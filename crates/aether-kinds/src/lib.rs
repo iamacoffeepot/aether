@@ -1561,6 +1561,83 @@ mod control_plane {
         pub entries: Vec<LogEvent>,
     }
 
+    /// One log entry as it appears on the wire when an MCP caller
+    /// pulls from a substrate's log ring via
+    /// [`LogRead`]/[`LogReadResult`] (issue 776, restoring ADR-0023 §4
+    /// under the forward model). Mirrors the substrate-local
+    /// `aether_substrate::LogEntry` field-for-field; the cap converts
+    /// at the wire boundary.
+    ///
+    /// `level` follows the same `0 = trace .. 4 = error` mapping the
+    /// rest of `aether.log.*` uses. `origin` is the `MailboxId` of the
+    /// actor whose dispatch buffered the entry, or `None` for host-
+    /// emitted events (substrate boot, scheduler, panic hook).
+    /// `sequence` is monotonic per substrate boot starting at 1;
+    /// callers use it as the cursor for `LogRead::since`.
+    ///
+    /// Not a `Kind` — only addressable as an element of
+    /// `LogReadResult::Ok::entries`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct LogEntry {
+        pub timestamp_unix_ms: u64,
+        pub level: u8,
+        pub target: String,
+        pub message: String,
+        pub sequence: u64,
+        pub origin: Option<aether_data::MailboxId>,
+    }
+
+    /// `aether.log.read` — pull entries out of the substrate's log
+    /// ring (issue 776). Mailed by the `aether-mcp` `engine_logs` tool
+    /// (or any RPC caller) to the chassis's `"aether.log"` mailbox;
+    /// reply rides back as [`LogReadResult`].
+    ///
+    /// Per ADR-0023 §4 (restored under the forward model):
+    /// - `max` is the cap on returned entries; `0` is treated as the
+    ///   default (100) and any value over `1000` is clamped to `1000`.
+    /// - `min_level` filters server-side: `None` returns every entry,
+    ///   `Some(2)` returns `info` and above, etc. Same `0..=4` mapping
+    ///   as the rest of `aether.log.*`.
+    /// - `since` is a cursor: `None` returns from the oldest entry in
+    ///   the ring, `Some(n)` returns only entries with `sequence > n`.
+    ///
+    /// Fire-and-await — the reply correlates by kind (`LogReadResult`),
+    /// not by an explicit correlation id (the chassis's
+    /// `send_and_await_reply` plumbing carries that).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.log.read")]
+    pub struct LogRead {
+        pub max: u32,
+        pub min_level: Option<u8>,
+        pub since: Option<u64>,
+    }
+
+    /// Reply to [`LogRead`]. `Ok::entries` carries the slice of the
+    /// ring matching the filter, ordered oldest-to-newest. `next_since`
+    /// is the highest `sequence` in `entries` (or the caller's `since`
+    /// echoed back when the slice is empty) — callers thread it into
+    /// the next `LogRead::since` for a stable cursor. `truncated_before`
+    /// is set when the ring evicted entries the caller hadn't seen
+    /// yet: it's the lowest sequence still in the ring, signalling
+    /// the caller missed everything strictly below that.
+    ///
+    /// `Err` only surfaces for chassis-side failures (e.g. the
+    /// `aether.log` mailbox isn't bound, which shouldn't happen on a
+    /// healthy substrate); filter / cursor mismatches return an empty
+    /// `Ok` rather than `Err`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.log.read_result")]
+    pub enum LogReadResult {
+        Ok {
+            entries: Vec<LogEntry>,
+            next_since: u64,
+            truncated_before: Option<u64>,
+        },
+        Err {
+            error: String,
+        },
+    }
+
     // ADR-0066: camera control kinds (`aether.camera.{create, destroy,
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
     // `TopdownParams` / `ModeInit`) moved to the `aether-camera` trunk
@@ -1786,6 +1863,9 @@ mod tests {
             "aether.audio.set_master_gain_result"
         );
         assert_eq!(MonitorNotice::NAME, "aether.actor.monitor_notice");
+        assert_eq!(LogBatch::NAME, "aether.log.batch");
+        assert_eq!(LogRead::NAME, "aether.log.read");
+        assert_eq!(LogReadResult::NAME, "aether.log.read_result");
         assert_eq!(Read::NAME, "aether.fs.read");
         assert_eq!(ReadResult::NAME, "aether.fs.read_result");
         assert_eq!(Write::NAME, "aether.fs.write");

@@ -1,28 +1,36 @@
 //! Issue 635 Phase 2 stress test: drive 10k `LogBatch` mails through
-//! `LogCapability` on the worker pool path. Exercises end-to-end the
+//! the `Scheduling::Pooled` dispatcher path. Exercises end-to-end the
 //! macro-emitted `__dispatch` arm, the
 //! [`aether_substrate::runtime::log_install::with_actor_dispatch`] +
-//! `local::with_stamped` wrapping inside [`aether_substrate::actor::native::dispatcher_slot::DispatcherSlot`],
-//! the cap's handler-side egress to a recording outbound, and the
-//! `SlotState` requeue/idle transitions across batched cycles.
+//! `local::with_stamped` wrapping inside
+//! [`aether_substrate::actor::native::dispatcher_slot::DispatcherSlot`],
+//! and the `SlotState` requeue/idle transitions across batched cycles.
 //!
-//! Compared against a parallel `DedicatedBenchLogCap` fixture (same
-//! struct shape + handler body, `Scheduling::Dedicated`) so the perf
-//! check normalises against the host's clock instead of a hard
-//! wallclock bound. Issue 635 Phase 2 spec: throughput within 2× of
-//! the dedicated baseline.
+//! Compared against a parallel `Scheduling::Dedicated` fixture (same
+//! struct shape + handler body, only `SCHEDULING` differs) so the perf
+//! check normalises against the host's clock instead of a hard wallclock
+//! bound. Issue 635 Phase 2 spec: throughput within 2× of the dedicated
+//! baseline.
+//!
+//! Issue 776 retired `EgressBackend::egress_log_batch` (`LogCapability`
+//! owns its entries in a substrate-side ring now). The handler workload
+//! both fixtures share is a single `AtomicU64::fetch_add` — same shape
+//! the cap's `push_entry` runs minus the timestamp/origin stamp, which
+//! isn't what this test measures anyway. The counter doubles as the
+//! "every mail arrived" assertion that previously rode on draining the
+//! recording channel.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, ReplyTo};
-use aether_kinds::{LogBatch, LogEvent};
+use aether_kinds::LogBatch;
 
-use aether_capabilities::LogCapability;
 use aether_substrate::{
-    Actor, BootError, Builder, BuiltChassis, Chassis, EgressEvent, HubOutbound, Mailer,
-    NativeActor, NativeCtx, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
-    handle_store::HandleStore, mail::registry::MailboxEntry,
+    Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
+    NativeInitCtx, NeverDriver, PassiveChassis, Registry, handle_store::HandleStore,
+    mail::registry::MailboxEntry,
 };
 
 const STRESS_BATCHES: u32 = 10_000;
@@ -30,7 +38,7 @@ const STRESS_BATCHES: u32 = 10_000;
 /// 2×; we ship 3× as the assertion to leave CI-runner slack — the
 /// printed ratio is the load-bearing metric for human review.
 const RATIO_CAP: f64 = 3.0;
-/// Hard wallclock cap on the drain wait per run. Either flavour
+/// Hard wallclock cap on the counter wait per run. Either flavour
 /// completing within this budget is comfortably above any pool /
 /// dedicated baseline observed locally; if a regression pushes drain
 /// wallclock past this, the stress test is the right place to see it.
@@ -46,77 +54,75 @@ impl Chassis for TestChassis {
     }
 }
 
-/// Dedicated-thread baseline cap. Mirrors `LogCapability`'s handler
-/// body so the per-mail work is comparable; only `SCHEDULING` differs,
-/// which is the variable under test.
+/// Shared handler workload for both scheduling fixtures. Holds a
+/// counter the test thread polls after the push loop to confirm every
+/// dispatched mail ran end-to-end.
+#[derive(Clone)]
+struct CounterConfig {
+    counter: Arc<AtomicU64>,
+}
+
+/// `Scheduling::Pooled` fixture. Counter-incrementing handler so the
+/// per-mail work is a constant — the only variable under test is
+/// scheduling-class throughput.
+struct PooledBenchLogCap {
+    counter: Arc<AtomicU64>,
+}
+
+impl aether_actor::Singleton for PooledBenchLogCap {}
+
+#[aether_data::actor]
+impl NativeActor for PooledBenchLogCap {
+    type Config = CounterConfig;
+    const NAMESPACE: &'static str = "test.bench.log_pooled";
+    // SCHEDULING defaults to Pooled; left explicit so the contrast
+    // with DedicatedBenchLogCap below is visible at a glance.
+    const SCHEDULING: Scheduling = Scheduling::Pooled;
+
+    fn init(config: CounterConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self {
+            counter: config.counter,
+        })
+    }
+
+    #[aether_data::handler]
+    fn on_log_batch(&mut self, _ctx: &mut NativeCtx<'_>, _batch: LogBatch) {
+        self.counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `Scheduling::Dedicated` baseline. Mirrors `PooledBenchLogCap`'s
+/// handler body so per-mail work is comparable; only `SCHEDULING`
+/// differs, which is the variable under test.
 struct DedicatedBenchLogCap {
-    outbound: Option<Arc<HubOutbound>>,
-    sequence: u64,
+    counter: Arc<AtomicU64>,
 }
 
 impl aether_actor::Singleton for DedicatedBenchLogCap {}
 
 #[aether_data::actor]
 impl NativeActor for DedicatedBenchLogCap {
-    type Config = ();
+    type Config = CounterConfig;
     const NAMESPACE: &'static str = "test.bench.log_dedicated";
     const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
-    fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        let outbound = ctx.mailer().outbound().cloned();
+    fn init(config: CounterConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
-            outbound,
-            sequence: 1,
+            counter: config.counter,
         })
     }
 
     #[aether_data::handler]
-    fn on_log_batch(&mut self, ctx: &mut NativeCtx<'_>, batch: LogBatch) {
-        let Some(outbound) = self.outbound.as_ref() else {
-            return;
-        };
-        let origin = ctx.origin();
-        let entries: Vec<aether_substrate::LogEntry> = batch
-            .entries
-            .into_iter()
-            .map(|e| {
-                let sequence = self.sequence;
-                self.sequence += 1;
-                aether_substrate::LogEntry {
-                    timestamp_unix_ms: 0,
-                    level: u8_to_level(e.level),
-                    target: e.target,
-                    message: e.message,
-                    sequence,
-                    origin,
-                }
-            })
-            .collect();
-        outbound.egress_log_batch(entries);
+    fn on_log_batch(&mut self, _ctx: &mut NativeCtx<'_>, _batch: LogBatch) {
+        self.counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-fn u8_to_level(level: u8) -> aether_substrate::LogLevel {
-    match level {
-        0 => aether_substrate::LogLevel::Trace,
-        1 => aether_substrate::LogLevel::Debug,
-        2 => aether_substrate::LogLevel::Info,
-        3 => aether_substrate::LogLevel::Warn,
-        4 => aether_substrate::LogLevel::Error,
-        _ => aether_substrate::LogLevel::Info,
-    }
-}
-
-fn fresh_substrate_with_outbound() -> (
-    Arc<Registry>,
-    Arc<Mailer>,
-    std::sync::mpsc::Receiver<EgressEvent>,
-) {
+fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let registry = Arc::new(Registry::new());
     let store = Arc::new(HandleStore::new(1024 * 1024));
-    let (outbound, rx) = HubOutbound::attached_loopback();
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
-    (registry, mailer, rx)
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+    (registry, mailer)
 }
 
 fn push_log_batch(registry: &Registry, recipient: &str, payload: &[u8]) {
@@ -137,21 +143,18 @@ fn push_log_batch(registry: &Registry, recipient: &str, payload: &[u8]) {
     });
 }
 
-fn drain_n_log_batches(rx: &std::sync::mpsc::Receiver<EgressEvent>, target: u32) -> u32 {
+/// Spin-wait until the counter reaches `target`, capped by
+/// [`DRAIN_BUDGET`]. Returns the count actually observed; callers
+/// assert it equals `target`.
+fn await_counter(counter: &AtomicU64, target: u64) -> u64 {
     let deadline = Instant::now() + DRAIN_BUDGET;
-    let mut count = 0u32;
-    while count < target {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
+    loop {
+        let value = counter.load(Ordering::Relaxed);
+        if value >= target || Instant::now() >= deadline {
+            return value;
         }
-        match rx.recv_timeout(remaining) {
-            Ok(EgressEvent::LogBatch { .. }) => count += 1,
-            Ok(_other) => {}
-            Err(_) => break,
-        }
+        std::thread::yield_now();
     }
-    count
 }
 
 /// Build one `LogBatch` mail with a single entry and return its
@@ -159,7 +162,7 @@ fn drain_n_log_batches(rx: &std::sync::mpsc::Receiver<EgressEvent>, target: u32)
 /// stress measurement reflects dispatch cost, not encode churn.
 fn encoded_one_entry_batch() -> Vec<u8> {
     let batch = LogBatch {
-        entries: vec![LogEvent {
+        entries: vec![aether_kinds::LogEvent {
             level: 2,
             target: "stress.bench".into(),
             message: "log_pool_stress".into(),
@@ -169,39 +172,42 @@ fn encoded_one_entry_batch() -> Vec<u8> {
 }
 
 fn run_pool_stress() -> Duration {
-    let (registry, mailer, rx) = fresh_substrate_with_outbound();
+    let (registry, mailer) = fresh_substrate();
+    let counter = Arc::new(AtomicU64::new(0));
     let chassis: PassiveChassis<TestChassis> =
         Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<LogCapability>(())
+            .with_actor::<PooledBenchLogCap>(CounterConfig {
+                counter: Arc::clone(&counter),
+            })
             .build_passive()
-            .expect("LogCapability boots");
+            .expect("PooledBenchLogCap boots");
 
     let bytes = encoded_one_entry_batch();
     let start = Instant::now();
     for _ in 0..STRESS_BATCHES {
-        push_log_batch(&registry, LogCapability::NAMESPACE, &bytes);
+        push_log_batch(&registry, PooledBenchLogCap::NAMESPACE, &bytes);
     }
-    let received = drain_n_log_batches(&rx, STRESS_BATCHES);
+    let observed = await_counter(&counter, STRESS_BATCHES as u64);
     let elapsed = start.elapsed();
 
     drop(chassis);
 
     assert_eq!(
-        received,
-        STRESS_BATCHES,
-        "pool-path LogCapability dropped {} of {} mails",
-        STRESS_BATCHES - received,
-        STRESS_BATCHES
+        observed, STRESS_BATCHES as u64,
+        "pool-path counter reached {observed} of {STRESS_BATCHES} before drain budget elapsed",
     );
 
     elapsed
 }
 
 fn run_dedicated_baseline() -> Duration {
-    let (registry, mailer, rx) = fresh_substrate_with_outbound();
+    let (registry, mailer) = fresh_substrate();
+    let counter = Arc::new(AtomicU64::new(0));
     let chassis: PassiveChassis<TestChassis> =
         Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<DedicatedBenchLogCap>(())
+            .with_actor::<DedicatedBenchLogCap>(CounterConfig {
+                counter: Arc::clone(&counter),
+            })
             .build_passive()
             .expect("DedicatedBenchLogCap boots");
 
@@ -210,17 +216,14 @@ fn run_dedicated_baseline() -> Duration {
     for _ in 0..STRESS_BATCHES {
         push_log_batch(&registry, DedicatedBenchLogCap::NAMESPACE, &bytes);
     }
-    let received = drain_n_log_batches(&rx, STRESS_BATCHES);
+    let observed = await_counter(&counter, STRESS_BATCHES as u64);
     let elapsed = start.elapsed();
 
     drop(chassis);
 
     assert_eq!(
-        received,
-        STRESS_BATCHES,
-        "dedicated-baseline cap dropped {} of {} mails",
-        STRESS_BATCHES - received,
-        STRESS_BATCHES
+        observed, STRESS_BATCHES as u64,
+        "dedicated-baseline counter reached {observed} of {STRESS_BATCHES} before drain budget elapsed",
     );
 
     elapsed

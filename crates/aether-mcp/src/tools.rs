@@ -45,6 +45,8 @@ const ENGINE_CAP: &str = "aether.engine";
 const COMPONENT_CAP: &str = "aether.component";
 /// Mailbox name of a substrate's render cap.
 const RENDER_CAP: &str = "aether.render";
+/// Mailbox name of a substrate's log cap (issue 776 / ADR-0023 §4).
+const LOG_CAP: &str = "aether.log";
 
 /// Component receive-side capabilities, keyed by `(engine, mailbox)`.
 /// Populated from `load_component` / `replace_component` replies and
@@ -336,6 +338,65 @@ impl Mcp {
             )),
         }
     }
+
+    #[tool(
+        description = "Pull recent log entries from a substrate's ring (issue 776, restoring ADR-0023 §4). \
+                       Forwards aether.log.read to the engine's aether.log mailbox and decodes \
+                       aether.log.read_result. `max` defaults to 100 and clamps to 1000; pass \
+                       `level` (`trace|debug|info|warn|error`) for server-side filtering; pass `since` \
+                       (the prior call's `next_since`) to walk past already-seen entries without \
+                       double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
+                       evicted entries the caller hadn't seen yet (the lowest sequence still held), \
+                       a signal to poll more often or accept the gap."
+    )]
+    pub async fn engine_logs(
+        &self,
+        Parameters(args): Parameters<crate::args::EngineLogsArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let engine_id_str = args.engine_id.clone();
+        let min_level = match args.level.as_deref() {
+            Some(s) => Some(parse_level(s)?),
+            None => None,
+        };
+        let request = aether_kinds::LogRead {
+            max: args.max.unwrap_or(0),
+            min_level,
+            since: args.since,
+        };
+        let reply = self
+            .session
+            .call_one(engine_envelope(engine, LOG_CAP, &request))
+            .await
+            .map_err(internal)?;
+        match aether_kinds::LogReadResult::decode_from_bytes(&reply.payload) {
+            Some(aether_kinds::LogReadResult::Ok {
+                entries,
+                next_since,
+                truncated_before,
+            }) => {
+                let response = crate::args::EngineLogsResponse {
+                    engine_id: engine_id_str,
+                    entries: entries
+                        .into_iter()
+                        .map(|e| crate::args::EngineLogEntry {
+                            timestamp_unix_ms: e.timestamp_unix_ms,
+                            level: level_to_str(e.level).to_owned(),
+                            target: e.target,
+                            message: e.message,
+                            sequence: e.sequence,
+                            origin: e.origin.map(|id| id.to_string()),
+                        })
+                        .collect(),
+                    next_since,
+                    truncated_before,
+                };
+                json(&response)
+            }
+            Some(aether_kinds::LogReadResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable LogReadResult")),
+        }
+    }
 }
 
 impl Mcp {
@@ -477,6 +538,39 @@ fn internal(e: anyhow::Error) -> McpError {
 
 fn internal_msg(msg: &str) -> McpError {
     McpError::internal_error(msg.to_owned(), None)
+}
+
+/// Map ADR-0023 §4's level string to the `0..=4` byte the
+/// `aether.log.*` kinds carry. Case-insensitive. Returns an
+/// `invalid_params` error on unknown strings so a typoed `"Warn "`
+/// surfaces at the tool boundary rather than reaching the substrate.
+fn parse_level(s: &str) -> Result<u8, McpError> {
+    match s.to_ascii_lowercase().as_str() {
+        "trace" => Ok(0),
+        "debug" => Ok(1),
+        "info" => Ok(2),
+        "warn" => Ok(3),
+        "error" => Ok(4),
+        other => Err(McpError::invalid_params(
+            format!("unknown level {other:?}; expected trace|debug|info|warn|error"),
+            None,
+        )),
+    }
+}
+
+/// Inverse of [`parse_level`]: render the `0..=4` byte back to the
+/// canonical lowercase level string. Out-of-band bytes render as
+/// `"info"` (matches the existing fallback in
+/// `aether-capabilities::log`'s pre-issue-776 conversion).
+fn level_to_str(level: u8) -> &'static str {
+    match level {
+        0 => "trace",
+        1 => "debug",
+        2 => "info",
+        3 => "warn",
+        4 => "error",
+        _ => "info",
+    }
 }
 
 #[cfg(test)]
@@ -741,5 +835,68 @@ mod tests {
             .expect("cached component describes");
         let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
         assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
+    }
+
+    /// `parse_level` round-trips every documented spelling and rejects
+    /// unknown strings — case-insensitive (`"INFO"` and `"info"` both
+    /// land on `2`).
+    #[test]
+    fn parse_level_round_trips_documented_strings() {
+        assert_eq!(parse_level("trace").unwrap(), 0);
+        assert_eq!(parse_level("debug").unwrap(), 1);
+        assert_eq!(parse_level("info").unwrap(), 2);
+        assert_eq!(parse_level("warn").unwrap(), 3);
+        assert_eq!(parse_level("error").unwrap(), 4);
+        assert_eq!(parse_level("INFO").unwrap(), 2);
+        assert!(parse_level("verbose").is_err());
+    }
+
+    /// `level_to_str` inverts `parse_level` for in-band bytes and
+    /// falls back to `"info"` for out-of-band ones (matches the
+    /// pre-issue-776 conversion behaviour in `aether-capabilities`).
+    #[test]
+    fn level_to_str_matches_parse_level_and_falls_back_to_info() {
+        for level in 0..=4u8 {
+            let parsed = parse_level(level_to_str(level)).unwrap();
+            assert_eq!(parsed, level);
+        }
+        assert_eq!(level_to_str(99), "info");
+    }
+
+    /// `engine_logs` with a malformed `engine_id` rejects up front
+    /// without touching the wire.
+    #[tokio::test]
+    async fn engine_logs_bad_engine_id_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .engine_logs(Parameters(crate::args::EngineLogsArgs {
+                engine_id: "not-a-uuid".to_owned(),
+                max: None,
+                level: None,
+                since: None,
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "a malformed engine_id should be a tool error"
+        );
+    }
+
+    /// `engine_logs` with an unknown `level` string is rejected at
+    /// the tool boundary before any RPC.
+    #[tokio::test]
+    async fn engine_logs_bad_level_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .engine_logs(Parameters(crate::args::EngineLogsArgs {
+                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                max: None,
+                level: Some("verbose".to_owned()),
+                since: None,
+            }))
+            .await;
+        assert!(result.is_err(), "an unknown level should be a tool error");
     }
 }

@@ -1,6 +1,6 @@
 # ADR-0077: Actor-aware logging through `LogCapability` and per-actor buffer-and-drain
 
-- **Status:** Accepted
+- **Status:** Accepted; egress retired by issue 776 (see end-of-file note)
 - **Date:** 2026-05-06
 - **Supersedes parts of:** ADR-0023
 
@@ -86,8 +86,14 @@ The substrate→hub wire `LogEntry` grows one field. `Some(id)` for cap-attribut
 - **Per-actor `tracing::Subscriber` rather than per-actor buffer.** Each actor's dispatcher installs its own subscriber with an actor-bound mail egress. Rejected: tracing's subscriber model is process-wide; nesting subscribers per call is doable but expensive (every event traverses N subscribers), and the layer-with-thread-local-actor-context pattern is the established way to attribute events to a logical scope.
 - **Direct-emit from `LogCapability` only (issue 583's intermediate).** Code inside the cap's adjacency calls a non-`tracing` emit function that writes to the ring directly. Rejected as the destination — works for cap-internal calls, doesn't help substrate-internal or guest-side `tracing::*` calls. Shipped as a stepping stone in PR 586 and retired by PR 588.
 
+## 2026-05-16 amendment (issue 776)
+
+The "follow-up work / pull-based log model" item below shipped as issue 776. `LogCapability` now owns a 2,000-entry ring directly and serves `aether.log.read` / `aether.log.read_result` mail; `EgressBackend::egress_log_batch` and the substrate-local `LogEntry` / `LogLevel` types retired alongside (no production consumer remained after issue 763 moved MCP out-of-process). The rest of the ADR — per-actor `LogBuffer`, actor-aware tracing layer, `ConfigureLogDrain` chassis-pushed config, `aether.log.batch` as the lone wire kind for log content — stands unchanged. The `LogCapability` handler body is the only piece that changed: instead of forwarding each entry through `outbound.egress_log_batch`, it appends to the cap-local ring; a new `on_log_read` handler serves the §4 contract.
+
+`aether-mcp` ships a typed `engine_logs(engine_id, max?, level?, since?)` tool wrapping the `aether.log.read` round-trip — wire shape and response shape match ADR-0023 §4 verbatim. Out-of-actor host events (substrate boot, scheduler, panic hook) still don't reach the ring; the actor-model invariant from this ADR's §3 holds.
+
 ## Follow-up work
 
-- **Pull-based log model (issue 587).** Today the substrate pushes batches to the hub via `egress_log_batch` regardless of whether anyone's polling `engine_logs`. A pull model — hub queries `LogCapability` on demand — would localize retention policy inside the cap. Issue 587 is queued; not part of this ADR.
+- **Pull-based log model (issue 587, ~~queued~~ shipped as issue 776).** Today the substrate pushes batches to the hub via `egress_log_batch` regardless of whether anyone's polling `engine_logs`. A pull model — hub queries `LogCapability` on demand — would localize retention policy inside the cap. Issue 587 is queued; not part of this ADR.
 - **Per-buffer length cap.** Drop-and-record-loss when an actor's `LogBuffer` exceeds a threshold between drains. Match the bounded-channel discipline of the rest of the system. File when the unbounded growth becomes observable.
 - **Structured field passthrough.** Tracing's structured fields (`?value`, `%value`) still flatten into the message string at the layer's `Visit` impl, same as ADR-0023. Threading them through `LogEvent` as a `Vec<(String, String)>` is mechanical; parked until a consumer asks.

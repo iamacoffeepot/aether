@@ -23,38 +23,14 @@ use aether_data::{EngineId, KindDescriptor, KindId, MailboxDescriptor, MailboxId
 
 use crate::mail::{ReplyTarget, ReplyTo};
 
-/// Substrate-side mirror of the hub-protocol log entry shape (ADR-0023).
-/// Held by the log-capture ring and handed to the egress backend
-/// in batches; the hub backend converts to `aether_data::LogEntry`
-/// at the wire boundary. Field shape matches the wire type so the
-/// conversion is a struct copy.
-///
-/// Issue #581 added `origin`: the `MailboxId` of the actor whose
-/// dispatch buffered this entry. `None` means host-emitted (substrate
-/// boot, scheduler, panic hook — no actor stamp at the time of
-/// emission). The hub's `engine_logs` MCP tool surfaces it for
-/// per-actor attribution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LogEntry {
-    pub timestamp_unix_ms: u64,
-    pub level: LogLevel,
-    pub target: String,
-    pub message: String,
-    pub sequence: u64,
-    pub origin: Option<MailboxId>,
-}
-
-/// Severity for `LogEntry`. Mirrors `tracing::Level`. Ordered
-/// most-verbose to least-verbose so a min-level filter can be
-/// expressed as `entry.level >= min`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
+// Issue 776 retired the substrate-local `LogEntry` + `LogLevel`
+// types alongside the `EgressBackend::egress_log_batch` method. Log
+// entries are owned end-to-end by `aether-capabilities::LogCapability`
+// in its substrate-side ring and served via the `aether.log.read` /
+// `aether.log.read_result` kinds (the `aether_kinds::LogEntry` wire
+// shape is the only `LogEntry` left in the workspace). The cap reads
+// `ctx.origin()` directly off the mail envelope, so no substrate-side
+// helper type is needed.
 
 /// Pluggable egress backend the substrate calls through `HubOutbound`.
 /// Every substrate egress intent is one method; implementations decide
@@ -126,9 +102,6 @@ pub trait EgressBackend: Send + Sync {
     /// Fired after each successful `load_component` registers a new
     /// trampoline mailbox so the hub's cached inventory stays current.
     fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>);
-
-    /// Push a batch of captured log entries (ADR-0023).
-    fn egress_log_batch(&self, entries: Vec<LogEntry>);
 }
 
 /// No-op backend installed before any hub connection is attached and
@@ -169,7 +142,6 @@ impl EgressBackend for DroppingBackend {
     }
     fn egress_kinds_changed(&self, _descriptors: Vec<KindDescriptor>) {}
     fn egress_mailboxes_changed(&self, _descriptors: Vec<MailboxDescriptor>) {}
-    fn egress_log_batch(&self, _entries: Vec<LogEntry>) {}
 }
 
 /// Substrate-side mirror of every `EgressBackend` method, reified as
@@ -208,9 +180,6 @@ pub enum EgressEvent {
     },
     MailboxesChanged {
         descriptors: Vec<MailboxDescriptor>,
-    },
-    LogBatch {
-        entries: Vec<LogEntry>,
     },
 }
 
@@ -295,10 +264,6 @@ impl EgressBackend for RecordingBackend {
 
     fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>) {
         let _ = self.tx.send(EgressEvent::MailboxesChanged { descriptors });
-    }
-
-    fn egress_log_batch(&self, entries: Vec<LogEntry>) {
-        let _ = self.tx.send(EgressEvent::LogBatch { entries });
     }
 }
 
@@ -421,13 +386,6 @@ impl HubOutbound {
     pub fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>) {
         if let Some(b) = self.backend.get() {
             b.egress_mailboxes_changed(descriptors);
-        }
-    }
-
-    /// Push a batch of captured log entries.
-    pub fn egress_log_batch(&self, entries: Vec<LogEntry>) {
-        if let Some(b) = self.backend.get() {
-            b.egress_log_batch(entries);
         }
     }
 

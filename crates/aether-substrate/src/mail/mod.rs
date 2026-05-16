@@ -13,9 +13,7 @@ pub mod outbound;
 pub mod registry;
 
 pub use mailer::Mailer;
-pub use outbound::{
-    DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
-};
+pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
 pub use registry::{MailboxEntry, MailboxHandler, Registry};
 
 /// Addressing token for any mailbox — component or substrate-owned sink.
