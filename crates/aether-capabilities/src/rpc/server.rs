@@ -681,27 +681,12 @@ pub fn rpc_server_mailbox_id() -> aether_data::MailboxId {
 mod tests {
     use super::*;
     use crate::rpc::wire::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
-    use crate::test_chassis::TestChassis;
+    use crate::test_chassis::{TestChassis, fresh_substrate};
     use aether_codec::frame::{read_frame, write_frame};
     use aether_substrate::chassis::builder::Builder;
-    use aether_substrate::handle_store::HandleStore;
-    use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::outbound::HubOutbound;
-    use aether_substrate::mail::registry::Registry;
     use std::net::TcpStream;
     use std::sync::Arc;
     use std::time::Duration;
-
-    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        let registry = Arc::new(Registry::new());
-        for d in aether_kinds::descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
-        }
-        let (outbound, _rx) = HubOutbound::attached_loopback();
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
-        (registry, mailer)
-    }
 
     fn test_peer_kind() -> PeerKind {
         PeerKind::Substrate {
