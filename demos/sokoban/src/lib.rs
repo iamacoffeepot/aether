@@ -396,68 +396,36 @@ impl Sokoban {
                 let x1 = x0 + cell;
                 let y0 = origin_y - y as f32 * cell;
                 let y1 = y0 - cell;
-                // Two triangles per quad (tl, tr, br) and (tl, br, bl).
-                tris[n] = DrawTriangle {
-                    verts: [
-                        Vertex {
-                            x: x0,
-                            y: y0,
-                            z: 0.0,
-                            r,
-                            g,
-                            b,
-                        },
-                        Vertex {
-                            x: x1,
-                            y: y0,
-                            z: 0.0,
-                            r,
-                            g,
-                            b,
-                        },
-                        Vertex {
-                            x: x1,
-                            y: y1,
-                            z: 0.0,
-                            r,
-                            g,
-                            b,
-                        },
-                    ],
-                };
-                tris[n + 1] = DrawTriangle {
-                    verts: [
-                        Vertex {
-                            x: x0,
-                            y: y0,
-                            z: 0.0,
-                            r,
-                            g,
-                            b,
-                        },
-                        Vertex {
-                            x: x1,
-                            y: y1,
-                            z: 0.0,
-                            r,
-                            g,
-                            b,
-                        },
-                        Vertex {
-                            x: x0,
-                            y: y1,
-                            z: 0.0,
-                            r,
-                            g,
-                            b,
-                        },
-                    ],
-                };
+                fill_quad_triangle_pair(&mut tris, n, [x0, x1, y0, y1], 0.0, [r, g, b]);
                 n += 2;
             }
         }
         ctx.actor::<RenderCapability>().send_many(&tris[..n]);
     }
+}
+
+/// Write the two triangles that make up an axis-aligned quad into
+/// `tris[n]` and `tris[n + 1]`. `rect` is `[x0, x1, y0, y1]` (the
+/// quad spans `(x0, y0)..(x1, y1)`); `z` is the shared world-z;
+/// `rgb` is the flat color applied to all six vertices. Triangle
+/// winding matches the inline form it replaced: `(tl, tr, br)` then
+/// `(tl, br, bl)`.
+fn fill_quad_triangle_pair(
+    tris: &mut [DrawTriangle],
+    n: usize,
+    rect: [f32; 4],
+    z: f32,
+    rgb: [f32; 3],
+) {
+    let [x0, x1, y0, y1] = rect;
+    let [r, g, b] = rgb;
+    let v = |x: f32, y: f32| Vertex { x, y, z, r, g, b };
+    tris[n] = DrawTriangle {
+        verts: [v(x0, y0), v(x1, y0), v(x1, y1)],
+    };
+    tris[n + 1] = DrawTriangle {
+        verts: [v(x0, y0), v(x1, y1), v(x0, y1)],
+    };
 }
 
 fn in_bounds(state: &SokobanState, x: i32, y: i32) -> bool {
