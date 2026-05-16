@@ -611,6 +611,28 @@ mod tests {
         (registry, mailer)
     }
 
+    /// Build a registry handler that forwards every [`MailDispatch`]
+    /// it receives onto `tx` as an owned [`Envelope`]. Used by tests
+    /// that need a registered recipient but only care about
+    /// observing — or just not warn-dropping — the mail.
+    fn forward_to_envelope_sender(
+        tx: mpsc::Sender<Envelope>,
+    ) -> crate::mail::registry::MailboxHandler {
+        Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+            let _ = tx.send(Envelope {
+                kind: dispatch.kind,
+                kind_name: dispatch.kind_name.to_owned(),
+                origin: dispatch.origin.map(str::to_owned),
+                sender: dispatch.sender,
+                payload: dispatch.payload.to_vec(),
+                count: dispatch.count,
+                mail_id: dispatch.mail_id,
+                root: dispatch.root,
+                parent_mail: dispatch.parent_mail,
+            });
+        })
+    }
+
     /// `prev_correlation` returns 0 before any send and tracks the
     /// monotonic counter as `send_mail` mints new ids.
     #[test]
@@ -619,22 +641,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         // Register a sink so push routes somewhere instead of
         // hitting the unknown-recipient warn.
-        registry.register_closure(
-            "test.sink",
-            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
-                let _ = tx.send(Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                });
-            }),
-        );
+        registry.register_closure("test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
 
         let transport = NativeBinding::new_for_test(mailer, MailboxId(99));
@@ -714,22 +721,7 @@ mod tests {
     fn cross_class_wait_reply_aborts_when_caller_frame_bound_and_recipient_free_running() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_closure(
-            "test.free.running",
-            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
-                let _ = tx.send(Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                });
-            }),
-        );
+        registry.register_closure("test.free.running", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.free.running").unwrap();
 
         // Empty frame-bound set => recipient classifies as free-running.
@@ -755,22 +747,7 @@ mod tests {
     fn cross_class_wait_reply_does_not_abort_when_recipient_also_frame_bound() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_closure(
-            "test.frame.bound",
-            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
-                let _ = tx.send(Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                });
-            }),
-        );
+        registry.register_closure("test.frame.bound", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.frame.bound").unwrap();
 
         let frame_bound_set = Arc::new(RwLock::new(HashSet::new()));
@@ -803,22 +780,7 @@ mod tests {
     fn cross_class_wait_reply_does_not_abort_when_caller_free_running() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_closure(
-            "test.any",
-            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
-                let _ = tx.send(Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                });
-            }),
-        );
+        registry.register_closure("test.any", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.any").unwrap();
 
         // Empty set — recipient is free-running. Caller is also
@@ -844,22 +806,7 @@ mod tests {
     fn wait_reply_prunes_pending_recipient_on_timeout() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_closure(
-            "test.prune",
-            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
-                let _ = tx.send(Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                });
-            }),
-        );
+        registry.register_closure("test.prune", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.prune").unwrap();
 
         let transport = NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(99));
