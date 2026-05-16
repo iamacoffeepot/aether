@@ -336,25 +336,14 @@ mod cap_native {
             BindListener, BindListenerResult, ListListeners, ListListenersResult, TcpCapability,
             UnbindListener, UnbindListenerResult,
         };
+        use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
         use aether_data::{Kind, SessionToken, Uuid};
-        use aether_substrate::chassis::Chassis;
-        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
-        use aether_substrate::chassis::error::BootError;
+        use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
-
-        struct TestChassis;
-        impl Chassis for TestChassis {
-            const PROFILE: &'static str = "test";
-            type Driver = NeverDriver;
-            type Env = ();
-            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-            }
-        }
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
             let registry = Arc::new(Registry::new());

@@ -500,22 +500,13 @@ mod native {
         use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::chassis::Chassis;
-        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::Registry;
 
-        struct TestChassis;
-        impl Chassis for TestChassis {
-            const PROFILE: &'static str = "test";
-            type Driver = NeverDriver;
-            type Env = ();
-            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-            }
-        }
+        use crate::test_chassis::TestChassis;
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.

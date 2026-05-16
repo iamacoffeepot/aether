@@ -452,22 +452,13 @@ mod native {
         use aether_data::{Kind, MailboxId};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::chassis::Chassis;
-        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::Registry;
 
-        struct TestChassis;
-        impl Chassis for TestChassis {
-            const PROFILE: &'static str = "test";
-            type Driver = NeverDriver;
-            type Env = ();
-            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-            }
-        }
+        use crate::test_chassis::TestChassis;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());

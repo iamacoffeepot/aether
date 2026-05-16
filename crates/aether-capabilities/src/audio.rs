@@ -876,22 +876,12 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
-        use aether_substrate::chassis::Chassis;
-        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::Registry;
-
-        struct TestChassis;
-        impl Chassis for TestChassis {
-            const PROFILE: &'static str = "test";
-            type Driver = NeverDriver;
-            type Env = ();
-            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-            }
-        }
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());

@@ -271,13 +271,12 @@ mod tests {
     use crate::rpc::wire::{
         HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame,
     };
+    use crate::test_chassis::TestChassis;
     use crate::trace::TraceObserverCapability;
     use aether_actor::Actor;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{Kind, mailbox_id_from_name};
-    use aether_substrate::chassis::Chassis;
-    use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
-    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::chassis::builder::Builder;
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -288,16 +287,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::JoinHandle;
     use std::time::Duration;
-
-    struct TestChassis;
-    impl Chassis for TestChassis {
-        const PROFILE: &'static str = "test";
-        type Driver = NeverDriver;
-        type Env = ();
-        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-            unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-        }
-    }
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());

@@ -39,6 +39,8 @@ pub mod render;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
+#[cfg(test)]
+pub(crate) mod test_chassis;
 pub mod trace;
 pub mod window;
 
