@@ -25,6 +25,7 @@ use aether_substrate_bundle::test_bench::TestBench;
 // `Step::SendMail` for `demo.sokoban.*` kinds fails with "unknown
 // kind". Same fix as PR 432 / PR 434 used for the trunk-rlib
 // pattern.
+#[allow(unused_imports)]
 use aether_demo_sokoban as _;
 
 /// User-facing component name passed to `LoadComponent`.

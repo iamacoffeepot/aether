@@ -40,6 +40,7 @@ use aether_test_fixture_probe::SetRender;
 // entries are present in this test binary. Without the reference, the
 // host-target rlib's descriptor symbols can be stripped by the linker
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
+#[allow(unused_imports)]
 use aether_test_fixture_probe as _;
 
 /// Caller-supplied component name passed to `LoadComponent`.
