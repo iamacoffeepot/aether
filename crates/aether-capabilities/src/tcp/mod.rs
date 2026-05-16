@@ -339,7 +339,7 @@ mod cap_native {
         use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
         use aether_data::{Kind, SessionToken, Uuid};
-        use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
@@ -357,6 +357,29 @@ mod cap_native {
             let mailer =
                 Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
             (registry, mailer, rx)
+        }
+
+        /// Boot a fresh substrate with `TcpCapability` registered as a
+        /// passive actor and return the pieces every test in this
+        /// module reaches for: the kind registry (for mailbox lookup
+        /// in [`drive_and_decode`]), the egress receiver (for reply
+        /// decode), and the [`PassiveChassis`] (held by the caller so
+        /// the cap's actor thread stays alive for the test body).
+        ///
+        /// Collapses the previously-duplicated `fresh_substrate()` +
+        /// `Builder::<TestChassis>::new(...)` chain that opened every
+        /// test (issue 796).
+        fn boot_tcp_substrate() -> (
+            Arc<Registry>,
+            mpsc::Receiver<EgressEvent>,
+            PassiveChassis<TestChassis>,
+        ) {
+            let (registry, mailer, rx) = fresh_substrate();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<TcpCapability>(())
+                .build_passive()
+                .expect("TcpCapability boots");
+            (registry, rx, chassis)
         }
 
         fn session_reply() -> ReplyTo {
@@ -417,11 +440,7 @@ mod cap_native {
         /// reflects every step (bound, listed, unbound).
         #[test]
         fn bind_then_list_then_unbind_roundtrip() {
-            let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<TcpCapability>(())
-                .build_passive()
-                .expect("TcpCapability boots");
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
             // Bind to port 0 — let the OS pick a free port.
             let bind_reply: BindListenerResult = drive_and_decode(
@@ -493,11 +512,7 @@ mod cap_native {
         /// the first bind's actually-bound port to drive the second.
         #[test]
         fn bind_port_in_use_returns_err() {
-            let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<TcpCapability>(())
-                .build_passive()
-                .expect("TcpCapability boots");
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
             let first: BindListenerResult = drive_and_decode(
                 &registry,
@@ -539,11 +554,7 @@ mod cap_native {
         /// echoed back.
         #[test]
         fn unbind_unknown_listener_errors() {
-            let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<TcpCapability>(())
-                .build_passive()
-                .expect("TcpCapability boots");
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
             let reply: UnbindListenerResult = drive_and_decode(
                 &registry,
@@ -572,11 +583,7 @@ mod cap_native {
         /// `ListListeners`.
         #[test]
         fn list_enumerates_two_concurrent_listeners() {
-            let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<TcpCapability>(())
-                .build_passive()
-                .expect("TcpCapability boots");
+            let (registry, rx, _chassis) = boot_tcp_substrate();
 
             let _: BindListenerResult = drive_and_decode(
                 &registry,
