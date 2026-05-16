@@ -491,23 +491,13 @@ mod tests {
         PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
     };
     use aether_capabilities::trace::TraceObserverCapability;
-    use aether_substrate::chassis::Chassis;
-    use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
-    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
 
-    struct TestChassis;
-    impl Chassis for TestChassis {
-        const PROFILE: &'static str = "test";
-        type Driver = NeverDriver;
-        type Env = ();
-        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-            unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-        }
-    }
+    use crate::test_chassis::TestChassis;
 
     /// Boot a hub-shaped passive chassis: a forwarding
     /// `RpcServerCapability` + the engines cap + `TraceObserver` (so

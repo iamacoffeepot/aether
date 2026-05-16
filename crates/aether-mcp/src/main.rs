@@ -12,6 +12,8 @@
 
 mod args;
 mod rpc;
+#[cfg(test)]
+mod test_chassis;
 mod tools;
 
 use std::sync::Arc;
