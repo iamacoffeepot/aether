@@ -26,6 +26,7 @@ use aether_substrate_bundle::test_bench::TestBench;
 // the linker strips inventory submits for kinds the test code doesn't
 // statically reference. Without this anchor, `Step::SendMail` for
 // `aether.camera.*` kinds fails with "unknown kind".
+#[allow(unused_imports)]
 use aether_camera as _;
 
 #[test]
