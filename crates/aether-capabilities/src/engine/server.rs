@@ -393,14 +393,13 @@ mod sink {
 #[cfg(test)]
 mod tests {
     use super::{EngineServer, ReplyCells, ReplySink};
+    use crate::test_chassis::TestChassis;
     use aether_actor::Actor;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::{
         ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult,
     };
-    use aether_substrate::chassis::Chassis;
-    use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
-    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -408,16 +407,6 @@ mod tests {
     use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    struct TestChassis;
-    impl Chassis for TestChassis {
-        const PROFILE: &'static str = "test";
-        type Driver = NeverDriver;
-        type Env = ();
-        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-            unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-        }
-    }
 
     /// Boot a passive chassis hosting `EngineServer` + the reply sink.
     /// Returns the chassis (kept alive for its dispatcher threads), the

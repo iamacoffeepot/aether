@@ -152,22 +152,12 @@ mod native {
         use super::{
             Arc, BootError, HandleCapability, HandlePublish, HandlePublishResult, HandleStore,
         };
-        use aether_substrate::chassis::Chassis;
-        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use crate::test_chassis::TestChassis;
+        use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::EgressEvent;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
-
-        struct TestChassis;
-        impl Chassis for TestChassis {
-            const PROFILE: &'static str = "test";
-            type Driver = NeverDriver;
-            type Env = ();
-            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-            }
-        }
 
         fn fresh_substrate() -> (
             Arc<HandleStore>,

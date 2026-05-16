@@ -444,13 +444,12 @@ mod tests {
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::rpc::wire::PeerKind;
+    use crate::test_chassis::TestChassis;
     use crate::trace::TraceObserverCapability;
     use aether_actor::Actor;
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_substrate::Subname;
-    use aether_substrate::chassis::Chassis;
-    use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
-    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::chassis::builder::Builder;
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -458,16 +457,6 @@ mod tests {
     use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
-
-    struct TestChassis;
-    impl Chassis for TestChassis {
-        const PROFILE: &'static str = "test";
-        type Driver = NeverDriver;
-        type Env = ();
-        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-            unreachable!("TestChassis is driven by Builder::new directly in unit tests")
-        }
-    }
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
