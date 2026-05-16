@@ -88,17 +88,6 @@ pub trait EgressBackend: Send + Sync {
         correlation_id: u64,
     );
 
-    /// Mail addressed at every attached Claude session (the
-    /// `hub.claude.broadcast` sink fan-out). Same shape as
-    /// `egress_to_session` minus the session token.
-    fn egress_broadcast(
-        &self,
-        kind_name: &str,
-        payload: Vec<u8>,
-        origin: Option<String>,
-        correlation_id: u64,
-    );
-
     /// Reply or push mail addressed at a specific component on
     /// another engine (ADR-0037 phase 2). Identifies the receiver by
     /// engine + mailbox id rather than by name because the source
@@ -158,14 +147,6 @@ impl EgressBackend for DroppingBackend {
         _correlation_id: u64,
     ) {
     }
-    fn egress_broadcast(
-        &self,
-        _kind_name: &str,
-        _payload: Vec<u8>,
-        _origin: Option<String>,
-        _correlation_id: u64,
-    ) {
-    }
     fn egress_to_engine_mailbox(
         &self,
         _engine_id: EngineId,
@@ -201,12 +182,6 @@ impl EgressBackend for DroppingBackend {
 pub enum EgressEvent {
     ToSession {
         session: SessionToken,
-        kind_name: String,
-        payload: Vec<u8>,
-        origin: Option<String>,
-        correlation_id: u64,
-    },
-    Broadcast {
         kind_name: String,
         payload: Vec<u8>,
         origin: Option<String>,
@@ -269,21 +244,6 @@ impl EgressBackend for RecordingBackend {
     ) {
         let _ = self.tx.send(EgressEvent::ToSession {
             session,
-            kind_name: kind_name.to_owned(),
-            payload,
-            origin,
-            correlation_id,
-        });
-    }
-
-    fn egress_broadcast(
-        &self,
-        kind_name: &str,
-        payload: Vec<u8>,
-        origin: Option<String>,
-        correlation_id: u64,
-    ) {
-        let _ = self.tx.send(EgressEvent::Broadcast {
             kind_name: kind_name.to_owned(),
             payload,
             origin,
@@ -403,19 +363,6 @@ impl HubOutbound {
     ) {
         if let Some(b) = self.backend.get() {
             b.egress_to_session(session, kind_name, payload, origin, correlation_id);
-        }
-    }
-
-    /// Push mail addressed at every attached session.
-    pub fn egress_broadcast(
-        &self,
-        kind_name: &str,
-        payload: Vec<u8>,
-        origin: Option<String>,
-        correlation_id: u64,
-    ) {
-        if let Some(b) = self.backend.get() {
-            b.egress_broadcast(kind_name, payload, origin, correlation_id);
         }
     }
 

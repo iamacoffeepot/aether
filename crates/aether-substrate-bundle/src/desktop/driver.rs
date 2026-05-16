@@ -26,7 +26,7 @@ use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
-    CaptureFrameResult, FrameStats, Key, KeyRelease, MouseButton, MouseMove, SetWindowMode,
+    CaptureFrameResult, Key, KeyRelease, MouseButton, MouseMove, SetWindowMode,
     SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
     keycode,
 };
@@ -68,19 +68,17 @@ pub struct App {
     kind_mouse_button: aether_data::KindId,
     kind_mouse_move: aether_data::KindId,
     kind_window_size: aether_data::KindId,
-    kind_frame_stats: aether_data::KindId,
     /// Cloned out of `RenderCapability::handles()` before the cap
     /// moves into the chassis builder. The app holds a clone so
     /// `Gpu::new` can install wgpu state and the per-frame loop can
     /// call `record_frame` / `record_capture_copy` / `finish_capture`.
     render_handles: RenderHandles,
-    triangles_rendered: Arc<AtomicU64>,
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
     /// `render_and_capture`, then reply-to-sender on `outbound`.
     capture_queue: aether_substrate::capture::CaptureQueue,
-    /// Hub outbound — also shared with the log-capture layer and the
-    /// broadcast sink. The capture-reply path is the third consumer.
+    /// Hub outbound — shared with the log-capture layer and the
+    /// capture-reply path.
     outbound: Arc<HubOutbound>,
     /// Snapshot of every frame-bound capability's pending counter
     /// (ADR-0074 §Decision 5). Today: render. Cloned out of
@@ -539,26 +537,6 @@ impl ApplicationHandler<UserEvent> for App {
                     );
                 }
                 self.frame += 1;
-                if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-                    let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-                    tracing::info!(
-                        target: "aether_substrate::frame_loop",
-                        frame = self.frame,
-                        triangles,
-                        "frame stats",
-                    );
-                    let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
-                    if correlation == 0 {
-                        correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
-                    }
-                    frame_loop::emit_frame_stats(
-                        &self.queue,
-                        self.kind_frame_stats,
-                        self.frame,
-                        triangles,
-                        correlation,
-                    );
-                }
                 if !self.occluded
                     && let Some(w) = &self.window
                 {
@@ -692,10 +670,6 @@ impl DriverCapability for DesktopDriverCapability {
             .registry
             .kind_id(WindowSize::NAME)
             .expect("WindowSize registered");
-        let kind_frame_stats = boot
-            .registry
-            .kind_id(FrameStats::NAME)
-            .expect("FrameStats registered");
         let kind_set_window_mode = boot
             .registry
             .kind_id(SetWindowMode::NAME)
@@ -719,9 +693,7 @@ impl DriverCapability for DesktopDriverCapability {
             kind_mouse_button,
             kind_mouse_move,
             kind_window_size,
-            kind_frame_stats,
             render_handles,
-            triangles_rendered: Arc::clone(&triangles_rendered),
             capture_queue,
             outbound: Arc::clone(&boot.outbound),
             frame_bound_pending,

@@ -26,8 +26,7 @@ use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId,
-    runtime::trace::push_chassis_root_mail,
+    Mailer, SubstrateBoot, mail::MailboxId, runtime::trace::push_chassis_root_mail,
 };
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
@@ -66,7 +65,6 @@ pub fn parse_tick_hz_env() -> u32 {
 pub struct HeadlessTimerCapability {
     pub boot: SubstrateBoot,
     pub kind_tick: KindId,
-    pub kind_frame_stats: KindId,
     pub tick_period: Duration,
 }
 
@@ -77,7 +75,6 @@ pub struct HeadlessTimerRunning {
     /// subscriber (issue 640).
     input_mailbox: MailboxId,
     kind_tick: KindId,
-    kind_frame_stats: KindId,
     tick_period: Duration,
     /// `SubstrateBoot` drops at the end of `run()` so its scheduler
     /// joins workers before the chassis exits.
@@ -91,7 +88,6 @@ impl DriverCapability for HeadlessTimerCapability {
         let HeadlessTimerCapability {
             boot,
             kind_tick,
-            kind_frame_stats,
             tick_period,
         } = self;
 
@@ -99,7 +95,6 @@ impl DriverCapability for HeadlessTimerCapability {
             queue: Arc::clone(&boot.queue),
             input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             kind_tick,
-            kind_frame_stats,
             tick_period,
             _boot: boot,
         })
@@ -112,7 +107,6 @@ impl DriverRunning for HeadlessTimerRunning {
             queue,
             input_mailbox,
             kind_tick,
-            kind_frame_stats,
             tick_period,
             _boot,
         } = *self;
@@ -131,8 +125,6 @@ impl DriverRunning for HeadlessTimerRunning {
             }
         };
 
-        let started = Instant::now();
-        let mut frame: u64 = 0;
         let mut next_deadline = Instant::now() + tick_period;
         loop {
             let now = Instant::now();
@@ -146,7 +138,6 @@ impl DriverRunning for HeadlessTimerRunning {
             // backlog, which would just compound the stall.
             next_deadline = Instant::now() + tick_period;
 
-            frame += 1;
             push_chassis_root_mail(
                 &queue,
                 next_correlation(),
@@ -155,22 +146,6 @@ impl DriverRunning for HeadlessTimerRunning {
                 encode_empty::<Tick>(),
                 1,
             );
-            if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-                frame_loop::emit_frame_stats(
-                    &queue,
-                    kind_frame_stats,
-                    frame,
-                    0,
-                    next_correlation(),
-                );
-                let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                tracing::info!(
-                    target: "aether_substrate::frame_loop",
-                    frame = frame,
-                    fps = frame as f64 / elapsed,
-                    "headless tick",
-                );
-            }
         }
         // The `loop` above never breaks — process exit is the only
         // termination path (SIGTERM/SIGINT or `fatal_abort`).

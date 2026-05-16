@@ -3,10 +3,14 @@
 //! `fatal_abort` is the chassis-facing exit path for abnormal
 //! component lifecycle events: a wasm trap or host panic during
 //! `deliver`, or a `drain_with_budget` returning `Wedged`. The
-//! function logs the abort reason, emits a final `SubstrateDying`
-//! broadcast to attached hub sessions, synchronously flushes the
-//! capture ring (so the abort log lands in `engine_logs`), and
-//! exits the process with code `2`.
+//! function logs the abort reason, synchronously flushes the
+//! per-actor capture buffers (so the abort log lands in
+//! `engine_logs`), and exits the process with code `2`.
+//!
+//! Issue 775 retired the final `SubstrateDying` broadcast that
+//! preceded `process::exit`: with `BroadcastCapability` gone the
+//! chassis has no fan-out for the kind, so the abort relies on
+//! the log capture path alone.
 //!
 //! The function is `-> !`. It does not unwind — by the time we're
 //! here we've already decided the substrate is going down, and any
@@ -23,45 +27,28 @@
 
 use std::sync::Arc;
 
-use aether_kinds::SubstrateDying;
-
 use crate::mail::outbound::HubOutbound;
 
 /// Process exit code on fatal abort. Distinct from `0` (clean exit)
 /// and `1` (which Rust uses for panics from `main`).
 pub const FATAL_EXIT_CODE: i32 = 2;
 
-/// Emit a final `SubstrateDying` broadcast and exit the process. The
-/// reason string is what lands in `engine_logs` — make it specific
-/// enough that an operator reading the logs knows what triggered the
-/// abort (e.g. `"component died: <kind> ..."` vs. `"dispatcher
-/// wedged: mailbox=... waited=5s"`).
+/// Log the abort reason, flush per-actor log buffers, and exit the
+/// process. The reason string is what lands in `engine_logs` — make
+/// it specific enough that an operator reading the logs knows what
+/// triggered the abort (e.g. `"component died: <kind> ..."` vs.
+/// `"dispatcher wedged: mailbox=... waited=5s"`).
 ///
-/// The broadcast uses `outbound` directly (bypassing the mailer) so
-/// it works even when the abort cause is an in-mailer wedge. Send is
-/// best-effort: a closed connection silently drops the frame, which
-/// is the right disposition during abort.
-pub fn fatal_abort(outbound: &HubOutbound, reason: String) -> ! {
+/// `_outbound` is kept on the signature because the [`FatalAborter`]
+/// trait threads one through. Pre-#775 it carried the final
+/// `SubstrateDying` broadcast; today the only sink that observed it
+/// retired, and the parameter is unused at this call site.
+pub fn fatal_abort(_outbound: &HubOutbound, reason: String) -> ! {
     tracing::error!(
         target: "aether_substrate::lifecycle",
         reason = %reason,
         "substrate fatal abort",
     );
-
-    // SubstrateDying carries the same reason; postcard-encode and
-    // ship as a broadcast frame on the engine TCP. Encoding is
-    // infallible for `String`-only structs; the `if let` is just
-    // defensive against a future schema change.
-    if let Ok(payload) = postcard::to_allocvec(&SubstrateDying {
-        reason: reason.clone(),
-    }) {
-        outbound.egress_broadcast(
-            <SubstrateDying as aether_data::Kind>::NAME,
-            payload,
-            None,
-            0,
-        );
-    }
 
     // Issue #581: drain the dying actor's per-actor `LogBuffer`
     // into LogCapability's mailbox so trap-time tracing events
@@ -69,9 +56,7 @@ pub fn fatal_abort(outbound: &HubOutbound, reason: String) -> ! {
     // drained the substrate-global ring synchronously; with the
     // ring retired, `aether-actor::log::drain_buffer` is the
     // closest equivalent — it hands buffered events to the cap
-    // via the actor's transport. Hub-egress is still
-    // fire-and-forget against a process exit, same window as
-    // before.)
+    // via the actor's transport.)
     aether_actor::log::drain_buffer();
 
     std::process::exit(FATAL_EXIT_CODE);
@@ -93,9 +78,9 @@ pub trait FatalAborter: Send + Sync + 'static {
 }
 
 /// Production [`FatalAborter`] backed by [`fatal_abort`]. Holds the
-/// chassis's [`HubOutbound`] so the abort emits a final
-/// `SubstrateDying` broadcast before `process::exit`. Constructed by
-/// chassis drivers (desktop, headless) that already own outbound.
+/// chassis's [`HubOutbound`] for symmetry with the trait; the
+/// outbound itself is unused since issue 775 retired the
+/// `SubstrateDying` broadcast.
 pub struct OutboundFatalAborter {
     outbound: Arc<HubOutbound>,
 }

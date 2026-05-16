@@ -513,28 +513,7 @@ fn io_read_unknown_path_returns_not_found() {
     }
 }
 
-/// `aether.observation.frame_stats` is broadcast every 120 frames
-/// (ADR-0023). Advancing exactly 120 ticks should yield one such
-/// broadcast on the loopback. The bench emits this from its own
-/// frame loop — no fixture component needed.
-#[test]
-fn frame_stats_broadcast_at_120_tick_cadence() {
-    if !has_wgpu_adapter() {
-        let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-        assert!(
-            !strict,
-            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-        );
-        eprintln!("skipping: no wgpu adapter available");
-        return;
-    }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    bench.advance(120).expect("advance 120");
-    let stats_count = bench.count_observed("aether.observation.frame_stats");
-    assert_eq!(
-        stats_count,
-        1,
-        "expected exactly one frame_stats broadcast at 120 ticks; observed kinds: {:?}",
-        bench.observed_kinds(),
-    );
-}
+// Pre-#775 the bench emitted `aether.observation.frame_stats` every
+// 120 frames and a test verified one broadcast arrived after
+// `advance(120)`. Issue 775 retired the broadcast cap, the frame_stats
+// kind, and the helper that emitted it; this test went with them.

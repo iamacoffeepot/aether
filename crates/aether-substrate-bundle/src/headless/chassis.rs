@@ -19,13 +19,13 @@ use std::time::Duration;
 
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    BroadcastCapability, ComponentHostCapability, ComponentHostConfig, FsCapability,
-    HandleCapability, HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability,
-    InputCapability, InputConfig, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf, trace::TraceObserverCapability,
+    ComponentHostCapability, ComponentHostConfig, FsCapability, HandleCapability,
+    HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, InputCapability,
+    InputConfig, LogCapability, TcpCapability, UnsupportedTestBenchCapability, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf, trace::TraceObserverCapability,
 };
 use aether_data::Kind;
-use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
+use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
@@ -113,10 +113,6 @@ impl HeadlessChassis {
         let input_config = InputConfig::default();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-        let kind_frame_stats = boot
-            .registry
-            .kind_id(FrameStats::NAME)
-            .expect("FrameStats registered");
 
         // Audio nop sink — NoteOn/NoteOff fall through silently;
         // SetMasterGain replies Err so agents fail fast rather than
@@ -154,8 +150,8 @@ impl HeadlessChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         // ADR-0074 §Decision 5: production chassis configures the
-        // cross-class `wait_reply` aborter to broadcast
-        // `SubstrateDying` before exit.
+        // cross-class `wait_reply` aborter so the substrate exits via
+        // `lifecycle::fatal_abort` instead of unwinding.
         let aborter: Arc<dyn aether_substrate::runtime::lifecycle::FatalAborter> = Arc::new(
             aether_substrate::runtime::lifecycle::OutboundFatalAborter::new(Arc::clone(
                 &boot.outbound,
@@ -165,7 +161,6 @@ impl HeadlessChassis {
         let driver = HeadlessTimerCapability {
             boot,
             kind_tick,
-            kind_frame_stats,
             tick_period,
         };
 
@@ -175,7 +170,6 @@ impl HeadlessChassis {
         // through the log capture.
         let mut builder = Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
-            .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<TraceObserverCapability>(())

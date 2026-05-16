@@ -616,8 +616,6 @@ fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
         // [`Registry::list_mailbox_descriptors`] uses the same
         // categorisation so re-registration would be redundant.
         Some(MailboxCategory::ChassisSentinel)
-    } else if name == "hub.claude.broadcast" {
-        Some(MailboxCategory::BroadcastSink)
     } else if name.starts_with("aether.component.trampoline:") {
         Some(MailboxCategory::Trampoline)
     } else if name.starts_with("aether.") {
@@ -710,9 +708,9 @@ mod tests {
     fn mailbox_name_reverse_lookup() {
         let r = Registry::new();
         let a = r.register_closure("physics", noop_handler());
-        let b = r.register_closure("hub.claude.broadcast", noop_handler());
+        let b = r.register_closure("graphics", noop_handler());
         assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
-        assert_eq!(r.mailbox_name(b).as_deref(), Some("hub.claude.broadcast"));
+        assert_eq!(r.mailbox_name(b).as_deref(), Some("graphics"));
         assert!(r.mailbox_name(MailboxId(999)).is_none());
     }
 
@@ -981,13 +979,12 @@ mod tests {
     fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
         let r = Registry::new();
         r.register_closure("aether.input", noop_handler());
-        r.register_closure("hub.claude.broadcast", noop_handler());
         r.register_closure("aether.component.trampoline:cam", noop_handler());
         r.register_closure("user_thing", noop_handler());
 
         let snap = r.list_mailbox_descriptors();
-        // Five entries: 4 registered + 1 synthetic chassis sentinel.
-        assert_eq!(snap.len(), 5, "got: {snap:#?}");
+        // Four entries: 3 registered + 1 synthetic chassis sentinel.
+        assert_eq!(snap.len(), 4, "got: {snap:#?}");
 
         // Sorted by name.
         let names: Vec<&str> = snap.iter().map(|d| d.name.as_str()).collect();
@@ -1004,7 +1001,6 @@ mod tests {
         };
         assert_eq!(cat("aether.chassis"), MailboxCategory::ChassisSentinel);
         assert_eq!(cat("aether.input"), MailboxCategory::Actor);
-        assert_eq!(cat("hub.claude.broadcast"), MailboxCategory::BroadcastSink);
         assert_eq!(
             cat("aether.component.trampoline:cam"),
             MailboxCategory::Trampoline

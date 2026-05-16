@@ -27,7 +27,6 @@
 
 #[cfg(feature = "audio")]
 pub mod audio;
-pub mod broadcast;
 pub mod component;
 pub mod engine;
 pub mod fs;
@@ -47,7 +46,6 @@ pub mod window;
 pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
-pub use broadcast::BroadcastCapability;
 pub use component::ComponentHostCapability;
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). It re-exports only on the native

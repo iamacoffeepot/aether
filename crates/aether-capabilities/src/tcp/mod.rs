@@ -417,10 +417,8 @@ mod cap_native {
                 thread::sleep(Duration::from_millis(5));
             };
             let payload = match frame {
-                EgressEvent::ToSession { payload, .. } | EgressEvent::Broadcast { payload, .. } => {
-                    payload
-                }
-                other => panic!("expected ToSession/Broadcast egress, got {other:?}"),
+                EgressEvent::ToSession { payload, .. } => payload,
+                other => panic!("expected ToSession egress, got {other:?}"),
             };
             postcard::from_bytes(&payload).expect("decode reply")
         }
@@ -574,99 +572,12 @@ mod cap_native {
             }
         }
 
-        /// Issue 607 Phase 6b: connect a real TCP client to a bound
-        /// listener, write bytes, observe `SessionData` broadcast on
-        /// the egress, then drop the client and observe
-        /// `SessionClosed`. Exercises the full pipeline:
-        /// listener accept thread → mpsc → ConnectionReady wake →
-        /// listener spawns TcpSessionActor → session read thread →
-        /// mpsc → SessionDataReady wake → session broadcasts.
-        ///
-        /// Boots [`crate::BroadcastCapability`] alongside `TcpCapability`
-        /// so the broadcast mailbox is registered; sessions broadcast
-        /// `SessionData` / `SessionClosed` through it.
-        #[test]
-        fn session_round_trip_data_then_close() {
-            use std::io::Write;
-            use std::net::TcpStream;
-
-            let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<crate::BroadcastCapability>(())
-                .with_actor::<TcpCapability>(())
-                .build_passive()
-                .expect("caps boot");
-
-            // Bind to OS-picked port.
-            let bind_reply: BindListenerResult = drive_and_decode(
-                &registry,
-                &rx,
-                TcpCapability::NAMESPACE,
-                &BindListener {
-                    addr: "127.0.0.1:0".into(),
-                    name: None,
-                },
-            );
-            let local_port = match bind_reply {
-                BindListenerResult::Ok { local_port, .. } => local_port,
-                BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
-            };
-
-            // Connect a real client to the listener and write a
-            // tagged payload. Drop the client to trigger EOF on the
-            // session's read path.
-            let payload_text = b"hello session";
-            {
-                let mut client = TcpStream::connect(format!("127.0.0.1:{local_port}"))
-                    .expect("client connects to listener");
-                client.write_all(payload_text).expect("client write");
-                // Explicit flush + drop. `Drop` on TcpStream calls
-                // shutdown which triggers EOF on the server read.
-            }
-
-            // Drain egress until we observe both SessionData and
-            // SessionClosed broadcasts. The chassis driver thread
-            // (the loopback HubOutbound) ships every broadcast over
-            // `rx`. We tolerate other egress events (e.g. Tick
-            // broadcasts) interleaved.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut saw_data = false;
-            let mut saw_closed = false;
-            while !saw_data || !saw_closed {
-                let remaining = match deadline.checked_duration_since(Instant::now()) {
-                    Some(d) => d,
-                    None => break,
-                };
-                let frame = match rx.recv_timeout(remaining) {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
-                let (kind_name, payload) = match frame {
-                    EgressEvent::Broadcast {
-                        kind_name, payload, ..
-                    } => (kind_name, payload),
-                    EgressEvent::ToSession {
-                        kind_name, payload, ..
-                    } => (kind_name, payload),
-                    _ => continue,
-                };
-                if kind_name == <aether_kinds::SessionData as Kind>::NAME {
-                    let decoded: aether_kinds::SessionData =
-                        postcard::from_bytes(&payload).expect("decode SessionData");
-                    assert_eq!(decoded.bytes, payload_text);
-                    assert!(decoded.peer.starts_with("127.0.0.1:"));
-                    assert!(decoded.session_name.starts_with("conn-"));
-                    saw_data = true;
-                } else if kind_name == <aether_kinds::SessionClosed as Kind>::NAME {
-                    let decoded: aether_kinds::SessionClosed =
-                        postcard::from_bytes(&payload).expect("decode SessionClosed");
-                    assert_eq!(decoded.reason, "eof");
-                    saw_closed = true;
-                }
-            }
-            assert!(saw_data, "SessionData broadcast did not arrive");
-            assert!(saw_closed, "SessionClosed broadcast did not arrive");
-        }
+        // Pre-#775 the session round-trip test asserted that
+        // SessionData / SessionClosed broadcasts arrived at the egress
+        // after a real TCP client wrote then dropped. Issue 775 retired
+        // the BroadcastCapability + observation fan-out, so the
+        // session actor no longer publishes those kinds — the test was
+        // deleted with the broadcasts.
 
         /// Two concurrent binds on different ports both surface in
         /// `ListListeners`.

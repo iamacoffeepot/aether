@@ -1,10 +1,9 @@
 //! Tic-tac-toe demo runtime: a two-player game component that exists
-//! to stress the ADR-0035 headless chassis end-to-end, plus the
-//! multi-session reply / broadcast paths that the hub already
-//! supports. Two Claude sessions attach to the same hub, take turns
-//! sending `tic_tac_toe.play_move` mail, and observe
-//! `tic_tac_toe.game_state` broadcasts that fan out to every attached
-//! session after each accepted move.
+//! to stress the ADR-0035 headless chassis end-to-end and the reply
+//! path the hub already supports. Sessions take turns sending
+//! `tic_tac_toe.play_move` mail and the server routes
+//! `tic_tac_toe.game_state` to the sibling `CLIENT_OBSERVER` after
+//! each accepted move.
 //!
 //! Scope: no identity tracking. The component doesn't care which
 //! session sent a move — it just alternates turns starting with X.
@@ -17,24 +16,38 @@
 //! and doesn't emit `DrawTriangle`. Desktop is welcome to load it but
 //! the window will stay blank since nothing draws.
 //!
+//! Issue 775 retired the multi-MCP-session broadcast fan-out
+//! (`hub.claude.broadcast`); the demo previously also broadcast each
+//! `GameState` to every attached session. With `BroadcastCapability`
+//! gone the demo keeps the direct observer hand-off but drops the
+//! multi-session observation. A future user-space observer
+//! component can re-introduce the broader fan-out if needed.
+//!
 //! Wire types and well-known mailbox names live in the
 //! `aether-demo-tic-tac-toe` trunk rlib; the client component depends
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
-use aether_capabilities::BroadcastCapability;
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
     MOVE_CELL_OCCUPIED, MOVE_GAME_OVER, MOVE_OK, MOVE_OUT_OF_BOUNDS, MoveResult, PLAYER_NONE,
     PLAYER_O, PLAYER_X, PlayMove, Reset,
 };
 
+/// Mirror of `aether_substrate_bundle::test_bench::TEST_BENCH_OBSERVER_MAILBOX_NAME`.
+/// Inlined so the cdylib doesn't pull the host-only bundle crate.
+/// `send_to_named` against this name is a no-op outside the test bench
+/// (production registries don't carry an observer); inside scenario
+/// runs the test-bench chassis captures each kind by name so
+/// `count_observed("tic_tac_toe.game_state")` works against the
+/// existing assertion vocabulary.
+const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
+
 /// Per-instance component state. Holds the live game board plus the
-/// cached kind id used for replies. Receivers are addressed via
-/// `ctx.actor::<R>()` (broadcast) or `ctx.send_to_named` (the
-/// observer client, whose Rust type is in a sibling cdylib the server
-/// can't import).
+/// cached kind id used for replies. Observer client (its Rust type is
+/// in a sibling cdylib the server can't import) is addressed via
+/// `ctx.send_to_named`.
 pub struct TicTacToe {
     state: GameState,
     move_result_kind: KindId<MoveResult>,
@@ -42,8 +55,8 @@ pub struct TicTacToe {
 
 /// Authoritative tic-tac-toe server. Accepts `PlayMove` and `Reset`
 /// from any attached Claude session, replies to the sender with the
-/// outcome, and broadcasts the new `GameState` to
-/// `hub.claude.broadcast` whenever the board changes.
+/// outcome, and routes the new `GameState` to the sibling
+/// `CLIENT_OBSERVER` component after each accepted move.
 ///
 /// # Agent
 /// Alternating turns start with X. Send `tic_tac_toe.play_move` with
@@ -51,11 +64,8 @@ pub struct TicTacToe {
 /// is on turn. The reply is `tic_tac_toe.move_result` where
 /// `status == 0` (MOVE_OK) means accepted; non-zero means rejected
 /// (`1` out-of-bounds, `2` cell-occupied, `3` game-over) and the
-/// board is unchanged. Watch `tic_tac_toe.game_state` on your
-/// `receive_mail` stream to see every state update regardless of who
-/// sent the move — that's the broadcast path the hub fans out to
-/// every session. Send `tic_tac_toe.reset` (empty payload) to start a
-/// fresh game.
+/// board is unchanged. Send `tic_tac_toe.reset` (empty payload) to
+/// start a fresh game.
 #[actor]
 impl FfiActor for TicTacToe {
     const NAMESPACE: &'static str = "tic_tac_toe";
@@ -71,8 +81,8 @@ impl FfiActor for TicTacToe {
     }
 
     /// Applies a move if legal, then replies to the sender with the
-    /// outcome. On acceptance the new state is also broadcast so every
-    /// attached session sees the update — not just the one that moved.
+    /// outcome. On acceptance the new state is also handed to the
+    /// sibling observer component for display.
     ///
     /// # Agent
     /// Send `{ row, col }` with both in `0..=2`. The reply's `status`
@@ -86,24 +96,23 @@ impl FfiActor for TicTacToe {
         let status = self.apply_move(mv.row, mv.col);
         self.reply(ctx, status);
         if status == MOVE_OK {
-            ctx.actor::<BroadcastCapability>().send(&self.state);
             ctx.send_to_named(CLIENT_OBSERVER, &self.state);
+            ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &self.state);
         }
     }
 
-    /// Resets to a fresh game, replies to the caller, and broadcasts
-    /// the new empty state so other sessions notice.
+    /// Resets to a fresh game, replies to the caller, and hands the
+    /// new empty state to the observer.
     ///
     /// # Agent
     /// Use this to start over after a win/draw or to abandon an
-    /// in-progress game. The reply always has `status == MOVE_OK`
-    /// and the broadcast is fire-and-forget.
+    /// in-progress game. The reply always has `status == MOVE_OK`.
     #[handler]
     fn on_reset(&mut self, ctx: &mut FfiCtx<'_>, _r: Reset) {
         self.state = GameState::new_game();
         self.reply(ctx, MOVE_OK);
-        ctx.actor::<BroadcastCapability>().send(&self.state);
         ctx.send_to_named(CLIENT_OBSERVER, &self.state);
+        ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &self.state);
     }
 }
 

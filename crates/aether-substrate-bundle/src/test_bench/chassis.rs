@@ -11,14 +11,14 @@
 use std::sync::{Arc, Mutex};
 
 use aether_capabilities::{
-    BroadcastCapability, CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability,
-    InputCapability, InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles,
-    TcpCapability, fs::NamespaceRoots, trace::TraceObserverCapability,
+    CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
+    InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles, TcpCapability,
+    fs::NamespaceRoots, trace::TraceObserverCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
-use aether_kinds::{FrameStats, Tick};
+use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
@@ -32,6 +32,89 @@ use super::events::{ChassisEvent, EventSender};
 /// component, the scheduler doesn't read this — it's retained on the
 /// hub-protocol wire for compatibility).
 pub const WORKERS: usize = 2;
+
+/// Test-bench observability mailbox. Scenarios that want to assert on
+/// component-emitted kinds (the probe's `aether.test_fixture.tick_observed`,
+/// for example) target this name with `ctx.send_to_named`; the
+/// test-bench chassis registers [`TestBenchObserverCapability`] under
+/// this namespace and the cap's fallback handler records each kind
+/// name in `TestBenchEnv::observed_kinds`. Only booted when
+/// `observed_kinds` is `Some` (binaries pass `None` for zero
+/// overhead).
+///
+/// Mirrored inline as the `NativeActor::NAMESPACE` literal inside
+/// the observer module (the bridge macro can't see this const from
+/// the lifted-impl scope); keep them in lockstep.
+pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
+
+// `TestBenchObserverCapability` re-exports via the `#[bridge]` macro;
+// `TestBenchObserverConfig` lives inside the `observer` mod and is
+// surfaced for chassis builder calls.
+pub use observer::TestBenchObserverConfig;
+
+/// Catch-all observer cap that records every kind name addressed at
+/// `aether.test_bench.observer`. Pre-issue-775 the same role lived on
+/// `BroadcastCapability` (which also fanned the mail out to attached
+/// MCP sessions); with that fan-out retired the observer survives as
+/// a test-bench-private cap whose only job is recording kind names
+/// for `count_observed` assertions. The cap is a real `NativeActor`
+/// (not a `register_closure`) so its handler completes through the
+/// framework's ADR-0080 settlement reporting — the bench's Tick
+/// settlement gate would otherwise wait the full 5 s timeout per
+/// tick when a probe component routes observation mail here.
+#[aether_actor::bridge(singleton)]
+mod observer {
+    use std::sync::{Arc, Mutex};
+
+    use aether_actor::actor;
+    use aether_substrate::actor::native::envelope::Envelope;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+
+    /// Config passed in via [`super::TestBenchEnv::observed_kinds`].
+    /// The cap captures the `Arc<Mutex<Vec<String>>>` and pushes each
+    /// handled mail's kind name into it.
+    pub struct TestBenchObserverConfig {
+        pub observed_kinds: Arc<Mutex<Vec<String>>>,
+    }
+
+    pub struct TestBenchObserverCapability {
+        observed_kinds: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[actor]
+    impl NativeActor for TestBenchObserverCapability {
+        type Config = TestBenchObserverConfig;
+        // Mirror of `super::TEST_BENCH_OBSERVER_MAILBOX_NAME` (the
+        // bridge macro lifts the impl outside the mod, so a `super::`
+        // path no longer resolves in the rewritten location).
+        const NAMESPACE: &'static str = "aether.test_bench.observer";
+
+        fn init(
+            cfg: TestBenchObserverConfig,
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
+            Ok(Self {
+                observed_kinds: cfg.observed_kinds,
+            })
+        }
+
+        /// Catch-all: every kind sent to this mailbox records its
+        /// name. The macro auto-emits a blanket `HandlesKind<K>` impl
+        /// so callers using `ctx.send_to_named` against an arbitrary
+        /// kind compile against the cap.
+        #[fallback]
+        fn on_any(&self, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
+            if env.kind_name.is_empty() {
+                return;
+            }
+            self.observed_kinds
+                .lock()
+                .unwrap()
+                .push(env.kind_name.clone());
+        }
+    }
+}
 
 /// ADR-0071 marker type for the test-bench chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<TestBenchChassis>`]
@@ -130,7 +213,6 @@ pub struct TestBenchBuild {
     /// encoder-level methods live on [`RenderHandles`].
     pub render_handles: RenderHandles,
     pub kind_tick: KindId,
-    pub kind_frame_stats: KindId,
 }
 
 impl TestBenchChassis {
@@ -162,10 +244,6 @@ impl TestBenchChassis {
         };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-        let kind_frame_stats = boot
-            .registry
-            .kind_id(FrameStats::NAME)
-            .expect("FrameStats registered");
 
         // Capture handoff lives on `RenderCapability` post-issue-603
         // Phase 2. The cap dispatcher parks the request on
@@ -174,7 +252,7 @@ impl TestBenchChassis {
         let events_for_render = events_tx.clone();
         let render_config = RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-            observed_kinds,
+            observed_kinds: observed_kinds.clone(),
             capture_backend: Some(CaptureBackend {
                 queue: capture_queue.clone(),
                 wake: Arc::new(move || {
@@ -224,7 +302,6 @@ impl TestBenchChassis {
 
         let mut builder =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
-                .with_actor::<BroadcastCapability>(())
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
                 .with_actor::<TraceObserverCapability>(())
@@ -234,6 +311,16 @@ impl TestBenchChassis {
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())
                 .with_actor::<TestBenchCapability>(test_bench_cap_config);
+        // Issue 775: scenarios that want to assert on component-emitted
+        // kinds boot the catch-all observer cap. The binary
+        // (`bin/test-bench.rs`) passes `observed_kinds: None` and skips
+        // the cap entirely; mail to the observer mailbox warn-drops in
+        // that mode.
+        if let Some(sink) = observed_kinds.clone() {
+            builder = builder.with_actor::<TestBenchObserverCapability>(TestBenchObserverConfig {
+                observed_kinds: sink,
+            });
+        }
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }
@@ -260,7 +347,6 @@ impl TestBenchChassis {
             boot,
             render_handles,
             kind_tick,
-            kind_frame_stats,
         })
     }
 }

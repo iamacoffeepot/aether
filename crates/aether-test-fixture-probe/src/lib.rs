@@ -5,10 +5,12 @@
 //!
 //! Behaviour:
 //!
-//! - On every tick, broadcasts `aether.test_fixture.tick_observed`
-//!   with a monotonic counter. Lets scenarios count tick deliveries
-//!   via `TestBench::count_observed` (broadcasts arrive on the
-//!   loopback and get recorded by kind name).
+//! - On every tick, sends `aether.test_fixture.tick_observed` to the
+//!   test-bench observer mailbox (`aether.test_bench.observer`) with
+//!   a monotonic counter. Lets scenarios count tick deliveries via
+//!   `TestBench::count_observed` (issue 775 retired the
+//!   `BroadcastCapability` MCP fan-out; the bench now owns a private
+//!   catch-all observer mailbox for these scenario observations).
 //! - On the first tick, emits a `tracing::info!("typed_send_alive")`
 //!   that flows through the actor-aware subscriber (issue #581) →
 //!   per-actor `LogBuffer` → drain at handler exit ships a `LogBatch`
@@ -22,11 +24,16 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
-use aether_capabilities::{BroadcastCapability, InputCapability, RenderCapability};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_capabilities::{InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{DrawTriangle, SubscribeInput, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
+
+/// Mirror of `aether_substrate_bundle::test_bench::TEST_BENCH_OBSERVER_MAILBOX_NAME`.
+/// Inlined here so wasm guests don't pull the bundle (`std`-bound)
+/// into the FFI build.
+const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
 
 /// Broadcast payload emitted on each tick. Postcard-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the bench's
@@ -97,9 +104,12 @@ impl FfiActor for Probe {
     #[handler]
     fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _: Tick) {
         self.tick_count += 1;
-        ctx.actor::<BroadcastCapability>().send(&TickObserved {
-            count: self.tick_count,
-        });
+        ctx.send_to_named::<TickObserved>(
+            TEST_BENCH_OBSERVER_MAILBOX_NAME,
+            &TickObserved {
+                count: self.tick_count,
+            },
+        );
         if self.tick_count == 1 {
             tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
         }

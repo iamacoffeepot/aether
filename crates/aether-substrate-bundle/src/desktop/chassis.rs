@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    AudioCapability, BroadcastCapability, CaptureBackend, ComponentHostCapability,
-    ComponentHostConfig, FsCapability, HandleCapability, HttpCapability, InputCapability,
-    InputConfig, LogCapability, RenderCapability, RenderConfig, TcpCapability,
-    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf, trace::TraceObserverCapability,
+    AudioCapability, CaptureBackend, ComponentHostCapability, ComponentHostConfig, FsCapability,
+    HandleCapability, HttpCapability, InputCapability, InputConfig, LogCapability,
+    RenderCapability, RenderConfig, TcpCapability, UnsupportedTestBenchCapability,
+    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    trace::TraceObserverCapability,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -200,9 +200,9 @@ impl DesktopChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         // ADR-0074 §Decision 5: production chassis configures the
-        // cross-class `wait_reply` aborter to broadcast
-        // `SubstrateDying` before exit. Built before `boot` moves
-        // into the driver.
+        // cross-class `wait_reply` aborter so the substrate exits via
+        // `lifecycle::fatal_abort` instead of unwinding. Built before
+        // `boot` moves into the driver.
         let aborter: Arc<dyn aether_substrate::runtime::lifecycle::FatalAborter> = Arc::new(
             aether_substrate::runtime::lifecycle::OutboundFatalAborter::new(Arc::clone(
                 &boot.outbound,
@@ -229,7 +229,6 @@ impl DesktopChassis {
         // chassis cap.
         let mut builder = Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
-            .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<TraceObserverCapability>(())

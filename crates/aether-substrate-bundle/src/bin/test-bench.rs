@@ -13,8 +13,6 @@
 // share `TestBenchChassis::build_passive`.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Instant;
 
 use aether_actor::Actor;
 use aether_capabilities::InputCapability;
@@ -81,7 +79,6 @@ fn main() -> anyhow::Result<()> {
         boot,
         render_handles,
         kind_tick,
-        kind_frame_stats,
     } = TestBenchChassis::build_passive(env)?;
 
     let (width, height) = parse_size_env();
@@ -98,16 +95,7 @@ fn main() -> anyhow::Result<()> {
         "test-bench componentless boot — drive ticks via aether.test_bench.advance",
     );
 
-    drive_events_loop(
-        events_rx,
-        capture_queue,
-        boot,
-        passive,
-        render_handles,
-        gpu,
-        kind_tick,
-        kind_frame_stats,
-    )
+    drive_events_loop(events_rx, capture_queue, boot, passive, gpu, kind_tick)
 }
 
 /// Drive the chassis event loop on the main thread. Embedder is the
@@ -120,39 +108,30 @@ fn drive_events_loop(
     capture_queue: CaptureQueue,
     boot: aether_substrate::SubstrateBoot,
     passive: aether_substrate::PassiveChassis<TestBenchChassis>,
-    render_handles: aether_capabilities::RenderHandles,
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
-    kind_frame_stats: aether_data::KindId,
 ) -> anyhow::Result<()> {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
     let input_mailbox = mailbox_id_from_name(InputCapability::NAMESPACE);
     let frame_bound_pending = passive.frame_bound_pending();
-    let started = Instant::now();
-    let mut frame: u64 = 0;
     // ADR-0080 §6 chassis-root correlation counter (issue
-    // iamacoffeepot/aether#723). Threaded through `run_frame` so the
-    // tick + frame-stats pushes here carry observable lineage like
-    // the desktop and headless drivers do.
+    // iamacoffeepot/aether#723). Threaded through `run_frame` so each
+    // tick push carries observable lineage like the desktop and
+    // headless drivers do.
     let chassis_correlation = std::sync::atomic::AtomicU64::new(1);
 
     while let Ok(event) = events_rx.recv() {
         match event {
             ChassisEvent::Advance { reply_to, ticks } => {
                 for _ in 0..ticks {
-                    frame += 1;
                     run_frame(
-                        frame,
-                        started,
                         true,
                         &queue,
                         &outbound,
                         input_mailbox,
                         kind_tick,
-                        kind_frame_stats,
                         &capture_queue,
-                        &render_handles,
                         &frame_bound_pending,
                         &mut gpu,
                         &chassis_correlation,
@@ -166,18 +145,13 @@ fn drive_events_loop(
                 );
             }
             ChassisEvent::CaptureRequested => {
-                frame += 1;
                 run_frame(
-                    frame,
-                    started,
                     false,
                     &queue,
                     &outbound,
                     input_mailbox,
                     kind_tick,
-                    kind_frame_stats,
                     &capture_queue,
-                    &render_handles,
                     &frame_bound_pending,
                     &mut gpu,
                     &chassis_correlation,
@@ -196,16 +170,12 @@ fn drive_events_loop(
 
 #[allow(clippy::too_many_arguments)]
 fn run_frame(
-    frame: u64,
-    started: Instant,
     dispatch_tick: bool,
     queue: &Arc<aether_substrate::Mailer>,
     outbound: &Arc<aether_substrate::HubOutbound>,
     input_mailbox: MailboxId,
     kind_tick: aether_data::KindId,
-    kind_frame_stats: aether_data::KindId,
     capture_queue: &CaptureQueue,
-    render_handles: &aether_capabilities::RenderHandles,
     frame_bound_pending: &[(
         aether_substrate::MailboxId,
         Arc<std::sync::atomic::AtomicU64>,
@@ -253,24 +223,5 @@ fn run_frame(
         None => {
             gpu.render();
         }
-    }
-
-    if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-        let triangles = render_handles.triangles_rendered.load(Ordering::Relaxed);
-        frame_loop::emit_frame_stats(
-            queue,
-            kind_frame_stats,
-            frame,
-            triangles,
-            next_correlation(),
-        );
-        let elapsed = started.elapsed().as_secs_f64().max(0.001);
-        tracing::info!(
-            target: "aether_substrate::frame_loop",
-            frame = frame,
-            fps = frame as f64 / elapsed,
-            triangles,
-            "test-bench frame",
-        );
     }
 }

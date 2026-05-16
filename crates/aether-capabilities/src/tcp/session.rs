@@ -1,11 +1,9 @@
 //! `aether.tcp.session` — instanced actor, one per accepted
 //! connection. Owns a `TcpStream` (split for read/write) and a
-//! sidecar read thread that loops on blocking `read()`. Mirrors
-//! [`crate::tcp::listener::TcpListenerActor`]'s wake-mail shape:
-//! the read thread pushes byte chunks (or an EOF / error signal)
-//! over an mpsc and fires a [`SessionDataReady`] mail at this
-//! actor's own mailbox; the dispatcher's handler drains and
-//! broadcasts each chunk as [`SessionData`].
+//! sidecar read thread that loops on blocking `read()`. The read
+//! thread pushes byte chunks (or an EOF / error signal) over an
+//! mpsc and fires a [`SessionDataReady`] mail at this actor's own
+//! mailbox; the dispatcher drains them.
 //!
 //! Writes go directly from the dispatcher thread (`on_session_write`
 //! does a blocking `write_all` on the write half). The read path
@@ -17,9 +15,15 @@
 //! Shutdown: `unwire` flips the read thread's shutdown flag and
 //! calls `stream.shutdown(Both)` on the write half. The kernel
 //! aborts any blocked `read()` on the read half, the read thread
-//! sees the error / EOF, exits. The dispatcher joins the thread
-//! and emits a single `SessionClosed` broadcast (suppressed if the
-//! read path already broadcast one for an EOF / error).
+//! sees the error / EOF, exits, and the dispatcher joins it.
+//!
+//! Issue 775 retired the publish path: pre-#775 the dispatcher
+//! re-broadcast every chunk as `SessionData` and the close as
+//! `SessionClosed` through the `hub.claude.broadcast` mailbox.
+//! With `BroadcastCapability` gone the chassis no longer fans
+//! observation out, so this actor drops bytes on the floor today.
+//! A future user-space TCP observer (monitor-based or session-
+//! targeted mail) is the replacement path.
 
 // Handler-signature kinds need to be importable at file root for
 // the `#[bridge]`-emitted `HandlesKind` markers.
@@ -33,9 +37,8 @@ pub use session_native::TcpSessionConfig;
 #[aether_actor::bridge(instanced)]
 mod session_native {
     use super::{SessionClose, SessionDataReady, SessionWrite};
-    use aether_actor::{Sender, actor};
+    use aether_actor::actor;
     use aether_data::Kind;
-    use aether_kinds::{HUB_BROADCAST_MAILBOX_NAME, SessionClosed, SessionData};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::{KindId, Mail, Mailer};
@@ -49,16 +52,14 @@ mod session_native {
     /// Default per-read buffer size. 64 KiB matches the typical
     /// kernel TCP buffer; any larger and we just block waiting for
     /// the kernel to fill it. Smaller adds syscall overhead per
-    /// chunk. Not currently configurable; agents that want
-    /// different framing can broadcast on top of `SessionData` and
-    /// re-chunk in user-space.
+    /// chunk.
     const READ_BUFFER_BYTES: usize = 64 * 1024;
 
     /// Init config for [`TcpSessionActor`]. The listener's
     /// `on_connection_ready` builds this per accepted stream and
     /// hands it through `spawn_child`. `stream` is `Option` so init
     /// can `.take()` and split it; `peer` and `session_name` are
-    /// echoed in every broadcast for agent-side correlation.
+    /// retained for log attribution.
     pub struct TcpSessionConfig {
         pub stream: Option<TcpStream>,
         pub peer: String,
@@ -68,7 +69,9 @@ mod session_native {
     /// One end of a split `TcpStream`. The read sidecar owns the
     /// read half; the dispatcher owns the write half (used by
     /// `on_session_write`). Read-side errors / EOF flow back to the
-    /// dispatcher via the `bytes_rx` channel as `Err(reason)`.
+    /// dispatcher via the `bytes_rx` channel as `Err(reason)`; the
+    /// dispatcher discards them today (issue 775 retired the
+    /// SessionData/SessionClosed broadcast path).
     pub struct TcpSessionActor {
         peer: String,
         session_name: String,
@@ -76,11 +79,6 @@ mod session_native {
         shutdown: Arc<AtomicBool>,
         read_thread: Option<JoinHandle<()>>,
         bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
-        mailer: Arc<Mailer>,
-        // Sticks to true once a `SessionClosed` broadcast has fired
-        // so duplicate broadcasts don't pile up if both the read
-        // path and `unwire` see the close.
-        closed_emitted: bool,
     }
 
     #[actor]
@@ -114,8 +112,7 @@ mod session_native {
             // or a SessionClosed broadcast + ctx.shutdown() (Err).
             let (bytes_tx, bytes_rx) = mpsc::channel::<Result<Vec<u8>, String>>();
 
-            let mailer: Arc<Mailer> = ctx.mailer();
-            let mailer_for_thread = Arc::clone(&mailer);
+            let mailer_for_thread: Arc<Mailer> = ctx.mailer();
             let self_id = ctx.self_id();
             let data_ready_kind = KindId(<SessionDataReady as Kind>::ID.0);
 
@@ -185,8 +182,6 @@ mod session_native {
                 shutdown,
                 read_thread: Some(thread),
                 bytes_rx,
-                mailer,
-                closed_emitted: false,
             })
         }
 
@@ -200,19 +195,6 @@ mod session_native {
             if let Some(t) = self.read_thread.take() {
                 let _ = t.join();
             }
-            // Emit one SessionClosed if the read path didn't already
-            // (e.g. an explicit close before EOF was observed).
-            if !self.closed_emitted {
-                self.closed_emitted = true;
-                broadcast_via_mailer(
-                    &self.mailer,
-                    &SessionClosed {
-                        session_name: self.session_name.clone(),
-                        peer: self.peer.clone(),
-                        reason: "explicit close".to_owned(),
-                    },
-                );
-            }
             tracing::info!(
                 target: "aether_substrate::tcp",
                 session = %self.session_name,
@@ -221,35 +203,21 @@ mod session_native {
             );
         }
 
-        /// Sidecar read wake. Drain every pending chunk: each `Ok`
-        /// becomes a [`SessionData`] broadcast; an `Err` ends the
-        /// session (broadcast `SessionClosed`, call `ctx.shutdown()`).
-        ///
-        /// One wake fires per chunk, but the handler drains until
-        /// the queue is empty so coalesced wakes process all
-        /// outstanding chunks in one dispatcher tick.
+        /// Sidecar read wake. Drain every pending chunk; `Ok` bytes
+        /// are dropped (issue 775 retired the SessionData broadcast)
+        /// and `Err` ends the session via `ctx.shutdown()`. One wake
+        /// fires per chunk, but the handler drains until the queue
+        /// is empty so coalesced wakes process all outstanding chunks
+        /// in one dispatcher tick.
         #[handler]
         fn on_data_ready(&mut self, ctx: &mut NativeCtx<'_>, _mail: SessionDataReady) {
             while let Ok(item) = self.bytes_rx.try_recv() {
                 match item {
-                    Ok(bytes) => {
-                        let payload = SessionData {
-                            session_name: self.session_name.clone(),
-                            peer: self.peer.clone(),
-                            bytes,
-                        };
-                        broadcast(ctx, &payload);
+                    Ok(_bytes) => {
+                        // Bytes drop on the floor pending a user-space
+                        // TCP observer rewire (issue 775).
                     }
-                    Err(reason) => {
-                        if !self.closed_emitted {
-                            self.closed_emitted = true;
-                            let payload = SessionClosed {
-                                session_name: self.session_name.clone(),
-                                peer: self.peer.clone(),
-                                reason,
-                            };
-                            broadcast(ctx, &payload);
-                        }
+                    Err(_reason) => {
                         ctx.shutdown();
                         return;
                     }
@@ -271,53 +239,16 @@ mod session_native {
                     error = %e,
                     "tcp session write failed",
                 );
-                if !self.closed_emitted {
-                    self.closed_emitted = true;
-                    let payload = SessionClosed {
-                        session_name: self.session_name.clone(),
-                        peer: self.peer.clone(),
-                        reason: format!("write error: {e}"),
-                    };
-                    broadcast(ctx, &payload);
-                }
                 ctx.shutdown();
             }
         }
 
-        /// Cooperative external close. Same shape as the listener
-        /// pattern: peer mails this, we call `ctx.shutdown()`, the
-        /// dispatcher drains remaining inbox mail, runs `unwire`
-        /// (which joins the read thread and emits `SessionClosed`).
+        /// Cooperative external close. Peer mails this, we call
+        /// `ctx.shutdown()`, the dispatcher drains remaining inbox
+        /// mail, runs `unwire` (which joins the read thread).
         #[handler]
         fn on_close_request(&mut self, ctx: &mut NativeCtx<'_>, _mail: SessionClose) {
             ctx.shutdown();
         }
-    }
-
-    /// Best-effort hub broadcast from inside a handler — uses the
-    /// ctx's `Sender::send_to_named` path for typed addressing.
-    fn broadcast<K: Kind + serde::Serialize>(ctx: &mut NativeCtx<'_>, payload: &K) {
-        ctx.send_to_named::<K>(HUB_BROADCAST_MAILBOX_NAME, payload);
-    }
-
-    /// Broadcast variant for `unwire` where we want to use the
-    /// stored `mailer` reference directly (still inside the
-    /// dispatcher thread). Functionally equivalent — the
-    /// `send_to_named` path also goes through `Mailer::push` —
-    /// kept separate to avoid borrowing `&mut self` and `ctx`
-    /// simultaneously when computing the payload from `self` fields.
-    fn broadcast_via_mailer<K: Kind + serde::Serialize>(mailer: &Arc<Mailer>, payload: &K) {
-        let bytes = match postcard::to_allocvec(payload) {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-        let kind = KindId(K::ID.0);
-        let mailbox = aether_data::mailbox_id_from_name(HUB_BROADCAST_MAILBOX_NAME);
-        mailer.push(Mail::new(
-            aether_substrate::MailboxId(mailbox.0),
-            kind,
-            bytes,
-            1,
-        ));
     }
 }

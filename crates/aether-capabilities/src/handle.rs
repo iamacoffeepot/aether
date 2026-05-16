@@ -241,10 +241,8 @@ mod native {
                 thread::sleep(Duration::from_millis(5));
             };
             let payload = match frame {
-                EgressEvent::ToSession { payload, .. } | EgressEvent::Broadcast { payload, .. } => {
-                    payload
-                }
-                other => panic!("expected ToSession/Broadcast egress, got {other:?}"),
+                EgressEvent::ToSession { payload, .. } => payload,
+                other => panic!("expected ToSession egress, got {other:?}"),
             };
             let result: HandlePublishResult = postcard::from_bytes(&payload).unwrap();
             let HandlePublishResult::Ok {

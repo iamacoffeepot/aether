@@ -49,11 +49,11 @@ mod tests {
     use aether_data::{Primitive, SchemaType};
 
     use crate::{
-        Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, Fetch, FetchResult,
-        FrameStats, Key, List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove,
-        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, ReplaceComponent,
-        ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput, SubscribeInputResult,
-        Terminate, TerminateResult, Tick, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, Fetch, FetchResult, Key,
+        List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove, NoteOff, NoteOn, Ping,
+        Pong, ProcessExited, Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain,
+        Spawn, SpawnResult, SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick,
+        UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -198,7 +198,6 @@ mod tests {
             Key::NAME,
             MouseMove::NAME,
             DrawTriangle::NAME,
-            FrameStats::NAME,
             Ping::NAME,
             Pong::NAME,
             NoteOn::NAME,
@@ -271,18 +270,5 @@ mod tests {
         };
         assert!(*nested_repr);
         assert_eq!(nested_fields.len(), 6);
-    }
-
-    #[test]
-    fn frame_stats_field_layout() {
-        let descs = all();
-        let fs = descs.iter().find(|d| d.name == FrameStats::NAME).unwrap();
-        let SchemaType::Struct { fields, .. } = &fs.schema else {
-            panic!("expected Struct")
-        };
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].name, "frame");
-        assert_eq!(fields[1].name, "triangles");
-        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U64));
     }
 }

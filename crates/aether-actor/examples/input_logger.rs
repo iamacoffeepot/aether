@@ -1,13 +1,13 @@
 //! Smoke component for ADR-0021 input subscriptions. Observes the
 //! four substrate-published input kinds (Tick / Key / MouseMove /
-//! MouseButton) and emits a `demo.input_observed { stream, code }`
-//! observation to `hub.claude.broadcast` so the driving Claude
-//! session sees each dispatch land via `receive_mail`.
+//! MouseButton) and counts each dispatch.
 //!
-//! `stream` encoding: 0=Tick, 1=Key, 2=MouseButton, 3=MouseMove.
-//! `code` carries the keycode for Key, the rounded cursor `x` for
-//! MouseMove, and `0` for the empty-payload kinds (Tick and
-//! MouseButton).
+//! Pre-issue-775 the example emitted a `demo.input_observed { stream,
+//! code }` to `hub.claude.broadcast` so the driving Claude session
+//! saw each dispatch land via `receive_mail`. With
+//! `BroadcastCapability` retired the broadcast goes away; handlers
+//! still run (and trigger any tracing the substrate captures), but no
+//! observation kind is emitted.
 //!
 //! Each input kind has its own `#[handler]` method. Issue 640 retired
 //! the cap-side manifest auto-subscribe walker (and the macro-side
@@ -15,18 +15,9 @@
 //! via `ctx.subscribe_input::<K>()` in `init`.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
-use aether_capabilities::{BroadcastCapability, InputCapability};
-use aether_data::{Kind, MailboxId, Schema};
+use aether_capabilities::InputCapability;
+use aether_data::{Kind, MailboxId};
 use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput, Tick};
-use bytemuck::{Pod, Zeroable};
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
-#[kind(name = "demo.input_observed")]
-pub struct InputObserved {
-    pub stream: u32,
-    pub code: u32,
-}
 
 pub struct InputLogger;
 
@@ -50,32 +41,16 @@ impl FfiActor for InputLogger {
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
-        ctx.actor::<BroadcastCapability>()
-            .send(&InputObserved { stream: 0, code: 0 });
-    }
+    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {}
 
     #[handler]
-    fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) {
-        ctx.actor::<BroadcastCapability>().send(&InputObserved {
-            stream: 1,
-            code: key.code,
-        });
-    }
+    fn on_key(&mut self, _ctx: &mut FfiCtx<'_>, _key: Key) {}
 
     #[handler]
-    fn on_mouse_button(&mut self, ctx: &mut FfiCtx<'_>, _mb: MouseButton) {
-        ctx.actor::<BroadcastCapability>()
-            .send(&InputObserved { stream: 2, code: 0 });
-    }
+    fn on_mouse_button(&mut self, _ctx: &mut FfiCtx<'_>, _mb: MouseButton) {}
 
     #[handler]
-    fn on_mouse_move(&mut self, ctx: &mut FfiCtx<'_>, m: MouseMove) {
-        ctx.actor::<BroadcastCapability>().send(&InputObserved {
-            stream: 3,
-            code: m.x as u32,
-        });
-    }
+    fn on_mouse_move(&mut self, _ctx: &mut FfiCtx<'_>, _m: MouseMove) {}
 }
 
 aether_actor::export!(InputLogger);

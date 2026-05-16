@@ -147,11 +147,10 @@ impl Mailer {
     }
 
     /// Borrow the wired [`HubOutbound`], or `None` if no outbound was
-    /// attached (the hub chassis, or tests). Issue 576: surfaced so
-    /// the broadcast cap's `init` can grab the outbound at boot and
-    /// lift catch-all envelopes through
-    /// [`HubOutbound::egress_broadcast`] without the substrate
-    /// holding a registry closure for it.
+    /// attached (the hub chassis, or tests). Surfaced for chassis caps
+    /// that thread egress events (replies, log batches, etc.) back to
+    /// the hub without the substrate holding a registry closure for
+    /// them.
     pub fn outbound(&self) -> Option<&Arc<HubOutbound>> {
         self.outbound.as_ref()
     }
@@ -378,8 +377,8 @@ fn route_mail(
                 // component's mailbox id so the hub can build a
                 // `ReplyTo::EngineMailbox { engine_id, mailbox_id }`
                 // for the receiving component. `None` for mail
-                // with no local component origin (broadcast-
-                // originated, substrate-generated). Recovered from
+                // with no local component origin (substrate-generated).
+                // Recovered from
                 // `reply_to.target = Component(_)` set by
                 // `ComponentCtx::send` / `NativeBinding::send_mail`
                 // (issue #644).
