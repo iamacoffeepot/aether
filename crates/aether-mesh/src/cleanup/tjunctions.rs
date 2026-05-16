@@ -184,18 +184,10 @@ pub(super) fn is_strictly_between(p: Point3, a: Point3, b: Point3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixed::f32_to_fixed;
     use crate::plane::Plane3;
+    use crate::test_helpers::pt;
 
     use super::super::mesh::IndexedPolygon;
-
-    fn pt(x: f32, y: f32, z: f32) -> Point3 {
-        Point3 {
-            x: f32_to_fixed(x).unwrap(),
-            y: f32_to_fixed(y).unwrap(),
-            z: f32_to_fixed(z).unwrap(),
-        }
-    }
 
     fn xy_plane() -> Plane3 {
         Plane3 {

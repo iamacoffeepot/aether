@@ -25,6 +25,9 @@ pub mod serialize;
 pub mod simplify;
 pub mod tessellate;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 pub use ast::{Axis, Node};
 pub use mesh::{MeshError, Triangle, mesh};
 pub use obj::to_obj;
