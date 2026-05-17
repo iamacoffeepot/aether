@@ -47,10 +47,10 @@ wasmtime = "30"
 # don't enable the feature, so wgpu's transitive graph stays out of
 # their builds.
 wgpu = { version = "29.0.1", optional = true }
-png = { version = "0.17", optional = true }
+png = { version = "0.18", optional = true }
 # Audio-only deps; gated by the `audio` feature. Desktop enables it,
 # headless and hub do not.
-cpal = { version = "0.15", optional = true }
+cpal = { version = "0.17", optional = true }
 # ADR-0080 trace queue (always on — substrate-wide tracing).
 crossbeam-queue = "0.3"
 # Issue 635 PR B worker-pool ready queue. MPMC channel — std mpsc is
@@ -60,7 +60,7 @@ crossbeam-channel = "0.5"
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
 # `aether.kinds` section. Pin to the version wasmtime re-exports
 # transitively so we stay on a single compiled copy.
-wasmparser = "0.224"
+wasmparser = "0.249"
 
 [dev-dependencies]
 wat = "1"
