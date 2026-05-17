@@ -14,7 +14,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::Kind;
+use aether_data::{Kind, mailbox_id_from_name};
 
 use crate::actor::{Actor, HandlesKind};
 use crate::ffi::bridge::MAIL_BRIDGE;
@@ -49,6 +49,16 @@ impl<R> FfiActorMailbox<R> {
     /// it for diagnostics or a host fn the SDK doesn't yet wrap.
     pub fn mailbox_id(&self) -> aether_data::MailboxId {
         aether_data::MailboxId(self.mailbox)
+    }
+
+    /// Resolve a sibling mailbox on the same transport, addressed by
+    /// `name`. Same FNV-hash name resolution as
+    /// [`crate::ffi::FfiCtx::resolve_actor`] — kept as an inherent
+    /// method so cap-owned ext traits (which only have a mailbox in
+    /// hand, not a ctx) can hand back peer handles without rethreading
+    /// the ctx.
+    pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> FfiActorMailbox<Peer> {
+        FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
 }
 

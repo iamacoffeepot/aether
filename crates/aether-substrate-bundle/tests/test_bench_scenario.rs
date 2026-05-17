@@ -48,8 +48,17 @@ use aether_test_fixture_probe as _;
 const PROBE_NAME: &str = "probe";
 /// Full trampoline address the substrate registers under post-issue-634
 /// Phase 4. Mail destined for the loaded probe goes here, not to the
-/// bare `PROBE_NAME` (which isn't a registered mailbox).
-const PROBE_ADDRESS: &str = "aether.component.trampoline:probe";
+/// bare `PROBE_NAME` (which isn't a registered mailbox). Built from
+/// `WasmTrampoline::NAMESPACE` — the cap-owned single source of truth
+/// post issue 654.
+fn probe_address() -> String {
+    use aether_actor::Actor;
+    format!(
+        "{}:{}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+        PROBE_NAME,
+    )
+}
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
 /// Build a `MailEnvelope` for a `CaptureFrame` mail bundle. Uses
@@ -134,7 +143,7 @@ fn drop_component_silences_tick_echoes() {
     // longer naturally orders ahead of the next advance. Await
     // `DropResult` explicitly so the probe's mailbox is fully gone
     // before the next advance dispatches ticks.
-    let probe_mbox = mailbox_id_from_name(PROBE_ADDRESS);
+    let probe_mbox = mailbox_id_from_name(&probe_address());
     let drop_result: aether_kinds::DropResult = bench
         .send_and_await_reply(
             "aether.component",
@@ -187,7 +196,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // frame_vertices buffer right before the GPU readback.
     let pre = vec![
         envelope(
-            PROBE_ADDRESS,
+            &probe_address(),
             &SetRender {
                 r: 200,
                 g: 32,
@@ -196,7 +205,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
             },
         ),
         MailEnvelope {
-            recipient_name: PROBE_ADDRESS.to_owned(),
+            recipient_name: probe_address(),
             kind_name: "aether.tick".to_owned(),
             payload: Vec::new(),
             count: 1,
@@ -206,7 +215,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // render state to invisible so the post-cleanup capture is back
     // at the chassis clear color.
     let after = vec![envelope(
-        PROBE_ADDRESS,
+        &probe_address(),
         &SetRender {
             r: 0,
             g: 0,
@@ -262,7 +271,7 @@ fn replace_component_preserves_mailbox_identity() {
     // Phase 4 of issue 603 split advance off `aether.component`, so
     // replace mail no longer naturally orders ahead of the next
     // advance. Await `ReplaceResult` explicitly.
-    let probe_mbox = mailbox_id_from_name(PROBE_ADDRESS);
+    let probe_mbox = mailbox_id_from_name(&probe_address());
     let wasm = std::fs::read(&wasm_path).expect("re-read fixture wasm");
     let replace_result: aether_kinds::ReplaceResult = bench
         .send_and_await_reply(

@@ -5,10 +5,12 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! Each loaded wasm component runs as a [`actor::wasm::trampoline::WasmTrampoline`] —
-//! a `NativeActor` instanced under `aether.component.trampoline:NAME`
+//! Each loaded wasm component runs as an `aether_capabilities::trampoline::WasmTrampoline`
+//! — a `NativeActor` instanced under `aether.component.trampoline:NAME`
 //! that delegates incoming mail to the wasm guest via `#[fallback]`
-//! (issue 634 Phase 4). The chassis-side `ComponentHostCapability`
+//! (issue 634 Phase 4; trampoline moved to capabilities by issue 654
+//! so its `Actor::NAMESPACE` is the single cap-owned declaration of
+//! the prefix). The chassis-side `ComponentHostCapability`
 //! (in `aether-capabilities`) shrinks to a `LoadComponent` handler
 //! that spawns the trampoline (and forwarders for `DropComponent` /
 //! `ReplaceComponent`). Phase 4 PR 2 retired the per-frame drain
@@ -28,11 +30,13 @@
 // The `#[actor] impl NativeActor for X` macro emits
 // `impl ::aether_substrate::NativeDispatch for X` so external callers
 // (caps in `aether-capabilities`, user-crate caps) resolve
-// unambiguously. For impls written *inside* aether-substrate (today:
-// the wasm trampoline at `actor::wasm::trampoline`) the
+// unambiguously. For impls written *inside* aether-substrate the
 // `::aether_substrate` prefix is in-crate; the self-alias makes
 // absolute paths resolve without a separate "internal vs external"
-// macro arm.
+// macro arm. (Pre-issue-654 the wasm trampoline was one such in-crate
+// impl; post-654 it lives in `aether-capabilities`, but the alias
+// stays because future substrate-internal `#[actor]` impls would hit
+// the same need.)
 extern crate self as aether_substrate;
 
 pub mod actor;

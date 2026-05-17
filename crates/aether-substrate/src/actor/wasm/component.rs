@@ -148,12 +148,15 @@ impl ComponentCtx {
 
     /// Wire the trampoline's `NativeBinding` into the ctx so the
     /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn can route through
-    /// it. Called by [`WasmTrampoline::init`] right after constructing
-    /// the ctx (and before `Component::instantiate`, since the host
-    /// fn closure captures the ctx via the wasmtime `Store` data
-    /// pointer at instantiation time, not at host-fn call time, so
-    /// installing later than that is fine).
-    pub(crate) fn install_binding(&mut self, binding: Arc<NativeBinding>) {
+    /// it. Called by `WasmTrampoline::init` (in `aether-capabilities`)
+    /// right after constructing the ctx and before
+    /// `Component::instantiate` — the host-fn closure captures the ctx
+    /// via the wasmtime `Store` data pointer at instantiation time,
+    /// not at host-fn call time, so installing later than that is
+    /// fine. Promoted from `pub(crate)` to `pub` by issue 654 when the
+    /// trampoline moved to `aether-capabilities` next to its only
+    /// consumer; no other call site exists today and none is intended.
+    pub fn install_binding(&mut self, binding: Arc<NativeBinding>) {
         self.binding = Some(binding);
     }
 

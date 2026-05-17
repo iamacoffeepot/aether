@@ -39,8 +39,17 @@ const COMPONENT_NAME: &str = "world";
 /// component (issue 634 Phase 4 PR 1). Mail to the bare
 /// `COMPONENT_NAME` warn-drops as unknown — agents address the
 /// trampoline by its full `aether.component.trampoline:NAME` form,
-/// which is what `LoadResult.name` returns.
-const COMPONENT_ADDRESS: &str = "aether.component.trampoline:world";
+/// which is what `LoadResult.name` returns. Built from
+/// `WasmTrampoline::NAMESPACE` — the cap-owned single source of truth
+/// post issue 654.
+fn component_address() -> String {
+    use aether_actor::Actor;
+    format!(
+        "{}:{}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+        COMPONENT_NAME,
+    )
+}
 
 /// Load this crate's pre-built wasm into the bench and await
 /// `LoadResult`. Panics on load failure so the calling test surfaces
@@ -79,7 +88,7 @@ fn nudge_tick(bench: &mut TestBench) {
     // can't go through `send_mail::<K>` (postcard-only). Same applies
     // to `Key` below.
     bench
-        .send_bytes(COMPONENT_ADDRESS, Tick::ID, Tick.encode_into_bytes())
+        .send_bytes(&component_address(), Tick::ID, Tick.encode_into_bytes())
         .expect("send tick");
 }
 
@@ -136,7 +145,7 @@ fn key_press_keeps_render_path_alive() {
         code: keycode::KEY_D,
     };
     bench
-        .send_bytes(COMPONENT_ADDRESS, Key::ID, key.encode_into_bytes())
+        .send_bytes(&component_address(), Key::ID, key.encode_into_bytes())
         .expect("send key");
 
     bench.advance(2).expect("post-key advance");

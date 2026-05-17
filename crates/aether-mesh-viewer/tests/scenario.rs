@@ -44,8 +44,17 @@ const COMPONENT_NAME: &str = "mv";
 /// component (issue 634 Phase 4 PR 1). Mail to the bare
 /// `COMPONENT_NAME` warn-drops as unknown — agents address the
 /// trampoline by its full `aether.component.trampoline:NAME` form,
-/// which is what `LoadResult.name` returns.
-const COMPONENT_ADDRESS: &str = "aether.component.trampoline:mv";
+/// which is what `LoadResult.name` returns. Built from
+/// `WasmTrampoline::NAMESPACE` — the cap-owned single source of truth
+/// post issue 654.
+fn component_address() -> String {
+    use aether_actor::Actor;
+    format!(
+        "{}:{}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+        COMPONENT_NAME,
+    )
+}
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
 const QUAD_OBJ: &[u8] = b"\
@@ -95,7 +104,7 @@ fn nudge_tick(bench: &mut TestBench) {
     // the bytes path with the kind's own `encode_into_bytes` helper,
     // which the derive emits per-shape.
     bench
-        .send_bytes(COMPONENT_ADDRESS, Tick::ID, Tick.encode_into_bytes())
+        .send_bytes(&component_address(), Tick::ID, Tick.encode_into_bytes())
         .expect("send tick");
 }
 
@@ -137,7 +146,7 @@ fn dsl_box_loads_and_renders() {
     bench.advance(1).expect("priming advance");
     bench
         .send_mail(
-            COMPONENT_ADDRESS,
+            &component_address(),
             &LoadMesh {
                 namespace: "save".to_owned(),
                 path,
@@ -175,7 +184,7 @@ fn obj_quad_loads_and_renders() {
     bench.advance(1).expect("priming advance");
     bench
         .send_mail(
-            COMPONENT_ADDRESS,
+            &component_address(),
             &LoadMesh {
                 namespace: "save".to_owned(),
                 path,
@@ -216,7 +225,7 @@ fn parse_failure_keeps_prior_mesh() {
     bench.advance(1).expect("priming advance");
     bench
         .send_mail(
-            COMPONENT_ADDRESS,
+            &component_address(),
             &LoadMesh {
                 namespace: "save".to_owned(),
                 path: good,
@@ -231,7 +240,7 @@ fn parse_failure_keeps_prior_mesh() {
     // Now hand the viewer something it can't parse.
     bench
         .send_mail(
-            COMPONENT_ADDRESS,
+            &component_address(),
             &LoadMesh {
                 namespace: "save".to_owned(),
                 path: bad,
