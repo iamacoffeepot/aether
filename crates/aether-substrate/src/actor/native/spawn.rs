@@ -204,7 +204,11 @@ impl Spawner {
             entry.slot.set_close_done_tx(tx);
             waiters.push(rx);
             entry.slot.signal_shutdown();
-            entry.wake.wake();
+            // Shutdown wake: schedule the slot so the worker observes
+            // the shutdown signal. The CAS-win bool is meaningful only
+            // for callers wiring up first-time scheduling races; here
+            // we just need *some* worker to pick the slot up.
+            let _ = entry.wake.wake();
         }
         let deadline = std::time::Instant::now() + timeout;
         let mut stuck = 0usize;
@@ -590,9 +594,15 @@ impl Spawner {
                 // the closure and wake on their own.
                 let manual_wake = wake.clone();
                 wake_slot.set(Arc::new(move || {
-                    wake.wake();
+                    // Inbox-sender hook: the CAS-win bool would tell us
+                    // whether *this* sender owns the schedule push, but
+                    // the scheduler self-deduplicates so either outcome
+                    // is fine.
+                    let _ = wake.wake();
                 }));
-                manual_wake.wake();
+                // Manual catch-up wake for inbox mail that landed
+                // before the closure was installed (see comment above).
+                let _ = manual_wake.wake();
             }
         }
 

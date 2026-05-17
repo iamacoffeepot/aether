@@ -673,9 +673,12 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 // Pooled branch carries (issue 635 Phase 3).
                 let manual_wake = wake.clone();
                 wake_slot.set(Arc::new(move || {
-                    wake.wake();
+                    // Inbox-sender hook — same fire-and-forget shape
+                    // as the spawn.rs analogue: scheduler deduplicates
+                    // the CAS, so the bool is irrelevant here.
+                    let _ = wake.wake();
                 }));
-                manual_wake.wake();
+                let _ = manual_wake.wake();
                 Ok(Box::new(PooledActorShutdown::<A> {
                     slot: Some(slot),
                     mailbox_sender: Some(mailbox_sender),

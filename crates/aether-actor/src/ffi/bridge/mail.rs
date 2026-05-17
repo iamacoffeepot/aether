@@ -38,7 +38,13 @@ impl MailBridge {
     /// Returns `0` on success; `1` on substrate-side recipient
     /// lookup miss. Other non-zero values are reserved for future
     /// host-side failure surfaces.
-    #[must_use]
+    ///
+    /// Not `#[must_use]`: the public ctx surfaces (`MailSender::send`,
+    /// `MailSender::send_to_named`, `OutboundReply::reply`, etc.) are
+    /// trait-defined as fire-and-forget and have no return channel for
+    /// a lookup-miss status. The substrate warn-drops unknown
+    /// recipients on its side, which is the diagnostic path; the guest
+    /// can't surface the status anywhere meaningful.
     pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
         // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
         // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
@@ -61,7 +67,10 @@ impl MailBridge {
     /// threaded onto the ctx at receive time; the substrate routes it
     /// to the right Claude session, sibling component, or remote
     /// engine mailbox.
-    #[must_use]
+    ///
+    /// Not `#[must_use]`: the trait surfaces (`OutboundReply::reply`,
+    /// `MailCtx::reply`) are fire-and-forget by contract — see the
+    /// matching rationale on `send_mail`.
     pub fn reply_mail(&self, sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
         // SAFETY: forwards to `raw::reply_mail`, whose ABI is documented
         // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
