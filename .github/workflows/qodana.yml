@@ -24,6 +24,21 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
+      # Cache cycle is split out of qodana-action so we can interleave
+      # an ownership chown between the root-written scan and the tar
+      # save — qodana-action's internal cache save runs inside its own
+      # step, before any post-scan step we could add, so we can't fix
+      # the ownership in time without taking over the save side.
+      - name: Restore Qodana cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/qodana/caches
+          key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            qodana-2026.1-${{ github.ref }}-
+            qodana-2026.1-
+
       - name: Qodana scan
         uses: JetBrains/qodana-action@v2026.1
         with:
@@ -40,5 +55,30 @@ jobs:
           # § "Run as a non-root user". The CARGO_HOME override on
           # the prior approach (#911) is now unnecessary.
           args: --linter qodana-rust -u root
+          # We own restore/save (steps above + below); qodana-action's
+          # built-in cache save runs root-owned and trips tar exit 2.
+          use-caches: false
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
+
+      - name: Reclaim qodana cache ownership for tar
+        # Qodana ran as root in the container; new cache files inherit
+        # uid 0 on the bind-mount. The save step below runs as the
+        # runner user (uid 1001) and would tar-exit-2 on those files.
+        # Chown the tree back so save can read everything.
+        #
+        # `if: always()` so the chown still runs when qodana itself
+        # exits non-zero on findings. `|| true` because the cache dir
+        # may not exist at all if the scan crashed before populating.
+        if: always()
+        run: |
+          if [ -d "${RUNNER_TEMP}/qodana/caches" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/qodana/caches" || true
+          fi
+
+      - name: Save Qodana cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/qodana/caches
+          key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
