@@ -611,10 +611,15 @@ impl TestBench {
             // CaptureRequested kinds before this loop body runs.
 
             // Drain any pending chassis events. Each invocation
-            // potentially produces a reply on `outbound`.
+            // potentially produces a reply on `outbound`. A
+            // `SettlementTimeout` from `dispatch_event` short-circuits
+            // the pump — the substrate is stuck and no AdvanceResult
+            // is coming, so propagating is faster and more actionable
+            // than burning out the quiet-iteration budget waiting on
+            // a reply that will never land.
             let mut found_event = false;
             while let Ok(event) = self.events_rx.try_recv() {
-                self.dispatch_event(event);
+                self.dispatch_event(event)?;
                 found_event = true;
             }
 
@@ -673,12 +678,19 @@ impl TestBench {
 
     /// Run one chassis event. Mirrors what the binary's events loop
     /// does — but inline on the test thread instead of on a worker.
-    fn dispatch_event(&mut self, event: ChassisEvent) {
+    ///
+    /// Returns `SettlementTimeout` if `run_frame`'s per-tick
+    /// settlement misses [`SETTLEMENT_TIMEOUT`]. In the Advance
+    /// branch we bail mid-loop without sending `AdvanceResult::Ok` so
+    /// the pump_until_reply caller surfaces the timeout rather than
+    /// waiting on a reply that will never arrive — the substrate is
+    /// in a stuck state and the test should fail loudly.
+    fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), TestBenchError> {
         match event {
             ChassisEvent::Advance { reply_to, ticks } => {
                 for _ in 0..ticks {
                     self.frame += 1;
-                    self.run_frame(/* dispatch_tick */ true);
+                    self.run_frame(/* dispatch_tick */ true)?;
                 }
                 self.outbound.send_reply(
                     reply_to,
@@ -689,12 +701,13 @@ impl TestBench {
             }
             ChassisEvent::CaptureRequested => {
                 self.frame += 1;
-                self.run_frame(/* dispatch_tick */ false);
+                self.run_frame(/* dispatch_tick */ false)?;
             }
         }
+        Ok(())
     }
 
-    fn run_frame(&mut self, dispatch_tick: bool) {
+    fn run_frame(&mut self, dispatch_tick: bool) -> Result<(), TestBenchError> {
         if dispatch_tick {
             // ADR-0080 §6 settlement gating: push the Tick mail with a
             // chassis-minted `MailId` so the trace pipeline tracks
@@ -710,6 +723,16 @@ impl TestBench {
             // loop (issue #707): the polling deadline guessed at
             // when broadcasts had landed; settlement knows
             // structurally.
+            //
+            // Strict propagation: pre-iamacoffeepot/aether#845 this
+            // was `let _ = rx.recv_timeout(...)` — a workaround for
+            // pre-#840 settlement leaks that swallowed silently when
+            // chains never settled. With #840's terminal-arm
+            // bracketing in place a real timeout here means a
+            // genuine in_flight leak in some downstream cap;
+            // surfacing it as `SettlementTimeout` lets the failing
+            // test name the actual cause instead of timing out
+            // generically on the reply pump.
             let registry = self._passive.settlement_registry();
             let tick_root = push_chassis_root_mail(
                 &self.queue,
@@ -720,7 +743,12 @@ impl TestBench {
                 1,
             );
             let rx = registry.subscribe_settlement(tick_root);
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            if rx.recv_timeout(SETTLEMENT_TIMEOUT).is_err() {
+                return Err(TestBenchError::SettlementTimeout {
+                    recipient: "aether.input".to_owned(),
+                    kind_name: Tick::NAME,
+                });
+            }
         }
         // ADR-0074 §Decision 5: render's inbox must quiesce before
         // submit so any DrawTriangle / aether.camera mail this frame
@@ -754,6 +782,8 @@ impl TestBench {
         // FrameStats settlement gate every `LOG_EVERY_FRAMES`; with the
         // observation path retired the drain stands on its own.
         frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
+
+        Ok(())
     }
 }
 
@@ -828,13 +858,24 @@ mod tests {
             }
         };
 
-        // Register a closure mailbox that captures the lineage of every
-        // mail it receives. The Closure variant is what the input cap's
-        // `validate_subscriber_mailbox` accepts.
+        // Register a synchronous closure mailbox that captures the
+        // lineage of every mail it receives. `register_inline` is the
+        // correct variant: the handler does immediate work (push into
+        // a captured Vec) rather than enqueueing onto a downstream
+        // inbox, so the producer-side `Received`/`Finished` bracket
+        // belongs on the call site. `validate_subscriber_mailbox`
+        // accepts both `Inbox` and `Inline` so the input cap's
+        // subscribe path still admits this mailbox. Pre-#845 this
+        // used `register_inbox` and the substrate's `run_frame`
+        // silently swallowed the resulting in_flight leak; strict
+        // propagation surfaces the variant mismatch as a
+        // `SettlementTimeout`, which is the right shape — the
+        // handler that owns the bracket gets to advertise its
+        // contract via the variant choice.
         type CapturedRow = (MailId, MailId, Option<MailId>);
         let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
-        let subscriber_mbox = tb.registry.register_inbox(
+        let subscriber_mbox = tb.registry.register_inline(
             "issue_723_test_subscriber",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured_for_handler.lock().unwrap().push((
