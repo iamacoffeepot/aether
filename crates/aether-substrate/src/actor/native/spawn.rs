@@ -684,6 +684,13 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
     /// Consume the builder and run the spawn lifecycle. Returns the
     /// new actor's [`MailboxId`] on success, or a typed [`SpawnError`]
     /// describing which lifecycle step failed.
+    ///
+    /// # Panics
+    /// Panics if `finish` is called more than once on the same builder
+    /// (the `Config` slot is taken on first call) — fail-fast per
+    /// ADR-0063: `SpawnBuilder` is a single-use type, the typestate is
+    /// enforced by the move into `finish`, and a double-finish would
+    /// require an unsafe API misuse.
     pub fn finish(self) -> Result<MailboxId, SpawnError> {
         let SpawnBuilder {
             spawner,

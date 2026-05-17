@@ -109,7 +109,12 @@ pub struct PoolHandle {
 impl PoolHandle {
     /// Hand out a clone of the ready-queue sender. PR C wires this
     /// into [`crate::scheduler::WakeHandle`]s when registering
-    /// dispatcher slots. Panics if the pool has been shut down.
+    /// dispatcher slots.
+    ///
+    /// # Panics
+    /// Panics if the pool has already been shut down (the sender slot
+    /// is `None`) — fail-fast per ADR-0063: registering a wake handle
+    /// after pool shutdown is a chassis-lifecycle bug.
     #[must_use]
     pub fn ready_tx(&self) -> Sender<Arc<dyn Drainable>> {
         self.ready_tx
@@ -171,6 +176,12 @@ impl Pool {
     /// Spawn the worker threads and return a [`PoolHandle`] holding
     /// the ready-queue sender. Each worker thread is named
     /// `aether-worker-<n>` (Open Question 10 resolution).
+    ///
+    /// # Panics
+    /// Panics if `config.workers < 1`, or if the OS refuses to spawn
+    /// any worker thread — fail-fast per ADR-0063: worker count is a
+    /// chassis-boot invariant and thread spawn is a substrate
+    /// prerequisite.
     pub fn start(config: PoolConfig, aborter: Arc<dyn FatalAborter>) -> PoolHandle {
         assert!(config.workers >= 1, "pool needs at least one worker");
         let (ready_tx, ready_rx) = unbounded::<Arc<dyn Drainable>>();

@@ -342,6 +342,11 @@ impl TestBench {
     /// / session-zero frames that arrived on the loopback. Mail to
     /// other sinks and direct component-to-component flows are not
     /// observed (v1).
+    ///
+    /// # Panics
+    /// Panics if the `observed_kinds` mutex is poisoned — fail-fast
+    /// per ADR-0063: a poisoned mutex means a prior holder panicked
+    /// under the guard.
     pub fn count_observed(&self, kind_name: &str) -> usize {
         self.observed_kinds
             .lock()
@@ -354,6 +359,11 @@ impl TestBench {
     /// Snapshot every kind name currently observed, oldest first.
     /// Cheap clone — used for scenario diagnostics when an assert
     /// trips, so the failure message can list "what we did see."
+    ///
+    /// # Panics
+    /// Panics if the `observed_kinds` mutex is poisoned — fail-fast
+    /// per ADR-0063: a poisoned mutex means a prior holder panicked
+    /// under the guard.
     pub fn observed_kinds(&self) -> Vec<String> {
         self.observed_kinds.lock().unwrap().clone()
     }

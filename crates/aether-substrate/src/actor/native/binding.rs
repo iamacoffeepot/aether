@@ -223,6 +223,11 @@ impl NativeBinding {
     /// `wait_reply` has somewhere to pull from. Called once per
     /// transport, before any `wait_reply` invocation. Subsequent
     /// calls panic — the slot is single-claim by construction.
+    ///
+    /// # Panics
+    /// Panics if called more than once — fail-fast per ADR-0063: the
+    /// inbox slot is single-claim, so a second install indicates a
+    /// chassis-wiring bug.
     pub fn install_inbox(&self, inbox: Receiver<Envelope>) {
         self.inbox
             .set(Mutex::new(inbox))
@@ -297,6 +302,11 @@ impl NativeBinding {
     /// `(kind, correlation)` and returns when a *specific* reply
     /// arrives — `recv_blocking` is for the dispatcher's "next
     /// thing, whatever it is" main loop.
+    ///
+    /// # Panics
+    /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked inside the
+    /// guard, which is itself a substrate-level invariant violation.
     pub fn recv_blocking(&self) -> Option<Envelope> {
         let inbox = self.inbox.get()?;
         // The mutex guard stays held across `recv()`. Dispatcher
@@ -309,6 +319,11 @@ impl NativeBinding {
     /// `None` for "no envelope available right now" or "channel
     /// disconnected" or "no inbox installed". A capability that
     /// needs to distinguish drains via repeated calls until `None`.
+    ///
+    /// # Panics
+    /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked inside the
+    /// guard, which is itself a substrate-level invariant violation.
     pub fn try_recv(&self) -> Option<Envelope> {
         let inbox = self.inbox.get()?;
         inbox.lock().unwrap().try_recv().ok()
@@ -400,6 +415,12 @@ impl NativeBinding {
     /// Same semantics as the `u32`-returning variant; the success-path
     /// `0` was vestigial at this layer (channel-send failures collapse to
     /// the same scalar).
+    ///
+    /// # Panics
+    /// Panics if the `pending_recipients` mutex is poisoned — fail-fast
+    /// per ADR-0063: a poisoned mutex means a prior holder panicked
+    /// inside the guard, which is itself a substrate-level invariant
+    /// violation.
     pub fn push_envelope_returning_root(
         &self,
         recipient: u64,
@@ -458,6 +479,13 @@ impl NativeBinding {
     /// larger than `out` (mail re-parked for retry), `-3` = the host
     /// tore the actor down mid-wait. Any other negative is a
     /// transport-specific sentinel (e.g. `-100` no-inbox).
+    ///
+    /// # Panics
+    /// Panics if any of the internal mutexes (overflow, pending
+    /// recipients, frame-bound set) are poisoned, or if the cross-class
+    /// guard fires (ADR-0074 §Decision 5: a frame-bound caller blocking
+    /// on a free-running recipient triggers `fatal_abort`) — both are
+    /// fail-fast per ADR-0063.
     pub fn wait_reply(
         &self,
         expected_kind: u64,

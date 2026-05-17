@@ -90,6 +90,14 @@ pub const fn varint_u32_len(val: u32) -> usize {
     }
 }
 
+/// Byte count of `val` in postcard's unsigned-varint encoding, after
+/// narrowing `usize` to `u32`. Used by `const` size passes that walk
+/// schema arrays whose lengths fit in `u32` by construction.
+///
+/// # Panics
+/// Panics if `val > u32::MAX` — fail-fast per ADR-0063: callers
+/// guarantee the input fits in `u32` by walking bounded `const`
+/// structures, so an overflow indicates a bug in the caller.
 #[must_use]
 pub const fn varint_usize_len(val: usize) -> usize {
     assert!(

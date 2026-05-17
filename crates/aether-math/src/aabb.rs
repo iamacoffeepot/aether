@@ -225,7 +225,11 @@ impl Aabb {
 
     /// Mirror across the plane `axis_index = 0` (`0 = X, 1 = Y, 2 = Z`).
     /// The bounds along that axis flip sign and swap; the others are
-    /// unchanged. Panics if `axis_index > 2`.
+    /// unchanged.
+    ///
+    /// # Panics
+    /// Panics if `axis_index > 2` — the only valid values are `0`, `1`,
+    /// or `2`.
     #[must_use]
     pub fn mirror(&self, axis_index: usize) -> Self {
         assert!(axis_index < 3, "axis_index must be 0, 1, or 2");

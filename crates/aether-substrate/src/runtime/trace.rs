@@ -245,6 +245,11 @@ impl Drop for TraceDrainerHandle {
 /// Idempotent in the sense that calling [`install_trace_queue`]
 /// twice with the same `queue` Arc is a no-op; the chassis builder
 /// installs the queue exactly once and pairs it with one drainer.
+///
+/// # Panics
+/// Panics if the OS refuses to spawn the drainer thread — fail-fast
+/// per ADR-0063: thread spawn is a substrate-boot prerequisite and a
+/// failure means the process is in an unrecoverable state.
 pub fn start_drainer(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>) -> TraceDrainerHandle {
     let (shutdown_tx, shutdown_rx) = channel::<()>();
     let handle = thread::Builder::new()

@@ -65,36 +65,60 @@ unsafe extern "C" {
     pub fn init_failed(ptr: u32, len: u32);
 }
 
-/// # Safety
 /// Host-side stub for the FFI `aether::send_mail` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-actor: send_mail called outside the FFI guest");
 }
 
-/// # Safety
 /// Host-side stub for the FFI `aether::reply_mail` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-actor: reply_mail called outside the FFI guest");
 }
 
-/// # Safety
 /// Host-side stub for the FFI `aether::save_state` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
     panic!("aether-actor: save_state called outside the FFI guest");
 }
 
-/// # Safety
 /// Host-side stub for the FFI `aether::wait_reply` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub unsafe fn wait_reply(
@@ -107,18 +131,30 @@ pub unsafe fn wait_reply(
     panic!("aether-actor: wait_reply called outside the FFI guest");
 }
 
-/// # Safety
 /// Host-side stub for the FFI `aether::prev_correlation` import.
 /// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
 }
 
-/// # Safety
 /// Host-side stub for the FFI `aether::init_failed` import.
 /// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn init_failed(_ptr: u32, _len: u32) {
     panic!("aether-actor: init_failed called outside the FFI guest");

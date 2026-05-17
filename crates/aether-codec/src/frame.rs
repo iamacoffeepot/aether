@@ -70,6 +70,12 @@ impl From<postcard::Error> for FrameError {
 /// Encode a message into its framed wire representation (4-byte LE
 /// length prefix + postcard body). Infallible — postcard encoding
 /// of `alloc::Vec` is infallible for the types this is used with.
+///
+/// # Panics
+/// Panics if postcard encoding of `msg` fails — fail-fast per ADR-0063:
+/// `postcard::to_allocvec` into a growable `Vec` cannot fail for the
+/// `Serialize` types this is used with, so a failure indicates the
+/// caller passed a type whose serializer is observably broken.
 pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
     let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
     let mut out = Vec::with_capacity(4 + body.len());

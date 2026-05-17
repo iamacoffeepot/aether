@@ -168,6 +168,10 @@ impl FfiCtx<'_> {
     /// substrate-side `fatal_abort` path. Symmetric to
     /// `aether_substrate::actor::native::NativeCtx::fatal_abort` so
     /// trap-escalation reads the same on both sides.
+    ///
+    /// # Panics
+    /// Always panics — that's the point. The trap propagates to the
+    /// substrate's ADR-0063 fail-fast escalation path.
     pub fn fatal_abort(&self, reason: alloc::string::String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
     }
@@ -314,6 +318,12 @@ impl FfiDropCtx<'_> {
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
+    ///
+    /// # Panics
+    /// Panics if the host `save_state` import returns non-zero — fail-fast
+    /// per ADR-0063: the persistence bridge is part of the substrate
+    /// contract and a failure here means the runtime is in an
+    /// unrecoverable state.
     pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
         let status = PERSIST_BRIDGE.save_state(version, bytes);
         assert!(

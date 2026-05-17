@@ -411,6 +411,11 @@ impl<'a> ChassisCtx<'a> {
     /// wait for it to hit zero before render submit. Pair this with
     /// `FRAME_BARRIER = true` on the [`Actor`] impl. See
     /// `aether_capabilities::RenderCapability` for the reference shape.
+    ///
+    /// # Panics
+    /// Panics if the `frame_bound_set` `RwLock` is poisoned — fail-fast
+    /// per ADR-0063: a poisoned lock means a prior writer panicked
+    /// under the guard, a substrate-level invariant violation.
     pub fn claim_frame_bound_mailbox_with_override(
         &mut self,
         name: &str,
@@ -496,6 +501,11 @@ impl<'a> ChassisCtx<'a> {
     /// against its namespace and a stuck counter in
     /// `frame_bound_pending` that the chassis frame loop would wait
     /// for forever.
+    ///
+    /// # Panics
+    /// Panics if the `frame_bound_set` `RwLock` is poisoned — fail-fast
+    /// per ADR-0063: a poisoned lock means a prior writer panicked
+    /// under the guard, a substrate-level invariant violation.
     pub fn unclaim_mailbox(&mut self, id: MailboxId) {
         self.registry.remove_closure(id);
         self.frame_bound_pending.retain(|(i, _)| *i != id);

@@ -111,6 +111,13 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// chassis main using the fields exposed on [`SubstrateBoot`].
     /// Does NOT dial the hub — chassis mains compose
     /// `aether_hub::HubClientCapability` themselves (issue #262).
+    ///
+    /// # Panics
+    /// Panics if `aether_kinds::descriptors::all()` contains a
+    /// duplicate kind id, or if any of the substrate's internal
+    /// locks are poisoned during the boot sequence — fail-fast per
+    /// ADR-0063: both conditions indicate a substrate-level invariant
+    /// violation discovered before any user code runs.
     pub fn build(self) -> wasmtime::Result<SubstrateBoot> {
         // Issue #321: route panics through tracing so dispatcher-thread
         // crashes surface in `engine_logs` instead of vanishing to

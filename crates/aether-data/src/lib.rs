@@ -613,6 +613,12 @@ pub fn decode_slice<T: Kind + bytemuck::AnyBitPattern>(bytes: &[u8]) -> Result<&
 }
 
 /// Encode a structural value via postcard.
+///
+/// # Panics
+/// Panics if postcard encoding of `value` fails — fail-fast per ADR-0063:
+/// `postcard::to_allocvec` into a growable `Vec` cannot fail for the
+/// `Serialize` types this is used with, so a failure indicates the
+/// caller passed a type whose serializer is observably broken.
 pub fn encode_struct<T: Kind + serde::Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
 }

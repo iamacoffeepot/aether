@@ -165,6 +165,13 @@ impl TestBenchChassis {
     /// further capability adds (io with whatever failure semantics
     /// it wants), GPU creation, egress-backend attach, and driving
     /// the event loop.
+    ///
+    /// # Panics
+    /// Panics if the `Tick` kind isn't registered in the substrate boot
+    /// — fail-fast per ADR-0063: `Tick` is part of the always-on kind
+    /// vocabulary the substrate registers from
+    /// `aether_kinds::descriptors::all()`, so a missing entry indicates
+    /// a substrate-build bug.
     pub fn build_passive(env: TestBenchEnv) -> anyhow::Result<TestBenchBuild> {
         let TestBenchEnv {
             name,
