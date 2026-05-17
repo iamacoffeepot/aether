@@ -80,6 +80,12 @@ pub fn has_wgpu_adapter() -> bool {
 /// `CARGO_MANIFEST_DIR` is irrelevant because the wasm artifacts live
 /// under the shared workspace target dir, which is the same for every
 /// caller.
+///
+/// # Panics
+/// Panics if `CARGO_MANIFEST_DIR` does not have two ancestor
+/// directories — fail-fast per ADR-0063: this helper only runs from
+/// integration-test binaries (`crates/<crate>/tests/...`), so the
+/// workspace root is always two levels up.
 #[must_use]
 pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -106,6 +112,12 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 /// CI catches a forgotten pre-build entry instead of passing a 30 ms
 /// vacuous test. CI sets this; local devs leave it unset and keep the
 /// existing skip behavior.
+///
+/// # Panics
+/// Panics in strict (`AETHER_REQUIRE_RUNTIME=1`) mode if either no
+/// wgpu adapter is available or the named crate's wasm artifact is
+/// not pre-built — fail-fast per ADR-0063: CI relies on the strict
+/// mode to catch missing pre-build entries.
 #[must_use]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
@@ -144,6 +156,10 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
 /// like `"mesh-viewer"` or `"test-bench-io"`. Each integration test
 /// binary is its own process, so the label is only ever set once per
 /// process and collisions across binaries don't arise.
+///
+/// # Panics
+/// Panics if the tempdir can't be created — fail-fast per ADR-0063:
+/// a test that can't reserve its sandbox can't proceed.
 pub fn init_save_sandbox(label: &str) -> &'static Path {
     TEST_SAVE_DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!(
@@ -178,9 +194,12 @@ pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
 /// namespace root, so callers pass this as the `path` field of
 /// `aether.fs.read` / `aether.mesh.load` / etc.
 ///
-/// Panics if `init_save_sandbox` was never called in this process —
-/// the helper resolves the dir from the same `OnceLock` that
-/// `init_save_sandbox` populates.
+/// # Panics
+/// Panics if [`init_save_sandbox`] was never called in this process,
+/// or if the file write fails — fail-fast per ADR-0063: the helper
+/// resolves the dir from the same `OnceLock` that
+/// `init_save_sandbox` populates, and a failed fixture write means
+/// the test can't proceed.
 pub fn write_fixture(name: &str, bytes: &[u8]) -> String {
     let dir = TEST_SAVE_DIR
         .get()

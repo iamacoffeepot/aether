@@ -127,6 +127,10 @@ impl SettlementRegistry {
     /// attempts return [`crossbeam_channel::TryRecvError::Empty`] /
     /// `Disconnected` per the bounded(1) channel contract. Gate
     /// sites typically `recv_timeout` once and discard the receiver.
+    ///
+    /// # Panics
+    /// Panics if the inner `Mutex` is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked under the guard.
     pub fn subscribe_settlement(&self, root: MailId) -> Receiver<()> {
         let (tx, rx) = bounded::<()>(1);
         let mut inner = self.inner.lock().unwrap();
@@ -153,6 +157,10 @@ impl SettlementRegistry {
     ///
     /// Coexists with [`Self::subscribe_settlement`] — a root can have
     /// channel and mail subscribers; both fire on `fire_settled`.
+    ///
+    /// # Panics
+    /// Panics if the inner `Mutex` is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked under the guard.
     pub fn subscribe_settlement_mail(
         &self,
         root: MailId,
@@ -184,6 +192,10 @@ impl SettlementRegistry {
     /// `settled` set so subsequent [`Self::subscribe_settlement`]
     /// calls pre-fire. Idempotent: calling twice is the same as
     /// calling once for any waiter that already woke.
+    ///
+    /// # Panics
+    /// Panics if the inner `Mutex` is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked under the guard.
     pub fn fire_settled(&self, root: MailId) {
         // Drop the mutex before firing — mail subscribers resolve
         // the recipient inline on this thread, and channel sends are

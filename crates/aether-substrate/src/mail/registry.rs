@@ -435,6 +435,11 @@ impl Registry {
     /// (chassis-builder `.with_actor::<...>` chain, runtime
     /// `load_component`, etc.). Subsequent calls overwrite the
     /// previous hook.
+    ///
+    /// # Panics
+    /// Panics if the `on_mailbox_change` `RwLock` is poisoned —
+    /// fail-fast per ADR-0063: a poisoned lock means a prior holder
+    /// panicked under the guard.
     pub fn set_on_mailbox_change(&self, hook: MailboxChangeHook) {
         *self.on_mailbox_change.write().unwrap() = Some(hook);
     }
@@ -496,6 +501,11 @@ impl Registry {
     /// Production has exactly one caller — `WasmTrampoline`'s
     /// shutdown path transitioning its own slot — chassis-cap
     /// mailboxes never route here.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
         let mut inner = self.inner.write().unwrap();
         let Some(slot) = inner.mailboxes.get_mut(&id) else {
@@ -536,8 +546,12 @@ impl Registry {
     /// channel is natural; a synchronous body that doesn't move
     /// payload reads as "I should be Inline."
     ///
-    /// Panics on a name collision — these are substrate-internal
-    /// names, collisions are bugs.
+    /// # Panics
+    /// Panics on a name collision (or if the inner `RwLock` is
+    /// poisoned) — fail-fast per ADR-0063: substrate-internal
+    /// registrations should never collide; use
+    /// [`Self::try_register_inbox`] when a collision is a recoverable
+    /// outcome rather than a bug.
     pub fn register_inbox(
         &self,
         name: impl Into<String>,
@@ -562,6 +576,11 @@ impl Registry {
     /// capability claim against the same mailbox during the
     /// transition diff) can surface the collision as a typed error
     /// rather than aborting the chassis.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn try_register_inbox(
         &self,
         name: impl Into<String>,
@@ -597,8 +616,12 @@ impl Registry {
     /// `to_vec()` clone; that clone is the visible "I should be
     /// Inbox" smell.
     ///
-    /// Panics on a name collision — these are substrate-internal
-    /// names, collisions are bugs.
+    /// # Panics
+    /// Panics on a name collision (or if the inner `RwLock` is
+    /// poisoned) — fail-fast per ADR-0063: substrate-internal
+    /// registrations should never collide; use
+    /// [`Self::try_register_inline`] when a collision is a recoverable
+    /// outcome rather than a bug.
     pub fn register_inline(
         &self,
         name: impl Into<String>,
@@ -618,6 +641,11 @@ impl Registry {
 
     /// Non-panicking variant of [`Self::register_inline`], symmetric
     /// with [`Self::try_register_inbox`].
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn try_register_inline(
         &self,
         name: impl Into<String>,
@@ -659,6 +687,11 @@ impl Registry {
     /// its id if so. The id itself is deterministic (ADR-0029) —
     /// callers that just want the id without a liveness check can use
     /// `MailboxId::from_name` directly.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
         let id = MailboxId::from_name(name);
         let inner = self.inner.read().unwrap();
@@ -674,6 +707,11 @@ impl Registry {
     /// caller can drop the internal lock before invoking the handler
     /// (whether `Inbox` or `Inline`) — avoids holding the registry
     /// lock across arbitrary user code.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
         self.inner
             .read()
@@ -686,6 +724,11 @@ impl Registry {
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
     /// the id is unknown. Used by the closure dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn mailbox_name(&self, id: MailboxId) -> Option<String> {
         self.inner
             .read()
@@ -705,6 +748,12 @@ impl Registry {
     /// `register_kind_with_descriptor` so the descriptor stored here
     /// matches the type definition and the derived id agrees with
     /// `<K as Kind>::ID` on the guest side.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard. The internal `expect("Bytes default cannot produce a
+    /// conflict")` is unreachable by construction.
     pub fn register_kind(&self, name: impl Into<String>) -> KindId {
         let name = name.into();
         let descriptor = KindDescriptor {
@@ -731,6 +780,11 @@ impl Registry {
     ///   than silent data corruption.
     ///
     /// Used by substrate boot (`descriptors::all()`) and `load_component`.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn register_kind_with_descriptor(
         &self,
         descriptor: KindDescriptor,
@@ -782,6 +836,11 @@ impl Registry {
     /// exact descriptor the caller is thinking of. Primarily used by
     /// the hub-inbound dispatch path, which needs to convert an
     /// incoming `kind_name` back to the registered id.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn kind_id(&self, name: &str) -> Option<KindId> {
         self.inner.read().unwrap().name_index.get(name).copied()
     }
@@ -790,6 +849,11 @@ impl Registry {
     /// isn't registered. Used by the dispatch path to hand mailbox
     /// closure handlers a kind name without them keeping their own
     /// map.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn kind_name(&self, kind: KindId) -> Option<String> {
         self.inner
             .read()
@@ -802,6 +866,11 @@ impl Registry {
     /// The descriptor stored for a given kind id, or `None` if the id
     /// isn't registered. Returned as an owned clone so callers don't
     /// hold the read lock while inspecting the encoding.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn kind_descriptor(&self, kind: KindId) -> Option<KindDescriptor> {
         self.inner
             .read()
@@ -817,6 +886,11 @@ impl Registry {
     /// unrelated kinds; name order preserves a human-readable grouping).
     /// Used by the control plane to ship an authoritative view to the
     /// hub after a runtime load or replace (ADR-0010 §4).
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn list_kind_descriptors(&self) -> Vec<KindDescriptor> {
         let mut out: Vec<KindDescriptor> = self
             .inner
@@ -843,6 +917,11 @@ impl Registry {
     /// trace was captured. Categorisation is a pure function of the
     /// mailbox name (`categorise_name`); the registry stores no
     /// per-mailbox category state.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn list_mailbox_descriptors(&self) -> Vec<MailboxDescriptor> {
         let mut out: Vec<MailboxDescriptor> = self
             .inner
@@ -865,10 +944,22 @@ impl Registry {
         out
     }
 
+    /// Number of registered mailbox entries (live + `Dropped`).
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn len(&self) -> usize {
         self.inner.read().unwrap().mailboxes.len()
     }
 
+    /// `true` when no mailbox has ever been registered.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn is_empty(&self) -> bool {
         self.inner.read().unwrap().mailboxes.is_empty()
     }

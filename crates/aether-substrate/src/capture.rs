@@ -69,6 +69,10 @@ impl CaptureQueue {
     /// if the slot was empty and the request is now pending; `false`
     /// if a capture is already in flight. The caller wakes the event
     /// loop on success — `CaptureQueue` itself stays chassis-agnostic.
+    ///
+    /// # Panics
+    /// Panics if the slot `Mutex` is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked under the guard.
     #[must_use]
     pub fn request(&self, pending: PendingCapture) -> bool {
         let mut slot = self.slot.lock().unwrap();
@@ -82,6 +86,10 @@ impl CaptureQueue {
     /// Take the pending capture if one is set. Called by the render
     /// thread at the start of a frame; leaves the slot empty so the
     /// next capture request can land before this one completes.
+    ///
+    /// # Panics
+    /// Panics if the slot `Mutex` is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked under the guard.
     #[must_use]
     pub fn take(&self) -> Option<PendingCapture> {
         self.slot.lock().unwrap().take()

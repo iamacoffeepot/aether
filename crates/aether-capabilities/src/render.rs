@@ -424,9 +424,13 @@ mod native {
         /// The driver constructs [`RenderGpu`] once it has a device +
         /// queue — for desktop that's inside `resumed` after winit hands
         /// back a window and surface; for test-bench it's right after
-        /// `build_passive` returns. Calling twice panics: install is the
-        /// chassis's promise that wgpu state is now ready and stable for
-        /// the chassis lifetime.
+        /// `build_passive` returns.
+        ///
+        /// # Panics
+        /// Panics if called more than once — fail-fast per ADR-0063:
+        /// install is the chassis's promise that wgpu state is now
+        /// ready and stable for the chassis lifetime; a double install
+        /// indicates a chassis-wiring bug.
         pub fn install_gpu(&self, gpu: RenderGpu) {
             self.gpu
                 .set(gpu)
@@ -485,6 +489,12 @@ mod native {
         ///
         /// Lock ordering: `frame_vertices` first, then
         /// `last_submitted`. Today only this function holds both.
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called, or if any of the
+        /// internal mutexes (frame vertices, last submitted, camera
+        /// state, targets) are poisoned — fail-fast per ADR-0063: both
+        /// indicate a substrate-level invariant violation.
         pub fn record_frame(
             &self,
             encoder: &mut wgpu::CommandEncoder,
@@ -532,6 +542,10 @@ mod native {
         /// readback buffer is reallocated on size mismatch with the
         /// current offscreen, so any sequence of resize → `record_frame` →
         /// `record_capture_copy` → submit → `finish_capture` works.
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called or if the targets
+        /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn record_capture_copy(&self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
             let gpu = self.expect_gpu();
             let mut targets = gpu.targets.lock().unwrap();
@@ -541,6 +555,10 @@ mod native {
         /// Map the readback buffer prepared by [`Self::record_capture_copy`]
         /// and return the encoded PNG. Call after the encoder containing
         /// the matching `record_capture_copy` has been submitted.
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called or if the targets
+        /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn finish_capture(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
             let gpu = self.expect_gpu();
             let targets = gpu.targets.lock().unwrap();
@@ -549,6 +567,10 @@ mod native {
 
         /// Resize the offscreen color + depth targets. Idempotent on
         /// zero dimensions (matches winit's `Resized(0, 0)` on minimize).
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called or if the targets
+        /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn resize(&self, width: u32, height: u32) {
             let gpu = self.expect_gpu();
             let mut targets = gpu.targets.lock().unwrap();
@@ -583,6 +605,10 @@ mod native {
 
         /// Current offscreen color target dimensions. Drivers reading
         /// after a `resize` see the new dimensions immediately.
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called or if the targets
+        /// mutex is poisoned — fail-fast per ADR-0063.
         #[must_use]
         pub fn color_size(&self) -> (u32, u32) {
             let targets = self.expect_gpu().targets.lock().unwrap();
@@ -594,6 +620,10 @@ mod native {
         /// mutex, so any encoder commands recorded inside are sequenced
         /// against any concurrent resize. Test-bench reaches the
         /// offscreen via the capture path and doesn't need this.
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called or if the targets
+        /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn with_color_texture<F, R>(&self, f: F) -> R
         where
             F: FnOnce(&wgpu::Texture) -> R,

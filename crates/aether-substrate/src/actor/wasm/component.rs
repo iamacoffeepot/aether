@@ -635,6 +635,11 @@ impl Component {
     /// accessor: the production mail path writes at `MAIL_OFFSET`
     /// and the guest interprets the bytes — nothing in non-test
     /// code reads guest memory directly.
+    ///
+    /// # Panics
+    /// Panics if the memory read fails — fail-fast per ADR-0063:
+    /// tests construct the offset/length pair directly, so an
+    /// out-of-bounds read is a test bug.
     #[cfg(test)]
     pub fn read_u32(&mut self, offset: usize) -> u32 {
         let mut buf = [0u8; 4];
@@ -647,6 +652,11 @@ impl Component {
     /// Read `len` bytes from guest linear memory starting at `offset`.
     /// Test-only accessor for verifying that a rehydrate hook copied
     /// bytes to a known marker offset.
+    ///
+    /// # Panics
+    /// Panics if the memory read fails — fail-fast per ADR-0063:
+    /// tests construct the offset/length pair directly, so an
+    /// out-of-bounds read is a test bug.
     #[cfg(test)]
     pub fn read_bytes(&mut self, offset: usize, len: usize) -> Vec<u8> {
         let mut buf = vec![0u8; len];

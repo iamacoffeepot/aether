@@ -93,6 +93,15 @@ impl WireframeMode {
 }
 
 impl Gpu {
+    /// Construct the desktop chassis's wgpu state: instance, surface,
+    /// adapter, device, queue, pipeline, and the shared `RenderHandles`
+    /// install. Called once during desktop boot from inside winit's
+    /// `resumed` handler.
+    ///
+    /// # Panics
+    /// Panics if surface creation, adapter selection, or device
+    /// acquisition fail — fail-fast per ADR-0063: the desktop chassis
+    /// can't proceed without a usable GPU pipeline.
     pub fn new(window: Arc<Window>, render_handles: RenderHandles) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());

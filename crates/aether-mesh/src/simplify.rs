@@ -21,6 +21,13 @@ use aether_math::Vec3;
 
 /// Recursively simplify `node`. Pure transformation: input + output
 /// always describe the same mesh.
+///
+/// # Panics
+/// Panics if internal invariants are violated — fail-fast per
+/// ADR-0063: the single-child `composition` unwrap proves the vector
+/// has one element via `simplified.len() == 1` before the `unwrap`,
+/// so an unwrap failure would indicate a mid-iter mutation that
+/// cannot occur in safe code.
 pub fn simplify(node: &Node) -> Node {
     match node {
         Node::Box { .. }

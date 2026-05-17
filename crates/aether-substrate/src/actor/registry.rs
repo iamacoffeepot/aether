@@ -140,6 +140,11 @@ impl ActorRegistry {
     /// distinguish via this path, by design (ADR-0079: `Dead` is opaque
     /// to lookup; spawn-time retirement check goes through
     /// [`Self::is_tombstoned`]).
+    ///
+    /// # Panics
+    /// Panics if the `actors` `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior writer panicked under
+    /// the guard, a substrate-level invariant violation.
     pub fn is_live(&self, id: MailboxId) -> bool {
         let actors = self.actors.read().unwrap();
         matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
@@ -149,6 +154,11 @@ impl ActorRegistry {
     /// `Sender` is cloned out of the registry's `Arc<Sender>` so the
     /// caller can push mail directly into the actor's inbox without
     /// holding the registry lock or affecting the Arc's strong count.
+    ///
+    /// # Panics
+    /// Panics if the `actors` `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior writer panicked under
+    /// the guard, a substrate-level invariant violation.
     pub fn live_sender(&self, id: MailboxId) -> Option<Sender<Envelope>> {
         let actors = self.actors.read().unwrap();
         match actors.get(&id) {
@@ -160,6 +170,11 @@ impl ActorRegistry {
     /// `TypeId` of the actor occupying the slot at `id`, or `None` if
     /// the slot is `Dead` or missing. The downcast-safety counterpart
     /// to [`Self::is_live`].
+    ///
+    /// # Panics
+    /// Panics if the `actors` `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior writer panicked under
+    /// the guard, a substrate-level invariant violation.
     pub fn type_id_at(&self, id: MailboxId) -> Option<TypeId> {
         let actors = self.actors.read().unwrap();
         match actors.get(&id) {
@@ -170,12 +185,22 @@ impl ActorRegistry {
 
     /// Has this id been tombstoned (its actor closed)? `spawn_child`
     /// uses this in Phase 3 to reject reuse of retired full names.
+    ///
+    /// # Panics
+    /// Panics if the `tombstones` `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior writer panicked under
+    /// the guard, a substrate-level invariant violation.
     pub fn is_tombstoned(&self, id: MailboxId) -> bool {
         self.tombstones.read().unwrap().contains(&id)
     }
 
     /// `TypeId` that owns the given namespace, if any. Populated at
     /// chassis-build (singletons) and first spawn (instanced).
+    ///
+    /// # Panics
+    /// Panics if the `name_owners` `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior writer panicked under
+    /// the guard, a substrate-level invariant violation.
     pub fn namespace_owner(&self, namespace: &'static str) -> Option<TypeId> {
         self.name_owners.read().unwrap().get(namespace).copied()
     }

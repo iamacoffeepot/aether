@@ -29,6 +29,12 @@ pub struct CaptureMeta {
 ///
 /// Returns the meta dims + format `finish_capture` will need after
 /// the GPU work completes.
+///
+/// # Panics
+/// Panics if the readback slot is missing immediately after being
+/// set — fail-fast per ADR-0063: the slot is populated inline above
+/// the lookup, so a `None` indicates a substrate-level invariant
+/// violation.
 pub fn prepare_capture_copy(
     device: &wgpu::Device,
     targets: &mut Targets,

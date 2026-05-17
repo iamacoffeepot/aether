@@ -8,6 +8,13 @@ use lexpr::{Cons, Number, Value};
 use crate::ast::Node;
 use aether_math::Vec3;
 
+/// Serialize a typed mesh AST to its canonical Lisp s-expression form.
+///
+/// # Panics
+/// Panics if writing to the in-memory `Vec` buffer fails or if `lexpr`
+/// emits non-UTF-8 bytes — fail-fast per ADR-0063: both conditions are
+/// structurally impossible (Vec writes never fail; lexpr emits UTF-8),
+/// so a failure indicates an upstream bug.
 #[must_use]
 pub fn serialize(node: &Node) -> String {
     let value = node_to_value(node);

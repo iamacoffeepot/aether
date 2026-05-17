@@ -173,6 +173,11 @@ impl HandleStore {
     /// are bit-distinguishable from mailbox / kind ids. The counter
     /// occupies the low 60 bits — at one mint per nanosecond it
     /// wraps in ~37 years, well past any single substrate lifetime.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn next_ephemeral(&self) -> HandleId {
         let mut inner = self.inner.write().unwrap();
         let counter = inner.next_ephemeral;
@@ -188,6 +193,11 @@ impl HandleStore {
     /// existing entry is a `KindMismatch` error. Refcount and pinned
     /// state survive a same-kind re-put — the publisher updating
     /// bytes shouldn't silently break references held by other code.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned, or if the eviction
+    /// pass underflows the byte accounting — fail-fast per ADR-0063:
+    /// both indicate a substrate-level invariant violation.
     pub fn put(&self, id: HandleId, kind: KindId, bytes: Vec<u8>) -> Result<(), PutError> {
         let mut inner = self.inner.write().unwrap();
         let (prior_size, refcount, pinned) = match inner.entries.get(&id) {
@@ -229,6 +239,11 @@ impl HandleStore {
     /// Mark `id` as pinned: it won't be evicted under memory pressure
     /// regardless of `refcount`. Returns `false` if the id isn't in
     /// the store.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn pin(&self, id: HandleId) -> bool {
         let mut inner = self.inner.write().unwrap();
         if let Some(entry) = inner.entries.get_mut(&id) {
@@ -241,6 +256,11 @@ impl HandleStore {
 
     /// Clear the pinned flag on `id`. Doesn't drop the entry; only
     /// makes it eligible for LRU eviction once `refcount == 0`.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn unpin(&self, id: HandleId) -> bool {
         let mut inner = self.inner.write().unwrap();
         if let Some(entry) = inner.entries.get_mut(&id) {
@@ -251,6 +271,14 @@ impl HandleStore {
         }
     }
 
+    /// Increment the refcount on `id`. Returns `false` if the id isn't
+    /// in the store. Saturating: held references past `u32::MAX` clamp
+    /// rather than wrap, so the `dec_ref` underflow guard never trips.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn inc_ref(&self, id: HandleId) -> bool {
         let mut inner = self.inner.write().unwrap();
         if let Some(entry) = inner.entries.get_mut(&id) {
@@ -261,6 +289,14 @@ impl HandleStore {
         }
     }
 
+    /// Decrement the refcount on `id`. Returns `false` if the id isn't
+    /// in the store. Saturating at zero: a double-drop doesn't
+    /// underflow.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn dec_ref(&self, id: HandleId) -> bool {
         let mut inner = self.inner.write().unwrap();
         if let Some(entry) = inner.entries.get_mut(&id) {
@@ -275,6 +311,11 @@ impl HandleStore {
     /// caller can drop the lock before extending its output buffer.
     /// Bumps `last_access` so dispatch usage protects an entry from
     /// LRU eviction.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn get(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
         let mut inner = self.inner.write().unwrap();
         let access = bump_clock(&mut inner);
@@ -286,6 +327,11 @@ impl HandleStore {
     /// Park a `Mail` under `handle_id`. The mailer calls this when
     /// `walk_and_resolve` returns `Parked`. The mail stays in the
     /// queue until a matching `put` or until the engine shuts down.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn park(&self, handle_id: HandleId, mail: Mail) {
         let mut inner = self.inner.write().unwrap();
         inner.parked.entry(handle_id).or_default().push_back(mail);
@@ -298,6 +344,11 @@ impl HandleStore {
     /// resolved). Returns the drained mails in FIFO order; the
     /// `HashMap` entry itself is removed so a subsequent `parked_count`
     /// returns 0.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn take_parked(&self, id: HandleId) -> Vec<Mail> {
         let mut inner = self.inner.write().unwrap();
         match inner.parked.remove(&id) {
@@ -306,14 +357,32 @@ impl HandleStore {
         }
     }
 
+    /// Sum of `bytes.len()` across every entry in the store.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn total_bytes(&self) -> usize {
         self.inner.read().unwrap().total_bytes
     }
 
+    /// Count of stored entries (parked-mail queues not included).
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn entry_count(&self) -> usize {
         self.inner.read().unwrap().entries.len()
     }
 
+    /// Number of mails currently parked under `id`.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn parked_count(&self, id: HandleId) -> usize {
         self.inner
             .read()
@@ -324,10 +393,18 @@ impl HandleStore {
             .unwrap_or(0)
     }
 
+    /// Configured byte cap; eviction kicks in once `total_bytes`
+    /// would exceed this value.
     pub fn max_bytes(&self) -> usize {
         self.max_bytes
     }
 
+    /// `true` if `id` is currently stored.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
     pub fn contains(&self, id: HandleId) -> bool {
         self.inner.read().unwrap().entries.contains_key(&id)
     }

@@ -236,9 +236,11 @@ impl<'a> NativeCtx<'a> {
     /// them so monitoring a singleton works the same way. Until then,
     /// monitor only addresses instanced actors.
     ///
+    /// # Panics
     /// Panics if the transport was constructed via
     /// [`NativeBinding::new_for_test`] (no spawner / actor registry
-    /// wired). Production transports always carry both.
+    /// wired) — fail-fast per ADR-0063: production transports always
+    /// carry both, so handler code never reaches the panic.
     pub fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
         let spawner = self
             .binding
@@ -260,10 +262,11 @@ impl<'a> NativeCtx<'a> {
     /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`
     /// shape; both flow through the same [`crate::Spawner`].
     ///
+    /// # Panics
     /// Panics if the transport was constructed via
     /// [`NativeBinding::new_for_test`] (which doesn't wire a
-    /// spawner). Production transports always carry one, so handler
-    /// code never reaches the panic.
+    /// spawner) — fail-fast per ADR-0063: production transports always
+    /// carry one, so handler code never reaches the panic.
     pub fn spawn_child<'b, A>(
         &'b self,
         subname: super::spawn::Subname<'b>,

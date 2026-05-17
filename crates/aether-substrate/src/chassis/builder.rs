@@ -1007,6 +1007,11 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via
     /// [`BootedPassives::Drop`]) before propagating the error.
+    ///
+    /// # Panics
+    /// Panics if the `HasDriver` typestate is reached without a driver
+    /// installed — fail-fast per ADR-0063: the typestate guarantees
+    /// `with_driver` has run, so a missing driver is a builder API bug.
     pub fn build(self) -> Result<BuiltChassis<C>, BootError> {
         let Builder {
             registry,

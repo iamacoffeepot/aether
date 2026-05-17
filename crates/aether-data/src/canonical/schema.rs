@@ -130,6 +130,12 @@ const fn canonical_len_variant(variant: &EnumVariant) -> usize {
 
 /// Serialize `schema` into `N` bytes of canonical postcard form.
 /// Caller passes `N = canonical_len_schema(schema)`.
+///
+/// # Panics
+/// Panics if `N` does not match the byte length the size pass
+/// (`canonical_len_schema`) reports for `schema` — fail-fast per
+/// ADR-0063: callers pair the two passes via the same `const` inputs,
+/// so a mismatch is a bug in the serializer or its caller.
 #[must_use]
 pub const fn canonical_serialize_schema<const N: usize>(schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
@@ -151,6 +157,12 @@ pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
 /// Serialize `(name, schema)` into `N` bytes of a canonical postcard
 /// record. These are the bytes that populate `aether.kinds` (one
 /// record per `#[derive(Kind)]` type) and that `Kind::ID` hashes over.
+///
+/// # Panics
+/// Panics if `N` does not match the byte length the size pass
+/// (`canonical_len_kind`) reports for `(name, schema)` — fail-fast per
+/// ADR-0063: callers pair the two passes via the same `const` inputs,
+/// so a mismatch is a bug in the serializer or its caller.
 #[must_use]
 pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
@@ -176,6 +188,11 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// const serializer also drops, so the two paths produce
 /// byte-identical output. Pinned by the `canonical_kind_bytes_runtime_
 /// matches_const` test below.
+///
+/// # Panics
+/// Panics if postcard encoding of the `KindShape` fails — fail-fast
+/// per ADR-0063: `postcard::to_allocvec` into a growable `Vec` cannot
+/// fail for `KindShape`, so a failure indicates a serializer bug.
 #[must_use]
 pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> alloc::vec::Vec<u8> {
     let shape = crate::schema::KindShape {
@@ -271,6 +288,11 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 /// `postcard(KindShape)`, so we postcard the shape directly without a
 /// `SchemaShape → SchemaType` detour. Used by `kind_manifest` to key
 /// labels records by id after decoding both sections off the wasm.
+///
+/// # Panics
+/// Panics if postcard encoding of `shape` fails — fail-fast per
+/// ADR-0063: `postcard::to_allocvec` into a growable `Vec` cannot fail
+/// for `KindShape`, so a failure indicates a serializer bug.
 #[must_use]
 pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
     let bytes =

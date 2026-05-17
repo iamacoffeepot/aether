@@ -33,6 +33,13 @@ impl Gpu {
     /// `render_running` so encoder methods on the running can read
     /// them. `width` and `height` size the offscreen color + depth
     /// targets — the dimensions every captured frame will report.
+    ///
+    /// # Panics
+    /// Panics if adapter selection or device acquisition fail —
+    /// fail-fast per ADR-0063: the test bench can't proceed without a
+    /// usable offscreen wgpu pipeline, and driverless dev boxes are
+    /// expected to skip the test entirely (handled at the scenario
+    /// runner layer per ADR-0067).
     #[must_use]
     pub fn new(width: u32, height: u32, render_handles: RenderHandles) -> Self {
         let instance =

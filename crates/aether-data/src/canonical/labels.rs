@@ -127,6 +127,12 @@ const fn variant_label_len(v: &VariantLabel) -> usize {
 }
 
 /// Serialize `labels` into `N` bytes of canonical postcard form.
+///
+/// # Panics
+/// Panics if `N` does not match the byte length the size pass
+/// (`canonical_serialize_labels_len`) reports for `labels` — fail-fast
+/// per ADR-0063: callers pair the two passes via the same `const`
+/// inputs, so a mismatch is a bug in the serializer or its caller.
 #[must_use]
 pub const fn canonical_serialize_labels<const N: usize>(labels: &KindLabels) -> [u8; N] {
     let mut out = [0u8; N];
