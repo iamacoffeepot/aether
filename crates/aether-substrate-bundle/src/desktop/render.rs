@@ -382,7 +382,7 @@ impl Gpu {
                 None
             }
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,
-            other => {
+            other @ wgpu::CurrentSurfaceTexture::Validation => {
                 tracing::warn!(
                     target: "aether_substrate::render",
                     status = ?other,

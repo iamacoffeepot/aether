@@ -152,7 +152,9 @@ mod tests {
         let err = Point3::from_f32(Vec3::new(f32::NAN, f32::INFINITY, 999.0)).unwrap_err();
         match err {
             FixedError::NotFinite { value } => assert!(value.is_nan()),
-            other => panic!("expected NotFinite for x=NaN, got {other:?}"),
+            other @ FixedError::OutOfRange { .. } => {
+                panic!("expected NotFinite for x=NaN, got {other:?}")
+            }
         }
     }
 
@@ -173,7 +175,9 @@ mod tests {
         let err = Point3::from_f32(Vec3::new(0.0, 0.0, f32::INFINITY)).unwrap_err();
         match err {
             FixedError::NotFinite { value } => assert_eq!(value, f32::INFINITY),
-            other => panic!("expected NotFinite for z=Inf, got {other:?}"),
+            other @ FixedError::OutOfRange { .. } => {
+                panic!("expected NotFinite for z=Inf, got {other:?}")
+            }
         }
     }
 
