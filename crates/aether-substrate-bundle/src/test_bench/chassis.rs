@@ -33,91 +33,29 @@ use super::events::{ChassisEvent, EventSender};
 /// hub-protocol wire for compatibility).
 pub const WORKERS: usize = 2;
 
-/// Test-bench observability mailbox. Scenarios that want to assert on
-/// component-emitted kinds (the probe's `aether.test_fixture.tick_observed`,
-/// for example) target this name with `ctx.send_to_named`; the
-/// test-bench chassis registers [`TestBenchObserverCapability`] under
-/// this namespace and the cap's fallback handler records each kind
-/// name in `TestBenchEnv::observed_kinds`. Only booted when
-/// `observed_kinds` is `Some` (binaries pass `None` for zero
-/// overhead).
+/// Test-bench observability mailbox. Scenarios that want to assert
+/// on component-emitted kinds (the probe's
+/// `aether.test_fixture.tick_observed`, for example) target this
+/// name with `ctx.send_to_named`; the test-bench chassis registers
+/// a synchronous-handler closure under this namespace via
+/// `Registry::register_inline` (see `build_passive`) and the
+/// closure records each kind name in `TestBenchEnv::observed_kinds`.
+/// Only registered when `observed_kinds` is `Some` (binaries pass
+/// `None` for zero overhead — mail to this mailbox warn-drops in
+/// that mode).
 ///
-/// Mirrored inline as the `NativeActor::NAMESPACE` literal inside
-/// the observer module (the bridge macro can't see this const from
-/// the lifted-impl scope); keep them in lockstep.
-pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
-
-// `TestBenchObserverCapability` re-exports via the `#[bridge]` macro;
-// `TestBenchObserverConfig` lives inside the `observer` mod and is
-// surfaced for chassis builder calls.
-pub use observer::TestBenchObserverConfig;
-
-/// Catch-all observer cap that records every kind name addressed at
-/// `aether.test_bench.observer`. Pre-issue-775 the same role lived on
-/// `BroadcastCapability` (which also fanned the mail out to attached
-/// MCP sessions); with that fan-out retired the observer survives as
-/// a test-bench-private cap whose only job is recording kind names
-/// for `count_observed` assertions. The cap is a real `NativeActor`
-/// (not a `register_inline` synchronous handler) so its handler
-/// completes through the framework's ADR-0080 settlement reporting
+/// Pre-iamacoffeepot/aether#838 this rode a full `NativeActor`
+/// (TestBenchObserverCapability) specifically because synchronous
+/// closures leaked `in_flight` and prevented chains from settling
 /// — the bench's Tick settlement gate would otherwise wait the
-/// full 5 s timeout per tick when a probe component routes
-/// observation mail here. (Post-iamacoffeepot/aether#840 a
-/// `register_inline` sink would also settle correctly; retiring
-/// this actor-shaped workaround is a tracked follow-up.)
-#[aether_actor::bridge(singleton)]
-mod observer {
-    use std::sync::{Arc, Mutex};
-
-    use aether_actor::actor;
-    use aether_substrate::actor::native::envelope::Envelope;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
-
-    /// Config passed in via [`super::TestBenchEnv::observed_kinds`].
-    /// The cap captures the `Arc<Mutex<Vec<String>>>` and pushes each
-    /// handled mail's kind name into it.
-    pub struct TestBenchObserverConfig {
-        pub observed_kinds: Arc<Mutex<Vec<String>>>,
-    }
-
-    pub struct TestBenchObserverCapability {
-        observed_kinds: Arc<Mutex<Vec<String>>>,
-    }
-
-    #[actor]
-    impl NativeActor for TestBenchObserverCapability {
-        type Config = TestBenchObserverConfig;
-        // Mirror of `super::TEST_BENCH_OBSERVER_MAILBOX_NAME` (the
-        // bridge macro lifts the impl outside the mod, so a `super::`
-        // path no longer resolves in the rewritten location).
-        const NAMESPACE: &'static str = "aether.test_bench.observer";
-
-        fn init(
-            cfg: TestBenchObserverConfig,
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<Self, BootError> {
-            Ok(Self {
-                observed_kinds: cfg.observed_kinds,
-            })
-        }
-
-        /// Catch-all: every kind sent to this mailbox records its
-        /// name. The macro auto-emits a blanket `HandlesKind<K>` impl
-        /// so callers using `ctx.send_to_named` against an arbitrary
-        /// kind compile against the cap.
-        #[fallback]
-        fn on_any(&self, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
-            if env.kind_name.is_empty() {
-                return;
-            }
-            self.observed_kinds
-                .lock()
-                .unwrap()
-                .push(env.kind_name.clone());
-        }
-    }
-}
+/// full 5 s timeout per tick when a probe component routed
+/// observation mail here. iamacoffeepot/aether#840 added the
+/// `MailboxEntry::Inline` variant (renamed `MailboxEntry::Sink` ->
+/// `Inline` in iamacoffeepot/aether#842) which brackets sync
+/// handlers with `Received`/`Finished`, closing the gap and
+/// letting us retire the actor-shaped workaround — one fewer
+/// thread per TestBench.
+pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
 
 /// ADR-0071 marker type for the test-bench chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<TestBenchChassis>`]
@@ -303,6 +241,40 @@ impl TestBenchChassis {
             None => None,
         };
 
+        // Issue 775: scenarios that want to assert on component-
+        // emitted kinds register a synchronous catch-all observer
+        // closure under `aether.test_bench.observer`. The closure
+        // body records each inbound mail's kind name into the shared
+        // `observed_kinds` vec; the binary (`bin/test-bench.rs`)
+        // passes `observed_kinds: None` and skips registration —
+        // mail to the observer mailbox warn-drops in that mode.
+        //
+        // Registered via `register_inline` (issue 840 + iamacoffeepot/aether#841
+        // follow-up): the closure runs inline on the pushing thread
+        // and the mailer brackets it with `Received`/`Finished` so
+        // chains touching this mailbox settle. Pre-iamacoffeepot/aether#840
+        // this rode a full NativeActor specifically because closure
+        // arms leaked settlement; now that `Inline` participates in
+        // ADR-0080 §6 we get the same correctness with one fewer
+        // thread per TestBench.
+        if let Some(sink) = observed_kinds.clone() {
+            let observed_for_handler = sink;
+            boot.registry.register_inline(
+                TEST_BENCH_OBSERVER_MAILBOX_NAME,
+                Arc::new(
+                    move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {
+                        if dispatch.kind_name.is_empty() {
+                            return;
+                        }
+                        observed_for_handler
+                            .lock()
+                            .unwrap()
+                            .push(dispatch.kind_name.to_owned());
+                    },
+                ),
+            );
+        }
+
         let mut builder =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
                 .with_actor::<HandleCapability>(())
@@ -314,16 +286,6 @@ impl TestBenchChassis {
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())
                 .with_actor::<TestBenchCapability>(test_bench_cap_config);
-        // Issue 775: scenarios that want to assert on component-emitted
-        // kinds boot the catch-all observer cap. The binary
-        // (`bin/test-bench.rs`) passes `observed_kinds: None` and skips
-        // the cap entirely; mail to the observer mailbox warn-drops in
-        // that mode.
-        if let Some(sink) = observed_kinds.clone() {
-            builder = builder.with_actor::<TestBenchObserverCapability>(TestBenchObserverConfig {
-                observed_kinds: sink,
-            });
-        }
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

@@ -271,10 +271,10 @@ impl<'a> ChassisCtx<'a> {
         }
     }
 
-    /// Register an mpsc-fed sink under `C::NAMESPACE` and return both
-    /// its derived [`MailboxId`] (ADR-0029 hash) and the receiver.
-    /// The capability's own type is the single source of truth for
-    /// the recipient name (issue 525 Phase 1).
+    /// Register a `MailboxEntry::Inbox` under `C::NAMESPACE` and
+    /// return both its derived [`MailboxId`] (ADR-0029 hash) and
+    /// the receiver. The capability's own type is the single source
+    /// of truth for the recipient name (issue 525 Phase 1).
     ///
     /// Tests that need a parameterized name (one fixture, many
     /// claims) reach for [`Self::claim_mailbox_with_override`].
@@ -282,11 +282,11 @@ impl<'a> ChassisCtx<'a> {
         self.claim_mailbox_with_override(C::NAMESPACE)
     }
 
-    /// Register an mpsc-fed sink under `name` and return both its
-    /// derived [`MailboxId`] (ADR-0029 hash) and the receiver.
-    /// Escape hatch for tests with parameterized names; production
-    /// caps go through [`Self::claim_mailbox`] so the cap's own
-    /// `NAMESPACE` is authoritative.
+    /// Register a `MailboxEntry::Inbox` under `name` and return
+    /// both its derived [`MailboxId`] (ADR-0029 hash) and the
+    /// receiver. Escape hatch for tests with parameterized names;
+    /// production caps go through [`Self::claim_mailbox`] so the
+    /// cap's own `NAMESPACE` is authoritative.
     ///
     /// The closure registered with the registry forwards every
     /// delivery into the sender side of the mpsc pair, so the
