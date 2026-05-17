@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     use crate::handle_store::HandleStore;
     use crate::mail::mailer::Mailer;
-    use crate::mail::registry::{MailDispatch, Registry};
+    use crate::mail::registry::Registry;
     use std::sync::Mutex as StdMutex;
 
     fn root(sender: u64, cid: u64) -> MailId {
@@ -301,10 +301,14 @@ mod tests {
         let captured_clone = Arc::clone(&captured);
         let target = registry.register_inbox(
             sink_name,
-            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
+            // iamacoffeepot/aether#848 PR 3: take `OwnedDispatch`
+            // directly and move payload into the captured row
+            // (was: `payload.to_vec()` clone via the legacy
+            // borrowed-dispatch shape).
+            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                 captured_clone.lock().unwrap().push(CapturedDispatch {
                     kind: dispatch.kind,
-                    payload: dispatch.payload.to_vec(),
+                    payload: dispatch.payload,
                     count: dispatch.count,
                 });
             }),
