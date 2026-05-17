@@ -23,6 +23,10 @@
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
+// Integration-test skip diagnostic: emit via stderr so `cargo test`
+// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
+#![allow(clippy::print_stderr)]
+
 use std::path::Path;
 
 use aether_data::{Kind, mailbox_id_from_name};

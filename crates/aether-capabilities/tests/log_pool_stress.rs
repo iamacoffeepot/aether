@@ -20,6 +20,10 @@
 //! "every mail arrived" assertion that previously rode on draining the
 //! recording channel.
 
+// Integration-test diagnostic: emit measured ratio via stderr so
+// `cargo test --nocapture` surfaces it (issue 891).
+#![allow(clippy::print_stderr)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

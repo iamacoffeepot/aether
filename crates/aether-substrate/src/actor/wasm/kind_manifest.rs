@@ -1,3 +1,8 @@
+// Test-only skip diagnostics emit `eprintln!` so `cargo test` runners
+// surface a visible "skipping: ..." line alongside `test ... ok`;
+// not routed through `tracing` (issue 891).
+#![cfg_attr(test, allow(clippy::print_stderr))]
+
 // ADR-0028 / ADR-0032: read a component's embedded kind manifest
 // from two wasm custom sections — `aether.kinds` (canonical bytes,
 // the `Kind::ID` hash input) and `aether.kinds.labels` (Rust-nominal

@@ -17,6 +17,11 @@
 //! in-flight requests would be unambiguous — though `TestBench`'s
 //! synchronous shape means at most one is ever outstanding.
 
+// Test-only skip diagnostics emit `eprintln!` so `cargo test` runners
+// surface a visible "skipping: ..." line alongside `test ... ok`;
+// not routed through `tracing` (issue 891).
+#![cfg_attr(test, allow(clippy::print_stderr))]
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
