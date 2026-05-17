@@ -182,9 +182,9 @@ mod tests {
     fn conjugate_is_inverse_for_unit_quats() {
         let q = Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7);
         let r = q * q.conjugate();
-        assert!((r.x).abs() < EPS);
-        assert!((r.y).abs() < EPS);
-        assert!((r.z).abs() < EPS);
+        assert!(r.x.abs() < EPS);
+        assert!(r.y.abs() < EPS);
+        assert!(r.z.abs() < EPS);
         assert!((r.w - 1.0).abs() < EPS);
     }
 

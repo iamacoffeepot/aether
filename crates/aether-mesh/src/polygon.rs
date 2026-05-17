@@ -609,7 +609,11 @@ mod tests {
             p(0.199_996_95, 0.453_582_76, 0.346_405_03),
             p(0.199_996_95, 1.0, 0.346_405_03),
         ];
-        let normal = Vec3::new(-0.707_106_77, 0.0, -0.707_106_77);
+        let normal = Vec3::new(
+            -core::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            -core::f32::consts::FRAC_1_SQRT_2,
+        );
         assert!(
             is_convex(&verts, &normal),
             "snap-rounded near-collinear vertex should not flip convex classification"
@@ -625,8 +629,8 @@ mod tests {
             d: 0,
         };
         let n = unit_normal(&xy);
-        assert!((n.x).abs() < 1e-6);
-        assert!((n.y).abs() < 1e-6);
+        assert!(n.x.abs() < 1e-6);
+        assert!(n.y.abs() < 1e-6);
         assert!((n.z - 1.0).abs() < 1e-6, "expected +z, got {n:?}");
     }
 

@@ -74,7 +74,7 @@ struct DispatchGuard {
 
 impl Drop for DispatchGuard {
     fn drop(&mut self) {
-        ACTOR_DISPATCH.with(|slot| slot.set(self.prev));
+        ACTOR_DISPATCH.set(self.prev);
     }
 }
 

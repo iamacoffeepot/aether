@@ -168,7 +168,7 @@ fn engines_cap_spawns_lists_and_terminates_a_real_headless_substrate() {
             engine_id,
             rpc_port,
         } => {
-            assert!(rpc_port != 0, "cap should report the assigned RPC port");
+            assert_ne!(rpc_port, 0, "cap should report the assigned RPC port");
             engine_id
         }
         SpawnEngineResult::Err { error } => panic!("spawn failed: {error}"),

@@ -413,8 +413,9 @@ pub mod tests {
 
         fn drain_one(&self, env: u32) {
             let n = self.dispatched.fetch_add(1, Ordering::AcqRel) + 1;
-            assert!(
-                Some(n) != self.panic_at,
+            assert_ne!(
+                Some(n),
+                self.panic_at,
                 "CounterSlot panic at envelope #{n} (test-induced)"
             );
             std::hint::black_box(env);
