@@ -76,6 +76,9 @@ pub fn simplify(node: &Node) -> Node {
                 child: inner_child,
             } = &child
             {
+                // match arms read clearer than `.map_or(default, |sign| ...)`
+                // when the closure body and default both bind locals.
+                #[allow(clippy::option_if_let_else)]
                 match parallel_sign(*axis, *inner_axis) {
                     Some(sign) => (*angle + sign * *inner_angle, (**inner_child).clone()),
                     None => (*angle, child),
@@ -148,10 +151,10 @@ pub fn simplify(node: &Node) -> Node {
 /// the rotate-fold rewrite to decide whether two adjacent rotations
 /// can collapse.
 fn parallel_sign(a: Vec3, b: Vec3) -> Option<f32> {
+    const TOL: f32 = 1e-4;
     let na = a.normalize_or(Vec3::Y);
     let nb = b.normalize_or(Vec3::Y);
     let dot = na.dot(nb);
-    const TOL: f32 = 1e-4;
     if dot > 1.0 - TOL {
         Some(1.0)
     } else if dot < -1.0 + TOL {

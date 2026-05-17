@@ -150,6 +150,8 @@ impl HandleStore {
     /// back to the default with a warn log so a typo doesn't silently
     /// shrink the cache to zero.
     pub fn from_env() -> Self {
+        // Nested match keeps the warn-log path readable.
+        #[allow(clippy::option_if_let_else)]
         let max_bytes = match std::env::var(ENV_MAX_BYTES) {
             Ok(raw) => match raw.parse::<usize>() {
                 Ok(n) => n,
@@ -357,10 +359,7 @@ impl HandleStore {
     /// the guard.
     pub fn take_parked(&self, id: HandleId) -> Vec<Mail> {
         let mut inner = self.inner.write().unwrap();
-        match inner.parked.remove(&id) {
-            Some(q) => q.into(),
-            None => Vec::new(),
-        }
+        inner.parked.remove(&id).map_or_else(Vec::new, Into::into)
     }
 
     /// Sum of `bytes.len()` across every entry in the store.
@@ -395,8 +394,7 @@ impl HandleStore {
             .unwrap()
             .parked
             .get(&id)
-            .map(|q| q.len())
-            .unwrap_or(0)
+            .map_or(0, VecDeque::len)
     }
 
     /// Configured byte cap; eviction kicks in once `total_bytes`
@@ -476,7 +474,10 @@ pub fn schema_contains_ref(schema: &SchemaType) -> bool {
         | SchemaType::Bool
         | SchemaType::Scalar(_)
         | SchemaType::String
-        | SchemaType::Bytes => false,
+        | SchemaType::Bytes
+        // ADR-0065: typed-id leaves carry no nested fields and so
+        // can never embed a `Ref`.
+        | SchemaType::TypeId(_) => false,
         SchemaType::Option(inner) | SchemaType::Vec(inner) => schema_contains_ref(inner),
         SchemaType::Array { element, .. } => schema_contains_ref(element),
         SchemaType::Struct { fields, .. } => fields.iter().any(|f| schema_contains_ref(&f.ty)),
@@ -490,9 +491,6 @@ pub fn schema_contains_ref(schema: &SchemaType) -> bool {
         // those defensively rather than the type system, so be
         // conservative and walk both sides.
         SchemaType::Map { key, value } => schema_contains_ref(key) || schema_contains_ref(value),
-        // ADR-0065: typed-id leaves carry no nested fields and so
-        // can never embed a `Ref`.
-        SchemaType::TypeId(_) => false,
     }
 }
 

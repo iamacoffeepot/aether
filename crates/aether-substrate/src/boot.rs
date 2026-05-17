@@ -100,7 +100,7 @@ impl SubstrateBoot {
     }
 }
 
-impl<'a> SubstrateBootBuilder<'a> {
+impl SubstrateBootBuilder<'_> {
     /// Execute the boot: registers `aether_kinds::descriptors::all()`,
     /// wires the diagnostic sink, and prepares the runtime handles
     /// (engine, registry, mailer, linker, outbound, input subscribers)

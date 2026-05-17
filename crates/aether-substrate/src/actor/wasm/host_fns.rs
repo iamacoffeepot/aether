@@ -65,9 +65,11 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          len: u32,
          count: u32|
          -> u32 {
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return 1, // guest exports no memory
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
+                return 1; // guest exports no memory
             };
 
             // Copy the bytes out of guest memory so the mail outlives
@@ -118,9 +120,11 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 ));
                 return SAVE_STATE_TOO_LARGE;
             }
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return SAVE_STATE_NO_MEMORY,
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
+                return SAVE_STATE_NO_MEMORY;
             };
             let data = memory.data(&caller);
             let start = ptr as usize;
@@ -155,9 +159,11 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          len: u32,
          count: u32|
          -> u32 {
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return REPLY_OOB,
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
+                return REPLY_OOB;
             };
             let data = memory.data(&caller);
             let start = ptr as usize;
@@ -278,7 +284,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // a `-2` from the transport means the payload exceeded
             // `out_cap` and the transport already parked the envelope
             // on its overflow for a retry.
-            let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
                 return WAIT_BUFFER_TOO_SMALL;
             };
             let start = out_ptr as usize;
@@ -332,7 +341,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "init_failed_p32",
         |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
-            let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
                 return;
             };
             let data = memory.data(&caller);

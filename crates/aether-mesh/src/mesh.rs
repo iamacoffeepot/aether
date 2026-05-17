@@ -525,7 +525,7 @@ fn mesh_sweep(
                 u = u.rotate_axis_angle(axis_n, angle);
             }
         }
-        let scale = scales.map(|s| s[k]).unwrap_or(1.0);
+        let scale = scales.map_or(1.0, |s| s[k]);
         let p_world = offset + *p;
         let mut ring = Vec::with_capacity(n);
         for pt in profile {

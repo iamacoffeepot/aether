@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn ping_pong_roundtrip() {
         let (registry, mailer) = fresh_substrate();
-        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
                 peer_kind: test_peer_kind(),
@@ -759,7 +759,7 @@ mod tests {
             .build_passive()
             .expect("rpc server boots");
 
-        let port = _chassis
+        let port = chassis
             .handle::<RpcServerHandle>()
             .expect("RpcServerHandle published")
             .local_port;
@@ -804,7 +804,7 @@ mod tests {
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (registry, mailer) = fresh_substrate();
-        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             // TraceObserver folds substrate-wide trace events into per-
             // root counters and fires `Settled { root }` mail at the
             // chassis-mailbox once a root drains. Without it,
@@ -819,7 +819,7 @@ mod tests {
             .build_passive()
             .expect("caps boot");
 
-        let port = _chassis
+        let port = chassis
             .handle::<RpcServerHandle>()
             .expect("RpcServerHandle published")
             .local_port;
@@ -902,7 +902,7 @@ mod tests {
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (registry, mailer) = fresh_substrate();
-        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<TestEchoActor>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
@@ -911,7 +911,7 @@ mod tests {
             .build_passive()
             .expect("caps boot");
 
-        let port = _chassis
+        let port = chassis
             .handle::<RpcServerHandle>()
             .expect("RpcServerHandle published")
             .local_port;
@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn wire_version_mismatch_kicks_connection() {
         let (registry, mailer) = fresh_substrate();
-        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
                 peer_kind: test_peer_kind(),
@@ -976,7 +976,7 @@ mod tests {
             .build_passive()
             .expect("rpc server boots");
 
-        let port = _chassis
+        let port = chassis
             .handle::<RpcServerHandle>()
             .expect("RpcServerHandle published")
             .local_port;

@@ -197,6 +197,8 @@ impl Vec3 {
     /// while rejecting visibly-different axes.
     #[inline]
     #[must_use]
+    // `mag_a_sq` / `mag_b_sq` are intuitive math names for the two operands.
+    #[allow(clippy::similar_names)]
     pub fn parallel_sign(self, other: Self) -> Option<f32> {
         let mag_a_sq = self.length_squared();
         let mag_b_sq = other.length_squared();

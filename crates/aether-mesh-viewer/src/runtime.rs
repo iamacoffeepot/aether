@@ -329,9 +329,8 @@ pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
             continue;
         }
         let mut parts = trimmed.split_whitespace();
-        let head = match parts.next() {
-            Some(h) => h,
-            None => continue,
+        let Some(head) = parts.next() else {
+            continue;
         };
         match head {
             "v" => {

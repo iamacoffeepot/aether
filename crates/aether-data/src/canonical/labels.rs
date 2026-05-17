@@ -35,9 +35,10 @@ pub const fn canonical_len_labels(labels: &KindLabels) -> usize {
 const fn label_node_len(node: &LabelNode) -> usize {
     match node {
         LabelNode::Anonymous => 1,
-        LabelNode::Option(cell) => 1 + label_cell_len(cell),
-        LabelNode::Vec(cell) => 1 + label_cell_len(cell),
-        LabelNode::Array(cell) => 1 + label_cell_len(cell),
+        LabelNode::Option(cell)
+        | LabelNode::Vec(cell)
+        | LabelNode::Array(cell)
+        | LabelNode::Ref(cell) => 1 + label_cell_len(cell),
         LabelNode::Struct {
             type_label,
             field_names,
@@ -74,7 +75,6 @@ const fn label_node_len(node: &LabelNode) -> usize {
             }
             total
         }
-        LabelNode::Ref(cell) => 1 + label_cell_len(cell),
         LabelNode::Map { key, value } => 1 + label_cell_len(key) + label_cell_len(value),
     }
 }

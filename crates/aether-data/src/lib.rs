@@ -573,8 +573,7 @@ impl From<bytemuck::PodCastError> for DecodeError {
                 expected: 0,
                 actual: 0,
             },
-            TargetAlignmentGreaterAndInputNotAligned => Self::Alignment,
-            AlignmentMismatch => Self::Alignment,
+            TargetAlignmentGreaterAndInputNotAligned | AlignmentMismatch => Self::Alignment,
         }
     }
 }

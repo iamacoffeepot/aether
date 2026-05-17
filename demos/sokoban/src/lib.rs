@@ -246,7 +246,6 @@ impl Sokoban {
             for (x, ch) in row.chars().enumerate() {
                 let cell = match ch {
                     '#' => CELL_WALL,
-                    '.' => CELL_FLOOR,
                     '$' => CELL_BOX,
                     'T' => CELL_TARGET,
                     '*' => CELL_BOX_ON_TARGET,
@@ -258,6 +257,7 @@ impl Sokoban {
                         player = (x as u32, y as u32);
                         CELL_TARGET
                     }
+                    // '.' and any unknown char fall through to floor.
                     _ => CELL_FLOOR,
                 };
                 cells[y * GRID_MAX + x] = cell;
@@ -283,6 +283,8 @@ impl Sokoban {
     /// Returns `true` when the player moved; `false` when the step
     /// was rejected (wall, out of bounds, unpushable box, post-solve,
     /// diagonal or invalid delta).
+    // `delta_gx` / `delta_gy` are the natural grid-axis component names.
+    #[allow(clippy::similar_names)]
     fn apply_step(&mut self, dx: i32, dy: i32) -> bool {
         if self.state.solved == 1 {
             return false;
@@ -304,7 +306,6 @@ impl Sokoban {
 
         let target = cell_at(&self.state, tx as u32, ty as u32);
         match target {
-            CELL_WALL => return false,
             CELL_FLOOR | CELL_TARGET => {}
             CELL_BOX | CELL_BOX_ON_TARGET => {
                 let bx = tx + delta_gx;
@@ -328,6 +329,7 @@ impl Sokoban {
                 };
                 set_cell(&mut self.state, tx as u32, ty as u32, vacated);
             }
+            // CELL_WALL or any unrecognised tile blocks the step.
             _ => return false,
         }
 

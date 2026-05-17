@@ -163,9 +163,8 @@ pub fn set_native_log_shipper(hook: NativeLogShipper) {
 /// declared no drain), or (on native) no [`with_actor_dispatch`] is
 /// active.
 pub fn drain_buffer() {
-    let entries = match LogBuffer::try_with_mut(|b| core::mem::take(&mut b.0)) {
-        Some(es) => es,
-        None => return,
+    let Some(entries) = LogBuffer::try_with_mut(|b| core::mem::take(&mut b.0)) else {
+        return;
     };
     if entries.is_empty() {
         return;
@@ -187,9 +186,8 @@ pub fn drain_buffer() {
         let Some(shipper) = shipper::load() else {
             return;
         };
-        let bytes = match postcard::to_allocvec(&batch) {
-            Ok(b) => b,
-            Err(_) => return,
+        let Ok(bytes) = postcard::to_allocvec(&batch) else {
+            return;
         };
         shipper(mailbox, <LogBatch as Kind>::ID, &bytes);
     }

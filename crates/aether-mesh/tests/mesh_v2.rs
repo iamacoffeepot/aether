@@ -165,6 +165,9 @@ fn round_trip_torus_and_sweep() {
 /// other sweep round-trip test in the suite.
 #[test]
 fn round_trip_open_sweep() {
+    use aether_math::Vec3;
+    use aether_mesh::ast::Node;
+
     let text = "(sweep ((0 0) (1 0) (1 1) (0 1))
                        ((0 0 0) (0 1 0))
                        :open true
@@ -175,8 +178,6 @@ fn round_trip_open_sweep() {
     assert_eq!(ast1, ast2);
     // Pin the AST shape so a regression in the parser silently
     // dropping `:open` would surface as a structural mismatch.
-    use aether_math::Vec3;
-    use aether_mesh::ast::Node;
     assert_eq!(
         ast1,
         Node::Sweep {

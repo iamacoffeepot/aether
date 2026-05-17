@@ -270,6 +270,9 @@ fn worker_loop(
 }
 
 fn format_panic_payload(payload: &Box<dyn Any + Send>, actor_label: &str) -> String {
+    // Chained if-let on disjoint downcasts reads cleaner than a deep
+    // `map_or_else` ladder over two Options.
+    #[allow(clippy::option_if_let_else)]
     let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {

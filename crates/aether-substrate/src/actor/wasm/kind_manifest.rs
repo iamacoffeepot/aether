@@ -221,7 +221,7 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
                 caps.handlers.push(HandlerCapability {
                     id,
                     name: name.into_owned(),
-                    doc: doc.map(|d| d.into_owned()),
+                    doc: doc.map(std::borrow::Cow::into_owned),
                 });
             }
             InputsRecord::Fallback { doc } => {
@@ -231,7 +231,7 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
                     ));
                 }
                 caps.fallback = Some(FallbackCapability {
-                    doc: doc.map(|d| d.into_owned()),
+                    doc: doc.map(std::borrow::Cow::into_owned),
                 });
             }
             InputsRecord::Component { doc } => {

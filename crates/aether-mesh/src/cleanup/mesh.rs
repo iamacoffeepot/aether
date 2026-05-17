@@ -15,18 +15,18 @@ use crate::loop_polygon::Polygon;
 use crate::plane::Plane3;
 use crate::point::Point3;
 
-pub(crate) type VertexId = usize;
+pub type VertexId = usize;
 
-pub(crate) struct IndexedMesh {
-    pub(crate) vertices: Vec<Point3>,
-    pub(crate) polygons: Vec<IndexedPolygon>,
+pub struct IndexedMesh {
+    pub vertices: Vec<Point3>,
+    pub polygons: Vec<IndexedPolygon>,
 }
 
 #[derive(Clone)]
-pub(crate) struct IndexedPolygon {
-    pub(crate) vertices: Vec<VertexId>,
-    pub(crate) plane: Plane3,
-    pub(crate) color: u32,
+pub struct IndexedPolygon {
+    pub vertices: Vec<VertexId>,
+    pub plane: Plane3,
+    pub color: u32,
 }
 
 impl IndexedMesh {

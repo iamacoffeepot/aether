@@ -105,6 +105,9 @@ impl DesktopEnv {
         let namespace_roots = NamespaceRoots::from_env();
         let audio = AudioConf::from_env();
 
+        // nested matches read clearer than `map_or_else` here because both
+        // arms have multi-line bodies (warn-log path on parse failure).
+        #[allow(clippy::option_if_let_else)]
         let (boot_mode, boot_size) = match std::env::var("AETHER_WINDOW_MODE") {
             Ok(s) => match parse_window_mode_env(&s) {
                 Ok(parsed) => parsed,
