@@ -39,6 +39,12 @@ impl SyncWaitBridge {
         timeout_ms: u32,
         expected_correlation: u64,
     ) -> i32 {
+        // SAFETY: forwards to `raw::wait_reply`, whose ABI is documented
+        // at the import site in `ffi/raw.rs`. The `(out_ptr, out_cap)`
+        // pair is derived from the `&mut [u8]` we just received, which
+        // the borrow checker proves is valid for `out.len()` bytes for
+        // the duration of the call; the host writes at most `out_cap`
+        // bytes through the pointer (`-2` re-parks rather than spilling).
         unsafe {
             raw::wait_reply(
                 expected_kind,
