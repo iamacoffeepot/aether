@@ -281,12 +281,12 @@ mod native {
                 entries: vec![event(3, "parse failed: missing close paren")],
             };
             let bytes = postcard::to_allocvec(&batch).expect("encode");
-            handler(aether_substrate::mail::registry::MailDispatch {
+            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
                 kind: <LogBatch as Kind>::ID,
-                kind_name: "aether.log",
+                kind_name: "aether.log".to_owned(),
                 origin: None,
                 sender: aether_substrate::mail::ReplyTo::NONE,
-                payload: &bytes,
+                payload: bytes,
                 count: 1,
                 mail_id: aether_substrate::mail::MailId::NONE,
                 root: aether_substrate::mail::MailId::NONE,

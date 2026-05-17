@@ -397,45 +397,47 @@ impl Spawner {
         let wake_for_handler = Arc::clone(&wake_slot);
         let registered = self.registry.try_register_inbox(
             full_name.clone(),
-            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
-                let Some(tx) = weak_for_handler.upgrade() else {
-                    tracing::warn!(
-                        target: "aether_substrate::spawn",
-                        kind = dispatch.kind_name,
-                        "instanced actor sender dropped — mail discarded"
-                    );
-                    return;
-                };
-                let env = Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                };
-                pending_for_handler.fetch_add(1, Ordering::AcqRel);
-                if tx.send(env).is_err() {
-                    // Receiver disconnected before we could deliver;
-                    // un-account for the increment so the counter
-                    // stays accurate (a future post-PR-4 cleanup may
-                    // drop the counter entirely now that
-                    // `wait_instanced_quiesce` retired).
-                    pending_for_handler.fetch_sub(1, Ordering::AcqRel);
-                    tracing::warn!(
-                        target: "aether_substrate::spawn",
-                        kind = dispatch.kind_name,
-                        "instanced actor receiver dropped — mail discarded"
-                    );
-                    return;
-                }
-                if let Some(wake) = wake_for_handler.get() {
-                    wake();
-                }
-            }),
+            crate::mail::registry::legacy_inbox_handler(
+                move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                    let Some(tx) = weak_for_handler.upgrade() else {
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            kind = dispatch.kind_name,
+                            "instanced actor sender dropped — mail discarded"
+                        );
+                        return;
+                    };
+                    let env = Envelope {
+                        kind: dispatch.kind,
+                        kind_name: dispatch.kind_name.to_owned(),
+                        origin: dispatch.origin.map(str::to_owned),
+                        sender: dispatch.sender,
+                        payload: dispatch.payload.to_vec(),
+                        count: dispatch.count,
+                        mail_id: dispatch.mail_id,
+                        root: dispatch.root,
+                        parent_mail: dispatch.parent_mail,
+                    };
+                    pending_for_handler.fetch_add(1, Ordering::AcqRel);
+                    if tx.send(env).is_err() {
+                        // Receiver disconnected before we could deliver;
+                        // un-account for the increment so the counter
+                        // stays accurate (a future post-PR-4 cleanup may
+                        // drop the counter entirely now that
+                        // `wait_instanced_quiesce` retired).
+                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            kind = dispatch.kind_name,
+                            "instanced actor receiver dropped — mail discarded"
+                        );
+                        return;
+                    }
+                    if let Some(wake) = wake_for_handler.get() {
+                        wake();
+                    }
+                },
+            ),
         );
         let _ = sender_for_init; // Phase 3 doesn't stamp pre-load mail with the spawner; envelopes are pre-built by SpawnBuilder.
         match registered {

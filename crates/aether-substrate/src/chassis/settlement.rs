@@ -301,7 +301,7 @@ mod tests {
         let captured_clone = Arc::clone(&captured);
         let target = registry.register_inbox(
             sink_name,
-            Arc::new(move |dispatch: MailDispatch<'_>| {
+            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
                 captured_clone.lock().unwrap().push(CapturedDispatch {
                     kind: dispatch.kind,
                     payload: dispatch.payload.to_vec(),

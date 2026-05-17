@@ -618,12 +618,12 @@ mod cap_native {
                 panic!("expected mailbox entry");
             };
             let bytes = postcard::to_allocvec(mail).expect("encode");
-            handler(aether_substrate::mail::registry::MailDispatch {
+            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
                 kind: K::ID,
-                kind_name: K::NAME,
+                kind_name: K::NAME.to_owned(),
                 origin: None,
                 sender: session_reply(),
-                payload: &bytes,
+                payload: bytes,
                 count: 1,
                 mail_id: aether_substrate::mail::MailId::NONE,
                 root: aether_substrate::mail::MailId::NONE,
