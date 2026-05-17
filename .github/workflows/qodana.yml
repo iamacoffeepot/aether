@@ -27,7 +27,10 @@ jobs:
       - name: Qodana scan
         uses: JetBrains/qodana-action@v2026.1
         with:
-          # Space-separated; comma form is deprecated as of action v2026.1.
-          args: --linter qodana-rust
+          # Space-separated args. The --env passes CARGO_HOME into the
+          # container so cargo metadata doesn't perm-deny on the
+          # baked /usr/local/cargo (owned by a different user than
+          # Qodana's non-root scan process).
+          args: --linter qodana-rust --env CARGO_HOME=/tmp/qodana-cargo
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}

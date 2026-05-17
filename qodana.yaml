@@ -19,13 +19,10 @@ exclude:
       - archive
       - spikes
 
-# Override CARGO_HOME so Qodana's non-root scan user can write the
-# cargo registry index + global-cache. The container's default
-# /usr/local/cargo is owned by a different user, causing
-# `cargo metadata` (which Qodana runs to load the workspace) to fail
-# with permission-denied — leaving the entire workspace unanalysed.
-env:
-  - CARGO_HOME=/tmp/qodana-cargo
+# CARGO_HOME override (so cargo metadata doesn't perm-deny on
+# /usr/local/cargo) is passed via `--env CARGO_HOME=…` in the
+# workflow's args, NOT via this file — `env:` is not a recognized
+# qodana.yaml key ("Unexpected keys in qodana.yaml: [env]").
 
 # No bootstrap: the qodana-rust:2026.1-eap container runs bootstrap as
 # a non-root user with no sudo binary and no write access to
