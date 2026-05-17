@@ -286,14 +286,26 @@ fn route_mail(
     // `SettlementRegistry`; future chassis-internal kinds add
     // matching arms inside the router closure.
     if mail.recipient == aether_data::MailboxId::CHASSIS_MAILBOX_ID {
+        // ADR-0080 §2 producer hook: balance the `Sent` so settlement
+        // chains drain (issue 838). Today the only chassis-addressed
+        // kind is `Settled` itself, which is pushed bare without
+        // lineage by `TraceObserverCapability::fire_settled`, so the
+        // `MailId::NONE` short-circuit inside `record_finished`
+        // no-ops. Stamped kinds (future debugger / describe_tree
+        // replies) get the symmetric `Received`/`Finished` bracket.
+        let inbound_mail_id = mail.mail_id;
         if let Some(router) = chassis_router {
+            let thread_name = std::thread::current().name().map(str::to_owned);
+            crate::runtime::trace::record_received(inbound_mail_id, thread_name);
             router(mail);
+            crate::runtime::trace::record_finished(inbound_mail_id);
         } else {
             tracing::warn!(
                 target: "aether_substrate::queue",
                 kind = %mail.kind,
                 "chassis-addressed mail dropped — no chassis router installed",
             );
+            crate::runtime::trace::record_finished(inbound_mail_id);
         }
         return;
     }
@@ -328,12 +340,18 @@ fn route_mail(
                     recipient = ?mail.recipient,
                     "ref-walk failed against registered schema; mail dropped",
                 );
+                // ADR-0080 §2: balance the `Sent` so settlement chains
+                // drain (issue 838). Parked mail (the `Ok(WalkOutcome::Parked)`
+                // arm above) is deliberately NOT finished — it's held
+                // for replay when the handle resolves.
+                crate::runtime::trace::record_finished(mail.mail_id);
                 return;
             }
         }
     }
 
     let recipient = mail.recipient;
+    let inbound_mail_id = mail.mail_id;
     match registry.entry(recipient) {
         Some(MailboxEntry::Closure(handler)) => {
             let kind_name = registry.kind_name(mail.kind).unwrap_or_default();
@@ -343,6 +361,22 @@ fn route_mail(
             // ADR-0011 origin is `None`. Components reach
             // closure-bound mailboxes via `ComponentCtx::send` inline
             // and never enter `push`.
+            //
+            // ADR-0080 §2 producer-hook note (issue 838): no
+            // `Received`/`Finished` bracket fires here. The
+            // `Closure` arm is overloaded — it serves BOTH
+            // synchronous sinks (which would benefit from a bracket
+            // to balance the producer's `Sent`) AND actor-inbox
+            // enqueue closures registered by `spawn.rs::try_register_closure`
+            // (whose dispatch loop already records `Received`/
+            // `Finished` once the actor's worker picks the envelope
+            // up). Adding a bracket here would double-count
+            // `Finished` for the actor case and fire settlement
+            // prematurely. The structural fix is a new
+            // `MailboxEntry::Sink` variant for synchronous sinks —
+            // tracked as a follow-up; the warn-drop / Dropped /
+            // egress / chassis-router arms below close the other
+            // gaps issue 838 catalogued.
             handler(MailDispatch {
                 kind: mail.kind,
                 kind_name: &kind_name,
@@ -361,6 +395,9 @@ fn route_mail(
                 mailbox = %recipient,
                 "mail to dropped mailbox — discarded",
             );
+            // ADR-0080 §2: balance the `Sent` so settlement chains
+            // drain (issue 838). No `Received` — no handler ran.
+            crate::runtime::trace::record_finished(inbound_mail_id);
         }
         None => {
             // ADR-0037 Phase 1: unknown-locally mailboxes bubble up
@@ -398,6 +435,13 @@ fn route_mail(
                     source_mailbox_id,
                     correlation_id,
                 );
+                // ADR-0080 §2: per-engine settlement (issue 838) —
+                // the local engine treats egress-to-hub as "Finished
+                // from our perspective." The hub processes the
+                // bubbled-up mail on its own settlement domain; no
+                // wire signal exists today for federated cross-engine
+                // settlement (and the issue body parks that design).
+                crate::runtime::trace::record_finished(inbound_mail_id);
                 return;
             }
             tracing::warn!(
@@ -405,6 +449,12 @@ fn route_mail(
                 mailbox = %recipient,
                 "mail to unknown mailbox — dropped",
             );
+            // ADR-0080 §2: balance the `Sent` so settlement chains
+            // drain (issue 838). Sokoban's `on_tick` sends to an
+            // unloaded `"camera"` mailbox every tick; without this
+            // every Tick chain has an orphaned `Sent` and never
+            // settles.
+            crate::runtime::trace::record_finished(inbound_mail_id);
         }
     }
 }
@@ -678,5 +728,117 @@ mod tests {
         // Truncated payload — the walker bails Truncated mid-walk.
         mailer.push(Mail::new(sink_id, kind_id, vec![0u8; 1], 1));
         assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// Issue 838: ADR-0080 §2 producer-hook coverage on the inline
+    /// dispatch arms. Each test below stamps a `Mail` with a unique
+    /// sender mailbox id, pushes through the Mailer, and drains the
+    /// process-global trace queue filtering on its own sender so
+    /// events from concurrent tests in the same binary don't
+    /// confuse the assertion.
+    use aether_data::MailId;
+    use aether_kinds::trace::TraceEvent;
+    use crossbeam_queue::SegQueue;
+
+    /// Install a fresh process-global trace queue if none is wired
+    /// yet (e.g. when this test runs in isolation), otherwise return
+    /// the existing one. Either way the queue is ready for `push` —
+    /// these tests don't assume ownership, they filter their own
+    /// events out of whatever's in flight.
+    fn ensure_trace_queue() -> Arc<SegQueue<TraceEvent>> {
+        if let Some(q) = crate::runtime::trace::trace_queue() {
+            return Arc::clone(q);
+        }
+        let q = Arc::new(SegQueue::<TraceEvent>::new());
+        crate::runtime::trace::install_trace_queue(Arc::clone(&q));
+        crate::runtime::trace::trace_queue().cloned().unwrap_or(q)
+    }
+
+    /// Drain the trace queue and return only events whose `mail_id`
+    /// is keyed to `sender` — lets parallel tests share the global
+    /// queue without false positives.
+    fn drain_events_for(queue: &SegQueue<TraceEvent>, sender: MailboxId) -> Vec<TraceEvent> {
+        let mut out = Vec::new();
+        let mut leftover = Vec::new();
+        while let Some(event) = queue.pop() {
+            let belongs = match &event {
+                TraceEvent::Sent { mail_id, .. } => mail_id.sender == sender,
+                TraceEvent::Received { mail_id, .. } => mail_id.sender == sender,
+                TraceEvent::Finished { mail_id, .. } => mail_id.sender == sender,
+            };
+            if belongs {
+                out.push(event);
+            } else {
+                leftover.push(event);
+            }
+        }
+        for ev in leftover {
+            queue.push(ev);
+        }
+        out
+    }
+
+    /// Unknown-mailbox warn-drop (no outbound wired): the chain's
+    /// `Sent` is still balanced by `Finished` so settlement
+    /// subscribers don't hang.
+    #[test]
+    fn unknown_mailbox_warn_drop_records_finished() {
+        let queue = ensure_trace_queue();
+        let sender = MailboxId(0x8380_0002_0000_0000);
+        let inbound_mail_id = MailId::new(sender, 1);
+
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+
+        let unknown = MailboxId(0xDEAD_BEEF_BABE);
+        let mail = Mail::new(unknown, KindId(0xABCD), vec![], 1).with_lineage(
+            inbound_mail_id,
+            inbound_mail_id,
+            None,
+        );
+        mailer.push(mail);
+
+        let events = drain_events_for(&queue, sender);
+        let finished = events.iter().any(
+            |e| matches!(e, TraceEvent::Finished { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        assert!(finished, "expected Finished for warn-drop; got {events:?}");
+    }
+
+    /// Egress-to-hub: per-engine settlement (issue 838) — the local
+    /// engine treats the egress as "Finished from our perspective"
+    /// so local subscribers don't wait on a hub roundtrip that
+    /// doesn't exist on the wire today.
+    #[test]
+    fn unknown_mailbox_egress_records_finished_locally() {
+        let queue = ensure_trace_queue();
+        let sender = MailboxId(0x8380_0003_0000_0000);
+        let inbound_mail_id = MailId::new(sender, 1);
+
+        let (outbound, outbound_rx) = crate::mail::outbound::HubOutbound::attached_loopback();
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound));
+
+        let unknown = MailboxId(0xDEAD_BEEF_F00D);
+        let mail = Mail::new(unknown, KindId(0xABCD), vec![9, 9], 1).with_lineage(
+            inbound_mail_id,
+            inbound_mail_id,
+            None,
+        );
+        mailer.push(mail);
+
+        // Sanity: the bubble-up actually happened.
+        let _ = outbound_rx.try_recv().expect("bubble-up event emitted");
+
+        let events = drain_events_for(&queue, sender);
+        let finished = events.iter().any(
+            |e| matches!(e, TraceEvent::Finished { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        assert!(
+            finished,
+            "expected Finished after egress (per-engine settlement); got {events:?}"
+        );
     }
 }
