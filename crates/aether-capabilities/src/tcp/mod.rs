@@ -42,25 +42,237 @@ mod listener;
 mod session;
 
 pub use listener::TcpListenerActor;
-// TcpListenerConfig and TcpSessionActor / TcpSessionConfig live
-// inside the native bridge mod (gated non-wasm32) and are only
-// consumed by the cap's spawn path on native — re-exporting
-// unconditionally would fail to resolve on wasm32 builds where
-// the bridge emits a stub.
+pub use session::TcpSessionActor;
+// `TcpListenerConfig` and `TcpSessionConfig` carry `std::net`
+// types (native-only) so they live inside the native bridge mod
+// and only re-export under `not(target_arch = "wasm32")`. The
+// actor markers themselves (above) are always-on so wasm callers
+// can name them in [`TcpFfiExt::listener`] / [`TcpFfiExt::session`]
+// type parameters.
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener::TcpListenerConfig;
 #[cfg(not(target_arch = "wasm32"))]
-pub use session::{TcpSessionActor, TcpSessionConfig};
+pub use session::TcpSessionConfig;
 
-// Trait-marker kinds the wasm32 bridge stub references via HandlesKind.
-use aether_kinds::{BindListener, ListListeners, MonitorNotice, UnbindListener};
+use aether_actor::{Actor, FfiActorMailbox};
+// Always-on imports — every kind named in the ext-trait helpers
+// must be reachable from wasm too so the `TcpFfiExt` impl
+// compiles under `--target wasm32-unknown-unknown
+// --no-default-features` (issue 832 acceptance criteria).
+use aether_kinds::{
+    BindListener, Close, ListListeners, MonitorNotice, SessionClose, SessionWrite, UnbindListener,
+};
 // Reply / payload kinds only consumed by native handler bodies. Gated to
 // avoid an unused-import warning on wasm32 where the bridge stub doesn't
 // reference them.
 #[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::{
-    BindListenerResult, Close, ListListenersResult, ListenerInfo, UnbindListenerResult,
-};
+use aether_kinds::{BindListenerResult, ListListenersResult, ListenerInfo, UnbindListenerResult};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_substrate::actor::native::NativeActorMailbox;
+
+/// Sender-side facade for FFI guests addressing
+/// [`TcpCapability`] through a `ctx.actor::<TcpCapability>()`
+/// handle.
+///
+/// Two distinct surfaces:
+///
+/// 1. Request helpers — [`bind_listener`](Self::bind_listener),
+///    [`unbind_listener`](Self::unbind_listener),
+///    [`list_listeners`](Self::list_listeners),
+///    [`close`](Self::close), [`session_write`](Self::session_write),
+///    [`session_close`](Self::session_close). Mirror
+///    [`crate::fs::FsMailboxExt`] (issue 580): lift the cap-shaped
+///    kinds (`Close`, `SessionWrite`, ...) one indirection above the
+///    raw `.send(&Kind { .. })` so component code stops reconstructing
+///    the struct (and the `.into()` ceremony) at every call site.
+///    `close`, `session_write`, `session_close` internally resolve the
+///    addressed listener / session actor — the request kind body itself
+///    has no name field (the addressing rides the mailbox).
+///
+/// 2. Peer resolvers — [`listener::<R>`](Self::listener) and
+///    [`session::<R>`](Self::session). Mirror
+///    [`crate::component::ComponentHostFfiExt::loaded`] (issue 654):
+///    the "aether.tcp.listener:" / "aether.tcp.session:" prefixes live
+///    in exactly two methods in the workspace — these — so a future
+///    namespace rename touches one constant ([`TcpListenerActor::NAMESPACE`]
+///    / [`TcpSessionActor::NAMESPACE`]) and propagates everywhere.
+///
+/// All request methods are fire-and-forget. Replies arrive on the
+/// matching `*Result` kinds (see ADR-0079 + the kind definitions in
+/// `aether_kinds::tcp`). Synchronous wrappers (`bind_listener_sync`
+/// etc.) were on the original issue 580 sketch — parked as a follow-up
+/// so this PR stays mechanical.
+///
+/// The generic escape hatch is unaffected: `mailbox.send(&CustomKind { .. })`
+/// still works for any `K` the cap declares via `HandlesKind<K>`, since
+/// `send` is an inherent method on the underlying mailbox type.
+pub trait TcpFfiExt {
+    /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
+    /// Reply: `BindListenerResult`. Pass `name = None` to let the cap
+    /// default the subname to the bound port (typically with `addr =
+    /// "127.0.0.1:0"` so the OS picks a free port).
+    fn bind_listener(&self, addr: &str, name: Option<&str>);
+
+    /// Mail `aether.tcp.unbind_listener { listener_name }` to the cap.
+    /// Reply: `UnbindListenerResult` (asynchronous — the cap parks the
+    /// reply until the listener's `MonitorNotice` arrives).
+    fn unbind_listener(&self, listener_name: &str);
+
+    /// Mail `aether.tcp.list_listeners` to the cap. Reply:
+    /// `ListListenersResult`.
+    fn list_listeners(&self);
+
+    /// Mail `aether.tcp.close` to the named `TcpListenerActor`,
+    /// asking it to shut down cooperatively. Equivalent to
+    /// `self.listener::<TcpListenerActor>(listener_name).send(&Close::default())`.
+    /// Fire-and-forget at the kind level; the close response rides via
+    /// the cap's monitor on the listener, not via the `Close` kind.
+    fn close(&self, listener_name: &str);
+
+    /// Mail `aether.tcp.session_write { bytes }` to the named
+    /// `TcpSessionActor`. The session's handler does a blocking write
+    /// on the dispatcher thread. Fire-and-forget — failures surface
+    /// via the session's close path, not via a reply to this send.
+    fn session_write(&self, session_name: &str, bytes: &[u8]);
+
+    /// Mail `aether.tcp.session_close` to the named `TcpSessionActor`,
+    /// asking it to close gracefully. Fire-and-forget; the close
+    /// fan-out fires `MonitorNotice` to the parent listener that spawned
+    /// the session.
+    fn session_close(&self, session_name: &str);
+
+    /// Resolve a typed listener-instance mailbox for the bound
+    /// listener named `name`. The full mailbox address is
+    /// `format!("{}:{}", TcpListenerActor::NAMESPACE, name)`. `R` is
+    /// the listener-side actor type (typically [`TcpListenerActor`]
+    /// itself, but the type parameter lets callers address a custom
+    /// wrapper that handles a different kind vocabulary on the same
+    /// mailbox).
+    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<R>;
+
+    /// Resolve a typed session-instance mailbox for the open session
+    /// named `name`. The full mailbox address is
+    /// `format!("{}:{}", TcpSessionActor::NAMESPACE, name)`. See
+    /// [`Self::listener`] for the `R` parameter shape.
+    fn session<R: Actor>(&self, name: &str) -> FfiActorMailbox<R>;
+}
+
+impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
+    fn bind_listener(&self, addr: &str, name: Option<&str>) {
+        self.send(&BindListener {
+            addr: addr.into(),
+            name: name.map(Into::into),
+        });
+    }
+    fn unbind_listener(&self, listener_name: &str) {
+        self.send(&UnbindListener {
+            listener_name: listener_name.into(),
+        });
+    }
+    fn list_listeners(&self) {
+        self.send(&ListListeners::default());
+    }
+    fn close(&self, listener_name: &str) {
+        self.listener::<TcpListenerActor>(listener_name)
+            .send(&Close::default());
+    }
+    fn session_write(&self, session_name: &str, bytes: &[u8]) {
+        self.session::<TcpSessionActor>(session_name)
+            .send(&SessionWrite {
+                bytes: bytes.to_vec(),
+            });
+    }
+    fn session_close(&self, session_name: &str) {
+        self.session::<TcpSessionActor>(session_name)
+            .send(&SessionClose::default());
+    }
+    fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
+        self.resolve_peer::<R>(&format!("{}:{}", TcpListenerActor::NAMESPACE, name))
+    }
+    fn session<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
+        self.resolve_peer::<R>(&format!("{}:{}", TcpSessionActor::NAMESPACE, name))
+    }
+}
+
+/// Sender-side facade for native cap-to-cap callers addressing
+/// [`TcpCapability`] through a `ctx.actor::<TcpCapability>()` handle
+/// that returns a [`NativeActorMailbox`]. Same shape as [`TcpFfiExt`]
+/// on the wasm transport — split into two traits because the listener /
+/// session peer resolvers return [`NativeActorMailbox<'a, R>`] here
+/// (with a transport-binding lifetime) vs [`FfiActorMailbox<R>`] on
+/// FFI, and a single trait can't carry both signatures. The precedent
+/// is [`crate::component::ComponentHostFfiExt`] /
+/// [`crate::component::ComponentHostNativeExt`] (issue 654).
+#[cfg(not(target_arch = "wasm32"))]
+pub trait TcpNativeExt {
+    /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
+    fn bind_listener(&self, addr: &str, name: Option<&str>);
+
+    /// Mail `aether.tcp.unbind_listener { listener_name }` to the cap.
+    fn unbind_listener(&self, listener_name: &str);
+
+    /// Mail `aether.tcp.list_listeners` to the cap.
+    fn list_listeners(&self);
+
+    /// Mail `aether.tcp.close` to the named `TcpListenerActor`.
+    fn close(&self, listener_name: &str);
+
+    /// Mail `aether.tcp.session_write { bytes }` to the named
+    /// `TcpSessionActor`.
+    fn session_write(&self, session_name: &str, bytes: &[u8]);
+
+    /// Mail `aether.tcp.session_close` to the named `TcpSessionActor`.
+    fn session_close(&self, session_name: &str);
+
+    /// Resolve a typed listener-instance mailbox. See
+    /// [`TcpFfiExt::listener`] for the addressing rationale; the
+    /// returned handle inherits the parent mailbox's `'a` binding ref
+    /// so `.send::<K>(&mail)` dispatches through the same
+    /// `NativeBinding` without re-threading the ctx.
+    fn listener<'a, R: Actor>(&'a self, name: &str) -> NativeActorMailbox<'a, R>;
+
+    /// Resolve a typed session-instance mailbox. See
+    /// [`TcpFfiExt::session`] for the addressing rationale.
+    fn session<'a, R: Actor>(&'a self, name: &str) -> NativeActorMailbox<'a, R>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> TcpNativeExt for NativeActorMailbox<'a, TcpCapability> {
+    fn bind_listener(&self, addr: &str, name: Option<&str>) {
+        self.send(&BindListener {
+            addr: addr.into(),
+            name: name.map(Into::into),
+        });
+    }
+    fn unbind_listener(&self, listener_name: &str) {
+        self.send(&UnbindListener {
+            listener_name: listener_name.into(),
+        });
+    }
+    fn list_listeners(&self) {
+        self.send(&ListListeners::default());
+    }
+    fn close(&self, listener_name: &str) {
+        self.listener::<TcpListenerActor>(listener_name)
+            .send(&Close::default());
+    }
+    fn session_write(&self, session_name: &str, bytes: &[u8]) {
+        self.session::<TcpSessionActor>(session_name)
+            .send(&SessionWrite {
+                bytes: bytes.to_vec(),
+            });
+    }
+    fn session_close(&self, session_name: &str) {
+        self.session::<TcpSessionActor>(session_name)
+            .send(&SessionClose::default());
+    }
+    fn listener<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
+        self.resolve_peer::<R>(&format!("{}:{}", TcpListenerActor::NAMESPACE, name))
+    }
+    fn session<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
+        self.resolve_peer::<R>(&format!("{}:{}", TcpSessionActor::NAMESPACE, name))
+    }
+}
 
 #[aether_actor::bridge(singleton)]
 mod cap_native {
