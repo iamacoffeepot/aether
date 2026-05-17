@@ -488,6 +488,10 @@ fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
+)]
 mod tests {
     use super::*;
     use aether_data::{LabelCell, LabelNode, Primitive, SchemaShape, VariantShape};

@@ -330,6 +330,10 @@ where
 // is held through `.push(...)` which is the captured payload — that's
 // the intended sequence, not a tightening opportunity.
 #[allow(clippy::significant_drop_tightening)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and capture panic on failure is the assertion"
+)]
 mod tests {
     use super::*;
     use std::sync::Mutex;

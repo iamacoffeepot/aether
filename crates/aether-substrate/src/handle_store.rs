@@ -193,7 +193,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn next_ephemeral(&self) -> HandleId {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         let counter = inner.next_ephemeral;
         inner.next_ephemeral = inner.next_ephemeral.wrapping_add(1);
         if inner.next_ephemeral == 0 {
@@ -213,7 +216,10 @@ impl HandleStore {
     /// pass underflows the byte accounting — fail-fast per ADR-0063:
     /// both indicate a substrate-level invariant violation.
     pub fn put(&self, id: HandleId, kind: KindId, bytes: Vec<u8>) -> Result<(), PutError> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         let (prior_size, refcount, pinned) = match inner.entries.get(&id) {
             Some(e) if e.kind != kind => {
                 return Err(PutError::KindMismatch {
@@ -259,7 +265,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn pin(&self, id: HandleId) -> bool {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         if let Some(entry) = inner.entries.get_mut(&id) {
             entry.pinned = true;
             true
@@ -276,7 +285,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn unpin(&self, id: HandleId) -> bool {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         if let Some(entry) = inner.entries.get_mut(&id) {
             entry.pinned = false;
             true
@@ -294,7 +306,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn inc_ref(&self, id: HandleId) -> bool {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         if let Some(entry) = inner.entries.get_mut(&id) {
             entry.refcount = entry.refcount.saturating_add(1);
             true
@@ -312,7 +327,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn dec_ref(&self, id: HandleId) -> bool {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         if let Some(entry) = inner.entries.get_mut(&id) {
             entry.refcount = entry.refcount.saturating_sub(1);
             true
@@ -331,7 +349,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn get(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         let access = bump_clock(&mut inner);
         let entry = inner.entries.get_mut(&id)?;
         entry.last_access = access;
@@ -347,7 +368,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn park(&self, handle_id: HandleId, mail: Mail) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         inner.parked.entry(handle_id).or_default().push_back(mail);
     }
 
@@ -364,7 +388,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn take_parked(&self, id: HandleId) -> Vec<Mail> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
         inner.parked.remove(&id).map_or_else(Vec::new, Into::into)
     }
 
@@ -375,7 +402,10 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn total_bytes(&self) -> usize {
-        self.inner.read().unwrap().total_bytes
+        self.inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
+            .total_bytes
     }
 
     /// Count of stored entries (parked-mail queues not included).
@@ -385,7 +415,11 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn entry_count(&self) -> usize {
-        self.inner.read().unwrap().entries.len()
+        self.inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
+            .entries
+            .len()
     }
 
     /// Number of mails currently parked under `id`.
@@ -397,7 +431,7 @@ impl HandleStore {
     pub fn parked_count(&self, id: HandleId) -> usize {
         self.inner
             .read()
-            .unwrap()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
             .parked
             .get(&id)
             .map_or(0, VecDeque::len)
@@ -416,7 +450,11 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn contains(&self, id: HandleId) -> bool {
-        self.inner.read().unwrap().entries.contains_key(&id)
+        self.inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
+            .entries
+            .contains_key(&id)
     }
 }
 
@@ -785,6 +823,10 @@ fn skip_primitive_postcard(state: &mut State<'_>, p: Primitive) -> Result<(), Wa
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
+)]
 mod tests {
     use std::sync::Arc;
 

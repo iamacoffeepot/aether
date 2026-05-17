@@ -328,7 +328,11 @@ impl NativeBinding {
         // The mutex guard stays held across `recv()`. Dispatcher
         // threads are single-tasked while parked here; nothing else
         // on this thread contends.
-        inbox.lock().unwrap().recv().ok()
+        inbox
+            .lock()
+            .expect("inbox mutex poisoned; fail-fast per ADR-0063")
+            .recv()
+            .ok()
     }
 
     /// Non-blocking variant of [`Self::recv_blocking`]. Returns
@@ -342,7 +346,11 @@ impl NativeBinding {
     /// guard, which is itself a substrate-level invariant violation.
     pub fn try_recv(&self) -> Option<Envelope> {
         let inbox = self.inbox.get()?;
-        inbox.lock().unwrap().try_recv().ok()
+        inbox
+            .lock()
+            .expect("inbox mutex poisoned; fail-fast per ADR-0063")
+            .try_recv()
+            .ok()
     }
 
     /// Reply path for native actors. Routes through the substrate's
@@ -473,7 +481,10 @@ impl NativeBinding {
         // `wait_reply` prune. The opportunistic cap below stops a
         // runaway sender that never paired a wait from leaking.
         {
-            let mut pending = self.pending_recipients.lock().unwrap();
+            let mut pending = self
+                .pending_recipients
+                .lock()
+                .expect("pending_recipients mutex poisoned; fail-fast per ADR-0063");
             if pending.len() >= MAX_PENDING_RECIPIENTS
                 && let Some(&drop_key) = pending.keys().next()
             {
@@ -532,10 +543,14 @@ impl NativeBinding {
             && let Some(recipient) = self
                 .pending_recipients
                 .lock()
-                .unwrap()
+                .expect("pending_recipients mutex poisoned; fail-fast per ADR-0063")
                 .get(&expected_correlation)
                 .copied()
-            && !self.frame_bound_set.read().unwrap().contains(&recipient)
+            && !self
+                .frame_bound_set
+                .read()
+                .expect("frame_bound_set lock poisoned; fail-fast per ADR-0063")
+                .contains(&recipient)
         {
             self.aborter.abort(format!(
                 "frame-bound actor {} attempted wait_reply on free-running recipient {} \
@@ -554,7 +569,10 @@ impl NativeBinding {
             // have parked envelopes that match this kind /
             // correlation.
             let from_overflow = {
-                let mut overflow = self.overflow.lock().unwrap();
+                let mut overflow = self
+                    .overflow
+                    .lock()
+                    .expect("overflow mutex poisoned; fail-fast per ADR-0063");
                 let pos = overflow
                     .iter()
                     .position(|env| matches_filter(env, expected_kind, expected_correlation));
@@ -566,7 +584,10 @@ impl NativeBinding {
                     // Buffer too small: park back at the front so a
                     // retry with a larger buffer picks it up before
                     // anything newer.
-                    self.overflow.lock().unwrap().push_front(env);
+                    self.overflow
+                        .lock()
+                        .expect("overflow mutex poisoned; fail-fast per ADR-0063")
+                        .push_front(env);
                 }
                 break rc;
             }
@@ -577,7 +598,10 @@ impl NativeBinding {
             // single-tasked while parked here, so no other code on
             // this thread contends with the lock.
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let recv_outcome = inbox_mutex.lock().unwrap().recv_timeout(remaining);
+            let recv_outcome = inbox_mutex
+                .lock()
+                .expect("inbox mutex poisoned; fail-fast per ADR-0063")
+                .recv_timeout(remaining);
 
             match recv_outcome {
                 Ok(env) => {
@@ -586,11 +610,17 @@ impl NativeBinding {
                         if rc == -2 {
                             // Same retry-friendly disposition as
                             // overflow-matched: park at the front.
-                            self.overflow.lock().unwrap().push_front(env);
+                            self.overflow
+                                .lock()
+                                .expect("overflow mutex poisoned; fail-fast per ADR-0063")
+                                .push_front(env);
                         }
                         break rc;
                     }
-                    self.overflow.lock().unwrap().push_back(env);
+                    self.overflow
+                        .lock()
+                        .expect("overflow mutex poisoned; fail-fast per ADR-0063")
+                        .push_back(env);
                     // Loop continues — try again with whatever time
                     // is left on the deadline.
                 }
@@ -606,7 +636,7 @@ impl NativeBinding {
         if expected_correlation != ReplyTo::NO_CORRELATION {
             self.pending_recipients
                 .lock()
-                .unwrap()
+                .expect("pending_recipients mutex poisoned; fail-fast per ADR-0063")
                 .remove(&expected_correlation);
         }
         rc
@@ -644,6 +674,10 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
+)]
 mod tests {
     use super::*;
     use crate::mail::registry::Registry;

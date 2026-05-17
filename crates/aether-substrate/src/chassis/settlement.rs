@@ -133,7 +133,10 @@ impl SettlementRegistry {
     /// a poisoned mutex means a prior holder panicked under the guard.
     pub fn subscribe_settlement(&self, root: MailId) -> Receiver<()> {
         let (tx, rx) = bounded::<()>(1);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
         if inner.settled.contains(&root) {
             // Pre-fire — root already settled. `try_send` rather
             // than `send` so a closed receiver (caller dropped it
@@ -168,7 +171,10 @@ impl SettlementRegistry {
         kind: KindId,
         mailer: Arc<crate::mail::mailer::Mailer>,
     ) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
         if inner.settled.contains(&root) {
             // Drop the mutex before pushing — `push` may run hot
             // (resolves the recipient inline on this thread).
@@ -203,7 +209,10 @@ impl SettlementRegistry {
         // tight and removes a re-entrancy hazard if a future
         // subscriber type re-enters the registry.
         let subs = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self
+                .inner
+                .lock()
+                .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
             inner.settled.insert(root);
             inner.pending.remove(&root)
         };
@@ -221,7 +230,7 @@ impl SettlementRegistry {
     fn pending_count(&self) -> usize {
         self.inner
             .lock()
-            .unwrap()
+            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
             .pending
             .values()
             .flat_map(|v| v.iter())
@@ -233,7 +242,11 @@ impl SettlementRegistry {
     /// settled.
     #[cfg(test)]
     fn settled_count(&self) -> usize {
-        self.inner.lock().unwrap().settled.len()
+        self.inner
+            .lock()
+            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
+            .settled
+            .len()
     }
 
     /// Test introspection: count of pending mail subscribers across all
@@ -242,7 +255,7 @@ impl SettlementRegistry {
     fn pending_mail_count(&self) -> usize {
         self.inner
             .lock()
-            .unwrap()
+            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
             .pending
             .values()
             .flat_map(|v| v.iter())
@@ -281,6 +294,10 @@ fn push_settlement_notice(
 // sequence so the captured state stays consistent against the
 // concurrent firing thread.
 #[allow(clippy::significant_drop_tightening)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
+)]
 mod tests {
     use super::*;
     use crate::handle_store::HandleStore;

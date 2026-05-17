@@ -185,7 +185,10 @@ impl Spawner {
     /// the today behavior pre-685).
     pub(crate) fn shutdown_instanced(&self, timeout: std::time::Duration) {
         let entries: Vec<InstancedSlotEntry> = {
-            let mut guard = self.instanced_slots.lock().unwrap();
+            let mut guard = self
+                .instanced_slots
+                .lock()
+                .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063");
             guard.drain().map(|(_id, entry)| entry).collect()
         };
         if entries.is_empty() {
@@ -584,13 +587,16 @@ impl Spawner {
                 // one wake per slot after signaling shutdown.
                 drop(slot);
                 let teardown_wake = wake.clone();
-                self.instanced_slots.lock().unwrap().insert(
-                    id,
-                    InstancedSlotEntry {
-                        slot: slot_dyn,
-                        wake: teardown_wake,
-                    },
-                );
+                self.instanced_slots
+                    .lock()
+                    .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
+                    .insert(
+                        id,
+                        InstancedSlotEntry {
+                            slot: slot_dyn,
+                            wake: teardown_wake,
+                        },
+                    );
                 // Pre-loaded `after_init` mail (lines above) was sent
                 // straight to the inbox via `tx.send`, which bypasses
                 // the closure's wake hook. Fire one wake now so the
