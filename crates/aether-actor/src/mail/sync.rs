@@ -48,6 +48,8 @@ where
         -2 => Err(E::buffer_too_small()),
         -3 => Err(E::cancelled()),
         n if n >= 0 => {
+            // Match arm gates `n >= 0`, so the sign-loss cast is sound.
+            #[allow(clippy::cast_sign_loss)]
             let len = n as usize;
             postcard::from_bytes(&buf[..len]).map_err(|e| E::decode(alloc::format!("{e}")))
         }

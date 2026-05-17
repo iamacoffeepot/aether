@@ -915,6 +915,8 @@ mod native {
                     instrument_id: 0,
                 })
                 .unwrap();
+            // Compile-time constant; trivially exact for usize.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let release_samples = (0.5 * 48_000.0) as usize;
             let mut tail = vec![0.0f32; release_samples];
             synth.fill(&mut tail, 1);

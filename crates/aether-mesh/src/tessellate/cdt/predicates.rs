@@ -1,3 +1,8 @@
+// Every cast in this file widens `i64 → i128` for the exact
+// determinant arithmetic per the magnitude budget in the module doc.
+// Widening is structurally lossless.
+#![allow(clippy::cast_lossless)]
+
 //! Exact integer geometric predicates for CDT (ADR-0056).
 //!
 //! Both predicates take 2D points as `(i64, i64)` and return an `i32`

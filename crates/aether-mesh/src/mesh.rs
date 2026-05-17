@@ -2,7 +2,7 @@
 // scalar accumulators that don't benefit from FMA, and `a`/`b`/`c`/`d`
 // for triangle vertices and matrix elements are the canonical vocabulary.
 // `cast_lossless` fires on the routine `i32 → i64` widening into the
-// exact-arithmetic integer-grid coord pipeline.
+// exact-arithmetic integer-grid coord pipeline — structurally lossless.
 #![allow(
     clippy::cast_precision_loss,
     clippy::suboptimal_flops,

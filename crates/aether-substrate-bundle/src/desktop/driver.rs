@@ -598,6 +598,10 @@ impl ApplicationHandler<UserEvent> for App {
                 );
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // winit reports cursor position as f64; the input wire
+                // kind carries f32. Realistic window sizes (< 2^20 px)
+                // stay well inside f32 mantissa.
+                #[allow(clippy::cast_possible_truncation)]
                 let payload = encode(&MouseMove {
                     x: position.x as f32,
                     y: position.y as f32,

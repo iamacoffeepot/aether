@@ -1,7 +1,16 @@
 // Sokoban grid math: bounded `usize` grid coordinates cast to f32 for
 // world-space placement, and single-letter `a` / `b` / `c` for triangle
 // vertices are the canonical vocabulary.
-#![allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
+// `usize ↔ u32 ↔ i32` casts are bounded by `GRID_MAX` (≪ `i32::MAX`);
+// `i32 → u32 / usize` sign-loss casts are gated by in-bounds checks;
+// `i32 → i32` step deltas don't wrap inside the 8x8 grid budget.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 //! Sokoban demo: a grid-based puzzle world. The world owns walls,
 //! boxes, targets, the player's grid position, *and* the player's

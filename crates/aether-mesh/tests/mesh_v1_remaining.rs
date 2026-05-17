@@ -1,3 +1,8 @@
+// Test geometry uses small integer-valued f32 coords; casting vertex
+// `f32 → i32` for corner snapping is exact in the value range these
+// tests exercise.
+#![allow(clippy::cast_possible_truncation)]
+
 //! Tests for the v1 vocabulary completion: cylinder, cone, wedge,
 //! sphere, extrude, mirror, array. Promoted alongside ADR-0051's
 //! formalization of the v1 vocabulary.

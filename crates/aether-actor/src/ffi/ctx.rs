@@ -1,3 +1,7 @@
+// Wire-encode: `usize → u32` narrowings forward `(ptr, len)` pairs
+// to the wasm32 host-fn ABI (`_p32` convention, ADR-0024).
+#![allow(clippy::cast_possible_truncation)]
+
 //! Concrete FFI ctx structs — [`FfiInitCtx`] / [`FfiCtx`] / [`FfiDropCtx`].
 //!
 //! Replaces the pre-issue-663 parametric `Ctx<'a, T>` / `InitCtx<'a, T>` /

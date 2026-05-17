@@ -95,8 +95,11 @@ impl<'a, R: Actor> NativeActorMailbox<'a, R> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.binding
-            .send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32);
+        // Batch count rides as `u32` on the wire (matches the FFI ABI);
+        // realistic mail batches stay well below `u32::MAX`.
+        #[allow(clippy::cast_possible_truncation)]
+        let count = payloads.len() as u32;
+        self.binding.send_mail(self.mailbox, K::ID.0, bytes, count);
     }
 
     /// ADR-0080: like [`Self::send`] but returns the minted `MailId`

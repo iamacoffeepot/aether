@@ -1,3 +1,7 @@
+// Wire-encode: `usize → u32` narrowings forward batch lengths to the
+// wasm32 host-fn ABI (`_p32` convention, ADR-0024).
+#![allow(clippy::cast_possible_truncation)]
+
 //! [`FfiActorMailbox`] — actor-typed sender handle for FFI guests.
 //!
 //! Issue 665 split the prior parametric `ActorMailbox<'a, R, T>` into

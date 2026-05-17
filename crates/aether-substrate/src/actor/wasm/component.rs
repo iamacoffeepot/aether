@@ -547,6 +547,9 @@ impl Component {
         };
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
+        // Wasm32 ABI carries `u32` byte lengths; mail payloads are
+        // bounded by guest memory size (well below `u32::MAX`).
+        #[allow(clippy::cast_possible_truncation)]
         let byte_len = mail.payload.len() as u32;
         // ADR-0080 §5 (issue iamacoffeepot/aether#722): publish the
         // inbound's lineage on `ComponentCtx` so any guest-triggered
@@ -624,10 +627,11 @@ impl Component {
         };
         self.memory
             .write(&mut self.store, STATE_OFFSET as usize, &bundle.bytes)?;
-        f.call(
-            &mut self.store,
-            (bundle.version, STATE_OFFSET, bundle.bytes.len() as u32),
-        )?;
+        // Wasm32 ABI carries `u32` byte lengths; bundle bytes are
+        // bounded by guest memory size (well below `u32::MAX`).
+        #[allow(clippy::cast_possible_truncation)]
+        let byte_len = bundle.bytes.len() as u32;
+        f.call(&mut self.store, (bundle.version, STATE_OFFSET, byte_len))?;
         Ok(())
     }
 

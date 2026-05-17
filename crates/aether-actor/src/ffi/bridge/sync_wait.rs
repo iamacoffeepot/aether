@@ -1,3 +1,7 @@
+// Wire-encode: `usize → u32` narrowings forward `(ptr, len)` pairs
+// to the wasm32 host-fn ABI (`_p32` convention, ADR-0024).
+#![allow(clippy::cast_possible_truncation)]
+
 //! [`SyncWaitBridge`] — blocking-reply FFI bridge.
 //!
 //! ZST whose only inherent method is `wait_reply`, the ADR-0042 sync

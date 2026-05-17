@@ -1,6 +1,14 @@
 // Tessellation math: bounded vertex counts cast to f32 for fan
 // triangulation indices are domain-correct.
-#![allow(clippy::cast_precision_loss)]
+// Integer-grid arithmetic: `i32 → i64` widenings move snapped
+// fixed-point coordinates into the exact-arithmetic CDT predicates;
+// bounded `usize` vertex/triangle counts cast to `u32` for the wire
+// index buffers stay well below `u32::MAX`.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation
+)]
 
 //! Polygon → triangle conversion for the wire `Vec<Triangle>` path.
 //!

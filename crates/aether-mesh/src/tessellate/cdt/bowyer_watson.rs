@@ -1,3 +1,9 @@
+// Integer-grid arithmetic: `i32 → i64` widenings on snapped fixed-point
+// coordinates feed the exact incircle / orient2d predicates; bounded
+// `usize` triangle counts cast to `u32` for the wire vertex index
+// space stay well below `u32::MAX`.
+#![allow(clippy::cast_lossless, clippy::cast_possible_truncation)]
+
 //! Bowyer-Watson incremental Delaunay triangulation (ADR-0056 PR 2).
 //!
 //! Builds an unconstrained Delaunay triangulation of a set of 2D

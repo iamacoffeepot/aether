@@ -364,6 +364,11 @@ mod schema_impls {
     impl<T: Schema + 'static, const N: usize> Schema for [T; N] {
         const SCHEMA: SchemaType = SchemaType::Array {
             element: SchemaCell::Static(&T::SCHEMA),
+            // Schema array lengths are bounded by `u32` on the wire
+            // (canonical bytes format). Const-context `try_into` is
+            // unavailable; arrays exceeding `u32::MAX` aren't a
+            // realistic schema shape and would fail elsewhere first.
+            #[allow(clippy::cast_possible_truncation)]
             len: N as u32,
         };
         const LABEL: Option<&'static str> = None;

@@ -1,3 +1,8 @@
+// Wire-encode: `usize → u32` narrowings forward sizes to the wasm32
+// host-fn ABI (`_p32` convention, ADR-0024) and stage test payloads
+// in the in-process decode-roundtrip fixtures.
+#![allow(clippy::cast_possible_truncation)]
+
 //! Mail layer of the actor SDK: the inbound `Mail` envelope,
 //! `PriorState` bundle, and `ReplyTo` opaque handle live here in
 //! `mod.rs` (pure decoders, no transport coupling). The

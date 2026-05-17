@@ -205,7 +205,12 @@ mod native {
     fn now_unix_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
+            // Millisecond clock fits comfortably in u64 for the next ~584 million years.
+            .map(|d| {
+                #[allow(clippy::cast_possible_truncation)]
+                let ms = d.as_millis() as u64;
+                ms
+            })
             .unwrap_or(0)
     }
 

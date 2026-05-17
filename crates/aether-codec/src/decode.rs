@@ -1,3 +1,10 @@
+// Wire-decode: bytes laid out per `SchemaType` → serde_json. The
+// narrowing casts (`u64 → u32`, varint slot to signed via
+// `cast_possible_wrap`) are the load-bearing inverse of the encode
+// path; `From::from` / `try_into` would obscure the byte-layout
+// contract this function implements.
+#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+
 // `decode_schema`: wire bytes + `SchemaType` descriptor → serde_json
 // value the agent can read directly. Mirror of `encoder::encode_schema`
 // — same two paths, picked the same way:

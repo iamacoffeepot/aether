@@ -190,6 +190,10 @@ fn check_no_extra_keywords(
     Ok(())
 }
 
+// DSL numbers parse as f64; mesh AST is f32. Narrowing in this fn is
+// the intended precision boundary (DSL author writes the literal;
+// we keep the lower-precision in-engine representation).
+#[allow(clippy::cast_possible_truncation)]
 fn as_f32(value: &Value) -> Result<f32, ParseError> {
     value
         .as_f64()
@@ -469,7 +473,7 @@ mod tests {
     /// surface a parse error rather than producing a different mesh.
     #[test]
     fn as_u32_rejects_values_above_u32_max() {
-        let dsl = format!("(box 1 1 1 :color {})", u32::MAX as u64 + 1);
+        let dsl = format!("(box 1 1 1 :color {})", u64::from(u32::MAX) + 1);
         let err = parse(&dsl).expect_err("values above u32::MAX must error");
         match err {
             ParseError::ExpectedInteger(msg) => {
