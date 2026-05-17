@@ -1788,7 +1788,7 @@ mod tests {
         let k = Key { code: 42 };
         let bytes = encode(&k);
         assert_eq!(bytes.len(), 4);
-        let back: Key = decode(&bytes).unwrap();
+        let back: Key = decode(&bytes).expect("test setup: Key cast round-trip decodes");
         assert_eq!(back, k);
     }
 
@@ -1797,7 +1797,8 @@ mod tests {
         let m = MouseMove { x: 1.5, y: -3.25 };
         let bytes = encode(&m);
         assert_eq!(bytes.len(), 8);
-        let back: MouseMove = decode(&bytes).unwrap();
+        let back: MouseMove =
+            decode(&bytes).expect("test setup: MouseMove cast round-trip decodes");
         assert_eq!(back, m);
     }
 
@@ -1817,7 +1818,8 @@ mod tests {
         ];
         let bytes = encode_slice(&tris);
         assert_eq!(bytes.len(), 2 * 72);
-        let back: &[DrawTriangle] = decode_slice(&bytes).unwrap();
+        let back: &[DrawTriangle] =
+            decode_slice(&bytes).expect("test setup: DrawTriangle slice decodes zero-copy");
         assert_eq!(back, &tris);
     }
 
@@ -1954,8 +1956,9 @@ mod tests {
                 namespace: "save".to_string(),
                 path: "slot1.bin".to_string(),
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: Read = postcard::from_bytes(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Read");
+            let back: Read =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes Read");
             assert_eq!(back.namespace, r.namespace);
             assert_eq!(back.path, r.path);
         }
@@ -1967,8 +1970,10 @@ mod tests {
                 path: "slot.bin".to_string(),
                 bytes: vec![1, 2, 3, 4],
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: ReadResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes ReadResult::Ok");
+            let back: ReadResult =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes ReadResult::Ok");
             match back {
                 ReadResult::Ok {
                     namespace,
@@ -1990,8 +1995,10 @@ mod tests {
                 path: "ghost.bin".to_string(),
                 error: FsError::NotFound,
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: ReadResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes ReadResult::Err");
+            let back: ReadResult =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes ReadResult::Err");
             match back {
                 ReadResult::Err {
                     namespace,
@@ -2009,8 +2016,9 @@ mod tests {
         #[test]
         fn io_error_adapter_carries_payload() {
             let e = FsError::AdapterError("disk full".to_string());
-            let bytes = postcard::to_allocvec(&e).unwrap();
-            let back: FsError = postcard::from_bytes(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&e).expect("test setup: postcard encodes FsError");
+            let back: FsError =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes FsError");
             match back {
                 FsError::AdapterError(msg) => assert_eq!(msg, "disk full"),
                 other => panic!("expected AdapterError, got {other:?}"),
@@ -2024,8 +2032,9 @@ mod tests {
                 path: "state.bin".to_string(),
                 bytes: vec![0xde, 0xad, 0xbe, 0xef],
             };
-            let bytes = postcard::to_allocvec(&w).unwrap();
-            let back: Write = postcard::from_bytes(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&w).expect("test setup: postcard encodes Write");
+            let back: Write =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes Write");
             assert_eq!(back.bytes, vec![0xde, 0xad, 0xbe, 0xef]);
         }
 
@@ -2036,8 +2045,10 @@ mod tests {
                 prefix: "slots/".to_string(),
                 entries: vec!["a".to_string(), "b".to_string(), "c".to_string()],
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: ListResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes ListResult::Ok");
+            let back: ListResult =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes ListResult::Ok");
             match back {
                 ListResult::Ok {
                     namespace,
@@ -2061,8 +2072,10 @@ mod tests {
                 namespace: "save".to_string(),
                 path: "state.bin".to_string(),
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: WriteResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes WriteResult::Ok");
+            let back: WriteResult =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes WriteResult::Ok");
             match back {
                 WriteResult::Ok { namespace, path } => {
                     assert_eq!(namespace, "save");
@@ -2079,8 +2092,10 @@ mod tests {
                 path: "ghost.bin".to_string(),
                 error: FsError::NotFound,
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: DeleteResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes DeleteResult::Err");
+            let back: DeleteResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes DeleteResult::Err");
             match back {
                 DeleteResult::Err {
                     namespace,
@@ -2131,8 +2146,9 @@ mod tests {
                 body: vec![b'{', b'}'],
                 timeout_ms: Some(5000),
             };
-            let bytes = postcard::to_allocvec(&f).unwrap();
-            let back: Fetch = postcard::from_bytes(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&f).expect("test setup: postcard encodes Fetch");
+            let back: Fetch =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes Fetch");
             assert_eq!(back.url, f.url);
             assert_eq!(back.method, HttpMethod::Post);
             assert_eq!(back.headers, f.headers);
@@ -2149,8 +2165,10 @@ mod tests {
                 body: vec![],
                 timeout_ms: None,
             };
-            let bytes = postcard::to_allocvec(&f).unwrap();
-            let back: Fetch = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&f).expect("test setup: postcard encodes Fetch (no timeout)");
+            let back: Fetch = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes Fetch (no timeout)");
             assert_eq!(back.timeout_ms, None);
             assert_eq!(back.method, HttpMethod::Get);
         }
@@ -2163,8 +2181,10 @@ mod tests {
                 headers: sample_headers(),
                 body: vec![0xde, 0xad, 0xbe, 0xef],
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: FetchResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes FetchResult::Ok");
+            let back: FetchResult =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes FetchResult::Ok");
             match back {
                 FetchResult::Ok {
                     url,
@@ -2187,8 +2207,10 @@ mod tests {
                 url: "https://api.example.com/gone".to_string(),
                 error: HttpError::Timeout,
             };
-            let bytes = postcard::to_allocvec(&r).unwrap();
-            let back: FetchResult = postcard::from_bytes(&bytes).unwrap();
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes FetchResult::Err");
+            let back: FetchResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes FetchResult::Err");
             match back {
                 FetchResult::Err { url, error } => {
                     assert_eq!(url, "https://api.example.com/gone");
@@ -2201,8 +2223,10 @@ mod tests {
         #[test]
         fn http_error_invalid_url_carries_payload() {
             let e = HttpError::InvalidUrl("not a url".to_string());
-            let bytes = postcard::to_allocvec(&e).unwrap();
-            let back: HttpError = postcard::from_bytes(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&e)
+                .expect("test setup: postcard encodes HttpError::InvalidUrl");
+            let back: HttpError = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes HttpError::InvalidUrl");
             match back {
                 HttpError::InvalidUrl(s) => assert_eq!(s, "not a url"),
                 other => panic!("expected InvalidUrl, got {other:?}"),
@@ -2212,8 +2236,10 @@ mod tests {
         #[test]
         fn http_error_adapter_carries_detail() {
             let e = HttpError::AdapterError("dns lookup failed".to_string());
-            let bytes = postcard::to_allocvec(&e).unwrap();
-            let back: HttpError = postcard::from_bytes(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&e)
+                .expect("test setup: postcard encodes HttpError::AdapterError");
+            let back: HttpError = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes HttpError::AdapterError");
             match back {
                 HttpError::AdapterError(s) => assert_eq!(s, "dns lookup failed"),
                 other => panic!("expected AdapterError, got {other:?}"),
@@ -2228,8 +2254,10 @@ mod tests {
                 HttpError::AllowlistDenied,
                 HttpError::Disabled,
             ] {
-                let bytes = postcard::to_allocvec(&e).unwrap();
-                let back: HttpError = postcard::from_bytes(&bytes).unwrap();
+                let bytes = postcard::to_allocvec(&e)
+                    .expect("test setup: postcard encodes HttpError unit variant");
+                let back: HttpError = postcard::from_bytes(&bytes)
+                    .expect("test setup: postcard decodes HttpError unit variant");
                 assert_eq!(back, e);
             }
         }
@@ -2245,8 +2273,10 @@ mod tests {
                 HttpMethod::Head,
                 HttpMethod::Options,
             ] {
-                let bytes = postcard::to_allocvec(&m).unwrap();
-                let back: HttpMethod = postcard::from_bytes(&bytes).unwrap();
+                let bytes = postcard::to_allocvec(&m)
+                    .expect("test setup: postcard encodes HttpMethod variant");
+                let back: HttpMethod = postcard::from_bytes(&bytes)
+                    .expect("test setup: postcard decodes HttpMethod variant");
                 assert_eq!(back, m);
             }
         }

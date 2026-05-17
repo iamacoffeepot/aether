@@ -136,7 +136,10 @@ mod tests {
         // `Pod` derive that would silently flip the wire format.
         let descs = all();
         for name in [Read::NAME, Write::NAME, Delete::NAME, List::NAME] {
-            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: io request kind is registered in descriptor inventory");
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("{name} should be Struct, got {:?}", d.schema);
             };
@@ -155,7 +158,10 @@ mod tests {
             DeleteResult::NAME,
             ListResult::NAME,
         ] {
-            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: io result kind is registered in descriptor inventory");
             assert!(
                 matches!(d.schema, SchemaType::Enum { .. }),
                 "{name} should be Enum, got {:?}",
@@ -176,14 +182,20 @@ mod tests {
             ReplaceComponent::NAME,
             DropComponent::NAME,
         ] {
-            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: control request kind is registered in descriptor inventory");
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("{name} should be Struct, got {:?}", d.schema);
             };
             assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
         }
         for name in [LoadResult::NAME, DropResult::NAME, ReplaceResult::NAME] {
-            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: control result kind is registered in descriptor inventory");
             assert!(
                 matches!(d.schema, SchemaType::Enum { .. }),
                 "{name} should be Enum, got {:?}",
@@ -205,7 +217,10 @@ mod tests {
             NoteOff::NAME,
             SetMasterGain::NAME,
         ] {
-            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: cast kind is registered in descriptor inventory");
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
                 panic!("expected Struct for {name}, got {:?}", d.schema);
             };
@@ -217,7 +232,10 @@ mod tests {
     fn signal_kinds_emit_unit() {
         let descs = all();
         for name in [Tick::NAME, MouseButton::NAME] {
-            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: signal kind is registered in descriptor inventory");
             assert_eq!(d.schema, SchemaType::Unit, "{name} should be Unit");
         }
     }
@@ -225,7 +243,10 @@ mod tests {
     #[test]
     fn key_field_layout() {
         let descs = all();
-        let key = descs.iter().find(|d| d.name == Key::NAME).unwrap();
+        let key = descs
+            .iter()
+            .find(|d| d.name == Key::NAME)
+            .expect("test setup: Key kind is registered in descriptor inventory");
         let SchemaType::Struct { fields, .. } = &key.schema else {
             panic!("expected Struct")
         };
@@ -237,7 +258,10 @@ mod tests {
     #[test]
     fn mouse_move_field_layout() {
         let descs = all();
-        let mm = descs.iter().find(|d| d.name == MouseMove::NAME).unwrap();
+        let mm = descs
+            .iter()
+            .find(|d| d.name == MouseMove::NAME)
+            .expect("test setup: MouseMove kind is registered in descriptor inventory");
         let SchemaType::Struct { fields, .. } = &mm.schema else {
             panic!("expected Struct")
         };
@@ -251,7 +275,10 @@ mod tests {
     #[test]
     fn draw_triangle_recurses_into_vertex() {
         let descs = all();
-        let dt = descs.iter().find(|d| d.name == DrawTriangle::NAME).unwrap();
+        let dt = descs
+            .iter()
+            .find(|d| d.name == DrawTriangle::NAME)
+            .expect("test setup: DrawTriangle kind is registered in descriptor inventory");
         let SchemaType::Struct { fields, repr_c } = &dt.schema else {
             panic!("expected Struct")
         };

@@ -208,8 +208,11 @@ mod tests {
                 let id = with_tag(tag, hash);
                 assert_eq!(tag_of(id), Some(tag));
                 assert_eq!(body_of(id), hash & HASH_MASK);
-                let s = encode(id).unwrap();
-                assert_eq!(decode(&s).unwrap(), id);
+                let s = encode(id).expect("test setup: tagged id encodes (tag is non-zero)");
+                assert_eq!(
+                    decode(&s).expect("test setup: round-trip decode of encoded id"),
+                    id
+                );
             }
         }
     }
@@ -217,7 +220,7 @@ mod tests {
     #[test]
     fn encoding_shape() {
         let id = with_tag(Tag::Mailbox, 0);
-        let s = encode(id).unwrap();
+        let s = encode(id).expect("test setup: Mailbox id encodes (tag is non-zero)");
         assert_eq!(s.len(), 18);
         assert!(s.starts_with("mbx-"));
         assert_eq!(s, "mbx-aaaa-aaaa-aaaa");
@@ -226,7 +229,7 @@ mod tests {
     #[test]
     fn alphabet_excludes_digit_lookalikes() {
         let id = with_tag(Tag::Kind, HASH_MASK);
-        let s = encode(id).unwrap();
+        let s = encode(id).expect("test setup: Kind id encodes (tag is non-zero)");
         assert_eq!(s, "knd-7777-7777-7777");
         assert!(!s.contains('0'));
         assert!(!s.contains('1'));
@@ -261,16 +264,23 @@ mod tests {
     #[test]
     fn decode_is_case_insensitive() {
         let id = with_tag(Tag::Handle, 0x1234_5678_9abc_def0 & HASH_MASK);
-        let lower = encode(id).unwrap();
+        let lower = encode(id).expect("test setup: Handle id encodes (tag is non-zero)");
         let upper = lower.to_uppercase();
-        assert_eq!(decode(&lower).unwrap(), id);
-        assert_eq!(decode(&upper).unwrap(), id);
+        assert_eq!(
+            decode(&lower).expect("test setup: lowercase form decodes back to id"),
+            id
+        );
+        assert_eq!(
+            decode(&upper).expect("test setup: uppercase form decodes back to id"),
+            id
+        );
     }
 
     #[test]
     fn decode_with_tag_catches_mismatch() {
-        let mailbox = encode(with_tag(Tag::Mailbox, 0x42)).unwrap();
-        let err = decode_with_tag(&mailbox, Tag::Kind).unwrap_err();
+        let mailbox = encode(with_tag(Tag::Mailbox, 0x42)).expect("test setup: Mailbox id encodes");
+        let err = decode_with_tag(&mailbox, Tag::Kind)
+            .expect_err("test setup: Mailbox bytes must reject Kind tag");
         assert_eq!(
             err,
             DecodeError::TagMismatch {

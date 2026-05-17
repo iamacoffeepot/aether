@@ -69,17 +69,29 @@ mod sink {
 
         #[handler]
         fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
-            *self.cells.list.lock().unwrap() = Some(reply);
+            *self
+                .cells
+                .list
+                .lock()
+                .expect("test setup: list cell mutex is never poisoned") = Some(reply);
         }
 
         #[handler]
         fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
-            *self.cells.spawn.lock().unwrap() = Some(reply);
+            *self
+                .cells
+                .spawn
+                .lock()
+                .expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
         }
 
         #[handler]
         fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
-            *self.cells.terminate.lock().unwrap() = Some(reply);
+            *self
+                .cells
+                .terminate
+                .lock()
+                .expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
         }
     }
 }
@@ -143,7 +155,13 @@ fn engines_cap_spawns_lists_and_terminates_a_real_headless_substrate() {
             args: vec![],
         },
         Duration::from_secs(30),
-        || cells.spawn.lock().unwrap().take(),
+        || {
+            cells
+                .spawn
+                .lock()
+                .expect("test setup: spawn cell mutex is never poisoned")
+                .take()
+        },
     );
     let engine_id = match spawn {
         SpawnEngineResult::Ok {
@@ -158,7 +176,11 @@ fn engines_cap_spawns_lists_and_terminates_a_real_headless_substrate() {
 
     // List: the freshly-spawned engine shows up in the cap's table.
     let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
-        cells.list.lock().unwrap().take()
+        cells
+            .list
+            .lock()
+            .expect("test setup: list cell mutex is never poisoned")
+            .take()
     });
     assert!(
         list.engines.iter().any(|e| e.engine_id == engine_id),
@@ -173,7 +195,13 @@ fn engines_cap_spawns_lists_and_terminates_a_real_headless_substrate() {
             engine_id: engine_id.clone(),
         },
         Duration::from_secs(5),
-        || cells.terminate.lock().unwrap().take(),
+        || {
+            cells
+                .terminate
+                .lock()
+                .expect("test setup: terminate cell mutex is never poisoned")
+                .take()
+        },
     );
     assert!(
         matches!(terminate, TerminateEngineResult::Ok),
@@ -182,7 +210,11 @@ fn engines_cap_spawns_lists_and_terminates_a_real_headless_substrate() {
 
     // After terminate, the engine is gone from the table.
     let list_after = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
-        cells.list.lock().unwrap().take()
+        cells
+            .list
+            .lock()
+            .expect("test setup: list cell mutex is never poisoned")
+            .take()
     });
     assert!(
         !list_after.engines.iter().any(|e| e.engine_id == engine_id),

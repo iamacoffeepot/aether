@@ -695,7 +695,7 @@ mod tests {
         let v = TestPod { a: 42, b: 1.5 };
         let bytes = encode(&v);
         assert_eq!(bytes.len(), 8);
-        let back: TestPod = decode(&bytes).unwrap();
+        let back: TestPod = decode(&bytes).expect("test setup: cast round-trip decodes");
         assert_eq!(back, v);
     }
 
@@ -704,14 +704,16 @@ mod tests {
         let verts = [Vertex { x: 0.0, y: 0.5 }, Vertex { x: 1.0, y: -0.5 }];
         let bytes = encode_slice(&verts);
         assert_eq!(bytes.len(), 16);
-        let decoded: &[Vertex] = decode_slice(&bytes).unwrap();
+        let decoded: &[Vertex] =
+            decode_slice(&bytes).expect("test setup: aligned slice decodes zero-copy");
         assert_eq!(decoded, &verts);
     }
 
     #[test]
     fn pod_decode_size_mismatch_rejected() {
         let bytes = [0u8; 7]; // TestPod is 8 bytes
-        let err = decode::<TestPod>(&bytes).unwrap_err();
+        let err =
+            decode::<TestPod>(&bytes).expect_err("test setup: short buffer must fail size check");
         assert!(matches!(
             err,
             DecodeError::SizeMismatch {
@@ -728,13 +730,15 @@ mod tests {
             label: alloc::string::String::from("hello"),
         };
         let bytes = encode_struct(&v);
-        let back: TestStruct = decode_struct(&bytes).unwrap();
+        let back: TestStruct =
+            decode_struct(&bytes).expect("test setup: postcard round-trip decodes TestStruct");
         assert_eq!(back, v);
     }
 
     #[test]
     fn struct_decode_malformed_rejected() {
-        let err = decode_struct::<TestStruct>(&[0x00]).unwrap_err();
+        let err = decode_struct::<TestStruct>(&[0x00])
+            .expect_err("test setup: single-byte buffer must fail postcard decode");
         assert!(matches!(err, DecodeError::Postcard(_)));
     }
 
@@ -809,8 +813,9 @@ mod tests {
             label: alloc::string::String::from("hello"),
         };
         let r = Ref::Inline(v);
-        let bytes = postcard::to_allocvec(&r).unwrap();
-        let back: Ref<TestStruct> = postcard::from_bytes(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Inline Ref");
+        let back: Ref<TestStruct> =
+            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Inline Ref");
         assert_eq!(back, r);
     }
 
@@ -820,8 +825,9 @@ mod tests {
             id: 0xdead_beef_cafe_babe,
             kind_id: 0x1234_5678_9abc_def0,
         };
-        let bytes = postcard::to_allocvec(&r).unwrap();
-        let back: Ref<TestStruct> = postcard::from_bytes(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Handle Ref");
+        let back: Ref<TestStruct> =
+            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Handle Ref");
         assert_eq!(back, r);
     }
 
@@ -832,8 +838,10 @@ mod tests {
             label: alloc::string::String::from("x"),
         });
         let handle: Ref<TestStruct> = Ref::Handle { id: 1, kind_id: 1 };
-        let inline_bytes = postcard::to_allocvec(&inline).unwrap();
-        let handle_bytes = postcard::to_allocvec(&handle).unwrap();
+        let inline_bytes =
+            postcard::to_allocvec(&inline).expect("test setup: postcard encodes Inline Ref");
+        let handle_bytes =
+            postcard::to_allocvec(&handle).expect("test setup: postcard encodes Handle Ref");
         assert_eq!(inline_bytes[0], 0, "Inline discriminant must be 0");
         assert_eq!(handle_bytes[0], 1, "Handle discriminant must be 1");
     }

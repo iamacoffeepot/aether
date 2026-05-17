@@ -468,7 +468,9 @@ mod tests {
         // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
-        let out = mail.decode(kind).unwrap();
+        let out = mail
+            .decode(kind)
+            .expect("test setup: matching kind id decodes");
         assert_eq!(out, value);
     }
 
@@ -503,7 +505,9 @@ mod tests {
         // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
-        let out = mail.decode_slice(kind).unwrap();
+        let out = mail
+            .decode_slice(kind)
+            .expect("test setup: matching kind id decodes slice");
         assert_eq!(out, &values);
     }
 
@@ -562,7 +566,9 @@ mod tests {
         // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
-        let out = mail.decode_typed::<FakePod>().unwrap();
+        let out = mail
+            .decode_typed::<FakePod>()
+            .expect("test setup: matching kind id decodes typed");
         assert_eq!(out, value);
     }
 
@@ -597,7 +603,9 @@ mod tests {
         // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
-        let out = mail.decode_slice_typed::<FakePod>().unwrap();
+        let out = mail
+            .decode_slice_typed::<FakePod>()
+            .expect("test setup: matching kind id decodes typed slice");
         assert_eq!(out, &values);
     }
 
@@ -607,7 +615,8 @@ mod tests {
             tag: alloc::string::String::from("greet"),
             ids: alloc::vec![1, 2, 3, 4],
         };
-        let bytes = postcard::to_allocvec(&value).unwrap();
+        let bytes =
+            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
         // SAFETY: `bytes` (a `Vec<u8>` from postcard) outlives `mail`;
         // its `(addr, len)` pair is valid for the rest of the body.
         let mail = unsafe {
@@ -661,7 +670,8 @@ mod tests {
             tag: alloc::string::String::from("x"),
             ids: alloc::vec![],
         };
-        let bytes = postcard::to_allocvec(&value).unwrap();
+        let bytes =
+            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
@@ -682,7 +692,8 @@ mod tests {
             tag: alloc::string::String::from("x"),
             ids: alloc::vec![],
         };
-        let bytes = postcard::to_allocvec(&value).unwrap();
+        let bytes =
+            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
@@ -703,7 +714,8 @@ mod tests {
             tag: alloc::string::String::from("longer"),
             ids: alloc::vec![1, 2, 3],
         };
-        let bytes = postcard::to_allocvec(&value).unwrap();
+        let bytes =
+            postcard::to_allocvec(&value).expect("test setup: postcard encodes FakePostcard");
         // Pretend the substrate only wrote the first 2 bytes —
         // `decode_from_bytes` (postcard arm) gets the truncated slice
         // and surfaces the parse error as `None`.
@@ -786,7 +798,8 @@ mod tests {
 
     fn frame_bundle<K: Kind + Schema + Serialize>(value: &K) -> Vec<u8> {
         let mut out = Vec::from(K::ID.0.to_le_bytes());
-        let payload = postcard::to_allocvec(value).unwrap();
+        let payload =
+            postcard::to_allocvec(value).expect("test setup: postcard encodes test value");
         out.extend_from_slice(&payload);
         out
     }
@@ -808,7 +821,9 @@ mod tests {
         };
         let buf = frame_bundle(&value);
         let prior = prior_from(&buf, 0);
-        let decoded = prior.as_kind::<StateStruct>().unwrap();
+        let decoded = prior
+            .as_kind::<StateStruct>()
+            .expect("test setup: round-trip frame decodes back to StateStruct");
         assert_eq!(decoded, value);
     }
 

@@ -355,7 +355,7 @@ impl TestBench {
     pub fn count_observed(&self, kind_name: &str) -> usize {
         self.observed_kinds
             .lock()
-            .unwrap()
+            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
             .iter()
             .filter(|n| n.as_str() == kind_name)
             .count()
@@ -370,7 +370,10 @@ impl TestBench {
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
     /// under the guard.
     pub fn observed_kinds(&self) -> Vec<String> {
-        self.observed_kinds.lock().unwrap().clone()
+        self.observed_kinds
+            .lock()
+            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
+            .clone()
     }
 
     /// Push a typed mail and block until the dispatched chain
@@ -935,11 +938,10 @@ mod tests {
         let subscriber_mbox = tb.registry.register_inline(
             "issue_723_test_subscriber",
             Arc::new(move |dispatch: MailDispatch<'_>| {
-                captured_for_handler.lock().unwrap().push((
-                    dispatch.mail_id,
-                    dispatch.root,
-                    dispatch.parent_mail,
-                ));
+                captured_for_handler
+                    .lock()
+                    .expect("test setup: captured mutex is never poisoned")
+                    .push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
             }),
         );
 
@@ -960,7 +962,9 @@ mod tests {
         // and threads them through `ctx.fanout` to every subscriber.
         let _ = tb.advance(1).expect("advance");
 
-        let captured = captured.lock().unwrap();
+        let captured = captured
+            .lock()
+            .expect("test setup: captured mutex is never poisoned");
         assert!(
             !captured.is_empty(),
             "subscriber received no mail — fanout never reached it",
@@ -984,7 +988,7 @@ mod tests {
         // parent — it's a child node in the trace tree.
         assert_ne!(
             mail_id,
-            parent.unwrap(),
+            parent.expect("test setup: parent was asserted non-None above"),
             "fanned-out mail_id should differ from parent (each fanout copy gets a fresh id)"
         );
     }

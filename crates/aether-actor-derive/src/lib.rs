@@ -2703,7 +2703,8 @@ mod tests {
 
     #[test]
     fn allows_btreemap_field() {
-        let parsed: syn::Type = parse_str("BTreeMap<String, String>").unwrap();
+        let parsed: syn::Type =
+            parse_str("BTreeMap<String, String>").expect("test setup: BTreeMap type parses");
         assert!(reject_hashmap(&parsed).is_ok());
     }
 
@@ -2716,7 +2717,8 @@ mod tests {
             "Option<String>",
             "BTreeSet<u64>",
         ] {
-            let parsed: syn::Type = parse_str(ty).unwrap();
+            let parsed: syn::Type =
+                parse_str(ty).expect("test setup: candidate type parses as syn::Type");
             assert!(
                 reject_hashmap(&parsed).is_ok(),
                 "rejected {ty} unexpectedly"

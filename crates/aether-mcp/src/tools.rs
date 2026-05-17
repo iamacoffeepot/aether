@@ -211,7 +211,7 @@ impl Mcp {
             }) => {
                 self.components
                     .lock()
-                    .unwrap()
+                    .expect("component cache mutex is never poisoned")
                     .insert((engine, mailbox_id), capabilities.clone());
                 json(&serde_json::json!({
                     "mailbox_id": mailbox_id,
@@ -256,7 +256,7 @@ impl Mcp {
             Some(ReplaceResult::Ok { capabilities }) => {
                 self.components
                     .lock()
-                    .unwrap()
+                    .expect("component cache mutex is never poisoned")
                     .insert((engine, mailbox_id), capabilities.clone());
                 json(&capabilities)
             }
@@ -323,7 +323,7 @@ impl Mcp {
         let caps = self
             .components
             .lock()
-            .unwrap()
+            .expect("component cache mutex is never poisoned")
             .get(&(engine, mailbox_id))
             .cloned();
         match caps {
@@ -824,10 +824,11 @@ mod tests {
         );
 
         // Seed the cache, then it round-trips.
-        let engine = EngineId(Uuid::parse_str(engine_id).unwrap());
+        let engine =
+            EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
         mcp.components
             .lock()
-            .unwrap()
+            .expect("test setup: component cache mutex is never poisoned")
             .insert((engine, mailbox), ComponentCapabilities::default());
         let hit = mcp
             .describe_component(Parameters(DescribeComponentArgs {
@@ -845,12 +846,24 @@ mod tests {
     /// land on `2`).
     #[test]
     fn parse_level_round_trips_documented_strings() {
-        assert_eq!(parse_level("trace").unwrap(), 0);
-        assert_eq!(parse_level("debug").unwrap(), 1);
-        assert_eq!(parse_level("info").unwrap(), 2);
-        assert_eq!(parse_level("warn").unwrap(), 3);
-        assert_eq!(parse_level("error").unwrap(), 4);
-        assert_eq!(parse_level("INFO").unwrap(), 2);
+        assert_eq!(
+            parse_level("trace").expect("test setup: \"trace\" parses"),
+            0
+        );
+        assert_eq!(
+            parse_level("debug").expect("test setup: \"debug\" parses"),
+            1
+        );
+        assert_eq!(parse_level("info").expect("test setup: \"info\" parses"), 2);
+        assert_eq!(parse_level("warn").expect("test setup: \"warn\" parses"), 3);
+        assert_eq!(
+            parse_level("error").expect("test setup: \"error\" parses"),
+            4
+        );
+        assert_eq!(
+            parse_level("INFO").expect("test setup: case-insensitive \"INFO\" parses"),
+            2
+        );
         assert!(parse_level("verbose").is_err());
     }
 
@@ -860,7 +873,8 @@ mod tests {
     #[test]
     fn level_to_str_matches_parse_level_and_falls_back_to_info() {
         for level in 0..=4u8 {
-            let parsed = parse_level(level_to_str(level)).unwrap();
+            let parsed = parse_level(level_to_str(level))
+                .expect("test setup: level_to_str output round-trips through parse_level");
             assert_eq!(parsed, level);
         }
         assert_eq!(level_to_str(99), "info");
