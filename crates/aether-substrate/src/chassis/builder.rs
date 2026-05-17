@@ -804,6 +804,11 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// `LogDrainSlot`s, set the same way every actor's slot is set:
     /// via mail.
     log_drain: Option<MailboxId>,
+    /// Issue 745: override [`PoolConfig::workers`]. `None` means
+    /// [`PoolConfig::default`] (`available_parallelism() - 1`, min 1);
+    /// `Some(n)` plumbs `n` into the pool at boot. Production chassis
+    /// mains populate this from `AETHER_WORKERS`.
+    workers: Option<usize>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -822,6 +827,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             driver: None,
             aborter: Arc::new(PanicAborter),
             log_drain: None,
+            workers: None,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -834,6 +840,16 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// second invocation overwrites the prior aborter.
     pub fn with_aborter(mut self, aborter: Arc<dyn FatalAborter>) -> Self {
         self.aborter = aborter;
+        self
+    }
+
+    /// Issue 745: override the worker pool size. `None` keeps
+    /// [`PoolConfig::default`] (`available_parallelism() - 1`, min 1);
+    /// `Some(n)` plumbs `n` into the pool at boot. `Some(0)` is
+    /// clamped to 1 since the pool requires at least one worker. The
+    /// override can be applied either before or after `.driver(_)`.
+    pub fn with_workers(mut self, workers: Option<usize>) -> Self {
+        self.workers = workers.map(|n| n.max(1));
         self
     }
 
@@ -900,6 +916,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             driver: self.driver,
             aborter: self.aborter,
             log_drain: self.log_drain,
+            workers: self.workers,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -909,7 +926,13 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// and returns a [`PassiveChassis`] whose embedder is responsible
     /// for driving the loop manually (TestBench).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
-        let booted = boot_passives(&self.registry, &self.mailer, &self.aborter, self.passives)?;
+        let booted = boot_passives(
+            &self.registry,
+            &self.mailer,
+            &self.aborter,
+            self.workers,
+            self.passives,
+        )?;
         // Issue #601: push `ConfigureLogDrain` to every booted actor
         // and to `aether.component` so every per-actor `LogDrainSlot`
         // (auto-emitted handler) plus the `ComponentHostCapability`'s
@@ -961,6 +984,13 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
+    /// Mirror of [`Builder::with_workers`][Builder<C, NoDriver>::with_workers]
+    /// for the post-driver state. Issue 745.
+    pub fn with_workers(mut self, workers: Option<usize>) -> Self {
+        self.workers = workers.map(|n| n.max(1));
+        self
+    }
+
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via
@@ -972,11 +1002,12 @@ impl<C: Chassis> Builder<C, HasDriver> {
             passives,
             driver,
             aborter,
+            workers,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
-        let mut booted = boot_passives(&registry, &mailer, &aborter, passives)?;
+        let mut booted = boot_passives(&registry, &mailer, &aborter, workers, passives)?;
         // Issue #601: push `ConfigureLogDrain` to every booted actor
         // and to `aether.component` so the runtime load path picks up
         // the chassis-declared drain through the same mail every
@@ -1141,6 +1172,7 @@ fn boot_passives(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
     aborter: &Arc<dyn FatalAborter>,
+    workers: Option<usize>,
     passives: Vec<Box<dyn PassiveBoot>>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
@@ -1156,7 +1188,20 @@ fn boot_passives(
     // caps). Today every cap is Dedicated so the pool sits idle, but
     // booting it here means PR D / Phase 2 can flip a cap to Pooled
     // without re-plumbing the boot order.
-    let pool = Pool::start(PoolConfig::default(), Arc::clone(aborter));
+    //
+    // Issue 745: `workers` is the `AETHER_WORKERS` override threaded
+    // through `Builder::with_workers`. `None` keeps `PoolConfig::default`
+    // (`available_parallelism() - 1`, min 1); `Some(n)` swaps the
+    // worker count while preserving every other default field
+    // (`budget_template`, etc.).
+    let pool_config = match workers {
+        Some(n) => PoolConfig {
+            workers: n,
+            ..PoolConfig::default()
+        },
+        None => PoolConfig::default(),
+    };
+    let pool = Pool::start(pool_config, Arc::clone(aborter));
 
     // ADR-0080 §3 trace pipeline. `init_substrate_start` pins the
     // monotonic-since-boot reference; `install_trace_queue` makes the
@@ -3824,5 +3869,47 @@ mod tests {
 
         drop(chassis);
         let _ = id;
+    }
+
+    /// Issue 745: `Builder::with_workers(None)` leaves the override
+    /// field unset so `boot_passives` falls back to
+    /// `PoolConfig::default()`.
+    #[test]
+    fn with_workers_none_leaves_field_unset() {
+        let (registry, mailer) = fresh_substrate();
+        let builder = Builder::<TestChassis>::new(registry, mailer).with_workers(None);
+        assert_eq!(builder.workers, None);
+    }
+
+    /// Issue 745: a positive worker count plumbs through verbatim.
+    #[test]
+    fn with_workers_some_passes_through() {
+        let (registry, mailer) = fresh_substrate();
+        let builder = Builder::<TestChassis>::new(registry, mailer).with_workers(Some(7));
+        assert_eq!(builder.workers, Some(7));
+    }
+
+    /// Issue 745: `Some(0)` clamps to 1 since the pool requires at
+    /// least one worker.
+    #[test]
+    fn with_workers_some_zero_clamps_to_one() {
+        let (registry, mailer) = fresh_substrate();
+        let builder = Builder::<TestChassis>::new(registry, mailer).with_workers(Some(0));
+        assert_eq!(builder.workers, Some(1));
+    }
+
+    /// Issue 745: the override survives the type-state transition into
+    /// [`HasDriver`] so chassis mains can call `.with_workers(...)`
+    /// either before or after `.driver(_)`.
+    #[test]
+    fn with_workers_survives_driver_transition() {
+        let (registry, mailer) = fresh_substrate();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let builder = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
+            .with_workers(Some(3))
+            .driver(RanDriver {
+                ran: Arc::clone(&ran),
+            });
+        assert_eq!(builder.workers, Some(3));
     }
 }

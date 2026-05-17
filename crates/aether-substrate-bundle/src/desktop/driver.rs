@@ -47,14 +47,6 @@ use winit::window::{Fullscreen, Window, WindowId};
 use super::chassis::UserEvent;
 use super::render::Gpu;
 
-/// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
-/// component, the scheduler doesn't read this — it's retained on the
-/// hub-protocol wire for compatibility). Stays chassis-side because
-/// it's declarative for `aether.control.platform_info`, not loop
-/// policy. The shared frame-loop policy (drain budget, frame-stats
-/// cadence) lives in `aether_substrate::frame_loop`.
-pub const WORKERS: usize = 2;
-
 pub struct App {
     queue: Arc<Mailer>,
     /// `aether.input` mailbox id, cached at driver boot. Each platform

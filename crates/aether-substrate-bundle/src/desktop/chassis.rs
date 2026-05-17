@@ -29,7 +29,7 @@ use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
-use super::driver::{DesktopDriverCapability, WORKERS, parse_window_mode_env};
+use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Just one variant today: a wake-up so the loop picks up a queued
@@ -80,6 +80,10 @@ pub struct DesktopEnv {
     /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
     /// `RpcServerCapability` so existing chassis behavior is unchanged.
     pub rpc_addr: Option<SocketAddr>,
+    /// Issue 745: optional worker-pool size override. Populated from
+    /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
+    /// (`available_parallelism() - 1`, min 1).
+    pub workers: Option<usize>,
 }
 
 impl DesktopEnv {
@@ -127,6 +131,8 @@ impl DesktopEnv {
                 .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
+        let workers = parse_workers_env();
+
         Ok(DesktopEnv {
             event_loop,
             capture_queue,
@@ -137,7 +143,36 @@ impl DesktopEnv {
             boot_size,
             boot_title,
             rpc_addr,
+            workers,
         })
+    }
+}
+
+/// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
+/// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
+/// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
+/// one worker); unparseable → `None` with a warn. Issue 745.
+fn parse_workers_env() -> Option<usize> {
+    let raw = std::env::var("AETHER_WORKERS").ok()?;
+    match raw.trim().parse::<usize>() {
+        Ok(0) => {
+            tracing::warn!(
+                target: "aether_substrate::boot",
+                value = %raw,
+                "AETHER_WORKERS=0 — clamping to 1",
+            );
+            Some(1)
+        }
+        Ok(n) => Some(n),
+        Err(e) => {
+            tracing::warn!(
+                target: "aether_substrate::boot",
+                value = %raw,
+                error = %e,
+                "AETHER_WORKERS unparseable — falling back to PoolConfig::default",
+            );
+            None
+        }
     }
 }
 
@@ -161,10 +196,10 @@ impl DesktopChassis {
             boot_size,
             boot_title,
             rpc_addr,
+            workers,
         } = env;
 
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
-        let _ = WORKERS;
 
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
@@ -191,7 +226,7 @@ impl DesktopChassis {
 
         tracing::info!(
             target: "aether_substrate::boot",
-            workers = WORKERS,
+            workers_override = ?workers,
             "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
@@ -227,6 +262,7 @@ impl DesktopChassis {
         // chassis cap.
         let mut builder = Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
+            .with_workers(workers)
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<TraceObserverCapability>(())
