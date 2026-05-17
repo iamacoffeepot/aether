@@ -39,7 +39,7 @@ unimplemented                       = "warn"  # promote to deny if no hits surfa
 undocumented_unsafe_blocks          = "warn"  # promote to deny in Phase 1.b after 73 SAFETY backfills
 cloned_instead_of_copied            = "deny"
 large_stack_arrays                  = "deny"
-match_wildcard_for_single_variants  = "warn"  # promote to deny in Phase 1.c.iii
+match_wildcard_for_single_variants  = "deny"
 uninlined_format_args               = "deny"
 unreadable_literal                  = "warn"  # promote to deny in Phase 1.c.i
 
