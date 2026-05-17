@@ -5,7 +5,7 @@
 //! holds the per-actor state — mailer + self mailbox + inbox +
 //! correlation counter + wait-overflow queue — directly as fields,
 //! reached via `&self` on every inherent method. No thread-locals,
-//! no install/uninstall ceremony, no RefCell runtime borrow checks.
+//! no install/uninstall ceremony, no `RefCell` runtime borrow checks.
 //! The actor binding is type-system-tracked through the
 //! `&NativeBinding` references the SDK threads into
 //! [`super::ctx::NativeCtx`], [`super::mailbox::NativeActorMailbox`],
@@ -149,7 +149,7 @@ impl NativeBinding {
     /// Capabilities authored under a [`crate::ChassisCtx`] should
     /// prefer [`Self::from_ctx`], which inherits the chassis's
     /// shared set + aborter automatically; the explicit constructor
-    /// is for harnesses that don't go through a chassis (TestBench
+    /// is for harnesses that don't go through a chassis (`TestBench`
     /// internals) or for tests that want to substitute a custom
     /// aborter.
     pub fn new(
@@ -188,7 +188,7 @@ impl NativeBinding {
     /// same PR keep using [`Self::new_for_test`] (or call
     /// [`Self::new`] explicitly with their chosen guard state); the
     /// guard is a no-op for non-frame-bound callers and the
-    /// PanicAborter default is harmless for production caps that
+    /// `PanicAborter` default is harmless for production caps that
     /// never call `wait_reply`.
     #[must_use]
     pub fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId, frame_bound: bool) -> Self {
@@ -336,7 +336,7 @@ impl NativeBinding {
 /// "no inbox installed" by name in the error.
 const ERR_NO_INBOX_I32: i32 = 100;
 
-/// Inherent send / wait_reply / prev_correlation entry points the
+/// Inherent send / `wait_reply` / `prev_correlation` entry points the
 /// per-handler [`super::ctx::NativeCtx`] / [`super::ctx::NativeInitCtx`]
 /// route through. Issue 665 retired the prior `MailTransport` trait
 /// impl; the FFI-shaped wrapper served no purpose for native (Mailer
@@ -719,7 +719,7 @@ mod tests {
 
     /// ADR-0074 §Decision 5: a frame-bound caller blocking on a
     /// free-running recipient must abort. Verified via the
-    /// PanicAborter — the panic message names both mailboxes plus
+    /// `PanicAborter` — the panic message names both mailboxes plus
     /// the ADR.
     #[test]
     #[should_panic(expected = "forbidden by ADR-0074")]

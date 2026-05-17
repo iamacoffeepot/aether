@@ -269,8 +269,8 @@ impl EgressBackend for RecordingBackend {
 }
 
 /// Substrate-side outbound facade. Threads through every place that
-/// emits hub-bound mail (mailer bubble-up, host_fns guest sends,
-/// log_capture, control kind announcements, lifecycle dying-broadcast,
+/// emits hub-bound mail (mailer bubble-up, `host_fns` guest sends,
+/// `log_capture`, control kind announcements, lifecycle dying-broadcast,
 /// boot-installed broadcast sink). Holds an `OnceLock<Arc<dyn EgressBackend>>`:
 /// pre-attach the lock is empty and every method drops silently;
 /// post-attach the wired backend handles the egress (the standard

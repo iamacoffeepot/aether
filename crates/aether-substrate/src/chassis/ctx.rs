@@ -140,7 +140,7 @@ impl MailboxSender {
 /// must claim through this method instead of
 /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] — otherwise the
 /// chassis has no counter to wait on and the barrier degrades to
-/// "components only", reintroducing the race the FRAME_BARRIER
+/// "components only", reintroducing the race the `FRAME_BARRIER`
 /// classification exists to close.
 #[derive(Debug)]
 pub struct FrameBoundClaim {
@@ -490,7 +490,7 @@ impl<'a> ChassisCtx<'a> {
     /// `frame_bound_set`, and the id from `claimed_actor_mailboxes`.
     /// Idempotent: calling on an id that wasn't claimed is a no-op.
     ///
-    /// Used in the singleton-boot unwind path (chassis_builder /
+    /// Used in the singleton-boot unwind path (`chassis_builder` /
     /// capability) when `init` fails after the cap mailbox was
     /// claimed. Without this, the failed cap leaves a sink registered
     /// against its namespace and a stuck counter in

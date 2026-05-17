@@ -67,7 +67,7 @@ pub struct Mail {
     /// ADR-0080 §1: this mail's identity. The producer mints it from
     /// `MailId::new(producer_mailbox, producer_per_actor_correlation)`
     /// before pushing through `Mailer`. PR 2 stamps it inert (no
-    /// trace-event consumer reads it yet); PR 2's TraceObserver hooks
+    /// trace-event consumer reads it yet); PR 2's `TraceObserver` hooks
     /// emit `TraceEvent::Sent { mail_id, .. }` against this value.
     /// `MailId::NONE` for legacy paths that haven't migrated.
     pub mail_id: MailId,

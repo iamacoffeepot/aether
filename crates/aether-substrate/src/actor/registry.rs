@@ -73,7 +73,7 @@ pub struct ActorRegistry {
     /// Retired full names. `spawn_child` rejects reuse; lookups
     /// distinguish "never existed" from "previously existed and
     /// closed." Single static membership — no per-tombstone allocation
-    /// beyond the HashSet entry itself.
+    /// beyond the `HashSet` entry itself.
     tombstones: RwLock<HashSet<MailboxId>>,
 
     /// One owner per `NAMESPACE`. Populated at chassis-build for
@@ -234,7 +234,7 @@ impl ActorRegistry {
     /// [`super::PassiveChassis::resolve_actors`] iterates over;
     /// callers that don't originate from the spawn path (today: none;
     /// tests use empty strings) pass `""` and accept they won't show
-    /// up in the resolve_actors iterator.
+    /// up in the `resolve_actors` iterator.
     pub(crate) fn insert_live(
         &self,
         id: MailboxId,

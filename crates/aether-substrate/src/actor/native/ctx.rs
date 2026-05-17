@@ -395,7 +395,7 @@ impl<'a> NativeCtx<'a> {
     ///
     /// Use this when the cap is acting on an external event (wire-
     /// borne RPC call, file watcher, timer) rather than forwarding a
-    /// mail that was already in flight. The RpcServer cap's `Call`
+    /// mail that was already in flight. The `RpcServer` cap's `Call`
     /// handler is the motivating case: the inbound that wakes the cap
     /// is an internal wake mail causally unrelated to the wire-borne
     /// `Call` — inheriting its chain would attribute the dispatch to
@@ -463,7 +463,7 @@ impl<'a> Sender for NativeCtx<'a> {
 impl<'a> MailCtx for NativeCtx<'a> {
     /// Stage 2: route the reply through the substrate's `Mailer::send_reply`
     /// (Component recipient → push as Mail with the originator's
-    /// correlation echoed and reply-to None; Session / EngineMailbox
+    /// correlation echoed and reply-to None; Session / `EngineMailbox`
     /// → outbound bridge; None → silent drop). This is the same path
     /// pre-stage-2 caps walked manually via `self.mailer.send_reply(sender, &result)`
     /// — caps now reach for `ctx.reply(&result)` and the per-mail

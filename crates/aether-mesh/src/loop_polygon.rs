@@ -551,7 +551,7 @@ mod tests {
     /// diagonal plane with normal `(n,n,n)`, so vertices with `|side|`
     /// up to `3n` (perpendicular distance up to `√3 ≈ 1.73`) absorbed
     /// as COPLANAR — including this triangle's `±2n` sides (perp ~1.15).
-    /// The polygon routed to coplanar_front instead of being split,
+    /// The polygon routed to `coplanar_front` instead of being split,
     /// dropping the back fragment and producing the boundary edges
     /// observed in the box-minus-sphere/cylinder regressions.
     ///

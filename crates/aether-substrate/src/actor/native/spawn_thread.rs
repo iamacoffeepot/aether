@@ -1,7 +1,7 @@
 //! ADR-0080 §12 thread-spawn primitives.
 //!
 //! Caps that own threads driven by external events (TCP per-connection
-//! workers, future drivers like WebSocketCapability or pollers,
+//! workers, future drivers like `WebSocketCapability` or pollers,
 //! occasional CPU-offload workers) need a structured way to send mail
 //! from those threads while staying coherent with the trace pipeline.
 //! The pattern matches the per-handler [`super::ctx::NativeCtx`]:
@@ -437,7 +437,7 @@ mod tests {
     }
 
     /// `RootCtx`-spawned thread's `send_to_named` mints a fresh root
-    /// chain — root == its own mail_id, parent_mail = None.
+    /// chain — root == its own `mail_id`, `parent_mail` = None.
     #[test]
     fn root_ctx_send_mints_fresh_root_with_no_parent() {
         let (registry, mailer) = fresh_substrate();
@@ -568,7 +568,7 @@ mod tests {
 
     /// Setup smoke: a `Mail` pushed bare via `Mailer` doesn't trigger
     /// the spawn primitives but verifies the test fixture's
-    /// register_capture closure works.
+    /// `register_capture` closure works.
     #[test]
     fn fixture_smoke_capture_observes_bare_push() {
         let (registry, mailer) = fresh_substrate();

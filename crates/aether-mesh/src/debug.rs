@@ -526,7 +526,7 @@ pub struct Summary {
     pub vertex_count_avg: f32,
     pub hole_count_total: usize,
     /// Polygons grouped by canonical plane direction signature.
-    /// (sign(n_x), sign(n_y), sign(n_z)) → count. For axis-aligned
+    /// (`sign(n_x)`, `sign(n_y)`, `sign(n_z)`) → count. For axis-aligned
     /// meshes like cubes, expect 6 distinct entries.
     pub by_plane_direction: HashMap<(i8, i8, i8), usize>,
 }

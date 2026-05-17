@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(payload_string(payload.as_ref()), "owned reason");
     }
 
-    /// Anything else falls through to a TypeId mention so the message
+    /// Anything else falls through to a `TypeId` mention so the message
     /// at least identifies the payload shape.
     #[test]
     fn payload_string_handles_unknown_type() {
@@ -177,7 +177,7 @@ mod tests {
     }
 
     /// `init_panic_hook` is idempotent — calling it many times must
-    /// not double-install or panic. The OnceLock guard is the
+    /// not double-install or panic. The `OnceLock` guard is the
     /// load-bearing piece; this test makes regressions loud.
     #[test]
     fn init_is_idempotent() {

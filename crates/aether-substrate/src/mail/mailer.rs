@@ -65,7 +65,7 @@ pub struct Mailer {
     /// in that case.
     chassis_router: OnceLock<Box<dyn Fn(Mail) + Send + Sync>>,
     /// ADR-0080 §6 settlement registry handle, exposed so capabilities
-    /// hosting external entry points (RpcServer, future event-source
+    /// hosting external entry points (`RpcServer`, future event-source
     /// caps) can subscribe to settlement of mail they dispatch from
     /// their handlers. Threaded through the Mailer rather than down
     /// every `NativeBinding` because settlement is a chassis-wide
@@ -893,7 +893,7 @@ mod tests {
 
     /// Issue 838 diff 2: synchronous dispatch via the `Inline`
     /// arm runs the handler inline AND emits a `Received`/`Finished`
-    /// bracket so the chain's in_flight balances and settlement
+    /// bracket so the chain's `in_flight` balances and settlement
     /// subscribers wake. Mirrors what the actor-dispatch loop does
     /// for `Inbox` recipients, but on the pushing thread.
     #[test]
@@ -941,8 +941,8 @@ mod tests {
     /// side. The actor's dispatch loop at
     /// `actor/native/dispatch.rs:85` owns the bracket; doubling it
     /// here fires settlement prematurely and breaks
-    /// `aether-substrate-bundle::rpc_engine_routing` (ReplyEnd
-    /// before ReplyEvent). This test pins the contract so a
+    /// `aether-substrate-bundle::rpc_engine_routing` (`ReplyEnd`
+    /// before `ReplyEvent`). This test pins the contract so a
     /// future "let's add the bracket for symmetry" refactor fails
     /// loudly.
     #[test]
@@ -1107,7 +1107,7 @@ mod tests {
     /// - Original iamacoffeepot/aether#838 leak: `Inline` case would have shown no
     ///   Finished, expected Bracket.
     /// - iamacoffeepot/aether#839-attempt-1 double-count: `Inbox` case would have shown
-    ///   Finished from the Mailer side, expected NeitherFromMailer.
+    ///   Finished from the Mailer side, expected `NeitherFromMailer`.
     #[test]
     fn every_mailer_push_path_produces_correct_lifecycle_events() {
         // Static link to `MailboxEntry`: a new variant added there

@@ -8,7 +8,7 @@
 //! 2. Inserting input vertices one at a time. For each insertion:
 //!    - Walk to the triangle containing the new point (orient2d steps).
 //!    - Expand the **cavity** = set of triangles whose circumcircle
-//!      contains the new point (BFS via neighbor pointers + in_circle).
+//!      contains the new point (BFS via neighbor pointers + `in_circle`).
 //!    - Delete cavity triangles, then re-triangulate the cavity by
 //!      connecting the new vertex to each cavity-boundary edge.
 //!    - Stitch neighbor pointers across the new fan.
@@ -504,7 +504,7 @@ impl Mesh {
         unreachable!("first_alive called on empty mesh");
     }
 
-    /// Expand the cavity around vertex `vid` outward via in_circle.
+    /// Expand the cavity around vertex `vid` outward via `in_circle`.
     /// The starting triangle is always in the cavity (its circumcircle
     /// contains `vid` by construction — `vid` is in its interior).
     fn expand_cavity(&self, start: TriId, vid: VertId) -> Vec<TriId> {

@@ -9,7 +9,7 @@
 //!
 //! - **orient2d**: a single 2×2 determinant of i64 differences;
 //!   bounded by 2 · 2^25 · 2^25 = 2^51. Trivial.
-//! - **in_circle**: 3×3 determinant whose third column carries
+//! - **`in_circle`**: 3×3 determinant whose third column carries
 //!   squared-sum entries (≤ 2^51). Expanding along row 0 keeps the
 //!   small (linear-difference, ≤ 2^25) multiplier on the outside of
 //!   the largest 2×2 sub-determinant. Each of the three terms is

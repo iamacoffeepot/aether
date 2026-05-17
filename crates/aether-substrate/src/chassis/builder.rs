@@ -6,7 +6,7 @@
 //! A chassis composes passive capabilities (dispatcher-thread sinks
 //! per ADR-0070) plus exactly one [`DriverCapability`] that owns the
 //! chassis main thread. The type-state [`Builder`] enforces "exactly
-//! one driver" structurally; embedders that drive manually (TestBench,
+//! one driver" structurally; embedders that drive manually (`TestBench`,
 //! future embedded harnesses) build a [`PassiveChassis`] via the
 //! no-driver path.
 //!
@@ -385,7 +385,7 @@ enum BootState<A: NativeActor + NativeDispatch> {
 /// the sum dispatch trait the `#[actor] impl NativeActor for A`
 /// macro emits.
 ///
-/// Stage 2d: FRAME_BARRIER caps go through this path too. The
+/// Stage 2d: `FRAME_BARRIER` caps go through this path too. The
 /// frame-bound claim (`claim_frame_bound_mailbox_with_override`)
 /// registers the per-mailbox `pending` counter into the chassis's
 /// `frame_bound_pending` Vec; the dispatcher thread decrements after
@@ -932,7 +932,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
 
     /// No-driver build path. Boots every passive in declaration order
     /// and returns a [`PassiveChassis`] whose embedder is responsible
-    /// for driving the loop manually (TestBench).
+    /// for driving the loop manually (`TestBench`).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
         let booted = boot_passives(
             &self.registry,
@@ -1090,8 +1090,8 @@ struct BootedPassives {
     /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
     /// lifecycle registry, plus the spawn machinery that writes into
     /// it. Both built once at boot; `Spawner` carries `Arc` clones of
-    /// the chassis-level handles (registry, actor_registry, mailer,
-    /// frame_bound_set, aborter) so future per-handler `spawn_child`
+    /// the chassis-level handles (registry, `actor_registry`, mailer,
+    /// `frame_bound_set`, aborter) so future per-handler `spawn_child`
     /// reaches them without separate plumbing.
     actor_registry: Arc<crate::ActorRegistry>,
     spawner: Arc<crate::Spawner>,
@@ -1501,7 +1501,7 @@ impl<C: Chassis> BuiltChassis<C> {
     /// `TcpListenerActor`) hold their own cap-local map of children
     /// and update it on `MonitorNotice` — they don't enumerate via
     /// the chassis registry from a handler. Reach for this from a
-    /// driver / TestBench / scenario inspection step, not from
+    /// driver / `TestBench` / scenario inspection step, not from
     /// production cap state. ADR-0079 supervisor-as-cap pattern.
     pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
         &self,
@@ -1553,7 +1553,7 @@ impl<C: Chassis> BuiltChassis<C> {
     }
 }
 
-/// A chassis built without a driver. The embedder (TestBench, future
+/// A chassis built without a driver. The embedder (`TestBench`, future
 /// embedded harnesses) drives any loop manually. Passives are booted
 /// and accessible via [`Self::capability`]; they shut down when the
 /// `PassiveChassis` is dropped.
@@ -1584,7 +1584,7 @@ impl<C: Chassis> PassiveChassis<C> {
 
     /// Issue 629 / Phase A: retrieve a clone of a cap-published handle
     /// bundle of type `H`. Mirrors [`DriverCtx::handle`] for embedders
-    /// that drive a `PassiveChassis` directly (TestBench, integration
+    /// that drive a `PassiveChassis` directly (`TestBench`, integration
     /// harnesses). `None` if no booted cap published a handle of that
     /// type.
     pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
@@ -1601,7 +1601,7 @@ impl<C: Chassis> PassiveChassis<C> {
     }
 
     /// Snapshot of every frame-bound mailbox's pending counter
-    /// collected during passive boot. Embedders (TestBench, bin
+    /// collected during passive boot. Embedders (`TestBench`, bin
     /// drivers) clone this once and feed it to
     /// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] each frame —
     /// same role as [`crate::chassis::builder::DriverCtx::frame_bound_pending`]
@@ -1612,7 +1612,7 @@ impl<C: Chassis> PassiveChassis<C> {
 
     /// Issue 607 Phase 5 (ADR-0079): mirror of
     /// [`BuiltChassis::resolve_actor`] for embedders that drive
-    /// passive chassis directly (TestBench, integration tests).
+    /// passive chassis directly (`TestBench`, integration tests).
     /// Issue 629 / Phase A: returns the address (`MailboxId`); the
     /// actor itself never escapes its dispatcher thread.
     ///
@@ -1984,7 +1984,7 @@ mod tests {
         drop(chassis);
     }
 
-    /// Issue 552 stage 2d: with_actor accepts FRAME_BARRIER caps.
+    /// Issue 552 stage 2d: `with_actor` accepts `FRAME_BARRIER` caps.
     /// The chassis claims through `claim_frame_bound_mailbox`, the
     /// pending counter feeds the chassis's `frame_bound_pending` Vec,
     /// and the dispatcher decrements after each handler dispatch so
@@ -2347,7 +2347,7 @@ mod tests {
 
     /// Issue 607 Phase 4a verify: `ctx.shutdown()` from inside an
     /// instanced actor's handler triggers the drain → unwire → exit
-    /// path, flips the actor_registry slot to `Dead`, and inserts the
+    /// path, flips the `actor_registry` slot to `Dead`, and inserts the
     /// id into `tombstones`. A reused subname after retirement returns
     /// `SpawnError::SubnameRetired`.
     #[test]
@@ -2563,7 +2563,7 @@ mod tests {
     }
 
     /// Issue 714: stress version of the chassis-teardown contract.
-    /// Spawn N=64 instanced actors and assert all N close_observed
+    /// Spawn N=64 instanced actors and assert all N `close_observed`
     /// counters tick to exactly 1 after `drop(chassis)`. Pre-714 the
     /// polling-based `shutdown_instanced` could lose individual wakes
     /// under contention; the channel-signal rewrite is deterministic
@@ -3358,7 +3358,7 @@ mod tests {
     /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
     /// every spawned actor's transport precisely so this works; this
     /// test is the first end-to-end coverage of the instanced→instanced
-    /// path. Phase 6b (TcpListenerActor → TcpSessionActor) structurally
+    /// path. Phase 6b (`TcpListenerActor` → `TcpSessionActor`) structurally
     /// depends on this — listeners spawning sessions IS the recursive
     /// case.
     ///

@@ -18,7 +18,7 @@
 //! anyway.
 //!
 //! [`FatalAborter`] is the indirection that lets call sites that
-//! don't naturally hold a [`HubOutbound`] (the cross-class wait_reply
+//! don't naturally hold a [`HubOutbound`] (the cross-class `wait_reply`
 //! guard in [`crate::actor::native::binding`], future ADR-0074 §Decision-7
 //! checks) request an abort without plumbing outbound through every
 //! layer. Production chassis construct an [`OutboundFatalAborter`];
@@ -100,7 +100,7 @@ impl FatalAborter for OutboundFatalAborter {
 /// Test [`FatalAborter`] that panics instead of `process::exit`-ing.
 /// Lets a `#[should_panic]` test assert the cross-class guard fires
 /// without taking down the whole test runner. Also the default for
-/// chassis built without an explicit aborter (tests, the TestBench
+/// chassis built without an explicit aborter (tests, the `TestBench`
 /// in-process driver) so an abort surfaces as a panic the harness
 /// catches.
 pub struct PanicAborter;

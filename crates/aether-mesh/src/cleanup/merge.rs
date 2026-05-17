@@ -68,9 +68,9 @@
 //! BSP fragments inherit their parent triangle's plane field-for-field
 //! so all fragments of one source share a key.
 //!
-//! Determinism: HashMap iteration order doesn't leak — bucket keys are
+//! Determinism: `HashMap` iteration order doesn't leak — bucket keys are
 //! sorted before processing, and loop extraction walks edges in
-//! deterministic order (sorted starts, sorted outgoing lists, VertexId
+//! deterministic order (sorted starts, sorted outgoing lists, `VertexId`
 //! tiebreak in the angular pick).
 
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
@@ -428,7 +428,7 @@ pub(super) fn normalize_loop(loop_verts: &[VertexId]) -> Vec<Vec<VertexId>> {
 ///
 /// At each vertex with multiple unvisited outgoing edges, the angular
 /// continuation rule picks the candidate whose direction is closest to
-/// the incoming direction (smallest absolute turn angle). VertexId
+/// the incoming direction (smallest absolute turn angle). `VertexId`
 /// breaks turn-angle ties for determinism. The first edge of a loop
 /// has no incoming direction; it's chosen by the sort order of
 /// `boundary`. See module-level docs for why this is the right rule
@@ -489,7 +489,7 @@ fn extract_loops(
 /// Pick the next outgoing edge from `cur` that continues most directly
 /// from the incoming direction `prev → cur`. With a single unvisited
 /// candidate, returns it; with several, picks the smallest absolute
-/// turn angle, VertexId tiebreak.
+/// turn angle, `VertexId` tiebreak.
 fn pick_continuation(
     vertices: &[Point3],
     axes: (usize, usize),
@@ -545,7 +545,7 @@ fn pick_continuation(
 ///   the inequality flips.
 ///
 /// On i128 multiplication overflow falls back to `Equal` so the
-/// VertexId tiebreak in `pick_continuation` resolves the choice — that
+/// `VertexId` tiebreak in `pick_continuation` resolves the choice — that
 /// only triggers for input coords near the i32 fixed-point limits,
 /// and erring deterministic at the edge is fine.
 fn cmp_turn(
@@ -978,7 +978,7 @@ mod tests {
         }
     }
 
-    /// Cross-plane shared edges must keep matching VertexIds. Different
+    /// Cross-plane shared edges must keep matching `VertexId`s. Different
     /// planes land in different buckets, but the manifold validator
     /// walks edges across all polygons regardless of plane.
     #[test]
@@ -1326,7 +1326,7 @@ mod tests {
 
     /// A reverse that exists only inside this bucket does NOT count as
     /// externally backed — bucket-internal twins were already cancelled
-    /// before extract_loops ran. This is the "subtract bucket from
+    /// before `extract_loops` ran. This is the "subtract bucket from
     /// global" check working as intended.
     #[test]
     fn collapse_ignores_intra_bucket_reverses() {
@@ -1369,7 +1369,7 @@ mod tests {
         assert!(boundary.is_empty());
     }
 
-    /// Pathological topology where extract_loops returns None and the
+    /// Pathological topology where `extract_loops` returns None and the
     /// fallback emits the bucket's originals unchanged. Pinned because
     /// the fallback path otherwise has zero coverage.
     #[test]

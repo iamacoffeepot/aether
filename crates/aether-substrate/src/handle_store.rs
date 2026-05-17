@@ -8,7 +8,7 @@
 //!
 //! Wire format (postcard, ADR-0045 §1):
 //! - Inline arm: discriminant 0 + K postcard bytes.
-//! - Handle arm: discriminant 1 + varint(id) + varint(kind_id).
+//! - Handle arm: discriminant 1 + `varint(id)` + `varint(kind_id)`.
 //!
 //! Resolution is structural: the walker reads the schema and skips
 //! through the payload bytes, splicing inline-discriminant + cached
@@ -296,7 +296,7 @@ impl HandleStore {
     /// re-routes through `route_mail` (re-walks the payload, possibly
     /// parks again on a different missing id, dispatches if fully
     /// resolved). Returns the drained mails in FIFO order; the
-    /// HashMap entry itself is removed so a subsequent `parked_count`
+    /// `HashMap` entry itself is removed so a subsequent `parked_count`
     /// returns 0.
     pub fn take_parked(&self, id: HandleId) -> Vec<Mail> {
         let mut inner = self.inner.write().unwrap();
@@ -1149,7 +1149,7 @@ mod tests {
         assert!(matches!(err, WalkError::Truncated));
     }
 
-    /// Locks down the Cow::Borrowed fast path: a kind with no Refs in
+    /// Locks down the `Cow::Borrowed` fast path: a kind with no Refs in
     /// its schema must never allocate. Pin the outcome shape so a
     /// regression that always builds an Owned vec is loud.
     #[test]

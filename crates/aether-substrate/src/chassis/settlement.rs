@@ -32,7 +32,7 @@
 //!   subscribers have drained are no-ops (the `HashSet` hit short-
 //!   circuits).
 //!
-//! The `settled` HashSet grows unboundedly within a chassis lifetime
+//! The `settled` `HashSet` grows unboundedly within a chassis lifetime
 //! today. PR 5 (or a later cleanup) wires retention against the
 //! observer's eviction policy. For v1 — a chassis runs for a session,
 //! not forever — the cap-by-count plus per-process tear-down keeps

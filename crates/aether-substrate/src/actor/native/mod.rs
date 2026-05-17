@@ -46,7 +46,7 @@
 //!   sibling state recreates the shared-state coupling the actor
 //!   model is designed to eliminate. The chassis-level
 //!   `chassis.actor::<X>() -> Arc<X>` retired with issue 629 / Phase A;
-//!   external runtimes (drivers, TestBench, MCP) reach for
+//!   external runtimes (drivers, `TestBench`, MCP) reach for
 //!   cap-exported handles instead.
 //!
 //! ## Catch-all caps (issue 576)
