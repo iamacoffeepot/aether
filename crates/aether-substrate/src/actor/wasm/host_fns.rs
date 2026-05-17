@@ -114,8 +114,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         |mut caller: Caller<'_, ComponentCtx>, version: u32, ptr: u32, len: u32| -> u32 {
             if len as usize > MAX_STATE_BUNDLE_BYTES {
                 caller.data_mut().save_state_error = Some(format!(
-                    "save_state: bundle size {} exceeds {} byte cap",
-                    len, MAX_STATE_BUNDLE_BYTES,
+                    "save_state: bundle size {len} exceeds {MAX_STATE_BUNDLE_BYTES} byte cap"
                 ));
                 return SAVE_STATE_TOO_LARGE;
             }

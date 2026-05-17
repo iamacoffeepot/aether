@@ -34,8 +34,8 @@ fn parse_size_env() -> (u32, u32) {
         Ok(s) => s,
         Err(_) => return (DEFAULT_WIDTH, DEFAULT_HEIGHT),
     };
-    match raw.split_once('x') {
-        Some((w, h)) => match (w.parse::<u32>(), h.parse::<u32>()) {
+    if let Some((w, h)) = raw.split_once('x') {
+        match (w.parse::<u32>(), h.parse::<u32>()) {
             (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
             _ => {
                 tracing::warn!(
@@ -45,15 +45,14 @@ fn parse_size_env() -> (u32, u32) {
                 );
                 (DEFAULT_WIDTH, DEFAULT_HEIGHT)
             }
-        },
-        None => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                "AETHER_TEST_BENCH_SIZE missing 'x' separator — falling back to default",
-            );
-            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
         }
+    } else {
+        tracing::warn!(
+            target: "aether_substrate::boot",
+            value = %raw,
+            "AETHER_TEST_BENCH_SIZE missing 'x' separator — falling back to default",
+        );
+        (DEFAULT_WIDTH, DEFAULT_HEIGHT)
     }
 }
 
@@ -82,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     } = TestBenchChassis::build_passive(env)?;
 
     let (width, height) = parse_size_env();
-    let gpu = Gpu::new(width, height, render_handles.clone());
+    let gpu = Gpu::new(width, height, render_handles);
     tracing::info!(
         target: "aether_substrate::boot",
         adapter = %gpu.adapter_info.name,
@@ -100,7 +99,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Drive the chassis event loop on the main thread. Embedder is the
 /// driver — runs until every `EventSender` clone drops (clean
-/// shutdown via the chassis_control handler clones being released)
+/// shutdown via the `chassis_control` handler clones being released)
 /// or a fatal abort tears the process down.
 #[allow(clippy::too_many_arguments)]
 fn drive_events_loop(

@@ -67,7 +67,7 @@ impl MailId {
     /// Sentinel for "not yet stamped" / "chassis root". Equivalent to
     /// `MailId::default()`. The PR 2 dispatch path treats this value
     /// as the chassis-as-originator marker.
-    pub const NONE: MailId = MailId {
+    pub const NONE: Self = Self {
         sender: MailboxId::NONE,
         correlation_id: 0,
     };
@@ -76,6 +76,7 @@ impl MailId {
     /// Producer paths (`NativeBinding::send_mail`, plus the future
     /// drainer and chassis-pushed sites) call this immediately after
     /// fetching the next correlation from the per-actor counter.
+    #[must_use]
     pub const fn new(sender: MailboxId, correlation_id: u64) -> Self {
         Self {
             sender,
@@ -131,7 +132,7 @@ impl ReplyTo {
     pub const NO_CORRELATION: u64 = 0;
 
     /// `ReplyTo` with no target and no correlation.
-    pub const NONE: ReplyTo = ReplyTo {
+    pub const NONE: Self = Self {
         target: ReplyTarget::None,
         correlation_id: Self::NO_CORRELATION,
     };
@@ -140,7 +141,8 @@ impl ReplyTo {
     /// that want to address a reply but don't participate in the
     /// ADR-0042 correlation scheme (the hub's inbound session mail
     /// today — a future change could have sessions carry correlation
-    /// when the MCP send_mail tool grows to expose it).
+    /// when the MCP `send_mail` tool grows to expose it).
+    #[must_use]
     pub fn to(target: ReplyTarget) -> Self {
         Self {
             target,
@@ -149,6 +151,7 @@ impl ReplyTo {
     }
 
     /// Target + correlation. The common sync-wrapper shape.
+    #[must_use]
     pub fn with_correlation(target: ReplyTarget, correlation_id: u64) -> Self {
         Self {
             target,
@@ -159,6 +162,7 @@ impl ReplyTo {
     /// Whether the reply target is `None`. Existing callers that were
     /// pattern-matching on the pre-refactor `ReplyTo::None` variant
     /// use this instead.
+    #[must_use]
     pub fn is_none(&self) -> bool {
         matches!(self.target, ReplyTarget::None)
     }

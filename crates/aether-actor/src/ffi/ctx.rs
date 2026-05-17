@@ -37,9 +37,10 @@ pub struct FfiInitCtx<'a> {
     _borrow: PhantomData<&'a ()>,
 }
 
-impl<'a> FfiInitCtx<'a> {
+impl FfiInitCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
+    #[must_use]
     pub fn __new(mailbox: u64) -> Self {
         Self {
             mailbox,
@@ -48,35 +49,40 @@ impl<'a> FfiInitCtx<'a> {
     }
 
     /// The component's own mailbox id. Mirrors [`Resolver::mailbox_id`].
+    #[must_use]
     pub fn mailbox_id(&self) -> u64 {
         self.mailbox
     }
 
     /// Resolve a kind by its `const ID`. Mirrors [`Resolver::resolve`].
+    #[must_use]
     pub const fn resolve<K: Kind>(&self) -> KindId<K> {
         resolve::<K>()
     }
 
     /// Bind a mailbox name to kind `K`. Mirrors
     /// [`Resolver::resolve_mailbox`].
+    #[must_use]
     pub const fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
         resolve_mailbox::<K>(name)
     }
 
     /// Singleton sender shortcut. Returns a typed [`FfiActorMailbox`]
     /// addressing the unique instance of receiver actor `R`.
+    #[must_use]
     pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0)
     }
 
     /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
     /// from a runtime instance name.
+    #[must_use]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
 }
 
-impl<'a> Resolver for FfiInitCtx<'a> {
+impl Resolver for FfiInitCtx<'_> {
     fn mailbox_id(&self) -> u64 {
         self.mailbox
     }
@@ -102,9 +108,10 @@ pub struct FfiCtx<'a> {
     _borrow: PhantomData<&'a ()>,
 }
 
-impl<'a> FfiCtx<'a> {
+impl FfiCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
+    #[must_use]
     pub fn __new(mailbox: u64) -> Self {
         Self {
             mailbox,
@@ -119,7 +126,7 @@ impl<'a> FfiCtx<'a> {
     /// broadcast mail (which have no reply target) land as `None`.
     #[doc(hidden)]
     pub fn __set_reply_to(&mut self, sender: Option<ReplyTo>) {
-        self.sender = sender.map(|s| s.raw());
+        self.sender = sender.map(super::super::mail::ReplyTo::raw);
     }
 
     /// Reply with an explicit `sender` + cached `KindId<K>`. Sits
@@ -143,12 +150,14 @@ impl<'a> FfiCtx<'a> {
 
     /// Singleton sender shortcut. Returns a typed [`FfiActorMailbox`]
     /// addressing the unique instance of receiver actor `R`.
+    #[must_use]
     pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0)
     }
 
     /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
     /// from a runtime instance name.
+    #[must_use]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
@@ -156,7 +165,7 @@ impl<'a> FfiCtx<'a> {
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
     /// Diverging — does not return. The body `panic!`s; the substrate's
     /// wasm runtime catches the trap and ADR-0063 escalates the
-    /// substrate-side fatal_abort path. Symmetric to
+    /// substrate-side `fatal_abort` path. Symmetric to
     /// `aether_substrate::actor::native::NativeCtx::fatal_abort` so
     /// trap-escalation reads the same on both sides.
     pub fn fatal_abort(&self, reason: alloc::string::String) -> ! {
@@ -164,7 +173,7 @@ impl<'a> FfiCtx<'a> {
     }
 }
 
-impl<'a> Resolver for FfiCtx<'a> {
+impl Resolver for FfiCtx<'_> {
     fn mailbox_id(&self) -> u64 {
         self.mailbox
     }
@@ -178,7 +187,7 @@ impl<'a> Resolver for FfiCtx<'a> {
     }
 }
 
-impl<'a> MailSender for FfiCtx<'a> {
+impl MailSender for FfiCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -212,7 +221,7 @@ impl<'a> MailSender for FfiCtx<'a> {
     }
 }
 
-impl<'a> OutboundReply for FfiCtx<'a> {
+impl OutboundReply for FfiCtx<'_> {
     type ReplyHandle = ReplyTo;
 
     fn reply_target(&self) -> Option<ReplyTo> {
@@ -236,7 +245,7 @@ impl<'a> OutboundReply for FfiCtx<'a> {
     }
 }
 
-impl<'a> SyncWaiter for FfiCtx<'a> {
+impl SyncWaiter for FfiCtx<'_> {
     fn wait_reply<K, E>(
         &self,
         timeout_ms: u32,
@@ -256,7 +265,7 @@ impl<'a> SyncWaiter for FfiCtx<'a> {
     }
 }
 
-impl<'a> Sender for FfiCtx<'a> {
+impl Sender for FfiCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -278,7 +287,7 @@ impl<'a> Sender for FfiCtx<'a> {
     }
 }
 
-impl<'a> MailCtx for FfiCtx<'a> {
+impl MailCtx for FfiCtx<'_> {
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
@@ -294,9 +303,10 @@ pub struct FfiDropCtx<'a> {
     _borrow: PhantomData<&'a ()>,
 }
 
-impl<'a> FfiDropCtx<'a> {
+impl FfiDropCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
+    #[must_use]
     pub fn __new() -> Self {
         Self {
             _borrow: PhantomData,
@@ -306,9 +316,10 @@ impl<'a> FfiDropCtx<'a> {
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
     pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
         let status = PERSIST_BRIDGE.save_state(version, bytes);
-        if status != 0 {
-            panic!("aether-actor: save_state failed (status {status})");
-        }
+        assert!(
+            status == 0,
+            "aether-actor: save_state failed (status {status})"
+        );
     }
 
     /// Persist a typed kind value. Mirrors
@@ -321,7 +332,7 @@ impl<'a> FfiDropCtx<'a> {
     }
 }
 
-impl<'a> MailSender for FfiDropCtx<'a> {
+impl MailSender for FfiDropCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -355,16 +366,17 @@ impl<'a> MailSender for FfiDropCtx<'a> {
     }
 }
 
-impl<'a> Persistence for FfiDropCtx<'a> {
+impl Persistence for FfiDropCtx<'_> {
     fn save_state(&mut self, version: u32, bytes: &[u8]) {
         let status = PERSIST_BRIDGE.save_state(version, bytes);
-        if status != 0 {
-            panic!("aether-actor: save_state failed (status {status})");
-        }
+        assert!(
+            status == 0,
+            "aether-actor: save_state failed (status {status})"
+        );
     }
 }
 
-impl<'a> Sender for FfiDropCtx<'a> {
+impl Sender for FfiDropCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,

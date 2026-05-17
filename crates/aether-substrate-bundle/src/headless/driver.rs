@@ -11,7 +11,7 @@
 //!
 //! No `Send` bound on the driver capability or its running — the
 //! headless tick loop runs on the chassis main thread end-to-end (no
-//! winit, but the chassis_builder's single-threaded
+//! winit, but the `chassis_builder`'s single-threaded
 //! Builder→BuiltChassis→run path applies all the same).
 
 use std::sync::Arc;
@@ -34,6 +34,7 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 /// Parse `AETHER_TICK_HZ`. Unset → [`DEFAULT_TICK_HZ`]; non-positive
 /// or unparseable → log + fall back to default. Tests bypass this by
 /// constructing `HeadlessEnv` with a chosen `tick_period` directly.
+#[must_use]
 pub fn parse_tick_hz_env() -> u32 {
     match std::env::var("AETHER_TICK_HZ") {
         Ok(s) => s
@@ -79,7 +80,7 @@ impl DriverCapability for HeadlessTimerCapability {
     type Running = HeadlessTimerRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let HeadlessTimerCapability {
+        let Self {
             boot,
             kind_tick,
             tick_period,
@@ -97,7 +98,7 @@ impl DriverCapability for HeadlessTimerCapability {
 
 impl DriverRunning for HeadlessTimerRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let HeadlessTimerRunning {
+        let Self {
             queue,
             input_mailbox,
             kind_tick,

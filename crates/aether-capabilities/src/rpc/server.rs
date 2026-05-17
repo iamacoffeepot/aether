@@ -96,8 +96,8 @@ mod server_native {
     /// reader-side socket (each thread owns one half of the split).
     struct ConnState {
         peer: SocketAddr,
-        /// Dispatcher's half — used for inline writes (HelloAck,
-        /// ReplyEvent, ReplyEnd, Pong, Bye).
+        /// Dispatcher's half — used for inline writes (`HelloAck`,
+        /// `ReplyEvent`, `ReplyEnd`, Pong, Bye).
         write_half: TcpStream,
         /// Reader thread's shutdown flag. Cap flips it + shuts down
         /// the read half to wake the blocked `read()`.
@@ -173,26 +173,23 @@ mod server_native {
                 .name(format!("aether-rpc-accept-{port}"))
                 .spawn(move || {
                     while !accept_shutdown_for_thread.load(Ordering::Acquire) {
-                        match listener.accept() {
-                            Ok((stream, peer)) => {
-                                if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                                    drop(stream);
-                                    break;
-                                }
-                                if inbound_tx_for_thread
-                                    .send(InboundEvent::PeerAccepted { stream, peer })
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                        if let Ok((stream, peer)) = listener.accept() {
+                            if accept_shutdown_for_thread.load(Ordering::Acquire) {
+                                drop(stream);
+                                break;
                             }
-                            Err(_) => {
-                                if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                continue;
+                            if inbound_tx_for_thread
+                                .send(InboundEvent::PeerAccepted { stream, peer })
+                                .is_err()
+                            {
+                                break;
                             }
+                            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                        } else {
+                            if accept_shutdown_for_thread.load(Ordering::Acquire) {
+                                break;
+                            }
+                            continue;
                         }
                     }
                 })
@@ -235,7 +232,7 @@ mod server_native {
             // Stop every per-connection reader. Shutting down the read
             // half wakes the blocked `read()`; the reader sees the
             // shutdown flag and exits.
-            for (_, conn) in self.connections.iter_mut() {
+            for conn in self.connections.values_mut() {
                 conn.shutdown.store(true, Ordering::Release);
                 let _ = conn.write_half.shutdown(std::net::Shutdown::Read);
                 if let Some(t) = conn.reader_thread.take() {
@@ -369,7 +366,7 @@ mod server_native {
     }
 
     impl RpcServerCapability {
-        /// Allocate a fresh ConnId, store the connection's write half,
+        /// Allocate a fresh `ConnId`, store the connection's write half,
         /// spin a reader thread for the read half.
         fn spawn_reader_for_peer(
             &mut self,
@@ -672,6 +669,7 @@ mod server_native {
 /// `NAMESPACE` via the standard name-hash. Convenience for chassis
 /// code that wants to address the cap without round-tripping through
 /// a runtime lookup.
+#[must_use]
 pub fn rpc_server_mailbox_id() -> aether_data::MailboxId {
     use aether_actor::Actor;
     aether_data::mailbox_id_from_name(<RpcServerCapability as Actor>::NAMESPACE)
@@ -896,9 +894,9 @@ mod tests {
     /// entirely — no settlement subscription is created, no
     /// `ReplyEnd` is written. Verify by sending a Call with cid None
     /// at the test echo actor (whose reply would otherwise come back
-    /// as a ReplyEvent if correlation had leaked) and confirming a
+    /// as a `ReplyEvent` if correlation had leaked) and confirming a
     /// subsequent `Ping(token)` round-trips immediately, which proves
-    /// no stale ReplyEvent / ReplyEnd frames are in the way.
+    /// no stale `ReplyEvent` / `ReplyEnd` frames are in the way.
     #[test]
     fn call_without_cid_is_fire_and_forget() {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};

@@ -2,7 +2,7 @@
 //!
 //! ZST whose only inherent method is `save_state`, the ADR-0016
 //! deposit hook called inside `on_replace` to hand a typed bundle to
-//! the replacement instance. PersistBridgeence is conceptually distinct
+//! the replacement instance. `PersistBridgeence` is conceptually distinct
 //! from mail (it's a one-shot byte deposit, not a routed envelope),
 //! so it lives in its own bridge rather than on [`super::mail::MailBridge`].
 //!
@@ -32,6 +32,7 @@ impl PersistBridge {
     /// `on_drop` is technically accepted by the host fn, but the
     /// bytes are then discarded (ADR-0016 §5 — plain drops have no
     /// successor).
+    #[must_use]
     pub fn save_state(&self, version: u32, bytes: &[u8]) -> u32 {
         unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) }
     }

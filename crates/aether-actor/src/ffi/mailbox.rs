@@ -38,6 +38,7 @@ impl<R> FfiActorMailbox<R> {
     /// Not part of the public API; the ctx-level constructors go
     /// through here so the field stays private.
     #[doc(hidden)]
+    #[must_use]
     pub fn __new(mailbox: u64) -> Self {
         Self {
             mailbox,
@@ -47,6 +48,7 @@ impl<R> FfiActorMailbox<R> {
 
     /// The receiver's typed mailbox id. Exposed for callers that need
     /// it for diagnostics or a host fn the SDK doesn't yet wrap.
+    #[must_use]
     pub fn mailbox_id(&self) -> aether_data::MailboxId {
         aether_data::MailboxId(self.mailbox)
     }
@@ -57,6 +59,7 @@ impl<R> FfiActorMailbox<R> {
     /// method so cap-owned ext traits (which only have a mailbox in
     /// hand, not a ctx) can hand back peer handles without rethreading
     /// the ctx.
+    #[must_use]
     pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> FfiActorMailbox<Peer> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }

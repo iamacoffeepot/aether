@@ -47,13 +47,14 @@ fn cylinder_outward_normals() {
         let c = tri_centroid(tri);
         // Pick the dominant axis component of the centroid as the
         // expected outward direction.
-        let radial_len = (c.x * c.x + c.z * c.z).sqrt();
+        let radial_len = c.x.hypot(c.z);
         let outward = if c.y.abs() > radial_len {
             [0.0, c.y.signum(), 0.0]
         } else {
             [c.x, 0.0, c.z]
         };
-        let dot = n.x * outward[0] + n.y * outward[1] + n.z * outward[2];
+        let dot =
+            n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
         assert!(
             dot > 0.0,
             "cylinder face normal points inward for triangle {tri:?}"
@@ -157,7 +158,7 @@ fn sphere_vertices_lie_on_radius() {
     let tris = mesh(&ast).unwrap();
     for tri in &tris {
         for v in tri.vertices {
-            let r = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+            let r = v.z.mul_add(v.z, v.x.mul_add(v.x, v.y * v.y)).sqrt();
             assert!(
                 (r - radius).abs() < 1e-4,
                 "sphere vertex off-radius: r={r}, expected {radius}"
@@ -174,7 +175,7 @@ fn sphere_outward_normals() {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
         // Centroid is inside the sphere shell; outward = c (radial).
-        let dot = n.x * c.x + n.y * c.y + n.z * c.z;
+        let dot = n.z.mul_add(c.z, n.x.mul_add(c.x, n.y * c.y));
         assert!(
             dot > 0.0,
             "sphere face normal points inward for triangle {tri:?}"
@@ -267,7 +268,8 @@ fn mirror_preserves_outward_winding() {
         let c = tri_centroid(tri);
         // Reflected box center is at (-5, 0, 0); outward = c - center.
         let outward = [c.x + 5.0, c.y, c.z];
-        let dot = n.x * outward[0] + n.y * outward[1] + n.z * outward[2];
+        let dot =
+            n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
         assert!(
             dot > 0.0,
             "mirror face normal points inward for triangle {tri:?}"

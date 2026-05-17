@@ -33,6 +33,7 @@ pub const TYPE_DOMAIN: &[u8] = b"type:";
 /// hash neither a mailbox name nor a kind schema. New callers should
 /// prefer `fnv1a_64_prefixed` with an explicit domain so the output
 /// id space doesn't collide with an existing domain by accident.
+#[must_use]
 pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
     fnv1a_64_prefixed(&[], bytes)
 }
@@ -41,6 +42,7 @@ pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
 /// to `fnv1a_64_bytes(&[prefix, payload].concat())` but `const`-safe.
 /// Used by `mailbox_id_from_name` (prefix `MAILBOX_DOMAIN`) and by
 /// `#[derive(Kind)]` through the macro (prefix `KIND_DOMAIN`).
+#[must_use]
 pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0;
@@ -63,6 +65,7 @@ pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
 /// into the high nibble. Substrate and guest SDK compute this
 /// identically so ids round-trip verbatim across the FFI without a
 /// host-fn resolve.
+#[must_use]
 pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
     MailboxId(with_tag(
         Tag::Mailbox,

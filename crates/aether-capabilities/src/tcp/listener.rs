@@ -106,35 +106,27 @@ mod listener_native {
                 .name(format!("aether-tcp-accept-{port}"))
                 .spawn(move || {
                     while !shutdown_for_thread.load(Ordering::Acquire) {
-                        match listener.accept() {
-                            Ok((stream, peer)) => {
-                                if shutdown_for_thread.load(Ordering::Acquire) {
-                                    drop(stream);
-                                    break;
-                                }
-                                if connection_tx.send((stream, peer)).is_err() {
-                                    // Dispatcher's receiver gone — actor
-                                    // is shutting down or already dropped.
-                                    break;
-                                }
-                                // Wake the dispatcher: the actual
-                                // stream is in the mpsc; this mail
-                                // just signals "drain me". Empty
-                                // payload (postcard encodes a unit
-                                // struct as zero bytes).
-                                mailer.push(Mail::new(
-                                    self_id,
-                                    connection_ready_kind,
-                                    Vec::new(),
-                                    1,
-                                ));
+                        if let Ok((stream, peer)) = listener.accept() {
+                            if shutdown_for_thread.load(Ordering::Acquire) {
+                                drop(stream);
+                                break;
                             }
-                            Err(_) => {
-                                if shutdown_for_thread.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                continue;
+                            if connection_tx.send((stream, peer)).is_err() {
+                                // Dispatcher's receiver gone — actor
+                                // is shutting down or already dropped.
+                                break;
                             }
+                            // Wake the dispatcher: the actual
+                            // stream is in the mpsc; this mail
+                            // just signals "drain me". Empty
+                            // payload (postcard encodes a unit
+                            // struct as zero bytes).
+                            mailer.push(Mail::new(self_id, connection_ready_kind, Vec::new(), 1));
+                        } else {
+                            if shutdown_for_thread.load(Ordering::Acquire) {
+                                break;
+                            }
+                            continue;
                         }
                     }
                 })
@@ -187,7 +179,7 @@ mod listener_native {
 
         /// Sidecar wake. Drain every pending accepted connection and
         /// spawn a `TcpSessionActor` per stream. Each session is a
-        /// child of this listener (parent ReplyTo stamps as our own
+        /// child of this listener (parent `ReplyTo` stamps as our own
         /// mailbox), so on session close the close fan-out reaches
         /// us via the standard monitor path.
         ///

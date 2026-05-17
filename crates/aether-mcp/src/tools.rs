@@ -595,7 +595,7 @@ mod tests {
 
     /// Boot a hub-shaped passive chassis: a forwarding
     /// `RpcServerCapability` + the engines cap + `TraceObserver` (so
-    /// the RpcServer's local Calls settle and close). Returns the
+    /// the `RpcServer`'s local Calls settle and close). Returns the
     /// chassis (kept alive for its dispatcher threads) and the RPC
     /// port an `RpcSession` dials.
     fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {

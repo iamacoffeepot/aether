@@ -1,6 +1,6 @@
 //! `aether.render` cap. Owns the render mailbox surface plus the
 //! driver-facing accumulator state ([`RenderHandles`]) and GPU bundle
-//! ([`RenderGpu`]). FRAME_BARRIER = true so the chassis frame loop's
+//! ([`RenderGpu`]). `FRAME_BARRIER` = true so the chassis frame loop's
 //! drain-or-abort sees the per-mailbox pending counter before recording
 //! a frame (ADR-0074 §Decision 5).
 //!
@@ -144,6 +144,7 @@ mod native {
         /// the booted `Arc<RenderCapability>` (fetched via
         /// `DriverCtx::actor`) — every field is Arc-shared, so the clone
         /// is just refcount bumps.
+        #[must_use]
         pub fn handles(&self) -> RenderHandles {
             self.handles.clone()
         }
@@ -412,6 +413,7 @@ mod native {
         /// hasn't been called yet. Chassis-side glue that needs raw
         /// access to the pipeline's bind group layouts (e.g. desktop's
         /// wireframe overlay pipeline construction) reaches in here.
+        #[must_use]
         pub fn gpu(&self) -> Option<&RenderGpu> {
             self.gpu.get()
         }
@@ -503,8 +505,8 @@ mod native {
         /// Encode a copy of the offscreen color target into a readback
         /// buffer. Pair with [`Self::finish_capture`] after submit. The
         /// readback buffer is reallocated on size mismatch with the
-        /// current offscreen, so any sequence of resize → record_frame →
-        /// record_capture_copy → submit → finish_capture works.
+        /// current offscreen, so any sequence of resize → `record_frame` →
+        /// `record_capture_copy` → submit → `finish_capture` works.
         pub fn record_capture_copy(&self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
             let gpu = self.expect_gpu();
             let mut targets = gpu.targets.lock().unwrap();
@@ -531,6 +533,7 @@ mod native {
         /// Cloned `Arc<wgpu::Device>`. Drivers that need the device for
         /// their own pipelines (e.g. desktop's wireframe overlay pipeline,
         /// swapchain blit) clone here.
+        #[must_use]
         pub fn device(&self) -> Arc<wgpu::Device> {
             Arc::clone(&self.expect_gpu().device)
         }
@@ -539,6 +542,7 @@ mod native {
         /// shared queue means render's `record_frame` writes and the
         /// driver's swapchain submit go through the same submission
         /// order.
+        #[must_use]
         pub fn queue(&self) -> Arc<wgpu::Queue> {
             Arc::clone(&self.expect_gpu().queue)
         }
@@ -547,12 +551,14 @@ mod native {
         /// BGRA-vs-RGBA decision keys on this; desktop's swapchain blit
         /// matches its surface format against this to pick a direct copy
         /// vs a manual swizzle.
+        #[must_use]
         pub fn color_format(&self) -> wgpu::TextureFormat {
             self.expect_gpu().color_format
         }
 
         /// Current offscreen color target dimensions. Drivers reading
         /// after a `resize` see the new dimensions immediately.
+        #[must_use]
         pub fn color_size(&self) -> (u32, u32) {
             let targets = self.expect_gpu().targets.lock().unwrap();
             (targets.width(), targets.height())
@@ -594,6 +600,7 @@ mod native {
         /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
         /// pipeline draws as wireframe instead of building a separate
         /// overlay pipeline.
+        #[must_use]
         pub fn new(
             device: Arc<wgpu::Device>,
             queue: Arc<wgpu::Queue>,
@@ -680,10 +687,10 @@ mod native {
         }
 
         /// Boots render through `Builder::with_actor` and asserts a
-        /// `DrawTriangle` mail accumulates into the frame_vertices
+        /// `DrawTriangle` mail accumulates into the `frame_vertices`
         /// buffer. The `RenderHandles` here is reached via the chassis
         /// post-build by waiting on the per-mailbox pending counter
-        /// the FRAME_BARRIER claim populates. Coverage of the
+        /// the `FRAME_BARRIER` claim populates. Coverage of the
         /// `handles` accessor is in the desktop chassis path.
         #[test]
         fn render_dispatcher_appends_triangles_to_frame_vertices() {

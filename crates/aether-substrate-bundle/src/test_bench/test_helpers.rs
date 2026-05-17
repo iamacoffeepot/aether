@@ -56,6 +56,7 @@ static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Probe for any usable wgpu adapter. Used by `require_runtime` and
 /// by tests that need wgpu but not a wasm component (e.g. IO sink
 /// scenarios in `aether-substrate-bundle`'s own test-bench tests).
+#[must_use]
 pub fn has_wgpu_adapter() -> bool {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -79,6 +80,7 @@ pub fn has_wgpu_adapter() -> bool {
 /// `CARGO_MANIFEST_DIR` is irrelevant because the wasm artifacts live
 /// under the shared workspace target dir, which is the same for every
 /// caller.
+#[must_use]
 pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -104,6 +106,7 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 /// CI catches a forgotten pre-build entry instead of passing a 30 ms
 /// vacuous test. CI sets this; local devs leave it unset and keep the
 /// existing skip behavior.
+#[must_use]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {
@@ -114,20 +117,19 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
         eprintln!("skipping: no wgpu adapter available");
         return None;
     }
-    match locate_component_wasm(crate_name) {
-        Some(path) => Some(path),
-        None => {
-            assert!(
-                !strict,
-                "AETHER_REQUIRE_RUNTIME set but {crate_name}.wasm not pre-built; \
-                 CI's `Pre-build component wasm for scenario tests` step is missing this crate",
-            );
-            eprintln!(
-                "skipping: {crate_name}.wasm not built; \
-                 run `cargo build --target wasm32-unknown-unknown -p <crate>`",
-            );
-            None
-        }
+    if let Some(path) = locate_component_wasm(crate_name) {
+        Some(path)
+    } else {
+        assert!(
+            !strict,
+            "AETHER_REQUIRE_RUNTIME set but {crate_name}.wasm not pre-built; \
+             CI's `Pre-build component wasm for scenario tests` step is missing this crate",
+        );
+        eprintln!(
+            "skipping: {crate_name}.wasm not built; \
+             run `cargo build --target wasm32-unknown-unknown -p <crate>`",
+        );
+        None
     }
 }
 
@@ -162,6 +164,7 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
 ///
 /// Per issue 464, this is the no-env replacement for the old
 /// `init_save_sandbox`-sets-`AETHER_SAVE_DIR` pattern.
+#[must_use]
 pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
     NamespaceRoots {
         save: save_dir.to_path_buf(),

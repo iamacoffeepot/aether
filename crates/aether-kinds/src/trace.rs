@@ -12,7 +12,7 @@
 //!   root counters and the parent → mail graph.
 //! - [`BatchedTraceEvents`] — what the chassis drainer thread mails
 //!   to the [`TRACE_OBSERVER_MAILBOX_NAME`] sink, batching events to
-//!   amortise dispatch cost (defaults: BATCH_MAX = 256, BATCH_INTERVAL
+//!   amortise dispatch cost (defaults: `BATCH_MAX` = 256, `BATCH_INTERVAL`
 //!   = 1ms; see ADR-0080 §3).
 
 use alloc::string::String;
@@ -184,7 +184,7 @@ pub struct MailNodeWire {
 
 /// Issue 718: request kind for the recent-roots summary. `since_ms`
 /// filters to roots whose originating `Sent` event is no older than
-/// the given window (default 60_000 ms). `max` caps the reply length
+/// the given window (default `60_000` ms). `max` caps the reply length
 /// (default 50, hard cap 1000).
 #[derive(
     Copy,

@@ -104,7 +104,7 @@ impl Default for HttpConfig {
             allowlist: HashSet::new(),
             require_https: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
-            default_timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+            default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
         }
     }
 }
@@ -113,6 +113,7 @@ impl HttpConfig {
     /// Resolve every field from the corresponding `AETHER_HTTP_*`
     /// environment variable. Used by chassis mains; tests build
     /// `HttpConfig` directly so they never read process env.
+    #[must_use]
     pub fn from_env() -> Self {
         Self {
             disabled: disable_flag_env(),
@@ -161,7 +162,7 @@ fn parse_default_timeout_env() -> Duration {
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_TIMEOUT_MS);
-    Duration::from_millis(ms as u64)
+    Duration::from_millis(u64::from(ms))
 }
 
 /// Sender-side facade for actors addressed via
@@ -222,7 +223,7 @@ impl HttpMailboxExt for FfiActorMailbox<HttpCapability> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> HttpMailboxExt for NativeActorMailbox<'a, HttpCapability> {
+impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
     fn get(&self, url: &str) {
         self.send(&Fetch {
             url: url.into(),
@@ -491,10 +492,9 @@ mod native {
         /// long-running fetches block other HTTP mail until they finish.
         #[handler]
         fn on_fetch(&self, ctx: &mut NativeCtx<'_>, mail: Fetch) {
-            let timeout = mail
-                .timeout_ms
-                .map(|ms| Duration::from_millis(ms as u64))
-                .unwrap_or(self.default_timeout);
+            let timeout = mail.timeout_ms.map_or(self.default_timeout, |ms| {
+                Duration::from_millis(u64::from(ms))
+            });
 
             let url = mail.url.clone();
             let adapter_req = FetchRequest {
@@ -604,7 +604,7 @@ mod native {
             postcard::from_bytes(&payload).unwrap()
         }
 
-        /// Boot the cap against a default disabled HttpConfig and confirm
+        /// Boot the cap against a default disabled `HttpConfig` and confirm
         /// the mailbox is registered.
         #[test]
         fn capability_boots_and_registers_mailbox() {

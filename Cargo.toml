@@ -40,7 +40,7 @@ undocumented_unsafe_blocks          = "warn"  # promote to deny in Phase 1.b aft
 cloned_instead_of_copied            = "deny"
 large_stack_arrays                  = "deny"
 match_wildcard_for_single_variants  = "warn"  # promote to deny in Phase 1.c.iii
-uninlined_format_args               = "warn"  # promote to deny in Phase 1.c.ii
+uninlined_format_args               = "deny"
 unreadable_literal                  = "warn"  # promote to deny in Phase 1.c.i
 
 # Warn picks — cherry-picked from restriction + style (not covered by pedantic/nursery baseline).

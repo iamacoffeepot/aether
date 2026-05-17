@@ -2,7 +2,7 @@
 //! the struct + actor impl + tests live inside `mod native`, which
 //! `#[bridge]` cfg-gates. The macro emits a wasm-stub `pub struct
 //! LogCapability;` at file root plus always-on Singleton + Actor +
-//! HandlesKind markers, and re-exports the real struct from inside
+//! `HandlesKind` markers, and re-exports the real struct from inside
 //! the mod on native.
 //!
 //! Issue #581 retired `log_capture`'s ring/flush plumbing in favour
@@ -180,7 +180,7 @@ mod native {
                 .cloned()
                 .collect();
 
-            let next_since = entries.last().map(|e| e.sequence).unwrap_or(since);
+            let next_since = entries.last().map_or(since, |e| e.sequence);
 
             LogReadResult::Ok {
                 entries,

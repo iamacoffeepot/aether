@@ -98,9 +98,9 @@ pub enum RpcClientError {
 impl fmt::Display for RpcClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RpcClientError::Connect(e) => write!(f, "rpc connect: {e}"),
-            RpcClientError::Handshake(reason) => write!(f, "rpc handshake: {reason}"),
-            RpcClientError::Frame(e) => write!(f, "rpc frame: {e}"),
+            Self::Connect(e) => write!(f, "rpc connect: {e}"),
+            Self::Handshake(reason) => write!(f, "rpc handshake: {reason}"),
+            Self::Frame(e) => write!(f, "rpc frame: {e}"),
         }
     }
 }
@@ -108,9 +108,9 @@ impl fmt::Display for RpcClientError {
 impl std::error::Error for RpcClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            RpcClientError::Connect(e) => Some(e),
-            RpcClientError::Frame(e) => Some(e),
-            RpcClientError::Handshake(_) => None,
+            Self::Connect(e) => Some(e),
+            Self::Frame(e) => Some(e),
+            Self::Handshake(_) => None,
         }
     }
 }
@@ -222,7 +222,7 @@ impl RpcClient {
             .map_err(RpcClientError::Connect)?;
 
         Ok(RpcConnection {
-            client: RpcClient {
+            client: Self {
                 write_half,
                 next_cid: 1,
             },

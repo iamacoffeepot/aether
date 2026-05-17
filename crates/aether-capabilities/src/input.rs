@@ -88,7 +88,7 @@ impl InputMailboxExt for FfiActorMailbox<InputCapability> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> InputMailboxExt for NativeActorMailbox<'a, InputCapability> {
+impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
     fn subscribe(&self, kind: KindId, mailbox: MailboxId) {
         self.send(&SubscribeInput { kind, mailbox });
     }
@@ -129,7 +129,7 @@ mod native {
     /// `aether.input` cap. The single owner of the input-stream
     /// subscriber table. Handles three classes of mail:
     ///
-    /// 1. **Subscribe / Unsubscribe / UnsubscribeAll** — mutates the
+    /// 1. **Subscribe / Unsubscribe / `UnsubscribeAll`** — mutates the
     ///    table on `&mut self`. Reply target: the original sender.
     ///
     /// 2. **Input events** (`Tick`, `Key`, `KeyRelease`, `MouseMove`,
@@ -276,9 +276,9 @@ mod native {
     /// subscribers if any future driver wants one.
     fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
         match registry.entry(id) {
-            Some(MailboxEntry::Inbox(_)) | Some(MailboxEntry::Inline(_)) => Ok(()),
-            Some(MailboxEntry::Dropped) => Err(format!("mailbox {:?} already dropped", id)),
-            None => Err(format!("unknown mailbox id {:?}", id)),
+            Some(MailboxEntry::Inbox(_) | MailboxEntry::Inline(_)) => Ok(()),
+            Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
+            None => Err(format!("unknown mailbox id {id:?}")),
         }
     }
 }

@@ -60,7 +60,7 @@ fn lathe_face_normals_point_outward() {
         // Radial vector from Y axis at the triangle's centroid (drop y).
         let cent_x = (a.x + b.x + c.x) / 3.0;
         let cent_z = (a.z + b.z + c.z) / 3.0;
-        let radial_dot = normal.x * cent_x + normal.z * cent_z;
+        let radial_dot = normal.x.mul_add(cent_x, normal.z * cent_z);
         assert!(
             radial_dot > 0.0,
             "lathe face normal points inward for triangle {tri:?}"

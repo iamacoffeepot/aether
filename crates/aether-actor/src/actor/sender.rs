@@ -147,7 +147,7 @@ pub trait MailCtx: Sender {
     /// satisfied transparently.
     ///
     /// Stage 1 shipped the trait method; stage 2 wires native
-    /// dispatch onto it (NativeCtx routes through the substrate
+    /// dispatch onto it (`NativeCtx` routes through the substrate
     /// `Mailer::send_reply` / outbound bridge).
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K);
 }

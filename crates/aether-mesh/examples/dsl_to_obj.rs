@@ -7,12 +7,11 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let path = match args.get(1) {
-        Some(p) => p,
-        None => {
-            eprintln!("usage: {} <path-to-.dsl>", args[0]);
-            return ExitCode::from(2);
-        }
+    let path = if let Some(p) = args.get(1) {
+        p
+    } else {
+        eprintln!("usage: {} <path-to-.dsl>", args[0]);
+        return ExitCode::from(2);
     };
 
     let text = match std::fs::read_to_string(path) {

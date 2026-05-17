@@ -25,6 +25,7 @@ const VARIANT_LABEL_TUPLE: u8 = 1;
 const VARIANT_LABEL_STRUCT: u8 = 2;
 
 /// Byte length for `KindLabels` postcard encoding.
+#[must_use]
 pub const fn canonical_len_labels(labels: &KindLabels) -> usize {
     varint_u64_len(labels.kind_id.0)
         + str_len(cow_str_as_str(&labels.kind_label))
@@ -126,14 +127,16 @@ const fn variant_label_len(v: &VariantLabel) -> usize {
 }
 
 /// Serialize `labels` into `N` bytes of canonical postcard form.
+#[must_use]
 pub const fn canonical_serialize_labels<const N: usize>(labels: &KindLabels) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = write_varint_u64(labels.kind_id.0, &mut out, 0);
     pos = write_str(cow_str_as_str(&labels.kind_label), &mut out, pos);
     pos = write_label_node(&labels.root, &mut out, pos);
-    if pos != N {
-        panic!("canonical_serialize_labels: size mismatch between len pass and serialize pass");
-    }
+    assert!(
+        pos == N,
+        "canonical_serialize_labels: size mismatch between len pass and serialize pass"
+    );
     out
 }
 

@@ -21,7 +21,7 @@
 //! There is no host branch. `tracing::*` events fired outside any
 //! actor stamp (substrate boot, scheduler thread, panic hook) do NOT
 //! enter the mail system — they hit stderr via the substrate's
-//! registered fmt::Layer for operator visibility but never reach
+//! registered `fmt::Layer` for operator visibility but never reach
 //! `engine_logs`. The actor model's invariant is that every piece of
 //! engine logic eventually runs as an actor; the host-branch shortcut
 //! retired in issue #601 alongside `PROCESS` / `install_log_target` /
@@ -36,7 +36,7 @@
 //! at WARN, and recurse — observable as a stack overflow during
 //! shutdown. The [`is_in_pipeline`] TLS flag short-circuits the
 //! actor-aware path while a drain is in flight; events still flow to
-//! the registered fmt::Layer so operators see them on stderr.
+//! the registered `fmt::Layer` so operators see them on stderr.
 
 extern crate alloc;
 
@@ -102,6 +102,7 @@ pub fn set_drain(mailbox: MailboxId) {
 /// hook) or when the slot is still at its default `MailboxId(0)`
 /// (chassis hasn't dispatched `ConfigureLogDrain` yet, or chassis
 /// declared no drain).
+#[must_use]
 pub fn current_drain() -> Option<MailboxId> {
     let raw = LogDrainSlot::try_with(|s| s.0)?;
     if raw.0 == 0 { None } else { Some(raw) }
@@ -240,8 +241,9 @@ mod pipeline_tls {
 /// Read by [`crate::log::is_in_pipeline`] consumers (chiefly the
 /// actor-aware layer in `aether-substrate::log_install`); set + cleared
 /// by [`PipelineGuard`].
+#[must_use]
 pub fn is_in_pipeline() -> bool {
-    pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.get())
+    pipeline_tls::IN_LOG_PIPELINE.with(core::cell::Cell::get)
 }
 
 struct PipelineGuard;
@@ -274,6 +276,7 @@ fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
 const MAX_MESSAGE_BYTES: usize = 4096;
 const TRUNCATED_SUFFIX: &str = " [truncated]";
 
+#[must_use]
 pub fn encode_event(event: &Event<'_>) -> LogEvent {
     let metadata = event.metadata();
     let level = level_to_u8(*metadata.level());
@@ -329,16 +332,16 @@ impl MessageBuilder {
         if !self.fields.is_empty() {
             self.fields.push(' ');
         }
-        let _ = write!(&mut self.fields, "{}{}{}", name, separator, value);
+        let _ = write!(&mut self.fields, "{name}{separator}{value}");
     }
 }
 
 impl Visit for MessageBuilder {
     fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
         if field.name() == "message" {
-            let _ = write!(&mut self.message, "{:?}", value);
+            let _ = write!(&mut self.message, "{value:?}");
         } else {
-            self.append_field(field.name(), "=", format_args!("{:?}", value));
+            self.append_field(field.name(), "=", format_args!("{value:?}"));
         }
     }
 
@@ -346,20 +349,20 @@ impl Visit for MessageBuilder {
         if field.name() == "message" {
             self.message.push_str(value);
         } else {
-            self.append_field(field.name(), "=", format_args!("{}", value));
+            self.append_field(field.name(), "=", format_args!("{value}"));
         }
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.append_field(field.name(), "=", format_args!("{}", value));
+        self.append_field(field.name(), "=", format_args!("{value}"));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.append_field(field.name(), "=", format_args!("{}", value));
+        self.append_field(field.name(), "=", format_args!("{value}"));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.append_field(field.name(), "=", format_args!("{}", value));
+        self.append_field(field.name(), "=", format_args!("{value}"));
     }
 }
 

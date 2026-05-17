@@ -24,7 +24,7 @@ pub enum ChassisEvent {
     /// `ticks` full cycles (Tick fanout → drain → render or capture)
     /// then replies with `AdvanceResult::Ok { ticks_completed }`.
     Advance { reply_to: ReplyTo, ticks: u32 },
-    /// `aether.render.capture_frame`. The PendingCapture itself
+    /// `aether.render.capture_frame`. The `PendingCapture` itself
     /// was pushed into `CaptureQueue` by the chassis-control
     /// handler; this event just wakes the loop so the next idle
     /// cycle picks it up. The loop runs one drain → render-with-
@@ -70,6 +70,7 @@ impl EventReceiver {
 }
 
 /// Build the sender/receiver pair the chassis wires once at boot.
+#[must_use]
 pub fn channel() -> (EventSender, EventReceiver) {
     let (tx, rx) = mpsc::channel();
     (EventSender(tx), EventReceiver(rx))

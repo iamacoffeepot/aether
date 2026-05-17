@@ -161,8 +161,9 @@ impl SchemaCell {
     /// Construct an `Owned` cell from a schema value. Convenience for
     /// code paths that build schemas at runtime (mostly tests and the
     /// hub's decoder). Production const callers use `Static(&FOO)`.
+    #[must_use]
     pub fn owned(schema: SchemaType) -> Self {
-        SchemaCell::Owned(Box::new(schema))
+        Self::Owned(Box::new(schema))
     }
 }
 
@@ -170,8 +171,8 @@ impl core::ops::Deref for SchemaCell {
     type Target = SchemaType;
     fn deref(&self) -> &SchemaType {
         match self {
-            SchemaCell::Static(r) => r,
-            SchemaCell::Owned(b) => b,
+            Self::Static(r) => r,
+            Self::Owned(b) => b,
         }
     }
 }
@@ -189,7 +190,7 @@ impl Clone for SchemaCell {
         // literal lands as Owned(Box::new(copy_of_value)); the value
         // is identical, the variant chosen expresses "this clone has
         // its own allocation."
-        SchemaCell::Owned(Box::new((**self).clone()))
+        Self::Owned(Box::new((**self).clone()))
     }
 }
 
@@ -209,7 +210,7 @@ impl Serialize for SchemaCell {
 
 impl<'de> Deserialize<'de> for SchemaCell {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        SchemaType::deserialize(deserializer).map(SchemaCell::owned)
+        SchemaType::deserialize(deserializer).map(Self::owned)
     }
 }
 
@@ -248,22 +249,22 @@ impl EnumVariant {
     /// Variant's wire name — matches the `#[postcard(...)]` rename (if
     /// any) or the bare Rust variant identifier. Used on both the
     /// encode and decode sides for lookup and error reporting.
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
-            EnumVariant::Unit { name, .. }
-            | EnumVariant::Tuple { name, .. }
-            | EnumVariant::Struct { name, .. } => name,
+            Self::Unit { name, .. } | Self::Tuple { name, .. } | Self::Struct { name, .. } => name,
         }
     }
 
     /// Postcard discriminant — the varint written on the wire before
     /// the variant body. Assigned by the derive at schema-build time
     /// and stable for the life of the kind vocabulary.
+    #[must_use]
     pub fn discriminant(&self) -> u32 {
         match self {
-            EnumVariant::Unit { discriminant, .. }
-            | EnumVariant::Tuple { discriminant, .. }
-            | EnumVariant::Struct { discriminant, .. } => *discriminant,
+            Self::Unit { discriminant, .. }
+            | Self::Tuple { discriminant, .. }
+            | Self::Struct { discriminant, .. } => *discriminant,
         }
     }
 }
@@ -306,23 +307,23 @@ pub enum SchemaShape {
     Scalar(Primitive),
     String,
     Bytes,
-    Option(Box<SchemaShape>),
-    Vec(Box<SchemaShape>),
+    Option(Box<Self>),
+    Vec(Box<Self>),
     Array {
-        element: Box<SchemaShape>,
+        element: Box<Self>,
         len: u32,
     },
     Struct {
-        fields: Vec<SchemaShape>,
+        fields: Vec<Self>,
         repr_c: bool,
     },
     Enum {
         variants: Vec<VariantShape>,
     },
-    Ref(Box<SchemaShape>),
+    Ref(Box<Self>),
     Map {
-        key: Box<SchemaShape>,
-        value: Box<SchemaShape>,
+        key: Box<Self>,
+        value: Box<Self>,
     },
     /// ADR-0065 first-class typed reference. Wire-identical to
     /// `SchemaType::TypeId(u64)`.
@@ -384,7 +385,7 @@ pub enum LabelNode {
     Struct {
         type_label: Option<Cow<'static, str>>,
         field_names: Cow<'static, [Cow<'static, str>]>,
-        fields: Cow<'static, [LabelNode]>,
+        fields: Cow<'static, [Self]>,
     },
     Enum {
         type_label: Option<Cow<'static, str>>,
@@ -432,8 +433,9 @@ pub enum LabelCell {
 }
 
 impl LabelCell {
+    #[must_use]
     pub fn owned(node: LabelNode) -> Self {
-        LabelCell::Owned(Box::new(node))
+        Self::Owned(Box::new(node))
     }
 }
 
@@ -441,8 +443,8 @@ impl core::ops::Deref for LabelCell {
     type Target = LabelNode;
     fn deref(&self) -> &LabelNode {
         match self {
-            LabelCell::Static(r) => r,
-            LabelCell::Owned(b) => b,
+            Self::Static(r) => r,
+            Self::Owned(b) => b,
         }
     }
 }
@@ -455,7 +457,7 @@ impl AsRef<LabelNode> for LabelCell {
 
 impl Clone for LabelCell {
     fn clone(&self) -> Self {
-        LabelCell::Owned(Box::new((**self).clone()))
+        Self::Owned(Box::new((**self).clone()))
     }
 }
 
@@ -475,35 +477,35 @@ impl Serialize for LabelCell {
 
 impl<'de> Deserialize<'de> for LabelCell {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        LabelNode::deserialize(deserializer).map(LabelCell::owned)
+        LabelNode::deserialize(deserializer).map(Self::owned)
     }
 }
 
 impl Clone for LabelNode {
     fn clone(&self) -> Self {
         match self {
-            LabelNode::Anonymous => LabelNode::Anonymous,
-            LabelNode::Option(c) => LabelNode::Option(c.clone()),
-            LabelNode::Vec(c) => LabelNode::Vec(c.clone()),
-            LabelNode::Array(c) => LabelNode::Array(c.clone()),
-            LabelNode::Struct {
+            Self::Anonymous => Self::Anonymous,
+            Self::Option(c) => Self::Option(c.clone()),
+            Self::Vec(c) => Self::Vec(c.clone()),
+            Self::Array(c) => Self::Array(c.clone()),
+            Self::Struct {
                 type_label,
                 field_names,
                 fields,
-            } => LabelNode::Struct {
+            } => Self::Struct {
                 type_label: type_label.clone(),
                 field_names: field_names.clone(),
                 fields: fields.clone(),
             },
-            LabelNode::Enum {
+            Self::Enum {
                 type_label,
                 variants,
-            } => LabelNode::Enum {
+            } => Self::Enum {
                 type_label: type_label.clone(),
                 variants: variants.clone(),
             },
-            LabelNode::Ref(c) => LabelNode::Ref(c.clone()),
-            LabelNode::Map { key, value } => LabelNode::Map {
+            Self::Ref(c) => Self::Ref(c.clone()),
+            Self::Map { key, value } => Self::Map {
                 key: key.clone(),
                 value: value.clone(),
             },
@@ -514,34 +516,34 @@ impl Clone for LabelNode {
 impl PartialEq for LabelNode {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (LabelNode::Anonymous, LabelNode::Anonymous) => true,
-            (LabelNode::Option(a), LabelNode::Option(b)) => a == b,
-            (LabelNode::Vec(a), LabelNode::Vec(b)) => a == b,
-            (LabelNode::Array(a), LabelNode::Array(b)) => a == b,
+            (Self::Anonymous, Self::Anonymous) => true,
+            (Self::Option(a), Self::Option(b)) => a == b,
+            (Self::Vec(a), Self::Vec(b)) => a == b,
+            (Self::Array(a), Self::Array(b)) => a == b,
             (
-                LabelNode::Struct {
+                Self::Struct {
                     type_label: la,
                     field_names: na,
                     fields: fa,
                 },
-                LabelNode::Struct {
+                Self::Struct {
                     type_label: lb,
                     field_names: nb,
                     fields: fb,
                 },
             ) => la == lb && na == nb && fa == fb,
             (
-                LabelNode::Enum {
+                Self::Enum {
                     type_label: la,
                     variants: va,
                 },
-                LabelNode::Enum {
+                Self::Enum {
                     type_label: lb,
                     variants: vb,
                 },
             ) => la == lb && va == vb,
-            (LabelNode::Ref(a), LabelNode::Ref(b)) => a == b,
-            (LabelNode::Map { key: ka, value: va }, LabelNode::Map { key: kb, value: vb }) => {
+            (Self::Ref(a), Self::Ref(b)) => a == b,
+            (Self::Map { key: ka, value: va }, Self::Map { key: kb, value: vb }) => {
                 ka == kb && va == vb
             }
             _ => false,
@@ -559,23 +561,23 @@ impl Serialize for LabelNode {
         use serde::ser::SerializeStructVariant;
         use serde::ser::SerializeTupleVariant;
         match self {
-            LabelNode::Anonymous => serializer.serialize_unit_variant("LabelNode", 0, "Anonymous"),
-            LabelNode::Option(cell) => {
+            Self::Anonymous => serializer.serialize_unit_variant("LabelNode", 0, "Anonymous"),
+            Self::Option(cell) => {
                 let mut s = serializer.serialize_tuple_variant("LabelNode", 1, "Option", 1)?;
                 s.serialize_field(cell)?;
                 s.end()
             }
-            LabelNode::Vec(cell) => {
+            Self::Vec(cell) => {
                 let mut s = serializer.serialize_tuple_variant("LabelNode", 2, "Vec", 1)?;
                 s.serialize_field(cell)?;
                 s.end()
             }
-            LabelNode::Array(cell) => {
+            Self::Array(cell) => {
                 let mut s = serializer.serialize_tuple_variant("LabelNode", 3, "Array", 1)?;
                 s.serialize_field(cell)?;
                 s.end()
             }
-            LabelNode::Struct {
+            Self::Struct {
                 type_label,
                 field_names,
                 fields,
@@ -586,7 +588,7 @@ impl Serialize for LabelNode {
                 s.serialize_field("fields", fields)?;
                 s.end()
             }
-            LabelNode::Enum {
+            Self::Enum {
                 type_label,
                 variants,
             } => {
@@ -595,12 +597,12 @@ impl Serialize for LabelNode {
                 s.serialize_field("variants", variants)?;
                 s.end()
             }
-            LabelNode::Ref(cell) => {
+            Self::Ref(cell) => {
                 let mut s = serializer.serialize_tuple_variant("LabelNode", 6, "Ref", 1)?;
                 s.serialize_field(cell)?;
                 s.end()
             }
-            LabelNode::Map { key, value } => {
+            Self::Map { key, value } => {
                 let mut s = serializer.serialize_struct_variant("LabelNode", 7, "Map", 2)?;
                 s.serialize_field("key", key)?;
                 s.serialize_field("value", value)?;
@@ -636,15 +638,15 @@ impl<'de> Deserialize<'de> for LabelNode {
             },
         }
         match LabelNodeDe::deserialize(deserializer)? {
-            LabelNodeDe::Anonymous => Ok(LabelNode::Anonymous),
-            LabelNodeDe::Option(c) => Ok(LabelNode::Option(c)),
-            LabelNodeDe::Vec(c) => Ok(LabelNode::Vec(c)),
-            LabelNodeDe::Array(c) => Ok(LabelNode::Array(c)),
+            LabelNodeDe::Anonymous => Ok(Self::Anonymous),
+            LabelNodeDe::Option(c) => Ok(Self::Option(c)),
+            LabelNodeDe::Vec(c) => Ok(Self::Vec(c)),
+            LabelNodeDe::Array(c) => Ok(Self::Array(c)),
             LabelNodeDe::Struct {
                 type_label,
                 field_names,
                 fields,
-            } => Ok(LabelNode::Struct {
+            } => Ok(Self::Struct {
                 type_label,
                 field_names: Cow::Owned(field_names),
                 fields: Cow::Owned(fields),
@@ -652,12 +654,12 @@ impl<'de> Deserialize<'de> for LabelNode {
             LabelNodeDe::Enum {
                 type_label,
                 variants,
-            } => Ok(LabelNode::Enum {
+            } => Ok(Self::Enum {
                 type_label,
                 variants: Cow::Owned(variants),
             }),
-            LabelNodeDe::Ref(c) => Ok(LabelNode::Ref(c)),
-            LabelNodeDe::Map { key, value } => Ok(LabelNode::Map { key, value }),
+            LabelNodeDe::Ref(c) => Ok(Self::Ref(c)),
+            LabelNodeDe::Map { key, value } => Ok(Self::Map { key, value }),
         }
     }
 }
@@ -665,16 +667,16 @@ impl<'de> Deserialize<'de> for LabelNode {
 impl Clone for VariantLabel {
     fn clone(&self) -> Self {
         match self {
-            VariantLabel::Unit { name } => VariantLabel::Unit { name: name.clone() },
-            VariantLabel::Tuple { name, fields } => VariantLabel::Tuple {
+            Self::Unit { name } => Self::Unit { name: name.clone() },
+            Self::Tuple { name, fields } => Self::Tuple {
                 name: name.clone(),
                 fields: fields.clone(),
             },
-            VariantLabel::Struct {
+            Self::Struct {
                 name,
                 field_names,
                 fields,
-            } => VariantLabel::Struct {
+            } => Self::Struct {
                 name: name.clone(),
                 field_names: field_names.clone(),
                 fields: fields.clone(),
@@ -686,24 +688,24 @@ impl Clone for VariantLabel {
 impl PartialEq for VariantLabel {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (VariantLabel::Unit { name: a }, VariantLabel::Unit { name: b }) => a == b,
+            (Self::Unit { name: a }, Self::Unit { name: b }) => a == b,
             (
-                VariantLabel::Tuple {
+                Self::Tuple {
                     name: na,
                     fields: fa,
                 },
-                VariantLabel::Tuple {
+                Self::Tuple {
                     name: nb,
                     fields: fb,
                 },
             ) => na == nb && fa == fb,
             (
-                VariantLabel::Struct {
+                Self::Struct {
                     name: na,
                     field_names: fna,
                     fields: fa,
                 },
-                VariantLabel::Struct {
+                Self::Struct {
                     name: nb,
                     field_names: fnb,
                     fields: fb,
@@ -720,18 +722,18 @@ impl Serialize for VariantLabel {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStructVariant;
         match self {
-            VariantLabel::Unit { name } => {
+            Self::Unit { name } => {
                 let mut s = serializer.serialize_struct_variant("VariantLabel", 0, "Unit", 1)?;
                 s.serialize_field("name", name)?;
                 s.end()
             }
-            VariantLabel::Tuple { name, fields } => {
+            Self::Tuple { name, fields } => {
                 let mut s = serializer.serialize_struct_variant("VariantLabel", 1, "Tuple", 2)?;
                 s.serialize_field("name", name)?;
                 s.serialize_field("fields", fields)?;
                 s.end()
             }
-            VariantLabel::Struct {
+            Self::Struct {
                 name,
                 field_names,
                 fields,
@@ -764,8 +766,8 @@ impl<'de> Deserialize<'de> for VariantLabel {
             },
         }
         match VariantLabelDe::deserialize(deserializer)? {
-            VariantLabelDe::Unit { name } => Ok(VariantLabel::Unit { name }),
-            VariantLabelDe::Tuple { name, fields } => Ok(VariantLabel::Tuple {
+            VariantLabelDe::Unit { name } => Ok(Self::Unit { name }),
+            VariantLabelDe::Tuple { name, fields } => Ok(Self::Tuple {
                 name,
                 fields: Cow::Owned(fields),
             }),
@@ -773,7 +775,7 @@ impl<'de> Deserialize<'de> for VariantLabel {
                 name,
                 field_names,
                 fields,
-            } => Ok(VariantLabel::Struct {
+            } => Ok(Self::Struct {
                 name,
                 field_names: Cow::Owned(field_names),
                 fields: Cow::Owned(fields),

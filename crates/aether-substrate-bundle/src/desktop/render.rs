@@ -25,7 +25,7 @@ pub use render::VERTEX_BUFFER_BYTES;
 /// the pipeline shares the existing vertex buffer. The fragment stage
 /// emits a flat dark color so wires read against any filled-color
 /// underneath.
-const WIREFRAME_WGSL: &str = r#"
+const WIREFRAME_WGSL: &str = r"
 struct Camera {
     view_proj: mat4x4<f32>,
 }
@@ -47,7 +47,7 @@ fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
 fn fs_main() -> @location(0) vec4<f32> {
     return vec4<f32>(0.05, 0.07, 0.12, 1.0);
 }
-"#;
+";
 
 pub struct Gpu {
     pub surface: wgpu::Surface<'static>,
@@ -81,14 +81,14 @@ enum WireframeMode {
 impl WireframeMode {
     fn from_env() -> Self {
         match std::env::var("AETHER_WIREFRAME").ok().as_deref() {
-            None | Some("") | Some("0") | Some("off") => WireframeMode::Off,
-            Some("line") => WireframeMode::Line,
-            Some(_) => WireframeMode::Overlay, // "1", "overlay", etc.
+            None | Some("" | "0" | "off") => Self::Off,
+            Some("line") => Self::Line,
+            Some(_) => Self::Overlay, // "1", "overlay", etc.
         }
     }
 
     fn needs_polygon_mode_line(self) -> bool {
-        !matches!(self, WireframeMode::Off)
+        !matches!(self, Self::Off)
     }
 }
 
@@ -154,7 +154,7 @@ impl Gpu {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(wgpu::TextureFormat::is_srgb)
             .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             // COPY_DST: the swapchain receives a texture-to-texture

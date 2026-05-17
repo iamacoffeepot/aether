@@ -6,14 +6,14 @@
 //! `AETHER_WINDOW_MODE` parser. Wraps everything in a
 //! [`DesktopDriverCapability`] so [`crate::chassis::DesktopChassis`]
 //! composes one driver alongside its passive capabilities
-//! (LogCapability, FsCapability, HttpCapability, AudioCapability,
-//! RenderCapability — composed via `chassis_builder::Builder::with_actor`
+//! (`LogCapability`, `FsCapability`, `HttpCapability`, `AudioCapability`,
+//! `RenderCapability` — composed via `chassis_builder::Builder::with_actor`
 //! per ADR-0071 phase B).
 //!
 //! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`
 //! and emits the shutdown telemetry the previous `DesktopChassis::run`
 //! body owned. Returning means the user closed the window or the
-//! event loop exited cleanly; the chassis_builder then tears down
+//! event loop exited cleanly; the `chassis_builder` then tears down
 //! every passive in reverse boot order via `BootedPassives::Drop`.
 
 use std::sync::Arc;
@@ -186,7 +186,7 @@ fn map_winit_keycode(k: KeyCode) -> Option<u32> {
 
 /// Parse `AETHER_WINDOW_MODE`. Grammar:
 ///   `windowed`              — default size
-///   `windowed:WxH`          — windowed, WxH physical pixels
+///   `windowed:WxH`          — windowed, `WxH` physical pixels
 ///   `fullscreen-borderless` — borderless on current monitor
 ///   `exclusive:WxH@HZ`      — exclusive, matched against monitor modes
 /// Refresh is integer Hz (converted to mhz by *1000); non-integer
@@ -306,7 +306,7 @@ impl App {
         width: Option<u32>,
         height: Option<u32>,
     ) -> SetWindowModeResult {
-        let Some(window) = self.window.as_ref().cloned() else {
+        let Some(window) = self.window.clone() else {
             return SetWindowModeResult::Err {
                 error: "set_window_mode requested before window initialized".to_owned(),
             };
@@ -351,7 +351,7 @@ impl App {
         loop {
             match self.window_inbox.try_recv() {
                 Ok(env) => self.dispatch_window_envelope(env),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
             }
         }
     }
@@ -588,7 +588,7 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// ADR-0071 driver capability for the desktop chassis. Owns the
 /// pieces the winit event-loop body needs at construction time, then
-/// `boot()`-builds the App + DriverRunning that drives the loop.
+/// `boot()`-builds the App + `DriverRunning` that drives the loop.
 /// `boot()` looks up [`RenderCapability`] via [`DriverCtx::expect`]
 /// (booted earlier in the `.with()` chain) and pulls the accumulator
 /// handles out of it.
@@ -608,7 +608,7 @@ pub struct DesktopDriverRunning {
     app: App,
     event_loop: EventLoop<UserEvent>,
     triangles_rendered: Arc<AtomicU64>,
-    /// `SubstrateBoot` drops at the end of `run()`. The chassis_builder
+    /// `SubstrateBoot` drops at the end of `run()`. The `chassis_builder`
     /// `BootedPassives` (holding render/audio/io/http/log runnings)
     /// drops just after, tearing down each passive in reverse boot
     /// order via `RunningCapability::shutdown`.
@@ -619,7 +619,7 @@ impl DriverCapability for DesktopDriverCapability {
     type Running = DesktopDriverRunning;
 
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let DesktopDriverCapability {
+        let Self {
             event_loop,
             boot,
             capture_queue,
@@ -722,7 +722,7 @@ impl DriverCapability for DesktopDriverCapability {
 
 impl DriverRunning for DesktopDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let DesktopDriverRunning {
+        let Self {
             mut app,
             event_loop,
             triangles_rendered,

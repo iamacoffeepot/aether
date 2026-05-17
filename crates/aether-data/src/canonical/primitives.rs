@@ -75,6 +75,7 @@ pub(super) const fn cow_str_as_str<'a>(c: &'a Cow<'static, str>) -> &'a str {
 
 /// Byte count of `val` in postcard's unsigned-varint encoding
 /// (7 bits per byte, MSB set until the last byte).
+#[must_use]
 pub const fn varint_u32_len(val: u32) -> usize {
     if val < (1 << 7) {
         1
@@ -89,15 +90,18 @@ pub const fn varint_u32_len(val: u32) -> usize {
     }
 }
 
+#[must_use]
 pub const fn varint_usize_len(val: usize) -> usize {
-    if val > u32::MAX as usize {
-        panic!("varint_usize_len: value exceeds u32::MAX");
-    }
+    assert!(
+        val <= u32::MAX as usize,
+        "varint_usize_len: value exceeds u32::MAX"
+    );
     varint_u32_len(val as u32)
 }
 
 /// Byte count of `val` in postcard's unsigned-varint encoding for u64.
 /// Extends `varint_u32_len` to the full u64 range needed by `Kind::ID`.
+#[must_use]
 pub const fn varint_u64_len(val: u64) -> usize {
     let mut bytes = 1usize;
     let mut v = val >> 7;
@@ -120,9 +124,10 @@ pub(super) const fn write_varint_u32(mut val: u32, out: &mut [u8], cursor: usize
 }
 
 pub(super) const fn write_varint_usize(val: usize, out: &mut [u8], cursor: usize) -> usize {
-    if val > u32::MAX as usize {
-        panic!("write_varint_usize: value exceeds u32::MAX");
-    }
+    assert!(
+        val <= u32::MAX as usize,
+        "write_varint_usize: value exceeds u32::MAX"
+    );
     write_varint_u32(val as u32, out, cursor)
 }
 

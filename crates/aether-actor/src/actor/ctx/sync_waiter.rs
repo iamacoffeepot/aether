@@ -26,7 +26,7 @@ use crate::mail::sync::{WaitError, decode_wait_reply};
 /// Synchronous reply-receive surface every per-handler ctx that
 /// participates in ADR-0042 sync round trips exposes. Today FFI ctxs
 /// (wasm guests) and native ctxs both impl this; the implementations
-/// route to their per-target wait_reply primitive.
+/// route to their per-target `wait_reply` primitive.
 pub trait SyncWaiter {
     /// Allocate a `capacity`-sized scratch buffer, block until a mail
     /// of kind `K` (and, when `expected_correlation != 0`, also

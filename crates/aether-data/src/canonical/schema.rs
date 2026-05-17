@@ -46,6 +46,7 @@ const PRIM_F32: u8 = 8;
 const PRIM_F64: u8 = 9;
 
 /// Byte length the canonical schema encoding will take.
+#[must_use]
 pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
     match schema {
         SchemaType::Unit => 1,
@@ -129,17 +130,20 @@ const fn canonical_len_variant(variant: &EnumVariant) -> usize {
 
 /// Serialize `schema` into `N` bytes of canonical postcard form.
 /// Caller passes `N = canonical_len_schema(schema)`.
+#[must_use]
 pub const fn canonical_serialize_schema<const N: usize>(schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
     let written = write_schema(schema, &mut out, 0);
-    if written != N {
-        panic!("canonical_serialize_schema: size mismatch between len pass and serialize pass");
-    }
+    assert!(
+        written == N,
+        "canonical_serialize_schema: size mismatch between len pass and serialize pass"
+    );
     out
 }
 
 /// Byte length for a full `(name, schema)` canonical record —
 /// matches `postcard(KindShape { name, schema })`.
+#[must_use]
 pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
     str_len(name) + canonical_len_schema(schema)
 }
@@ -147,13 +151,15 @@ pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
 /// Serialize `(name, schema)` into `N` bytes of a canonical postcard
 /// record. These are the bytes that populate `aether.kinds` (one
 /// record per `#[derive(Kind)]` type) and that `Kind::ID` hashes over.
+#[must_use]
 pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = write_str(name, &mut out, 0);
     pos = write_schema(schema, &mut out, pos);
-    if pos != N {
-        panic!("canonical_serialize_kind: size mismatch between len pass and serialize pass");
-    }
+    assert!(
+        pos == N,
+        "canonical_serialize_kind: size mismatch between len pass and serialize pass"
+    );
     out
 }
 
@@ -170,6 +176,7 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// const serializer also drops, so the two paths produce
 /// byte-identical output. Pinned by the `canonical_kind_bytes_runtime_
 /// matches_const` test below.
+#[must_use]
 pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> alloc::vec::Vec<u8> {
     let shape = crate::schema::KindShape {
         name: alloc::borrow::Cow::Owned(name.into()),
@@ -241,20 +248,21 @@ fn variant_to_shape(v: &EnumVariant) -> crate::schema::VariantShape {
 /// the same reason `fnv1a_64_prefixed` is (the canonical-bytes path
 /// hashes `KIND_DOMAIN ++ bytes` without reaching across module
 /// boundaries).
-pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
+pub const KIND_DOMAIN: &[u8] = b"kind:";
 
 use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
 
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
 /// the `#[derive(Kind)]` compile-time emission byte-for-byte:
-/// `Tag::Kind` ORed into the high 4 bits + the low 60 bits of
+/// `Tag::Kind` `ORed` into the high 4 bits + the low 60 bits of
 /// `fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))`.
 /// A substrate computing `kind_id_from_parts(&desc.name, &desc.schema)`
 /// after a runtime `register_kind_with_descriptor` agrees with the id
 /// the component published as `<K as Kind>::ID` (ADR-0030 Phase 2 +
 /// ADR-0064).
+#[must_use]
 pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
-    ((TAG_KIND as u64) << TAG_SHIFT)
+    (u64::from(TAG_KIND) << TAG_SHIFT)
         | (fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema)) & HASH_MASK)
 }
 
@@ -263,10 +271,11 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 /// `postcard(KindShape)`, so we postcard the shape directly without a
 /// `SchemaShape → SchemaType` detour. Used by `kind_manifest` to key
 /// labels records by id after decoding both sections off the wasm.
+#[must_use]
 pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
     let bytes =
         postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
-    ((TAG_KIND as u64) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
+    (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
 }
 
 /// FNV-1a 64 over `prefix ++ payload`, mirrored from
@@ -274,7 +283,7 @@ pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
 /// the canonical-bytes path can hash `KIND_DOMAIN ++ bytes` without
 /// a transient `Vec<u8>` — same offset basis and prime, identical
 /// output.
-pub(crate) const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
+pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0;
     while i < prefix.len() {

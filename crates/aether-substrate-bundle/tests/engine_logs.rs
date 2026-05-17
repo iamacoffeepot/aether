@@ -111,8 +111,7 @@ fn batch_mail_surfaces_in_engine_logs() {
         .find(|e| e.target == "engine_logs_e2e_target" && e.message == "marker payload")
         .unwrap_or_else(|| {
             panic!(
-                "expected the synthesised LogBatch to surface in entries; observed: {:#?}",
-                entries
+                "expected the synthesised LogBatch to surface in entries; observed: {entries:#?}"
             )
         });
     assert_eq!(hit.level, 4, "expected error level=4; got {}", hit.level);

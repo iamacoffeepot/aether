@@ -33,6 +33,7 @@ impl MailBridge {
     /// Returns `0` on success; `1` on substrate-side recipient
     /// lookup miss. Other non-zero values are reserved for future
     /// host-side failure surfaces.
+    #[must_use]
     pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
         unsafe {
             raw::send_mail(
@@ -50,6 +51,7 @@ impl MailBridge {
     /// threaded onto the ctx at receive time; the substrate routes it
     /// to the right Claude session, sibling component, or remote
     /// engine mailbox.
+    #[must_use]
     pub fn reply_mail(&self, sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
         unsafe {
             raw::reply_mail(
@@ -67,6 +69,7 @@ impl MailBridge {
     /// every send mints a correlation; sync wrappers filter
     /// `wait_reply` against it, async handlers stash it and match on
     /// the inbound's reply correlation.
+    #[must_use]
     pub fn prev_correlation(&self) -> u64 {
         unsafe { raw::prev_correlation() }
     }

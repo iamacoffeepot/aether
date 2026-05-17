@@ -8,7 +8,7 @@
 //! hand-rolled synth, built-in instrument registry — plus the
 //! [`AudioCapability`] itself.
 //!
-//! Synthesis is hand-rolled (no SoundFont, no DSP graph library): a
+//! Synthesis is hand-rolled (no `SoundFont`, no DSP graph library): a
 //! waveform oscillator + ADSR envelope per voice, summed flat, scaled
 //! by master gain. 5 built-in instruments cover the common shapes
 //! (sine / square / triangle / saw + a pluck-flavoured sawtooth).
@@ -111,6 +111,7 @@ mod native {
     }
 
     impl AudioConfig {
+        #[must_use]
         pub fn from_env() -> Self {
             let disabled = std::env::var("AETHER_AUDIO_DISABLE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -323,7 +324,7 @@ mod native {
             def: &InstrumentDef,
             sample_rate: f32,
         ) -> Self {
-            let freq = 440.0 * 2f32.powf((f32::from(pitch) - 69.0) / 12.0);
+            let freq = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
             let phase_step = freq / sample_rate;
             let v = f32::from(velocity) / 127.0;
             let amplitude = def.base_amp * v * v;
@@ -351,7 +352,7 @@ mod native {
                 }
                 EnvelopeStage::Decay { t } => {
                     if self.adsr.decay_s > 0.0 {
-                        let fall = 1.0 - (1.0 - self.adsr.sustain) * (t / self.adsr.decay_s);
+                        let fall = (1.0 - self.adsr.sustain).mul_add(-(t / self.adsr.decay_s), 1.0);
                         fall.clamp(self.adsr.sustain.min(1.0), 1.0)
                     } else {
                         self.adsr.sustain
@@ -384,7 +385,7 @@ mod native {
                         self.envelope = EnvelopeStage::Sustain;
                         self.adsr.sustain
                     } else {
-                        1.0 - (1.0 - self.adsr.sustain) * (*t / self.adsr.decay_s)
+                        (1.0 - self.adsr.sustain).mul_add(-(*t / self.adsr.decay_s), 1.0)
                     }
                 }
                 EnvelopeStage::Sustain => self.adsr.sustain,
@@ -413,12 +414,12 @@ mod native {
                 }
                 Wave::Triangle => {
                     if self.phase < 0.5 {
-                        -1.0 + 4.0 * self.phase
+                        4.0f32.mul_add(self.phase, -1.0)
                     } else {
-                        3.0 - 4.0 * self.phase
+                        4.0f32.mul_add(-self.phase, 3.0)
                     }
                 }
-                Wave::Saw => 1.0 - 2.0 * self.phase,
+                Wave::Saw => 2.0f32.mul_add(-self.phase, 1.0),
             }
         }
 

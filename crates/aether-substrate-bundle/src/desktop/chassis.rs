@@ -44,7 +44,7 @@ pub enum UserEvent {
 
 /// Marker type for the desktop chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<DesktopChassis>`] returned
-/// by [`Self::build`]. The unit struct exists so the chassis_builder
+/// by [`Self::build`]. The unit struct exists so the `chassis_builder`
 /// machinery can parameterise over a concrete chassis kind for type
 /// disambiguation, and so [`Chassis::PROFILE`] has a home.
 pub struct DesktopChassis;
@@ -133,7 +133,7 @@ impl DesktopEnv {
 
         let workers = parse_workers_env();
 
-        Ok(DesktopEnv {
+        Ok(Self {
             event_loop,
             capture_queue,
             namespace_roots,
@@ -179,13 +179,13 @@ fn parse_workers_env() -> Option<usize> {
 impl DesktopChassis {
     /// Build the desktop chassis: stand up substrate-core internals,
     /// compose the native passives (log, io, http, audio, render+camera)
-    /// through the chassis_builder `.with()` chain, then wrap everything
+    /// through the `chassis_builder` `.with()` chain, then wrap everything
     /// in a [`DesktopDriverCapability`] and hand it to the builder.
     /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
     /// on the winit event loop.
     ///
     /// The trait method [`Chassis::build`] forwards here.
-    fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<DesktopChassis>, BootError> {
+    fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<Self>, BootError> {
         let DesktopEnv {
             event_loop,
             capture_queue,
@@ -260,7 +260,7 @@ impl DesktopChassis {
         // capabilities' boot tracing routes through the log capture;
         // render last so it claims its mailboxes after every other
         // chassis cap.
-        let mut builder = Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
+        let mut builder = Builder::<Self>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
             .with_workers(workers)
             .with_actor::<HandleCapability>(())

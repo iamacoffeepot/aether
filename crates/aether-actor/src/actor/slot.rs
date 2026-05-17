@@ -14,7 +14,7 @@ pub struct Slot<C> {
 impl<C> Slot<C> {
     /// Build an empty slot. `const` so it can live in a `static`.
     pub const fn new() -> Self {
-        Slot {
+        Self {
             inner: core::cell::UnsafeCell::new(None),
         }
     }
@@ -45,7 +45,7 @@ impl<C> Slot<C> {
 
 impl<C> Default for Slot<C> {
     fn default() -> Self {
-        Slot::new()
+        Self::new()
     }
 }
 

@@ -1,6 +1,6 @@
 //! Smoke component for ADR-0021 input subscriptions. Observes the
-//! four substrate-published input kinds (Tick / Key / MouseMove /
-//! MouseButton) and counts each dispatch.
+//! four substrate-published input kinds (Tick / Key / `MouseMove` /
+//! `MouseButton`) and counts each dispatch.
 //!
 //! Pre-issue-775 the example emitted a `demo.input_observed { stream,
 //! code }` to `hub.claude.broadcast` so the driving Claude session

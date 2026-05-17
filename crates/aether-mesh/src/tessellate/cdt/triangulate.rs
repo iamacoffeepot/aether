@@ -261,8 +261,7 @@ mod tests {
             let q2 = project_point(p2, axis_a, axis_b);
             assert!(
                 orient2d(q0, q1, q2) > 0,
-                "triangle {:?} not CCW in projection",
-                tri
+                "triangle {tri:?} not CCW in projection"
             );
         }
     }

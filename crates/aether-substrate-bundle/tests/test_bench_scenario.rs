@@ -1,6 +1,6 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
 //! a `TestBench` and exercises one substrate primitive — input
-//! subscription, drop, capture_frame round-trip, replace_component
+//! subscription, drop, `capture_frame` round-trip, `replace_component`
 //! (all via `aether-test-fixture-probe`), or the IO sink's
 //! read/write/delete/list round trips (which talk directly to the
 //! chassis `aether.fs` via `TestBench::send_and_await_reply`).
@@ -100,7 +100,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) {
 
 /// Subscribing the fixture to Tick yields exactly one
 /// `tick_observed` broadcast per advance tick. Validates the
-/// subscribe_input → tick fanout path end-to-end.
+/// `subscribe_input` → tick fanout path end-to-end.
 #[test]
 fn input_subscription_yields_one_tick_observed_per_advance() {
     let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
@@ -119,7 +119,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
     );
 }
 
-/// Dropping the probe stops further tick_observed broadcasts.
+/// Dropping the probe stops further `tick_observed` broadcasts.
 /// Validates that `aether.component.drop` removes the
 /// mailbox from the input subscriber set so subsequent ticks don't
 /// reach it (ADR-0021 + ADR-0038 actor lifecycle).
@@ -430,7 +430,7 @@ fn io_delete_removes_written_file() {
             FS_MAILBOX,
             &Read {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path.clone(),
+                path: path,
             },
         )
         .expect("read-after-delete reply");

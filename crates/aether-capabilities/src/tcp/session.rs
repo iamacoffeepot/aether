@@ -204,7 +204,7 @@ mod session_native {
         }
 
         /// Sidecar read wake. Drain every pending chunk; `Ok` bytes
-        /// are dropped (issue 775 retired the SessionData broadcast)
+        /// are dropped (issue 775 retired the `SessionData` broadcast)
         /// and `Err` ends the session via `ctx.shutdown()`. One wake
         /// fires per chunk, but the handler drains until the queue
         /// is empty so coalesced wakes process all outstanding chunks

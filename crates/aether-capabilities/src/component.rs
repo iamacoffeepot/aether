@@ -82,7 +82,7 @@ pub trait ComponentHostNativeExt {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> ComponentHostNativeExt for NativeActorMailbox<'a, ComponentHostCapability> {
+impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
     fn loaded<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
         self.resolve_peer::<R>(&format!("{}:{}", WasmTrampoline::NAMESPACE, name))
     }
@@ -143,7 +143,7 @@ mod native {
         outbound: Arc<HubOutbound>,
         /// Monotonic counter for `component_N` default names when an
         /// agent passes `name: None` and the wasm doesn't declare an
-        /// `aether.namespace`. AtomicU64 because the bridge macro
+        /// `aether.namespace`. `AtomicU64` because the bridge macro
         /// emits handlers behind `&self` for some patterns; the
         /// counter is fine either way.
         default_name_counter: AtomicU64,
