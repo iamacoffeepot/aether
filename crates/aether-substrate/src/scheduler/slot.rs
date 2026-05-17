@@ -533,13 +533,24 @@ pub(crate) mod tests {
         }
         slot.state.try_wake();
 
-        let result = run_one_cycle(&slot);
+        // Generous wallclock so only the count budget (`BATCH_MAX_MAILS`)
+        // can trip — this test asserts the exact dispatched count after
+        // the budget trips, so a 200μs wallclock (the `standard()`
+        // default) racing the count under CI CPU contention would
+        // dispatch some `N < BATCH_MAX_MAILS` and flake the assert
+        // (iamacoffeepot/aether#869). Same workaround `drain_empty_returns_idle`
+        // uses for the same reason.
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let result = slot.run_cycle(budget);
         assert_eq!(result, CycleResult::Requeue);
         assert_eq!(slot.dispatched(), BATCH_MAX_MAILS);
         assert_eq!(slot.state.current(), SlotStateLabel::Ready);
 
-        // Second cycle drains the rest.
-        let result = run_one_cycle(&slot);
+        // Second cycle drains the rest. Same wallclock isolation — the
+        // remaining 50 envelopes shouldn't trip the count budget but
+        // could trip the 200μs wallclock under contention.
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let result = slot.run_cycle(budget);
         assert_eq!(result, CycleResult::Idle);
         assert_eq!(slot.dispatched(), BATCH_MAX_MAILS + 50);
         assert_eq!(slot.state.current(), SlotStateLabel::Idle);
