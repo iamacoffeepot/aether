@@ -278,7 +278,7 @@ impl TestBenchChassis {
                         }
                         observed_for_handler
                             .lock()
-                            .unwrap()
+                            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
                             .push(dispatch.kind_name.to_owned());
                     },
                 ),

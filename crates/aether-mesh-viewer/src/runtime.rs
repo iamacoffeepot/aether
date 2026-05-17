@@ -418,7 +418,7 @@ mod tests {
             v 0 1 0\n\
             f 1 2 3\n\
             f 1 3 4\n";
-        let tris = parse_obj(obj).unwrap();
+        let tris = parse_obj(obj).expect("test setup: well-formed OBJ parses");
         assert_eq!(tris.len(), 2);
     }
 
@@ -430,7 +430,7 @@ mod tests {
             v 1 1 0\n\
             v 0 1 0\n\
             f 1 2 3 4\n";
-        let tris = parse_obj(obj).unwrap();
+        let tris = parse_obj(obj).expect("test setup: quad OBJ parses");
         assert_eq!(tris.len(), 2, "quad should triangulate to 2 triangles");
     }
 
@@ -447,7 +447,8 @@ mod tests {
             s off\n\
             g group_name\n\
             f 1 2 3\n";
-        let tris = parse_obj(obj).unwrap();
+        let tris =
+            parse_obj(obj).expect("test setup: OBJ with unknown directives still parses faces");
         assert_eq!(tris.len(), 1);
     }
 
@@ -458,7 +459,7 @@ mod tests {
             v 1 0 0\n\
             v 1 1 0\n\
             f 1/1/1 2/2/1 3/3/1\n";
-        let tris = parse_obj(obj).unwrap();
+        let tris = parse_obj(obj).expect("test setup: OBJ with v/vt/vn refs parses");
         assert_eq!(tris.len(), 1);
     }
 

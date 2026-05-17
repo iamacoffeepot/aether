@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn not_all_black_fails_on_pure_black() {
         let img = solid(4, 4, [0, 0, 0, 255]);
-        let err = not_all_black(&img).unwrap_err();
+        let err = not_all_black(&img).expect_err("test setup: solid black must fail");
         assert!(err.contains("4x4"));
     }
 
@@ -148,7 +148,8 @@ mod tests {
     #[test]
     fn differs_from_background_fails_on_uniform_color() {
         let img = solid(8, 8, [69, 79, 105, 255]);
-        let err = differs_from_background(&img, 5).unwrap_err();
+        let err =
+            differs_from_background(&img, 5).expect_err("test setup: uniform background must fail");
         assert!(err.contains("69,79,105"));
         assert!(err.contains("8x8"));
     }
@@ -178,7 +179,8 @@ mod tests {
             height: 0,
             rgba: Vec::new(),
         };
-        let err = differs_from_background(&img, 5).unwrap_err();
+        let err = differs_from_background(&img, 5)
+            .expect_err("test setup: empty image must fail with \"too small\"");
         assert!(err.contains("too small"));
     }
 }

@@ -140,7 +140,7 @@ fn hub_routes_engine_addressed_calls_to_a_real_substrate() {
     // substrate and waiting for it to bind its RPC port.
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
+        .expect("test setup: setting socket read timeout on a connected stream succeeds");
 
     // Handshake.
     write_frame(

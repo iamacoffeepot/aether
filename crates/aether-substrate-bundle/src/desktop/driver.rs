@@ -793,28 +793,32 @@ mod tests {
 
     #[test]
     fn parse_windowed_defaults() {
-        let (m, s) = parse_window_mode_env("windowed").unwrap();
+        let (m, s) =
+            parse_window_mode_env("windowed").expect("test setup: \"windowed\" is a valid spec");
         assert!(matches!(m, WindowMode::Windowed));
         assert_eq!(s, None);
     }
 
     #[test]
     fn parse_windowed_with_size() {
-        let (m, s) = parse_window_mode_env("windowed:1280x720").unwrap();
+        let (m, s) = parse_window_mode_env("windowed:1280x720")
+            .expect("test setup: \"windowed:WxH\" is a valid spec");
         assert!(matches!(m, WindowMode::Windowed));
         assert_eq!(s, Some((1280, 720)));
     }
 
     #[test]
     fn parse_fullscreen_borderless() {
-        let (m, s) = parse_window_mode_env("fullscreen-borderless").unwrap();
+        let (m, s) = parse_window_mode_env("fullscreen-borderless")
+            .expect("test setup: \"fullscreen-borderless\" is a valid spec");
         assert!(matches!(m, WindowMode::FullscreenBorderless));
         assert_eq!(s, None);
     }
 
     #[test]
     fn parse_exclusive_converts_hz_to_mhz() {
-        let (m, s) = parse_window_mode_env("exclusive:1920x1080@60").unwrap();
+        let (m, s) = parse_window_mode_env("exclusive:1920x1080@60")
+            .expect("test setup: \"exclusive:WxH@HZ\" is a valid spec");
         let WindowMode::FullscreenExclusive {
             width,
             height,
@@ -836,7 +840,8 @@ mod tests {
 
     #[test]
     fn parse_ignores_whitespace() {
-        let (m, _) = parse_window_mode_env("  windowed  ").unwrap();
+        let (m, _) = parse_window_mode_env("  windowed  ")
+            .expect("test setup: surrounding whitespace is trimmed");
         assert!(matches!(m, WindowMode::Windowed));
     }
 }

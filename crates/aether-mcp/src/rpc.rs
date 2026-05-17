@@ -80,14 +80,21 @@ impl RpcSession {
                             // Drop every pending sender so each waiting
                             // `call()` future sees `None` and errors
                             // out rather than hanging forever.
-                            router_pending.lock().unwrap().clear();
+                            router_pending
+                                .lock()
+                                .expect("router pending mutex is never poisoned")
+                                .clear();
                             break;
                         }
                         // Hello / HelloAck / Call / Ping / Pong: a
                         // client-side router never expects these.
                         _ => continue,
                     };
-                    if let Some(tx) = router_pending.lock().unwrap().get(&cid) {
+                    if let Some(tx) = router_pending
+                        .lock()
+                        .expect("router pending mutex is never poisoned")
+                        .get(&cid)
+                    {
                         // A failed send just means a stray frame for an
                         // already-finished call — drop it.
                         let _ = tx.send(frame);
@@ -118,11 +125,14 @@ impl RpcSession {
     pub async fn call(&self, envelope: MailEnvelope) -> anyhow::Result<Vec<MailEnvelope>> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cid = {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self
+                .pending
+                .lock()
+                .expect("rpc pending mutex is never poisoned");
             let cid = self
                 .client
                 .lock()
-                .unwrap()
+                .expect("rpc client mutex is never poisoned")
                 .call(envelope)
                 .map_err(|e| anyhow::anyhow!("rpc call write failed: {e}"))?;
             pending.insert(cid, tx);
@@ -146,7 +156,10 @@ impl RpcSession {
                 }
             }
         };
-        self.pending.lock().unwrap().remove(&cid);
+        self.pending
+            .lock()
+            .expect("rpc pending mutex is never poisoned")
+            .remove(&cid);
         outcome.map(|()| events)
     }
 

@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(
             decoded,
             InputsRecord::Fallback {
-                doc: Some(DOC.unwrap().into()),
+                doc: Some(DOC.expect("test setup: DOC is Some by construction").into()),
             }
         );
     }
@@ -448,7 +448,8 @@ mod tests {
         for &v in &[0u64, 1, 0x7f, 0x80, 0xff, 0xffff_ffff, u64::MAX] {
             let mut out = [0u8; 10];
             let used = write_varint_u64(v, &mut out, 0);
-            let postcard_bytes = postcard::to_allocvec(&v).unwrap();
+            let postcard_bytes =
+                postcard::to_allocvec(&v).expect("test setup: postcard encodes u64");
             assert_eq!(&out[..used], &postcard_bytes[..], "mismatch for {v:#x}");
             assert_eq!(used, varint_u64_len(v), "len mismatch for {v:#x}");
         }
