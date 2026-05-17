@@ -594,7 +594,7 @@ mod native {
                 .config(),
         };
 
-        let sample_rate = config.sample_rate.0;
+        let sample_rate = config.sample_rate;
         let channels = config.channels;
 
         let (sender, queue) = new_event_channel();
@@ -641,10 +641,10 @@ mod native {
     fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::StreamConfig> {
         let configs = device.supported_output_configs().ok()?;
         for cfg in configs {
-            let min = cfg.min_sample_rate().0;
-            let max = cfg.max_sample_rate().0;
+            let min = cfg.min_sample_rate();
+            let max = cfg.max_sample_rate();
             if rate >= min && rate <= max {
-                return Some(cfg.with_sample_rate(cpal::SampleRate(rate)).config());
+                return Some(cfg.with_sample_rate(rate).config());
             }
         }
         None
