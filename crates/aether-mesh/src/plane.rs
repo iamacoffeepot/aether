@@ -630,9 +630,6 @@ mod tests {
         let s = plane.side(extreme_query);
         // The opposite corner from the plane's centroid must be on
         // the positive side (the normal points outward).
-        assert_ne!(
-            s, 0,
-            "extreme query should not coincidentally lie on plane"
-        );
+        assert_ne!(s, 0, "extreme query should not coincidentally lie on plane");
     }
 }
