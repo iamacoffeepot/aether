@@ -1352,7 +1352,7 @@ fn boot_passives(
     }
 
     // Pass 2 — init.
-    for boot in booted.iter_mut() {
+    for boot in &mut *booted {
         let mut ctx = build_ctx!();
         if let Err(e) = boot.init(&mut ctx, &mut handles) {
             rollback(
@@ -1372,7 +1372,7 @@ fn boot_passives(
     }
 
     // Pass 3 — wire.
-    for boot in booted.iter_mut() {
+    for boot in &mut *booted {
         if let Err(e) = boot.wire() {
             rollback(
                 registry,
@@ -1395,7 +1395,7 @@ fn boot_passives(
     // as `Some` in the slot) clean up in reverse via the rollback
     // helper.
     let mut booted_opt: Vec<Option<Box<dyn PassiveBoot>>> = booted.into_iter().map(Some).collect();
-    for slot in booted_opt.iter_mut() {
+    for slot in &mut booted_opt {
         let boot = slot.take().expect("each slot drained exactly once");
         let mut ctx = build_ctx!();
         match boot.spawn(&mut ctx) {
@@ -1449,7 +1449,7 @@ impl<C: Chassis> fmt::Debug for BuiltChassis<C> {
         f.debug_struct("BuiltChassis")
             .field("profile", &C::PROFILE)
             .field("passives", &self.booted.shutdowns.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -1696,7 +1696,7 @@ mod tests {
     impl crate::actor::native::NativeActor for StubLog {
         type Config = ();
         fn init(
-            _: Self::Config,
+            (): Self::Config,
             _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             Ok(Self)
@@ -1824,7 +1824,7 @@ mod tests {
         impl crate::actor::native::NativeActor for FailingCap {
             type Config = ();
             fn init(
-                _: (),
+                (): (),
                 _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Err(BootError::Other(Box::new(std::io::Error::other(
@@ -2003,7 +2003,7 @@ mod tests {
         impl crate::actor::native::NativeActor for FrameBoundProbe {
             type Config = ();
             fn init(
-                _: (),
+                (): (),
                 _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
@@ -2705,7 +2705,7 @@ mod tests {
         impl crate::actor::native::NativeActor for Target {
             type Config = ();
             fn init(
-                _: Self::Config,
+                (): Self::Config,
                 _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
@@ -2957,7 +2957,7 @@ mod tests {
         impl crate::actor::native::NativeActor for Target {
             type Config = ();
             fn init(
-                _: Self::Config,
+                (): Self::Config,
                 _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
@@ -3287,7 +3287,7 @@ mod tests {
         impl crate::actor::native::NativeActor for Foo {
             type Config = ();
             fn init(
-                _: (),
+                (): (),
                 _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
@@ -3312,7 +3312,7 @@ mod tests {
         impl crate::actor::native::NativeActor for Bar {
             type Config = ();
             fn init(
-                _: (),
+                (): (),
                 _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)

@@ -787,7 +787,7 @@ mod tests {
 
     impl NativeActor for StubActor {
         type Config = ();
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 boots: AtomicU32::new(0),
             })

@@ -342,11 +342,16 @@ impl Mesh {
             // Walk all alive triangles, edge by edge, looking for any
             // crossing diagonal whose quad is convex.
             let mut flipped = false;
-            'outer: for (tid2, tri) in self
+            // `collect` is intentional: the loop body calls
+            // `self.flip_edge`, which mutates `self.triangles`. Iterating
+            // borrowed against the live iterator would conflict with the
+            // mutating call inside the loop.
+            #[allow(clippy::needless_collect)]
+            let candidates: Vec<_> = self
                 .alive_triangles()
                 .map(|(i, t)| (i, t.clone()))
-                .collect::<Vec<_>>()
-            {
+                .collect();
+            'outer: for (tid2, tri) in candidates {
                 for i in 0..3 {
                     let a = tri.verts[(i + 1) % 3];
                     let b = tri.verts[(i + 2) % 3];
@@ -440,8 +445,8 @@ impl Mesh {
         }
         let dx = max_x - min_x;
         let dy = max_y - min_y;
-        let cx = (min_x + max_x) / 2;
-        let cy = (min_y + max_y) / 2;
+        let cx = min_x.midpoint(max_x);
+        let cy = min_y.midpoint(max_y);
         // `+ 1` ensures non-zero scale even for a single point or all
         // collinear points; `* 4` gives generous margin so input points
         // sit comfortably inside the super-triangle.

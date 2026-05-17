@@ -94,7 +94,8 @@ fn main() -> anyhow::Result<()> {
         "test-bench componentless boot — drive ticks via aether.test_bench.advance",
     );
 
-    drive_events_loop(events_rx, capture_queue, boot, passive, gpu, kind_tick)
+    drive_events_loop(events_rx, capture_queue, boot, passive, gpu, kind_tick);
+    Ok(())
 }
 
 /// Drive the chassis event loop on the main thread. Embedder is the
@@ -109,7 +110,7 @@ fn drive_events_loop(
     passive: aether_substrate::PassiveChassis<TestBenchChassis>,
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
-) -> anyhow::Result<()> {
+) {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
     let input_mailbox = mailbox_id_from_name(InputCapability::NAMESPACE);
@@ -164,7 +165,6 @@ fn drive_events_loop(
     // last-first since locals drop in reverse declaration order.
     drop(passive);
     drop(boot);
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

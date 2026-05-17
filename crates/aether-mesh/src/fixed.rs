@@ -205,6 +205,10 @@ mod tests {
         let step = 1.0 / 1024.0; // about 64 fixed units per step
         let mut prev = f32_to_fixed(-MAX_INPUT_MAGNITUDE).unwrap();
         let mut x = -MAX_INPUT_MAGNITUDE + step;
+        // Stepping a float counter is the natural shape for sweeping the
+        // input range; `step` is a power of two so accumulation drift is
+        // bounded.
+        #[allow(clippy::while_float)]
         while x <= MAX_INPUT_MAGNITUDE {
             let fx = f32_to_fixed(x).unwrap();
             assert!(fx >= prev, "monotonicity violated at x={x}: {prev} > {fx}");
@@ -323,6 +327,9 @@ mod tests {
         // otherwise asymmetric rounding could flip a polygon's side
         // classification across an axis-aligned plane.
         let mut x = 1.0 / SCALE as f32;
+        // Walks the input range by doubling — exact in IEEE-754, so the
+        // float-counter loop is safe.
+        #[allow(clippy::while_float)]
         while x <= MAX_INPUT_MAGNITUDE {
             let pos = f32_to_fixed(x).unwrap();
             let neg = f32_to_fixed(-x).unwrap();

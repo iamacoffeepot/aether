@@ -392,7 +392,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
     }
     let mut out = Vec::new();
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
-    for ((a, b), incidents) in edges.iter() {
+    for ((a, b), incidents) in &edges {
         if incidents.len() != 2 {
             continue;
         }

@@ -117,9 +117,8 @@ fn list_to_vec(value: &Value) -> Result<Vec<&Value>, ParseError> {
             other => {
                 if out.is_empty() {
                     return Err(ParseError::NotAList(format!("{other}")));
-                } else {
-                    return Err(ParseError::NotProperList);
                 }
+                return Err(ParseError::NotProperList);
             }
         }
     }
@@ -152,14 +151,14 @@ fn expect_arity(
     positional: &[&Value],
     expected: usize,
 ) -> Result<(), ParseError> {
-    if positional.len() != expected {
+    if positional.len() == expected {
+        Ok(())
+    } else {
         Err(ParseError::WrongArity {
             node,
             expected,
             got: positional.len(),
         })
-    } else {
-        Ok(())
     }
 }
 

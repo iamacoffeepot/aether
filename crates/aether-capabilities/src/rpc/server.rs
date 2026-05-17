@@ -185,11 +185,8 @@ mod server_native {
                                 break;
                             }
                             mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
-                        } else {
-                            if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                                break;
-                            }
-                            continue;
+                        } else if accept_shutdown_for_thread.load(Ordering::Acquire) {
+                            break;
                         }
                     }
                 })

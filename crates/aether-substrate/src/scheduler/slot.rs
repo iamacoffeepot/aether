@@ -241,7 +241,7 @@ pub trait Drainable: Send + Sync + 'static {
     /// Debug label — used in tracing events when the worker logs slot
     /// activity. Default `"<unnamed>"`. Implementors override with
     /// something stable (e.g. the actor's namespace).
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "<unnamed>"
     }
 
@@ -409,9 +409,10 @@ pub(crate) mod tests {
 
         fn drain_one(&self, env: u32) {
             let n = self.dispatched.fetch_add(1, Ordering::AcqRel) + 1;
-            if Some(n) == self.panic_at {
-                panic!("CounterSlot panic at envelope #{n} (test-induced)");
-            }
+            assert!(
+                Some(n) != self.panic_at,
+                "CounterSlot panic at envelope #{n} (test-induced)"
+            );
             std::hint::black_box(env);
             if !self.work_per_env.is_zero() {
                 std::thread::sleep(self.work_per_env);
@@ -466,7 +467,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn label(&self) -> &str {
+        fn label(&self) -> &'static str {
             self.label
         }
 
