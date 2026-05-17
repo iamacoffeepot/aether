@@ -711,7 +711,7 @@ mod tests {
         };
         let mut orphan = KindLabels {
             // Deliberately a id that won't match `shape`.
-            kind_id: aether_data::KindId(0xDEADBEEF_DEADBEEF),
+            kind_id: aether_data::KindId(0xDEAD_BEEF_DEAD_BEEF),
             kind_label: Cow::Borrowed("my::Missing"),
             root: LabelNode::Anonymous,
         };

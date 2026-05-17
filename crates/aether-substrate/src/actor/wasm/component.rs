@@ -1149,7 +1149,7 @@ mod tests {
 
         let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
-        let unknown = MailboxId(0xDEADBEEF_u64);
+        let unknown = MailboxId(0xDEAD_BEEF_u64);
         let kind = aether_data::KindId(0xABCD_u64);
         ctx.send(unknown, kind, vec![1, 2, 3], 1);
 
@@ -1191,7 +1191,7 @@ mod tests {
         let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
         ctx.send(
-            MailboxId(0xDEADBEEF_u64),
+            MailboxId(0xDEAD_BEEF_u64),
             aether_data::KindId(0xABCD),
             vec![],
             0,

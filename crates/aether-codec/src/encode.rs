@@ -1474,7 +1474,7 @@ mod tests {
         }]);
         let knd_string = aether_data::tagged_id::encode(aether_data::with_tag(
             aether_data::Tag::Kind,
-            0xdeadbeef,
+            0xdead_beef,
         ))
         .unwrap();
         let err = encode_schema(&json!({ "mailbox": knd_string }), &schema).unwrap_err();

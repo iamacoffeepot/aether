@@ -283,18 +283,18 @@ pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
 /// the canonical-bytes path can hash `KIND_DOMAIN ++ bytes` without
 /// a transient `Vec<u8>` — same offset basis and prime, identical
 /// output.
-pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
+pub(crate) const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut i = 0;
     while i < prefix.len() {
         hash ^= prefix[i] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
         i += 1;
     }
     let mut i = 0;
     while i < payload.len() {
         hash ^= payload[i] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
         i += 1;
     }
     hash

@@ -749,7 +749,7 @@ mod tests {
             )),
         );
         assert_eq!(tagged_id::tag_of(a.0), Some(Tag::Mailbox));
-        assert_ne!(mailbox_id_from_name(""), MailboxId(0xcbf29ce484222325));
+        assert_ne!(mailbox_id_from_name(""), MailboxId(0xcbf2_9ce4_8422_2325));
     }
 
     #[test]

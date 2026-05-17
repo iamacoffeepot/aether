@@ -787,9 +787,9 @@ mod tests {
         .unwrap();
         let _: WireFrame = read_frame(&mut stream).unwrap();
 
-        write_frame(&mut stream, &WireFrame::Ping(0xc0ffee)).expect("write Ping");
+        write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee)).expect("write Ping");
         let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
-        assert_eq!(reply, WireFrame::Pong(0xc0ffee));
+        assert_eq!(reply, WireFrame::Pong(0x00c0_ffee));
     }
 
     /// End-to-end Call dispatch: connect, handshake, fire a `Call`
@@ -961,9 +961,9 @@ mod tests {
         // Immediately Ping. If the fire-and-forget Call had leaked
         // reply correlation, a ReplyEvent / ReplyEnd would arrive
         // before the Pong. Asserting we see Pong first proves no leak.
-        write_frame(&mut stream, &WireFrame::Ping(0xc0ffee)).unwrap();
+        write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee)).unwrap();
         let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
-        assert_eq!(reply, WireFrame::Pong(0xc0ffee));
+        assert_eq!(reply, WireFrame::Pong(0x00c0_ffee));
     }
 
     /// A `Hello` carrying a mismatched `wire_version` triggers a `Bye`

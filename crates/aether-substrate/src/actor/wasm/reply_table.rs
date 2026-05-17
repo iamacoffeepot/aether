@@ -156,9 +156,9 @@ mod tests {
     #[test]
     fn allocate_preserves_correlation_id() {
         let mut t = ReplyTable::new();
-        let entry = ReplyEntry::new(ReplyTarget::Session(token(5)), 0xCAFEBABE);
+        let entry = ReplyEntry::new(ReplyTarget::Session(token(5)), 0xCAFE_BABE);
         let h = t.allocate(entry);
         let got = t.resolve(h).expect("resolves");
-        assert_eq!(got.correlation_id, 0xCAFEBABE);
+        assert_eq!(got.correlation_id, 0xCAFE_BABE);
     }
 }
