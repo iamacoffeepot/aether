@@ -16,7 +16,7 @@
 //! (issues 460 + 821).
 
 use aether_data::Kind;
-use aether_kinds::{Key, LoadComponent, LoadResult, Tick, keycode};
+use aether_kinds::{Key, LoadComponent, LoadResult, keycode};
 use aether_substrate_bundle::test_bench::{
     TestBench,
     test_helpers::require_runtime,
@@ -71,31 +71,6 @@ fn load_sokoban(bench: &mut TestBench, wasm_path: &std::path::Path) {
     }
 }
 
-/// Direct `aether.tick` to the loaded component so the next `capture`
-/// sees fresh render-sink emissions.
-///
-/// Background: `TestBench::capture` runs its frame with
-/// `dispatch_tick=false` (capture is a state snapshot, not a tick
-/// advance). The render cap's vert accumulator drains on every
-/// `record_frame` (`std::mem::replace` on `frame_vertices`), so a
-/// component that emits geometry only on `on_tick` has nothing in
-/// the accumulator by the time capture's render reads it. Sending
-/// `Tick` directly to the component's mailbox right before
-/// `capture` populates the accumulator for the upcoming capture
-/// frame.
-///
-/// Pre-iamacoffeepot/aether#834 this was a band-aid that flaked
-/// because the bare `send_bytes` push didn't subscribe to the
-/// chain's settlement — capture could race ahead before sokoban's
-/// DrawTriangle landed in render's accumulator. iamacoffeepot/aether#834 made
-/// `send_bytes` synchronous on settlement, so nudge_tick now
-/// reliably pre-populates the accumulator before returning.
-fn nudge_tick(bench: &mut TestBench) {
-    bench
-        .send_bytes(&component_address(), Tick::ID, Tick.encode_into_bytes())
-        .expect("send tick");
-}
-
 fn assert_draw_triangle_observed(bench: &TestBench) {
     let observed = bench.count_observed("aether.draw_triangle");
     assert!(
@@ -106,12 +81,18 @@ fn assert_draw_triangle_observed(bench: &TestBench) {
 }
 
 /// Default-level rendering smoke test. Loads the wasm, advances a
-/// few ticks so init can flush, fires one more `Tick` via
-/// `nudge_tick` to populate render's accumulator (consumed during
-/// each advance's render — see `nudge_tick` docs), captures, and
-/// asserts both that `DrawTriangle` mail flowed and that the
-/// captured frame contains pixels diverging from the chassis clear
-/// color.
+/// few ticks so the cap's accumulator + the render cap's
+/// `last_submitted` cache populate, captures, and asserts both
+/// that `DrawTriangle` mail flowed and that the captured frame
+/// contains pixels diverging from the chassis clear color.
+///
+/// Pre-iamacoffeepot/aether#847 this required an explicit
+/// `nudge_tick` after the advance: `capture` runs `record_frame`
+/// with `dispatch_tick=false`, the live `frame_vertices` was
+/// drained by the last `advance` render, and capture saw an empty
+/// buffer. iamacoffeepot/aether#847 made `record_frame` swap-not-
+/// replace into `last_submitted`, so capture replays the last
+/// rendered geometry and no nudge is needed.
 #[test]
 fn default_level_renders_grid_and_player() {
     let Some(wasm_path) = require_runtime("aether_demo_sokoban") else {
@@ -122,7 +103,6 @@ fn default_level_renders_grid_and_player() {
     load_sokoban(&mut bench, &wasm_path);
 
     bench.advance(3).expect("advance");
-    nudge_tick(&mut bench);
 
     let png = bench.capture().expect("capture");
     let img = decode_png(&png).expect("decode capture png");
@@ -158,7 +138,6 @@ fn key_press_keeps_render_path_alive() {
         .expect("send key");
 
     bench.advance(2).expect("post-key advance");
-    nudge_tick(&mut bench);
 
     let png = bench.capture().expect("capture");
     let img = decode_png(&png).expect("decode capture png");

@@ -20,8 +20,7 @@
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_data::Kind;
-use aether_kinds::{LoadComponent, LoadResult, Tick};
+use aether_kinds::{LoadComponent, LoadResult};
 use aether_mesh_viewer::LoadMesh;
 use aether_substrate_bundle::test_bench::{
     TestBench,
@@ -86,27 +85,6 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &std::path::Path) {
     }
 }
 
-/// Direct `aether.tick` to the loaded viewer so the next `capture`
-/// Background: `TestBench::capture` runs its frame with
-/// `dispatch_tick=false` (capture is a state snapshot, not a tick
-/// advance). The render cap's vert accumulator drains on every
-/// `record_frame` (`std::mem::replace` on `frame_vertices`), so a
-/// viewer that emits geometry only on `on_tick` has nothing in the
-/// accumulator by the time capture's render reads it. Sending
-/// `Tick` directly to the component's mailbox right before
-/// `capture` populates the accumulator for the upcoming capture
-/// frame.
-///
-/// Pre-iamacoffeepot/aether#834 this was a band-aid that flaked
-/// because the bare `send_bytes` push didn't subscribe to the
-/// chain's settlement. iamacoffeepot/aether#834 made `send_bytes`
-/// synchronous on settlement, so this now reliably pre-populates.
-fn nudge_tick(bench: &mut TestBench) {
-    bench
-        .send_bytes(&component_address(), Tick::ID, Tick.encode_into_bytes())
-        .expect("send tick");
-}
-
 /// Assert that `aether.draw_triangle` was observed at least once.
 /// Surfaces the observed-kinds list on failure so a typo or missing
 /// subscription is debuggable.
@@ -153,7 +131,6 @@ fn dsl_box_loads_and_renders() {
         )
         .expect("send mesh.load");
     bench.advance(5).expect("post-load advance");
-    nudge_tick(&mut bench);
 
     let png = bench.capture().expect("capture");
     let img = decode_png(&png).expect("decode capture png");
@@ -191,7 +168,6 @@ fn obj_quad_loads_and_renders() {
         )
         .expect("send mesh.load");
     bench.advance(5).expect("post-load advance");
-    nudge_tick(&mut bench);
 
     let png = bench.capture().expect("capture");
     let img = decode_png(&png).expect("decode capture png");
@@ -247,7 +223,6 @@ fn parse_failure_keeps_prior_mesh() {
         )
         .expect("send bad mesh.load");
     bench.advance(5).expect("post-bad-load advance");
-    nudge_tick(&mut bench);
 
     // The cached triangle list should be intact — the captured frame
     // still has non-clear-color geometry.

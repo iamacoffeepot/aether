@@ -511,6 +511,17 @@ impl TestBench {
     /// PNG bytes. Capture observes the current state — it does not
     /// dispatch `Tick`. Pair with `advance` if the world needs to
     /// advance before the capture.
+    ///
+    /// Post-iamacoffeepot/aether#847 the render cap caches the
+    /// most-recently-submitted geometry across frames: the capture's
+    /// `record_frame` sees an empty `frame_vertices` (no producer
+    /// emit this microsecond) and replays the cache instead of
+    /// drawing into a clear-color buffer. Callers no longer need to
+    /// poke the loaded component with a `Tick` before each capture
+    /// — what the test sees is the geometry the producer last
+    /// rendered, which matches "what the user would see right now"
+    /// in the same way wgpu / D3D / Vulkan swapchain front buffers
+    /// behave.
     pub fn capture(&mut self) -> Result<Vec<u8>, TestBenchError> {
         self.capture_with_mails(Vec::new(), Vec::new())
     }
