@@ -4,6 +4,8 @@
 //! `&Image` so a single capture can drive many asserts without
 //! re-decoding.
 
+use std::io::Cursor;
+
 use thiserror::Error;
 
 /// Decoded frame: RGBA8 pixels in row-major top-down order, width
@@ -28,7 +30,10 @@ pub enum ImageError {
 /// always emits 8-bit RGBA, so non-RGBA decodes are flagged as
 /// `UnsupportedColor` rather than silently coerced.
 pub fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
-    let decoder = png::Decoder::new(bytes);
+    // png 0.18 requires `BufRead + Seek` on the reader. Wrap the byte
+    // slice in a `Cursor` to satisfy both bounds (the slice itself is
+    // already `Read` but neither `BufRead` nor `Seek`).
+    let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder
         .read_info()
         .map_err(|e| ImageError::Decode(e.to_string()))?;
@@ -39,7 +44,12 @@ pub fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
     if color != png::ColorType::Rgba {
         return Err(ImageError::UnsupportedColor(color));
     }
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    // png 0.18 returns `Option<usize>` here (None on size overflow);
+    // surface it as a decode error rather than panicking.
+    let buf_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| ImageError::Decode("output buffer size overflowed".to_string()))?;
+    let mut buf = vec![0u8; buf_size];
     reader
         .next_frame(&mut buf)
         .map_err(|e| ImageError::Decode(e.to_string()))?;

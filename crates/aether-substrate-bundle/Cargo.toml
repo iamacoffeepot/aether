@@ -44,7 +44,7 @@ aether-kinds = { path = "../aether-kinds" }
 # Same crate as `wasmtime::Result` re-exports (issue #571).
 anyhow = "1"
 bytemuck = { version = "1.19", features = ["derive"] }
-png = "0.17"
+png = "0.18"
 pollster = "0.4.0"
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # `rmcp` / `axum` / `base64` / `schemars` retired with the embedded MCP
@@ -54,7 +54,7 @@ serde = { version = "1", features = ["derive"] }
 # `test_bench::visual::ImageError` derives `thiserror::Error` (moved
 # from `aether-scenario` per issue 821). New runtime dep here because
 # `aether-substrate-bundle` had no prior thiserror consumer.
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 wgpu = "29.0.1"
 winit = "0.30.13"
@@ -68,7 +68,7 @@ winit = "0.30.13"
 # Ctrl-C only (matches the pre-tokio-retirement behavior, which also
 # distinguished SIGINT/SIGTERM only on Unix).
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc = "3"
