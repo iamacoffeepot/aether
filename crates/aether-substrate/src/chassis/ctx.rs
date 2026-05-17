@@ -509,6 +509,7 @@ impl<'a> ChassisCtx<'a> {
     /// capability sees, so an envelope sent here goes through the
     /// substrate's routing table the same way component-originated mail
     /// does.
+    #[must_use]
     pub fn mail_send_handle(&self) -> Arc<Mailer> {
         Arc::clone(self.mailer)
     }
@@ -517,6 +518,7 @@ impl<'a> ChassisCtx<'a> {
     /// names or descriptors at boot (today: the hub client capability
     /// cloning the registry into its TCP reader thread) reach for
     /// this; most capabilities don't need it.
+    #[must_use]
     pub fn registry(&self) -> &Arc<Registry> {
         self.registry
     }
@@ -525,6 +527,7 @@ impl<'a> ChassisCtx<'a> {
     /// [`Self::mail_send_handle`] but returns a borrow instead of a
     /// clone — preferred when the capability is going to clone with
     /// `Arc::clone` itself.
+    #[must_use]
     pub fn mailer(&self) -> &Arc<Mailer> {
         self.mailer
     }
@@ -535,6 +538,7 @@ impl<'a> ChassisCtx<'a> {
     /// snapshot the list at driver-boot time; capabilities that just
     /// want their own counter should hold the `Arc<AtomicU64>` from
     /// their [`FrameBoundClaim`] directly instead.
+    #[must_use]
     pub fn frame_bound_pending(&self) -> &[(MailboxId, Arc<AtomicU64>)] {
         self.frame_bound_pending
     }
@@ -543,6 +547,7 @@ impl<'a> ChassisCtx<'a> {
     /// [`crate::NativeBinding::from_ctx`] so the cross-class
     /// `wait_reply` guard can classify each outbound recipient.
     /// Capabilities that just want to send mail don't need this.
+    #[must_use]
     pub fn frame_bound_set(&self) -> Arc<RwLock<HashSet<MailboxId>>> {
         Arc::clone(self.frame_bound_set)
     }
@@ -551,6 +556,7 @@ impl<'a> ChassisCtx<'a> {
     /// [`crate::NativeBinding::from_ctx`] so the cross-class
     /// `wait_reply` guard has somewhere to abort to without each
     /// transport plumbing [`crate::HubOutbound`] itself.
+    #[must_use]
     pub fn fatal_aborter(&self) -> Arc<dyn FatalAborter> {
         Arc::clone(self.aborter)
     }
@@ -559,6 +565,7 @@ impl<'a> ChassisCtx<'a> {
     /// [`crate::NativeBinding::from_ctx`] to clone an `Arc<Spawner>`
     /// into every booted actor's transport so per-handler
     /// `NativeCtx::spawn_child` can reach the spawn machinery.
+    #[must_use]
     pub fn spawner_arc(&self) -> &Arc<crate::Spawner> {
         self.spawner
     }

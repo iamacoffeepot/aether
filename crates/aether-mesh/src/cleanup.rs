@@ -165,6 +165,7 @@ fn check_invariants_after_slivers(mesh: &mesh::IndexedMesh) {
 /// emit two polygons sharing a `Plane3` and color: the CCW outer loop
 /// plus the CW hole loop. Callers responsible for grouping by plane
 /// when they want the polygon-with-holes shape.
+#[must_use]
 pub fn run_to_loops(polygons: Vec<Polygon>) -> Vec<Polygon> {
     run_to_indexed(polygons).into_polygons()
 }

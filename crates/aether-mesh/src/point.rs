@@ -20,6 +20,7 @@ impl Point3 {
         })
     }
 
+    #[must_use]
     pub fn to_f32(self) -> Vec3 {
         Vec3::new(
             fixed_to_f32(self.x),

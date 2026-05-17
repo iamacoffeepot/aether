@@ -53,6 +53,7 @@ impl Plane3 {
     /// Construct the plane through three points (winding-CCW gives a
     /// right-handed normal). Returns a degenerate plane (zero normal)
     /// for collinear input — callers should filter via [`Self::is_degenerate`].
+    #[must_use]
     pub fn from_points(a: Point3, b: Point3, c: Point3) -> Self {
         let e1x = b.x as i64 - a.x as i64;
         let e1y = b.y as i64 - a.y as i64;
@@ -70,12 +71,14 @@ impl Plane3 {
     }
 
     /// Zero-normal plane comes from collinear input (degenerate triangle).
+    #[must_use]
     pub fn is_degenerate(&self) -> bool {
         self.n_x == 0 && self.n_y == 0 && self.n_z == 0
     }
 
     /// Signed integer side test. `> 0` in front of the plane (along the
     /// normal direction), `< 0` behind, `0` on the plane.
+    #[must_use]
     pub fn side(&self, p: Point3) -> i128 {
         (self.n_x as i128) * (p.x as i128)
             + (self.n_y as i128) * (p.y as i128)
@@ -114,6 +117,7 @@ impl Plane3 {
     /// sum of three squares fits in i128 (≤ 2^104), and `u128::isqrt`
     /// returns a value ≤ 2^52 — well within i128 for downstream
     /// comparisons against `side()`.
+    #[must_use]
     pub fn coplanar_threshold(&self) -> i128 {
         let nx = self.n_x.unsigned_abs() as u128;
         let ny = self.n_y.unsigned_abs() as u128;
@@ -121,6 +125,7 @@ impl Plane3 {
         (nx * nx + ny * ny + nz * nz).isqrt() as i128
     }
 
+    #[must_use]
     pub fn invert(self) -> Self {
         Plane3 {
             n_x: -self.n_x,
@@ -143,6 +148,7 @@ impl Plane3 {
     /// Used by the cleanup pipeline's coplanar grouping per ADR-0057
     /// — without it, CDT-triangulated faces re-emerge with one plane
     /// key per output triangle and never re-merge into n-gon faces.
+    #[must_use]
     pub fn canonical_key(&self) -> (i64, i64, i64, i128) {
         let g = gcd_4(
             self.n_x.unsigned_abs() as u128,
@@ -166,6 +172,7 @@ impl Plane3 {
     /// Sign of `dot(self.normal, other.normal)`. Used to distinguish
     /// coplanar-front from coplanar-back when classifying a polygon
     /// against a partitioner whose plane it shares.
+    #[must_use]
     pub fn normal_dot_sign(&self, other: &Plane3) -> i32 {
         let dot = (self.n_x as i128) * (other.n_x as i128)
             + (self.n_y as i128) * (other.n_y as i128)

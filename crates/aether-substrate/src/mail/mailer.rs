@@ -134,6 +134,7 @@ impl Mailer {
     /// that are their own hub or for tests that want local warn-drop
     /// semantics (the hub chassis, the warn-drop test in
     /// `actor::wasm::component`).
+    #[must_use]
     pub fn with_outbound(mut self, outbound: Arc<HubOutbound>) -> Self {
         self.outbound = Some(outbound);
         self

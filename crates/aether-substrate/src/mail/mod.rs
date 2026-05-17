@@ -83,6 +83,7 @@ pub struct Mail {
 }
 
 impl Mail {
+    #[must_use]
     pub fn new(recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32) -> Self {
         Self {
             recipient,
@@ -102,6 +103,7 @@ impl Mail {
     /// `ComponentCtx::send` / `NativeBinding::send_mail` for
     /// peer-to-peer component sends (target = `Component(sender)`).
     /// Other mail paths leave the default `ReplyTo::None`.
+    #[must_use]
     pub fn with_reply_to(mut self, reply_to: ReplyTo) -> Self {
         self.reply_to = reply_to;
         self
@@ -112,6 +114,7 @@ impl Mail {
     /// paths (`NativeBinding::send_mail`, `Mailer::send_reply`,
     /// chassis-root push sites) call this immediately after minting.
     /// Mail with no lineage stamped retains `MailId::NONE` defaults.
+    #[must_use]
     pub fn with_lineage(
         mut self,
         mail_id: MailId,

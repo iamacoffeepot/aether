@@ -64,6 +64,7 @@ pub struct SlotState {
 }
 
 impl SlotState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state: AtomicU8::new(STATE_IDLE),
@@ -165,11 +166,13 @@ pub struct BatchBudget {
 
 impl BatchBudget {
     /// Default budget per the const knobs at the top of this module.
+    #[must_use]
     pub fn standard() -> Self {
         Self::custom(BATCH_MAX_MAILS, Duration::from_micros(BATCH_MAX_USEC))
     }
 
     /// Custom budget. Mostly for tests.
+    #[must_use]
     pub fn custom(max_mails: u32, max_duration: Duration) -> Self {
         Self {
             max_mails,
@@ -313,6 +316,7 @@ impl WakeHandle {
     /// Returns `true` if this call won the `Idle → Ready` CAS (and
     /// thus pushed the slot to the ready queue), `false` if the slot
     /// was already `Ready`/`Running` or has been dropped.
+    #[must_use]
     pub fn wake(&self) -> bool {
         if !self.state.try_wake() {
             return false;
@@ -332,6 +336,7 @@ impl WakeHandle {
 
     /// Borrow the slot state. Tests reach for this; production code
     /// goes through `wake`.
+    #[must_use]
     pub fn state(&self) -> &Arc<SlotState> {
         &self.state
     }

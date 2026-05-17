@@ -94,6 +94,7 @@ impl SubstrateBoot {
     /// hub's `Hello` handshake — typically a short chassis-or-profile
     /// name (`"hello-triangle"`, `"headless"`) and
     /// `env!("CARGO_PKG_VERSION")`.
+    #[must_use]
     pub fn builder<'a>(name: &'a str, version: &'a str) -> SubstrateBootBuilder<'a> {
         SubstrateBootBuilder { name, version }
     }

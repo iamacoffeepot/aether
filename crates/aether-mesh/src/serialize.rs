@@ -8,6 +8,7 @@ use lexpr::{Cons, Number, Value};
 use crate::ast::Node;
 use aether_math::Vec3;
 
+#[must_use]
 pub fn serialize(node: &Node) -> String {
     let value = node_to_value(node);
     let opts = lexpr::print::Options::default()

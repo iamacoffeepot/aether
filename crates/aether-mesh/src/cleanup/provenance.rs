@@ -59,6 +59,7 @@ pub struct BoundaryEdgeProvenance {
 /// post-cleanup mesh emit a [`BoundaryEdgeProvenance`] record.
 ///
 /// Returns an empty `Vec` for a watertight mesh.
+#[must_use]
 pub fn analyze_unmatched_boundaries(input: Vec<Polygon>) -> Vec<BoundaryEdgeProvenance> {
     let welded = IndexedMesh::weld(input);
     let post_weld_directed = build_directed(&welded);

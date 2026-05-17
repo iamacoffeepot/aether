@@ -110,6 +110,7 @@ impl PoolHandle {
     /// Hand out a clone of the ready-queue sender. PR C wires this
     /// into [`crate::scheduler::WakeHandle`]s when registering
     /// dispatcher slots. Panics if the pool has been shut down.
+    #[must_use]
     pub fn ready_tx(&self) -> Sender<Arc<dyn Drainable>> {
         self.ready_tx
             .as_ref()
@@ -120,6 +121,7 @@ impl PoolHandle {
     /// Shut down the pool, joining every worker, and return each
     /// worker's join result so tests can inspect handler-induced
     /// panics (production goes through `Drop`, which discards results).
+    #[must_use]
     pub fn shutdown_with_results(mut self) -> Vec<thread::Result<()>> {
         self.shutdown_inner()
     }
@@ -139,6 +141,7 @@ impl PoolHandle {
     }
 
     /// Worker count. Exposed for tracing / introspection.
+    #[must_use]
     pub fn worker_count(&self) -> usize {
         self.workers.len()
     }

@@ -135,6 +135,7 @@ impl<'a> NativeCtx<'a> {
     /// dispatched. Read by outbound `send` paths to stamp
     /// `parent_mail` on child mail. `MailId::NONE` when the ctx was
     /// built without an inbound (close hook, init, chassis-pushed).
+    #[must_use]
     pub fn in_flight_mail_id(&self) -> MailId {
         self.in_flight_mail_id
     }
@@ -144,6 +145,7 @@ impl<'a> NativeCtx<'a> {
     /// `root` on child mail so descendants share the chain. The
     /// chassis-root case (no inbound) leaves this `MailId::NONE` and
     /// `NativeBinding::send_mail` mints a fresh root.
+    #[must_use]
     pub fn in_flight_root(&self) -> MailId {
         self.in_flight_root
     }
@@ -154,6 +156,7 @@ impl<'a> NativeCtx<'a> {
     /// [`MailCtx::reply`]. `target == ReplyTarget::None` means the
     /// inbound was broadcast or peer-component mail with no reply
     /// destination.
+    #[must_use]
     pub fn reply_target(&self) -> ReplyTo {
         self.sender
     }
@@ -163,6 +166,7 @@ impl<'a> NativeCtx<'a> {
     /// substrate-generated, hub-bubbled). Issue #581's `LogCapability`
     /// reads this to populate `LogEntry::origin` from the envelope
     /// rather than the payload.
+    #[must_use]
     pub fn origin(&self) -> Option<aether_data::MailboxId> {
         match self.sender.target {
             crate::mail::ReplyTarget::Component(id) => Some(id),
@@ -172,12 +176,14 @@ impl<'a> NativeCtx<'a> {
 
     /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
     /// addressing the unique instance of receiver actor `R`.
+    #[must_use]
     pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
     }
 
     /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
     /// from a runtime instance name.
+    #[must_use]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
@@ -367,6 +373,7 @@ impl<'a> NativeCtx<'a> {
     /// untyped dispatch always want the returned `MailId`. The typed
     /// `send` / `send_many` on `NativeActorMailbox` cover the
     /// fire-and-forget case.
+    #[must_use]
     pub fn send_envelope_traced(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_returning_root(
             recipient.0,
@@ -395,6 +402,7 @@ impl<'a> NativeCtx<'a> {
     /// the wrong root and `subscribe_settlement_mail` would never fire
     /// (descendants don't settle individually; only the chain root
     /// does).
+    #[must_use]
     pub fn send_envelope_as_root(
         &self,
         recipient: MailboxId,
@@ -508,6 +516,7 @@ impl<'a> NativeInitCtx<'a> {
     /// Promoted from `pub(crate)` to `pub` by issue 654 when the
     /// trampoline moved to `aether-capabilities` next to its consumer;
     /// no other external caller is intended.
+    #[must_use]
     pub fn binding(&self) -> &Arc<NativeBinding> {
         self.binding
     }
@@ -520,6 +529,7 @@ impl<'a> NativeInitCtx<'a> {
     /// `aether.input.subscribe { mailbox: ctx.self_id() }` before
     /// registration completes; replies route correctly once the spawn
     /// lifecycle finishes inserting the entry.
+    #[must_use]
     pub fn self_id(&self) -> crate::mail::MailboxId {
         self.binding.self_mailbox()
     }
@@ -527,6 +537,7 @@ impl<'a> NativeInitCtx<'a> {
     /// Clone the substrate's mailer. Caps that need to register a
     /// `Mailer::set_outbound`-style hook (Hub client, future
     /// fallback routers) reach for this; most caps don't need it.
+    #[must_use]
     pub fn mailer(&self) -> Arc<Mailer> {
         Arc::clone(&self.mailer)
     }
@@ -549,12 +560,14 @@ impl<'a> NativeInitCtx<'a> {
 
     /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
     /// addressing the unique instance of receiver actor `R`.
+    #[must_use]
     pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
     }
 
     /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
     /// from a runtime instance name.
+    #[must_use]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
@@ -718,6 +731,7 @@ impl Default for ExportedHandles {
 }
 
 impl ExportedHandles {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             by_type: HashMap::new(),
@@ -727,6 +741,7 @@ impl ExportedHandles {
     /// Retrieve a cloned copy of the published handle bundle of type
     /// `H`, or `None` if no cap published one. The chassis-side
     /// reader; caps publish via [`NativeInitCtx::publish_handle`].
+    #[must_use]
     pub fn get<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
         self.by_type
             .get(&TypeId::of::<H>())
@@ -735,11 +750,13 @@ impl ExportedHandles {
     }
 
     /// `true` when no cap has published a handle yet. Useful for tests.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_type.is_empty()
     }
 
     /// Number of published handle bundles.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.by_type.len()
     }

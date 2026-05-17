@@ -49,6 +49,7 @@ pub struct ReplyEntry {
 
 impl ReplyEntry {
     /// Short constructor: `target` + `correlation_id`.
+    #[must_use]
     pub fn new(target: ReplyTarget, correlation_id: u64) -> Self {
         Self {
             target,
@@ -59,11 +60,13 @@ impl ReplyEntry {
     /// Back-compat shim for call sites that used the pre-correlation
     /// `ReplyEntry::Session(token)` form. Builds an entry with no
     /// correlation.
+    #[must_use]
     pub fn session(token: SessionToken) -> Self {
         Self::new(ReplyTarget::Session(token), 0)
     }
 
     /// Back-compat shim for `ReplyEntry::Component(mailbox)`.
+    #[must_use]
     pub fn component(mailbox: MailboxId) -> Self {
         Self::new(ReplyTarget::Component(mailbox), 0)
     }
@@ -77,6 +80,7 @@ pub struct ReplyTable {
 }
 
 impl ReplyTable {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -98,6 +102,7 @@ impl ReplyTable {
     /// Look up the entry for a guest-supplied handle. Returns `None`
     /// for `NO_REPLY_HANDLE` and for handles that were never
     /// allocated.
+    #[must_use]
     pub fn resolve(&self, handle: u32) -> Option<ReplyEntry> {
         if handle == NO_REPLY_HANDLE {
             return None;

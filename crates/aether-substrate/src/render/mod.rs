@@ -65,6 +65,7 @@ pub const IDENTITY_VIEW_PROJ: [f32; 16] = [
 /// pipeline expects. Exposed so chassis-side helpers building extra
 /// pipelines (e.g. desktop's wireframe overlay) can match the layout
 /// without re-deriving offsets.
+#[must_use]
 pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: VERTEX_STRIDE,

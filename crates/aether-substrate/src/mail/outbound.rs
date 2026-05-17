@@ -192,6 +192,7 @@ pub struct RecordingBackend {
 }
 
 impl RecordingBackend {
+    #[must_use]
     pub fn new() -> (Self, mpsc::Receiver<EgressEvent>) {
         let (tx, rx) = mpsc::channel();
         (Self { tx }, rx)
@@ -289,6 +290,7 @@ impl HubOutbound {
     /// constructs through this so substrate-core never holds a
     /// hub-protocol-aware default — the wiring happens at chassis
     /// composition time (the `HubClientCapability` boot, today).
+    #[must_use]
     pub fn disconnected() -> Arc<Self> {
         Arc::new(Self {
             backend: OnceLock::new(),
@@ -397,6 +399,7 @@ impl HubOutbound {
     /// instead of hub-protocol frames. The aether-hub crate ships its
     /// own `loopback_outbound` for tests that want to assert on
     /// `EngineToHub` frames specifically.
+    #[must_use]
     pub fn attached_loopback() -> (Arc<Self>, mpsc::Receiver<EgressEvent>) {
         let (backend, rx) = RecordingBackend::new();
         let outbound = Self::disconnected();

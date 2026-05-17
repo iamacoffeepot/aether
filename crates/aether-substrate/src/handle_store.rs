@@ -128,6 +128,7 @@ pub enum WalkError {
 }
 
 impl HandleStore {
+    #[must_use]
     pub fn new(max_bytes: usize) -> Self {
         Self {
             inner: RwLock::new(Inner {
@@ -384,6 +385,7 @@ fn evict_until_fits(
 /// The mailer uses this as the fast-path predicate: kinds without
 /// any refs skip the walker entirely and the original payload bytes
 /// flow through unchanged.
+#[must_use]
 pub fn schema_contains_ref(schema: &SchemaType) -> bool {
     match schema {
         SchemaType::Ref(_) => true,

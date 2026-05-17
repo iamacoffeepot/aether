@@ -60,6 +60,7 @@ pub struct CaptureQueue {
 }
 
 impl CaptureQueue {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -68,6 +69,7 @@ impl CaptureQueue {
     /// if the slot was empty and the request is now pending; `false`
     /// if a capture is already in flight. The caller wakes the event
     /// loop on success — `CaptureQueue` itself stays chassis-agnostic.
+    #[must_use]
     pub fn request(&self, pending: PendingCapture) -> bool {
         let mut slot = self.slot.lock().unwrap();
         if slot.is_some() {
@@ -80,6 +82,7 @@ impl CaptureQueue {
     /// Take the pending capture if one is set. Called by the render
     /// thread at the start of a frame; leaves the slot empty so the
     /// next capture request can land before this one completes.
+    #[must_use]
     pub fn take(&self) -> Option<PendingCapture> {
         self.slot.lock().unwrap().take()
     }

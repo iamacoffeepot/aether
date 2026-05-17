@@ -659,6 +659,7 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
     /// `A: HandlesKind<K>` ensures only kinds the actor's handler set
     /// covers can be pre-loaded; the strict-receiver miss path stays
     /// off the bootstrap surface.
+    #[must_use]
     pub fn after_init<K>(mut self, mail: K) -> Self
     where
         A: HandlesKind<K>,
