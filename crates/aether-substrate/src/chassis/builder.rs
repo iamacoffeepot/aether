@@ -1910,14 +1910,14 @@ mod tests {
         impl Kind for Ping {
             const NAME: &'static str = "test.with_actor.ping";
             const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0001);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2079,14 +2079,14 @@ mod tests {
         impl Kind for Tick {
             const NAME: &'static str = "test.local.tick";
             const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0002);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2209,14 +2209,14 @@ mod tests {
         impl Kind for Hatch {
             const NAME: &'static str = "test.spawn_child.hatch";
             const ID: DataKindId = DataKindId(0xC0C1_C2C3_C4C5_C6C7);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2228,14 +2228,14 @@ mod tests {
         impl Kind for Ping {
             const NAME: &'static str = "test.spawn_child.ping";
             const ID: DataKindId = DataKindId(0xD0D1_D2D3_D4D5_D6D7);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2389,14 +2389,14 @@ mod tests {
         impl Kind for Quit {
             const NAME: &'static str = "test.shutdown.quit";
             const ID: DataKindId = DataKindId(0xE0E1_E2E3_E4E5_E6E7);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2686,14 +2686,14 @@ mod tests {
         impl Kind for Quit {
             const NAME: &'static str = "test.monitor.quit";
             const ID: DataKindId = DataKindId(0xC0DE_C0DE_4B4B_4B4B);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2707,14 +2707,14 @@ mod tests {
         impl Kind for WatchOrder {
             const NAME: &'static str = "test.monitor.watch_order";
             const ID: DataKindId = DataKindId(0x4B4B_C0DE_C0DE_C0DE);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -2943,14 +2943,14 @@ mod tests {
         impl Kind for Quit {
             const NAME: &'static str = "test.monitor.quit2";
             const ID: DataKindId = DataKindId(0xCAFE_BABE_DEAD_BEEF);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
         #[repr(C)]
@@ -2961,14 +2961,14 @@ mod tests {
         impl Kind for WatchOrder {
             const NAME: &'static str = "test.monitor.watch_order2";
             const ID: DataKindId = DataKindId(0xBEEF_DEAD_BABE_CAFE);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -3153,14 +3153,14 @@ mod tests {
         impl Kind for Quit {
             const NAME: &'static str = "test.resolve.quit";
             const ID: DataKindId = DataKindId(0xF00D_F00D_F00D_F00D);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -3410,14 +3410,14 @@ mod tests {
         impl Kind for Hatch {
             const NAME: &'static str = "test.recursive.hatch";
             const ID: DataKindId = DataKindId(0xA00A_A00A_A00A_A00A);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -3430,14 +3430,14 @@ mod tests {
         impl Kind for Ping {
             const NAME: &'static str = "test.recursive.ping";
             const ID: DataKindId = DataKindId(0xB00B_B00B_B00B_B00B);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -3450,14 +3450,14 @@ mod tests {
         impl Kind for Quit {
             const NAME: &'static str = "test.recursive.quit";
             const ID: DataKindId = DataKindId(0xC00C_C00C_C00C_C00C);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
@@ -3729,14 +3729,14 @@ mod tests {
         impl Kind for WireBarrierPing {
             const NAME: &'static str = "test.barrier.wire_ping";
             const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 

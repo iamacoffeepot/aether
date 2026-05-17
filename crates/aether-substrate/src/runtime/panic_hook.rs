@@ -320,11 +320,11 @@ mod tests {
     struct StringVisit<'a>(&'a mut String);
 
     impl Visit for StringVisit<'_> {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            let _ = write!(self.0, "{}={:?};", field.name(), value);
-        }
         fn record_str(&mut self, field: &Field, value: &str) {
             let _ = write!(self.0, "{}={};", field.name(), value);
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let _ = write!(self.0, "{}={:?};", field.name(), value);
         }
     }
 }

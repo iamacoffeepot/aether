@@ -71,16 +71,16 @@ fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64,
             )
         }
 
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
-            tagged_id::decode_with_tag(v, self.expected).map_err(de::Error::custom)
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
+            v.try_into().map_err(|_| de::Error::custom("negative id"))
         }
 
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
             Ok(v)
         }
 
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
-            v.try_into().map_err(|_| de::Error::custom("negative id"))
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
+            tagged_id::decode_with_tag(v, self.expected).map_err(de::Error::custom)
         }
     }
 

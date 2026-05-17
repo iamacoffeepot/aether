@@ -423,24 +423,6 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        match event {
-            UserEvent::Capture => {
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-        }
-    }
-
-    /// winit fires this between events. Issue 603 Phase 3 makes the
-    /// driver itself the cap for `aether.window`, so the per-frame
-    /// drain happens here instead of riding through `EventLoopProxy`
-    /// from a separate dispatcher thread.
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        self.drain_window_inbox();
-    }
-
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -468,6 +450,16 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.started = Some(Instant::now());
         self.publish_window_size(initial_size.width, initial_size.height);
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Capture => {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
     }
 
     // winit's `window_event` dispatches one arm per `WindowEvent`
@@ -619,6 +611,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => {}
         }
+    }
+
+    /// winit fires this between events. Issue 603 Phase 3 makes the
+    /// driver itself the cap for `aether.window`, so the per-frame
+    /// drain happens here instead of riding through `EventLoopProxy`
+    /// from a separate dispatcher thread.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.drain_window_inbox();
     }
 }
 
