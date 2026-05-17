@@ -58,6 +58,13 @@ jobs:
           # We own restore/save (steps above + below); qodana-action's
           # built-in cache save runs root-owned and trips tar exit 2.
           use-caches: false
+          # Upload SARIF + qodana.sarif.json as a workflow artifact
+          # ('qodana-report') so triagers can grab findings without
+          # depending on the JB web dashboard. Needed for the Phase 2+
+          # sweeps in iamacoffeepot/aether#913 — re-triaging against
+          # the new 424-finding baseline (post rust-src components fix
+          # on commit 08e452c) requires local SARIF access.
+          upload-result: true
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
 
