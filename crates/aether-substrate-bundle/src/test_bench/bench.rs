@@ -56,7 +56,12 @@ pub const DEFAULT_HEIGHT: u32 = 600;
 /// decode failures (rare — implies a kind shape mismatch); `Timeout`
 /// covers replies that never arrive (chassis hung or wrong target);
 /// `Advance` and `Capture` pass through `Err` variants from the
-/// substrate's reply.
+/// substrate's reply. `SettlementTimeout` surfaces when a
+/// `send_mail` / `send_bytes` chain didn't drain within
+/// [`SETTLEMENT_TIMEOUT`] — issue 834: the bench waits on each
+/// pushed chain's `Settled { root }` so the next observation
+/// (`capture()`, the next typed send, an assertion) is causally
+/// after the producer's full descendant tree dispatched.
 #[derive(Debug)]
 pub enum TestBenchError {
     Boot(String),
@@ -68,6 +73,10 @@ pub enum TestBenchError {
     Advance(String),
     Capture(String),
     UnknownMailbox(String),
+    SettlementTimeout {
+        recipient: String,
+        kind_name: &'static str,
+    },
 }
 
 impl fmt::Display for TestBenchError {
@@ -85,9 +94,22 @@ impl fmt::Display for TestBenchError {
             Self::Advance(e) => write!(f, "advance failed: {e}"),
             Self::Capture(e) => write!(f, "capture failed: {e}"),
             Self::UnknownMailbox(name) => write!(f, "unknown mailbox: {name}"),
+            Self::SettlementTimeout {
+                recipient,
+                kind_name,
+            } => write!(
+                f,
+                "send to {recipient:?} ({kind_name}) did not settle within {} s — chain likely has an in_flight leak; check `engine_logs` for stuck mail",
+                SETTLEMENT_TIMEOUT.as_secs(),
+            ),
         }
     }
 }
+
+/// Per-send settlement timeout. Mirrors the `run_frame` tick wait at
+/// `bench.rs::run_frame`; long enough to absorb wasm compile + cap
+/// dispatcher wake under nextest CPU contention.
+const SETTLEMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl std::error::Error for TestBenchError {}
 
@@ -333,10 +355,21 @@ impl TestBench {
         self.observed_kinds.lock().unwrap().clone()
     }
 
-    /// Push a fire-and-forget mail into the queue. Recipient is
-    /// resolved by name against the registry; kind ids are pulled
-    /// from `K::ID` so the caller doesn't need to look anything up.
-    /// No reply awaited.
+    /// Push a typed mail and block until the dispatched chain
+    /// settles (ADR-0080 §6). Recipient is resolved by name against
+    /// the registry; kind ids are pulled from `K::ID` so the caller
+    /// doesn't need to look anything up.
+    ///
+    /// Issue 834: this is synchronous-on-settle. The mail is minted
+    /// as a chassis-root via [`push_chassis_root_mail`] so the trace
+    /// pipeline tracks the chain; the bench then subscribes to
+    /// `Settled { root }` and waits up to [`SETTLEMENT_TIMEOUT`] for
+    /// the chain (the recipient's handler + every descendant mail
+    /// it spawned) to drain. By the time this returns, any
+    /// subsequent observation (`capture()`, the next send, an
+    /// assertion) is causally after the producer's full chain —
+    /// no more nudge_tick-style band-aids needed for render-flush
+    /// races.
     pub fn send_mail<K>(&self, recipient_name: &str, mail: &K) -> Result<(), TestBenchError>
     where
         K: Kind + serde::Serialize,
@@ -346,8 +379,7 @@ impl TestBench {
             .lookup(recipient_name)
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let payload = encode_struct(mail);
-        self.queue.push(Mail::new(mailbox, K::ID, payload, 1));
-        Ok(())
+        self.push_and_settle(recipient_name, K::NAME, mailbox, K::ID, payload)
     }
 
     /// Bytes-level send for callers that resolve kind+payload at
@@ -355,6 +387,9 @@ impl TestBench {
     /// recipient lookup as `send_mail` but takes a pre-encoded
     /// `(kind, bytes)` tuple — the typed `send_mail<K>` is the
     /// preferred path when `K` is known statically.
+    ///
+    /// Issue 834: synchronous-on-settle, same semantics as
+    /// [`Self::send_mail`].
     pub fn send_bytes(
         &self,
         recipient_name: &str,
@@ -365,8 +400,33 @@ impl TestBench {
             .registry
             .lookup(recipient_name)
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
-        self.queue.push(Mail::new(mailbox, kind, bytes, 1));
-        Ok(())
+        self.push_and_settle(recipient_name, "<bytes>", mailbox, kind, bytes)
+    }
+
+    /// Shared body of [`Self::send_mail`] / [`Self::send_bytes`]:
+    /// push as a chassis-root mail (so the trace pipeline tracks
+    /// the chain) and block on `Settled { root }`. Returns
+    /// `SettlementTimeout` if the chain doesn't drain within
+    /// [`SETTLEMENT_TIMEOUT`].
+    fn push_and_settle(
+        &self,
+        recipient_name: &str,
+        kind_name: &'static str,
+        mailbox: aether_data::MailboxId,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> Result<(), TestBenchError> {
+        let cid = self.fresh_correlation_id();
+        let registry = self._passive.settlement_registry();
+        let root = push_chassis_root_mail(&self.queue, cid, mailbox, kind, payload, 1);
+        let rx = registry.subscribe_settlement(root);
+        match rx.recv_timeout(SETTLEMENT_TIMEOUT) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(TestBenchError::SettlementTimeout {
+                recipient: recipient_name.to_owned(),
+                kind_name,
+            }),
+        }
     }
 
     /// Issue 607 Phase 3: spawn an instanced actor onto the bench's

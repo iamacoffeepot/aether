@@ -87,22 +87,21 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &std::path::Path) {
 }
 
 /// Direct `aether.tick` to the loaded viewer so the next `capture`
-/// sees fresh render-sink emissions.
-///
 /// Background: `TestBench::capture` runs its frame with
 /// `dispatch_tick=false` (capture is a state snapshot, not a tick
-/// advance). The render sink's vert buffer is consumed-and-replaced
-/// every frame, so a component that emits geometry only on `on_tick`
-/// paints nothing during the capture frame even though the previous
-/// `advance` ticked it. Sending `Tick` directly to the component's
-/// mailbox right before `capture` queues a tick that drains alongside
-/// the capture request, populating the buffer before the offscreen
-/// render reads it.
+/// advance). The render cap's vert accumulator drains on every
+/// `record_frame` (`std::mem::replace` on `frame_vertices`), so a
+/// viewer that emits geometry only on `on_tick` has nothing in the
+/// accumulator by the time capture's render reads it. Sending
+/// `Tick` directly to the component's mailbox right before
+/// `capture` populates the accumulator for the upcoming capture
+/// frame.
+///
+/// Pre-iamacoffeepot/aether#834 this was a band-aid that flaked
+/// because the bare `send_bytes` push didn't subscribe to the
+/// chain's settlement. iamacoffeepot/aether#834 made `send_bytes`
+/// synchronous on settlement, so this now reliably pre-populates.
 fn nudge_tick(bench: &mut TestBench) {
-    // `Tick` is a unit struct on the cast wire shape (no Serialize),
-    // so it can't go through `send_mail::<K>` (postcard-only). Use
-    // the bytes path with the kind's own `encode_into_bytes` helper,
-    // which the derive emits per-shape.
     bench
         .send_bytes(&component_address(), Tick::ID, Tick.encode_into_bytes())
         .expect("send tick");
