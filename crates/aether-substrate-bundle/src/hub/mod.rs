@@ -24,3 +24,14 @@ pub use chassis::{HubChassis, HubEnv, HubServerDriverCapability, HubServerDriver
 /// out-of-process `aether-mcp` coordinator dials (matching that
 /// crate's `DEFAULT_HUB_RPC_ADDR`). `AETHER_RPC_PORT` overrides.
 pub const DEFAULT_RPC_PORT: u16 = 8901;
+
+/// Parse the `AETHER_RPC_PORT` env var into an optional port number
+/// (issue 792). `None` when unset or unparseable. The hub chassis
+/// substitutes [`DEFAULT_RPC_PORT`] when this returns `None`; the
+/// desktop and headless chassis treat `None` as "don't boot the RPC
+/// server" instead.
+pub fn rpc_port_from_env() -> Option<u16> {
+    std::env::var("AETHER_RPC_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}

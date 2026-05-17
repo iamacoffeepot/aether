@@ -54,10 +54,7 @@ impl HubEnv {
     /// development story.
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
-        let rpc_port = std::env::var("AETHER_RPC_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_RPC_PORT);
+        let rpc_port = super::rpc_port_from_env().unwrap_or(DEFAULT_RPC_PORT);
         Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
         }

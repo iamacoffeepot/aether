@@ -74,9 +74,7 @@ impl HeadlessEnv {
         let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
         // `AETHER_RPC_PORT` has no default — absent means RpcServer
         // doesn't boot. Binds `127.0.0.1`, matching the hub chassis.
-        let rpc_addr = std::env::var("AETHER_RPC_PORT")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
+        let rpc_addr = crate::hub::rpc_port_from_env()
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         HeadlessEnv {
             namespace_roots,
