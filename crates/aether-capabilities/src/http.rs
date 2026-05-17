@@ -126,15 +126,12 @@ impl HttpConfig {
 }
 
 fn disable_flag_env() -> bool {
-    std::env::var("AETHER_HTTP_DISABLE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    std::env::var("AETHER_HTTP_DISABLE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn https_flag_env() -> bool {
     std::env::var("AETHER_HTTP_REQUIRE_HTTPS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn parse_allowlist_env() -> HashSet<String> {

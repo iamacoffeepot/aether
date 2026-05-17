@@ -534,7 +534,7 @@ mod native {
                 std::env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
                 std::env::set_var("AETHER_TRACE_MAX_ROOTS", "1000");
             }
-            observer_with(Duration::from_millis(60_000), 1000)
+            observer_with(Duration::from_mins(1), 1000)
         }
 
         fn observer_with(retention: Duration, max_roots: usize) -> TraceObserverCapability {
@@ -706,7 +706,7 @@ mod native {
 
         #[test]
         fn max_roots_evicts_oldest() {
-            let mut obs = observer_with(Duration::from_secs(3600), 3);
+            let mut obs = observer_with(Duration::from_hours(1), 3);
             for cid in 1..=5 {
                 let m = mail(1, cid);
                 apply_sent_event(
@@ -759,7 +759,7 @@ mod native {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
-                retention: Duration::from_secs(60),
+                retention: Duration::from_mins(1),
                 max_roots: 1000,
                 mailer: Arc::clone(&mailer),
                 settled_kind,
@@ -979,7 +979,7 @@ mod native {
             // Exceeding `max_roots` evicts the oldest by `last_event_at`,
             // and `drop_orphaned_mails` should prune the secondary
             // index for the evicted mails too.
-            let mut obs = observer_with(Duration::from_secs(3600), 3);
+            let mut obs = observer_with(Duration::from_hours(1), 3);
             for cid in 1..=5u64 {
                 let m = mail(1, cid);
                 apply_sent_event(
