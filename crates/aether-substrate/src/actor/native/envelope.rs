@@ -15,7 +15,7 @@ use crate::mail::{KindId, MailId, ReplyTo};
 /// inbound mail's identity and causal-chain pointers. The native
 /// dispatcher reads them to populate the per-handler `NativeCtx`'s
 /// `in_flight()` accessors so child sends inherit the correct root.
-/// PR 2 of issue #707 plumbs the data; PR 2's TraceObserver hooks
+/// PR 2 of issue #707 plumbs the data; PR 2's `TraceObserver` hooks
 /// emit `TraceEvent::Received { mail_id, .. }` against the same value
 /// the producer's `Sent` event carried.
 #[derive(Debug)]
@@ -33,7 +33,7 @@ pub struct Envelope {
 
 /// Issue iamacoffeepot/aether#848 PR 3: move every field out of
 /// the inbound [`OwnedDispatch`] into a fresh [`Envelope`]. No
-/// allocations — payload + kind_name + origin all transfer
+/// allocations — payload + `kind_name` + origin all transfer
 /// ownership. Replaces the legacy `build_envelope(&MailDispatch)`
 /// path inside production cap registration closures, which paid
 /// `Vec<u8>` + `String` clones per dispatch.

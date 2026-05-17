@@ -25,8 +25,8 @@
 //! `Arc<SegQueue<TraceEvent>>` through every binding constructor is
 //! invasive churn for a feature that runs at most once per process.
 //! The global is initialised exactly once at chassis boot and never
-//! reset — multi-chassis test fixtures (TestBench) share the queue
-//! across their substrates, which is fine because each TraceEvent
+//! reset — multi-chassis test fixtures (`TestBench`) share the queue
+//! across their substrates, which is fine because each `TraceEvent`
 //! carries the producer's [`MailboxId`] so the observer can attribute
 //! events even if the queue is shared.
 
@@ -51,7 +51,7 @@ static SUBSTRATE_START: OnceLock<Instant> = OnceLock::new();
 /// Process-global trace queue. Set by [`install_trace_queue`] at
 /// chassis boot; producer-side hooks push when present, no-op when
 /// absent. Wrapped in `OnceLock<Arc<SegQueue>>` so the drainer thread
-/// can hold a clone for `pop` without contending on the OnceLock
+/// can hold a clone for `pop` without contending on the `OnceLock`
 /// itself on every read.
 static TRACE_QUEUE: OnceLock<Arc<SegQueue<TraceEvent>>> = OnceLock::new();
 
@@ -179,7 +179,7 @@ pub fn record_finished(mail_id: MailId) {
 /// own `AtomicU64` counter, symmetric with each per-actor `NativeBinding`'s
 /// counter). Pre-PR 4 the test bench / hub minters were the only
 /// chassis-side counters; this helper shapes them as ADR-0080 §1
-/// chassis-root MailIds.
+/// chassis-root `MailId`s.
 pub fn push_chassis_root_mail(
     mailer: &Mailer,
     correlation_id: u64,

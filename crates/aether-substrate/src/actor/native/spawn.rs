@@ -174,7 +174,7 @@ impl Spawner {
     /// `timeout`-bounded loop. Under nextest contention the worker that
     /// observed the wake could be scheduled out long enough that the
     /// 2 s deadline elapsed before the close cycle ran, surfacing as
-    /// the chassis_teardown_runs_unwire flake. The waker now installs a
+    /// the `chassis_teardown_runs_unwire` flake. The waker now installs a
     /// one-shot `crossbeam_channel::bounded(1)` per entry; the slot's
     /// close cycle fires it after `unwire` + registry close land, so
     /// teardown wakes the instant the cycle settles instead of polling.
@@ -653,7 +653,7 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
 
     /// Append `mail` to the bootstrap sequence. Order-preserving —
     /// the spawned actor sees envelopes in the order they were added.
-    /// Sender on each envelope is the spawner's reply target; reply_to
+    /// Sender on each envelope is the spawner's reply target; `reply_to`
     /// defaults to the spawner's mailbox.
     ///
     /// `A: HandlesKind<K>` ensures only kinds the actor's handler set

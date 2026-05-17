@@ -136,7 +136,7 @@ pub struct MailDispatch<'a> {
 /// borrow shape is wrong for actor-enqueue handlers — the borrow
 /// can't outlive the synchronous push call, so any handler that
 /// wants to enqueue must first clone. `OwnedDispatch` owns its
-/// payload + kind_name so it can be moved cross-thread directly.
+/// payload + `kind_name` so it can be moved cross-thread directly.
 #[derive(Clone, Debug)]
 pub struct OwnedDispatch {
     /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
@@ -281,7 +281,7 @@ pub enum MailboxEntry {
     /// public [`Registry::register_inbox`] /
     /// [`Registry::try_register_inbox`] for callers that own a
     /// separate dispatcher loop. Handler receives [`OwnedDispatch`]
-    /// so payload + kind_name move into the downstream envelope —
+    /// so payload + `kind_name` move into the downstream envelope —
     /// see [`InboxHandler`] for the full contract.
     Inbox(Arc<dyn InboxHandler>),
     /// The handler body does its work inline on the pushing thread;
@@ -350,8 +350,8 @@ struct Inner {
     /// `KindDescriptor`, substrate boot from `descriptors::all()`.
     kinds: HashMap<KindId, KindSlot>,
     /// O(1) name → id reverse lookup. Kept as a parallel map rather
-    /// than scanning `kinds` because the dispatch path (reply_mail kind
-    /// validation, hub_client inbound-mail name→id) runs on every mail.
+    /// than scanning `kinds` because the dispatch path (`reply_mail` kind
+    /// validation, `hub_client` inbound-mail name→id) runs on every mail.
     /// Every insert into `kinds` mirrors into `name_index`; every slot
     /// has exactly one entry here.
     name_index: HashMap<String, KindId>,

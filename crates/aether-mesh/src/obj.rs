@@ -1,7 +1,7 @@
 //! Wavefront OBJ writer for the spike's mesher output.
 //!
 //! OBJ is the simplest text format every 3D viewer can open (Preview.app on
-//! macOS, Blender, MeshLab, …). For spike measurability this beats stdout
+//! macOS, Blender, `MeshLab`, …). For spike measurability this beats stdout
 //! triangle dumps — you can actually look at the mesh.
 //!
 //! Per-face color is not standard OBJ; we emit one OBJ group per palette

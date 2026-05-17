@@ -101,7 +101,7 @@ fn bucket_key(plane: &Plane3, color: u32) -> BucketKey {
 /// or choke on. Checked at every cleanup stage so the first pass to
 /// emit a non-simple loop is identifiable.
 ///
-/// O(P · V) — one HashSet per polygon, single linear scan.
+/// O(P · V) — one `HashSet` per polygon, single linear scan.
 pub(crate) fn find_non_simple_loops(mesh: &IndexedMesh) -> Vec<NonSimpleLoopViolation> {
     use std::collections::HashMap;
     let mut violations: Vec<NonSimpleLoopViolation> = Vec::new();
@@ -288,7 +288,7 @@ pub(crate) fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJ
 /// conditions tautologically (retain on `len >= 3`, dedup-consecutive
 /// before retain), so violations here mean a regression in either step.
 ///
-/// O(P · V_avg).
+/// O(P · `V_avg`).
 pub(crate) fn find_post_sliver_violations(mesh: &IndexedMesh) -> Vec<PostSliverViolation> {
     let mut violations: Vec<PostSliverViolation> = Vec::new();
     for (poly_idx, poly) in mesh.polygons.iter().enumerate() {
@@ -580,7 +580,7 @@ mod tests {
         );
     }
 
-    /// Two distinct VertexIds resolving to identical fixed-point
+    /// Two distinct `VertexId`s resolving to identical fixed-point
     /// coords — exactly what the welding pass should have folded
     /// together. Surfacing this means the tolerance lookup missed.
     #[test]

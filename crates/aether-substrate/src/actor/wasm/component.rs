@@ -121,8 +121,8 @@ pub struct ComponentCtx {
 impl ComponentCtx {
     /// Build a fresh ctx with empty state-migration slots and an
     /// empty sender table. Using this over the struct literal keeps
-    /// the private fields (reply_table, saved_state,
-    /// save_state_error) internal to the wiring — callers should
+    /// the private fields (`reply_table`, `saved_state`,
+    /// `save_state_error`) internal to the wiring — callers should
     /// never set them directly.
     pub fn new(
         sender: MailboxId,
@@ -955,7 +955,7 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: a component without a `wire` / `unwire`
-    /// export is a no-op (matches the on_replace pattern).
+    /// export is a no-op (matches the `on_replace` pattern).
     #[test]
     fn unwire_on_component_without_export_is_noop() {
         let mut component = instantiate(WAT_NO_HOOKS);

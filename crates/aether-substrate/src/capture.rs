@@ -41,7 +41,7 @@ use crate::mail::{Mail, ReplyTo};
 /// pre-mail the render cap pushed before parking this request
 /// (iamacoffeepot/aether#860). The driver waits on each receiver
 /// before rendering so the cross-thread causal chain triggered by
-/// the pre-mails (component handlers → emitted DrawTriangle →
+/// the pre-mails (component handlers → emitted `DrawTriangle` →
 /// render cap accumulator) has fully landed before readback. Empty
 /// when there were no pre-mails or when the chassis didn't install
 /// a settlement registry (in which case the driver renders

@@ -84,7 +84,7 @@ pub(crate) struct DispatcherSlot<A>
 where
     A: NativeActor + NativeDispatch,
 {
-    /// The slot's atomic state machine. Shared with the WakeHandle.
+    /// The slot's atomic state machine. Shared with the `WakeHandle`.
     pub(crate) state: Arc<SlotState>,
     /// The actor itself. The state machine guarantees only one worker
     /// is in `Running` at a time, so the `Mutex` is uncontested in
@@ -228,7 +228,7 @@ where
         }
     }
 
-    /// Phase 3 of the dispatch_loop_run lifecycle. Wraps `actor.unwire`
+    /// Phase 3 of the `dispatch_loop_run` lifecycle. Wraps `actor.unwire`
     /// in the same `with_stamped` + `with_actor_dispatch` envelope so a
     /// final tracing event from the close hook still routes to
     /// `LogCapability`.

@@ -110,7 +110,7 @@ impl IndexedMesh {
 
 /// Look up `v` against pool entries within tolerance (Chebyshev), via
 /// the 27 neighboring spatial buckets. Returns the existing entry's
-/// VertexId if any is within tolerance; otherwise inserts as new.
+/// `VertexId` if any is within tolerance; otherwise inserts as new.
 fn lookup_or_insert(
     pool: &mut Vec<Point3>,
     buckets: &mut HashMap<BucketKey, Vec<VertexId>>,

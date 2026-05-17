@@ -12,7 +12,7 @@
 //! then [`crate::cleanup::run_to_loops`] to recover the boundary
 //! loops the cleanup pipeline produces; a future PR will skip the
 //! triangle round-trip by taking the polygon-domain path through
-//! ``union`/`intersection`/`difference` (retired ADR-0062)` directly.
+//! `union` / `intersection` / `difference` (retired ADR-0062) directly.
 //!
 //! Hole representation: `Polygon::holes` is the explicit
 //! polygon-with-holes form chosen for v1. The cleanup pipeline emits
@@ -61,7 +61,7 @@ pub struct Polygon {
 /// Goes directly through [`crate::mesh::mesh_polygons_internal`] —
 /// the polygon-domain mesh evaluator that operates polygon-in /
 /// polygon-out throughout (no triangle round-trip). This is the fix
-/// for the protruding_sphere SingularEdges: the previous path went
+/// for the `protruding_sphere` `SingularEdges`: the previous path went
 /// `mesh → Vec<Triangle> → from_triangle (re-derives plane via cross
 /// product) → polygons`, and `from_triangle` flips `n_z` sign on
 /// CDT-output sliver triangles. Skipping the triangle hop avoids the

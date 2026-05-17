@@ -3,7 +3,7 @@
 //! `install_log_target` / `ship_host_event` from `aether-actor::log`:
 //! `tracing::*` events emitted outside any actor stamp (substrate
 //! boot, scheduler thread, panic hook) hit stderr via the registered
-//! fmt::Layer for operator visibility but do not enter the mail
+//! `fmt::Layer` for operator visibility but do not enter the mail
 //! system. Until those code paths run as actors, their events stay
 //! out of `engine_logs`. The chassis-pushed `ConfigureLogDrain` mail
 //! and per-actor [`aether_actor::log::LogDrainSlot`] handle every
@@ -122,7 +122,7 @@ fn ship_via_stamped_dispatch(mailbox: MailboxId, kind: KindId, payload: &[u8]) {
 /// Tracing layer that routes in-actor events into the per-actor
 /// [`LogBuffer`] for the chassis-installed drain to ship as
 /// [`aether_kinds::LogBatch`] mail. Out-of-actor events drop here —
-/// stderr fmt::Layer, registered alongside in [`init_subscriber`],
+/// stderr `fmt::Layer`, registered alongside in [`init_subscriber`],
 /// keeps them visible to operators. Issue #601 retired the
 /// host-branch shortcut that previously routed out-of-actor events
 /// through a process-global egress; the actor model's invariant is
