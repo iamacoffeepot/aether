@@ -879,22 +879,26 @@ mod tests {
 
     #[test]
     fn unit_encodes_empty_payload() {
-        let bytes = encode_schema(&json!({}), &SchemaType::Unit).unwrap();
+        let bytes = encode_schema(&json!({}), &SchemaType::Unit)
+            .expect("test setup: encode empty unit object");
         assert!(bytes.is_empty());
-        let bytes = encode_schema(&json!(null), &SchemaType::Unit).unwrap();
+        let bytes = encode_schema(&json!(null), &SchemaType::Unit)
+            .expect("test setup: encode null unit value");
         assert!(bytes.is_empty());
     }
 
     #[test]
     fn unit_rejects_non_empty_object() {
-        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit).unwrap_err();
+        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit)
+            .expect_err("unit schema must reject extra field");
         assert!(matches!(err, EncodeError::UnexpectedField(_)));
     }
 
     #[test]
     fn cast_struct_single_u32_field() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let bytes = encode_schema(&json!({"code": 42}), &schema).unwrap();
+        let bytes =
+            encode_schema(&json!({"code": 42}), &schema).expect("test setup: encode u32 field");
         assert_eq!(bytes, vec![42, 0, 0, 0]);
     }
 
@@ -904,7 +908,8 @@ mod tests {
             scalar("x", Primitive::F32),
             scalar("y", Primitive::F32),
         ]);
-        let bytes = encode_schema(&json!({"x": 1.5, "y": -3.25}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"x": 1.5, "y": -3.25}), &schema)
+            .expect("test setup: encode two f32 fields");
         let mut expected = Vec::new();
         expected.extend_from_slice(&1.5f32.to_le_bytes());
         expected.extend_from_slice(&(-3.25f32).to_le_bytes());
@@ -919,7 +924,8 @@ mod tests {
             scalar("a", Primitive::U8),
             scalar("b", Primitive::U32),
         ]);
-        let bytes = encode_schema(&json!({"a": 7, "b": 0x0102_0304u32}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"a": 7, "b": 0x0102_0304u32}), &schema)
+            .expect("test setup: encode u8+u32 with padding");
         assert_eq!(bytes, vec![7, 0, 0, 0, 4, 3, 2, 1]);
     }
 
@@ -931,7 +937,8 @@ mod tests {
             scalar("a", Primitive::U64),
             scalar("b", Primitive::U8),
         ]);
-        let bytes = encode_schema(&json!({"a": 1u64, "b": 2}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"a": 1u64, "b": 2}), &schema)
+            .expect("test setup: encode u64+u8 with trailing padding");
         assert_eq!(bytes.len(), 16);
         assert_eq!(&bytes[0..8], &1u64.to_le_bytes());
         assert_eq!(bytes[8], 2);
@@ -947,7 +954,8 @@ mod tests {
                 len: 4,
             },
         }]);
-        let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema)
+            .expect("test setup: encode fixed array");
         assert_eq!(bytes, vec![1, 2, 3, 4]);
     }
 
@@ -955,7 +963,8 @@ mod tests {
     fn cast_struct_signed_negative_roundtrip() {
         // i32 in cast layout = LE bytes; -1 = 0xffffffff.
         let schema = cast_struct(vec![scalar("n", Primitive::I32)]);
-        let bytes = encode_schema(&json!({"n": -1}), &schema).unwrap();
+        let bytes =
+            encode_schema(&json!({"n": -1}), &schema).expect("test setup: encode negative i32");
         assert_eq!(bytes, vec![0xff, 0xff, 0xff, 0xff]);
     }
 
@@ -969,7 +978,8 @@ mod tests {
             code: u32,
         }
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let bytes = encode_schema(&json!({"code": 0xdead_beefu32}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"code": 0xdead_beefu32}), &schema)
+            .expect("test setup: encode key shape via cast");
         let back: Key = bytemuck::cast_slice(&bytes)[0];
         assert_eq!(back, Key { code: 0xdead_beef });
     }
@@ -977,28 +987,31 @@ mod tests {
     #[test]
     fn cast_struct_missing_field_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({}), &schema).unwrap_err();
+        let err =
+            encode_schema(&json!({}), &schema).expect_err("missing required field must error");
         assert!(matches!(err, EncodeError::MissingField(n) if n == "code"));
     }
 
     #[test]
     fn cast_struct_unexpected_field_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema).unwrap_err();
+        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema)
+            .expect_err("unexpected field must error");
         assert!(matches!(err, EncodeError::UnexpectedField(n) if n == "extra"));
     }
 
     #[test]
     fn cast_struct_type_mismatch_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({"code": "not-a-number"}), &schema).unwrap_err();
+        let err = encode_schema(&json!({"code": "not-a-number"}), &schema)
+            .expect_err("string for u32 field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
     fn cast_struct_out_of_range_errors() {
         let schema = cast_struct(vec![scalar("b", Primitive::U8)]);
-        let err = encode_schema(&json!({"b": 300}), &schema).unwrap_err();
+        let err = encode_schema(&json!({"b": 300}), &schema).expect_err("u8 overflow must error");
         assert!(matches!(err, EncodeError::OutOfRange { .. }));
     }
 
@@ -1011,7 +1024,8 @@ mod tests {
                 len: 4,
             },
         }]);
-        let err = encode_schema(&json!({"xs": [1, 2, 3]}), &schema).unwrap_err();
+        let err =
+            encode_schema(&json!({"xs": [1, 2, 3]}), &schema).expect_err("short array must error");
         assert!(matches!(
             err,
             EncodeError::ArrayLengthMismatch {
@@ -1025,7 +1039,8 @@ mod tests {
     #[test]
     fn cast_struct_non_object_params_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!([1, 2, 3]), &schema).unwrap_err();
+        let err = encode_schema(&json!([1, 2, 3]), &schema)
+            .expect_err("array params for struct must error");
         assert!(matches!(err, EncodeError::NotAnObject));
     }
 
@@ -1068,7 +1083,8 @@ mod tests {
         }]);
         let v = json!({"x": 0.0, "y": 0.5, "r": 1.0, "g": 0.0, "b": 0.0});
         let params = json!({"verts": [v, v, v]});
-        let bytes = encode_schema(&params, &triangle).unwrap();
+        let bytes =
+            encode_schema(&params, &triangle).expect("test setup: encode draw_triangle layout");
         assert_eq!(bytes.len(), 60);
 
         let back: DrawTriangle = bytemuck::cast_slice(&bytes)[0];
@@ -1143,15 +1159,19 @@ mod tests {
         let value = PostcardString {
             body: "hello world".into(),
         };
-        let expected = postcard::to_allocvec(&value).unwrap();
-        let bytes = encode_schema(&json!({"body": "hello world"}), &pc_string_schema()).unwrap();
+        let expected =
+            postcard::to_allocvec(&value).expect("test setup: postcard reference string");
+        let bytes = encode_schema(&json!({"body": "hello world"}), &pc_string_schema())
+            .expect("test setup: encode string field");
         assert_eq!(bytes, expected);
     }
 
     #[test]
     fn postcard_string_decodes_back() {
-        let bytes = encode_schema(&json!({"body": "round-trip"}), &pc_string_schema()).unwrap();
-        let back: PostcardString = postcard::from_bytes(&bytes).unwrap();
+        let bytes = encode_schema(&json!({"body": "round-trip"}), &pc_string_schema())
+            .expect("test setup: encode string for round-trip");
+        let back: PostcardString =
+            postcard::from_bytes(&bytes).expect("test setup: postcard decode string");
         assert_eq!(back.body, "round-trip");
     }
 
@@ -1160,12 +1180,13 @@ mod tests {
         let value = PostcardBytes {
             blob: vec![1, 2, 3, 4, 5],
         };
-        let expected = postcard::to_allocvec(&value).unwrap();
+        let expected = postcard::to_allocvec(&value).expect("test setup: postcard reference bytes");
         let schema = postcard_struct(vec![NamedField {
             name: "blob".into(),
             ty: SchemaType::Bytes,
         }]);
-        let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema)
+            .expect("test setup: encode bytes field");
         assert_eq!(bytes, expected);
     }
 
@@ -1178,12 +1199,20 @@ mod tests {
         let some = PostcardOption {
             name: Some("Aether".into()),
         };
-        let some_bytes = encode_schema(&json!({"name": "Aether"}), &schema).unwrap();
-        assert_eq!(some_bytes, postcard::to_allocvec(&some).unwrap());
+        let some_bytes = encode_schema(&json!({"name": "Aether"}), &schema)
+            .expect("test setup: encode some(name)");
+        assert_eq!(
+            some_bytes,
+            postcard::to_allocvec(&some).expect("test setup: postcard reference some")
+        );
 
         let none = PostcardOption { name: None };
-        let none_bytes = encode_schema(&json!({"name": null}), &schema).unwrap();
-        assert_eq!(none_bytes, postcard::to_allocvec(&none).unwrap());
+        let none_bytes =
+            encode_schema(&json!({"name": null}), &schema).expect("test setup: encode none(name)");
+        assert_eq!(
+            none_bytes,
+            postcard::to_allocvec(&none).expect("test setup: postcard reference none")
+        );
     }
 
     #[test]
@@ -1191,12 +1220,14 @@ mod tests {
         let value = PostcardVec {
             tags: vec!["alpha".into(), "beta".into(), "gamma".into()],
         };
-        let expected = postcard::to_allocvec(&value).unwrap();
+        let expected =
+            postcard::to_allocvec(&value).expect("test setup: postcard reference vec<string>");
         let schema = postcard_struct(vec![NamedField {
             name: "tags".into(),
             ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
         }]);
-        let bytes = encode_schema(&json!({"tags": ["alpha", "beta", "gamma"]}), &schema).unwrap();
+        let bytes = encode_schema(&json!({"tags": ["alpha", "beta", "gamma"]}), &schema)
+            .expect("test setup: encode vec<string> field");
         assert_eq!(bytes, expected);
     }
 
@@ -1205,7 +1236,8 @@ mod tests {
         let value = PostcardNested {
             items: vec![Inner { seq: 1 }, Inner { seq: 256 }, Inner { seq: 0xDEAD }],
         };
-        let expected = postcard::to_allocvec(&value).unwrap();
+        let expected =
+            postcard::to_allocvec(&value).expect("test setup: postcard reference vec<inner>");
         let inner_schema = postcard_struct(vec![NamedField {
             name: "seq".into(),
             ty: SchemaType::Scalar(Primitive::U32),
@@ -1218,7 +1250,7 @@ mod tests {
             &json!({"items": [{"seq": 1}, {"seq": 256}, {"seq": 0xDEAD}]}),
             &schema,
         )
-        .unwrap();
+        .expect("test setup: encode vec<nested>");
         assert_eq!(bytes, expected);
     }
 
@@ -1248,45 +1280,57 @@ mod tests {
     #[test]
     fn postcard_enum_unit_variant_as_string_tag() {
         // Unit variant accepts the bare-string form `"Pending"`.
-        let bytes = encode_schema(&json!("Pending"), &sum_schema()).unwrap();
-        assert_eq!(bytes, postcard::to_allocvec(&SimpleSum::Pending).unwrap());
+        let bytes = encode_schema(&json!("Pending"), &sum_schema())
+            .expect("test setup: encode unit variant");
+        assert_eq!(
+            bytes,
+            postcard::to_allocvec(&SimpleSum::Pending)
+                .expect("test setup: postcard reference pending")
+        );
     }
 
     #[test]
     fn postcard_enum_tuple_variant_with_unwrapped_body() {
         // Single-element tuple variants accept either `{"Ok": 42}` or
         // `{"Ok": [42]}`. Cover the unwrapped-body form here.
-        let bytes = encode_schema(&json!({"Ok": 42u64}), &sum_schema()).unwrap();
-        assert_eq!(bytes, postcard::to_allocvec(&SimpleSum::Ok(42)).unwrap());
+        let bytes = encode_schema(&json!({"Ok": 42u64}), &sum_schema())
+            .expect("test setup: encode tuple variant");
+        assert_eq!(
+            bytes,
+            postcard::to_allocvec(&SimpleSum::Ok(42))
+                .expect("test setup: postcard reference ok(42)")
+        );
     }
 
     #[test]
     fn postcard_enum_struct_variant() {
-        let bytes =
-            encode_schema(&json!({"Err": {"reason": "kind conflict"}}), &sum_schema()).unwrap();
+        let bytes = encode_schema(&json!({"Err": {"reason": "kind conflict"}}), &sum_schema())
+            .expect("test setup: encode struct variant");
         let expected = postcard::to_allocvec(&SimpleSum::Err {
             reason: "kind conflict".into(),
         })
-        .unwrap();
+        .expect("test setup: postcard reference err{reason}");
         assert_eq!(bytes, expected);
     }
 
     #[test]
     fn postcard_enum_unknown_tag_errors() {
-        let err = encode_schema(&json!("Nope"), &sum_schema()).unwrap_err();
+        let err =
+            encode_schema(&json!("Nope"), &sum_schema()).expect_err("unknown enum tag must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
     fn postcard_string_rejects_non_string() {
-        let err = encode_schema(&json!({"body": 7}), &pc_string_schema()).unwrap_err();
+        let err = encode_schema(&json!({"body": 7}), &pc_string_schema())
+            .expect_err("number for string field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
     fn postcard_struct_rejects_unexpected_field() {
         let err = encode_schema(&json!({"body": "ok", "extra": "nope"}), &pc_string_schema())
-            .unwrap_err();
+            .expect_err("extra field in postcard struct must error");
         assert!(matches!(err, EncodeError::UnexpectedField(_)));
     }
 
@@ -1297,7 +1341,8 @@ mod tests {
         for n in [0u64, 127, 128, 16383, 16384, u64::from(u32::MAX), u64::MAX] {
             let mut ours = Vec::new();
             write_varint_u64(&mut ours, n);
-            let theirs = postcard::to_allocvec(&n).unwrap();
+            let theirs =
+                postcard::to_allocvec(&n).expect("test setup: postcard reference varint u64");
             assert_eq!(ours, theirs, "varint mismatch for {n}");
         }
     }
@@ -1315,7 +1360,8 @@ mod tests {
         ] {
             let mut ours = Vec::new();
             write_varint_u64(&mut ours, zigzag_i64(n));
-            let theirs = postcard::to_allocvec(&n).unwrap();
+            let theirs =
+                postcard::to_allocvec(&n).expect("test setup: postcard reference zigzag i64");
             assert_eq!(ours, theirs, "zigzag mismatch for {n}");
         }
     }
@@ -1346,13 +1392,14 @@ mod tests {
         reference.insert("content-type".into(), "application/json".into());
         reference.insert("x-trace".into(), "abc123".into());
 
-        let expected = postcard::to_allocvec(&reference).unwrap();
+        let expected = postcard::to_allocvec(&reference)
+            .expect("test setup: postcard reference btreemap<string,string>");
 
         let bytes = encode_schema(
             &json!({"headers": {"x-trace": "abc123", "content-type": "application/json"}}),
             &schema,
         )
-        .unwrap();
+        .expect("test setup: encode map<string,string> field");
 
         // Strip the schema-struct field-prefix bytes — there are none
         // here since the field's value is the whole map. The encoded
@@ -1365,8 +1412,10 @@ mod tests {
         // Two callers produce the same wire bytes regardless of JSON
         // input order. Pins the sort-by-parsed-key step.
         let schema = map_schema(SchemaType::String, SchemaType::Scalar(Primitive::U32));
-        let a = encode_schema(&json!({"alpha": 1, "beta": 2, "gamma": 3}), &schema).unwrap();
-        let b = encode_schema(&json!({"gamma": 3, "alpha": 1, "beta": 2}), &schema).unwrap();
+        let a = encode_schema(&json!({"alpha": 1, "beta": 2, "gamma": 3}), &schema)
+            .expect("test setup: encode map in order A");
+        let b = encode_schema(&json!({"gamma": 3, "alpha": 1, "beta": 2}), &schema)
+            .expect("test setup: encode map in order B");
         assert_eq!(a, b);
     }
 
@@ -1380,13 +1429,14 @@ mod tests {
         reference.insert(42, "answer".into());
         reference.insert(255, "max-u8".into());
 
-        let expected = postcard::to_allocvec(&reference).unwrap();
+        let expected = postcard::to_allocvec(&reference)
+            .expect("test setup: postcard reference btreemap<u32,string>");
 
         let bytes = encode_schema(
             &json!({"42": "answer", "1": "one", "255": "max-u8"}),
             &schema,
         )
-        .unwrap();
+        .expect("test setup: encode map<u32,string> field");
         assert_eq!(bytes, expected);
     }
 
@@ -1397,29 +1447,34 @@ mod tests {
             std::collections::BTreeMap::new();
         reference.insert(false, 0);
         reference.insert(true, 1);
-        let expected = postcard::to_allocvec(&reference).unwrap();
-        let bytes = encode_schema(&json!({"true": 1, "false": 0}), &schema).unwrap();
+        let expected = postcard::to_allocvec(&reference)
+            .expect("test setup: postcard reference btreemap<bool,u32>");
+        let bytes = encode_schema(&json!({"true": 1, "false": 0}), &schema)
+            .expect("test setup: encode map<bool,u32> field");
         assert_eq!(bytes, expected);
     }
 
     #[test]
     fn map_rejects_non_object_input() {
         let schema = map_schema(SchemaType::String, SchemaType::String);
-        let err = encode_schema(&json!([["k", "v"]]), &schema).unwrap_err();
+        let err = encode_schema(&json!([["k", "v"]]), &schema)
+            .expect_err("array for map field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
     fn map_rejects_unparsable_integer_key() {
         let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
-        let err = encode_schema(&json!({"not-a-number": "v"}), &schema).unwrap_err();
+        let err = encode_schema(&json!({"not-a-number": "v"}), &schema)
+            .expect_err("non-numeric key for integer-keyed map must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
     fn map_rejects_invalid_bool_key() {
         let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
-        let err = encode_schema(&json!({"yes": 1}), &schema).unwrap_err();
+        let err = encode_schema(&json!({"yes": 1}), &schema)
+            .expect_err("non-bool key for bool-keyed map must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
@@ -1436,7 +1491,8 @@ mod tests {
             }]
             .into(),
         };
-        let err = encode_schema(&json!({"headers": {"k": "v"}}), &schema).unwrap_err();
+        let err = encode_schema(&json!({"headers": {"k": "v"}}), &schema)
+            .expect_err("map inside cast struct must error");
         assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 
@@ -1451,8 +1507,10 @@ mod tests {
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
-        let bytes = encode_schema(&json!({ "mailbox": s }), &schema).unwrap();
+        let s = aether_data::tagged_id::encode(mailbox.0)
+            .expect("test setup: encode tagged mailbox id");
+        let bytes = encode_schema(&json!({ "mailbox": s }), &schema)
+            .expect("test setup: encode typed-id postcard field");
         let mut expected = Vec::new();
         write_varint_u64(&mut expected, mailbox.0);
         assert_eq!(bytes, expected);
@@ -1467,7 +1525,8 @@ mod tests {
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema).unwrap();
+        let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema)
+            .expect("test setup: encode typed-id from raw number");
         let mut expected = Vec::new();
         write_varint_u64(&mut expected, mailbox.0);
         assert_eq!(bytes, expected);
@@ -1486,8 +1545,9 @@ mod tests {
             aether_data::Tag::Kind,
             0xdead_beef,
         ))
-        .unwrap();
-        let err = encode_schema(&json!({ "mailbox": knd_string }), &schema).unwrap_err();
+        .expect("test setup: encode wrongly-tagged kind id");
+        let err = encode_schema(&json!({ "mailbox": knd_string }), &schema)
+            .expect_err("wrong tag must surface OutOfRange");
         assert!(matches!(err, EncodeError::OutOfRange { .. }));
     }
 
@@ -1505,8 +1565,10 @@ mod tests {
             },
         ]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
-        let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema).unwrap();
+        let s = aether_data::tagged_id::encode(mailbox.0)
+            .expect("test setup: encode tagged mailbox id");
+        let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema)
+            .expect("test setup: encode typed-id cast field");
         assert_eq!(bytes.len(), 16);
         assert_eq!(bytes[0], 1);
         assert_eq!(&bytes[1..8], &[0u8; 7]);
@@ -1522,7 +1584,8 @@ mod tests {
             name: "mystery".into(),
             ty: SchemaType::TypeId(0xdead_beef_cafe_f00d),
         }]);
-        let err = encode_schema(&json!({ "mystery": 0u64 }), &schema).unwrap_err();
+        let err = encode_schema(&json!({ "mystery": 0u64 }), &schema)
+            .expect_err("unknown type id must surface UnsupportedSchema");
         assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 }

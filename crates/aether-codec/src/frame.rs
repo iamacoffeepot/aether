@@ -129,8 +129,8 @@ mod tests {
     #[test]
     fn roundtrip_unit_variant() {
         let mut buf = Vec::new();
-        write_frame(&mut buf, &Msg::Tick).unwrap();
-        let back: Msg = read_frame(&mut Cursor::new(buf)).unwrap();
+        write_frame(&mut buf, &Msg::Tick).expect("test setup: write unit frame");
+        let back: Msg = read_frame(&mut Cursor::new(buf)).expect("test setup: read unit frame");
         assert_eq!(back, Msg::Tick);
     }
 
@@ -141,8 +141,8 @@ mod tests {
             text: "hi".into(),
         };
         let mut buf = Vec::new();
-        write_frame(&mut buf, &msg).unwrap();
-        let back: Msg = read_frame(&mut Cursor::new(buf)).unwrap();
+        write_frame(&mut buf, &msg).expect("test setup: write struct frame");
+        let back: Msg = read_frame(&mut Cursor::new(buf)).expect("test setup: read struct frame");
         assert_eq!(back, msg);
     }
 
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn multiple_frames_back_to_back() {
         let mut buf = Vec::new();
-        write_frame(&mut buf, &Msg::Tick).unwrap();
+        write_frame(&mut buf, &Msg::Tick).expect("test setup: write first tick");
         write_frame(
             &mut buf,
             &Msg::Note {
@@ -163,20 +163,21 @@ mod tests {
                 text: "a".into(),
             },
         )
-        .unwrap();
-        write_frame(&mut buf, &Msg::Tick).unwrap();
+        .expect("test setup: write note frame");
+        write_frame(&mut buf, &Msg::Tick).expect("test setup: write second tick");
 
         let mut r = Cursor::new(buf);
-        let _: Msg = read_frame(&mut r).unwrap();
-        let _: Msg = read_frame(&mut r).unwrap();
-        let _: Msg = read_frame(&mut r).unwrap();
+        let _: Msg = read_frame(&mut r).expect("test setup: read frame 1 of 3");
+        let _: Msg = read_frame(&mut r).expect("test setup: read frame 2 of 3");
+        let _: Msg = read_frame(&mut r).expect("test setup: read frame 3 of 3");
     }
 
     #[test]
     fn frame_too_large_rejected() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(100 * 1024 * 1024u32).to_le_bytes());
-        let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).unwrap_err();
+        let err =
+            read_frame::<_, Msg>(&mut Cursor::new(buf)).expect_err("oversized frame must reject");
         assert!(matches!(err, FrameError::FrameTooLarge { .. }));
     }
 
@@ -185,7 +186,8 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&100u32.to_le_bytes());
         buf.extend_from_slice(&[0u8; 10]);
-        let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).unwrap_err();
+        let err = read_frame::<_, Msg>(&mut Cursor::new(buf))
+            .expect_err("truncated body must surface io error");
         assert!(matches!(err, FrameError::Io(_)));
     }
 
@@ -194,7 +196,8 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1u32.to_le_bytes());
         buf.push(0xff);
-        let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).unwrap_err();
+        let err = read_frame::<_, Msg>(&mut Cursor::new(buf))
+            .expect_err("malformed body must surface postcard error");
         assert!(matches!(err, FrameError::Postcard(_)));
     }
 }

@@ -659,13 +659,14 @@ mod tests {
 
     #[test]
     fn unit_decodes_null() {
-        let v = decode_schema(&[], &SchemaType::Unit).unwrap();
+        let v = decode_schema(&[], &SchemaType::Unit).expect("test setup: decode empty unit");
         assert_eq!(v, Value::Null);
     }
 
     #[test]
     fn unit_rejects_trailing_bytes() {
-        let err = decode_schema(&[1, 2, 3], &SchemaType::Unit).unwrap_err();
+        let err = decode_schema(&[1, 2, 3], &SchemaType::Unit)
+            .expect_err("trailing bytes after unit must error");
         assert!(matches!(err, DecodeError::TrailingBytes { .. }));
     }
 
@@ -766,7 +767,7 @@ mod tests {
     fn cast_truncated_payload_errors() {
         // 4-byte u32 expected, only 2 bytes provided.
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = decode_schema(&[1, 2], &schema).unwrap_err();
+        let err = decode_schema(&[1, 2], &schema).expect_err("truncated u32 payload must error");
         assert!(matches!(err, DecodeError::Truncated { .. }));
     }
 
@@ -796,7 +797,7 @@ mod tests {
             name: "flag".into(),
             ty: SchemaType::Bool,
         }]);
-        let err = decode_schema(&[2], &schema).unwrap_err();
+        let err = decode_schema(&[2], &schema).expect_err("non-0/1 bool byte must error");
         assert!(matches!(err, DecodeError::InvalidBool { .. }));
     }
 
@@ -818,7 +819,8 @@ mod tests {
             ty: SchemaType::String,
         }]);
         // varint length 2, then two invalid utf-8 bytes.
-        let err = decode_schema(&[2, 0xff, 0xfe], &schema).unwrap_err();
+        let err = decode_schema(&[2, 0xff, 0xfe], &schema)
+            .expect_err("invalid utf-8 string body must error");
         assert!(matches!(err, DecodeError::InvalidUtf8 { .. }));
     }
 
@@ -913,16 +915,17 @@ mod tests {
     fn postcard_enum_unknown_discriminant_errors() {
         // discriminant 99 isn't in the schema.
         let schema = sum_schema();
-        let err = decode_schema(&[99], &schema).unwrap_err();
+        let err = decode_schema(&[99], &schema).expect_err("unknown enum discriminant must error");
         assert!(matches!(err, DecodeError::UnknownEnumDiscriminant { .. }));
     }
 
     #[test]
     fn varint_decodes_at_byte_boundaries() {
         for n in [0u64, 127, 128, 16383, 16384, u64::from(u32::MAX), u64::MAX] {
-            let bytes = postcard::to_allocvec(&n).unwrap();
+            let bytes =
+                postcard::to_allocvec(&n).expect("test setup: postcard reference varint u64");
             let mut cur = Cursor::new(&bytes);
-            let back = read_varint_u64(&mut cur, "$").unwrap();
+            let back = read_varint_u64(&mut cur, "$").expect("test setup: read varint u64");
             assert_eq!(back, n, "varint decode mismatch for {n}");
         }
     }
@@ -932,7 +935,7 @@ mod tests {
         // 11 continuation bytes — exceeds u64.
         let bytes = vec![0xff; 11];
         let mut cur = Cursor::new(&bytes);
-        let err = read_varint_u64(&mut cur, "$").unwrap_err();
+        let err = read_varint_u64(&mut cur, "$").expect_err("varint exceeding 10 bytes must error");
         assert!(matches!(err, DecodeError::VarintOverflow { .. }));
     }
 
@@ -947,9 +950,10 @@ mod tests {
             i64::from(i32::MIN),
             i64::from(i32::MAX),
         ] {
-            let bytes = postcard::to_allocvec(&n).unwrap();
+            let bytes =
+                postcard::to_allocvec(&n).expect("test setup: postcard reference zigzag i64");
             let mut cur = Cursor::new(&bytes);
-            let raw = read_varint_u64(&mut cur, "$").unwrap();
+            let raw = read_varint_u64(&mut cur, "$").expect("test setup: read zigzag varint");
             assert_eq!(unzigzag(raw), n, "zigzag mismatch for {n}");
         }
     }
@@ -961,12 +965,12 @@ mod tests {
         let schema = pc_struct(vec![scalar("x", Primitive::F64)]);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&f64::NAN.to_le_bytes());
-        let v = decode_schema(&bytes, &schema).unwrap();
+        let v = decode_schema(&bytes, &schema).expect("test setup: decode NaN f64");
         assert_eq!(v, json!({"x": null}));
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&f64::INFINITY.to_le_bytes());
-        let v = decode_schema(&bytes, &schema).unwrap();
+        let v = decode_schema(&bytes, &schema).expect("test setup: decode infinity f64");
         assert_eq!(v, json!({"x": null}));
     }
 
@@ -1052,7 +1056,7 @@ mod tests {
             ty: map_schema(SchemaType::String, SchemaType::String),
         }]);
         // 1-byte payload is enough to fail at the field-walk step.
-        let err = decode_schema(&[0], &schema).unwrap_err();
+        let err = decode_schema(&[0], &schema).expect_err("map inside cast struct must error");
         assert!(matches!(err, DecodeError::UnsupportedSchema(_)));
     }
 
@@ -1068,7 +1072,8 @@ mod tests {
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
+        let s = aether_data::tagged_id::encode(mailbox.0)
+            .expect("test setup: encode tagged mailbox id");
         roundtrip(json!({ "mailbox": s }), &schema);
     }
 
@@ -1087,7 +1092,8 @@ mod tests {
             },
         ]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
+        let s = aether_data::tagged_id::encode(mailbox.0)
+            .expect("test setup: encode tagged mailbox id");
         roundtrip(json!({ "stream": 1, "mailbox": s }), &schema);
     }
 
@@ -1103,9 +1109,11 @@ mod tests {
         // match what the substrate expects.
         use aether_data::Kind;
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let mailbox_str = aether_data::tagged_id::encode(mailbox.0).unwrap();
+        let mailbox_str = aether_data::tagged_id::encode(mailbox.0)
+            .expect("test setup: encode tagged mailbox id");
         let kind_id = aether_kinds::Tick::ID;
-        let kind_str = aether_data::tagged_id::encode(kind_id.0).unwrap();
+        let kind_str =
+            aether_data::tagged_id::encode(kind_id.0).expect("test setup: encode tagged kind id");
         let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
 
         let bytes = encode_schema(
