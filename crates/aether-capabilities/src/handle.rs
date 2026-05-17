@@ -212,7 +212,8 @@ mod native {
                 kind_id: KindId(0xCAFE),
                 bytes: vec![1, 2, 3, 4, 5],
             };
-            let bytes = postcard::to_allocvec(&req).unwrap();
+            let bytes = postcard::to_allocvec(&req)
+                .expect("test setup: HandlePublish serializes via postcard");
             handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
                 kind: <HandlePublish as Kind>::ID,
                 kind_name: "aether.handle.publish".to_owned(),
@@ -240,7 +241,8 @@ mod native {
                 EgressEvent::ToSession { payload, .. } => payload,
                 other => panic!("expected ToSession egress, got {other:?}"),
             };
-            let result: HandlePublishResult = postcard::from_bytes(&payload).unwrap();
+            let result: HandlePublishResult = postcard::from_bytes(&payload)
+                .expect("test setup: HandlePublishResult decodes via postcard");
             let HandlePublishResult::Ok {
                 kind_id,
                 id: handle_id,
@@ -250,7 +252,9 @@ mod native {
             };
             assert_eq!(kind_id, KindId(0xCAFE));
             assert_ne!(handle_id, HandleId(0));
-            let (stored_kind, stored_bytes) = store.get(handle_id).unwrap();
+            let (stored_kind, stored_bytes) = store
+                .get(handle_id)
+                .expect("test setup: stored handle should be retrievable");
             assert_eq!(stored_kind, KindId(0xCAFE));
             assert_eq!(stored_bytes, vec![1, 2, 3, 4, 5]);
 

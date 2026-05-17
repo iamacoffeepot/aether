@@ -599,9 +599,18 @@ mod native {
                 Nanos(100),
             );
             assert_eq!(obs.roots.len(), 1);
-            assert_eq!(obs.roots.get(&m).unwrap().in_flight, 1);
+            assert_eq!(
+                obs.roots
+                    .get(&m)
+                    .expect("root entry exists for mail")
+                    .in_flight,
+                1
+            );
             assert_eq!(obs.mails.len(), 1);
-            assert_eq!(obs.mails.get(&m).unwrap().t_sent, Nanos(100));
+            assert_eq!(
+                obs.mails.get(&m).expect("mail node exists for mail").t_sent,
+                Nanos(100)
+            );
         }
 
         #[test]
@@ -630,8 +639,20 @@ mod native {
                 Nanos(200),
             );
             assert_eq!(obs.roots.len(), 1);
-            assert_eq!(obs.roots.get(&root).unwrap().in_flight, 2);
-            assert_eq!(obs.mails.get(&child).unwrap().parent, Some(root));
+            assert_eq!(
+                obs.roots
+                    .get(&root)
+                    .expect("root entry exists for root mail")
+                    .in_flight,
+                2
+            );
+            assert_eq!(
+                obs.mails
+                    .get(&child)
+                    .expect("child mail node exists")
+                    .parent,
+                Some(root)
+            );
         }
 
         #[test]
@@ -657,8 +678,14 @@ mod native {
                 mail_id: m,
                 t: Nanos(300),
             });
-            assert_eq!(obs.roots.get(&m).unwrap().in_flight, 0);
-            let node = obs.mails.get(&m).unwrap();
+            assert_eq!(
+                obs.roots
+                    .get(&m)
+                    .expect("root entry exists for mail")
+                    .in_flight,
+                0
+            );
+            let node = obs.mails.get(&m).expect("mail node exists for mail");
             assert_eq!(node.t_received, Some(Nanos(200)));
             assert_eq!(node.t_finished, Some(Nanos(300)));
             assert_eq!(node.thread_name.as_deref(), Some("aether-root-test"));
@@ -721,7 +748,10 @@ mod native {
                 if mail.kind == settled_kind
                     && let Ok(notice) = postcard::from_bytes::<Settled>(&mail.payload)
                 {
-                    captured_for_router.lock().unwrap().push(notice);
+                    captured_for_router
+                        .lock()
+                        .expect("test stub: captured mutex poisoned")
+                        .push(notice);
                 }
             }));
 
@@ -747,13 +777,18 @@ mod native {
                 Nanos(100),
             );
             // No Settled yet — in_flight is 1.
-            assert!(captured.lock().unwrap().is_empty());
+            assert!(
+                captured
+                    .lock()
+                    .expect("test stub: captured mutex poisoned")
+                    .is_empty()
+            );
             obs.apply_event(TraceEvent::Finished {
                 mail_id: root,
                 t: Nanos(200),
             });
             // Settled fired; chassis-router decoded the mail.
-            let captured = captured.lock().unwrap();
+            let captured = captured.lock().expect("test stub: captured mutex poisoned");
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].root, root);
         }

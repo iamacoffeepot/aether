@@ -433,7 +433,10 @@ mod proxy_reply_sink {
 
         #[handler]
         fn on_reply(&mut self, _ctx: &mut NativeCtx<'_>, reply: TestEchoReply) {
-            *self.recorded.lock().unwrap() = Some(reply.value);
+            *self
+                .recorded
+                .lock()
+                .expect("test setup: recorded mutex poisoned") = Some(reply.value);
         }
     }
 }
@@ -519,13 +522,15 @@ mod tests {
         let fwd = aether_kinds::ForwardEnvelope {
             mailbox: echo_mailbox,
             kind: <TestEchoRequest as Kind>::ID,
-            payload: postcard::to_allocvec(&TestEchoRequest { value: 42 }).unwrap(),
+            payload: postcard::to_allocvec(&TestEchoRequest { value: 42 })
+                .expect("test setup: TestEchoRequest serializes via postcard"),
         };
         mailer.push(
             Mail::new(
                 proxy_mailbox,
                 <aether_kinds::ForwardEnvelope as Kind>::ID,
-                postcard::to_allocvec(&fwd).unwrap(),
+                postcard::to_allocvec(&fwd)
+                    .expect("test setup: ForwardEnvelope serializes via postcard"),
                 1,
             )
             .with_reply_to(ReplyTo::with_correlation(
@@ -539,7 +544,9 @@ mod tests {
         // all across dispatcher threads — give it a generous deadline.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let snapshot = *recorded.lock().unwrap();
+            let snapshot = *recorded
+                .lock()
+                .expect("test setup: recorded mutex poisoned");
             if let Some(value) = snapshot {
                 assert_eq!(value, 42, "echoed value routed back through the proxy");
                 return;

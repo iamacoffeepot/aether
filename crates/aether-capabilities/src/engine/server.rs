@@ -385,17 +385,29 @@ mod sink {
 
         #[handler]
         fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
-            *self.cells.list.lock().unwrap() = Some(reply);
+            *self
+                .cells
+                .list
+                .lock()
+                .expect("test setup: list cell mutex poisoned") = Some(reply);
         }
 
         #[handler]
         fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
-            *self.cells.spawn.lock().unwrap() = Some(reply);
+            *self
+                .cells
+                .spawn
+                .lock()
+                .expect("test setup: spawn cell mutex poisoned") = Some(reply);
         }
 
         #[handler]
         fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
-            *self.cells.terminate.lock().unwrap() = Some(reply);
+            *self
+                .cells
+                .terminate
+                .lock()
+                .expect("test setup: terminate cell mutex poisoned") = Some(reply);
         }
     }
 }
@@ -467,7 +479,11 @@ mod tests {
     fn list_on_empty_cap_is_empty() {
         let (_chassis, mailer, cells) = boot();
         let result = drive(&mailer, &ListEngines {}, || {
-            cells.list.lock().unwrap().take()
+            cells
+                .list
+                .lock()
+                .expect("test setup: list cell mutex poisoned")
+                .take()
         });
         assert!(result.engines.is_empty(), "fresh cap supervises no engines");
     }
@@ -483,7 +499,13 @@ mod tests {
                 binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
                 args: vec![],
             },
-            || cells.spawn.lock().unwrap().take(),
+            || {
+                cells
+                    .spawn
+                    .lock()
+                    .expect("test setup: spawn cell mutex poisoned")
+                    .take()
+            },
         );
         match result {
             SpawnEngineResult::Err { error } => {
@@ -508,7 +530,13 @@ mod tests {
             &TerminateEngine {
                 engine_id: "not-a-uuid".to_owned(),
             },
-            || cells.terminate.lock().unwrap().take(),
+            || {
+                cells
+                    .terminate
+                    .lock()
+                    .expect("test setup: terminate cell mutex poisoned")
+                    .take()
+            },
         );
         assert!(
             matches!(malformed, TerminateEngineResult::Err { .. }),
@@ -520,7 +548,13 @@ mod tests {
             &TerminateEngine {
                 engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
             },
-            || cells.terminate.lock().unwrap().take(),
+            || {
+                cells
+                    .terminate
+                    .lock()
+                    .expect("test setup: terminate cell mutex poisoned")
+                    .take()
+            },
         );
         assert!(
             matches!(unknown, TerminateEngineResult::Err { .. }),

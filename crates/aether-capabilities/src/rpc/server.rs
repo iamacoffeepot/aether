@@ -720,7 +720,7 @@ mod tests {
             TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .expect("test: set_read_timeout on TcpStream");
 
         write_frame(
             &mut stream,
@@ -772,7 +772,7 @@ mod tests {
             TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .expect("test: set_read_timeout on TcpStream");
 
         // Send a Hello first so the handshake completes, then drain the
         // HelloAck reply before the Ping/Pong roundtrip.
@@ -786,8 +786,9 @@ mod tests {
                 },
             }),
         )
-        .unwrap();
-        let _: WireFrame = read_frame(&mut stream).unwrap();
+        .expect("test: write_frame Hello to rpc server");
+        let _: WireFrame =
+            read_frame(&mut stream).expect("test: read_frame after Hello returns HelloAck");
 
         write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee)).expect("write Ping");
         let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
@@ -832,7 +833,7 @@ mod tests {
             TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+            .expect("test: set_read_timeout on TcpStream");
 
         // Handshake.
         write_frame(
@@ -845,12 +846,14 @@ mod tests {
                 },
             }),
         )
-        .unwrap();
-        let _: WireFrame = read_frame(&mut stream).unwrap();
+        .expect("test: write_frame Hello to rpc server");
+        let _: WireFrame =
+            read_frame(&mut stream).expect("test: read_frame after Hello returns HelloAck");
 
         // Fire a Call against the echo actor. cid = 0xabc; the cap
         // correlates and ends with ReplyEnd matching the same cid.
-        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 }).unwrap();
+        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 })
+            .expect("test setup: TestEchoRequest serializes via postcard");
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
         write_frame(
             &mut stream,
@@ -865,7 +868,7 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .expect("test: write_frame Call to rpc server");
 
         // First frame back should be the ReplyEvent carrying the
         // TestEchoReply with the echoed value.
@@ -924,7 +927,7 @@ mod tests {
             TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .expect("test: set_read_timeout on TcpStream");
 
         // Handshake.
         write_frame(
@@ -937,13 +940,15 @@ mod tests {
                 },
             }),
         )
-        .unwrap();
-        let _: WireFrame = read_frame(&mut stream).unwrap();
+        .expect("test: write_frame Hello to rpc server");
+        let _: WireFrame =
+            read_frame(&mut stream).expect("test: read_frame after Hello returns HelloAck");
 
         // Fire-and-forget Call (cid = None). The echo actor will
         // still reply, but with cid None there's no in-flight entry
         // so the reply has no matching correlation and gets dropped.
-        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 7 }).unwrap();
+        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 7 })
+            .expect("test setup: TestEchoRequest serializes via postcard");
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
         write_frame(
             &mut stream,
@@ -958,12 +963,13 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .expect("test: write_frame fire-and-forget Call to rpc server");
 
         // Immediately Ping. If the fire-and-forget Call had leaked
         // reply correlation, a ReplyEvent / ReplyEnd would arrive
         // before the Pong. Asserting we see Pong first proves no leak.
-        write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee)).unwrap();
+        write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee))
+            .expect("test: write_frame Ping to rpc server");
         let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
         assert_eq!(reply, WireFrame::Pong(0x00c0_ffee));
     }
@@ -989,7 +995,7 @@ mod tests {
             TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .expect("test: set_read_timeout on TcpStream");
 
         write_frame(
             &mut stream,
@@ -1001,7 +1007,7 @@ mod tests {
                 },
             }),
         )
-        .unwrap();
+        .expect("test: write_frame future-version Hello to rpc server");
 
         let reply: WireFrame = read_frame(&mut stream).expect("read Bye");
         match reply {

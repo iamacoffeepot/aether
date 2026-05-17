@@ -558,7 +558,10 @@ mod native {
 
         impl HttpAdapter for StubAdapter {
             fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
-                *self.last_request.lock().unwrap() = Some(FetchRequest {
+                *self
+                    .last_request
+                    .lock()
+                    .expect("test stub: last_request mutex poisoned") = Some(FetchRequest {
                     url: req.url.clone(),
                     method: req.method,
                     headers: req.headers.clone(),
@@ -567,7 +570,7 @@ mod native {
                 });
                 self.response
                     .lock()
-                    .unwrap()
+                    .expect("test stub: response mutex poisoned")
                     .take()
                     .expect("stub response already consumed")
             }
@@ -594,7 +597,9 @@ mod native {
         fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
             rx: &std::sync::mpsc::Receiver<EgressEvent>,
         ) -> K {
-            let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let event = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("test: egress event arrives within 1s deadline");
             let EgressEvent::ToSession {
                 kind_name, payload, ..
             } = event
@@ -602,7 +607,7 @@ mod native {
                 panic!("expected ToSession egress, got {event:?}");
             };
             assert_eq!(kind_name, K::NAME);
-            postcard::from_bytes(&payload).unwrap()
+            postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
         }
 
         /// Boot the cap against a default disabled `HttpConfig` and confirm
@@ -869,7 +874,7 @@ mod native {
             let observed = stub_clone
                 .last_request
                 .lock()
-                .unwrap()
+                .expect("test stub: last_request mutex poisoned")
                 .take()
                 .expect("adapter was not called");
             assert!(observed.timeout > Duration::ZERO);
