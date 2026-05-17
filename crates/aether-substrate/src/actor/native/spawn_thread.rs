@@ -360,7 +360,7 @@ mod tests {
         let captured_for_handler = Arc::clone(&captured);
         let _ = registry.try_register_inbox(
             name.to_owned(),
-            Arc::new(move |dispatch: MailDispatch<'_>| {
+            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
                 captured_for_handler.lock().unwrap().push(CapturedDispatch {
                     mail_id: dispatch.mail_id,
                     root: dispatch.root,

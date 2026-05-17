@@ -585,12 +585,12 @@ mod native {
             let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry exists") else {
                 panic!("expected mailbox entry for {name}");
             };
-            handler(aether_substrate::mail::registry::MailDispatch {
+            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
                 kind,
-                kind_name: "test.kind",
+                kind_name: "test.kind".to_owned(),
                 origin: None,
                 sender: ReplyTo::NONE,
-                payload,
+                payload: payload.to_vec(),
                 count: 1,
                 mail_id: aether_substrate::mail::MailId::NONE,
                 root: aether_substrate::mail::MailId::NONE,

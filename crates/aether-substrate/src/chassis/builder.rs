@@ -1906,7 +1906,7 @@ mod tests {
 
         let payload = Ping { tag: 0xDEAD_BEEF };
         let bytes = payload.encode_into_bytes();
-        handler(crate::mail::registry::test_dispatch(
+        handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Ping as Kind>::ID,
             Ping::NAME,
             &bytes,
@@ -2086,7 +2086,7 @@ mod tests {
         for seq in 0..3 {
             let payload = Tick { seq };
             let bytes = payload.encode_into_bytes();
-            handler(crate::mail::registry::test_dispatch(
+            handler.enqueue(crate::mail::registry::test_owned_dispatch(
                 <Tick as Kind>::ID,
                 Tick::NAME,
                 &bytes,
@@ -2253,7 +2253,7 @@ mod tests {
             panic!("expected mailbox entry");
         };
         let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-        handler(crate::mail::registry::test_dispatch(
+        handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Hatch as Kind>::ID,
             Hatch::NAME,
             &bytes,
@@ -2377,7 +2377,7 @@ mod tests {
             panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
-        handler(crate::mail::registry::test_dispatch(
+        handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &bytes,
@@ -2760,7 +2760,7 @@ mod tests {
         let order = WatchOrder {
             target_id: target_id.0,
         };
-        watcher_handler(crate::mail::registry::test_dispatch(
+        watcher_handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <WatchOrder as Kind>::ID,
             WatchOrder::NAME,
             &order.encode_into_bytes(),
@@ -2793,7 +2793,7 @@ mod tests {
         else {
             panic!("expected mailbox entry for target");
         };
-        target_handler(crate::mail::registry::test_dispatch(
+        target_handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
@@ -2989,7 +2989,7 @@ mod tests {
         let order = WatchOrder {
             target_id: target_id.0,
         };
-        watcher_handler(crate::mail::registry::test_dispatch(
+        watcher_handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <WatchOrder as Kind>::ID,
             WatchOrder::NAME,
             &order.encode_into_bytes(),
@@ -3007,7 +3007,7 @@ mod tests {
 
         // Quit watcher — its close path walks `monitoring[watcher]` and
         // prunes watcher from `monitors_of[target]`.
-        watcher_handler(crate::mail::registry::test_dispatch(
+        watcher_handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
@@ -3176,7 +3176,7 @@ mod tests {
         let MailboxEntry::Inbox(handler) = registry.entry(id_c).expect("c sink registered") else {
             panic!("expected mailbox entry for c");
         };
-        handler(crate::mail::registry::test_dispatch(
+        handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
@@ -3483,7 +3483,7 @@ mod tests {
         else {
             panic!("expected mailbox entry for parent");
         };
-        parent_handler(crate::mail::registry::test_dispatch(
+        parent_handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Hatch as Kind>::ID,
             Hatch::NAME,
             &(Hatch { tag: 1 }).encode_into_bytes(),
@@ -3533,7 +3533,7 @@ mod tests {
         // Closing the parent does NOT cascade-close the grandchild.
         // Parent-child shutdown coupling is opt-in via monitor; without
         // it, the grandchild keeps running.
-        parent_handler(crate::mail::registry::test_dispatch(
+        parent_handler.enqueue(crate::mail::registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),

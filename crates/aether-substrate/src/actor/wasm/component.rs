@@ -239,13 +239,20 @@ impl ComponentCtx {
                 // to reply (ADR-0041's io sink is the motivating case)
                 // can route `*Result` back to this component via
                 // `Mailer::send_reply`.
+                //
+                // iamacoffeepot/aether#848 PR 2: handler is now
+                // `Arc<dyn InboxHandler>`; build an [`OwnedDispatch`]
+                // and move payload + kind_name into it. The bytes
+                // flow straight into the downstream cap's mpsc
+                // envelope without a `to_vec()` clone (once the cap
+                // migrates off `legacy_inbox_handler` in PR 3).
                 let origin = self.registry.mailbox_name(self.sender);
-                handler(crate::mail::registry::MailDispatch {
+                handler.enqueue(crate::mail::registry::OwnedDispatch {
                     kind,
-                    kind_name: &kind_name,
-                    origin: origin.as_deref(),
+                    kind_name,
+                    origin,
                     sender: reply_to,
-                    payload: &payload,
+                    payload,
                     count,
                     mail_id,
                     root,
@@ -258,7 +265,7 @@ impl ComponentCtx {
                 let origin = self.registry.mailbox_name(self.sender);
                 let thread_name = std::thread::current().name().map(str::to_owned);
                 crate::runtime::trace::record_received(mail_id, thread_name);
-                handler(crate::mail::registry::MailDispatch {
+                handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,
                     kind_name: &kind_name,
                     origin: origin.as_deref(),
@@ -1220,7 +1227,7 @@ mod tests {
         let sink_id = registry
             .try_register_inbox(
                 "issue_722_sink",
-                Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                     captured_for_handler.lock().unwrap().push((
                         dispatch.mail_id,
                         dispatch.root,
@@ -1292,7 +1299,7 @@ mod tests {
         let sink_id = registry
             .try_register_inbox(
                 "issue_722_fresh_root_sink",
-                Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                     captured_for_handler.lock().unwrap().push((
                         dispatch.mail_id,
                         dispatch.root,

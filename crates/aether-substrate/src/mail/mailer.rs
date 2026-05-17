@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{MailDispatch, MailboxEntry, Registry};
+use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use aether_data::{HandleId, KindId};
 use std::sync::OnceLock;
@@ -375,12 +375,22 @@ fn route_mail(
             // ReplyEnd before ReplyEvent). Synchronous handlers live
             // on the [`MailboxEntry::Inline`] arm below — they get
             // the bracket because nothing downstream owns it.
-            handler(MailDispatch {
+            //
+            // iamacoffeepot/aether#848 PR 2: payload + kind_name
+            // move into [`OwnedDispatch`] rather than being borrowed.
+            // The handler is now `Arc<dyn InboxHandler>` whose
+            // `enqueue` takes owned bytes — caps that migrate to
+            // `Fn(OwnedDispatch)` in PR 3 send the envelope
+            // downstream with zero payload-bytes copies; legacy cap
+            // closures still wrapped in `legacy_inbox_handler`
+            // re-borrow once back into `MailDispatch<'_>` for the
+            // unchanged body, cost-neutral with today's path.
+            handler.enqueue(OwnedDispatch {
                 kind: mail.kind,
-                kind_name: &kind_name,
+                kind_name,
                 origin: None,
                 sender: mail.reply_to,
-                payload: &mail.payload,
+                payload: mail.payload,
                 count: mail.count,
                 mail_id: mail.mail_id,
                 root: mail.root,
@@ -398,7 +408,7 @@ fn route_mail(
             // avoids.
             let thread_name = std::thread::current().name().map(str::to_owned);
             crate::runtime::trace::record_received(inbound_mail_id, thread_name);
-            handler(MailDispatch {
+            handler.dispatch(MailDispatch {
                 kind: mail.kind,
                 kind_name: &kind_name,
                 origin: None,
@@ -490,7 +500,6 @@ mod tests {
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
-    use crate::mail::registry::MailboxHandler;
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -618,11 +627,30 @@ mod tests {
                 delivery_count: Arc::new(AtomicUsize::new(0)),
             }
         }
-        fn handler(&self) -> MailboxHandler {
+        /// Inline-variant handler: synchronous capture body. Used by
+        /// the `register_inline` test sites; mailer brackets the
+        /// call so settlement balances.
+        fn inline_handler(&self) -> Arc<dyn crate::mail::registry::InlineHandler> {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured.write().unwrap().push(dispatch.payload.to_vec());
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+
+        /// Inbox-variant handler: receives [`OwnedDispatch`] and
+        /// moves the payload into the captured Vec (no `to_vec()`
+        /// clone). Used by `register_inbox` test sites that exercise
+        /// the actor-enqueue dispatch path. Bracket owned downstream
+        /// — these tests don't subscribe to settlement so the
+        /// "downstream never finishes" path is intentional and
+        /// harmless.
+        fn inbox_handler(&self) -> Arc<dyn crate::mail::registry::InboxHandler> {
+            let captured = Arc::clone(&self.captured);
+            let count = Arc::clone(&self.delivery_count);
+            Arc::new(move |dispatch: OwnedDispatch| {
+                captured.write().unwrap().push(dispatch.payload);
                 count.fetch_add(1, Ordering::SeqCst);
             })
         }
@@ -647,7 +675,7 @@ mod tests {
             })
             .unwrap();
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.handler());
+        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
         let note = Note {
             body: "verbatim".into(),
@@ -681,7 +709,7 @@ mod tests {
             .unwrap();
 
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.handler());
+        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
         // Push HeldNote mail with `held = Handle(7)`. Handle 7 is
         // not in the store yet — the mail must park. We construct
@@ -745,7 +773,7 @@ mod tests {
             .unwrap();
 
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.handler());
+        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
         // Truncated payload — the walker bails Truncated mid-walk.
         mailer.push(Mail::new(sink_id, kind_id, vec![0u8; 1], 1));
@@ -877,7 +905,7 @@ mod tests {
 
         let (registry, mailer, _store) = make_mailer();
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inline("test.838.sink", sink.handler());
+        let sink_id = registry.register_inline("test.838.sink", sink.inline_handler());
 
         let mail = Mail::new(sink_id, KindId(0xCAFE_BABE), vec![1, 2, 3], 1).with_lineage(
             inbound_mail_id,
@@ -928,7 +956,8 @@ mod tests {
         let sink = CapturingSink::new();
         // Register as `register_inbox` (the actor-enqueue
         // contract), NOT `register_inline`.
-        let recipient = registry.register_inbox("test.838.closure_regression", sink.handler());
+        let recipient =
+            registry.register_inbox("test.838.closure_regression", sink.inbox_handler());
 
         let mail = Mail::new(recipient, KindId(0xCAFE_BABE), vec![4, 5, 6], 1).with_lineage(
             inbound_mail_id,
@@ -996,7 +1025,7 @@ mod tests {
             })
             .unwrap();
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inline("test.838.park_defer", sink.handler());
+        let sink_id = registry.register_inline("test.838.park_defer", sink.inline_handler());
 
         // Build a payload that references a handle not yet in the
         // store — the walker returns `Parked`, mail held.
@@ -1131,7 +1160,7 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
                     let sink = CapturingSink::new();
-                    let id = registry.register_inline("test.meta.sink", sink.handler());
+                    let id = registry.register_inline("test.meta.sink", sink.inline_handler());
                     mailer.push(
                         Mail::new(id, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
@@ -1149,7 +1178,7 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
                     let sink = CapturingSink::new();
-                    let id = registry.register_inbox("test.meta.closure", sink.handler());
+                    let id = registry.register_inbox("test.meta.closure", sink.inbox_handler());
                     mailer.push(
                         Mail::new(id, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
@@ -1224,7 +1253,8 @@ mod tests {
                         })
                         .unwrap();
                     let sink = CapturingSink::new();
-                    let id = registry.register_inline("test.meta.refwalk_err", sink.handler());
+                    let id =
+                        registry.register_inline("test.meta.refwalk_err", sink.inline_handler());
                     // Truncated payload (1 byte) — walker bails Err.
                     mailer.push(
                         Mail::new(id, kind_id, vec![0u8; 1], 1)
@@ -1254,7 +1284,8 @@ mod tests {
                         })
                         .unwrap();
                     let sink = CapturingSink::new();
-                    let id = registry.register_inline("test.meta.refwalk_parked", sink.handler());
+                    let id =
+                        registry.register_inline("test.meta.refwalk_parked", sink.inline_handler());
                     let held = HeldNote {
                         held: Ref::Handle {
                             id: 0x8888_8888_8888_8888,

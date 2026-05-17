@@ -208,12 +208,12 @@ mod native {
                 bytes: vec![1, 2, 3, 4, 5],
             };
             let bytes = postcard::to_allocvec(&req).unwrap();
-            handler(aether_substrate::mail::registry::MailDispatch {
+            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
                 kind: <HandlePublish as Kind>::ID,
-                kind_name: "aether.handle.publish",
+                kind_name: "aether.handle.publish".to_owned(),
                 origin: None,
                 sender: session_reply_to(),
-                payload: &bytes,
+                payload: bytes,
                 count: 1,
                 mail_id: aether_substrate::mail::MailId::NONE,
                 root: aether_substrate::mail::MailId::NONE,

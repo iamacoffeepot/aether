@@ -41,12 +41,88 @@ pub(crate) fn test_dispatch<'a>(
     }
 }
 
-/// No-op [`MailboxHandler`] for tests that just need a registered
+/// Test-only owned mirror of [`test_dispatch`]. Used by tests that
+/// poke an `Inbox` handler directly through
+/// [`InboxHandler::enqueue`] — the trait's owned-dispatch contract
+/// makes the borrowed [`test_dispatch`] unsuitable. Same defaults
+/// (empty origin, `ReplyTo::NONE`, `MailId::NONE`).
+///
+/// Issue iamacoffeepot/aether#848 PR 2: added alongside the
+/// [`OwnedDispatch`] migration so cap-side dispatcher tests stay
+/// terse without each rebuilding the full struct literal.
+#[cfg(test)]
+pub(crate) fn test_owned_dispatch(
+    kind: KindId,
+    kind_name: &str,
+    payload: &[u8],
+    count: u32,
+) -> OwnedDispatch {
+    OwnedDispatch {
+        kind,
+        kind_name: kind_name.to_owned(),
+        origin: None,
+        sender: ReplyTo::NONE,
+        payload: payload.to_vec(),
+        count,
+        mail_id: MailId::NONE,
+        root: MailId::NONE,
+        parent_mail: None,
+    }
+}
+
+/// No-op [`InboxHandler`] for tests that just need a registered
 /// mailbox to route to *somewhere* without observing the mail. The
-/// explicit named helper documents intent at the call site and keeps
-/// the closure shape (post-ADR-0080 `MailDispatch`-based) hidden.
-pub fn noop_handler() -> MailboxHandler {
-    Arc::new(|_dispatch: MailDispatch<'_>| {})
+/// explicit named helper documents intent at the call site.
+///
+/// Defaults to the Inbox variant because every current caller pairs
+/// it with `register_inbox` / `try_register_inbox`. Tests that need
+/// the Inline variant (e.g. asserting bracket recording paths)
+/// build their own `Arc::new(|_d: MailDispatch<'_>| {}) as
+/// Arc<dyn InlineHandler>`.
+pub fn noop_handler() -> Arc<dyn InboxHandler> {
+    Arc::new(|_dispatch: OwnedDispatch| {})
+}
+
+/// Issue iamacoffeepot/aether#848 PR 2 adapter: wrap a legacy
+/// `Fn(MailDispatch<'_>)` closure (the pre-PR-2 cap shape) into an
+/// `Arc<dyn InboxHandler>` so existing cap closures keep compiling
+/// through the staged migration. The adapter re-borrows the inbound
+/// [`OwnedDispatch`] back into a [`MailDispatch<'_>`] for the legacy
+/// body. Cost-neutral with today's path (the borrow itself is free;
+/// the legacy body's `to_vec()` / `to_owned()` clones inside the
+/// closure are unchanged), so PR 2 doesn't introduce a perf
+/// regression on the cap dispatch hot path.
+///
+/// Each production cap that's still wrapped here migrates in PR 3
+/// to take `Fn(OwnedDispatch)` directly — moving payload + kind_name
+/// rather than cloning them, which is where iamacoffeepot/aether#848's
+/// documented hot-path win materializes. PR 5 retires this helper
+/// once every wrap is gone.
+pub fn legacy_inbox_handler<F>(closure: F) -> Arc<dyn InboxHandler>
+where
+    F: for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static,
+{
+    struct LegacyAdapter<F>(F);
+    impl<F> InboxHandler for LegacyAdapter<F>
+    where
+        F: for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static,
+    {
+        fn enqueue(&self, dispatch: OwnedDispatch) {
+            let borrowed = MailDispatch {
+                kind: dispatch.kind,
+                kind_name: &dispatch.kind_name,
+                origin: dispatch.origin.as_deref(),
+                sender: dispatch.sender,
+                payload: &dispatch.payload,
+                count: dispatch.count,
+                mail_id: dispatch.mail_id,
+                root: dispatch.root,
+                parent_mail: dispatch.parent_mail,
+            };
+            (self.0)(borrowed);
+        }
+    }
+    Arc::new(LegacyAdapter(closure))
 }
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType};
@@ -247,7 +323,17 @@ pub enum MailboxEntry {
     /// public [`Registry::register_inbox`] /
     /// [`Registry::try_register_inbox`] for callers that own a
     /// separate dispatcher loop.
-    Inbox(MailboxHandler),
+    ///
+    /// Issue iamacoffeepot/aether#848 PR 2: the variant now wraps
+    /// `Arc<dyn InboxHandler>` (was `MailboxHandler`). Handler
+    /// bodies receive [`OwnedDispatch`] so payload bytes move into
+    /// the downstream envelope rather than being cloned via
+    /// `to_vec()` — the hot-path perf win documented in iamacoffeepot/aether#848.
+    /// Legacy `Fn(MailDispatch<'_>)` cap closures bridge via
+    /// [`legacy_inbox_handler`] during the staged migration; PR 3
+    /// rewrites each cap to take `OwnedDispatch` directly and the
+    /// adapter retires in PR 5.
+    Inbox(Arc<dyn InboxHandler>),
     /// The handler body does its work inline on the pushing thread;
     /// there is no actor dispatch loop behind it. `Mailer::push`
     /// brackets this arm with `Received` and `Finished` so the
@@ -257,7 +343,13 @@ pub enum MailboxEntry {
     /// [`Registry::try_register_inline`]. Distinct from `Inbox` so
     /// the bracket isn't double-counted when the closure was an
     /// actor-enqueue (which would fire settlement prematurely).
-    Inline(MailboxHandler),
+    ///
+    /// Issue iamacoffeepot/aether#848 PR 2: the variant now wraps
+    /// `Arc<dyn InlineHandler>` (was `MailboxHandler`). The handler
+    /// body shape — `Fn(MailDispatch<'_>)` — is unchanged; the
+    /// blanket impl on the `InlineHandler` trait makes existing
+    /// closures coerce into `Arc<dyn InlineHandler>` automatically.
+    Inline(Arc<dyn InlineHandler>),
     /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
     /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
     /// until the same name is re-registered, at which point the slot
@@ -480,7 +572,11 @@ impl Registry {
     ///
     /// Panics on a name collision — these are substrate-internal
     /// names, collisions are bugs.
-    pub fn register_inbox(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
+    pub fn register_inbox(
+        &self,
+        name: impl Into<String>,
+        handler: Arc<dyn InboxHandler>,
+    ) -> MailboxId {
         let name = name.into();
         match self.insert(name.clone(), MailboxEntry::Inbox(handler)) {
             Ok(id) => {
@@ -501,7 +597,7 @@ impl Registry {
     pub fn try_register_inbox(
         &self,
         name: impl Into<String>,
-        handler: MailboxHandler,
+        handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
         let result = self.insert(name.into(), MailboxEntry::Inbox(handler));
         if result.is_ok() {
@@ -525,7 +621,11 @@ impl Registry {
     /// `Inline` double-counts `Finished` (settlement fires
     /// prematurely). Panics on a name collision — these are
     /// substrate-internal names, collisions are bugs.
-    pub fn register_inline(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
+    pub fn register_inline(
+        &self,
+        name: impl Into<String>,
+        handler: Arc<dyn InlineHandler>,
+    ) -> MailboxId {
         let name = name.into();
         match self.insert(name.clone(), MailboxEntry::Inline(handler)) {
             Ok(id) => {
@@ -541,7 +641,7 @@ impl Registry {
     pub fn try_register_inline(
         &self,
         name: impl Into<String>,
-        handler: MailboxHandler,
+        handler: Arc<dyn InlineHandler>,
     ) -> Result<MailboxId, NameConflict> {
         let result = self.insert(name.into(), MailboxEntry::Inline(handler));
         if result.is_ok() {
@@ -851,7 +951,7 @@ mod tests {
         let c2 = Arc::clone(&counter);
         let id = r.register_inbox(
             "heartbeat",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 c2.fetch_add(dispatch.count, Ordering::SeqCst);
             }),
         );
@@ -859,13 +959,13 @@ mod tests {
             panic!("expected closure entry")
         };
         // Test-side id is irrelevant — the handler ignores it.
-        h(test_dispatch(KindId(0), "aether.tick", &[], 7));
-        h(MailDispatch {
+        h.enqueue(test_owned_dispatch(KindId(0), "aether.tick", &[], 7));
+        h.enqueue(OwnedDispatch {
             kind: KindId(0),
-            kind_name: "aether.tick",
-            origin: Some("physics"),
+            kind_name: "aether.tick".to_owned(),
+            origin: Some("physics".to_owned()),
             sender: ReplyTo::NONE,
-            payload: &[],
+            payload: Vec::new(),
             count: 3,
             mail_id: MailId::NONE,
             root: MailId::NONE,

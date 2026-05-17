@@ -130,12 +130,12 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         panic!("expected mailbox entry under {recipient}");
     };
     let bytes = payload.encode_into_bytes();
-    handler(aether_substrate::mail::registry::MailDispatch {
+    handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
         kind: <K as Kind>::ID,
-        kind_name: K::NAME,
+        kind_name: K::NAME.to_owned(),
         origin: None,
         sender: ReplyTo::NONE,
-        payload: &bytes,
+        payload: bytes,
         count: 1,
         mail_id: aether_substrate::mail::MailId::NONE,
         root: aether_substrate::mail::MailId::NONE,

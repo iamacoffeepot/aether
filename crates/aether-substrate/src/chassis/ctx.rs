@@ -300,7 +300,7 @@ impl<'a> ChassisCtx<'a> {
         let tx = Arc::new(tx);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            Arc::new(move |dispatch: MailDispatch<'_>| {
+            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
                 let env = build_envelope(&dispatch);
                 if tx.send(env).is_err() {
                     tracing::warn!(
@@ -354,7 +354,7 @@ impl<'a> ChassisCtx<'a> {
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            Arc::new(move |dispatch: MailDispatch<'_>| {
+            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
                 let Some(tx) = weak.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -424,7 +424,7 @@ impl<'a> ChassisCtx<'a> {
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            Arc::new(move |dispatch: MailDispatch<'_>| {
+            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
                 let Some(tx) = weak.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::capability",
