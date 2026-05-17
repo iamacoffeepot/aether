@@ -42,3 +42,19 @@ jobs:
           args: --linter qodana-rust -u root
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
+      - name: Reclaim qodana cache ownership for tar
+        # Qodana ran as root in the container; cache files inherit
+        # uid 0 on the bind-mount. qodana-action's post-step then
+        # tries to tar the cache as the runner user (uid 1001) and
+        # fails with exit code 2 ('No cache found' on the next run,
+        # because save never completed). Chown the tree back to the
+        # runner user so the post-step can read everything.
+        #
+        # `if: always()` so the chown still runs when qodana itself
+        # exits non-zero on findings. `|| true` because the cache dir
+        # may not exist at all if the scan crashed before populating.
+        if: always()
+        run: |
+          if [ -d /home/runner/work/_temp/qodana/caches ]; then
+            sudo chown -R "$(id -u):$(id -g)" /home/runner/work/_temp/qodana/caches || true
+          fi
