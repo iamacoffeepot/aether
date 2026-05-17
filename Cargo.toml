@@ -36,7 +36,7 @@ nursery  = { level = "warn", priority = -1 }
 dbg_macro                           = "warn"  # promote to deny in Phase 1.c.* if any hits exist
 todo                                = "warn"  # promote to deny if no hits surface
 unimplemented                       = "warn"  # promote to deny if no hits surface
-undocumented_unsafe_blocks          = "warn"  # promote to deny in Phase 1.b after 73 SAFETY backfills
+undocumented_unsafe_blocks          = "deny"
 cloned_instead_of_copied            = "deny"
 large_stack_arrays                  = "deny"
 match_wildcard_for_single_variants  = "deny"

@@ -272,6 +272,8 @@ mod tests {
             }
         }
         let out = f();
+        // SAFETY: same justification as the prior block — this test
+        // still owns the `AETHER_WORKERS` slot via `ENV_LOCK`.
         unsafe {
             std::env::remove_var("AETHER_WORKERS");
         }

@@ -35,6 +35,11 @@ impl MailBridge {
     /// host-side failure surfaces.
     #[must_use]
     pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+        // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
+        // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
+        // derived from the `&[u8]` slice we just received, which the
+        // borrow checker proves is valid for `bytes.len()` bytes for
+        // the duration of the call; the host copies before returning.
         unsafe {
             raw::send_mail(
                 recipient,
@@ -53,6 +58,11 @@ impl MailBridge {
     /// engine mailbox.
     #[must_use]
     pub fn reply_mail(&self, sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
+        // SAFETY: forwards to `raw::reply_mail`, whose ABI is documented
+        // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
+        // derived from the `&[u8]` slice we just received, which the
+        // borrow checker proves is valid for `bytes.len()` bytes for
+        // the duration of the call; the host copies before returning.
         unsafe {
             raw::reply_mail(
                 sender,
@@ -71,6 +81,11 @@ impl MailBridge {
     /// the inbound's reply correlation.
     #[must_use]
     pub fn prev_correlation(&self) -> u64 {
+        // SAFETY: `raw::prev_correlation` takes no arguments and reads
+        // a host-side scalar set on the most recent `send_mail`; no
+        // ABI invariants to uphold beyond "we are the FFI guest", which
+        // the `#[cfg(target_arch = "wasm32")]` import gate enforces
+        // (the host-target stub panics rather than returning garbage).
         unsafe { raw::prev_correlation() }
     }
 }

@@ -181,6 +181,11 @@ impl<'a> Mail<'a> {
             return None;
         }
         let byte_len = core::mem::size_of::<K>();
+        // SAFETY: `self.ptr` / `self.byte_len` originate from the
+        // substrate's receive ABI (`Mail::__from_raw` / `__from_ptr`),
+        // which guarantees the substrate wrote `self.byte_len >=
+        // size_of::<K>()` bytes valid at `self.ptr` for the lifetime
+        // of this `Mail`. `'a` ties the borrow to that lifetime.
         let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         Some(bytemuck::pod_read_unaligned(bytes))
     }
@@ -198,6 +203,12 @@ impl<'a> Mail<'a> {
             return None;
         }
         let byte_len = core::mem::size_of::<K>() * self.count as usize;
+        // SAFETY: `self.ptr` / `self.byte_len` originate from the
+        // substrate's receive ABI; the substrate guarantees at least
+        // `size_of::<K>() * self.count` bytes valid at `self.ptr` for
+        // the lifetime of this `Mail`. `'a` ties the returned slice
+        // to that lifetime; `try_cast_slice` returns `None` on
+        // alignment mismatch.
         let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         bytemuck::try_cast_slice(bytes).ok()
     }
@@ -229,6 +240,10 @@ impl<'a> Mail<'a> {
         if self.byte_len as usize != byte_len {
             return None;
         }
+        // SAFETY: `self.ptr` / `self.byte_len` originate from the
+        // substrate's receive ABI; the `byte_len` check above proves
+        // the host promised exactly `size_of::<K>()` bytes valid at
+        // `self.ptr` for this `Mail`'s lifetime.
         let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         Some(bytemuck::pod_read_unaligned(bytes))
     }
@@ -244,6 +259,11 @@ impl<'a> Mail<'a> {
         if self.byte_len as usize != byte_len {
             return None;
         }
+        // SAFETY: `self.ptr` / `self.byte_len` originate from the
+        // substrate's receive ABI; the `byte_len` check above proves
+        // the host promised `size_of::<K>() * count` bytes valid at
+        // `self.ptr` for this `Mail`'s lifetime. `try_cast_slice`
+        // returns `None` on alignment mismatch.
         let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         bytemuck::try_cast_slice(bytes).ok()
     }
@@ -271,6 +291,12 @@ impl<'a> Mail<'a> {
         if self.kind != K::ID.0 || self.count != 1 {
             return None;
         }
+        // SAFETY: `self.ptr` / `self.byte_len` originate from the
+        // substrate's receive ABI; the substrate guarantees
+        // `self.byte_len` bytes valid at `self.ptr` for this `Mail`'s
+        // lifetime. Bounding the slice by `byte_len` keeps
+        // `K::decode_from_bytes` (cast or postcard) from running past
+        // the substrate-written region into adjacent linear memory.
         let bytes =
             unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
         K::decode_from_bytes(bytes)
@@ -333,6 +359,12 @@ impl<'a> PriorState<'a> {
         if self.len == 0 {
             &[]
         } else {
+            // SAFETY: `self.ptr` / `self.len` originate from the
+            // substrate's `on_rehydrate` ABI (`PriorState::__from_raw`
+            // / `__from_ptr`); the substrate guarantees `self.len`
+            // bytes valid at `self.ptr` for this `PriorState`'s
+            // lifetime. The `len == 0` branch above avoids forming a
+            // slice over a possibly-null pointer.
             unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
         }
     }
@@ -408,11 +440,24 @@ mod tests {
         ids: alloc::vec::Vec<u32>,
     }
 
+    // SAFETY (test fixtures): each `Mail::__from_ptr` / `__from_raw` /
+    // `PriorState::__from_ptr` / `__from_raw` below substitutes for the
+    // substrate's receive ABI. The host pointer + length pair we pass
+    // is derived from a local stack value or buffer whose lifetime
+    // straddles the resulting `Mail`/`PriorState`, satisfying the
+    // ABI's `(ptr, byte_len)` validity contract for the duration of
+    // the test body. The `count` / `sender` / `version` scalars are
+    // plain values with no aliasing implications. The `0,0,0` no-deref
+    // variants rely on the `bytes()` / `decode*` accessors honouring
+    // the `len == 0` early-return rather than forming a slice over the
+    // null pointer.
+
     #[test]
     fn mail_decode_single_roundtrip() {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
         let out = mail.decode(kind).unwrap();
@@ -424,6 +469,7 @@ mod tests {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let wrong: KindId<FakePod> = KindId::__new(8);
         assert!(mail.decode(wrong).is_none());
@@ -434,6 +480,7 @@ mod tests {
         let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
         // `decode` requires count == 1; use `decode_slice` for batches.
@@ -445,6 +492,7 @@ mod tests {
         let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
         let out = mail.decode_slice(kind).unwrap();
@@ -453,12 +501,15 @@ mod tests {
 
     #[test]
     fn mail_sender_none_for_sentinel_handle() {
+        // SAFETY: no pointer is dereferenced (`bytes()` and friends
+        // are not called); we only inspect the sentinel `sender`.
         let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, NO_REPLY_HANDLE) };
         assert!(mail.reply_to().is_none());
     }
 
     #[test]
     fn mail_sender_some_for_real_handle() {
+        // SAFETY: no pointer is dereferenced; we only inspect `sender`.
         let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42) };
         let s = mail.reply_to().expect("non-sentinel handle yields Some");
         assert_eq!(s.raw(), 42);
@@ -470,6 +521,8 @@ mod tests {
         // raw 0 ptr with len>0 would be UB if anyone called
         // `from_raw_parts` on it. The `if self.len == 0` branch in
         // `bytes()` is what guarantees this.
+        // SAFETY: `bytes()` returns `&[]` for `len == 0` without
+        // forming a slice over the null pointer.
         let prior = unsafe { PriorState::__from_raw(7, 0, 0) };
         assert_eq!(prior.schema_version(), 7);
         assert_eq!(prior.bytes(), &[] as &[u8]);
@@ -478,6 +531,8 @@ mod tests {
     #[test]
     fn prior_state_nonempty_bytes_roundtrip() {
         let buf: [u8; 4] = [1, 2, 3, 4];
+        // SAFETY: `buf` outlives `prior`; the `(addr, len)` pair is
+        // valid for `buf.len()` bytes for the rest of the test body.
         let prior = unsafe { PriorState::__from_ptr(3, buf.as_ptr().addr(), buf.len()) };
         assert_eq!(prior.schema_version(), 3);
         assert_eq!(prior.bytes(), &buf);
@@ -485,6 +540,7 @@ mod tests {
 
     #[test]
     fn mail_is_typed_matches_kind_id() {
+        // SAFETY: no pointer is dereferenced (`is::<K>` reads `kind`).
         let mail = unsafe { Mail::__from_ptr(FakeKind::ID.0, 0, 0, 0, NO_REPLY_HANDLE) };
         assert!(mail.is::<FakeKind>());
         assert!(!mail.is::<FakePod>());
@@ -495,6 +551,7 @@ mod tests {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let out = mail.decode_typed::<FakePod>().unwrap();
@@ -507,6 +564,7 @@ mod tests {
         let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         // Kind id deliberately mismatched (FakeKind instead of FakePod).
+        // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakeKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         assert!(mail.decode_typed::<FakePod>().is_none());
@@ -517,6 +575,7 @@ mod tests {
         let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         assert!(mail.decode_typed::<FakePod>().is_none());
@@ -527,6 +586,7 @@ mod tests {
         let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let out = mail.decode_slice_typed::<FakePod>().unwrap();
@@ -540,6 +600,8 @@ mod tests {
             ids: alloc::vec![1, 2, 3, 4],
         };
         let bytes = postcard::to_allocvec(&value).unwrap();
+        // SAFETY: `bytes` (a `Vec<u8>` from postcard) outlives `mail`;
+        // its `(addr, len)` pair is valid for the rest of the body.
         let mail = unsafe {
             Mail::__from_ptr(
                 FakePostcard::ID.0,
@@ -578,6 +640,7 @@ mod tests {
         let value = FakeCastKind { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakeCastKind>() as u32;
+        // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let out = mail.decode_kind::<FakeCastKind>().expect("decode");
@@ -591,6 +654,8 @@ mod tests {
             ids: alloc::vec![],
         };
         let bytes = postcard::to_allocvec(&value).unwrap();
+        // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
+        // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
             Mail::__from_ptr(
                 FakeKind::ID.0,
@@ -610,6 +675,8 @@ mod tests {
             ids: alloc::vec![],
         };
         let bytes = postcard::to_allocvec(&value).unwrap();
+        // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
+        // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
             Mail::__from_ptr(
                 FakePostcard::ID.0,
@@ -632,6 +699,9 @@ mod tests {
         // Pretend the substrate only wrote the first 2 bytes —
         // `decode_from_bytes` (postcard arm) gets the truncated slice
         // and surfaces the parse error as `None`.
+        // SAFETY: `bytes` outlives `mail`; the declared `byte_len=2`
+        // is within the actual allocation so the bounded read is
+        // valid even though it's deliberately a truncation.
         let mail = unsafe {
             Mail::__from_ptr(
                 FakePostcard::ID.0,
@@ -652,6 +722,9 @@ mod tests {
         // Use a real (empty) buffer — `slice::from_raw_parts(NULL, 0)`
         // is UB even when the length is zero.
         let buf: [u8; 1] = [0];
+        // SAFETY: `buf` outlives `mail`; the `(addr, 0)` pair points
+        // into the live `buf` allocation, satisfying the validity
+        // contract trivially for the zero-byte read.
         let mail =
             unsafe { Mail::__from_ptr(FakeKind::ID.0, buf.as_ptr().addr(), 0, 1, NO_REPLY_HANDLE) };
         assert!(mail.decode_kind::<FakeKind>().is_none());
@@ -666,6 +739,11 @@ mod tests {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
         let bogus_byte_len = (core::mem::size_of::<FakePod>() + 4) as u32;
+        // SAFETY: the bogus `byte_len` is intentional; `decode_typed`
+        // detects the size mismatch and returns `None` before reading.
+        // The pointer is still valid for `size_of::<FakePod>()` bytes
+        // (the `value` allocation), so even if decode did read it
+        // would touch only valid memory.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, bogus_byte_len, 1, NO_REPLY_HANDLE) };
         assert!(mail.decode_typed::<FakePod>().is_none());
@@ -706,6 +784,10 @@ mod tests {
     }
 
     fn prior_from(buf: &[u8], version: u32) -> PriorState<'_> {
+        // SAFETY: the returned `PriorState<'_>` borrows `buf` (via the
+        // explicit lifetime); the `(addr, len)` pair derives from a
+        // live slice the caller supplies, so validity holds for the
+        // borrow's lifetime.
         unsafe { PriorState::__from_ptr(version, buf.as_ptr().addr(), buf.len()) }
     }
 
@@ -746,6 +828,9 @@ mod tests {
         // `on_rehydrate` only fires when the predecessor saved
         // something, but a hypothetical zero-length buffer must
         // still fall through cleanly.
+        // SAFETY: `bytes()` returns `&[]` for `len == 0` without
+        // forming a slice over the null pointer; the decode reads
+        // through that empty slice and short-circuits.
         let prior = unsafe { PriorState::__from_raw(0, 0, 0) };
         assert!(prior.as_kind::<StateStruct>().is_none());
     }

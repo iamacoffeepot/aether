@@ -203,6 +203,13 @@ mod native_impl {
                         .expect("TypeId<T> ⇒ RefCell<T>"),
                 )
             };
+            // SAFETY: same justification as `with_mut` above — the
+            // pointer is into a heap-allocated `Box<RefCell<T>>` owned
+            // by `self.by_type`. The outer borrow released so a nested
+            // `with::<U>` can re-enter the map; the box's heap address
+            // is stable across `HashMap` rehashes; we never remove
+            // entries. The `&RefCell<T>` reborrow is unique for the
+            // closure's run.
             let cell = unsafe { &*cell_ptr };
             let borrow = cell.borrow();
             f(&*borrow)

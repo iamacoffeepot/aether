@@ -93,6 +93,11 @@ impl Drop for DispatchGuard {
 /// restores the prior pointer before the surrounding stack frame
 /// returns, so no `'static` reference escapes.
 pub fn with_actor_dispatch<R>(dispatch: &dyn MailDispatch, f: impl FnOnce() -> R) -> R {
+    // SAFETY: same justification as the `SAFETY` paragraph in the
+    // fn doc — the caller guarantees `dispatch` outlives `f`. The
+    // `'static` reborrow is confined to the surrounding stack frame
+    // by the `DispatchGuard` drop, so no `'static` reference escapes
+    // past `with_actor_dispatch`'s return.
     let static_ref: &'static dyn MailDispatch =
         unsafe { core::mem::transmute::<&dyn MailDispatch, &'static dyn MailDispatch>(dispatch) };
     let _guard = ACTOR_DISPATCH.with(|slot| {

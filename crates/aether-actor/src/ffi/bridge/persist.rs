@@ -34,6 +34,12 @@ impl PersistBridge {
     /// successor).
     #[must_use]
     pub fn save_state(&self, version: u32, bytes: &[u8]) -> u32 {
+        // SAFETY: forwards to `raw::save_state`, whose ABI is documented
+        // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
+        // derived from the `&[u8]` slice we just received, which the
+        // borrow checker proves is valid for `bytes.len()` bytes for
+        // the duration of the call; the substrate copies the bundle
+        // out of guest memory before returning.
         unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) }
     }
 }

@@ -515,6 +515,13 @@ mod native {
         /// chassis-router isn't installed, so the bare push warn-drops
         /// at the `route_mail` switch — that's fine for state assertions).
         fn boot_observer() -> TraceObserverCapability {
+            // SAFETY: called only from this test thread before any
+            // reader. `AETHER_TRACE_RETENTION_MS` and
+            // `AETHER_TRACE_MAX_ROOTS` are read inside `observer_with`
+            // (the next call on this same thread) and nowhere else in
+            // this test module, so no concurrent reader can race the
+            // write. `std::env::set_var` only requires "no other thread
+            // is reading or writing the environment simultaneously."
             unsafe {
                 std::env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
                 std::env::set_var("AETHER_TRACE_MAX_ROOTS", "1000");
