@@ -93,3 +93,6 @@ crossbeam-queue = { version = "0.3", optional = true }
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { version = "1.19", features = ["derive"] }
+
+[lints]
+workspace = true

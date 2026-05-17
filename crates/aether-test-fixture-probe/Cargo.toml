@@ -22,3 +22,6 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 # actor-aware subscriber installed by `export!()` buffers + drains it
 # to LogCapability.
 tracing = { version = "0.1", default-features = false }
+
+[lints]
+workspace = true

@@ -51,7 +51,8 @@ jobs:
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # TODO(iamacoffeepot/aether#854): restore `-D warnings` after the warn-prune passes land.
+      - run: cargo clippy --workspace --all-targets
 
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,

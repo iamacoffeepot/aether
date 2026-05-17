@@ -25,3 +25,32 @@ exclude = ["spikes/*"]
 [workspace.package]
 version = "0.2.0-alpha"
 edition = "2024"
+
+[workspace.lints.clippy]
+# Baseline — both groups as warn, then opt out of the idiom-fight bucket below.
+pedantic = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+
+# Deny picks — INITIALLY AT WARN until per-pick cleanup PRs land (iamacoffeepot/aether#854 Phase 1.b-1.c.iv).
+# Each follow-up PR fixes its hits and promotes its lint to deny in the same diff.
+dbg_macro                           = "warn"  # promote to deny in Phase 1.c.* if any hits exist
+todo                                = "warn"  # promote to deny if no hits surface
+unimplemented                       = "warn"  # promote to deny if no hits surface
+undocumented_unsafe_blocks          = "warn"  # promote to deny in Phase 1.b after 73 SAFETY backfills
+cloned_instead_of_copied            = "warn"  # promote to deny in Phase 1.c.iv
+large_stack_arrays                  = "warn"  # promote to deny in Phase 1.c.iv
+match_wildcard_for_single_variants  = "warn"  # promote to deny in Phase 1.c.iii
+uninlined_format_args               = "warn"  # promote to deny in Phase 1.c.ii
+unreadable_literal                  = "warn"  # promote to deny in Phase 1.c.i
+
+# Warn picks — cherry-picked from restriction + style (not covered by pedantic/nursery baseline).
+unwrap_used                         = "warn"
+print_stdout                        = "warn"
+print_stderr                        = "warn"
+
+# Disable — idiom fight / dispatcher contract / doc-burden. Rationale in iamacoffeepot/aether#854.
+float_cmp                    = "allow"
+missing_const_for_fn         = "allow"
+missing_errors_doc           = "allow"
+needless_pass_by_ref_mut     = "allow"
+too_long_first_doc_paragraph = "allow"

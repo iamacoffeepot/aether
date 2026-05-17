@@ -85,3 +85,6 @@ crate-type = ["cdylib"]
 [[example]]
 name = "hello"
 crate-type = ["cdylib"]
+
+[lints]
+workspace = true

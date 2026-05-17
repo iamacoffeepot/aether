@@ -33,3 +33,6 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 # the wasm-side collection mechanism; this is the native mirror.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = "0.3"
+
+[lints]
+workspace = true

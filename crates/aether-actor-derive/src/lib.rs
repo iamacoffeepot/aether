@@ -1,3 +1,9 @@
+// Derive codegen builds deeply-nested `quote!` trees from `if let Some(...)` branches;
+// `map_or_else` would obscure the control flow. Allow at the crate root because cargo
+// doesn't permit `[lints.clippy]` overrides alongside `lints.workspace = true` in the
+// manifest (iamacoffeepot/aether#854 Phase 1.a).
+#![allow(clippy::option_if_let_else)]
+
 //! Proc-macro home for `#[derive(Kind)]` and `#[derive(Schema)]` per
 //! ADR-0019 / ADR-0031 / ADR-0032. Kept separate from `aether-data`
 //! because Rust requires proc-macro crates to opt into
