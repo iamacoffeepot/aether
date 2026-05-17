@@ -44,7 +44,7 @@ impl Chassis for TestChassis {
 /// wired but inert — tests that never hit it (audio, fs, http handler
 /// paths) see no behavioural difference, and tests that do hit it
 /// (rpc, engine proxy) get the connected backend they need.
-pub(crate) fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let registry = Arc::new(Registry::new());
     for d in aether_kinds::descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);

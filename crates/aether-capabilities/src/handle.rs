@@ -44,7 +44,7 @@ mod native {
         /// retired the post-construction `wire_handle_store` setter),
         /// so the cap can clone it directly without a `None`-arm
         /// bootstrap-ordering check.
-        fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let store = Arc::clone(ctx.mailer().handle_store());
             Ok(Self { store })
         }
@@ -225,9 +225,10 @@ mod native {
                 if let Ok(f) = rx.try_recv() {
                     break f;
                 }
-                if Instant::now() >= deadline {
-                    panic!("publish reply did not arrive within deadline");
-                }
+                assert!(
+                    Instant::now() < deadline,
+                    "publish reply did not arrive within deadline"
+                );
                 thread::sleep(Duration::from_millis(5));
             };
             let payload = match frame {

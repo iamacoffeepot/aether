@@ -19,7 +19,7 @@
 //!   demoted `LogEvent` to a non-mailable struct so the buffer-and-
 //!   drain shape is the only sender path for log content.
 //! - Receives `aether.test_fixture.set_render { r, g, b, visible }`
-//!   to update render state. When `visible` is non-zero, on_tick
+//!   to update render state. When `visible` is non-zero, `on_tick`
 //!   emits a colored `DrawTriangle` to the chassis render sink, so
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
@@ -113,9 +113,9 @@ impl FfiActor for Probe {
             tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
         }
         if self.render.visible != 0 {
-            let r = self.render.r as f32 / 255.0;
-            let g = self.render.g as f32 / 255.0;
-            let b = self.render.b as f32 / 255.0;
+            let r = f32::from(self.render.r) / 255.0;
+            let g = f32::from(self.render.g) / 255.0;
+            let b = f32::from(self.render.b) / 255.0;
             let v = |x: f32, y: f32| Vertex {
                 x,
                 y,
@@ -135,7 +135,7 @@ impl FfiActor for Probe {
     ///
     /// # Agent
     /// Send via `send_mail` with `kind_name = "aether.test_fixture.set_render"`
-    /// and params `{ r, g, b, visible }`. Used by capture_frame
+    /// and params `{ r, g, b, visible }`. Used by `capture_frame`
     /// scenarios to flip the fixture's render output between frames.
     #[handler]
     fn on_set_render(&mut self, _ctx: &mut FfiCtx<'_>, mail: SetRender) {

@@ -187,13 +187,14 @@ fn run_pool_stress() -> Duration {
     for _ in 0..STRESS_BATCHES {
         push_log_batch(&registry, PooledBenchLogCap::NAMESPACE, &bytes);
     }
-    let observed = await_counter(&counter, STRESS_BATCHES as u64);
+    let observed = await_counter(&counter, u64::from(STRESS_BATCHES));
     let elapsed = start.elapsed();
 
     drop(chassis);
 
     assert_eq!(
-        observed, STRESS_BATCHES as u64,
+        observed,
+        u64::from(STRESS_BATCHES),
         "pool-path counter reached {observed} of {STRESS_BATCHES} before drain budget elapsed",
     );
 
@@ -216,13 +217,14 @@ fn run_dedicated_baseline() -> Duration {
     for _ in 0..STRESS_BATCHES {
         push_log_batch(&registry, DedicatedBenchLogCap::NAMESPACE, &bytes);
     }
-    let observed = await_counter(&counter, STRESS_BATCHES as u64);
+    let observed = await_counter(&counter, u64::from(STRESS_BATCHES));
     let elapsed = start.elapsed();
 
     drop(chassis);
 
     assert_eq!(
-        observed, STRESS_BATCHES as u64,
+        observed,
+        u64::from(STRESS_BATCHES),
         "dedicated-baseline counter reached {observed} of {STRESS_BATCHES} before drain budget elapsed",
     );
 
@@ -240,16 +242,11 @@ fn pool_path_drains_10k_log_batches_within_dedicated_budget() {
 
     let ratio = pooled.as_secs_f64() / dedicated.as_secs_f64().max(f64::MIN_POSITIVE);
     eprintln!(
-        "log_pool_stress: {} mails — dedicated={:?} pooled={:?} ratio={:.2}x",
-        STRESS_BATCHES, dedicated, pooled, ratio
+        "log_pool_stress: {STRESS_BATCHES} mails — dedicated={dedicated:?} pooled={pooled:?} ratio={ratio:.2}x"
     );
 
     assert!(
         ratio <= RATIO_CAP,
-        "pooled drain wallclock {:.2}x dedicated baseline (cap {:.2}x); pooled={:?} dedicated={:?}",
-        ratio,
-        RATIO_CAP,
-        pooled,
-        dedicated,
+        "pooled drain wallclock {ratio:.2}x dedicated baseline (cap {RATIO_CAP:.2}x); pooled={pooled:?} dedicated={dedicated:?}",
     );
 }

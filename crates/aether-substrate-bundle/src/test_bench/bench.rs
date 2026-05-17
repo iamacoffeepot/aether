@@ -153,7 +153,7 @@ pub struct TestBench {
     /// so the loopback receiver can recognise its own replies.
     session: SessionToken,
 
-    /// Replies that arrived for correlation_ids we haven't waited
+    /// Replies that arrived for `correlation_ids` we haven't waited
     /// for yet. Single-threaded callers won't accumulate entries
     /// here; the field exists so an out-of-order reply (e.g. a
     /// late-arriving frame) doesn't get silently dropped.
@@ -172,11 +172,11 @@ pub struct TestBench {
     observed_kinds: Arc<Mutex<Vec<String>>>,
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
-    /// TestBench drops the boot which joins the worker threads.
+    /// `TestBench` drops the boot which joins the worker threads.
     _boot: SubstrateBoot,
 
     /// `PassiveChassis<TestBenchChassis>` holding the booted Log +
-    /// Render passives via the chassis_builder typed map. Held for
+    /// Render passives via the `chassis_builder` typed map. Held for
     /// the bench's lifetime so the passives' dispatcher threads
     /// stay alive; drops in reverse declaration order before
     /// `_boot`, so render+log shut down before the scheduler joins.
@@ -217,6 +217,7 @@ impl Default for TestBenchBuilder {
 impl TestBenchBuilder {
     /// Set the offscreen target size. Width / height are clamped to a
     /// minimum of 1 inside `Gpu::new`.
+    #[must_use]
     pub fn size(mut self, width: u32, height: u32) -> Self {
         self.width = width;
         self.height = height;
@@ -228,6 +229,7 @@ impl TestBenchBuilder {
     /// `aether.fs` adapter wired by the bench resolves
     /// `save://` / `assets://` / `config://` against these paths
     /// instead of [`NamespaceRoots::from_env`].
+    #[must_use]
     pub fn namespace_roots(mut self, roots: NamespaceRoots) -> Self {
         self.namespace_roots = Some(roots);
         self
@@ -246,16 +248,17 @@ impl TestBench {
     /// Begin a `TestBench` boot. Default size 800x600, no
     /// `NamespaceRoots` override — chained methods on the returned
     /// builder set those.
+    #[must_use]
     pub fn builder() -> TestBenchBuilder {
         TestBenchBuilder::default()
     }
 
-    /// Boot a TestBench at the default 800x600 offscreen size.
+    /// Boot a `TestBench` at the default 800x600 offscreen size.
     pub fn start() -> Result<Self, TestBenchError> {
         Self::start_with_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
     }
 
-    /// Boot a TestBench with a specific offscreen target size.
+    /// Boot a `TestBench` with a specific offscreen target size.
     /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
     pub fn start_with_size(width: u32, height: u32) -> Result<Self, TestBenchError> {
         Self::start_inner(width, height, None)
@@ -301,7 +304,7 @@ impl TestBench {
         let (recording, loopback_rx) = RecordingBackend::new();
         boot.outbound.attach_backend(Arc::new(recording));
 
-        let gpu = Gpu::new(width, height, render_handles.clone());
+        let gpu = Gpu::new(width, height, render_handles);
 
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
@@ -527,7 +530,7 @@ impl TestBench {
     }
 
     /// Same as `capture` but with the two `CaptureFrame` mail bundles
-    /// (ADR-0020 §capture_frame). `pre` is dispatched *before* the
+    /// (ADR-0020 §`capture_frame`). `pre` is dispatched *before* the
     /// readback — its effects appear in the captured frame; `after`
     /// is dispatched *after* the readback — typically cleanup that
     /// restores state the caller flipped for the capture. Matches
@@ -693,7 +696,7 @@ impl TestBench {
     /// Returns `SettlementTimeout` if `run_frame`'s per-tick
     /// settlement misses [`SETTLEMENT_TIMEOUT`]. In the Advance
     /// branch we bail mid-loop without sending `AdvanceResult::Ok` so
-    /// the pump_until_reply caller surfaces the timeout rather than
+    /// the `pump_until_reply` caller surfaces the timeout rather than
     /// waiting on a reply that will never arrive — the substrate is
     /// in a stuck state and the test should fail loudly.
     fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), TestBenchError> {
@@ -798,7 +801,7 @@ impl TestBench {
     }
 }
 
-/// Pull the correlation_id out of an `EgressEvent`, if it represents
+/// Pull the `correlation_id` out of an `EgressEvent`, if it represents
 /// a session-targeted reply. `Broadcast` and the other event shapes
 /// aren't replies and return `None` — `pump_until_reply` records the
 /// broadcast kind for `observed_kinds` and otherwise ignores them.
@@ -842,7 +845,7 @@ mod tests {
         assert!(
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "captured bytes are not a PNG: first 8 bytes={:?}",
-            &png.iter().take(8).cloned().collect::<Vec<u8>>(),
+            &png.iter().take(8).copied().collect::<Vec<u8>>(),
         );
     }
 
@@ -932,8 +935,7 @@ mod tests {
         );
         assert!(
             parent.is_some_and(|p| p != MailId::NONE),
-            "fanned-out copy should carry a non-default parent_mail (got {:?})",
-            parent,
+            "fanned-out copy should carry a non-default parent_mail (got {parent:?})",
         );
         // The fanned-out copy's own mail_id must be distinct from its
         // parent — it's a child node in the trace tree.

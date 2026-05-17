@@ -44,9 +44,9 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FrameError::Io(e) => write!(f, "frame io: {e}"),
-            FrameError::Postcard(e) => write!(f, "frame decode: {e}"),
-            FrameError::FrameTooLarge { size, max } => {
+            Self::Io(e) => write!(f, "frame io: {e}"),
+            Self::Postcard(e) => write!(f, "frame decode: {e}"),
+            Self::FrameTooLarge { size, max } => {
                 write!(f, "frame too large: {size} > {max}")
             }
         }
@@ -57,13 +57,13 @@ impl std::error::Error for FrameError {}
 
 impl From<io::Error> for FrameError {
     fn from(e: io::Error) -> Self {
-        FrameError::Io(e)
+        Self::Io(e)
     }
 }
 
 impl From<postcard::Error> for FrameError {
     fn from(e: postcard::Error) -> Self {
-        FrameError::Postcard(e)
+        Self::Postcard(e)
     }
 }
 

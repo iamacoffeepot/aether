@@ -46,7 +46,7 @@ mod native {
     /// milliseconds at end-of-handler. `AETHER_TRACE_MAX_ROOTS` —
     /// hard cap on root count; oldest evicted first when exceeded.
     /// Memory ceiling: ~50 MB at 100k roots × ~512 bytes/root
-    /// (RootState + the typical handful of MailNodes per root).
+    /// (`RootState` + the typical handful of `MailNodes` per root).
     const RETENTION_MS_DEFAULT: u64 = 600_000;
     const MAX_ROOTS_DEFAULT: usize = 100_000;
 
@@ -102,7 +102,7 @@ mod native {
         /// pushed bare via [`Mailer::push`] — bypassing
         /// `NativeBinding::send_mail_with_lineage` so the outbound
         /// doesn't generate a `TraceEvent::Sent` (which would mint
-        /// a fresh mail_id chain whose `Finished` never fires —
+        /// a fresh `mail_id` chain whose `Finished` never fires —
         /// chassis-router-routed mail doesn't trip the dispatcher's
         /// Received/Finished hooks).
         mailer: Arc<Mailer>,
@@ -115,12 +115,14 @@ mod native {
         /// Read-only access to the per-root state map. Used by tests
         /// and (in PR 3) by `Settled` consumers; runtime callers
         /// should query via mail rather than reaching across threads.
+        #[must_use]
         pub fn roots(&self) -> &HashMap<MailId, RootState> {
             &self.roots
         }
 
         /// Read-only access to the per-mail graph. Same access shape
         /// as [`Self::roots`].
+        #[must_use]
         pub fn mails(&self) -> &HashMap<MailId, MailNode> {
             &self.mails
         }
@@ -233,7 +235,7 @@ mod native {
 
             let since_ms = request.since_ms.unwrap_or(DEFAULT_SINCE_MS);
             let max = request.max.unwrap_or(DEFAULT_MAX).min(HARD_MAX) as usize;
-            let cutoff_ns = (since_ms as u64).saturating_mul(1_000_000);
+            let cutoff_ns = u64::from(since_ms).saturating_mul(1_000_000);
 
             let mut summaries: Vec<RootSummaryWire> = self
                 .roots
@@ -425,7 +427,7 @@ mod native {
         // be a literal here for the `#[actor]` macro's expansion.
         const NAMESPACE: &'static str = "aether.trace";
 
-        fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let retention_ms = parse_env_u64("AETHER_TRACE_RETENTION_MS", RETENTION_MS_DEFAULT);
             let max_roots = parse_env_usize("AETHER_TRACE_MAX_ROOTS", MAX_ROOTS_DEFAULT);
             Ok(Self {
@@ -442,7 +444,7 @@ mod native {
         /// ADR-0080 §4: fold every event in the batch into the
         /// per-root counter map and the parent → mail graph. Eviction
         /// runs once at end-of-handler so the per-event hot path is
-        /// just a HashMap insert/update.
+        /// just a `HashMap` insert/update.
         ///
         /// # Agent
         /// Receives batched trace events from the chassis drainer
@@ -474,7 +476,7 @@ mod native {
         /// # Agent
         /// Returns recent root summaries for agent root-discovery.
         /// `since_ms` filters by the root's originating `Sent`
-        /// timestamp (default 60_000); `max` caps the reply length
+        /// timestamp (default `60_000`); `max` caps the reply length
         /// (default 50, hard cap 1000). Sorted by `t_sent` descending.
         /// Issue 718 / ADR-0080 Phase 2.
         #[handler]
@@ -489,8 +491,8 @@ mod native {
         /// within the requested window (strict containment). Window
         /// can be absolute nanoseconds or `Relative { last_ms }`
         /// (resolved against the substrate's monotonic now).
-        /// `max_mails` caps the reply size (default 10_000, hard cap
-        /// 100_000); over-cap windows reply `Err { too_many: Some(n)
+        /// `max_mails` caps the reply size (default `10_000`, hard cap
+        /// `100_000`); over-cap windows reply `Err { too_many: Some(n)
         /// }` so the caller can narrow the window. Parent edges may
         /// dangle to mail outside the window — drill into a specific
         /// root via `describe_tree` for full chain context. Issue 735.
@@ -511,7 +513,7 @@ mod native {
         /// Construct an observer for state-fold tests. Stash a fresh
         /// `Mailer` so `fire_settled` has somewhere to push (the
         /// chassis-router isn't installed, so the bare push warn-drops
-        /// at the route_mail switch — that's fine for state assertions).
+        /// at the `route_mail` switch — that's fine for state assertions).
         fn boot_observer() -> TraceObserverCapability {
             unsafe {
                 std::env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
@@ -807,7 +809,7 @@ mod native {
                     assert!(!ids.contains(&unrelated));
                 }
                 DescribeTreeResult::Err { not_found } => {
-                    panic!("expected Ok, got Err::not_found {:?}", not_found)
+                    panic!("expected Ok, got Err::not_found {not_found:?}")
                 }
             }
         }

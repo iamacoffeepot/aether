@@ -154,6 +154,7 @@ mod native_impl {
         /// Construct an empty slot map. The substrate's
         /// dispatcher trampoline calls this once per booted
         /// native actor.
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 by_type: RefCell::new(HashMap::new()),
@@ -169,9 +170,11 @@ mod native_impl {
                 let entry = map
                     .entry(TypeId::of::<T>())
                     .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-                entry
-                    .downcast_ref::<RefCell<T>>()
-                    .expect("TypeId<T> ⇒ RefCell<T>") as *const RefCell<T>
+                core::ptr::from_ref::<RefCell<T>>(
+                    entry
+                        .downcast_ref::<RefCell<T>>()
+                        .expect("TypeId<T> ⇒ RefCell<T>"),
+                )
             };
             // SAFETY: the pointer is into a heap-allocated
             // `Box<RefCell<T>>` owned by `self.by_type`. The
@@ -194,9 +197,11 @@ mod native_impl {
                 let entry = map
                     .entry(TypeId::of::<T>())
                     .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-                entry
-                    .downcast_ref::<RefCell<T>>()
-                    .expect("TypeId<T> ⇒ RefCell<T>") as *const RefCell<T>
+                core::ptr::from_ref::<RefCell<T>>(
+                    entry
+                        .downcast_ref::<RefCell<T>>()
+                        .expect("TypeId<T> ⇒ RefCell<T>"),
+                )
             };
             let cell = unsafe { &*cell_ptr };
             let borrow = cell.borrow();
@@ -238,7 +243,7 @@ mod native_impl {
     pub fn with_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
         let _guard = CURRENT_SLOTS.with(|slot| {
             let prev = slot.get();
-            slot.set(slots as *const ActorSlots);
+            slot.set(core::ptr::from_ref::<ActorSlots>(slots));
             StampGuard { prev }
         });
         f()
@@ -457,7 +462,7 @@ mod tests {
             Probe::with_mut(|outer| {
                 outer.0 = 1;
                 let inner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Probe::with_mut(|p| p.0 = 2)
+                    Probe::with_mut(|p| p.0 = 2);
                 }));
                 assert!(inner.is_err(), "nested same-type with_mut must panic");
             });

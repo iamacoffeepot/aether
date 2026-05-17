@@ -59,6 +59,7 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             adapters: HashMap::new(),
@@ -73,6 +74,7 @@ impl AdapterRegistry {
         self.adapters.get(namespace).map(Arc::clone)
     }
 
+    #[must_use]
     pub fn has(&self, namespace: &str) -> bool {
         self.adapters.contains_key(namespace)
     }
@@ -122,6 +124,7 @@ impl LocalFileAdapter {
 
     /// Exposed for tests and chassis boot logging. Not a routing
     /// surface — components address by namespace name, never by root.
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -333,7 +336,7 @@ impl FsMailboxExt for FfiActorMailbox<FsCapability> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> FsMailboxExt for NativeActorMailbox<'a, FsCapability> {
+impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
         self.send(&Read {
             namespace: namespace.into(),
@@ -396,6 +399,7 @@ mod native {
         /// `NamespaceRoots` directly so tests and chassis-as-library
         /// embedders can supply their own roots without process-env
         /// mutation.
+        #[must_use]
         pub fn from_env() -> Self {
             let save = env_or_default("AETHER_SAVE_DIR", || {
                 dirs::data_dir()
@@ -407,8 +411,10 @@ mod native {
                 std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(Path::to_path_buf))
-                    .map(|p| p.join("assets"))
-                    .unwrap_or_else(|| std::env::temp_dir().join("aether").join("assets"))
+                    .map_or_else(
+                        || std::env::temp_dir().join("aether").join("assets"),
+                        |p| p.join("assets"),
+                    )
             });
             let config = env_or_default("AETHER_CONFIG_DIR", || {
                 dirs::config_dir()
@@ -735,8 +741,8 @@ mod native {
             a.write("slot.bin", &[0u8; 16]).unwrap();
             let siblings: Vec<String> = std::fs::read_dir(a.root())
                 .unwrap()
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                .filter_map(std::result::Result::ok)
+                .filter_map(|e| e.file_name().to_str().map(std::string::ToString::to_string))
                 .collect();
             assert!(
                 !siblings.iter().any(|s| s.contains(".tmp-")),
@@ -1122,7 +1128,7 @@ mod native {
                 &mut ctx,
                 List {
                     namespace: "save".to_string(),
-                    prefix: "".to_string(),
+                    prefix: String::new(),
                 },
             );
             match decode_reply::<ListResult>(&fix.rx) {

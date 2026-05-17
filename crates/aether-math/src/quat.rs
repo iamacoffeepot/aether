@@ -15,11 +15,13 @@ impl Quat {
     pub const IDENTITY: Self = Self::new(0.0, 0.0, 0.0, 1.0);
 
     #[inline]
+    #[must_use]
     pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
         Self { x, y, z, w }
     }
 
     #[inline]
+    #[must_use]
     pub fn from_axis_angle(axis: Vec3, angle_rad: f32) -> Self {
         let half = angle_rad * 0.5;
         let s = libm::sinf(half);
@@ -31,6 +33,7 @@ impl Quat {
     /// YXZ Euler order: yaw around Y, then pitch around local X, then
     /// roll around local Z. Angles in radians.
     #[inline]
+    #[must_use]
     pub fn from_euler_yxz(yaw: f32, pitch: f32, roll: f32) -> Self {
         let (sy, cy) = (libm::sinf(yaw * 0.5), libm::cosf(yaw * 0.5));
         let (sp, cp) = (libm::sinf(pitch * 0.5), libm::cosf(pitch * 0.5));
@@ -44,11 +47,13 @@ impl Quat {
     }
 
     #[inline]
+    #[must_use]
     pub fn length_squared(self) -> f32 {
         self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
     }
 
     #[inline]
+    #[must_use]
     pub fn length(self) -> f32 {
         libm::sqrtf(self.length_squared())
     }
@@ -58,6 +63,7 @@ impl Quat {
     /// NaN through camera state; callers that need the distinction
     /// must check length themselves.
     #[inline]
+    #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
         if len > 0.0 {
@@ -69,6 +75,7 @@ impl Quat {
     }
 
     #[inline]
+    #[must_use]
     pub const fn conjugate(self) -> Self {
         Self::new(-self.x, -self.y, -self.z, self.w)
     }
@@ -77,6 +84,7 @@ impl Quat {
     /// equals `conjugate()` exactly — prefer that when you know the
     /// quat is normalized.
     #[inline]
+    #[must_use]
     pub fn inverse(self) -> Self {
         let ls = self.length_squared();
         if ls > 0.0 {
@@ -88,6 +96,7 @@ impl Quat {
     }
 
     #[inline]
+    #[must_use]
     pub fn rotate_vec3(self, v: Vec3) -> Vec3 {
         let xyz = Vec3::new(self.x, self.y, self.z);
         let t = xyz.cross(v) * 2.0;

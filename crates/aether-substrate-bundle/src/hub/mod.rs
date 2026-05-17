@@ -30,6 +30,7 @@ pub const DEFAULT_RPC_PORT: u16 = 8901;
 /// substitutes [`DEFAULT_RPC_PORT`] when this returns `None`; the
 /// desktop and headless chassis treat `None` as "don't boot the RPC
 /// server" instead.
+#[must_use]
 pub fn rpc_port_from_env() -> Option<u16> {
     std::env::var("AETHER_RPC_PORT")
         .ok()

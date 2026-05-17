@@ -48,7 +48,7 @@ impl Chassis for TestChassis {
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
 /// (engine-addressed Calls route through `aether.engine`), the engines
-/// cap, and `TraceObserverCapability` so the RpcServer's local Calls
+/// cap, and `TraceObserverCapability` so the `RpcServer`'s local Calls
 /// (`spawn`, `terminate`) settle and close.
 fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());

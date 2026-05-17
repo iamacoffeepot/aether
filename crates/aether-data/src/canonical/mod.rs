@@ -230,8 +230,8 @@ mod tests {
         const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
         // Domain-prefixed (issue #186) + ADR-0064 tag-stamped — agrees
         // with the derive macro's compile-time emission.
-        let expected =
-            ((TAG_KIND as u64) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &BYTES) & HASH_MASK);
+        let expected = (u64::from(TAG_KIND) << TAG_SHIFT)
+            | (fnv1a_64_prefixed(KIND_DOMAIN, &BYTES) & HASH_MASK);
         assert_eq!(kind_id_from_parts(NAME, &TRIANGLE), expected);
     }
 

@@ -51,8 +51,9 @@ impl<K: Kind> KindId<K> {
     /// Not part of the public API; the const `resolve::<K>()` builder
     /// goes through here so the field stays private to the SDK.
     #[doc(hidden)]
+    #[must_use]
     pub const fn __new(raw: u64) -> Self {
-        KindId {
+        Self {
             raw,
             _k: PhantomData,
         }
@@ -60,12 +61,14 @@ impl<K: Kind> KindId<K> {
 
     /// The raw kind id the substrate assigned. Exposed for hand-rolled
     /// receive shims that `match` on the inbound `kind: u64` parameter.
+    #[must_use]
     pub fn raw(self) -> u64 {
         self.raw
     }
 
     /// Returns `true` if `raw` is the id the substrate assigned to `K`.
     /// Convenience over `kind_id.raw() == raw`.
+    #[must_use]
     pub fn matches(self, raw: u64) -> bool {
         self.raw == raw
     }
@@ -97,8 +100,9 @@ impl<K: Kind> Mailbox<K> {
     /// Not part of the public API; the const `resolve_mailbox::<K>`
     /// builder goes through here so the fields stay private to the SDK.
     #[doc(hidden)]
+    #[must_use]
     pub const fn __new(mailbox: u64, kind: u64) -> Self {
-        Mailbox {
+        Self {
             mailbox,
             kind,
             _k: PhantomData,
@@ -107,11 +111,13 @@ impl<K: Kind> Mailbox<K> {
 
     /// Raw mailbox id. Exposed for components that need to pass the
     /// id to a host fn not yet wrapped by the SDK.
+    #[must_use]
     pub fn mailbox(self) -> u64 {
         self.mailbox
     }
 
     /// Raw kind id. Exposed for the same reason as `mailbox`.
+    #[must_use]
     pub fn kind(self) -> u64 {
         self.kind
     }
@@ -124,6 +130,7 @@ impl<K: Kind> Mailbox<K> {
 /// The substrate and guest compute the same id independently; a
 /// mismatch means one side was compiled against a different schema
 /// revision, and that surfaces as "kind not found" on the first mail.
+#[must_use]
 pub const fn resolve<K: Kind>() -> KindId<K> {
     KindId::__new(K::ID.0)
 }
@@ -133,6 +140,7 @@ pub const fn resolve<K: Kind>() -> KindId<K> {
 /// stable hash) and the kind id is `K::ID` (ADR-0030 Phase 2). No
 /// host-fn round trip, no requirement that the target mailbox or
 /// kind already exist on the substrate side at init time.
+#[must_use]
 pub const fn resolve_mailbox<K: Kind>(mailbox_name: &str) -> Mailbox<K> {
     Mailbox::__new(mailbox_id_from_name(mailbox_name).0, K::ID.0)
 }

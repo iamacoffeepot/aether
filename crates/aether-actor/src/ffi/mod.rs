@@ -49,7 +49,7 @@
 //! to-sender), ADR-0014 (Component trait + Mail), ADR-0015 (lifecycle
 //! hooks), ADR-0016 (state-across-replace), ADR-0024 (`_p32` FFI),
 //! ADR-0030 (compile-time kind ids), ADR-0033 (`#[actor]`), ADR-0040
-//! (kind-typed state), ADR-0041 (file I/O), ADR-0042 (sync wait_reply),
+//! (kind-typed state), ADR-0041 (file I/O), ADR-0042 (sync `wait_reply`),
 //! ADR-0043 (HTTP egress), ADR-0045 (typed handles), ADR-0058
 //! (`aether.sink.*` namespace), ADR-0060 (tracing→mail bridge),
 //! ADR-0074 (unified actor model).
@@ -102,6 +102,7 @@ impl BootError {
 
     /// Borrow the error text. Used by the [`crate::export!`] shim to
     /// copy bytes into the substrate via `init_failed_p32`.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }

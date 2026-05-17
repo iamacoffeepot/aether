@@ -33,6 +33,7 @@ impl Gpu {
     /// `render_running` so encoder methods on the running can read
     /// them. `width` and `height` size the offscreen color + depth
     /// targets — the dimensions every captured frame will report.
+    #[must_use]
     pub fn new(width: u32, height: u32, render_handles: RenderHandles) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());

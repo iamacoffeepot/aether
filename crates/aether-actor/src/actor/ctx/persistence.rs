@@ -3,7 +3,7 @@
 //! Per-stage capability trait under the issue 663 refactor. Drop ctxs
 //! impl this; runtime and init ctxs deliberately do not (init has no
 //! prior bundle to consume; runtime saves are conceptually deferred to
-//! the on_replace hook so the substrate can hand the bundle to the
+//! the `on_replace` hook so the substrate can hand the bundle to the
 //! replacement instance).
 //!
 //! `save_state` is meaningful in `on_replace`. Calling it from

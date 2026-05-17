@@ -33,5 +33,5 @@ pub struct SessionToken(pub Uuid);
 impl SessionToken {
     /// Placeholder used before session tracking lands at the hub.
     /// Always treated as expired by the hub's validator.
-    pub const NIL: SessionToken = SessionToken(Uuid::nil());
+    pub const NIL: Self = Self(Uuid::nil());
 }

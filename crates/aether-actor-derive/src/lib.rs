@@ -354,7 +354,11 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
             }
             Fields::Named(named) => {
                 let field_name_entries = named.named.iter().map(|f| {
-                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    let fname = f
+                        .ident
+                        .as_ref()
+                        .map(std::string::ToString::to_string)
+                        .unwrap_or_default();
                     quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#fname) }
                 });
                 let field_node_exprs = named.named.iter().map(|f| field_label_node_expr(&f.ty));
@@ -435,7 +439,7 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
 
 fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
     for v in &data.variants {
-        for f in v.fields.iter() {
+        for f in &v.fields {
             reject_hashmap(&f.ty)?;
         }
     }
@@ -465,7 +469,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
             }
             Fields::Named(named) => {
                 let field_exprs = named.named.iter().map(|f| {
-                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    let fname = f.ident.as_ref().map(std::string::ToString::to_string).unwrap_or_default();
                     let ty_expr = field_type_schema_expr(&f.ty);
                     quote! {
                         ::aether_data::__derive_runtime::NamedField {
@@ -592,8 +596,7 @@ fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
     Err(syn::Error::new(
         attrs
             .first()
-            .map(|a| a.span())
-            .unwrap_or_else(proc_macro2::Span::call_site),
+            .map_or_else(proc_macro2::Span::call_site, syn::spanned::Spanned::span),
         "missing `#[kind(name = \"...\")]` attribute",
     ))
 }
@@ -714,7 +717,7 @@ fn to_screaming_snake_case(s: &str) -> String {
 ///   `export!` shim's `receive_p32` calls.
 /// - The `aether.kinds.inputs` manifest consts (substrate reads them via
 ///   the wasm custom section the cdylib's `export!` pins in).
-/// - The `Actor`-trait const re-routing (NAMESPACE / FRAME_BARRIER from
+/// - The `Actor`-trait const re-routing (NAMESPACE / `FRAME_BARRIER` from
 ///   the impl block flow into a sibling `impl Actor`).
 ///
 /// Renamed from `#[actor]` in PR A of issue 533. Same behavior; the
@@ -1147,7 +1150,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     // in caller code.
     let mut items = items;
     if let Item::Impl(actor_impl_mut) = &mut items[actor_idx] {
-        for attr in actor_impl_mut.attrs.iter_mut() {
+        for attr in &mut actor_impl_mut.attrs {
             if attr_is_actor(attr) {
                 let path = attr.path().clone();
                 *attr = syn::parse_quote!(#[#path(skip_markers)]);
@@ -1342,7 +1345,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // host builds see the full struct.
     match &mut item.fields {
         syn::Fields::Named(fields) => {
-            for field in fields.named.iter_mut() {
+            for field in &mut fields.named {
                 let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
                 if !already_cfg {
                     field
@@ -1352,7 +1355,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         syn::Fields::Unnamed(fields) => {
-            for field in fields.unnamed.iter_mut() {
+            for field in &mut fields.unnamed {
                 let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
                 if !already_cfg {
                     field
@@ -2088,7 +2091,7 @@ fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<(Type, bool
             first,
             "#[handler] first parameter must be `&self` or `&mut self`",
         ));
-    };
+    }
     let third = &sig.inputs[2];
     let FnArg::Typed(pt) = third else {
         return Err(syn::Error::new_spanned(
@@ -2193,15 +2196,14 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         }
     });
 
-    let tail = match fallback {
-        Some(f) => {
-            let method = &f.method.sig.ident;
-            quote! {
-                self.#method(__aether_ctx, __aether_mail);
-                ::aether_actor::DISPATCH_HANDLED
-            }
+    let tail = if let Some(f) = fallback {
+        let method = &f.method.sig.ident;
+        quote! {
+            self.#method(__aether_ctx, __aether_mail);
+            ::aether_actor::DISPATCH_HANDLED
         }
-        None => quote! { ::aether_actor::DISPATCH_UNKNOWN_KIND },
+    } else {
+        quote! { ::aether_actor::DISPATCH_UNKNOWN_KIND }
     };
 
     // Issue #601: auto-emitted dispatch arm for the chassis-pushed
@@ -2546,12 +2548,11 @@ fn type_hint(ty: &Type) -> syn::Ident {
 /// `Option<String>` captured at macro expansion. Used for every
 /// rustdoc-sourced doc field.
 fn option_str_token(doc: &Option<String>) -> TokenStream2 {
-    match doc {
-        Some(s) => {
-            let lit = s.as_str();
-            quote! { ::core::option::Option::Some(#lit) }
-        }
-        None => quote! { ::core::option::Option::None },
+    if let Some(s) = doc {
+        let lit = s.as_str();
+        quote! { ::core::option::Option::Some(#lit) }
+    } else {
+        quote! { ::core::option::Option::None }
     }
 }
 

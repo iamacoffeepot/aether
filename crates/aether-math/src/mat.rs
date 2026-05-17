@@ -25,6 +25,7 @@ impl Mat4 {
     };
 
     #[inline]
+    #[must_use]
     pub const fn from_cols(c0: Vec4, c1: Vec4, c2: Vec4, c3: Vec4) -> Self {
         Self {
             cols: [c0, c1, c2, c3],
@@ -32,6 +33,7 @@ impl Mat4 {
     }
 
     #[inline]
+    #[must_use]
     pub const fn from_translation(t: Vec3) -> Self {
         Self {
             cols: [
@@ -44,6 +46,7 @@ impl Mat4 {
     }
 
     #[inline]
+    #[must_use]
     pub const fn from_scale(s: Vec3) -> Self {
         Self {
             cols: [
@@ -56,6 +59,7 @@ impl Mat4 {
     }
 
     #[inline]
+    #[must_use]
     pub fn from_rotation_quat(q: Quat) -> Self {
         let (x, y, z, w) = (q.x, q.y, q.z, q.w);
         let (xx, yy, zz) = (x * x, y * y, z * z);
@@ -75,6 +79,7 @@ impl Mat4 {
     /// `from_translation(t) * from_rotation_quat(r)` but composed
     /// in one step.
     #[inline]
+    #[must_use]
     pub fn from_rigid(rotation: Quat, translation: Vec3) -> Self {
         let mut m = Self::from_rotation_quat(rotation);
         m.cols[3] = Vec4::new(translation.x, translation.y, translation.z, 1.0);
@@ -86,6 +91,7 @@ impl Mat4 {
     /// embedding a matrix in a mail payload or uploading to a GPU
     /// uniform buffer; bytes upload verbatim with no transpose.
     #[inline]
+    #[must_use]
     pub fn to_cols_array(&self) -> [f32; 16] {
         let [c0, c1, c2, c3] = self.cols;
         [
@@ -97,6 +103,7 @@ impl Mat4 {
     }
 
     #[inline]
+    #[must_use]
     pub fn transpose(self) -> Self {
         let [c0, c1, c2, c3] = self.cols;
         Self {
@@ -114,6 +121,7 @@ impl Mat4 {
     /// the negated translation. Produces garbage on a non-rigid
     /// matrix; use only on view matrices and similar.
     #[inline]
+    #[must_use]
     pub fn inverse_rigid(self) -> Self {
         let [r0, r1, r2, t] = self.cols;
         let t_xyz = Vec3::new(t.x, t.y, t.z);
@@ -135,6 +143,7 @@ impl Mat4 {
     /// matrix that transforms world-space points into view space
     /// where the camera sits at the origin looking down `-Z`.
     #[inline]
+    #[must_use]
     pub fn look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> Self {
         let z = (eye - target).normalize();
         let x = up.cross(z).normalize();
@@ -153,6 +162,7 @@ impl Mat4 {
     /// (depth in `[0, 1]`, not OpenGL's `[-1, 1]`). `fov_y_rad` is
     /// the vertical field of view in radians.
     #[inline]
+    #[must_use]
     pub fn perspective_rh(fov_y_rad: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
         let f = 1.0 / libm::tanf(fov_y_rad * 0.5);
         let a = z_far / (z_near - z_far);
@@ -170,6 +180,7 @@ impl Mat4 {
     /// Right-handed orthographic projection, wgpu-style clip space
     /// (depth in `[0, 1]`).
     #[inline]
+    #[must_use]
     pub fn orthographic_rh(
         left: f32,
         right: f32,

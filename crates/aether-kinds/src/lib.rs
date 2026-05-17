@@ -1,7 +1,7 @@
 //! aether-kinds: the substrate's own mail vocabulary. Imported by any
 //! actor that wants to send mail to the substrate, receive mail the
 //! substrate dispatches (tick, input), or consume the substrate's sink
-//! kinds (draw_triangle). See ADR-0005 / ADR-0030.
+//! kinds (`draw_triangle`). See ADR-0005 / ADR-0030.
 //!
 //! Kind ids are `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` — a compile-time
 //! const on the `Kind` trait (ADR-0030 Phase 2). Substrate boot and
@@ -921,7 +921,7 @@ mod control_plane {
         pub mailbox: aether_data::MailboxId,
     }
 
-    /// Reply to subscribe / unsubscribe / unsubscribe_all (ADR-0021 §2).
+    /// Reply to subscribe / unsubscribe / `unsubscribe_all` (ADR-0021 §2).
     /// Only failure mode: the target mailbox id doesn't name a live
     /// component (unknown, a sink, or already dropped).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]

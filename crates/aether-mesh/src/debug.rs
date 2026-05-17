@@ -174,7 +174,7 @@ pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
         }
     }
     // Sort for deterministic output order.
-    violations.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+    violations.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     violations
 }
 
@@ -398,7 +398,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
             });
         }
     }
-    out.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+    out.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     out
 }
 
@@ -480,7 +480,7 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
             }
         }
     }
-    out.sort_by(|x, y| format!("{:?}", x).cmp(&format!("{:?}", y)));
+    out.sort_by(|x, y| format!("{x:?}").cmp(&format!("{y:?}")));
     out
 }
 
@@ -612,7 +612,7 @@ pub fn report(polygons: &[Polygon]) -> String {
     } else {
         out.push_str(&format!("  manifold: {} VIOLATIONS:\n", violations.len()));
         for v in &violations {
-            out.push_str(&format!("    {:?}\n", v));
+            out.push_str(&format!("    {v:?}\n"));
         }
     }
     let planarity = validate_planarity(polygons);
@@ -623,14 +623,14 @@ pub fn report(polygons: &[Polygon]) -> String {
     if total_geom == 0 {
         out.push_str("  geometry: OK (planar, well-shaped, coherent, no T-junctions)\n");
     } else {
-        out.push_str(&format!("  geometry: {} VIOLATIONS:\n", total_geom));
+        out.push_str(&format!("  geometry: {total_geom} VIOLATIONS:\n"));
         for v in planarity
             .iter()
             .chain(&quality)
             .chain(&normals)
             .chain(&tjunctions)
         {
-            out.push_str(&format!("    {:?}\n", v));
+            out.push_str(&format!("    {v:?}\n"));
         }
     }
     out.push_str("\nfull dump:\n");
@@ -749,8 +749,7 @@ mod tests {
         let violations = validate_manifold(&polys);
         assert!(
             violations.is_empty(),
-            "unit cube should be watertight; got {:#?}",
-            violations
+            "unit cube should be watertight; got {violations:#?}"
         );
     }
 
@@ -971,8 +970,7 @@ mod tests {
             .count();
         assert_eq!(
             boundary_count, 4,
-            "expected 4 boundary edges around missing face, got {}: {:#?}",
-            boundary_count, violations
+            "expected 4 boundary edges around missing face, got {boundary_count}: {violations:#?}"
         );
     }
 }

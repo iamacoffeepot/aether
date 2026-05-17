@@ -31,31 +31,37 @@ impl Vec2 {
     pub const Y: Self = Self::new(0.0, 1.0);
 
     #[inline]
+    #[must_use]
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 
     #[inline]
+    #[must_use]
     pub const fn splat(v: f32) -> Self {
         Self { x: v, y: v }
     }
 
     #[inline]
+    #[must_use]
     pub fn dot(self, other: Self) -> f32 {
         self.x * other.x + self.y * other.y
     }
 
     #[inline]
+    #[must_use]
     pub fn length_squared(self) -> f32 {
         self.dot(self)
     }
 
     #[inline]
+    #[must_use]
     pub fn length(self) -> f32 {
         libm::sqrtf(self.length_squared())
     }
 
     #[inline]
+    #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
         if len > 0.0 {
@@ -66,6 +72,7 @@ impl Vec2 {
     }
 
     #[inline]
+    #[must_use]
     pub fn lerp(self, other: Self, t: f32) -> Self {
         self + (other - self) * t
     }
@@ -79,11 +86,13 @@ impl Vec3 {
     pub const Z: Self = Self::new(0.0, 0.0, 1.0);
 
     #[inline]
+    #[must_use]
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
 
     #[inline]
+    #[must_use]
     pub const fn splat(v: f32) -> Self {
         Self { x: v, y: v, z: v }
     }
@@ -91,21 +100,25 @@ impl Vec3 {
     /// Construct a `Vec3` from a `[f32; 3]`. Mirror of [`Self::to_array`].
     /// Useful when bridging to legacy storage (mesh AST, OBJ, etc.).
     #[inline]
+    #[must_use]
     pub const fn from_array(a: [f32; 3]) -> Self {
         Self::new(a[0], a[1], a[2])
     }
 
     #[inline]
+    #[must_use]
     pub const fn to_array(self) -> [f32; 3] {
         [self.x, self.y, self.z]
     }
 
     #[inline]
+    #[must_use]
     pub fn dot(self, other: Self) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
 
     #[inline]
+    #[must_use]
     pub fn cross(self, other: Self) -> Self {
         Self::new(
             self.y * other.z - self.z * other.y,
@@ -115,11 +128,13 @@ impl Vec3 {
     }
 
     #[inline]
+    #[must_use]
     pub fn length_squared(self) -> f32 {
         self.dot(self)
     }
 
     #[inline]
+    #[must_use]
     pub fn length(self) -> f32 {
         libm::sqrtf(self.length_squared())
     }
@@ -128,6 +143,7 @@ impl Vec3 {
     /// `Self::ZERO` rather than NaN; callers that need to distinguish
     /// must check length themselves.
     #[inline]
+    #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
         if len > 0.0 {
@@ -143,6 +159,7 @@ impl Vec3 {
     /// nonzero but f32-noisy still routes to the fallback rather than
     /// blowing up to a near-infinite normalised vector.
     #[inline]
+    #[must_use]
     pub fn normalize_or(self, fallback: Self) -> Self {
         let len_sq = self.length_squared();
         if len_sq < 1e-12 {
@@ -156,6 +173,7 @@ impl Vec3 {
     /// Cheaper than constructing a quaternion for one-shot rotates;
     /// for chained rotations or interpolation prefer `Quat`.
     #[inline]
+    #[must_use]
     pub fn rotate_axis_angle(self, axis: Self, angle: f32) -> Self {
         let c = libm::cosf(angle);
         let s = libm::sinf(angle);
@@ -178,6 +196,7 @@ impl Vec3 {
     /// differ only by f32-rounding noise from a normalisation step
     /// while rejecting visibly-different axes.
     #[inline]
+    #[must_use]
     pub fn parallel_sign(self, other: Self) -> Option<f32> {
         let mag_a_sq = self.length_squared();
         let mag_b_sq = other.length_squared();
@@ -192,11 +211,13 @@ impl Vec3 {
     }
 
     #[inline]
+    #[must_use]
     pub fn lerp(self, other: Self, t: f32) -> Self {
         self + (other - self) * t
     }
 
     #[inline]
+    #[must_use]
     pub const fn extend(self, w: f32) -> Vec4 {
         Vec4::new(self.x, self.y, self.z, w)
     }
@@ -211,11 +232,13 @@ impl Vec4 {
     pub const W: Self = Self::new(0.0, 0.0, 0.0, 1.0);
 
     #[inline]
+    #[must_use]
     pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
         Self { x, y, z, w }
     }
 
     #[inline]
+    #[must_use]
     pub const fn splat(v: f32) -> Self {
         Self {
             x: v,
@@ -226,21 +249,25 @@ impl Vec4 {
     }
 
     #[inline]
+    #[must_use]
     pub fn dot(self, other: Self) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
     }
 
     #[inline]
+    #[must_use]
     pub fn length_squared(self) -> f32 {
         self.dot(self)
     }
 
     #[inline]
+    #[must_use]
     pub fn length(self) -> f32 {
         libm::sqrtf(self.length_squared())
     }
 
     #[inline]
+    #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
         if len > 0.0 {
@@ -251,11 +278,13 @@ impl Vec4 {
     }
 
     #[inline]
+    #[must_use]
     pub fn lerp(self, other: Self, t: f32) -> Self {
         self + (other - self) * t
     }
 
     #[inline]
+    #[must_use]
     pub const fn truncate(self) -> Vec3 {
         Vec3::new(self.x, self.y, self.z)
     }

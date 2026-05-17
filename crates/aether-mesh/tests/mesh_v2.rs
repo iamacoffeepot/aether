@@ -28,7 +28,7 @@ fn torus_face_normals_point_outward() {
         let normal = (b - a).cross(c - a);
         // Centroid in XZ; project onto the major circle.
         let cent = (a + b + c) * (1.0 / 3.0);
-        let radial_xz = (cent.x * cent.x + cent.z * cent.z).sqrt();
+        let radial_xz = cent.x.hypot(cent.z);
         let tube_center = if radial_xz < 1e-6 {
             Vec3::ZERO
         } else {
@@ -101,13 +101,13 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
                 let dx = v.x - p.x;
                 let dy = v.y - p.y;
                 let dz = v.z - p.z;
-                let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                let d = dz.mul_add(dz, dx.mul_add(dx, dy * dy)).sqrt();
                 if d < min_dist {
                     min_dist = d;
                 }
             }
             assert!(
-                min_dist <= radius * std::f32::consts::SQRT_2 + 1e-4,
+                min_dist <= radius.mul_add(std::f32::consts::SQRT_2, 1e-4),
                 "swept vertex too far from any waypoint: {v:?} (dist {min_dist})"
             );
         }

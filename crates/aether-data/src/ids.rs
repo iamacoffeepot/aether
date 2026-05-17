@@ -99,6 +99,7 @@ fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64,
 ///
 /// Adding a new typed-id wrapper is one entry here plus its
 /// `TYPE_ID`/`TYPE_NAME` consts on the newtype itself.
+#[must_use]
 pub const fn tag_for_type_id(type_id: u64) -> Option<Tag> {
     if type_id == MailboxId::TYPE_ID {
         Some(Tag::Mailbox)
@@ -114,6 +115,7 @@ pub const fn tag_for_type_id(type_id: u64) -> Option<Tag> {
 /// Resolve a `SchemaType::TypeId(id)` to its canonical type name —
 /// the `TYPE_NAME` const on the matching newtype. Surface for
 /// `describe_component` and for diagnostic rendering.
+#[must_use]
 pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
     if type_id == MailboxId::TYPE_ID {
         Some(MailboxId::TYPE_NAME)
@@ -150,7 +152,7 @@ impl MailboxId {
     /// name whose hash collides with 0 (practical probability
     /// ~2⁻⁶⁴, but the guard is cheap) so this id never belongs to a
     /// real mailbox.
-    pub const NONE: MailboxId = MailboxId(0);
+    pub const NONE: Self = Self(0);
 
     /// ADR-0080 §5 chassis-as-mailbox id. Derived from the reserved
     /// name `"aether.chassis"` so it carries normal `Tag::Mailbox` bits
@@ -168,12 +170,13 @@ impl MailboxId {
     /// **not** registered as a real mailbox — `Registry::insert` rejects
     /// any name that hashes to this id so the routing path stays
     /// unambiguous.
-    pub const CHASSIS_MAILBOX_ID: MailboxId = mailbox_id_from_name("aether.chassis");
+    pub const CHASSIS_MAILBOX_ID: Self = mailbox_id_from_name("aether.chassis");
 
     /// Compute the deterministic id for a mailbox name. Same algorithm
     /// the guest SDK uses on the component side — ids round-trip
     /// verbatim across the FFI.
-    pub fn from_name(name: &str) -> MailboxId {
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
         mailbox_id_from_name(name)
     }
 }
@@ -261,7 +264,7 @@ impl<'de> Deserialize<'de> for HandleId {
 mod tests {
     use super::*;
 
-    /// Issue iamacoffeepot/aether#725: CHASSIS_MAILBOX_ID is a real
+    /// Issue iamacoffeepot/aether#725: `CHASSIS_MAILBOX_ID` is a real
     /// `Tag::Mailbox`-tagged id derived from `mailbox_id_from_name(
     /// "aether.chassis")`, distinct from the zero `NONE` sentinel.
     /// Verifies the const isn't accidentally aliased back to NONE and

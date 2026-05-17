@@ -56,7 +56,7 @@ const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
 /// Compiled defaults used when a created camera leaves an `Option`
 /// field unset, or when a mode-switch lands without all fields seeded.
 mod defaults {
-    use super::*;
+    use super::{PI, Vec2, Vec3};
 
     pub const ORBIT_DISTANCE: f32 = 3.0;
     /// Roughly one full revolution every 12 seconds at 60 fps —
@@ -91,16 +91,13 @@ struct OrbitState {
 
 impl OrbitState {
     fn from_params(p: &OrbitParams) -> Self {
-        OrbitState {
+        Self {
             distance: p.distance.unwrap_or(defaults::ORBIT_DISTANCE),
             pitch: p.pitch.unwrap_or(defaults::ORBIT_PITCH),
             yaw: p.yaw.unwrap_or(defaults::ORBIT_YAW),
             speed: p.speed.unwrap_or(defaults::ORBIT_SPEED),
             fov_y_rad: p.fov_y_rad.unwrap_or(defaults::ORBIT_FOV),
-            target: p
-                .target
-                .map(Vec3::from_array)
-                .unwrap_or(defaults::ORBIT_TARGET),
+            target: p.target.map_or(defaults::ORBIT_TARGET, Vec3::from_array),
         }
     }
 
@@ -151,15 +148,13 @@ struct TopdownState {
 
 impl TopdownState {
     fn from_params(p: &TopdownParams) -> Self {
-        TopdownState {
+        Self {
             center: p
                 .center
-                .map(|c| Vec2::new(c[0], c[1]))
-                .unwrap_or(defaults::TOPDOWN_CENTER),
-            extent: p
-                .extent
-                .map(|e| e.max(defaults::TOPDOWN_EXTENT_FLOOR))
-                .unwrap_or(defaults::TOPDOWN_EXTENT),
+                .map_or(defaults::TOPDOWN_CENTER, |c| Vec2::new(c[0], c[1])),
+            extent: p.extent.map_or(defaults::TOPDOWN_EXTENT, |e| {
+                e.max(defaults::TOPDOWN_EXTENT_FLOOR)
+            }),
         }
     }
 
@@ -191,28 +186,28 @@ enum ModeState {
 impl ModeState {
     fn from_init(mode: &ModeInit) -> Self {
         match mode {
-            ModeInit::Orbit(p) => ModeState::Orbit(OrbitState::from_params(p)),
-            ModeInit::Topdown(p) => ModeState::Topdown(TopdownState::from_params(p)),
+            ModeInit::Orbit(p) => Self::Orbit(OrbitState::from_params(p)),
+            ModeInit::Topdown(p) => Self::Topdown(TopdownState::from_params(p)),
         }
     }
 
     fn tick(&mut self) {
-        if let ModeState::Orbit(state) = self {
+        if let Self::Orbit(state) = self {
             state.tick();
         }
     }
 
     fn view_proj(&self, aspect: f32) -> [f32; 16] {
         match self {
-            ModeState::Orbit(s) => s.view_proj(aspect),
-            ModeState::Topdown(s) => s.view_proj(aspect),
+            Self::Orbit(s) => s.view_proj(aspect),
+            Self::Topdown(s) => s.view_proj(aspect),
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
-            ModeState::Orbit(_) => "orbit",
-            ModeState::Topdown(_) => "topdown",
+            Self::Orbit(_) => "orbit",
+            Self::Topdown(_) => "topdown",
         }
     }
 }
@@ -368,13 +363,14 @@ impl FfiActor for CameraComponent {
     /// bound.
     #[handler]
     fn on_set_mode(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraSetMode) {
-        match self.cameras.get_mut(&msg.name) {
-            Some(cam) => cam.mode = ModeState::from_init(&msg.mode),
-            None => tracing::warn!(
+        if let Some(cam) = self.cameras.get_mut(&msg.name) {
+            cam.mode = ModeState::from_init(&msg.mode)
+        } else {
+            tracing::warn!(
                 target: "aether_camera",
                 name = %msg.name,
                 "camera.set_mode rejected: no camera bound under that name",
-            ),
+            );
         }
     }
 
@@ -384,8 +380,8 @@ impl FfiActor for CameraComponent {
     /// mode.
     #[handler]
     fn on_orbit_set(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraOrbitSet) {
-        match self.cameras.get_mut(&msg.name) {
-            Some(cam) => match &mut cam.mode {
+        if let Some(cam) = self.cameras.get_mut(&msg.name) {
+            match &mut cam.mode {
                 ModeState::Orbit(state) => state.apply(&msg.params),
                 other => tracing::warn!(
                     target: "aether_camera",
@@ -393,12 +389,13 @@ impl FfiActor for CameraComponent {
                     actual = %other.name(),
                     "camera.orbit.set rejected: camera is in a different mode; switch with set_mode first",
                 ),
-            },
-            None => tracing::warn!(
+            }
+        } else {
+            tracing::warn!(
                 target: "aether_camera",
                 name = %msg.name,
                 "camera.orbit.set rejected: no camera bound under that name",
-            ),
+            );
         }
     }
 
@@ -407,8 +404,8 @@ impl FfiActor for CameraComponent {
     /// / `extent`.
     #[handler]
     fn on_topdown_set(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraTopdownSet) {
-        match self.cameras.get_mut(&msg.name) {
-            Some(cam) => match &mut cam.mode {
+        if let Some(cam) = self.cameras.get_mut(&msg.name) {
+            match &mut cam.mode {
                 ModeState::Topdown(state) => state.apply(&msg.params),
                 other => tracing::warn!(
                     target: "aether_camera",
@@ -416,12 +413,13 @@ impl FfiActor for CameraComponent {
                     actual = %other.name(),
                     "camera.topdown.set rejected: camera is in a different mode; switch with set_mode first",
                 ),
-            },
-            None => tracing::warn!(
+            }
+        } else {
+            tracing::warn!(
                 target: "aether_camera",
                 name = %msg.name,
                 "camera.topdown.set rejected: no camera bound under that name",
-            ),
+            );
         }
     }
 }

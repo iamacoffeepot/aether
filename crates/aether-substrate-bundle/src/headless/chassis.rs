@@ -70,6 +70,7 @@ impl HeadlessEnv {
     /// The single env-reading edge for the headless chassis (per
     /// issue 464). Tests bypass this by constructing `HeadlessEnv`
     /// directly.
+    #[must_use]
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
         let http = HttpConf::from_env();
@@ -81,7 +82,7 @@ impl HeadlessEnv {
         let rpc_addr = crate::hub::rpc_port_from_env()
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = parse_workers_env();
-        HeadlessEnv {
+        Self {
             namespace_roots,
             http,
             tick_period,
@@ -124,10 +125,10 @@ impl HeadlessChassis {
     /// register the audio fail-fast sink, connect the hub, compose
     /// the native passives (broadcast/handle/log/control/io/http plus
     /// the headless render / window / test-bench fail-fast caps)
-    /// through the chassis_builder `.with()` chain, then wrap the
+    /// through the `chassis_builder` `.with()` chain, then wrap the
     /// timer in a [`HeadlessTimerCapability`] and hand it to the
     /// builder.
-    fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<HeadlessChassis>, BootError> {
+    fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<Self>, BootError> {
         let HeadlessEnv {
             namespace_roots,
             http,
@@ -209,7 +210,7 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
-        let mut builder = Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
+        let mut builder = Builder::<Self>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
             .with_workers(workers)
             .with_actor::<HandleCapability>(())
@@ -256,7 +257,9 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Safety: this test owns the AETHER_WORKERS slot for the
         // duration of the closure via ENV_LOCK; no other thread inside
         // the same test binary mutates it concurrently. Edition-2024

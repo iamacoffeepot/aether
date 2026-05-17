@@ -82,16 +82,16 @@ mod tests {
 
     impl WaitError for DummyTag {
         fn timeout() -> Self {
-            DummyTag::Timeout
+            Self::Timeout
         }
         fn buffer_too_small() -> Self {
-            DummyTag::BufferTooSmall
+            Self::BufferTooSmall
         }
         fn cancelled() -> Self {
-            DummyTag::Cancelled
+            Self::Cancelled
         }
         fn decode(message: String) -> Self {
-            DummyTag::Decode(message)
+            Self::Decode(message)
         }
     }
 

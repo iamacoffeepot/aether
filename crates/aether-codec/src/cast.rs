@@ -10,7 +10,7 @@ use aether_data::Primitive;
 /// Byte alignment of a `Primitive` scalar in its cast-shape (`#[repr(C)]`)
 /// layout. Mirrors the alignment Rust would pick for the corresponding
 /// scalar type.
-pub(crate) fn align_of_primitive(p: Primitive) -> usize {
+pub fn align_of_primitive(p: Primitive) -> usize {
     match p {
         Primitive::U8 | Primitive::I8 => 1,
         Primitive::U16 | Primitive::I16 => 2,
@@ -24,4 +24,4 @@ pub(crate) fn align_of_primitive(p: Primitive) -> usize {
 /// `Ref` / `Map`) appears inside a `#[repr(C)]` cast-shaped struct.
 /// Used by both the encode and decode paths so the diagnostic string
 /// stays byte-identical across the two sides.
-pub(crate) const NON_CAST_VARIANTS_MSG: &str = "non-cast field inside cast-shaped struct";
+pub const NON_CAST_VARIANTS_MSG: &str = "non-cast field inside cast-shaped struct";

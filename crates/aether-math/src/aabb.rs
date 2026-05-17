@@ -13,25 +13,27 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    pub const EMPTY: Aabb = Aabb {
+    pub const EMPTY: Self = Self {
         min: Vec3::splat(f32::INFINITY),
         max: Vec3::splat(f32::NEG_INFINITY),
     };
 
     #[inline]
-    pub const fn from_min_max(min: Vec3, max: Vec3) -> Aabb {
-        Aabb { min, max }
+    #[must_use]
+    pub const fn from_min_max(min: Vec3, max: Vec3) -> Self {
+        Self { min, max }
     }
 
     /// Construct an AABB centered at the origin with the given half-extents.
     /// Half-extents may be zero (degenerate box) or negative (treated as
     /// their absolute value).
     #[inline]
-    pub fn from_half_extents(hx: f32, hy: f32, hz: f32) -> Aabb {
+    #[must_use]
+    pub fn from_half_extents(hx: f32, hy: f32, hz: f32) -> Self {
         let hx = hx.abs();
         let hy = hy.abs();
         let hz = hz.abs();
-        Aabb {
+        Self {
             min: Vec3::new(-hx, -hy, -hz),
             max: Vec3::new(hx, hy, hz),
         }
@@ -39,7 +41,8 @@ impl Aabb {
 
     /// Smallest AABB containing every supplied point. Returns
     /// [`Aabb::EMPTY`] if the slice is empty.
-    pub fn from_points(points: &[Vec3]) -> Aabb {
+    #[must_use]
+    pub fn from_points(points: &[Vec3]) -> Self {
         let mut out = Self::EMPTY;
         for p in points {
             out.expand_to_point(*p);
@@ -48,16 +51,19 @@ impl Aabb {
     }
 
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.min.x > self.max.x || self.min.y > self.max.y || self.min.z > self.max.z
     }
 
     #[inline]
+    #[must_use]
     pub fn center(&self) -> Vec3 {
         (self.min + self.max) * 0.5
     }
 
     #[inline]
+    #[must_use]
     pub fn extents(&self) -> Vec3 {
         self.max - self.min
     }
@@ -65,6 +71,7 @@ impl Aabb {
     /// The eight corners in a fixed order:
     /// `(min,min,min) (max,min,min) (min,max,min) (max,max,min)
     ///  (min,min,max) (max,min,max) (min,max,max) (max,max,max)`.
+    #[must_use]
     pub fn corners(&self) -> [Vec3; 8] {
         let mn = self.min;
         let mx = self.max;
@@ -80,6 +87,7 @@ impl Aabb {
         ]
     }
 
+    #[must_use]
     pub fn contains_point(&self, p: Vec3) -> bool {
         if self.is_empty() {
             return false;
@@ -105,14 +113,15 @@ impl Aabb {
 
     /// Smallest AABB containing both `self` and `other`. Either being
     /// empty returns the other unchanged.
-    pub fn union(&self, other: &Aabb) -> Aabb {
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
         if self.is_empty() {
             return *other;
         }
         if other.is_empty() {
             return *self;
         }
-        Aabb {
+        Self {
             min: Vec3::new(
                 self.min.x.min(other.min.x),
                 self.min.y.min(other.min.y),
@@ -128,8 +137,9 @@ impl Aabb {
 
     /// Largest AABB contained in both `self` and `other`. Returns an
     /// empty AABB when the inputs don't overlap.
-    pub fn intersection(&self, other: &Aabb) -> Aabb {
-        Aabb {
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Self {
+        Self {
             min: Vec3::new(
                 self.min.x.max(other.min.x),
                 self.min.y.max(other.min.y),
@@ -145,7 +155,8 @@ impl Aabb {
 
     /// `true` if `self` and `other` share at least one point. Touching
     /// (a single shared face / edge / point) counts as intersecting.
-    pub fn intersects(&self, other: &Aabb) -> bool {
+    #[must_use]
+    pub fn intersects(&self, other: &Self) -> bool {
         if self.is_empty() || other.is_empty() {
             return false;
         }
@@ -157,11 +168,12 @@ impl Aabb {
             && self.max.z >= other.min.z
     }
 
-    pub fn translate(&self, offset: Vec3) -> Aabb {
+    #[must_use]
+    pub fn translate(&self, offset: Vec3) -> Self {
         if self.is_empty() {
             return *self;
         }
-        Aabb {
+        Self {
             min: self.min + offset,
             max: self.max + offset,
         }
@@ -169,7 +181,8 @@ impl Aabb {
 
     /// Component-wise scale. Negative factors swap min/max along their
     /// axis so the result still satisfies `min <= max`.
-    pub fn scale(&self, factor: Vec3) -> Aabb {
+    #[must_use]
+    pub fn scale(&self, factor: Vec3) -> Self {
         if self.is_empty() {
             return *self;
         }
@@ -183,7 +196,7 @@ impl Aabb {
             self.max.y * factor.y,
             self.max.z * factor.z,
         );
-        Aabb {
+        Self {
             min: Vec3::new(lo.x.min(hi.x), lo.y.min(hi.y), lo.z.min(hi.z)),
             max: Vec3::new(lo.x.max(hi.x), lo.y.max(hi.y), lo.z.max(hi.z)),
         }
@@ -197,12 +210,13 @@ impl Aabb {
     /// The result is rotation-invariant only for AABBs centered at the
     /// origin or for axis-aligned rotations; off-center boxes get a
     /// strictly larger AABB after rotation, as expected.
-    pub fn rotate(&self, axis: Vec3, angle: f32) -> Aabb {
+    #[must_use]
+    pub fn rotate(&self, axis: Vec3, angle: f32) -> Self {
         if self.is_empty() {
             return *self;
         }
         let n = axis.normalize_or(Vec3::Y);
-        let mut out = Aabb::EMPTY;
+        let mut out = Self::EMPTY;
         for c in self.corners() {
             out.expand_to_point(c.rotate_axis_angle(n, angle));
         }
@@ -212,7 +226,8 @@ impl Aabb {
     /// Mirror across the plane `axis_index = 0` (`0 = X, 1 = Y, 2 = Z`).
     /// The bounds along that axis flip sign and swap; the others are
     /// unchanged. Panics if `axis_index > 2`.
-    pub fn mirror(&self, axis_index: usize) -> Aabb {
+    #[must_use]
+    pub fn mirror(&self, axis_index: usize) -> Self {
         assert!(axis_index < 3, "axis_index must be 0, 1, or 2");
         if self.is_empty() {
             return *self;

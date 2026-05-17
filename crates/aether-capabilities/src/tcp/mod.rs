@@ -237,7 +237,7 @@ pub trait TcpNativeExt {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> TcpNativeExt for NativeActorMailbox<'a, TcpCapability> {
+impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener {
             addr: addr.into(),
@@ -344,7 +344,7 @@ mod cap_native {
         type Config = ();
         const NAMESPACE: &'static str = "aether.tcp";
 
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 listeners: HashMap::new(),
                 pending_unbinds: HashMap::new(),
@@ -428,7 +428,7 @@ mod cap_native {
             self.listeners.insert(
                 listener_id,
                 ListenerEntry {
-                    addr: mail.addr.clone(),
+                    addr: mail.addr,
                     port: local_port,
                     name: subname_str.clone(),
                     _monitor_handle: monitor_handle,
@@ -635,9 +635,11 @@ mod cap_native {
                 if let Ok(f) = rx.try_recv() {
                     break f;
                 }
-                if Instant::now() >= deadline {
-                    panic!("reply did not arrive within deadline for {}", K::NAME);
-                }
+                assert!(
+                    Instant::now() < deadline,
+                    "reply did not arrive within deadline for {}",
+                    K::NAME
+                );
                 thread::sleep(Duration::from_millis(5));
             };
             let payload = match frame {

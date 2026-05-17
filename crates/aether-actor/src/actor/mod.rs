@@ -153,7 +153,7 @@ pub const NAMESPACE_SEGMENT_MAX_LEN: usize = 256;
 /// - segments longer than [`NAMESPACE_SEGMENT_MAX_LEN`] bytes
 ///
 /// Multi-byte UTF-8 (CJK, emoji, ...) is allowed — the rule is "no
-/// ASCII control / whitespace / separator," not "ASCII-only." MailboxId
+/// ASCII control / whitespace / separator," not "ASCII-only." `MailboxId`
 /// hashing is byte-level so any valid UTF-8 hashes deterministically.
 pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
     if s.is_empty() {

@@ -59,25 +59,25 @@ pub enum DecodeError {
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DecodeError::Truncated { path, needed, had } => {
+            Self::Truncated { path, needed, had } => {
                 write!(f, "truncated at {path}: needed {needed} bytes, had {had}")
             }
-            DecodeError::TrailingBytes { path, remaining } => write!(
+            Self::TrailingBytes { path, remaining } => write!(
                 f,
                 "trailing bytes after decoding {path}: {remaining} unread"
             ),
-            DecodeError::InvalidBool { path, byte } => {
+            Self::InvalidBool { path, byte } => {
                 write!(f, "invalid bool at {path}: 0x{byte:02x} not 0 or 1")
             }
-            DecodeError::InvalidUtf8 { path } => write!(f, "invalid utf-8 in string at {path}"),
-            DecodeError::VarintOverflow { path } => {
+            Self::InvalidUtf8 { path } => write!(f, "invalid utf-8 in string at {path}"),
+            Self::VarintOverflow { path } => {
                 write!(f, "varint at {path} exceeds 10 bytes (overflow)")
             }
-            DecodeError::UnknownEnumDiscriminant { path, discriminant } => write!(
+            Self::UnknownEnumDiscriminant { path, discriminant } => write!(
                 f,
                 "enum at {path} has no variant for discriminant {discriminant}"
             ),
-            DecodeError::UnsupportedSchema(shape) => {
+            Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub decoder: {shape}")
             }
         }
@@ -228,7 +228,9 @@ fn read_primitive_cast(
         Primitive::I16 => Ok(Value::from(i16::from_le_bytes(cur.take::<2>(path)?))),
         Primitive::I32 => Ok(Value::from(i32::from_le_bytes(cur.take::<4>(path)?))),
         Primitive::I64 => Ok(Value::from(i64::from_le_bytes(cur.take::<8>(path)?))),
-        Primitive::F32 => Ok(json_f64(f32::from_le_bytes(cur.take::<4>(path)?) as f64)),
+        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(
+            cur.take::<4>(path)?,
+        )))),
         Primitive::F64 => Ok(json_f64(f64::from_le_bytes(cur.take::<8>(path)?))),
     }
 }
@@ -434,7 +436,9 @@ fn read_primitive_postcard(
             let n = read_varint_u64(cur, path)?;
             Ok(Value::from(unzigzag(n)))
         }
-        Primitive::F32 => Ok(json_f64(f32::from_le_bytes(cur.take::<4>(path)?) as f64)),
+        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(
+            cur.take::<4>(path)?,
+        )))),
         Primitive::F64 => Ok(json_f64(f64::from_le_bytes(cur.take::<8>(path)?))),
     }
 }
@@ -484,7 +488,7 @@ fn decode_enum_body(
 /// Stringify a decoded map key into its proto3-JSON form (issue #232).
 /// Mirrors the encoder's `parse_map_key`: string identity, integer
 /// scalars to decimal digits, bool to `"true"`/`"false"`. Anything else
-/// is `UnsupportedSchema` — the BTreeMap<K: Ord, V> bound at the Rust
+/// is `UnsupportedSchema` — the `BTreeMap`<K: Ord, V> bound at the Rust
 /// layer makes those unreachable, but the codec rejects them defensively
 /// in case a descriptor lands here from an external source.
 fn render_map_key(
@@ -528,7 +532,7 @@ fn read_varint_u64(cur: &mut Cursor<'_>, path: &str) -> Result<u64, DecodeError>
     let mut shift = 0u32;
     for _ in 0..10 {
         let [b] = cur.take::<1>(path)?;
-        n |= ((b & 0x7f) as u64) << shift;
+        n |= u64::from(b & 0x7f) << shift;
         if b & 0x80 == 0 {
             return Ok(n);
         }
@@ -546,9 +550,7 @@ fn unzigzag(n: u64) -> i64 {
 /// JSON value remains valid. Round-trip semantics: finite floats round
 /// trip exactly; NaN/inf bytes decode to null (loud, not silent).
 fn json_f64(n: f64) -> Value {
-    serde_json::Number::from_f64(n)
-        .map(Value::Number)
-        .unwrap_or(Value::Null)
+    serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
 }
 
 struct Cursor<'a> {
@@ -904,7 +906,7 @@ mod tests {
 
     #[test]
     fn varint_decodes_at_byte_boundaries() {
-        for n in [0u64, 127, 128, 16383, 16384, u32::MAX as u64, u64::MAX] {
+        for n in [0u64, 127, 128, 16383, 16384, u64::from(u32::MAX), u64::MAX] {
             let bytes = postcard::to_allocvec(&n).unwrap();
             let mut cur = Cursor::new(&bytes);
             let back = read_varint_u64(&mut cur, "$").unwrap();
@@ -923,7 +925,15 @@ mod tests {
 
     #[test]
     fn zigzag_decodes_to_signed() {
-        for n in [0i64, -1, 1, -128, 127, i32::MIN as i64, i32::MAX as i64] {
+        for n in [
+            0i64,
+            -1,
+            1,
+            -128,
+            127,
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+        ] {
             let bytes = postcard::to_allocvec(&n).unwrap();
             let mut cur = Cursor::new(&bytes);
             let raw = read_varint_u64(&mut cur, "$").unwrap();

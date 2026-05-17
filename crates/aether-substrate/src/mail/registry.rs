@@ -410,8 +410,8 @@ pub enum DropError {
 impl fmt::Display for DropError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DropError::UnknownId(id) => write!(f, "unknown mailbox id {:?}", id),
-            DropError::AlreadyDropped(id) => write!(f, "mailbox {:?} already dropped", id),
+            DropError::UnknownId(id) => write!(f, "unknown mailbox id {id:?}"),
+            DropError::AlreadyDropped(id) => write!(f, "mailbox {id:?} already dropped"),
         }
     }
 }

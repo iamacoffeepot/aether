@@ -25,7 +25,7 @@
 //! - **Schema vocabulary** (ADR-0019 / ADR-0031 / ADR-0032): `SchemaType`,
 //!   `LabelNode`, `KindShape`, `KindLabels`, `InputsRecord`, canonical
 //!   bytes encoders.
-//! - **Kind / Schema / CastEligible traits** (ADR-0030): the binding
+//! - **Kind / Schema / `CastEligible` traits** (ADR-0030): the binding
 //!   between a Rust type and its wire form.
 //! - **`Ref<K>`** (ADR-0045): typed handle reference for fields that
 //!   may inline a value or carry a handle into the substrate's store.
@@ -98,6 +98,7 @@ pub trait Kind {
     /// to the substrate-supplied `byte_len` so the decoder is bounded
     /// by the actual frame and can't read past the substrate-written
     /// payload into adjacent linear memory.
+    #[must_use]
     fn decode_from_bytes(_bytes: &[u8]) -> Option<Self>
     where
         Self: Sized,
@@ -229,8 +230,9 @@ impl<K: Kind> Ref<K> {
     /// `K::ID`. Preferred over hand-constructing the variant —
     /// callers can't pass a kind id that disagrees with the type
     /// parameter.
+    #[must_use]
     pub const fn handle(id: u64) -> Self {
-        Ref::Handle {
+        Self::Handle {
             id,
             kind_id: K::ID.0,
         }
@@ -241,20 +243,20 @@ impl<K> Ref<K> {
     /// Wrap an owned value as `Ref::Inline`. Convenience for call
     /// sites that have the value but want the field shape.
     pub const fn inline(value: K) -> Self {
-        Ref::Inline(value)
+        Self::Inline(value)
     }
 
     /// Returns `true` for `Ref::Inline`, `false` for
     /// `Ref::Handle`. Cheap predicate for call sites that branch
     /// on resolution state.
     pub const fn is_inline(&self) -> bool {
-        matches!(self, Ref::Inline(_))
+        matches!(self, Self::Inline(_))
     }
 
     /// Returns `true` for `Ref::Handle`, `false` for
     /// `Ref::Inline`.
     pub const fn is_handle(&self) -> bool {
-        matches!(self, Ref::Handle { .. })
+        matches!(self, Self::Handle { .. })
     }
 
     /// The wire `id` if this is a `Ref::Handle`, `None` for
@@ -262,8 +264,8 @@ impl<K> Ref<K> {
     /// no separate accessor is provided.
     pub const fn handle_id(&self) -> Option<u64> {
         match self {
-            Ref::Handle { id, .. } => Some(*id),
-            Ref::Inline(_) => None,
+            Self::Handle { id, .. } => Some(*id),
+            Self::Inline(_) => None,
         }
     }
 }
@@ -370,20 +372,20 @@ mod schema_impls {
 
     // ADR-0064 / ADR-0065 typed-id newtypes.
     impl Schema for MailboxId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(MailboxId::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(MailboxId::TYPE_NAME);
+        const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
     impl Schema for KindId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(KindId::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(KindId::TYPE_NAME);
+        const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
     impl Schema for HandleId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(HandleId::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(HandleId::TYPE_NAME);
+        const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
@@ -478,6 +480,7 @@ pub mod __derive_runtime {
     /// `AnyBitPattern` via the user's `#[derive(Pod)]`; the bound is
     /// enforced at the impl site rather than on `Kind` itself so non-
     /// cast kinds aren't poisoned by a trait they can't satisfy.
+    #[must_use]
     pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<T> {
         if bytes.len() != core::mem::size_of::<T>() {
             return None;
@@ -493,6 +496,7 @@ pub mod __derive_runtime {
     /// must be a multiple of `size_of::<T>()` and the slice must be
     /// suitably aligned; mis-shaped buffers return `None` and the
     /// dispatcher's miss path warn-logs at the chassis side.
+    #[must_use]
     pub fn decode_cast_slice<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<&[T]> {
         bytemuck::try_cast_slice(bytes).ok()
     }
@@ -503,6 +507,7 @@ pub mod __derive_runtime {
     /// via the user's `#[derive(Deserialize)]`; the bound lives on
     /// this helper rather than on `Kind` so cast kinds stay
     /// independent of `serde`.
+    #[must_use]
     pub fn decode_postcard<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         postcard::from_bytes(bytes).ok()
     }
@@ -540,35 +545,38 @@ pub enum DecodeError {
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DecodeError::SizeMismatch { expected, actual } => {
+            Self::SizeMismatch { expected, actual } => {
                 write!(
                     f,
                     "data payload size mismatch: expected {expected}, got {actual}"
                 )
             }
-            DecodeError::Alignment => f.write_str("data payload alignment mismatch"),
-            DecodeError::Postcard(e) => write!(f, "postcard decode failed: {e}"),
+            Self::Alignment => f.write_str("data payload alignment mismatch"),
+            Self::Postcard(e) => write!(f, "postcard decode failed: {e}"),
         }
     }
 }
 
 impl From<bytemuck::PodCastError> for DecodeError {
     fn from(err: bytemuck::PodCastError) -> Self {
-        use bytemuck::PodCastError::*;
+        use bytemuck::PodCastError::{
+            AlignmentMismatch, OutputSliceWouldHaveSlop, SizeMismatch,
+            TargetAlignmentGreaterAndInputNotAligned,
+        };
         match err {
-            SizeMismatch | OutputSliceWouldHaveSlop => DecodeError::SizeMismatch {
+            SizeMismatch | OutputSliceWouldHaveSlop => Self::SizeMismatch {
                 expected: 0,
                 actual: 0,
             },
-            TargetAlignmentGreaterAndInputNotAligned => DecodeError::Alignment,
-            AlignmentMismatch => DecodeError::Alignment,
+            TargetAlignmentGreaterAndInputNotAligned => Self::Alignment,
+            AlignmentMismatch => Self::Alignment,
         }
     }
 }
 
 impl From<postcard::Error> for DecodeError {
     fn from(err: postcard::Error) -> Self {
-        DecodeError::Postcard(err)
+        Self::Postcard(err)
     }
 }
 
@@ -619,6 +627,7 @@ pub fn decode_struct<T: Kind + serde::de::DeserializeOwned>(
 /// Marker payload for signal-only kinds with no bytes on the wire.
 /// Implementors need nothing but a `Kind` impl; use `encode_empty` on
 /// the sender side and ignore the payload on the receiver side.
+#[must_use]
 pub fn encode_empty<T: Kind>() -> Vec<u8> {
     Vec::new()
 }

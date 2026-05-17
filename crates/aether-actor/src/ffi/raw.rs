@@ -69,6 +69,7 @@ unsafe extern "C" {
 /// Host-side stub for the FFI `aether::send_mail` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-actor: send_mail called outside the FFI guest");
 }
@@ -77,6 +78,7 @@ pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _coun
 /// Host-side stub for the FFI `aether::reply_mail` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-actor: reply_mail called outside the FFI guest");
 }
@@ -85,6 +87,7 @@ pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count:
 /// Host-side stub for the FFI `aether::save_state` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
     panic!("aether-actor: save_state called outside the FFI guest");
 }
@@ -93,6 +96,7 @@ pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
 /// Host-side stub for the FFI `aether::wait_reply` import. Always
 /// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub unsafe fn wait_reply(
     _expected_kind: u64,
     _out_ptr: u32,
@@ -107,6 +111,7 @@ pub unsafe fn wait_reply(
 /// Host-side stub for the FFI `aether::prev_correlation` import.
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
 }

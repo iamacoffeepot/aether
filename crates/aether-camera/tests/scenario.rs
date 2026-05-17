@@ -123,7 +123,7 @@ fn camera_default_orbit_publishes_view_proj() {
 
 /// Destroy the active default camera ("main") and confirm the
 /// substrate stays alive — frame still draws the chassis clear, no
-/// panic, no fatal_abort. The component pauses publishing (no further
+/// panic, no `fatal_abort`. The component pauses publishing (no further
 /// `aether.camera` mail) per its docstring; `count_observed` is
 /// cumulative since boot so we can't assert "no further publishes"
 /// directly with the current vocabulary, but the survivability half

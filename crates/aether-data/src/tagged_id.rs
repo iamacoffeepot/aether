@@ -40,22 +40,24 @@ impl Tag {
     /// Three-letter wire prefix for the string form (`mbx`, `knd`,
     /// `hdl`). Concatenated with `-` and the base32 body to produce
     /// the full encoded id.
+    #[must_use]
     pub const fn prefix(self) -> &'static str {
         match self {
-            Tag::Mailbox => "mbx",
-            Tag::Kind => "knd",
-            Tag::Handle => "hdl",
+            Self::Mailbox => "mbx",
+            Self::Kind => "knd",
+            Self::Handle => "hdl",
         }
     }
 
     /// Decode a 4-bit tag value from the high nibble of a `u64`.
     /// Returns `None` for `0x0` (the reserved invalid sentinel) and
     /// for any reserved-future value (`0x4..=0xF`).
-    pub const fn from_bits(bits: u8) -> Option<Tag> {
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Option<Self> {
         match bits {
-            TAG_MAILBOX => Some(Tag::Mailbox),
-            TAG_KIND => Some(Tag::Kind),
-            TAG_HANDLE => Some(Tag::Handle),
+            TAG_MAILBOX => Some(Self::Mailbox),
+            TAG_KIND => Some(Self::Kind),
+            TAG_HANDLE => Some(Self::Handle),
             _ => None,
         }
     }
@@ -70,17 +72,20 @@ impl fmt::Display for Tag {
 /// Stamp `tag` into the high 4 bits of `hash`'s low 60 bits, dropping
 /// the hash's natural high 4 bits. Const-fold-friendly so the `Kind`
 /// derive and `mailbox_id_from_name` can bake the tag at compile time.
+#[must_use]
 pub const fn with_tag(tag: Tag, hash: u64) -> u64 {
     ((tag as u64) << TAG_SHIFT) | (hash & HASH_MASK)
 }
 
 /// Read the tag bits out of a tagged id. `None` on the `0x0`
 /// sentinel or a reserved-future tag value.
+#[must_use]
 pub const fn tag_of(id: u64) -> Option<Tag> {
     Tag::from_bits((id >> TAG_SHIFT) as u8 & 0x0F)
 }
 
 /// Return the 60-bit hash body with tag bits stripped.
+#[must_use]
 pub const fn body_of(id: u64) -> u64 {
     id & HASH_MASK
 }
@@ -102,9 +107,9 @@ pub enum DecodeError {
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DecodeError::Malformed => f.write_str("malformed tagged id"),
-            DecodeError::InvalidChar(c) => write!(f, "invalid base32 char: {c:?}"),
-            DecodeError::TagMismatch { expected, found } => {
+            Self::Malformed => f.write_str("malformed tagged id"),
+            Self::InvalidChar(c) => write!(f, "invalid base32 char: {c:?}"),
+            Self::TagMismatch { expected, found } => {
                 write!(f, "tag mismatch: expected {expected}, found {found}")
             }
         }
@@ -124,6 +129,7 @@ const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// `0x0` sentinel or `0x4..=0xF`). Callers that need a printable form
 /// for a possibly-malformed id should fall back to hex via
 /// `format!("{:#x}", id)`.
+#[must_use]
 pub fn encode(id: u64) -> Option<String> {
     let tag = tag_of(id)?;
     let body = body_of(id);
@@ -163,7 +169,7 @@ pub fn decode(s: &str) -> Result<u64, DecodeError> {
         for i in 0..4 {
             let c = bytes[start + i];
             let v = decode_char(c)?;
-            body = (body << 5) | v as u64;
+            body = (body << 5) | u64::from(v);
         }
     }
     Ok(with_tag(tag, body))

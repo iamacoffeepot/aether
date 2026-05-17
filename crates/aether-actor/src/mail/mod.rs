@@ -54,12 +54,14 @@ impl ReplyTo {
     /// Sentinel handling is the caller's responsibility — this
     /// constructor accepts any `u32`.
     #[doc(hidden)]
+    #[must_use]
     pub fn __from_raw(raw: u32) -> Self {
-        ReplyTo { raw }
+        Self { raw }
     }
 
     /// Raw handle value. Exposed for components that need to call a
     /// host fn the SDK doesn't yet wrap.
+    #[must_use]
     pub fn raw(self) -> u32 {
         self.raw
     }
@@ -97,6 +99,7 @@ impl<'a> Mail<'a> {
     /// Not part of the public API; called only by `export!`. The FFI
     /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
     #[doc(hidden)]
+    #[must_use]
     pub unsafe fn __from_raw(kind: u64, ptr: u32, byte_len: u32, count: u32, sender: u32) -> Self {
         Mail {
             kind,
@@ -113,6 +116,7 @@ impl<'a> Mail<'a> {
     /// rather than a wasm32 offset, so they go through here to keep
     /// the wider address.
     #[doc(hidden)]
+    #[must_use]
     pub unsafe fn __from_ptr(
         kind: u64,
         ptr: usize,
@@ -133,12 +137,14 @@ impl<'a> Mail<'a> {
     /// Raw kind id the substrate routed this mail under. Match against
     /// a cached `KindId<K>` via `kind_id.matches(mail.kind())`, or use
     /// `decode::<K>(kind_id)` and let it be the discriminator.
+    #[must_use]
     pub fn kind(&self) -> u64 {
         self.kind
     }
 
     /// Number of items carried on the mail frame — 1 for a single
     /// payload send, N for a batch send of N elements.
+    #[must_use]
     pub fn count(&self) -> u32 {
         self.count
     }
@@ -148,6 +154,7 @@ impl<'a> Mail<'a> {
     /// (`size_of::<K>() * count`); postcard decoders use it as the
     /// exact slice length so the parser is bounded by the substrate-
     /// written region rather than reading into adjacent memory.
+    #[must_use]
     pub fn byte_len(&self) -> u32 {
         self.byte_len
     }
@@ -156,6 +163,7 @@ impl<'a> Mail<'a> {
     /// for component-to-component mail and broadcast-origin mail;
     /// `Some(ReplyTo)` when the inbound came from a Claude session and
     /// can be answered via `Ctx::reply`.
+    #[must_use]
     pub fn reply_to(&self) -> Option<ReplyTo> {
         if self.sender == NO_REPLY_HANDLE {
             None
@@ -167,6 +175,7 @@ impl<'a> Mail<'a> {
     /// Decode as a single owned `K`. Returns `None` if the kind does
     /// not match or if `count` is not 1. Copies rather than borrows so
     /// alignment of the underlying bytes doesn't matter.
+    #[must_use]
     pub fn decode<K: Kind + bytemuck::AnyBitPattern>(&self, kind_id: KindId<K>) -> Option<K> {
         if !kind_id.matches(self.kind) || self.count != 1 {
             return None;
@@ -180,6 +189,7 @@ impl<'a> Mail<'a> {
     /// does not match or the bytes are not aligned for `K`. The
     /// returned slice borrows from actor linear memory for the
     /// lifetime of this `Mail`.
+    #[must_use]
     pub fn decode_slice<K: Kind + bytemuck::AnyBitPattern>(
         &self,
         kind_id: KindId<K>,
@@ -197,6 +207,7 @@ impl<'a> Mail<'a> {
     /// against a const. Useful as the discriminator before deciding
     /// how to handle a kind, or as a signal check when `K` is a
     /// zero-sized input marker like `Tick` / `MouseButton`.
+    #[must_use]
     pub fn is<K: Kind>(&self) -> bool {
         self.kind == K::ID.0
     }
@@ -209,6 +220,7 @@ impl<'a> Mail<'a> {
     /// schema-skew guard the substrate's frame metadata makes free).
     /// Copies rather than borrows so alignment of the underlying bytes
     /// doesn't matter — same semantics as `decode`.
+    #[must_use]
     pub fn decode_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<K> {
         if self.kind != K::ID.0 || self.count != 1 {
             return None;
@@ -223,6 +235,7 @@ impl<'a> Mail<'a> {
 
     /// Type-driven sibling of `decode_slice`. Borrowed, alignment
     /// required (returns `None` if misaligned).
+    #[must_use]
     pub fn decode_slice_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<&'a [K]> {
         if self.kind != K::ID.0 {
             return None;
@@ -253,6 +266,7 @@ impl<'a> Mail<'a> {
     /// either the default body for hand-rolled `Kind` impls that
     /// didn't override, a cast-size mismatch, or a postcard decode
     /// error.
+    #[must_use]
     pub fn decode_kind<K: Kind>(&self) -> Option<K> {
         if self.kind != K::ID.0 || self.count != 1 {
             return None;
@@ -282,6 +296,7 @@ impl<'a> PriorState<'a> {
     /// Not part of the public API; called only by `export!`. The FFI
     /// delivers the buffer as wasm32 `(u32, u32)`; this widens.
     #[doc(hidden)]
+    #[must_use]
     pub unsafe fn __from_raw(version: u32, ptr: u32, len: u32) -> Self {
         PriorState {
             version,
@@ -295,6 +310,7 @@ impl<'a> PriorState<'a> {
     /// host-pointer construction path (native callers, host-side unit
     /// tests).
     #[doc(hidden)]
+    #[must_use]
     pub unsafe fn __from_ptr(version: u32, ptr: usize, len: usize) -> Self {
         PriorState {
             version,
@@ -306,11 +322,13 @@ impl<'a> PriorState<'a> {
 
     /// Component-defined schema version. The substrate does not
     /// interpret it — see ADR-0016.
+    #[must_use]
     pub fn schema_version(&self) -> u32 {
         self.version
     }
 
     /// Bytes the previous instance saved via `DropCtx::save_state`.
+    #[must_use]
     pub fn bytes(&self) -> &'a [u8] {
         if self.len == 0 {
             &[]
@@ -332,6 +350,7 @@ impl<'a> PriorState<'a> {
     /// migrate across a schema change can reach for `bytes()` +
     /// `schema_version()` directly, or try `as_kind::<OldShape>()`
     /// first and fall back if it returns `None`.
+    #[must_use]
     pub fn as_kind<K>(&self) -> Option<K>
     where
         K: Kind + Schema + serde::de::DeserializeOwned,
@@ -392,7 +411,7 @@ mod tests {
     #[test]
     fn mail_decode_single_roundtrip() {
         let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
+        let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
@@ -403,7 +422,7 @@ mod tests {
     #[test]
     fn mail_decode_wrong_kind_returns_none() {
         let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
+        let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let wrong: KindId<FakePod> = KindId::__new(8);
@@ -474,7 +493,7 @@ mod tests {
     #[test]
     fn mail_decode_typed_roundtrip() {
         let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
+        let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
@@ -485,7 +504,7 @@ mod tests {
     #[test]
     fn mail_decode_typed_wrong_kind_returns_none() {
         let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
+        let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         // Kind id deliberately mismatched (FakeKind instead of FakePod).
         let mail =
@@ -557,7 +576,7 @@ mod tests {
         }
 
         let value = FakeCastKind { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakeCastKind).addr();
+        let ptr_raw = (&raw const value).addr();
         let byte_len = core::mem::size_of::<FakeCastKind>() as u32;
         let mail =
             unsafe { Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
@@ -645,7 +664,7 @@ mod tests {
         // mail whose declared byte_len doesn't match the kind's size,
         // decode bails rather than reading the wrong window.
         let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
+        let ptr_raw = (&raw const value).addr();
         let bogus_byte_len = (core::mem::size_of::<FakePod>() + 4) as u32;
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, bogus_byte_len, 1, NO_REPLY_HANDLE) };

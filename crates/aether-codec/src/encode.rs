@@ -66,16 +66,16 @@ pub enum EncodeError {
 impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EncodeError::NotAnObject => write!(f, "params must be a JSON object"),
-            EncodeError::MissingField(name) => write!(f, "missing required field {name:?}"),
-            EncodeError::UnexpectedField(name) => {
+            Self::NotAnObject => write!(f, "params must be a JSON object"),
+            Self::MissingField(name) => write!(f, "missing required field {name:?}"),
+            Self::UnexpectedField(name) => {
                 write!(f, "unexpected field {name:?} not in descriptor")
             }
-            EncodeError::TypeMismatch { field, expected } => {
+            Self::TypeMismatch { field, expected } => {
                 write!(f, "field {field:?} expected {expected}")
             }
-            EncodeError::OutOfRange { field, reason } => write!(f, "field {field:?}: {reason}"),
-            EncodeError::ArrayLengthMismatch {
+            Self::OutOfRange { field, reason } => write!(f, "field {field:?}: {reason}"),
+            Self::ArrayLengthMismatch {
                 field,
                 expected,
                 got,
@@ -83,7 +83,7 @@ impl fmt::Display for EncodeError {
                 f,
                 "field {field:?}: array length {got} != expected {expected}"
             ),
-            EncodeError::UnsupportedSchema(shape) => {
+            Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub encoder: {shape}")
             }
         }
@@ -158,7 +158,7 @@ fn encode_postcard(
                 field: path.to_owned(),
                 expected: "bool",
             })?;
-            out.push(b as u8);
+            out.push(u8::from(b));
             Ok(())
         }
         SchemaType::Scalar(p) => write_scalar_postcard(*p, value, path, out),
@@ -260,7 +260,7 @@ fn encode_postcard(
                         field: path.to_owned(),
                         expected: "enum variant matching schema",
                     })?;
-            write_varint_u64(out, variant.discriminant() as u64);
+            write_varint_u64(out, u64::from(variant.discriminant()));
             encode_enum_body(body, variant, path, out)?;
             Ok(())
         }
@@ -477,12 +477,12 @@ fn write_scalar_postcard(
         Primitive::I16 => {
             let n = as_signed(v, name, "i16")?;
             let n: i16 = n.try_into().map_err(|_| oor(name, "i16"))?;
-            write_varint_u64(out, zigzag_i64(n as i64));
+            write_varint_u64(out, zigzag_i64(i64::from(n)));
         }
         Primitive::I32 => {
             let n = as_signed(v, name, "i32")?;
             let n: i32 = n.try_into().map_err(|_| oor(name, "i32"))?;
-            write_varint_u64(out, zigzag_i64(n as i64));
+            write_varint_u64(out, zigzag_i64(i64::from(n)));
         }
         Primitive::I64 => {
             let n = as_signed(v, name, "i64")?;
@@ -621,7 +621,7 @@ fn encode_struct_fields(
     fields: &[NamedField],
 ) -> Result<usize, EncodeError> {
     let mut max_align = 1usize;
-    for field in fields.iter() {
+    for field in fields {
         let value = obj
             .get(&*field.name)
             .ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
@@ -1284,7 +1284,7 @@ mod tests {
     fn varint_matches_postcard_for_boundaries() {
         // 0, 127, 128, 16383, 16384 — each crosses a varint byte
         // boundary and is the most likely place for an off-by-one.
-        for n in [0u64, 127, 128, 16383, 16384, u32::MAX as u64, u64::MAX] {
+        for n in [0u64, 127, 128, 16383, 16384, u64::from(u32::MAX), u64::MAX] {
             let mut ours = Vec::new();
             write_varint_u64(&mut ours, n);
             let theirs = postcard::to_allocvec(&n).unwrap();
@@ -1294,7 +1294,15 @@ mod tests {
 
     #[test]
     fn zigzag_matches_postcard_for_signed() {
-        for n in [0i64, -1, 1, -128, 127, i32::MIN as i64, i32::MAX as i64] {
+        for n in [
+            0i64,
+            -1,
+            1,
+            -128,
+            127,
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+        ] {
             let mut ours = Vec::new();
             write_varint_u64(&mut ours, zigzag_i64(n));
             let theirs = postcard::to_allocvec(&n).unwrap();

@@ -16,6 +16,7 @@ use super::primitives::{
 /// Byte length of a `Handler` record's postcard encoding. One-byte
 /// enum-variant tag (`0x00`) + `varint(id)` + `postcard(name)` +
 /// `option_str(doc)`.
+#[must_use]
 pub const fn inputs_handler_len(id: u64, name: &str, doc: Option<&str>) -> usize {
     1 + varint_u64_len(id) + str_len(name) + option_borrowed_str_len(doc)
 }
@@ -23,6 +24,7 @@ pub const fn inputs_handler_len(id: u64, name: &str, doc: Option<&str>) -> usize
 /// Serialize an `InputsRecord::Handler` into a fixed-size array sized
 /// by `inputs_handler_len`. Exact postcard wire shape for
 /// `InputsRecord::Handler { id, name, doc }`.
+#[must_use]
 pub const fn write_inputs_handler<const N: usize>(
     id: u64,
     name: &str,
@@ -41,11 +43,13 @@ pub const fn write_inputs_handler<const N: usize>(
 }
 
 /// Byte length of a `Fallback` record's postcard encoding.
+#[must_use]
 pub const fn inputs_fallback_len(doc: Option<&str>) -> usize {
     1 + option_borrowed_str_len(doc)
 }
 
 /// Serialize an `InputsRecord::Fallback` into a fixed-size array.
+#[must_use]
 pub const fn write_inputs_fallback<const N: usize>(doc: Option<&str>) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = 0usize;
@@ -57,11 +61,13 @@ pub const fn write_inputs_fallback<const N: usize>(doc: Option<&str>) -> [u8; N]
 }
 
 /// Byte length of a `Component` record's postcard encoding.
+#[must_use]
 pub const fn inputs_component_len(doc: &str) -> usize {
     1 + str_len(doc)
 }
 
 /// Serialize an `InputsRecord::Component` into a fixed-size array.
+#[must_use]
 pub const fn write_inputs_component<const N: usize>(doc: &str) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = 0usize;

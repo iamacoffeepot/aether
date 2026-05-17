@@ -45,7 +45,7 @@ pub const WORKERS: usize = 2;
 /// that mode).
 ///
 /// Pre-iamacoffeepot/aether#838 this rode a full `NativeActor`
-/// (TestBenchObserverCapability) specifically because synchronous
+/// (`TestBenchObserverCapability`) specifically because synchronous
 /// closures leaked `in_flight` and prevented chains from settling
 /// — the bench's Tick settlement gate would otherwise wait the
 /// full 5 s timeout per tick when a probe component routed
@@ -54,7 +54,7 @@ pub const WORKERS: usize = 2;
 /// `Inline` in iamacoffeepot/aether#842) which brackets sync
 /// handlers with `Received`/`Finished`, closing the gap and
 /// letting us retire the actor-shaped workaround — one fewer
-/// thread per TestBench.
+/// thread per `TestBench`.
 pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
 
 /// ADR-0071 marker type for the test-bench chassis. Carries no
@@ -69,7 +69,7 @@ impl Chassis for TestBenchChassis {
     const PROFILE: &'static str = "test-bench";
     /// Phantom driver — test-bench is passive (the embedder is the
     /// driver). Declaring [`NeverDriver`] satisfies the trait bound;
-    /// the value is never instantiated because TestBench's build
+    /// the value is never instantiated because `TestBench`'s build
     /// path goes through `Builder::<_>::build_passive`.
     type Driver = NeverDriver;
     type Env = TestBenchEnv;
@@ -131,7 +131,7 @@ pub struct TestBenchEnv {
 
 /// Output of [`TestBenchChassis::build_passive`]. Bundles the
 /// `PassiveChassis<TestBenchChassis>` (holding the booted Log +
-/// Render passives via chassis_builder typed lookup) with the
+/// Render passives via `chassis_builder` typed lookup) with the
 /// substrate handles the embedder needs to drive its event loop —
 /// queue, outbound, kind ids, render accumulator handles.
 ///
@@ -159,7 +159,7 @@ pub struct TestBenchBuild {
 impl TestBenchChassis {
     /// Build the test-bench chassis: stand up substrate-core
     /// internals via [`SubstrateBoot::builder`], boot the standard
-    /// passives + `TestBenchCapability` via the chassis_builder
+    /// passives + `TestBenchCapability` via the `chassis_builder`
     /// [`Builder`], and return a [`TestBenchBuild`] the embedder
     /// takes ownership of. The embedder is responsible for any
     /// further capability adds (io with whatever failure semantics
@@ -195,7 +195,7 @@ impl TestBenchChassis {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds: observed_kinds.clone(),
             capture_backend: Some(CaptureBackend {
-                queue: capture_queue.clone(),
+                queue: capture_queue,
                 wake: Arc::new(move || {
                     events_for_render
                         .send(ChassisEvent::CaptureRequested)
@@ -257,7 +257,7 @@ impl TestBenchChassis {
         // arms leaked settlement; now that `Inline` participates in
         // ADR-0080 §6 we get the same correctness with one fewer
         // thread per TestBench.
-        if let Some(sink) = observed_kinds.clone() {
+        if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
             boot.registry.register_inline(
                 TEST_BENCH_OBSERVER_MAILBOX_NAME,
@@ -275,17 +275,16 @@ impl TestBenchChassis {
             );
         }
 
-        let mut builder =
-            Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
-                .with_actor::<HandleCapability>(())
-                .with_actor::<LogCapability>(())
-                .with_actor::<TraceObserverCapability>(())
-                .with_actor::<InputCapability>(input_config)
-                .with_actor::<ComponentHostCapability>(component_host_config)
-                .with_actor::<TcpCapability>(())
-                .with_actor::<RenderCapability>(render_config)
-                .with_actor::<HeadlessWindowCapability>(())
-                .with_actor::<TestBenchCapability>(test_bench_cap_config);
+        let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+            .with_actor::<HandleCapability>(())
+            .with_actor::<LogCapability>(())
+            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<InputCapability>(input_config)
+            .with_actor::<ComponentHostCapability>(component_host_config)
+            .with_actor::<TcpCapability>(())
+            .with_actor::<RenderCapability>(render_config)
+            .with_actor::<HeadlessWindowCapability>(())
+            .with_actor::<TestBenchCapability>(test_bench_cap_config);
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

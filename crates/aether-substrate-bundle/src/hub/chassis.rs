@@ -52,6 +52,7 @@ impl HubEnv {
     /// [`DEFAULT_RPC_PORT`] when unset or unparseable. Binds on
     /// `127.0.0.1` — intentional for the current single-host
     /// development story.
+    #[must_use]
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
         let rpc_port = super::rpc_port_from_env().unwrap_or(DEFAULT_RPC_PORT);
@@ -62,7 +63,7 @@ impl HubEnv {
 }
 
 impl HubChassis {
-    fn build_inner(env: HubEnv) -> Result<BuiltChassis<HubChassis>, BootError> {
+    fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
         let HubEnv { rpc_addr } = env;
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
@@ -70,7 +71,7 @@ impl HubChassis {
 
         let driver = HubServerDriverCapability { boot };
 
-        Builder::<HubChassis>::new(registry, mailer)
+        Builder::<Self>::new(registry, mailer)
             .with_actor::<TraceObserverCapability>(())
             .with_actor::<EngineServer>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
@@ -103,14 +104,14 @@ impl DriverCapability for HubServerDriverCapability {
     type Running = HubServerDriverRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let HubServerDriverCapability { boot } = self;
+        let Self { boot } = self;
         Ok(HubServerDriverRunning { boot })
     }
 }
 
 impl DriverRunning for HubServerDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let HubServerDriverRunning { boot } = *self;
+        let Self { boot } = *self;
         let sig = shutdown_signal();
         eprintln!("aether-substrate-hub: {sig} received, shutting down");
         // `boot` drops here — actor registries shut down, dispatcher

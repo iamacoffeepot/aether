@@ -33,6 +33,7 @@ use aether_data::KindDescriptor;
 /// Every kind the substrate exposes. Order is unspecified — names are
 /// the contract; downstream callers (`Registry::register_kind_with_descriptor`,
 /// hub `Hello` handshake) are order-independent.
+#[must_use]
 pub fn all() -> Vec<KindDescriptor> {
     inventory::iter::<aether_data::__inventory::DescriptorEntry>()
         .map(|e| KindDescriptor {

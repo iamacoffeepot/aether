@@ -67,7 +67,7 @@ mod test_echo_actor {
         type Config = ();
         const NAMESPACE: &'static str = "aether.rpc.test.echo";
 
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
 

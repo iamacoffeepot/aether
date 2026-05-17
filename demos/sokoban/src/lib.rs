@@ -73,7 +73,7 @@ pub struct SokobanState {
 
 impl Default for SokobanState {
     fn default() -> Self {
-        SokobanState {
+        Self {
             width: 0,
             height: 0,
             player_x: 0,
@@ -332,7 +332,7 @@ impl Sokoban {
         let h = self.state.height as f32;
         let gx = self.state.player_x as f32;
         let gy = self.state.player_y as f32;
-        (gx - w * 0.5 + 0.5, h * 0.5 - gy - 0.5)
+        (w.mul_add(-0.5, gx) + 0.5, h.mul_add(0.5, -gy) - 0.5)
     }
 
     /// Emit one `DrawTriangle` for the player body, centered at the
@@ -392,9 +392,9 @@ impl Sokoban {
             for x in 0..w {
                 let kind = cell_at(&self.state, x as u32, y as u32);
                 let (r, g, b) = cell_color(kind);
-                let x0 = origin_x + x as f32 * cell;
+                let x0 = (x as f32).mul_add(cell, origin_x);
                 let x1 = x0 + cell;
-                let y0 = origin_y - y as f32 * cell;
+                let y0 = (y as f32).mul_add(-cell, origin_y);
                 let y1 = y0 - cell;
                 fill_quad_triangle_pair(&mut tris, n, [x0, x1, y0, y1], 0.0, [r, g, b]);
                 n += 2;

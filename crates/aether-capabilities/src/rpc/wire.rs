@@ -38,7 +38,7 @@ pub enum WireFrame {
     },
     /// One reply mail observed in the trace chain of `cid`'s call.
     /// 0..n per cid; the server emits one for every mail addressed
-    /// back at the RpcServer mailbox with `correlation_id = cid`.
+    /// back at the `RpcServer` mailbox with `correlation_id = cid`.
     ReplyEvent {
         cid: u64,
         envelope: MailEnvelope,
@@ -122,12 +122,12 @@ pub struct KindDescriptor {
 /// non-local targets with [`RpcError::UnsupportedTarget`].
 ///
 /// `from` is `Some` when the originator wants replies (mail back at
-/// the RpcServer with `correlation_id = cid` round-trips to this
+/// the `RpcServer` with `correlation_id = cid` round-trips to this
 /// peer); `None` is fire-and-forget at the envelope layer regardless
 /// of whether the outer `Call.cid` is set.
 ///
 /// `correlation_id` is the mail-system correlation that responders
-/// use to `ctx.reply()` against. RpcServer sets this to the outer
+/// use to `ctx.reply()` against. `RpcServer` sets this to the outer
 /// `Call.cid` on dispatch so any actor in the trace chain that
 /// replies routes back to the originating peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +150,7 @@ pub struct MailboxAddress {
 
 impl MailboxAddress {
     /// Address a local mailbox (no engine routing).
+    #[must_use]
     pub const fn local(mailbox: MailboxId) -> Self {
         Self {
             engine: None,
