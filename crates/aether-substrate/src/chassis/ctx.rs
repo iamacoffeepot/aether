@@ -288,16 +288,13 @@ impl<'a> ChassisCtx<'a> {
         let tx = Arc::new(tx);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            // iamacoffeepot/aether#848 PR 3: closure now takes
-            // `OwnedDispatch` directly and moves it into `Envelope`
-            // via `From`. Drops the `legacy_inbox_handler` adapter
-            // (PR 2's transitional wrap) and the prior
-            // `build_envelope(&dispatch)` clone — one `Vec<u8>` +
-            // one `String` saved per Inbox dispatch through this
-            // claim path. `SendError` returns the envelope on
-            // failure so the warn-log reads `env.kind_name` (the
-            // owned String) without needing to clone ahead of the
-            // send.
+            // iamacoffeepot/aether#848: closure takes [`OwnedDispatch`]
+            // and moves it into [`Envelope`] via `From`. Zero clones
+            // on the cap dispatch hot path — one `Vec<u8>` + one
+            // `String` saved per Inbox dispatch through this claim
+            // path. `SendError` returns the envelope on failure so
+            // the warn-log reads `env.kind_name` (the owned String)
+            // without needing to clone ahead of the send.
             Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                 let env = Envelope::from(dispatch);
                 if let Err(mpsc::SendError(env)) = tx.send(env) {

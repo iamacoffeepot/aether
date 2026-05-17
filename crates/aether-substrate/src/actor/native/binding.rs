@@ -618,13 +618,10 @@ mod tests {
     fn forward_to_envelope_sender(
         tx: mpsc::Sender<Envelope>,
     ) -> Arc<dyn crate::mail::registry::InboxHandler> {
-        // iamacoffeepot/aether#848 PR 2: the test helper takes
-        // `OwnedDispatch` directly so the payload + kind_name move
-        // into the forwarded `Envelope` rather than being cloned via
-        // `to_vec()` / `to_owned()`. The legacy borrowed-dispatch
-        // shape stays accessible through `legacy_inbox_handler` for
-        // cap closures still mid-migration; this test helper is
-        // greenfield enough to skip the adapter.
+        // iamacoffeepot/aether#848: the helper takes
+        // [`OwnedDispatch`] directly so payload + kind_name move
+        // into the forwarded [`Envelope`] without `to_vec()` /
+        // `to_owned()` clones.
         Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
             let _ = tx.send(Envelope {
                 kind: dispatch.kind,
