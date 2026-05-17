@@ -82,14 +82,20 @@ impl Gpu {
     /// Draw the current accumulator's vertices into the offscreen
     /// target with the latest camera view-proj. No presentation step
     /// — desktop's swapchain blit is omitted because there's no
-    /// surface.
+    /// surface. Drives the test-bench's advance path; commits the
+    /// current frame to the render cap's `last_submitted` cache so
+    /// any subsequent `capture` observes the freshly-rendered state
+    /// (or an empty cache, if the producer chose not to emit).
     pub fn render(&mut self) {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame encoder"),
         });
-        match self.render_handles.record_frame(&mut encoder, &[]) {
+        // Advance path: commit-current (false). Empty live clears
+        // the cache so a producer that stopped emitting flushes
+        // cleanly to the next capture.
+        match self.render_handles.record_frame(&mut encoder, &[], false) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return,
         }
@@ -100,13 +106,24 @@ impl Gpu {
     /// into a readback buffer, maps it, and returns an encoded PNG.
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
+    ///
+    /// Drives the test-bench's `TestBench::capture` path with
+    /// `dispatch_tick=false`. The render cap's `replay_cache_when_idle`
+    /// flag is set so an empty live accumulator (no producer
+    /// emitted, because no `Tick` was dispatched for this frame)
+    /// replays the cache from the last committed advance —
+    /// iamacoffeepot/aether#847 retired the historical `nudge_tick`
+    /// boilerplate that worked around the prior consume-and-discard
+    /// behaviour.
     pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame encoder"),
         });
-        match self.render_handles.record_frame(&mut encoder, &[]) {
+        // Capture path: replay-cache (true). Empty live → render
+        // whatever the last advance committed.
+        match self.render_handles.record_frame(&mut encoder, &[], true) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => {
                 return Err("vertex buffer overflow — capture skipped".to_owned());

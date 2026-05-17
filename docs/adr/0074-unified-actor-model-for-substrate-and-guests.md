@@ -137,6 +137,13 @@ Render becomes one actor with one mailbox. The `aether.camera` kind addresses re
 
 This collapses render's two-thread structure to one thread (consistent with decision 4) and removes the implementation-detail second mailbox name from the public substrate vocabulary.
 
+**Amendment (iamacoffeepot/aether#847).** Render's `record_frame` keeps a per-cap `last_submitted` cache alongside the live `frame_vertices` accumulator. The cache holds whatever geometry was last drawn; `record_frame` swaps live into the cache when the producer emitted this frame, and the GPU pass always draws from the cache. The caller picks the empty-live policy via a `replay_cache_when_idle` flag:
+
+- **Commit-current** (`false`) — used by desktop's per-frame draw and the test-bench's advance path. Empty live clears the cache so the next frame reflects "the producer chose not to emit." Matches a game's normal semantic: stop drawing, screen goes to clear color.
+- **Replay-cache** (`true`) — used by `TestBench::capture` when it didn't dispatch a `Tick`. Empty live replays the cache from the last committed advance. Retires the historical `nudge_tick` boilerplate that every render-using scenario test carried — "what would the user see right now" is the cache contents, not an empty buffer.
+
+The cache is a render-cap implementation detail; producers see no contract change. Future render-architecture work (slot-tree, two-tier-intents) operates above the render cap and is unaffected.
+
 ### 8. Sinks retire (concept and name)
 
 The "sink" concept — synchronous-on-caller dispatch as a special-case path — disappears. Every recipient is an actor with an mpsc inbox. Every send is async at the dispatch layer. Per-frame consistency that sinks used to provide is recovered structurally by the frame barrier (decision 5) plus FIFO ordering inside each actor's inbox.

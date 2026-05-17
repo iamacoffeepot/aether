@@ -306,9 +306,12 @@ impl Gpu {
             }
             None => &[],
         };
+        // Desktop renders every frame from current producer state —
+        // commit-current semantic (false). The replay-cache mode is
+        // reserved for `TestBench::capture` (iamacoffeepot/aether#847).
         match self
             .render_handles
-            .record_frame(&mut encoder, extra_pipelines)
+            .record_frame(&mut encoder, extra_pipelines, false)
         {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return None,

@@ -175,9 +175,20 @@ mod native {
         /// `RenderConfig`; init only sets up the in-process buffers and
         /// the wgpu `OnceLock` (the driver fills it in `resumed` /
         /// post-`build_passive`).
+        ///
+        /// `last_submitted` mirrors `frame_vertices`'s capacity so the
+        /// swap inside `record_frame` (iamacoffeepot/aether#847) lands
+        /// a full-capacity buffer back into the live slot — without the
+        /// pre-allocation, the first frame's swap would leave the live
+        /// accumulator at `last_submitted`'s starting capacity (zero)
+        /// and the next tick's `on_draw_triangle` would reallocate
+        /// from scratch.
         fn init(config: RenderConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let handles = RenderHandles {
                 frame_vertices: Arc::new(Mutex::new(Vec::<u8>::with_capacity(
+                    config.vertex_buffer_bytes,
+                ))),
+                last_submitted: Arc::new(Mutex::new(Vec::<u8>::with_capacity(
                     config.vertex_buffer_bytes,
                 ))),
                 triangles_rendered: Arc::new(AtomicU64::new(0)),
@@ -354,7 +365,21 @@ mod native {
     /// drops are independent.
     #[derive(Clone)]
     pub struct RenderHandles {
+        /// Per-frame accumulator. `on_draw_triangle` appends bytes
+        /// here; `record_frame` consumes by swapping with
+        /// `last_submitted` and clearing.
         pub frame_vertices: Arc<Mutex<Vec<u8>>>,
+        /// Most-recently-rendered geometry, kept across frames
+        /// (iamacoffeepot/aether#847). When `record_frame` runs with
+        /// an empty `frame_vertices` — typically a `TestBench::capture`
+        /// that didn't dispatch a `Tick` — the GPU draw replays this
+        /// buffer so the captured frame matches "what the user would
+        /// see right now" instead of clear-color.
+        ///
+        /// Lock ordering: `frame_vertices` first, then `last_submitted`
+        /// when both are held. Today only `record_frame` holds both;
+        /// callers reading `last_submitted` in isolation are fine.
+        pub last_submitted: Arc<Mutex<Vec<u8>>>,
         pub triangles_rendered: Arc<AtomicU64>,
         pub camera_state: Arc<Mutex<[f32; 16]>>,
         /// wgpu state, installed post-cap-construction by the driver via
@@ -398,32 +423,78 @@ mod native {
             )
         }
 
-        /// Drain the current frame's accumulated vertices, read the
-        /// latest camera view-proj, and record the main render pass into
-        /// `encoder`. Each call consumes the accumulator (subsequent
-        /// inbound mail builds the next frame). `extra_pipelines` are
-        /// drawn after the main pipeline inside the same render pass —
-        /// desktop passes a wireframe overlay pipeline here when
-        /// `AETHER_WIREFRAME=overlay`; test-bench passes `&[]`.
+        /// Read the latest camera view-proj and record the main render
+        /// pass into `encoder` against the current frame's geometry.
+        /// `extra_pipelines` are drawn after the main pipeline inside
+        /// the same render pass — desktop passes a wireframe overlay
+        /// pipeline here when `AETHER_WIREFRAME=overlay`; test-bench
+        /// passes `&[]`.
+        ///
+        /// ## Cache semantics (iamacoffeepot/aether#847)
+        ///
+        /// If `frame_vertices` holds new emissions from this tick's
+        /// `on_draw_triangle` calls, swap them into `last_submitted`
+        /// and clear the live accumulator (the swapped-out buffer,
+        /// now in `live`, becomes the next tick's staging area). The
+        /// render pass then draws from `last_submitted`.
+        ///
+        /// If `frame_vertices` is empty, `replay_cache_when_idle`
+        /// picks the behaviour:
+        ///
+        /// - `false` — **commit-current**: clear `last_submitted` so
+        ///   the next frame reflects "the producer chose not to
+        ///   emit," and render an empty draw list (clear-color
+        ///   frame). Used by desktop's per-frame draw and by the
+        ///   test-bench's advance path. Matches a game's normal
+        ///   semantic: if the producer stops drawing, the screen
+        ///   goes to clear color.
+        /// - `true` — **replay-cache**: leave `last_submitted`
+        ///   untouched and render its current contents. Used by
+        ///   `TestBench::capture` when it didn't dispatch a `Tick`
+        ///   of its own — the cache holds whatever the last advance
+        ///   committed, which is the right "what would the user
+        ///   see right now" answer. Retires the historical
+        ///   `nudge_tick` boilerplate.
+        ///
+        /// Lock ordering: `frame_vertices` first, then
+        /// `last_submitted`. Today only this function holds both.
         pub fn record_frame(
             &self,
             encoder: &mut wgpu::CommandEncoder,
             extra_pipelines: &[&wgpu::RenderPipeline],
+            replay_cache_when_idle: bool,
         ) -> Result<(), RenderError> {
             let gpu = self.expect_gpu();
-            let cap = self.frame_vertices.lock().unwrap().capacity();
-            let vertices = std::mem::replace(
-                &mut *self.frame_vertices.lock().unwrap(),
-                Vec::with_capacity(cap),
-            );
+            {
+                let mut live = self.frame_vertices.lock().unwrap();
+                let mut last = self.last_submitted.lock().unwrap();
+                if !live.is_empty() {
+                    // Producer emitted: swap into cache.
+                    std::mem::swap(&mut *live, &mut *last);
+                    // Post-swap, `live` holds what `last` held before
+                    // — stale geometry from however many frames ago.
+                    // Clear (preserves capacity) so the next tick's
+                    // `on_draw_triangle` appends into an empty buffer
+                    // without reallocating.
+                    live.clear();
+                } else if !replay_cache_when_idle {
+                    // Commit-current: producer chose not to emit
+                    // this frame, so the cache should reflect that
+                    // for any subsequent replay-cache caller.
+                    last.clear();
+                }
+                // else: replay-cache + empty live — leave cache
+                // alone, render its current contents.
+            }
             let view_proj = *self.camera_state.lock().unwrap();
+            let last = self.last_submitted.lock().unwrap();
             let targets = gpu.targets.lock().unwrap();
             record_main_pass(
                 &gpu.queue,
                 encoder,
                 &gpu.pipeline,
                 &targets,
-                &vertices,
+                &last,
                 &view_proj,
                 extra_pipelines,
             )
