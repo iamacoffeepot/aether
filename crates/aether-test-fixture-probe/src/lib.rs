@@ -25,9 +25,10 @@
 //!   captured PNG.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::{InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{DrawTriangle, SubscribeInput, Tick, Vertex};
+use aether_kinds::{DrawTriangle, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
 /// Mirror of `aether_substrate_bundle::test_bench::TEST_BENCH_OBSERVER_MAILBOX_NAME`.
@@ -84,10 +85,8 @@ impl FfiActor for Probe {
     /// Issue 640: explicit subscribe in `wire`; init is `Resolver`-only
     /// post-issue-703 and can't mail.
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<InputCapability>().send(&SubscribeInput {
-            kind: Tick::ID,
-            mailbox: MailboxId(ctx.mailbox_id()),
-        });
+        ctx.actor::<InputCapability>()
+            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running
