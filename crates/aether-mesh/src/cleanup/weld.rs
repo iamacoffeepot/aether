@@ -232,7 +232,7 @@ mod tests {
         let tri_b =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 9)
                 .unwrap();
-        let original = vec![tri_a.clone(), tri_b.clone()];
+        let original = vec![tri_a, tri_b];
         let round_tripped = IndexedMesh::weld(original.clone()).into_polygons();
 
         assert_eq!(round_tripped.len(), original.len());

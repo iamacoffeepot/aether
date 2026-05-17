@@ -264,7 +264,7 @@ pub(crate) fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJ
 
     let mut violations: Vec<UnrepairedTJunction> = Vec::new();
     let mut sorted_edges: Vec<(VertexId, VertexId)> = edges.into_iter().collect();
-    sorted_edges.sort();
+    sorted_edges.sort_unstable();
     for &(a, b) in &sorted_edges {
         let pa = mesh.vertices[a];
         let pb = mesh.vertices[b];

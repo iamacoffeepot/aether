@@ -122,6 +122,7 @@ fn capture_backtrace_with(forced: bool) -> Option<Backtrace> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -310,10 +311,10 @@ mod tests {
 
     impl Visit for StringVisit<'_> {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!("{}={:?};", field.name(), value));
+            let _ = write!(self.0, "{}={:?};", field.name(), value);
         }
         fn record_str(&mut self, field: &Field, value: &str) {
-            self.0.push_str(&format!("{}={};", field.name(), value));
+            let _ = write!(self.0, "{}={};", field.name(), value);
         }
     }
 }

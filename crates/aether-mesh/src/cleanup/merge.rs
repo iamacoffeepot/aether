@@ -204,7 +204,7 @@ fn boundary_edges_after_twin_cancellation(
     let mut edges = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
-    keys.sort();
+    keys.sort_unstable();
 
     for (a, b) in keys {
         let canonical = if a < b { (a, b) } else { (b, a) };
@@ -443,11 +443,11 @@ fn extract_loops(
         outgoing.entry(a).or_default().push(b);
     }
     for v in outgoing.values_mut() {
-        v.sort();
+        v.sort_unstable();
     }
 
     let mut starts: Vec<(VertexId, VertexId)> = boundary.to_vec();
-    starts.sort();
+    starts.sort_unstable();
 
     let mut visited: std::collections::HashSet<(VertexId, VertexId)> =
         std::collections::HashSet::new();
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn square_with_square_hole_emits_outer_and_hole_loops() {
-        let vertices = annular_indexed_mesh().vertices.clone();
+        let vertices = annular_indexed_mesh().vertices;
         let merged = annular_indexed_mesh().merge_coplanar();
         assert_eq!(
             merged.polygons.len(),
