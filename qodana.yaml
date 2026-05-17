@@ -33,7 +33,4 @@ exclude:
 # Both run as root (workflow passes -u root to qodana scan); see the
 # rationale on `args:` in .github/workflows/qodana.yml. Bootstrap
 # adds ~30-60s per run.
-bootstrap: |
-  apt-get update && apt-get install -y libasound2-dev
-  rustup install 1.95.0 --profile minimal --no-self-update
-  rustup default 1.95.0
+bootstrap: apt-get update && apt-get install -y libasound2-dev && rustup install 1.95.0 --profile minimal --no-self-update && rustup default 1.95.0
