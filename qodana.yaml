@@ -24,13 +24,18 @@ exclude:
 # - libasound2-dev: cpal Linux backend (mirrors the clippy job in ci.yml).
 # - rustup install/default 1.95.0: the qodana-rust:2026.1-eap image
 #   ships rustc 1.94.0. Our workspace builds with 1.95.0 (stable since
-#   2026-04-14); the gap surfaces as "Failure"-severity false positives
-#   in the inspection results — Qodana's own self-diagnosis flags the 2
-#   findings as "analysis could be incorrect." Bumping the toolchain
-#   inside the container to match what we actually build against
-#   should eliminate them.
+#   2026-04-14); the gap surfaced as "Failure"-severity false positives
+#   in earlier runs.
+# - rustup component add rust-src rust-analyzer: an earlier bump used
+#   `--profile minimal` and regressed: +106 Critical "Derived trait not
+#   implemented" + 2 Critical "Unresolved path" Sanity-Check findings.
+#   Root cause: Qodana's Rust analyzer needs the stdlib source
+#   (rust-src) to resolve std types in derive expansion, and the
+#   bundled rust-analyzer to walk the project model. `--profile
+#   default` plus the explicit rust-src + rust-analyzer components
+#   restores both.
 #
 # Both run as root (workflow passes -u root to qodana scan); see the
 # rationale on `args:` in .github/workflows/qodana.yml. Bootstrap
-# adds ~30-60s per run.
-bootstrap: apt-get update && apt-get install -y libasound2-dev && rustup install 1.95.0 --profile minimal --no-self-update && rustup default 1.95.0
+# adds ~60-90s per run.
+bootstrap: apt-get update && apt-get install -y libasound2-dev && rustup install 1.95.0 --profile default --no-self-update && rustup default 1.95.0 && rustup component add rust-src rust-analyzer
