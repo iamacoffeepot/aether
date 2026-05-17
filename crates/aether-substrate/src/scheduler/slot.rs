@@ -527,7 +527,7 @@ pub mod tests {
         // envelopes regardless of CPU contention. This test validates the
         // state-machine invariant ("drain-to-empty leaves Idle"), not the
         // per-cycle budget — `drain_budget_yields_for_requeue` covers that.
-        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_mins(1));
         let outcome = slot.run_cycle(budget);
 
         assert_eq!(outcome, CycleResult::Idle);
@@ -550,7 +550,7 @@ pub mod tests {
         // dispatch some `N < BATCH_MAX_MAILS` and flake the assert
         // (iamacoffeepot/aether#869). Same workaround `drain_empty_returns_idle`
         // uses for the same reason.
-        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_mins(1));
         let result = slot.run_cycle(budget);
         assert_eq!(result, CycleResult::Requeue);
         assert_eq!(slot.dispatched(), BATCH_MAX_MAILS);
@@ -559,7 +559,7 @@ pub mod tests {
         // Second cycle drains the rest. Same wallclock isolation — the
         // remaining 50 envelopes shouldn't trip the count budget but
         // could trip the 200μs wallclock under contention.
-        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_mins(1));
         let result = slot.run_cycle(budget);
         assert_eq!(result, CycleResult::Idle);
         assert_eq!(slot.dispatched(), BATCH_MAX_MAILS + 50);
@@ -626,7 +626,7 @@ pub mod tests {
         // (drain envelope 1 → try_recv sees closed && empty → Closed)
         // under CI CPU contention, flipping the result to `Requeue`
         // (iamacoffeepot/aether#896; sibling of iamacoffeepot/aether#869).
-        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_mins(1));
         let result = slot.run_cycle(budget);
         // Closed + non-empty: drain remaining first, then return
         // Closed on next try_recv. CounterSlot's loop checks closed +
