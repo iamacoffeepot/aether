@@ -47,10 +47,10 @@ pub fn prepare_capture_copy(
     let padded_row_bytes = align_up(unpadded_row_bytes, COPY_ROW_ALIGN);
     let buffer_size = u64::from(padded_row_bytes) * u64::from(height);
 
-    let needs_realloc = match &targets.readback {
-        Some(rb) => rb.width != width || rb.height != height,
-        None => true,
-    };
+    let needs_realloc = targets
+        .readback
+        .as_ref()
+        .is_none_or(|rb| rb.width != width || rb.height != height);
     if needs_realloc {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("capture readback"),

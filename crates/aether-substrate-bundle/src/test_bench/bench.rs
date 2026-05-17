@@ -180,7 +180,7 @@ pub struct TestBench {
     /// the bench's lifetime so the passives' dispatcher threads
     /// stay alive; drops in reverse declaration order before
     /// `_boot`, so render+log shut down before the scheduler joins.
-    _passive: PassiveChassis<TestBenchChassis>,
+    passive: PassiveChassis<TestBenchChassis>,
 }
 
 /// Fixed UUID used as the `SessionToken` for in-process replies.
@@ -331,7 +331,7 @@ impl TestBench {
             stashed_replies: HashMap::new(),
             observed_kinds,
             _boot: boot,
-            _passive: passive,
+            passive,
         })
     }
 
@@ -430,7 +430,7 @@ impl TestBench {
         payload: Vec<u8>,
     ) -> Result<(), TestBenchError> {
         let cid = self.fresh_correlation_id();
-        let registry = self._passive.settlement_registry();
+        let registry = self.passive.settlement_registry();
         let root = push_chassis_root_mail(&self.queue, cid, mailbox, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
         match rx.recv_timeout(SETTLEMENT_TIMEOUT) {
@@ -458,14 +458,14 @@ impl TestBench {
             + aether_substrate::NativeActor
             + aether_substrate::NativeDispatch,
     {
-        self._passive.spawn_actor::<A>(subname, config)
+        self.passive.spawn_actor::<A>(subname, config)
     }
 
     /// Borrow the bench's [`aether_substrate::ActorRegistry`]. Used
     /// alongside `spawn_actor` so tests can inspect the live entry's
     /// `MailboxId` directly.
     pub fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
-        self._passive.actor_registry()
+        self.passive.actor_registry()
     }
 
     /// Send `mail` to `recipient_name` with this bench's session as
@@ -756,7 +756,7 @@ impl TestBench {
             // surfacing it as `SettlementTimeout` lets the failing
             // test name the actual cause instead of timing out
             // generically on the reply pump.
-            let registry = self._passive.settlement_registry();
+            let registry = self.passive.settlement_registry();
             let tick_root = push_chassis_root_mail(
                 &self.queue,
                 self.fresh_correlation_id(),
@@ -891,6 +891,8 @@ mod tests {
         use aether_substrate::mail::registry::MailDispatch;
         use std::sync::Mutex;
 
+        type CapturedRow = (MailId, MailId, Option<MailId>);
+
         let mut tb = match TestBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
@@ -913,7 +915,6 @@ mod tests {
         // `SettlementTimeout`, which is the right shape — the
         // handler that owns the bracket gets to advertise its
         // contract via the variant choice.
-        type CapturedRow = (MailId, MailId, Option<MailId>);
         let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
         let subscriber_mbox = tb.registry.register_inline(

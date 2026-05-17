@@ -83,6 +83,10 @@ impl<K: Kind> KindId<K> {
 /// Built via `resolve_mailbox::<K>(name)` during init, or constructed
 /// inline by hand-rolled callers that compute the mailbox id
 /// themselves.
+// The `mailbox` field name is intentional: this struct is a typed
+// wrapper around the raw mailbox id, and `Mailbox::mailbox()` returns
+// it — matching the existing kind/`kind()` pair on the same struct.
+#[allow(clippy::struct_field_names)]
 pub struct Mailbox<K: Kind> {
     mailbox: u64,
     kind: u64,

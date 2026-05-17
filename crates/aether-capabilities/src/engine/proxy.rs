@@ -539,7 +539,8 @@ mod tests {
         // all across dispatcher threads — give it a generous deadline.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(value) = *recorded.lock().unwrap() {
+            let snapshot = *recorded.lock().unwrap();
+            if let Some(value) = snapshot {
                 assert_eq!(value, 42, "echoed value routed back through the proxy");
                 return;
             }

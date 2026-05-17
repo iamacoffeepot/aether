@@ -527,13 +527,13 @@ impl ApplicationHandler<UserEvent> for App {
                                     break;
                                 }
                             }
-                            let result = match pre_failed {
-                                Some(error) => CaptureFrameResult::Err { error },
-                                None => match gpu.render_and_capture() {
+                            let result = pre_failed.map_or_else(
+                                || match gpu.render_and_capture() {
                                     Ok(png) => CaptureFrameResult::Ok { png },
                                     Err(error) => CaptureFrameResult::Err { error },
                                 },
-                            };
+                                |error| CaptureFrameResult::Err { error },
+                            );
                             for mail in req.after_mails {
                                 self.queue.push(mail);
                             }

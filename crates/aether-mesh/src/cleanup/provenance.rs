@@ -77,9 +77,8 @@ pub fn analyze_unmatched_boundaries(input: Vec<Polygon>) -> Vec<BoundaryEdgeProv
 
     let mut report: Vec<BoundaryEdgeProvenance> = Vec::with_capacity(unmatched.len());
     for (a, b) in unmatched {
-        let polygon_idx = match find_polygon_with_edge(&cleaned.polygons, a, b) {
-            Some(idx) => idx,
-            None => continue,
+        let Some(polygon_idx) = find_polygon_with_edge(&cleaned.polygons, a, b) else {
+            continue;
         };
         let polygon = &cleaned.polygons[polygon_idx];
         let pa = cleaned.vertices[a];

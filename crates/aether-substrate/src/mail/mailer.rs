@@ -231,12 +231,10 @@ impl Mailer {
     {
         match sender.target {
             ReplyTarget::None => false,
-            ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => {
-                match self.outbound.as_ref() {
-                    Some(outbound) => outbound.send_reply(sender, result),
-                    None => false,
-                }
-            }
+            ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => self
+                .outbound
+                .as_ref()
+                .is_some_and(|outbound| outbound.send_reply(sender, result)),
             ReplyTarget::Component(mailbox) => {
                 let payload = match postcard::to_allocvec(result) {
                     Ok(p) => p,
@@ -810,9 +808,9 @@ mod tests {
         let mut leftover = Vec::new();
         while let Some(event) = queue.pop() {
             let belongs = match &event {
-                TraceEvent::Sent { mail_id, .. } => mail_id.sender == sender,
-                TraceEvent::Received { mail_id, .. } => mail_id.sender == sender,
-                TraceEvent::Finished { mail_id, .. } => mail_id.sender == sender,
+                TraceEvent::Sent { mail_id, .. }
+                | TraceEvent::Received { mail_id, .. }
+                | TraceEvent::Finished { mail_id, .. } => mail_id.sender == sender,
             };
             if belongs {
                 out.push(event);
@@ -1120,14 +1118,7 @@ mod tests {
                 MailboxEntry::Dropped => "Dropped",
             }
         }
-        // Touch the helper so the compiler considers it live.
-        let _ = dispatch_path_for_entry(&MailboxEntry::Dropped);
 
-        let queue = ensure_trace_queue();
-        // Each case: (case-name, expectation, push-fn that returns
-        // the stamped mail_id to filter on). Cases construct their
-        // own Mailer fixtures so chassis-router / outbound / handle-
-        // store-Parked setups can vary independently.
         enum Expect {
             /// Sync handler ran inline → Received + Finished.
             Bracket,
@@ -1147,6 +1138,15 @@ mod tests {
             // Returns the `MailId` to filter the trace queue on.
             run: Box<dyn FnOnce() -> MailId>,
         }
+
+        // Touch the helper so the compiler considers it live.
+        let _ = dispatch_path_for_entry(&MailboxEntry::Dropped);
+
+        let queue = ensure_trace_queue();
+        // Each case: (case-name, expectation, push-fn that returns
+        // the stamped mail_id to filter on). Cases construct their
+        // own Mailer fixtures so chassis-router / outbound / handle-
+        // store-Parked setups can vary independently.
 
         let cases: Vec<Case> = vec![
             // 1. Inline arm — bracket.

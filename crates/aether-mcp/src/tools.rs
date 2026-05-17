@@ -566,9 +566,9 @@ fn level_to_str(level: u8) -> &'static str {
     match level {
         0 => "trace",
         1 => "debug",
-        2 => "info",
         3 => "warn",
         4 => "error",
+        // 2 is "info"; out-of-band bytes also render as "info".
         _ => "info",
     }
 }

@@ -215,10 +215,7 @@ fn decode_cast_field(
 fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, DecodeError> {
     let _expected = aether_data::tag_for_type_id(type_id)
         .ok_or(DecodeError::UnsupportedSchema("unknown TypeId in schema"))?;
-    match aether_data::tagged_id::encode(id) {
-        Some(s) => Ok(Value::String(s)),
-        None => Ok(Value::from(id)),
-    }
+    Ok(aether_data::tagged_id::encode(id).map_or_else(|| Value::from(id), Value::String))
 }
 
 fn read_primitive_cast(

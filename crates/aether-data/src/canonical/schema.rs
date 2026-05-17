@@ -49,13 +49,11 @@ const PRIM_F64: u8 = 9;
 #[must_use]
 pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
     match schema {
-        SchemaType::Unit => 1,
-        SchemaType::Bool => 1,
+        SchemaType::Unit | SchemaType::Bool | SchemaType::String | SchemaType::Bytes => 1,
         SchemaType::Scalar(_) => 1 + 1,
-        SchemaType::String => 1,
-        SchemaType::Bytes => 1,
-        SchemaType::Option(cell) => 1 + canonical_len_cell(cell),
-        SchemaType::Vec(cell) => 1 + canonical_len_cell(cell),
+        SchemaType::Option(cell) | SchemaType::Vec(cell) | SchemaType::Ref(cell) => {
+            1 + canonical_len_cell(cell)
+        }
         SchemaType::Array { element, len } => {
             1 + canonical_len_cell(element) + varint_u32_len(*len)
         }
@@ -79,7 +77,6 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
             }
             total
         }
-        SchemaType::Ref(cell) => 1 + canonical_len_cell(cell),
         SchemaType::Map { key, value } => 1 + canonical_len_cell(key) + canonical_len_cell(value),
         SchemaType::TypeId(id) => 1 + varint_u64_len(*id),
     }
@@ -305,7 +302,7 @@ pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
 /// the canonical-bytes path can hash `KIND_DOMAIN ++ bytes` without
 /// a transient `Vec<u8>` — same offset basis and prime, identical
 /// output.
-pub(crate) const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
+pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut i = 0;
     while i < prefix.len() {

@@ -517,9 +517,10 @@ impl PartialEq for LabelNode {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Anonymous, Self::Anonymous) => true,
-            (Self::Option(a), Self::Option(b)) => a == b,
-            (Self::Vec(a), Self::Vec(b)) => a == b,
-            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Option(a), Self::Option(b))
+            | (Self::Vec(a), Self::Vec(b))
+            | (Self::Array(a), Self::Array(b))
+            | (Self::Ref(a), Self::Ref(b)) => a == b,
             (
                 Self::Struct {
                     type_label: la,
@@ -542,7 +543,6 @@ impl PartialEq for LabelNode {
                     variants: vb,
                 },
             ) => la == lb && va == vb,
-            (Self::Ref(a), Self::Ref(b)) => a == b,
             (Self::Map { key: ka, value: va }, Self::Map { key: kb, value: vb }) => {
                 ka == kb && va == vb
             }

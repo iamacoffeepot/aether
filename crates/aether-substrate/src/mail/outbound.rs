@@ -313,10 +313,7 @@ impl HubOutbound {
 
     /// Whether a backend is wired and reports itself connected.
     pub fn is_connected(&self) -> bool {
-        self.backend
-            .get()
-            .map(|b| b.is_connected())
-            .unwrap_or(false)
+        self.backend.get().is_some_and(|b| b.is_connected())
     }
 
     /// Reply or push mail addressed at a Claude session.

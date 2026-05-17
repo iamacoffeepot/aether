@@ -300,6 +300,8 @@ mod native {
 
     impl HttpAdapter for UreqHttpAdapter {
         fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
+            use ureq::RequestExt;
+
             let parsed =
                 url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
@@ -351,7 +353,6 @@ mod native {
                 .body(req.body)
                 .map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
-            use ureq::RequestExt;
             let mut response = http_req
                 .with_agent(&self.agent)
                 .configure()

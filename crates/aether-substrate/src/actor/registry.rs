@@ -462,8 +462,7 @@ impl ActorRegistry {
             .read()
             .unwrap()
             .get(&target)
-            .map(|v| v.len())
-            .unwrap_or(0)
+            .map_or(0, Vec::len)
     }
 
     /// Number of targets `watcher` is monitoring right now. Test-facing
@@ -474,8 +473,7 @@ impl ActorRegistry {
             .read()
             .unwrap()
             .get(&watcher)
-            .map(|v| v.len())
-            .unwrap_or(0)
+            .map_or(0, Vec::len)
     }
 }
 
@@ -499,8 +497,8 @@ mod tests {
     /// liveness check passes. Uses a throwaway sender so the test
     /// doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
-        let (tx, _rx) = std::sync::mpsc::channel::<crate::actor::native::envelope::Envelope>();
         struct Stub;
+        let (tx, _rx) = std::sync::mpsc::channel::<crate::actor::native::envelope::Envelope>();
         r.insert_live(
             id,
             Arc::new(tx),

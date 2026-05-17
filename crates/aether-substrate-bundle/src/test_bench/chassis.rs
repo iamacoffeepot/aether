@@ -233,6 +233,9 @@ impl TestBenchChassis {
         // this was a post-build `boot.add_actor::<FsCapability>` call
         // with the same silent-skip semantics; the new shape moves
         // the validation up so all caps go through one boot path.
+        // Nested match keeps the warn-log path readable; converting to
+        // `map_or` buries the side-effect under closures.
+        #[allow(clippy::option_if_let_else)]
         let io_roots = match namespace_roots {
             Some(roots) => match roots.ensure_dirs() {
                 Ok(()) => Some(roots),

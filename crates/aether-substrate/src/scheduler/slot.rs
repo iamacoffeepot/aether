@@ -343,7 +343,7 @@ impl WakeHandle {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use std::any::Any;
     use std::sync::Mutex;

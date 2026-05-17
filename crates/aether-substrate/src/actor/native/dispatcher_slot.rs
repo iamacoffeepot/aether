@@ -80,7 +80,7 @@ use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState};
 /// registry finalize run when the cap shuts down) and weakly by the
 /// pool's [`crate::scheduler::WakeHandle`] (so a wake after the cap
 /// is gone silently no-ops).
-pub(crate) struct DispatcherSlot<A>
+pub struct DispatcherSlot<A>
 where
     A: NativeActor + NativeDispatch,
 {
@@ -177,7 +177,7 @@ where
         let tx = self
             .close_done_tx
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(tx) = tx {
             // Receiver may have hung up if the wait already timed out.
@@ -290,7 +290,7 @@ where
         let mut actor_guard = self
             .actor
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(actor) = actor_guard.as_mut() else {
             // Slot already finalized. Nothing to do.
             drop(actor_guard);
@@ -365,6 +365,9 @@ where
         //     is already requeued — we return `Idle`.
         debug_assert!(inbox_empty);
         self.state.mark_idle();
+        // match arms read clearer than `map_or_else(|| ..., |env| ...)` here
+        // because the Some arm runs multi-line side effects.
+        #[allow(clippy::option_if_let_else)]
         match self.binding.try_recv() {
             Some(env) => {
                 self.dispatch_one(actor, env);
@@ -403,7 +406,7 @@ where
         let guard = self
             .actor
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.is_none()
     }
 
@@ -422,7 +425,7 @@ where
         let prior = self
             .close_done_tx
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(tx);
         // Defensive: if a prior sender was installed (shouldn't happen
         // — `shutdown_instanced` runs once per chassis), drop it. The

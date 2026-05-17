@@ -1027,6 +1027,21 @@ mod tests {
 
     #[test]
     fn cast_nested_struct_drawtriangle_layout() {
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
+        struct Vertex {
+            x: f32,
+            y: f32,
+            r: f32,
+            g: f32,
+            b: f32,
+        }
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
+        struct DrawTriangle {
+            verts: [Vertex; 3],
+        }
+
         // DrawTriangle's shape: { verts: [Vertex; 3] } where Vertex is
         // 5 f32s. Cast wire format = 60 bytes, no internal padding.
         let vertex = SchemaType::Struct {
@@ -1052,20 +1067,6 @@ mod tests {
         let bytes = encode_schema(&params, &triangle).unwrap();
         assert_eq!(bytes.len(), 60);
 
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
-        struct Vertex {
-            x: f32,
-            y: f32,
-            r: f32,
-            g: f32,
-            b: f32,
-        }
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
-        struct DrawTriangle {
-            verts: [Vertex; 3],
-        }
         let back: DrawTriangle = bytemuck::cast_slice(&bytes)[0];
         let v_struct = Vertex {
             x: 0.0,

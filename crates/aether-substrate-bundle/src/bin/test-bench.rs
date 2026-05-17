@@ -30,9 +30,8 @@ use aether_substrate_bundle::test_bench::{
 /// see what dimensions they actually got.
 fn parse_size_env() -> (u32, u32) {
     use aether_substrate_bundle::test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-    let raw = match std::env::var("AETHER_TEST_BENCH_SIZE") {
-        Ok(s) => s,
-        Err(_) => return (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+    let Ok(raw) = std::env::var("AETHER_TEST_BENCH_SIZE") else {
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
     };
     if let Some((w, h)) = raw.split_once('x') {
         match (w.parse::<u32>(), h.parse::<u32>()) {
@@ -225,13 +224,13 @@ fn run_frame(
                     break;
                 }
             }
-            let result = match pre_failed {
-                Some(error) => CaptureFrameResult::Err { error },
-                None => match gpu.render_and_capture() {
+            let result = pre_failed.map_or_else(
+                || match gpu.render_and_capture() {
                     Ok(png) => CaptureFrameResult::Ok { png },
                     Err(error) => CaptureFrameResult::Err { error },
                 },
-            };
+                |error| CaptureFrameResult::Err { error },
+            );
             for mail in req.after_mails {
                 queue.push(mail);
             }

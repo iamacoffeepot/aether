@@ -669,29 +669,29 @@ mod native {
     /// docs for the `!Send` rationale), and a shutdown channel that
     /// signals the worker to exit on drop.
     ///
-    /// `audio_sender` is `None` when the cpal pipeline isn't running
+    /// `sender` is `None` when the cpal pipeline isn't running
     /// (`AETHER_AUDIO_DISABLE=1`, no audio device, init failure). In
     /// that mode `NoteOn` / `NoteOff` no-op and `SetMasterGain` replies
     /// `Err`.
     ///
-    /// Issue 629 / Phase B: `audio_thread` and `audio_shutdown` are
+    /// Issue 629 / Phase B: `thread` and `shutdown` are
     /// plain fields. Pre-Phase-A they sat behind a `Mutex<AudioTeardown>`
     /// so `Drop::drop(&mut self)` could `.take()` them while handlers
     /// ran with `&self` (Arc-shared). Post-Phase-A the dispatcher owns
     /// the cap as `Box<A>` and `Drop` runs with exclusive `&mut self`,
     /// so the wrapping mutex retires.
     pub struct AudioCapability {
-        audio_sender: Option<AudioEventSender>,
-        audio_thread: Option<JoinHandle<()>>,
-        audio_shutdown: Option<mpsc::Sender<()>>,
+        sender: Option<AudioEventSender>,
+        thread: Option<JoinHandle<()>>,
+        shutdown: Option<mpsc::Sender<()>>,
     }
 
     impl AudioCapability {
         fn nop() -> Self {
             Self {
-                audio_sender: None,
-                audio_thread: None,
-                audio_shutdown: None,
+                sender: None,
+                thread: None,
+                shutdown: None,
             }
         }
     }
@@ -701,8 +701,8 @@ mod native {
             // Drop the shutdown sender first; the worker's `recv()`
             // returns, it drops the cpal::Stream on its own thread, and
             // exits. Then we join.
-            self.audio_shutdown.take();
-            if let Some(t) = self.audio_thread.take() {
+            self.shutdown.take();
+            if let Some(t) = self.thread.take() {
                 let _ = t.join();
             }
         }
@@ -729,10 +729,10 @@ mod native {
                 return Ok(Self::nop());
             }
             match spawn_audio_worker(config.requested_sample_rate) {
-                Ok((audio_sender, audio_thread, audio_shutdown)) => Ok(Self {
-                    audio_sender: Some(audio_sender),
-                    audio_thread: Some(audio_thread),
-                    audio_shutdown: Some(audio_shutdown),
+                Ok((sender, thread, shutdown)) => Ok(Self {
+                    sender: Some(sender),
+                    thread: Some(thread),
+                    shutdown: Some(shutdown),
                 }),
                 Err(e) => {
                     tracing::warn!(
@@ -753,7 +753,7 @@ mod native {
         /// the same triple is a no-op.
         #[handler]
         fn on_note_on(&self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
-            let Some(s) = self.audio_sender.as_ref() else {
+            let Some(s) = self.sender.as_ref() else {
                 return;
             };
             let ev = AudioEvent::NoteOn {
@@ -776,7 +776,7 @@ mod native {
         /// Fire-and-forget.
         #[handler]
         fn on_note_off(&self, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
-            let Some(s) = self.audio_sender.as_ref() else {
+            let Some(s) = self.sender.as_ref() else {
                 return;
             };
             let ev = AudioEvent::NoteOff {
@@ -800,7 +800,7 @@ mod native {
         #[handler]
         fn on_set_master_gain(&self, ctx: &mut NativeCtx<'_>, mail: SetMasterGain) {
             let applied = mail.gain.clamp(0.0, 1.0);
-            match self.audio_sender.as_ref() {
+            match self.sender.as_ref() {
                 Some(s) => {
                     let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
                     ctx.reply(&SetMasterGainResult::Ok {

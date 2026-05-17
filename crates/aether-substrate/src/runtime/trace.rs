@@ -314,8 +314,7 @@ fn ship_batch(
     if !mailer
         .registry()
         .entry(recipient)
-        .map(|e| matches!(e, crate::mail::registry::MailboxEntry::Inbox(_)))
-        .unwrap_or(false)
+        .is_some_and(|e| matches!(e, crate::mail::registry::MailboxEntry::Inbox(_)))
     {
         // Observer not registered (or dropped); silently discard the
         // batch. Test isolation: a chassis without

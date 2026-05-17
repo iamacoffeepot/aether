@@ -7,7 +7,7 @@
 use crate::fixed::f32_to_fixed;
 use crate::point::Point3;
 
-pub(crate) fn pt(x: f32, y: f32, z: f32) -> Point3 {
+pub fn pt(x: f32, y: f32, z: f32) -> Point3 {
     Point3 {
         x: f32_to_fixed(x).unwrap(),
         y: f32_to_fixed(y).unwrap(),

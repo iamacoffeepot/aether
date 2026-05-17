@@ -1211,13 +1211,10 @@ fn boot_passives(
     // (`available_parallelism() - 1`, min 1); `Some(n)` swaps the
     // worker count while preserving every other default field
     // (`budget_template`, etc.).
-    let pool_config = match workers {
-        Some(n) => PoolConfig {
-            workers: n,
-            ..PoolConfig::default()
-        },
-        None => PoolConfig::default(),
-    };
+    let pool_config = workers.map_or_else(PoolConfig::default, |n| PoolConfig {
+        workers: n,
+        ..PoolConfig::default()
+    });
     let pool = Pool::start(pool_config, Arc::clone(aborter));
 
     // ADR-0080 §3 trace pipeline. `init_substrate_start` pins the
@@ -1299,7 +1296,10 @@ fn boot_passives(
     // Helper: undo every advanced passive in `booted` in reverse,
     // then propagate `err`. Spawn-pass failures additionally pass
     // already-spawned shutdowns; this helper handles those too.
-    #[allow(clippy::too_many_arguments)]
+    //
+    // Placed mid-block intentionally — sits next to the call sites in
+    // the boot sequence rather than hoisted to the top of `boot_into`.
+    #[allow(clippy::too_many_arguments, clippy::items_after_statements)]
     fn rollback(
         registry: &Arc<Registry>,
         mailer: &Arc<Mailer>,

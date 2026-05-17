@@ -7,9 +7,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let path = if let Some(p) = args.get(1) {
-        p
-    } else {
+    let Some(path) = args.get(1) else {
         eprintln!("usage: {} <path-to-.dsl>", args[0]);
         return ExitCode::from(2);
     };

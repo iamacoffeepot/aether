@@ -488,6 +488,8 @@ fn extract_loops(
 /// from the incoming direction `prev → cur`. With a single unvisited
 /// candidate, returns it; with several, picks the smallest absolute
 /// turn angle, `VertexId` tiebreak.
+// `in_dx` / `in_dy` are intuitive 2D component names paired by axis.
+#[allow(clippy::similar_names)]
 fn pick_continuation(
     vertices: &[Point3],
     axes: (usize, usize),
@@ -546,6 +548,9 @@ fn pick_continuation(
 /// `VertexId` tiebreak in `pick_continuation` resolves the choice — that
 /// only triggers for input coords near the i32 fixed-point limits,
 /// and erring deterministic at the edge is fine.
+// `in_dx`/`in_dy`, `a_dx`/`a_dy`, `b_dx`/`b_dy` are the canonical 2D
+// component-pair names for the three vectors compared here.
+#[allow(clippy::similar_names)]
 fn cmp_turn(
     in_dx: i64,
     in_dy: i64,
@@ -979,6 +984,9 @@ mod tests {
     /// Cross-plane shared edges must keep matching `VertexId`s. Different
     /// planes land in different buckets, but the manifold validator
     /// walks edges across all polygons regardless of plane.
+    // `xy_poly` / `xz_poly` are the natural names; renaming dilutes the
+    // test's intent.
+    #[allow(clippy::similar_names)]
     #[test]
     fn cross_plane_shared_edge_keeps_matching_vertex_ids() {
         let xy = Plane3 {

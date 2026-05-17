@@ -54,7 +54,7 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
 /// per-actor counter (no live consumer post-PR-4: `wait_instanced_quiesce`
 /// retired in favour of ADR-0080 settlement gating, but the counter
 /// stays plumbed for the trampoline's `tx.send` accounting).
-pub(crate) fn dispatch_loop_run<A>(
+pub fn dispatch_loop_run<A>(
     binding: &Arc<NativeBinding>,
     actor: &mut Box<A>,
     slots: &ActorSlots,
@@ -70,9 +70,8 @@ pub(crate) fn dispatch_loop_run<A>(
         if binding.should_shutdown() {
             break;
         }
-        let env = match binding.recv_blocking() {
-            Some(e) => e,
-            None => break,
+        let Some(env) = binding.recv_blocking() else {
+            break;
         };
         let inbound_mail_id = env.mail_id;
         // ADR-0080 §2 producer hook: `Received` at handler entry.

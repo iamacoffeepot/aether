@@ -129,6 +129,9 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
         eprintln!("skipping: no wgpu adapter available");
         return None;
     }
+    // The else arm runs side effects (assert + eprintln); `map_or_else`
+    // would bury that under closures with no clarity win.
+    #[allow(clippy::option_if_let_else)]
     if let Some(path) = locate_component_wasm(crate_name) {
         Some(path)
     } else {

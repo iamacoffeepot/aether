@@ -60,10 +60,10 @@ fn make_hook(
 fn emit_event(info: &PanicHookInfo<'_>) {
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
-    let location = info
-        .location()
-        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-        .unwrap_or_else(|| "<unknown>".to_string());
+    let location = info.location().map_or_else(
+        || "<unknown>".to_string(),
+        |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+    );
     let payload = payload_string(info.payload());
     let backtrace = capture_backtrace();
 
@@ -96,6 +96,9 @@ fn emit_event(info: &PanicHookInfo<'_>) {
 /// `panic!("{}", thing)`) — and falls back to a `TypeId` mention for
 /// anything else. Mirrors the default hook's behaviour without
 /// duplicating its full dance.
+// Chained if-let on disjoint downcasts reads cleaner than a deep
+// `map_or_else` ladder over two Options.
+#[allow(clippy::option_if_let_else)]
 fn payload_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()

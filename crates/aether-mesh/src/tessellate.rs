@@ -103,7 +103,7 @@ pub fn tessellate_polygon_integer(
 
     // Build a flat vertex pool — CDT's `triangulate_loops` takes
     // (pool, loops as VertexId sequences, plane).
-    let total = outer.len() + holes.iter().map(|h| h.len()).sum::<usize>();
+    let total = outer.len() + holes.iter().map(Vec::len).sum::<usize>();
     let mut vertices: Vec<Point3> = Vec::with_capacity(total);
     let mut all_loops: Vec<Vec<usize>> = Vec::with_capacity(1 + holes.len());
 

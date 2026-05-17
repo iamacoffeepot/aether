@@ -192,6 +192,9 @@ fn projected_loops_lookup(
 /// crosses an edge iff the edge straddles the test y AND the
 /// intersection x is to the right of the test x. We avoid division by
 /// cross-multiplying by `denom = pi.y - pj.y` and tracking its sign.
+// `pix3` / `piy3` and `pjx3` / `pjy3` are the canonical 2D component-pair
+// names for the two edge endpoints.
+#[allow(clippy::similar_names)]
 fn point_in_polygon_3x(cx3: i128, cy3: i128, poly: &[Point2]) -> bool {
     let mut inside = false;
     let n = poly.len();
@@ -589,12 +592,13 @@ mod tests {
 
     #[test]
     fn total_area_is_preserved_across_inputs() {
+        type Case = (&'static str, Vec<Point3>, Vec<Vec<VertexId>>, i128);
+
         // Property test: sum of triangle areas == outer area − sum(hole
         // areas) for every input the triangulator handles. If a future
         // change silently drops triangles or routes them wrong, this
         // catches it across any of the test cases at once.
         let unit = 1_i128 << 16;
-        type Case = (&'static str, Vec<Point3>, Vec<Vec<VertexId>>, i128);
         let cases: Vec<Case> = vec![
             (
                 "triangle",

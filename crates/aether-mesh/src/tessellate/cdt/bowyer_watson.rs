@@ -164,6 +164,10 @@ impl Mesh {
     /// their back-pointers redirected). The two original slots are
     /// reused for the new triangles to keep `TriId`s compact in the
     /// common flip-heavy case.
+    // `pv1`/`pv2`, `s_ab_v1`/`s_ab_v2`, `s_v1v2_a`/`s_v1v2_b`, and the
+    // four `n_after_*_in_t*` names are the standard CDT flip naming
+    // convention; renaming would hurt readability for this geometric kernel.
+    #[allow(clippy::similar_names)]
     pub(super) fn flip_edge(&mut self, tid: TriId, edge_idx: usize) -> Option<(TriId, TriId)> {
         let t1 = self.triangles[tid].clone()?;
         let n_tid = t1.neighbors[edge_idx]?;
@@ -288,13 +292,11 @@ impl Mesh {
                     }
                     // Find the vertex of the neighbor that's not on the
                     // shared edge — that's the candidate to flip toward.
-                    let n_tri = match self.triangles[n_tid].as_ref() {
-                        Some(t) => t.clone(),
-                        None => continue,
+                    let Some(n_tri) = self.triangles[n_tid].clone() else {
+                        continue;
                     };
-                    let opp = match n_tri.verts.iter().find(|&&v| v != a && v != b) {
-                        Some(&v) => v,
-                        None => continue,
+                    let Some(&opp) = n_tri.verts.iter().find(|&&v| v != a && v != b) else {
+                        continue;
                     };
                     // In-circle: triangle (tri.verts[i], a, b) is CCW
                     // (inherited from the parent triangle's CCW winding,
@@ -336,9 +338,8 @@ impl Mesh {
             if self.has_edge(u, v) {
                 return Ok(());
             }
-            let (tid, edge_idx) = match self.find_crossing_edge(u, v) {
-                Some(x) => x,
-                None => return Err(()), // no crossing but edge missing — topology bug
+            let Some((tid, edge_idx)) = self.find_crossing_edge(u, v) else {
+                return Err(()); // no crossing but edge missing — topology bug
             };
             // Try to flip. If non-convex, scan for any other crossing
             // edge that IS flippable.

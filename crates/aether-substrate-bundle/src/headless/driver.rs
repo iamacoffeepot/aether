@@ -36,6 +36,9 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 /// constructing `HeadlessEnv` with a chosen `tick_period` directly.
 #[must_use]
 pub fn parse_tick_hz_env() -> u32 {
+    // Match arms read cleaner than `map_or` here because the Ok arm
+    // is a chained iterator/closure that warn-logs on parse failure.
+    #[allow(clippy::option_if_let_else)]
     match std::env::var("AETHER_TICK_HZ") {
         Ok(s) => s
             .trim()

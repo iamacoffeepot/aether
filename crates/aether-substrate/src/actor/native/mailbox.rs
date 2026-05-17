@@ -36,8 +36,8 @@ pub struct NativeActorMailbox<'a, R> {
     _r: PhantomData<fn() -> R>,
 }
 
-impl<'a, R> Copy for NativeActorMailbox<'a, R> {}
-impl<'a, R> Clone for NativeActorMailbox<'a, R> {
+impl<R> Copy for NativeActorMailbox<'_, R> {}
+impl<R> Clone for NativeActorMailbox<'_, R> {
     fn clone(&self) -> Self {
         *self
     }
@@ -75,7 +75,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     }
 }
 
-impl<'a, R: Actor> NativeActorMailbox<'a, R> {
+impl<R: Actor> NativeActorMailbox<'_, R> {
     /// Send a single payload of kind `K` to actor `R`. Compile-checked
     /// against `R: HandlesKind<K>`. Wire shape (cast or postcard)
     /// follows `Kind::encode_into_bytes`.

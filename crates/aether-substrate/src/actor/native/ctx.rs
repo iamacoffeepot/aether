@@ -287,7 +287,7 @@ impl<'a> NativeCtx<'a> {
     }
 }
 
-impl<'a> NativeCtx<'a> {
+impl NativeCtx<'_> {
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
@@ -312,7 +312,7 @@ impl<'a> NativeCtx<'a> {
     }
 }
 
-impl<'a> NativeCtx<'a> {
+impl NativeCtx<'_> {
     /// Lineage-aware multicast: encode `payload` once, then push one copy
     /// to every `recipient`. The inbound `(mail_id, root)` from this ctx
     /// propagate as `parent_mail` + `inherited_root`, so each fanned-out
@@ -417,7 +417,7 @@ impl<'a> NativeCtx<'a> {
     }
 }
 
-impl<'a> Sender for NativeCtx<'a> {
+impl Sender for NativeCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -467,7 +467,7 @@ impl<'a> Sender for NativeCtx<'a> {
     }
 }
 
-impl<'a> MailCtx for NativeCtx<'a> {
+impl MailCtx for NativeCtx<'_> {
     /// Stage 2: route the reply through the substrate's `Mailer::send_reply`
     /// (Component recipient → push as Mail with the originator's
     /// correlation echoed and reply-to None; Session / `EngineMailbox`
@@ -595,7 +595,7 @@ impl<'a> NativeInitCtx<'a> {
 // FFI-side wiring (issue 607 phase 4 / ADR-0079) will program against
 // the trait the same way native callers do.
 
-impl<'a> MailSender for NativeCtx<'a> {
+impl MailSender for NativeCtx<'_> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -649,7 +649,7 @@ impl<'a> MailSender for NativeCtx<'a> {
     }
 }
 
-impl<'a> OutboundReply for NativeCtx<'a> {
+impl OutboundReply for NativeCtx<'_> {
     type ReplyHandle = ReplyTo;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher
@@ -679,7 +679,7 @@ impl<'a> OutboundReply for NativeCtx<'a> {
     }
 }
 
-impl<'a> SyncWaiter for NativeCtx<'a> {
+impl SyncWaiter for NativeCtx<'_> {
     fn wait_reply<K, E>(
         &self,
         timeout_ms: u32,
@@ -699,7 +699,7 @@ impl<'a> SyncWaiter for NativeCtx<'a> {
     }
 }
 
-impl<'a> LifecycleControl for NativeCtx<'a> {
+impl LifecycleControl for NativeCtx<'_> {
     type MonitorHandle = MonitorHandle;
     type MonitorError = MonitorError;
 

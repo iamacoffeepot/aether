@@ -32,6 +32,10 @@ pub enum RenderError {
 /// group. Built once at chassis boot via [`build_main_pipeline`];
 /// each frame's vertex blob and view-projection matrix are uploaded
 /// via [`record_main_pass`].
+// The `pipeline` field carries the `wgpu::RenderPipeline`; the wrapping
+// struct holds adjacent buffers + bind groups. Renaming to `render` or
+// `inner` loses the "this is the GPU pipeline handle" signal.
+#[allow(clippy::struct_field_names)]
 pub struct Pipeline {
     pub(super) pipeline: wgpu::RenderPipeline,
     pub(super) vertex_buffer: wgpu::Buffer,
