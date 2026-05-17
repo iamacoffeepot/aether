@@ -359,7 +359,8 @@ mod tests {
             PeerKind::Client { .. } => panic!("expected Substrate peer kind from server"),
         }
 
-        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 }).unwrap();
+        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 })
+            .expect("test setup: TestEchoRequest serializes via postcard");
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
         let cid = conn
             .client

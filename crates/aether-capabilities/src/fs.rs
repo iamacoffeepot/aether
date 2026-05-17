@@ -675,7 +675,7 @@ mod native {
                 })
                 .unwrap_or(0);
             let path = temp_dir().join(format!("aether-io-cap-{tag}-{pid}-{nonce}"));
-            std::fs::create_dir_all(&path).unwrap();
+            std::fs::create_dir_all(&path).expect("test setup: scratch dir creates");
             path
         }
 
@@ -689,16 +689,17 @@ mod native {
                 assets: root.join("assets"),
                 config: root.join("config"),
             };
-            std::fs::create_dir_all(&r.save).unwrap();
-            std::fs::create_dir_all(&r.assets).unwrap();
-            std::fs::create_dir_all(&r.config).unwrap();
+            std::fs::create_dir_all(&r.save).expect("test setup: save root creates");
+            std::fs::create_dir_all(&r.assets).expect("test setup: assets root creates");
+            std::fs::create_dir_all(&r.config).expect("test setup: config root creates");
             r
         }
 
         #[test]
         fn resolve_rejects_parent_traversal() {
             let root = scratch_root("resolve-parent");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.read("../etc/passwd"), Err(FsError::Forbidden)));
             assert!(matches!(
                 a.read("sub/../../escape"),
@@ -710,7 +711,8 @@ mod native {
         #[test]
         fn resolve_rejects_absolute() {
             let root = scratch_root("resolve-abs");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.read("/etc/passwd"), Err(FsError::Forbidden)));
             cleanup(&root);
         }
@@ -718,7 +720,8 @@ mod native {
         #[test]
         fn resolve_permits_dot_segments() {
             let root = scratch_root("resolve-dot");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.read("./nonexistent"), Err(FsError::NotFound)));
             cleanup(&root);
         }
@@ -726,7 +729,8 @@ mod native {
         #[test]
         fn read_missing_file_returns_not_found() {
             let root = scratch_root("read-missing");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.read("slot.bin"), Err(FsError::NotFound)));
             cleanup(&root);
         }
@@ -734,28 +738,42 @@ mod native {
         #[test]
         fn write_then_read_roundtrip() {
             let root = scratch_root("write-read");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            a.write("slot.bin", &[1, 2, 3, 4]).unwrap();
-            assert_eq!(a.read("slot.bin").unwrap(), vec![1, 2, 3, 4]);
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            a.write("slot.bin", &[1, 2, 3, 4])
+                .expect("test setup: adapter accepts write");
+            assert_eq!(
+                a.read("slot.bin")
+                    .expect("test setup: adapter returns written bytes"),
+                vec![1, 2, 3, 4]
+            );
             cleanup(&root);
         }
 
         #[test]
         fn write_creates_parent_directories() {
             let root = scratch_root("write-parents");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            a.write("deep/sub/dir/slot.bin", b"hi").unwrap();
-            assert_eq!(a.read("deep/sub/dir/slot.bin").unwrap(), b"hi");
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            a.write("deep/sub/dir/slot.bin", b"hi")
+                .expect("test setup: adapter writes through deep path");
+            assert_eq!(
+                a.read("deep/sub/dir/slot.bin")
+                    .expect("test setup: adapter reads through deep path"),
+                b"hi"
+            );
             cleanup(&root);
         }
 
         #[test]
         fn write_is_atomic_no_tmp_left_behind() {
             let root = scratch_root("write-atomic");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            a.write("slot.bin", &[0u8; 16]).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            a.write("slot.bin", &[0u8; 16])
+                .expect("test setup: adapter accepts atomic write");
             let siblings: Vec<String> = std::fs::read_dir(a.root())
-                .unwrap()
+                .expect("test setup: adapter root is readable")
                 .filter_map(std::result::Result::ok)
                 .filter_map(|e| e.file_name().to_str().map(std::string::ToString::to_string))
                 .collect();
@@ -769,7 +787,8 @@ mod native {
         #[test]
         fn write_on_read_only_returns_forbidden() {
             let root = scratch_root("write-readonly");
-            let a = LocalFileAdapter::new(root.clone(), false).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), false)
+                .expect("test setup: read-only LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.write("x.bin", &[]), Err(FsError::Forbidden)));
             cleanup(&root);
         }
@@ -777,7 +796,8 @@ mod native {
         #[test]
         fn delete_missing_returns_not_found() {
             let root = scratch_root("delete-missing");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.delete("ghost.bin"), Err(FsError::NotFound)));
             cleanup(&root);
         }
@@ -785,9 +805,12 @@ mod native {
         #[test]
         fn delete_removes_file() {
             let root = scratch_root("delete-works");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            a.write("slot.bin", b"x").unwrap();
-            a.delete("slot.bin").unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            a.write("slot.bin", b"x")
+                .expect("test setup: adapter accepts write");
+            a.delete("slot.bin")
+                .expect("test setup: adapter deletes existing file");
             assert!(matches!(a.read("slot.bin"), Err(FsError::NotFound)));
             cleanup(&root);
         }
@@ -795,7 +818,8 @@ mod native {
         #[test]
         fn delete_on_read_only_returns_forbidden() {
             let root = scratch_root("delete-readonly");
-            let a = LocalFileAdapter::new(root.clone(), false).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), false)
+                .expect("test setup: read-only LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.delete("x.bin"), Err(FsError::Forbidden)));
             cleanup(&root);
         }
@@ -803,30 +827,47 @@ mod native {
         #[test]
         fn list_empty_root_returns_empty_vec() {
             let root = scratch_root("list-empty");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert_eq!(a.list("").unwrap(), Vec::<String>::new());
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            assert_eq!(
+                a.list("").expect("test setup: adapter lists empty root"),
+                Vec::<String>::new()
+            );
             cleanup(&root);
         }
 
         #[test]
         fn list_returns_sorted_names_at_root() {
             let root = scratch_root("list-root");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            a.write("c.bin", b"").unwrap();
-            a.write("a.bin", b"").unwrap();
-            a.write("b.bin", b"").unwrap();
-            assert_eq!(a.list("").unwrap(), vec!["a.bin", "b.bin", "c.bin"]);
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            a.write("c.bin", b"")
+                .expect("test setup: adapter accepts c.bin write");
+            a.write("a.bin", b"")
+                .expect("test setup: adapter accepts a.bin write");
+            a.write("b.bin", b"")
+                .expect("test setup: adapter accepts b.bin write");
+            assert_eq!(
+                a.list("").expect("test setup: adapter lists root"),
+                vec!["a.bin", "b.bin", "c.bin"]
+            );
             cleanup(&root);
         }
 
         #[test]
         fn list_under_subdirectory() {
             let root = scratch_root("list-sub");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            a.write("saves/slot1.bin", b"").unwrap();
-            a.write("saves/slot2.bin", b"").unwrap();
-            a.write("cfg/keys.toml", b"").unwrap();
-            let saves = a.list("saves").unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
+            a.write("saves/slot1.bin", b"")
+                .expect("test setup: adapter accepts saves/slot1.bin write");
+            a.write("saves/slot2.bin", b"")
+                .expect("test setup: adapter accepts saves/slot2.bin write");
+            a.write("cfg/keys.toml", b"")
+                .expect("test setup: adapter accepts cfg/keys.toml write");
+            let saves = a
+                .list("saves")
+                .expect("test setup: adapter lists saves subdir");
             assert_eq!(saves, vec!["slot1.bin", "slot2.bin"]);
             cleanup(&root);
         }
@@ -834,7 +875,8 @@ mod native {
         #[test]
         fn list_missing_directory_returns_not_found() {
             let root = scratch_root("list-missing");
-            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            let a = LocalFileAdapter::new(root.clone(), true)
+                .expect("test setup: LocalFileAdapter constructs on scratch root");
             assert!(matches!(a.list("nope"), Err(FsError::NotFound)));
             cleanup(&root);
         }
@@ -849,8 +891,10 @@ mod native {
         #[test]
         fn registry_registers_and_retrieves_adapter() {
             let root = scratch_root("reg-basic");
-            let adapter: Arc<dyn FileAdapter> =
-                Arc::new(LocalFileAdapter::new(root.clone(), true).unwrap());
+            let adapter: Arc<dyn FileAdapter> = Arc::new(
+                LocalFileAdapter::new(root.clone(), true)
+                    .expect("test setup: LocalFileAdapter constructs on scratch root"),
+            );
             let mut reg = AdapterRegistry::new();
             reg.register("save", adapter);
             assert!(reg.has("save"));
@@ -862,8 +906,10 @@ mod native {
         use aether_substrate::mail::outbound::EgressEvent;
 
         fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
-            let adapter: Arc<dyn FileAdapter> =
-                Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
+            let adapter: Arc<dyn FileAdapter> = Arc::new(
+                LocalFileAdapter::new(root.to_path_buf(), writable)
+                    .expect("test setup: LocalFileAdapter constructs on supplied root"),
+            );
             let mut r = AdapterRegistry::new();
             r.register("save", adapter);
             Arc::new(r)
@@ -890,7 +936,9 @@ mod native {
         fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
             rx: &std::sync::mpsc::Receiver<EgressEvent>,
         ) -> K {
-            let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+            let event = rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("test: egress event arrives within 1s deadline");
             let EgressEvent::ToSession {
                 kind_name, payload, ..
             } = event
@@ -898,7 +946,7 @@ mod native {
                 panic!("expected ToSession egress, got {event:?}");
             };
             assert_eq!(kind_name, K::NAME);
-            postcard::from_bytes(&payload).unwrap()
+            postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
         }
 
         /// Boot the cap against a fresh tempdir; assert the mailbox
@@ -927,14 +975,15 @@ mod native {
         fn cap_init_fails_when_adapter_init_fails() {
             let root = scratch_root("init-fails");
             let save_path = root.join("save_is_actually_a_file");
-            std::fs::write(&save_path, b"not a dir").unwrap();
+            std::fs::write(&save_path, b"not a dir")
+                .expect("test setup: write save_path as a regular file");
             let roots = NamespaceRoots {
                 save: save_path,
                 assets: root.join("assets"),
                 config: root.join("config"),
             };
-            std::fs::create_dir_all(&roots.assets).unwrap();
-            std::fs::create_dir_all(&roots.config).unwrap();
+            std::fs::create_dir_all(&roots.assets).expect("test setup: assets root creates");
+            std::fs::create_dir_all(&roots.config).expect("test setup: config root creates");
 
             let (registry, mailer) = fresh_substrate();
             let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -972,9 +1021,9 @@ mod native {
             let root = scratch_root("cap-read");
             let reg = build_save_only_registry(&root, true);
             reg.get("save")
-                .unwrap()
+                .expect("test setup: save adapter is registered")
                 .write("slot.bin", &[9, 9, 9])
-                .unwrap();
+                .expect("test setup: adapter accepts write");
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
             fix.cap.on_read(
@@ -1072,7 +1121,11 @@ mod native {
                 WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
             }
             assert_eq!(
-                reg_clone.get("save").unwrap().read("slot.bin").unwrap(),
+                reg_clone
+                    .get("save")
+                    .expect("test setup: save adapter is registered")
+                    .read("slot.bin")
+                    .expect("test setup: adapter reads written bytes"),
                 vec![1, 2, 3]
             );
             cleanup(&root);
@@ -1107,7 +1160,10 @@ mod native {
             let root = scratch_root("cap-del");
             let reg = build_save_only_registry(&root, true);
             let reg_clone = Arc::clone(&reg);
-            reg.get("save").unwrap().write("x.bin", b"x").unwrap();
+            reg.get("save")
+                .expect("test setup: save adapter is registered")
+                .write("x.bin", b"x")
+                .expect("test setup: adapter accepts write");
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
             fix.cap.on_delete(
@@ -1125,7 +1181,10 @@ mod native {
                 DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
             }
             assert!(matches!(
-                reg_clone.get("save").unwrap().read("x.bin"),
+                reg_clone
+                    .get("save")
+                    .expect("test setup: save adapter is registered")
+                    .read("x.bin"),
                 Err(FsError::NotFound)
             ));
             cleanup(&root);
@@ -1135,8 +1194,14 @@ mod native {
         fn cap_list_returns_sorted_entries() {
             let root = scratch_root("cap-list");
             let reg = build_save_only_registry(&root, true);
-            reg.get("save").unwrap().write("b.bin", b"").unwrap();
-            reg.get("save").unwrap().write("a.bin", b"").unwrap();
+            reg.get("save")
+                .expect("test setup: save adapter is registered")
+                .write("b.bin", b"")
+                .expect("test setup: adapter accepts b.bin write");
+            reg.get("save")
+                .expect("test setup: save adapter is registered")
+                .write("a.bin", b"")
+                .expect("test setup: adapter accepts a.bin write");
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
             fix.cap.on_list(
