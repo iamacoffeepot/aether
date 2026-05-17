@@ -123,9 +123,7 @@ impl DesktopEnv {
         // doesn't boot. Binds `127.0.0.1`, matching the hub chassis.
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
-            std::env::var("AETHER_RPC_PORT")
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
+            crate::hub::rpc_port_from_env()
                 .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
