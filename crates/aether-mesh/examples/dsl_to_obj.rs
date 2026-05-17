@@ -5,6 +5,9 @@
 
 // CLI diagnostic before tracing subscriber is installed (issue 891).
 #![allow(clippy::print_stderr)]
+// CLI emits OBJ text to stdout for piping/redirect — the documented use case
+// (see the usage line above).
+#![allow(clippy::print_stdout)]
 
 use std::process::ExitCode;
 

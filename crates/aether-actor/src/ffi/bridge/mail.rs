@@ -45,6 +45,10 @@ impl MailBridge {
     /// a lookup-miss status. The substrate warn-drops unknown
     /// recipients on its side, which is the diagnostic path; the guest
     /// can't surface the status anywhere meaningful.
+    #[allow(
+        clippy::must_use_candidate,
+        reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
+    )]
     pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
         // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
         // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
@@ -71,6 +75,10 @@ impl MailBridge {
     /// Not `#[must_use]`: the trait surfaces (`OutboundReply::reply`,
     /// `MailCtx::reply`) are fire-and-forget by contract — see the
     /// matching rationale on `send_mail`.
+    #[allow(
+        clippy::must_use_candidate,
+        reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
+    )]
     pub fn reply_mail(&self, sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
         // SAFETY: forwards to `raw::reply_mail`, whose ABI is documented
         // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is

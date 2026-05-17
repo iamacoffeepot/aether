@@ -239,12 +239,16 @@ mod native {
         fn on_draw_triangle(&self, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
             if let Some(obs) = &self.config.observed_kinds {
                 obs.lock()
-                    .unwrap()
+                    .expect("mutex poisoned; fail-fast per ADR-0063")
                     .push(<DrawTriangle as Kind>::NAME.into());
             }
             let bytes: &[u8] = bytemuck::cast_slice(mails);
             let cap_bytes = self.config.vertex_buffer_bytes;
-            let mut verts = self.handles.frame_vertices.lock().unwrap();
+            let mut verts = self
+                .handles
+                .frame_vertices
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             let available = cap_bytes.saturating_sub(verts.len());
             let write_len = bytes.len().min(available);
             let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
@@ -277,9 +281,15 @@ mod native {
         #[handler]
         fn on_camera(&self, _ctx: &mut NativeCtx<'_>, mail: Camera) {
             if let Some(obs) = &self.config.observed_kinds {
-                obs.lock().unwrap().push(<Camera as Kind>::NAME.into());
+                obs.lock()
+                    .expect("mutex poisoned; fail-fast per ADR-0063")
+                    .push(<Camera as Kind>::NAME.into());
             }
-            *self.handles.camera_state.lock().unwrap() = mail.view_proj;
+            *self
+                .handles
+                .camera_state
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063") = mail.view_proj;
         }
 
         /// `CaptureFrame` handler. The cap dispatcher thread doesn't
@@ -305,7 +315,7 @@ mod native {
         fn on_capture_frame(&self, ctx: &mut NativeCtx<'_>, mail: CaptureFrame) {
             if let Some(obs) = &self.config.observed_kinds {
                 obs.lock()
-                    .unwrap()
+                    .expect("mutex poisoned; fail-fast per ADR-0063")
                     .push(<CaptureFrame as Kind>::NAME.into());
             }
 
@@ -514,8 +524,14 @@ mod native {
         ) -> Result<(), RenderError> {
             let gpu = self.expect_gpu();
             {
-                let mut live = self.frame_vertices.lock().unwrap();
-                let mut last = self.last_submitted.lock().unwrap();
+                let mut live = self
+                    .frame_vertices
+                    .lock()
+                    .expect("mutex poisoned; fail-fast per ADR-0063");
+                let mut last = self
+                    .last_submitted
+                    .lock()
+                    .expect("mutex poisoned; fail-fast per ADR-0063");
                 if !live.is_empty() {
                     // Producer emitted: swap into cache.
                     std::mem::swap(&mut *live, &mut *last);
@@ -534,9 +550,18 @@ mod native {
                 // else: replay-cache + empty live — leave cache
                 // alone, render its current contents.
             }
-            let view_proj = *self.camera_state.lock().unwrap();
-            let last = self.last_submitted.lock().unwrap();
-            let targets = gpu.targets.lock().unwrap();
+            let view_proj = *self
+                .camera_state
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
+            let last = self
+                .last_submitted
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
+            let targets = gpu
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             record_main_pass(
                 &gpu.queue,
                 encoder,
@@ -559,7 +584,10 @@ mod native {
         /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn record_capture_copy(&self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
             let gpu = self.expect_gpu();
-            let mut targets = gpu.targets.lock().unwrap();
+            let mut targets = gpu
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             prepare_capture_copy(&gpu.device, &mut targets, encoder)
         }
 
@@ -572,7 +600,10 @@ mod native {
         /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn finish_capture(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
             let gpu = self.expect_gpu();
-            let targets = gpu.targets.lock().unwrap();
+            let targets = gpu
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             finish_capture(&gpu.device, &targets, meta)
         }
 
@@ -584,7 +615,10 @@ mod native {
         /// mutex is poisoned — fail-fast per ADR-0063.
         pub fn resize(&self, width: u32, height: u32) {
             let gpu = self.expect_gpu();
-            let mut targets = gpu.targets.lock().unwrap();
+            let mut targets = gpu
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             targets.resize(&gpu.device, width, height);
         }
 
@@ -622,7 +656,11 @@ mod native {
         /// mutex is poisoned — fail-fast per ADR-0063.
         #[must_use]
         pub fn color_size(&self) -> (u32, u32) {
-            let targets = self.expect_gpu().targets.lock().unwrap();
+            let targets = self
+                .expect_gpu()
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             (targets.width(), targets.height())
         }
 
@@ -640,7 +678,10 @@ mod native {
             F: FnOnce(&wgpu::Texture) -> R,
         {
             let gpu = self.expect_gpu();
-            let targets = gpu.targets.lock().unwrap();
+            let targets = gpu
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
             f(targets.color_texture())
         }
     }

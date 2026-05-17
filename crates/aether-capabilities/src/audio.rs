@@ -878,6 +878,11 @@ mod native {
 
     #[cfg(test)]
     mod tests {
+        // `sender.push(...).unwrap()` reads as test setup — the channel
+        // is local and never full / closed during the test. `.expect`
+        // per call would be pure noise.
+        #![allow(clippy::unwrap_used)]
+
         use super::*;
         use crate::test_chassis::{TestChassis, fresh_substrate};
         use aether_actor::Actor;
