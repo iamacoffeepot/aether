@@ -76,17 +76,21 @@ fn load_sokoban(bench: &mut TestBench, wasm_path: &std::path::Path) {
 ///
 /// Background: `TestBench::capture` runs its frame with
 /// `dispatch_tick=false` (capture is a state snapshot, not a tick
-/// advance). The render sink's vert buffer is consumed-and-replaced
-/// every frame, so a component that emits geometry only on `on_tick`
-/// paints nothing during the capture frame even though the previous
-/// `advance` ticked it. Sending `Tick` directly to the component's
-/// mailbox right before `capture` queues a tick that drains alongside
-/// the capture request, populating the buffer before the offscreen
-/// render reads it.
+/// advance). The render cap's vert accumulator drains on every
+/// `record_frame` (`std::mem::replace` on `frame_vertices`), so a
+/// component that emits geometry only on `on_tick` has nothing in
+/// the accumulator by the time capture's render reads it. Sending
+/// `Tick` directly to the component's mailbox right before
+/// `capture` populates the accumulator for the upcoming capture
+/// frame.
+///
+/// Pre-iamacoffeepot/aether#834 this was a band-aid that flaked
+/// because the bare `send_bytes` push didn't subscribe to the
+/// chain's settlement — capture could race ahead before sokoban's
+/// DrawTriangle landed in render's accumulator. iamacoffeepot/aether#834 made
+/// `send_bytes` synchronous on settlement, so nudge_tick now
+/// reliably pre-populates the accumulator before returning.
 fn nudge_tick(bench: &mut TestBench) {
-    // `Tick` is a unit struct on the cast wire shape (no Serialize);
-    // can't go through `send_mail::<K>` (postcard-only). Same applies
-    // to `Key` below.
     bench
         .send_bytes(&component_address(), Tick::ID, Tick.encode_into_bytes())
         .expect("send tick");
@@ -102,10 +106,12 @@ fn assert_draw_triangle_observed(bench: &TestBench) {
 }
 
 /// Default-level rendering smoke test. Loads the wasm, advances a
-/// few ticks so init + tick can flush, fires one more tick before
-/// capture (so render-sink verts populate), and asserts both that
-/// `DrawTriangle` mail flows and that the captured frame contains
-/// pixels diverging from the chassis clear color.
+/// few ticks so init can flush, fires one more `Tick` via
+/// `nudge_tick` to populate render's accumulator (consumed during
+/// each advance's render — see `nudge_tick` docs), captures, and
+/// asserts both that `DrawTriangle` mail flowed and that the
+/// captured frame contains pixels diverging from the chassis clear
+/// color.
 #[test]
 fn default_level_renders_grid_and_player() {
     let Some(wasm_path) = require_runtime("aether_demo_sokoban") else {
@@ -140,7 +146,10 @@ fn key_press_keeps_render_path_alive() {
     bench.advance(2).expect("pre-key advance");
 
     // Press D — sokoban steps the player east; the WASD/arrow mapping
-    // lives in `step_delta` inside the demo's lib.rs.
+    // lives in `step_delta` inside the demo's lib.rs. `send_bytes`
+    // is synchronous-on-settle (iamacoffeepot/aether#834), so the
+    // post-key advance below picks up the new player position
+    // structurally.
     let key = Key {
         code: keycode::KEY_D,
     };
