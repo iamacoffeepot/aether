@@ -83,36 +83,44 @@ mod tests {
 
     #[test]
     fn zero_round_trips() {
-        assert_eq!(f32_to_fixed(0.0).unwrap(), 0);
+        assert_eq!(f32_to_fixed(0.0).expect("test setup: 0.0 is in range"), 0);
         assert_eq!(fixed_to_f32(0), 0.0);
     }
 
     #[test]
     fn one_round_trips() {
-        assert_eq!(f32_to_fixed(1.0).unwrap(), ONE_FIXED);
+        assert_eq!(
+            f32_to_fixed(1.0).expect("test setup: 1.0 is in range"),
+            ONE_FIXED
+        );
         assert_eq!(fixed_to_f32(ONE_FIXED), 1.0);
     }
 
     #[test]
     fn smallest_step_round_trips() {
-        let fx = f32_to_fixed(SMALLEST_REPRESENTABLE).unwrap();
+        let fx = f32_to_fixed(SMALLEST_REPRESENTABLE)
+            .expect("test setup: smallest representable is in range");
         assert_eq!(fx, 1);
         assert_eq!(fixed_to_f32(1), SMALLEST_REPRESENTABLE);
     }
 
     #[test]
     fn negative_round_trips() {
-        assert_eq!(f32_to_fixed(-1.0).unwrap(), -ONE_FIXED);
+        assert_eq!(
+            f32_to_fixed(-1.0).expect("test setup: -1.0 is in range"),
+            -ONE_FIXED
+        );
         assert_eq!(fixed_to_f32(-ONE_FIXED), -1.0);
         assert_eq!(
-            f32_to_fixed(-12.5).unwrap(),
+            f32_to_fixed(-12.5).expect("test setup: -12.5 is in range"),
             -12 * ONE_FIXED - ONE_FIXED / 2
         );
     }
 
     #[test]
     fn positive_boundary_accepted() {
-        let fx = f32_to_fixed(MAX_INPUT_MAGNITUDE).unwrap();
+        let fx = f32_to_fixed(MAX_INPUT_MAGNITUDE)
+            .expect("test setup: +MAX_INPUT_MAGNITUDE accepted at boundary");
         assert_eq!(fx, 256 * ONE_FIXED);
         // Round-trip must be exact at the boundary — that's the entire
         // point of the ±256 cap.
@@ -121,7 +129,8 @@ mod tests {
 
     #[test]
     fn negative_boundary_accepted() {
-        let fx = f32_to_fixed(-MAX_INPUT_MAGNITUDE).unwrap();
+        let fx = f32_to_fixed(-MAX_INPUT_MAGNITUDE)
+            .expect("test setup: -MAX_INPUT_MAGNITUDE accepted at boundary");
         assert_eq!(fx, -256 * ONE_FIXED);
         assert_eq!(fixed_to_f32(fx), -MAX_INPUT_MAGNITUDE);
     }
@@ -131,7 +140,7 @@ mod tests {
         // f32::next_up isn't stable yet on the toolchain — bump a bit
         // by adding the smallest representable step at this magnitude.
         let too_big = MAX_INPUT_MAGNITUDE + 1.0;
-        match f32_to_fixed(too_big).unwrap_err() {
+        match f32_to_fixed(too_big).expect_err("test setup: value past +boundary must Err") {
             FixedError::OutOfRange { value } => assert_eq!(value, too_big),
             other @ FixedError::NotFinite { .. } => {
                 panic!("expected OutOfRange, got {other:?}")
@@ -142,7 +151,7 @@ mod tests {
     #[test]
     fn just_past_negative_boundary_rejected() {
         let too_small = -MAX_INPUT_MAGNITUDE - 1.0;
-        match f32_to_fixed(too_small).unwrap_err() {
+        match f32_to_fixed(too_small).expect_err("test setup: value past -boundary must Err") {
             FixedError::OutOfRange { value } => assert_eq!(value, too_small),
             other @ FixedError::NotFinite { .. } => {
                 panic!("expected OutOfRange, got {other:?}")
@@ -204,14 +213,15 @@ mod tests {
         // values farther apart than 1/65536 (the fixed-point step), and
         // never inverted.
         let step = 1.0 / 1024.0; // about 64 fixed units per step
-        let mut prev = f32_to_fixed(-MAX_INPUT_MAGNITUDE).unwrap();
+        let mut prev = f32_to_fixed(-MAX_INPUT_MAGNITUDE)
+            .expect("test setup: -MAX_INPUT_MAGNITUDE accepted at boundary");
         let mut x = -MAX_INPUT_MAGNITUDE + step;
         // Stepping a float counter is the natural shape for sweeping the
         // input range; `step` is a power of two so accumulation drift is
         // bounded.
         #[allow(clippy::while_float)]
         while x <= MAX_INPUT_MAGNITUDE {
-            let fx = f32_to_fixed(x).unwrap();
+            let fx = f32_to_fixed(x).expect("test setup: sweep stays within ±MAX_INPUT_MAGNITUDE");
             assert!(fx >= prev, "monotonicity violated at x={x}: {prev} > {fx}");
             prev = fx;
             x += step;
@@ -225,8 +235,14 @@ mod tests {
         // direction every time across runs.
         let just_above_half = (1.0 / SCALE as f32) * 0.51;
         let just_below_half = (1.0 / SCALE as f32) * 0.49;
-        assert_eq!(f32_to_fixed(just_above_half).unwrap(), 1);
-        assert_eq!(f32_to_fixed(just_below_half).unwrap(), 0);
+        assert_eq!(
+            f32_to_fixed(just_above_half).expect("test setup: sub-LSB value is in range"),
+            1
+        );
+        assert_eq!(
+            f32_to_fixed(just_below_half).expect("test setup: sub-LSB value is in range"),
+            0
+        );
     }
 
     #[test]
@@ -299,7 +315,7 @@ mod tests {
             just_above > MAX_INPUT_MAGNITUDE,
             "test setup: just_above must exceed boundary"
         );
-        match f32_to_fixed(just_above).unwrap_err() {
+        match f32_to_fixed(just_above).expect_err("test setup: one ULP past +boundary must Err") {
             FixedError::OutOfRange { value } => assert_eq!(value, just_above),
             other @ FixedError::NotFinite { .. } => {
                 panic!("expected OutOfRange, got {other:?}")
@@ -332,8 +348,8 @@ mod tests {
         // float-counter loop is safe.
         #[allow(clippy::while_float)]
         while x <= MAX_INPUT_MAGNITUDE {
-            let pos = f32_to_fixed(x).unwrap();
-            let neg = f32_to_fixed(-x).unwrap();
+            let pos = f32_to_fixed(x).expect("test setup: power-of-two sweep stays in range");
+            let neg = f32_to_fixed(-x).expect("test setup: power-of-two sweep stays in range");
             assert_eq!(pos, -neg, "sign mismatch at x={x}: pos={pos} neg={neg}");
             x *= 2.0; // walk by powers of two — covers the full range fast
         }
@@ -355,9 +371,12 @@ mod tests {
             MAX_INPUT_MAGNITUDE,
         ];
         for v in samples {
-            let first = f32_to_fixed(v).unwrap();
+            let first = f32_to_fixed(v).expect("test setup: sample is in range");
             for _ in 0..16 {
-                assert_eq!(f32_to_fixed(v).unwrap(), first);
+                assert_eq!(
+                    f32_to_fixed(v).expect("test setup: sample is in range"),
+                    first
+                );
             }
         }
     }
@@ -370,8 +389,9 @@ mod tests {
         // input — we assert that case in `off_grid_round_trip_within_one_ulp`.)
         for k in -1024..=1024 {
             let value = (k as f32) * 0.25;
-            let once = f32_to_fixed(value).unwrap();
-            let twice = f32_to_fixed(fixed_to_f32(once)).unwrap();
+            let once = f32_to_fixed(value).expect("test setup: 0.25 ladder stays in range");
+            let twice = f32_to_fixed(fixed_to_f32(once))
+                .expect("test setup: grid-aligned round-trip stays in range");
             assert_eq!(once, twice, "idempotence broke at value={value}");
         }
     }
@@ -382,6 +402,6 @@ mod tests {
         // negative-zero representation. Important because BSP polygon
         // identity hashes derive from these integers, and we don't want
         // duplicate "same point, different sign of zero" entries.
-        assert_eq!(f32_to_fixed(-0.0).unwrap(), 0);
+        assert_eq!(f32_to_fixed(-0.0).expect("test setup: -0.0 is in range"), 0);
     }
 }

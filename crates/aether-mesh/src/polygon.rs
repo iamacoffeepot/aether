@@ -464,7 +464,7 @@ mod tests {
             z: 1.0,
             color: 0,
         };
-        let polys = mesh_polygons(&node).unwrap();
+        let polys = mesh_polygons(&node).expect("test setup: unit box meshes");
         // A unit cube: 6 faces, each a single quad after coplanar merge.
         assert_eq!(polys.len(), 6);
         for poly in &polys {
@@ -824,8 +824,14 @@ mod tests {
             // projection — sanity-check via x range.
             let hx = poly.holes[0][0].x;
             let outer_xs: Vec<i32> = poly.vertices.iter().map(|v| v.x).collect();
-            let min_x = *outer_xs.iter().min().unwrap();
-            let max_x = *outer_xs.iter().max().unwrap();
+            let min_x = *outer_xs
+                .iter()
+                .min()
+                .expect("test setup: outer loop has vertices");
+            let max_x = *outer_xs
+                .iter()
+                .max()
+                .expect("test setup: outer loop has vertices");
             assert!(
                 hx > min_x && hx < max_x,
                 "hole's first vert must be in its outer's x range"

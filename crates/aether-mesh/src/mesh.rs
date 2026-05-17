@@ -703,7 +703,8 @@ mod tests {
     #[test]
     fn lathe_meshes_to_non_empty_solid() {
         use crate::parse;
-        let ast = parse("(lathe ((0 -0.5) (0.5 -0.5) (0.5 0.5) (0 0.5)) 16 :color 3)").unwrap();
+        let ast = parse("(lathe ((0 -0.5) (0.5 -0.5) (0.5 0.5) (0 0.5)) 16 :color 3)")
+            .expect("test setup: lathe DSL parses");
         let tris = mesh(&ast).expect("lathe must mesh");
         assert!(!tris.is_empty(), "lathe produced no triangles");
         assert!(tris.iter().all(|t| t.color == 3));
@@ -712,7 +713,8 @@ mod tests {
     #[test]
     fn open_profile_lathe_meshes() {
         use crate::parse;
-        let ast = parse("(lathe ((0.5 -0.5) (0.5 0.5)) 16 :color 5)").unwrap();
+        let ast = parse("(lathe ((0.5 -0.5) (0.5 0.5)) 16 :color 5)")
+            .expect("test setup: lathe DSL parses");
         let tris = mesh(&ast).expect("open-profile lathe must mesh");
         assert!(!tris.is_empty(), "open lathe produced no triangles");
     }

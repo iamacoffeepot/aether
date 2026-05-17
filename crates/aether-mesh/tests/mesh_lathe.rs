@@ -8,8 +8,8 @@ fn straight_cylinder_via_lathe_has_expected_triangle_count() {
     // Two profile points, both at radius 1 — produces a cylinder side
     // wall (no caps). 8 segments → 8 quads → 16 triangles.
     let text = "(lathe ((1 0) (1 2)) 8 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: lathe DSL parses");
+    let tris = mesh(&ast).expect("test setup: lathe meshes");
     assert_eq!(tris.len(), 16);
 }
 
@@ -20,8 +20,8 @@ fn axis_apex_collapses_degenerate_triangles_away() {
     // mesher must drop the resulting zero-area triangles, leaving
     // only the slanted side wall (8 triangles for 8 segments).
     let text = "(lathe ((0 0) (1 1)) 8 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: lathe DSL parses");
+    let tris = mesh(&ast).expect("test setup: lathe meshes");
     assert_eq!(tris.len(), 8, "cone should have one triangle per segment");
 }
 
@@ -32,8 +32,8 @@ fn closed_disc_via_axis_to_rim_then_rim_to_axis() {
     // inverted cone. Just sanity-checks the mesher emits triangles
     // for both edges without panicking.
     let text = "(lathe ((0 0) (1 0) (0 0.01)) 6 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: lathe DSL parses");
+    let tris = mesh(&ast).expect("test setup: lathe meshes");
     // 6-segment lathe with two profile edges, both axis-collapsed on
     // one side. Bottom disc (y=0): 6 axis-fan triangles share a plane
     // and color, merge_coplanar collapses them into a hexagon, CDT
@@ -50,8 +50,8 @@ fn lathe_face_normals_point_outward() {
     // triangle's centroid (radial vector from y-axis) against
     // the cross-product normal.
     let text = "(lathe ((1 0) (1 2)) 12 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: lathe DSL parses");
+    let tris = mesh(&ast).expect("test setup: lathe meshes");
     for tri in &tris {
         let a = tri.vertices[0];
         let b = tri.vertices[1];
@@ -71,8 +71,8 @@ fn lathe_face_normals_point_outward() {
 #[test]
 fn lathe_with_translate_offsets_all_vertices() {
     let text = "(translate (5 0 0) (lathe ((1 0) (1 2)) 4 :color 0))";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: lathe DSL parses");
+    let tris = mesh(&ast).expect("test setup: lathe meshes");
     for tri in &tris {
         for v in tri.vertices {
             assert!(
@@ -86,8 +86,8 @@ fn lathe_with_translate_offsets_all_vertices() {
 #[test]
 fn fewer_than_three_segments_produces_no_geometry() {
     let text = "(lathe ((1 0) (1 1)) 2 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: lathe DSL parses");
+    let tris = mesh(&ast).expect("test setup: lathe meshes");
     assert_eq!(
         tris.len(),
         0,

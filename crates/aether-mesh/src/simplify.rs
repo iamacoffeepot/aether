@@ -44,7 +44,10 @@ pub fn simplify(node: &Node) -> Node {
         Node::Composition(children) => {
             let simplified: Vec<Node> = children.iter().map(simplify).collect();
             if simplified.len() == 1 {
-                return simplified.into_iter().next().unwrap();
+                return simplified
+                    .into_iter()
+                    .next()
+                    .expect("len() == 1 guarantees a single element");
             }
             Node::Composition(simplified)
         }

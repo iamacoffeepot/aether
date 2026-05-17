@@ -172,9 +172,9 @@ mod tests {
         // closed (degenerate) double-sided lamina — every directed edge
         // is twin-paired, so analyze finds no boundaries.
         let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(1.0, 0.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let report = analyze_unmatched_boundaries(vec![t1, t2]);
         assert!(report.is_empty(), "double-sided lamina is closed");
     }
@@ -184,7 +184,7 @@ mod tests {
         // A bare triangle has three boundary edges, no opposing
         // neighbours — every edge is unmatched.
         let t = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 7)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let report = analyze_unmatched_boundaries(vec![t]);
         assert_eq!(report.len(), 3);
         for r in &report {
