@@ -90,11 +90,133 @@ pub struct MailDispatch<'a> {
     pub parent_mail: Option<MailId>,
 }
 
+/// Owned mirror of [`MailDispatch`] handed to [`InboxHandler::enqueue`].
+/// Built by the mailer at the `Inbox` arm by moving `mail.payload`
+/// and `kind_name` out of the inbound `Mail`, so the receiving
+/// closure can forward the bytes onto a downstream mpsc without an
+/// intervening `payload.to_vec()` clone. The `MailDispatch<'_>`
+/// borrow shape is wrong for actor-enqueue handlers — the borrow
+/// can't outlive the synchronous push call, so any handler that
+/// wants to enqueue must first clone. `OwnedDispatch` owns its
+/// payload + kind_name so it can be moved cross-thread directly.
+///
+/// Issue iamacoffeepot/aether#848 (Phase 1): introduced alongside
+/// the [`InboxHandler`] trait. No call sites consume this in PR 1 —
+/// the existing `MailboxHandler` keeps the `MailDispatch<'_>` shape
+/// until PR 2 migrates the variant types and the mailer arms.
+#[derive(Clone, Debug)]
+pub struct OwnedDispatch {
+    /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
+    pub kind: KindId,
+    /// Kind's registered name. Owned `String` so the handler can move
+    /// it into a downstream envelope without cloning.
+    pub kind_name: String,
+    /// Sending mailbox's registered name, if the mail came from a
+    /// component. `None` for substrate-core pushes with no sending
+    /// mailbox (ADR-0011).
+    pub origin: Option<String>,
+    /// Remote reply target of the mail (ADR-0008 / ADR-0037 /
+    /// ADR-0042). Carries the correlation id for reply-routing.
+    pub sender: ReplyTo,
+    /// Payload bytes (the kind's encoded representation per ADR-0019).
+    /// Owned `Vec<u8>` — handlers move this into the downstream
+    /// envelope rather than cloning the borrowed slice every
+    /// dispatch (the perf win called out in iamacoffeepot/aether#848).
+    pub payload: Vec<u8>,
+    /// Kind-implied item count.
+    pub count: u32,
+    /// ADR-0080 §1: the producer-minted identity of this mail.
+    /// `MailId::NONE` for legacy paths that haven't migrated.
+    pub mail_id: MailId,
+    /// ADR-0080 §5: the root of this mail's causal chain.
+    pub root: MailId,
+    /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
+    /// chassis-root sends.
+    pub parent_mail: Option<MailId>,
+}
+
 /// Closure invoked when mail is delivered to a chassis-bound mailbox.
 /// Called on the caller's thread (or the platform thread for input
 /// fan-out); must be `Send + Sync`. The single [`MailDispatch`]
 /// argument bundles the per-mail metadata.
+///
+/// Issue iamacoffeepot/aether#848 (Phase 1): retained alongside the
+/// new [`InboxHandler`] / [`InlineHandler`] traits. PR 2 migrates
+/// `MailboxEntry::{Inbox, Inline}` to wrap `Arc<dyn InboxHandler>` /
+/// `Arc<dyn InlineHandler>` and PR 5 retires this alias entirely.
 pub type MailboxHandler = Arc<dyn for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static>;
+
+/// Synchronous handler installed under [`MailboxEntry::Inline`]. Runs
+/// on the mailer thread inside `Mailer::push`; the mailer brackets
+/// the call with `record_received` / `record_finished` so the
+/// chain's `in_flight` balances (ADR-0080 §2). The borrowed
+/// [`MailDispatch<'_>`] argument is zero-copy — the handler may read
+/// `payload` directly without owning it, which is the right shape
+/// for "do the work right here and return" bodies. Bodies that need
+/// to enqueue the payload across a channel should pick
+/// [`InboxHandler`] instead so the bytes move rather than copy.
+///
+/// Blanket impl below covers any `Fn(MailDispatch<'_>)` closure;
+/// hand-rolled `impl InlineHandler for MyType` is also supported
+/// for handlers that hold state.
+///
+/// Issue iamacoffeepot/aether#848 (Phase 1): introduced. No call
+/// sites consume this in PR 1 — `MailboxEntry::Inline` still wraps
+/// the legacy `MailboxHandler` alias until PR 2.
+pub trait InlineHandler: Send + Sync + 'static {
+    fn dispatch(&self, dispatch: MailDispatch<'_>);
+}
+
+/// Actor-enqueue handler installed under [`MailboxEntry::Inbox`]. The
+/// handler is expected to move `dispatch` onto a downstream channel
+/// (typically a cap-local mpsc); the downstream consumer — an actor
+/// dispatcher or chassis-side recv loop — records
+/// `Received`/`Finished` per envelope. **Contract:** every
+/// [`OwnedDispatch`] you receive must eventually have `Finished`
+/// recorded for its `mail_id` — otherwise the chain's `in_flight`
+/// leaks and any settlement subscriber hangs (the failure mode that
+/// surfaced in iamacoffeepot/aether#846).
+///
+/// The owned dispatch type is the structural hint: payload arrives
+/// as `Vec<u8>`, so moving it into an mpsc Sender is a single move,
+/// not a clone. A handler that does immediate synchronous work
+/// against the dispatch wastes the move and double-pays the bracket
+/// (the dispatcher downstream finishes the bracket once the
+/// enqueued envelope is picked up; running synchronously here means
+/// nothing picks it up) — those bodies belong on
+/// [`InlineHandler`] instead.
+///
+/// Blanket impl below covers any `Fn(OwnedDispatch)` closure;
+/// hand-rolled `impl InboxHandler for MyType` is supported for caps
+/// that want to bundle the channel sender with handler state.
+///
+/// Issue iamacoffeepot/aether#848 (Phase 1): introduced. No call
+/// sites consume this in PR 1; PR 2 wires it through
+/// `MailboxEntry::Inbox` and PR 3 migrates production cap call
+/// sites onto it.
+pub trait InboxHandler: Send + Sync + 'static {
+    fn enqueue(&self, dispatch: OwnedDispatch);
+}
+
+impl<F> InlineHandler for F
+where
+    F: for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static,
+{
+    #[inline]
+    fn dispatch(&self, dispatch: MailDispatch<'_>) {
+        self(dispatch)
+    }
+}
+
+impl<F> InboxHandler for F
+where
+    F: Fn(OwnedDispatch) + Send + Sync + 'static,
+{
+    #[inline]
+    fn enqueue(&self, dispatch: OwnedDispatch) {
+        self(dispatch)
+    }
+}
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -1192,6 +1314,115 @@ mod tests {
             r.kind_id("aether.late"),
             Some(kind_id),
             "shared Arc registrations are visible through the original handle"
+        );
+    }
+
+    /// Issue iamacoffeepot/aether#848 Phase 1: a bare
+    /// `Fn(MailDispatch<'_>)` closure satisfies `InlineHandler` via
+    /// the blanket impl, and dispatching through
+    /// `<dyn InlineHandler>::dispatch` invokes the body once per
+    /// call. No mailer / registry plumbing is wired through yet —
+    /// that lands in PR 2.
+    #[test]
+    fn inline_handler_blanket_impl_dispatches_closure_body() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let c2 = Arc::clone(&counter);
+        let handler: Arc<dyn InlineHandler> = Arc::new(move |dispatch: MailDispatch<'_>| {
+            c2.fetch_add(dispatch.count, Ordering::SeqCst);
+        });
+        handler.dispatch(test_dispatch(KindId(0), "aether.tick", &[], 5));
+        handler.dispatch(test_dispatch(KindId(0), "aether.tick", &[], 7));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            12,
+            "blanket InlineHandler impl should forward each dispatch to the closure body once",
+        );
+    }
+
+    /// Issue iamacoffeepot/aether#848 Phase 1: a bare
+    /// `Fn(OwnedDispatch)` closure satisfies `InboxHandler` via the
+    /// blanket impl. The closure body moves the payload into a
+    /// captured Vec, demonstrating the ownership transfer the trait
+    /// exists to enable — the hot-path "no `to_vec()` clone" win
+    /// called out in iamacoffeepot/aether#848.
+    #[test]
+    fn inbox_handler_blanket_impl_moves_owned_payload() {
+        let collected = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        let collected_for_handler = Arc::clone(&collected);
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+            // Payload moves straight into the captured Vec — no clone
+            // or `to_vec()` on a borrowed slice.
+            collected_for_handler.lock().unwrap().push(dispatch.payload);
+        });
+
+        handler.enqueue(OwnedDispatch {
+            kind: KindId(0),
+            kind_name: "aether.audio.note_on".to_owned(),
+            origin: None,
+            sender: ReplyTo::NONE,
+            payload: vec![1, 2, 3],
+            count: 1,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+        });
+        handler.enqueue(OwnedDispatch {
+            kind: KindId(0),
+            kind_name: "aether.audio.note_on".to_owned(),
+            origin: None,
+            sender: ReplyTo::NONE,
+            payload: vec![4, 5, 6, 7],
+            count: 1,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+        });
+
+        let collected = collected.lock().unwrap();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0], vec![1, 2, 3]);
+        assert_eq!(collected[1], vec![4, 5, 6, 7]);
+    }
+
+    /// Issue iamacoffeepot/aether#848 Phase 1: hand-rolled
+    /// `impl InboxHandler for MyStruct` compiles and dispatches
+    /// alongside the blanket-impl path. This is the cap-authoring
+    /// shape PR 3 will reach for (a struct holding the mpsc Sender);
+    /// a regression here means caps can't migrate.
+    #[test]
+    fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
+        use std::sync::mpsc;
+
+        struct ChannelForwarder {
+            tx: mpsc::Sender<OwnedDispatch>,
+        }
+        impl InboxHandler for ChannelForwarder {
+            fn enqueue(&self, dispatch: OwnedDispatch) {
+                let _ = self.tx.send(dispatch);
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let handler: Arc<dyn InboxHandler> = Arc::new(ChannelForwarder { tx });
+        handler.enqueue(OwnedDispatch {
+            kind: KindId(42),
+            kind_name: "aether.fs.write".to_owned(),
+            origin: Some("aether.fs".to_owned()),
+            sender: ReplyTo::NONE,
+            payload: vec![0xAB, 0xCD],
+            count: 1,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+        });
+
+        let received = rx.try_recv().expect("hand-rolled enqueue should send");
+        assert_eq!(received.kind, KindId(42));
+        assert_eq!(received.kind_name, "aether.fs.write");
+        assert_eq!(received.payload, vec![0xAB, 0xCD]);
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one enqueue should send exactly one envelope",
         );
     }
 }
