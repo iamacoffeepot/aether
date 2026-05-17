@@ -27,6 +27,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crossbeam_channel::Receiver;
+
 use crate::mail::{Mail, ReplyTo};
 
 /// One pending capture request. Carries the reply handle so the
@@ -34,9 +36,20 @@ use crate::mail::{Mail, ReplyTo};
 /// of `after_mails` the control plane already validated; the
 /// render thread pushes them onto the queue after readback, before
 /// replying.
+///
+/// `pre_settlements` is one settlement receiver per chassis-rooted
+/// pre-mail the render cap pushed before parking this request
+/// (iamacoffeepot/aether#860). The driver waits on each receiver
+/// before rendering so the cross-thread causal chain triggered by
+/// the pre-mails (component handlers → emitted DrawTriangle →
+/// render cap accumulator) has fully landed before readback. Empty
+/// when there were no pre-mails or when the chassis didn't install
+/// a settlement registry (in which case the driver renders
+/// immediately, preserving pre-fix behaviour on test fixtures).
 pub struct PendingCapture {
     pub reply_to: ReplyTo,
     pub after_mails: Vec<Mail>,
+    pub pre_settlements: Vec<Receiver<()>>,
 }
 
 /// Single-slot queue. Cheaply cloneable (wraps an `Arc`), shared
@@ -86,6 +99,7 @@ mod tests {
         PendingCapture {
             reply_to: reply_to(u),
             after_mails: Vec::new(),
+            pre_settlements: Vec::new(),
         }
     }
 

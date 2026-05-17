@@ -507,9 +507,32 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
                         Some(req) => {
-                            let result = match gpu.render_and_capture() {
-                                Ok(png) => CaptureFrameResult::Ok { png },
-                                Err(error) => CaptureFrameResult::Err { error },
+                            // iamacoffeepot/aether#860: wait for each
+                            // pre-mail's causal chain to settle before
+                            // rendering, mirroring the test-bench fix.
+                            // The desktop driver doesn't have a
+                            // `SettlementTimeout` error to surface, so
+                            // a stuck chain replies the capture with
+                            // an `Err` and continues the frame loop
+                            // (the user can retry without crashing
+                            // the chassis).
+                            let mut pre_failed: Option<String> = None;
+                            for rx in req.pre_settlements {
+                                if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                                    pre_failed = Some(
+                                        "capture pre-mail chain failed to settle within 5s — \
+                                         a downstream cap is wedged"
+                                            .to_owned(),
+                                    );
+                                    break;
+                                }
+                            }
+                            let result = match pre_failed {
+                                Some(error) => CaptureFrameResult::Err { error },
+                                None => match gpu.render_and_capture() {
+                                    Ok(png) => CaptureFrameResult::Ok { png },
+                                    Err(error) => CaptureFrameResult::Err { error },
+                                },
                             };
                             for mail in req.after_mails {
                                 self.queue.push(mail);
