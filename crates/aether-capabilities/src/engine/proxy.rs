@@ -279,7 +279,7 @@ mod proxy_native {
             let on_frame = move || {
                 wake_mailer.push(Mail::new(self_mailbox, wake_kind, Vec::new(), 1));
             };
-            match RpcClient::connect(
+            return match RpcClient::connect(
                 addr,
                 PeerKind::Client {
                     client_name: "aether.engine.proxy".to_owned(),
@@ -287,15 +287,15 @@ mod proxy_native {
                 },
                 on_frame,
             ) {
-                Ok(conn) => return Ok(conn),
+                Ok(conn) => Ok(conn),
                 Err(e) => {
                     if retry && is_transient_connect_error(&e) && Instant::now() < deadline {
                         std::thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
                         continue;
                     }
-                    return Err(e);
+                    Err(e)
                 }
-            }
+            };
         }
     }
 

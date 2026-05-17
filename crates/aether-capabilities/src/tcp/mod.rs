@@ -229,11 +229,11 @@ pub trait TcpNativeExt {
     /// returned handle inherits the parent mailbox's `'a` binding ref
     /// so `.send::<K>(&mail)` dispatches through the same
     /// `NativeBinding` without re-threading the ctx.
-    fn listener<'a, R: Actor>(&'a self, name: &str) -> NativeActorMailbox<'a, R>;
+    fn listener<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 
     /// Resolve a typed session-instance mailbox. See
     /// [`TcpFfiExt::session`] for the addressing rationale.
-    fn session<'a, R: Actor>(&'a self, name: &str) -> NativeActorMailbox<'a, R>;
+    fn session<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -266,10 +266,10 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
         self.session::<TcpSessionActor>(session_name)
             .send(&SessionClose::default());
     }
-    fn listener<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
+    fn listener<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         self.resolve_peer::<R>(&format!("{}:{}", TcpListenerActor::NAMESPACE, name))
     }
-    fn session<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
+    fn session<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         self.resolve_peer::<R>(&format!("{}:{}", TcpSessionActor::NAMESPACE, name))
     }
 }

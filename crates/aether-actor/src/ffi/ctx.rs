@@ -334,8 +334,8 @@ impl FfiDropCtx<'_> {
     /// unrecoverable state.
     pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
         let status = PERSIST_BRIDGE.save_state(version, bytes);
-        assert!(
-            status == 0,
+        assert_eq!(
+            status, 0,
             "aether-actor: save_state failed (status {status})"
         );
     }
@@ -387,8 +387,8 @@ impl MailSender for FfiDropCtx<'_> {
 impl Persistence for FfiDropCtx<'_> {
     fn save_state(&mut self, version: u32, bytes: &[u8]) {
         let status = PERSIST_BRIDGE.save_state(version, bytes);
-        assert!(
-            status == 0,
+        assert_eq!(
+            status, 0,
             "aether-actor: save_state failed (status {status})"
         );
     }

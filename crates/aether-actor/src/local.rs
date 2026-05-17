@@ -236,7 +236,7 @@ mod native_impl {
 
     impl Drop for StampGuard {
         fn drop(&mut self) {
-            CURRENT_SLOTS.with(|slot| slot.set(self.prev));
+            CURRENT_SLOTS.set(self.prev);
         }
     }
 

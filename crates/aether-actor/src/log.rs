@@ -248,14 +248,14 @@ struct PipelineGuard;
 
 impl PipelineGuard {
     fn enter() -> Self {
-        pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.set(true));
+        pipeline_tls::IN_LOG_PIPELINE.set(true);
         Self
     }
 }
 
 impl Drop for PipelineGuard {
     fn drop(&mut self) {
-        pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.set(false));
+        pipeline_tls::IN_LOG_PIPELINE.set(false);
     }
 }
 

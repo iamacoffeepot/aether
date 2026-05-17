@@ -83,12 +83,12 @@ pub trait ComponentHostNativeExt {
     /// Resolve a typed peer-component mailbox for the loaded component
     /// named `name`. The full mailbox address is
     /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`.
-    fn loaded<'a, R: Actor>(&'a self, name: &str) -> NativeActorMailbox<'a, R>;
+    fn loaded<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
+    fn loaded<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         self.resolve_peer::<R>(&format!("{}:{}", WasmTrampoline::NAMESPACE, name))
     }
 }

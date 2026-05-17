@@ -407,7 +407,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
         if !seen.insert(pair) {
             continue;
         }
-        let cos = (n0).dot(n1);
+        let cos = n0.dot(n1);
         if cos < tol::FOLD_COS {
             out.push(GeometryViolation::FoldedNormals {
                 v0: from_key(*a),
@@ -468,8 +468,8 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     for (a_key, b_key) in &edges {
         let a = from_key(*a_key);
         let b = from_key(*b_key);
-        let ab = (b) - (a);
-        let ab_len_sq = (ab).dot(ab);
+        let ab = b - a;
+        let ab_len_sq = ab.dot(ab);
         if ab_len_sq <= 0.0 {
             continue;
         }
@@ -477,8 +477,8 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
             if *v_key == *a_key || *v_key == *b_key {
                 continue;
             }
-            let av = (*v) - (a);
-            let t = (av).dot(ab) / ab_len_sq;
+            let av = *v - a;
+            let t = av.dot(ab) / ab_len_sq;
             // Open interior — exclude endpoints by a small parametric margin
             // proportional to the snap tolerance vs. edge length.
             let margin = (tol::T_JUNCTION / ab_len_sq.sqrt()).min(0.5);

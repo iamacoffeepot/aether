@@ -346,8 +346,8 @@ mod tests {
             *counts.entry(v).or_insert(0) += 1;
         }
         for (&v, &c) in &counts {
-            assert!(
-                c == 1,
+            assert_eq!(
+                c, 1,
                 "vertex {v} appears {c} times in repaired polygon {target:?} — spike emitted"
             );
         }
