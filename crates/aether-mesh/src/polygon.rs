@@ -1,3 +1,7 @@
+// Polygon math: bounded vertex counts cast to f32 for centroid /
+// averaging, scalar accumulators that don't benefit from FMA.
+#![allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
+
 //! Public n-gon polygon API (ADR-0057).
 //!
 //! `Polygon` is the canonical mesh form for the engine — one `Polygon`

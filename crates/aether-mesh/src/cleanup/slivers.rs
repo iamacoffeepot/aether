@@ -1,3 +1,8 @@
+// Integer-grid arithmetic: `i32 → i64 → i128` widenings on snapped
+// fixed-point coordinates feed the exact predicates that classify
+// sliver pairs. The widening is structurally lossless.
+#![allow(clippy::cast_lossless)]
+
 //! Pass 4: sliver-edge removal.
 //!
 //! After T-junction repair, off-axis CSG can still leave polygons with

@@ -1,3 +1,15 @@
+// Mesh debug math: bounded counts cast to f32 for averaging, scalar
+// accumulators that don't benefit from FMA, and single-letter names
+// for edge / vertex / face math are canonical. `cast_possible_truncation`
+// fires on the bounded `usize` vertex/face counts cast to `u32` for
+// debug counter formatting.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops,
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation
+)]
+
 //! Debug + invariant-checking tools for the polygon-domain mesh
 //! pipeline (ADR-0057). Used by regression tests and on-demand from
 //! the editor to diagnose topology issues without round-tripping

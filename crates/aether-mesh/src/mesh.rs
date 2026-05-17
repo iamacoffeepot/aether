@@ -1,3 +1,15 @@
+// Mesh primitives are domain math: bounded integer counts cast to f32,
+// scalar accumulators that don't benefit from FMA, and `a`/`b`/`c`/`d`
+// for triangle vertices and matrix elements are the canonical vocabulary.
+// `cast_lossless` fires on the routine `i32 → i64` widening into the
+// exact-arithmetic integer-grid coord pipeline.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops,
+    clippy::many_single_char_names,
+    clippy::cast_lossless
+)]
+
 //! Mesh a typed AST into a triangle list.
 //!
 //! Full v1 vocabulary per ADR-0026 + ADR-0051: primitives `box`,

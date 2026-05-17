@@ -1,3 +1,7 @@
+// Camera math: bounded tick counts cast to f32 for orbit angle
+// accumulation are domain-correct.
+#![allow(clippy::cast_precision_loss)]
+
 //! Multi-camera runtime. Hosts N named cameras (each in one of two
 //! modes — orbit or orthographic top-down), advances every camera each
 //! tick, and publishes the active camera's `view_proj` to

@@ -1,3 +1,7 @@
+// Tessellation math: bounded vertex counts cast to f32 for fan
+// triangulation indices are domain-correct.
+#![allow(clippy::cast_precision_loss)]
+
 //! Polygon → triangle conversion for the wire `Vec<Triangle>` path.
 //!
 //! Splits cleanly off the `cleanup` module: cleanup's job is to *fix*

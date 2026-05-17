@@ -1,3 +1,6 @@
+// Mesh simplification: scalar accumulators that don't benefit from FMA.
+#![allow(clippy::suboptimal_flops)]
+
 //! AST simplification: pure `Node → Node` rewrites that preserve the
 //! mesh result while reducing work the mesher has to do.
 //!

@@ -1,3 +1,9 @@
+// Coplanar merge: single-letter `a` / `b` for directed-edge twins is
+// the canonical edge-cancellation vocabulary. `cast_lossless` fires on
+// the routine `i32 → i64` widening of integer-grid edge components
+// fed into the exact-arithmetic merge predicates.
+#![allow(clippy::many_single_char_names, clippy::cast_lossless)]
+
 //! Pass 2: coplanar polygon merging — emits boundary loops as n-gons.
 //!
 //! Groups polygons by `(Plane3, color)` and runs a single directed-edge
