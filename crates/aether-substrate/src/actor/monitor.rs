@@ -53,6 +53,7 @@ impl MonitorHandle {
 
     /// The target this handle is monitoring. Useful for handlers that
     /// hold many handles and need to identify which one fired a notice.
+    #[must_use]
     pub fn target(&self) -> aether_data::MailboxId {
         self.target
     }

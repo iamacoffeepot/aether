@@ -57,6 +57,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
 
     /// The receiver's typed mailbox id. Exposed for callers that need
     /// it for diagnostics or a host fn the SDK doesn't yet wrap.
+    #[must_use]
     pub fn mailbox_id(&self) -> aether_data::MailboxId {
         aether_data::MailboxId(self.mailbox)
     }
@@ -68,6 +69,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// ctx) can hand back peer handles without rethreading the ctx.
     /// Threads the existing `'a` binding ref, so the returned handle
     /// inherits the parent mailbox's borrow lifetime.
+    #[must_use]
     pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }

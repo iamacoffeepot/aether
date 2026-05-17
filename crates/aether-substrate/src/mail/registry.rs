@@ -79,6 +79,7 @@ pub(crate) fn test_owned_dispatch(
 /// the Inline variant (e.g. asserting bracket recording paths)
 /// build their own `Arc::new(|_d: MailDispatch<'_>| {}) as
 /// Arc<dyn InlineHandler>`.
+#[must_use]
 pub fn noop_handler() -> Arc<dyn InboxHandler> {
     Arc::new(|_dispatch: OwnedDispatch| {})
 }
@@ -419,6 +420,7 @@ impl fmt::Display for DropError {
 impl std::error::Error for DropError {}
 
 impl Registry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(Inner::default()),

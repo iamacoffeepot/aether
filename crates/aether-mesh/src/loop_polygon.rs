@@ -26,6 +26,7 @@ const SPANNING: i32 = 3;
 impl Polygon {
     /// Construct a polygon from a triangle. Returns `None` if the input
     /// is degenerate (collinear vertices → zero-normal plane).
+    #[must_use]
     pub fn from_triangle(v0: Point3, v1: Point3, v2: Point3, color: u32) -> Option<Self> {
         let plane = Plane3::from_points(v0, v1, v2);
         if plane.is_degenerate() {

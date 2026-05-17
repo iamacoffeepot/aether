@@ -113,6 +113,7 @@ impl SettlementRegistry {
     /// the chassis context (subscribers reach for it) and the
     /// `Mailer` chassis-router closure (the `Settled` mail dispatch
     /// fires it).
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

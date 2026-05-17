@@ -169,6 +169,7 @@ impl<'a> DriverCtx<'a> {
         self.inner.claim_mailbox_with_override(name)
     }
 
+    #[must_use]
     pub fn mail_send_handle(&self) -> Arc<Mailer> {
         self.inner.mail_send_handle()
     }
@@ -186,6 +187,7 @@ impl<'a> DriverCtx<'a> {
     /// Returns an empty vec on chassis with no frame-bound
     /// capabilities (today: the headless chassis without render); in
     /// that case the per-frame call is a fast no-op.
+    #[must_use]
     pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
         self.inner.frame_bound_pending().to_vec()
     }
@@ -196,6 +198,7 @@ impl<'a> DriverCtx<'a> {
     /// chassis). Drivers use this to pull `RenderHandles` and similar
     /// driver-facing sub-handle bundles without reaching for the cap
     /// itself.
+    #[must_use]
     pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
         self.handles.get::<H>()
     }
@@ -838,6 +841,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// this before `build()` so a cross-class `wait_reply` violation
     /// broadcasts `SubstrateDying` before process exit. Single-call: a
     /// second invocation overwrites the prior aborter.
+    #[must_use]
     pub fn with_aborter(mut self, aborter: Arc<dyn FatalAborter>) -> Self {
         self.aborter = aborter;
         self
@@ -848,6 +852,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// `Some(n)` plumbs `n` into the pool at boot. `Some(0)` is
     /// clamped to 1 since the pool requires at least one worker. The
     /// override can be applied either before or after `.driver(_)`.
+    #[must_use]
     pub fn with_workers(mut self, workers: Option<usize>) -> Self {
         self.workers = workers.map(|n| n.max(1));
         self
@@ -857,6 +862,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// substrate consults for envelopes whose mailbox name doesn't
     /// resolve. Multiple calls collapse to a `BootError` at
     /// `build()` (single-claim invariant).
+    #[must_use]
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
         self.passives
             .push(Box::new(FallbackRouterBoot::new(handler)));
@@ -873,6 +879,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// and after `.driver(_)` boot together before the driver runs.
     /// Init-time peer lookups via `ctx.actor::<EarlierCap>()` see
     /// every cap inserted earlier in the chain.
+    #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
         A: NativeActor + NativeDispatch,
@@ -894,6 +901,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// dispatched, actors keep their default unset slot, and
     /// `drain_buffer` is a silent no-op (chassis intentionally
     /// skipping logging).
+    #[must_use]
     pub fn with_log_drain<T>(mut self) -> Self
     where
         T: NativeActor + HandlesKind<LogBatch>,
@@ -955,6 +963,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
 impl<C: Chassis> Builder<C, HasDriver> {
     /// Register a fallback router after the driver was supplied.
     /// Booted before the driver in declaration order.
+    #[must_use]
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
         self.passives
             .push(Box::new(FallbackRouterBoot::new(handler)));
@@ -965,6 +974,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// for the post-driver state — same semantics, accepted because
     /// declaration-order before/after `.driver(_)` doesn't change
     /// boot order (passives boot before the driver regardless).
+    #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
         A: NativeActor + NativeDispatch,
@@ -976,6 +986,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
 
     /// Mirror of [`Builder::with_log_drain`][Builder<C, NoDriver>::with_log_drain]
     /// for the post-driver state. Issue #601.
+    #[must_use]
     pub fn with_log_drain<T>(mut self) -> Self
     where
         T: NativeActor + HandlesKind<LogBatch>,
@@ -986,6 +997,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
 
     /// Mirror of [`Builder::with_workers`][Builder<C, NoDriver>::with_workers]
     /// for the post-driver state. Issue 745.
+    #[must_use]
     pub fn with_workers(mut self, workers: Option<usize>) -> Self {
         self.workers = workers.map(|n| n.max(1));
         self

@@ -78,12 +78,14 @@ impl<A> InheritCtx<A> {
 
     /// The in-flight `MailId` this ctx inherited from its spawning
     /// handler. Outbound sends use this as `parent_mail`.
+    #[must_use]
     pub fn inherited_mail_id(&self) -> MailId {
         self.inherited_mail_id
     }
 
     /// The chain root this ctx inherited from its spawning handler.
     /// Outbound sends inherit this as their `root`.
+    #[must_use]
     pub fn inherited_root(&self) -> MailId {
         self.inherited_root
     }

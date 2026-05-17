@@ -120,6 +120,7 @@ pub enum ManifoldViolation {
 /// Walk every directed edge across every polygon (outer + holes) and
 /// flag manifold violations. A closed manifold mesh should produce an
 /// empty Vec.
+#[must_use]
 pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
     let mut directed: HashMap<(VertKey, VertKey), usize> = HashMap::new();
 
@@ -258,6 +259,7 @@ fn projected_area(verts: &[Vec3], n: Vec3) -> f32 {
 /// of the polygon's stored plane. Plane is taken from the stored
 /// `plane_normal` plus the centroid of the outer loop as the in-plane
 /// reference point — both are what downstream rendering trusts.
+#[must_use]
 pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     let mut out = Vec::new();
     for (i, poly) in polygons.iter().enumerate() {
@@ -295,6 +297,7 @@ pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
 /// Polygon shape sanity: signed-area degeneracy, sliver edges, and
 /// extreme aspect ratio. These don't break manifoldness on paper but
 /// they're failure modes for `tessellate_polygon` and the BSP core.
+#[must_use]
 pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     let mut out = Vec::new();
     for (i, poly) in polygons.iter().enumerate() {
@@ -348,6 +351,7 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
 /// antiparallel (`dot < tol::FOLD_COS`). Antiparallel = the surface is
 /// folded back on itself at this edge, which means CSG misclassified
 /// inside vs outside on one of the two faces.
+#[must_use]
 pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     // Map: canonical (snapped) edge → list of (polygon_index, normal).
     type EdgeIncidents = HashMap<(VertKey, VertKey), Vec<(usize, Vec3)>>;
@@ -407,6 +411,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
 /// `tol::T_JUNCTION` of the open segment interior, flag a T-junction.
 /// Cleanup should have inserted V as an explicit vertex of (A, B)'s
 /// owning loop; missing it produces render-visible cracks.
+#[must_use]
 pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     // Collect every distinct vertex (snap-key + f32 coords for reporting).
     let mut all_verts: HashMap<VertKey, Vec3> = HashMap::new();
@@ -487,6 +492,7 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
 /// Run [`validate_manifold`] plus all four geometric validators.
 /// Returned tuple keeps manifold and geometric violations separate so
 /// callers can attribute failures cleanly.
+#[must_use]
 pub fn validate_geometry(polygons: &[Polygon]) -> (Vec<ManifoldViolation>, Vec<GeometryViolation>) {
     let manifold = validate_manifold(polygons);
     let mut geom = Vec::new();
@@ -513,6 +519,7 @@ pub struct Summary {
     pub by_plane_direction: HashMap<(i8, i8, i8), usize>,
 }
 
+#[must_use]
 pub fn summary(polygons: &[Polygon]) -> Summary {
     let polygon_count = polygons.len();
     let triangle_count_after_fan = polygons
@@ -559,6 +566,7 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
 
 /// Human-readable per-polygon dump. One line per polygon: index,
 /// color, plane normal, vertex count, hole count, centroid.
+#[must_use]
 pub fn dump(polygons: &[Polygon]) -> String {
     let mut out = String::new();
     for (i, p) in polygons.iter().enumerate() {
@@ -586,6 +594,7 @@ pub fn dump(polygons: &[Polygon]) -> String {
 ///     report(&polys)
 /// );
 /// ```
+#[must_use]
 pub fn report(polygons: &[Polygon]) -> String {
     let violations = validate_manifold(polygons);
     let summ = summary(polygons);

@@ -60,6 +60,7 @@ pub fn f32_to_fixed(value: f32) -> Result<i32, FixedError> {
 
 /// Convert a 16:16 fixed-point value back to `f32`. Lossless for
 /// in-range CSG outputs (the snapped i32 fits in f32's mantissa).
+#[must_use]
 pub fn fixed_to_f32(value: i32) -> f32 {
     (f64::from(value) / SCALE) as f32
 }

@@ -50,6 +50,7 @@ pub struct Pipeline {
 /// the [`Targets`] colour target the pass attaches to. `polygon_mode`
 /// controls fill vs line at construction — desktop sets `Line` when
 /// `AETHER_WIREFRAME=line`; everything else passes `Fill`.
+#[must_use]
 pub fn build_main_pipeline(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

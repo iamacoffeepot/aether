@@ -190,6 +190,7 @@ impl NativeBinding {
     /// guard is a no-op for non-frame-bound callers and the
     /// PanicAborter default is harmless for production caps that
     /// never call `wait_reply`.
+    #[must_use]
     pub fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId, frame_bound: bool) -> Self {
         Self::new(
             ctx.mail_send_handle(),

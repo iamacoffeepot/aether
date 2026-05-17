@@ -47,6 +47,7 @@ impl Targets {
     /// `Rgba8UnormSrgb` since there's no surface to query. Width and
     /// height are clamped to a minimum of 1 — wgpu rejects zero
     /// dimensions.
+    #[must_use]
     pub fn new(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
@@ -76,11 +77,13 @@ impl Targets {
     }
 
     /// Width of the current offscreen color target.
+    #[must_use]
     pub fn width(&self) -> u32 {
         self.offscreen.width
     }
 
     /// Height of the current offscreen color target.
+    #[must_use]
     pub fn height(&self) -> u32 {
         self.offscreen.height
     }
@@ -88,18 +91,21 @@ impl Targets {
     /// The `wgpu::TextureView` the main render pass attaches to.
     /// Exposed for chassis-side passes that want to draw into the
     /// same offscreen (e.g. test-bench's diagnostic clears).
+    #[must_use]
     pub fn color_view(&self) -> &wgpu::TextureView {
         &self.offscreen.view
     }
 
     /// The offscreen color texture itself. Desktop reaches for this
     /// to encode a `copy_texture_to_texture` blit onto the swapchain.
+    #[must_use]
     pub fn color_texture(&self) -> &wgpu::Texture {
         &self.offscreen.texture
     }
 
     /// Format the offscreen was created with. Capture's BGRA-vs-RGBA
     /// decision keys on this.
+    #[must_use]
     pub fn color_format(&self) -> wgpu::TextureFormat {
         self.color_format
     }

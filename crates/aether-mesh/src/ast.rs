@@ -115,6 +115,7 @@ pub enum Axis {
 }
 
 impl Axis {
+    #[must_use]
     pub fn as_symbol(self) -> &'static str {
         match self {
             Axis::X => "x",
@@ -123,6 +124,7 @@ impl Axis {
         }
     }
 
+    #[must_use]
     pub fn from_symbol(sym: &str) -> Option<Self> {
         match sym {
             "x" => Some(Axis::X),
@@ -135,6 +137,7 @@ impl Axis {
     /// Component index of this axis (`X = 0, Y = 1, Z = 2`). Useful as
     /// the bridge between the typed enum and the index-keyed APIs in
     /// `aether_math` (e.g. `Aabb::mirror`).
+    #[must_use]
     pub fn index(self) -> usize {
         match self {
             Axis::X => 0,
