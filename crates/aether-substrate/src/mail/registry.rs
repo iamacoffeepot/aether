@@ -231,7 +231,7 @@ where
 {
     #[inline]
     fn dispatch(&self, dispatch: MailDispatch<'_>) {
-        self(dispatch)
+        self(dispatch);
     }
 }
 
@@ -241,7 +241,7 @@ where
 {
     #[inline]
     fn enqueue(&self, dispatch: OwnedDispatch) {
-        self(dispatch)
+        self(dispatch);
     }
 }
 
@@ -547,7 +547,9 @@ impl Registry {
                 self.notify_mailbox_change();
                 id
             }
-            Err(_) => panic!("mailbox name already registered: {name}"),
+            Err(NameConflict { name }) => {
+                panic!("mailbox name already registered: {name}")
+            }
         }
     }
 
@@ -606,7 +608,9 @@ impl Registry {
                 self.notify_mailbox_change();
                 id
             }
-            Err(_) => panic!("mailbox name already registered: {name}"),
+            Err(NameConflict { name }) => {
+                panic!("mailbox name already registered: {name}")
+            }
         }
     }
 

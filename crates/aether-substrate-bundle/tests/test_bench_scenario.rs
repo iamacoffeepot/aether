@@ -430,7 +430,7 @@ fn io_delete_removes_written_file() {
             FS_MAILBOX,
             &Read {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path,
+                path,
             },
         )
         .expect("read-after-delete reply");

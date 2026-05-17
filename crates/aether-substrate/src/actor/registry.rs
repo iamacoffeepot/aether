@@ -242,22 +242,21 @@ impl ActorRegistry {
         subname: String,
     ) -> Result<(), ()> {
         let mut actors = self.actors.write().unwrap();
-        match actors.get(&id) {
-            Some(ActorEntry::Live { .. }) => Err(()),
+        if let Some(ActorEntry::Live { .. }) = actors.get(&id) {
+            Err(())
+        } else {
             // `Dead` slot or empty: install the live entry. Phase 4
             // populates `Dead` on close, but Phase 3 only ever sees
             // empty slots.
-            _ => {
-                actors.insert(
-                    id,
-                    ActorEntry::Live {
-                        sender,
-                        type_id,
-                        subname,
-                    },
-                );
-                Ok(())
-            }
+            actors.insert(
+                id,
+                ActorEntry::Live {
+                    sender,
+                    type_id,
+                    subname,
+                },
+            );
+            Ok(())
         }
     }
 

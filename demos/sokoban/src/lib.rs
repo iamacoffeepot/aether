@@ -394,12 +394,12 @@ impl Sokoban {
         for y in 0..h {
             for x in 0..w {
                 let kind = cell_at(&self.state, x as u32, y as u32);
-                let (r, g, b) = cell_color(kind);
+                let color = cell_color(kind);
                 let x0 = (x as f32).mul_add(cell, origin_x);
                 let x1 = x0 + cell;
                 let y0 = (y as f32).mul_add(-cell, origin_y);
                 let y1 = y0 - cell;
-                fill_quad_triangle_pair(&mut tris, n, [x0, x1, y0, y1], 0.0, [r, g, b]);
+                fill_quad_triangle_pair(&mut tris, n, [x0, x1, y0, y1], 0.0, color);
                 n += 2;
             }
         }
@@ -468,14 +468,14 @@ fn step_delta(code: u32) -> Option<(i32, i32)> {
     }
 }
 
-fn cell_color(cell: u8) -> (f32, f32, f32) {
+fn cell_color(cell: u8) -> [f32; 3] {
     match cell {
-        CELL_WALL => (0.08, 0.08, 0.12),
-        CELL_FLOOR => (0.18, 0.18, 0.22),
-        CELL_TARGET => (0.35, 0.22, 0.10),
-        CELL_BOX => (0.65, 0.50, 0.28),
-        CELL_BOX_ON_TARGET => (0.30, 0.70, 0.35),
-        _ => (0.0, 0.0, 0.0),
+        CELL_WALL => [0.08, 0.08, 0.12],
+        CELL_FLOOR => [0.18, 0.18, 0.22],
+        CELL_TARGET => [0.35, 0.22, 0.10],
+        CELL_BOX => [0.65, 0.50, 0.28],
+        CELL_BOX_ON_TARGET => [0.30, 0.70, 0.35],
+        _ => [0.0, 0.0, 0.0],
     }
 }
 

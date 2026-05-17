@@ -291,17 +291,14 @@ where
             .actor
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let actor = match actor_guard.as_mut() {
-            Some(a) => a,
-            None => {
-                // Slot already finalized. Nothing to do.
-                drop(actor_guard);
-                self.state.mark_idle();
-                // Issue 714: a wait that came in after the close cycle
-                // already ran needs the signal too.
-                self.fire_close_done();
-                return CycleResult::Closed;
-            }
+        let Some(actor) = actor_guard.as_mut() else {
+            // Slot already finalized. Nothing to do.
+            drop(actor_guard);
+            self.state.mark_idle();
+            // Issue 714: a wait that came in after the close cycle
+            // already ran needs the signal too.
+            self.fire_close_done();
+            return CycleResult::Closed;
         };
 
         let mut dispatched = 0u32;
@@ -313,12 +310,9 @@ where
                 shutdown_observed = true;
                 break;
             }
-            let env = match self.binding.try_recv() {
-                Some(e) => e,
-                None => {
-                    inbox_empty = true;
-                    break;
-                }
+            let Some(env) = self.binding.try_recv() else {
+                inbox_empty = true;
+                break;
             };
             self.dispatch_one(actor, env);
             dispatched += 1;
@@ -384,7 +378,7 @@ where
         }
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         self.label
     }
 

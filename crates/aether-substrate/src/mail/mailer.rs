@@ -298,15 +298,14 @@ fn route_mail(
             let thread_name = std::thread::current().name().map(str::to_owned);
             crate::runtime::trace::record_received(inbound_mail_id, thread_name);
             router(mail);
-            crate::runtime::trace::record_finished(inbound_mail_id);
         } else {
             tracing::warn!(
                 target: "aether_substrate::queue",
                 kind = %mail.kind,
                 "chassis-addressed mail dropped — no chassis router installed",
             );
-            crate::runtime::trace::record_finished(inbound_mail_id);
         }
+        crate::runtime::trace::record_finished(inbound_mail_id);
         return;
     }
 

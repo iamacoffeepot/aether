@@ -364,7 +364,7 @@ impl FfiActor for CameraComponent {
     #[handler]
     fn on_set_mode(&mut self, _ctx: &mut FfiCtx<'_>, msg: CameraSetMode) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
-            cam.mode = ModeState::from_init(&msg.mode)
+            cam.mode = ModeState::from_init(&msg.mode);
         } else {
             tracing::warn!(
                 target: "aether_camera",

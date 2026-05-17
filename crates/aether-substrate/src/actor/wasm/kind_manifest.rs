@@ -113,7 +113,7 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
                 reader.data(),
                 &mut labels_list,
             )?,
-            _ => continue,
+            _ => {}
         }
     }
 
@@ -487,14 +487,25 @@ mod tests {
     use super::*;
     use aether_data::{LabelCell, LabelNode, Primitive, SchemaShape, VariantShape};
     fn wasm_with_section(section_name: &str, section: &[u8]) -> Vec<u8> {
-        let escaped: String = section.iter().map(|b| format!("\\{b:02x}")).collect();
+        use core::fmt::Write as _;
+        let mut escaped = String::with_capacity(section.len() * 3);
+        for b in section {
+            write!(&mut escaped, "\\{b:02x}").expect("write to String");
+        }
         let wat =
             format!(r#"(module (@custom "{section_name}" "{escaped}") (func (export "noop")))"#);
         wat::parse_str(wat).unwrap()
     }
 
     fn wasm_with_two_sections(canonical: &[u8], labels: &[u8]) -> Vec<u8> {
-        let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
+        use core::fmt::Write as _;
+        let esc = |bs: &[u8]| -> String {
+            let mut s = String::with_capacity(bs.len() * 3);
+            for b in bs {
+                write!(&mut s, "\\{b:02x}").expect("write to String");
+            }
+            s
+        };
         let wat = format!(
             r#"(module
                 (@custom "{MANIFEST_SECTION}" "{}")

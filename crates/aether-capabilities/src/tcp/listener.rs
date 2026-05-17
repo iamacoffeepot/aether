@@ -122,11 +122,8 @@ mod listener_native {
                             // payload (postcard encodes a unit
                             // struct as zero bytes).
                             mailer.push(Mail::new(self_id, connection_ready_kind, Vec::new(), 1));
-                        } else {
-                            if shutdown_for_thread.load(Ordering::Acquire) {
-                                break;
-                            }
-                            continue;
+                        } else if shutdown_for_thread.load(Ordering::Acquire) {
+                            break;
                         }
                     }
                 })

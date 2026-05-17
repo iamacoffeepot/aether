@@ -9,7 +9,7 @@
 //!     stubs (the only place the `_p32` symbols are named).
 //!   - [`bridge`] — per-concern ZST dispatch surfaces ([`MAIL_BRIDGE`],
 //!     [`PERSIST_BRIDGE`], [`SYNC_WAIT_BRIDGE`]). Each ZST owns one FFI op family
-//!     and forwards inherent methods to the matching [`raw`]`::*`
+//!     and forwards inherent methods to the matching `raw::*`
 //!     host fn. Issue 665 split the prior monolithic
 //!     `MailTransport`-impl ZST into these per-concern bridges so
 //!     persistence isn't mixed with mail and sync-wait isn't mixed

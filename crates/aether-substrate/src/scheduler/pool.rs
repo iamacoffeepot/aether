@@ -225,7 +225,7 @@ fn worker_loop(
         let budget = template.build();
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
         match result {
-            Ok(CycleResult::Idle) | Ok(CycleResult::Closed) => {
+            Ok(CycleResult::Idle | CycleResult::Closed) => {
                 // Slot done for now; drop the popped Arc. The chassis
                 // registry's strong reference keeps the slot alive for
                 // future wakes (or its drop, in the Closed case).

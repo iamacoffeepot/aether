@@ -160,15 +160,12 @@ fn process_bucket(
     let boundary = boundary_edges_after_twin_cancellation(&directed);
 
     let plane = polygons[bucket[0]].plane;
-    let loops = match extract_loops(&boundary, vertices, &plane) {
-        Some(l) => l,
-        // Pathological boundary topology — pass through originals.
-        None => {
-            for &pid in bucket {
-                out.push(polygons[pid].clone());
-            }
-            return;
+    // Pathological boundary topology — pass through originals.
+    let Some(loops) = extract_loops(&boundary, vertices, &plane) else {
+        for &pid in bucket {
+            out.push(polygons[pid].clone());
         }
+        return;
     };
 
     let color = polygons[bucket[0]].color;

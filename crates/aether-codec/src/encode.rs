@@ -252,14 +252,12 @@ fn encode_postcard(
             // tuple/struct variants, `"VariantName"` (string) for unit
             // variants. Same shape serde emits by default.
             let (tag, body) = decode_enum_tag(value, path)?;
-            let variant =
-                variants
-                    .iter()
-                    .find(|v| v.name() == tag)
-                    .ok_or(EncodeError::TypeMismatch {
-                        field: path.to_owned(),
-                        expected: "enum variant matching schema",
-                    })?;
+            let variant = variants.iter().find(|v| v.name() == tag).ok_or_else(|| {
+                EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "enum variant matching schema",
+                }
+            })?;
             write_varint_u64(out, u64::from(variant.discriminant()));
             encode_enum_body(body, variant, path, out)?;
             Ok(())

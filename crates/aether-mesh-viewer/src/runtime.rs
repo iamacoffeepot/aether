@@ -161,9 +161,10 @@ impl FfiActor for MeshViewer {
             );
             return;
         };
-        if path.ends_with(".dsl") {
+        let lower = path.rsplit('.').next().map(str::to_ascii_lowercase);
+        if lower.as_deref() == Some("dsl") {
             self.try_replace_dsl(text);
-        } else if path.ends_with(".obj") {
+        } else if lower.as_deref() == Some("obj") {
             self.try_replace_obj(text);
         } else {
             tracing::warn!(

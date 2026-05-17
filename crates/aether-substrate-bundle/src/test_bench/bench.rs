@@ -647,7 +647,6 @@ impl TestBench {
                     }
                     // Reply for a different cid (rare; out-of-order).
                     self.stashed_replies.insert(event_cid, event);
-                    continue;
                 }
                 // Other untracked emission (kinds_changed,
                 // mailboxes_changed, log_batch). Ignored — only
