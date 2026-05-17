@@ -139,7 +139,14 @@ impl<'a> SubstrateBootBuilder<'a> {
         // today; the sink is structured as a general diagnostic
         // channel so future diagnostic kinds can land here without
         // needing another sink.
-        registry.register_closure(
+        //
+        // Issue 838: registered as `Sink` (not `Closure`) so the
+        // `Mailer::push` route brackets the inline handler with
+        // `Received`/`Finished`. The handler runs synchronously
+        // (just emits a `tracing::warn!`) — there's no actor
+        // dispatch loop behind it, so without the bracket the
+        // chain's `in_flight` would leak.
+        registry.register_sink(
             AETHER_DIAGNOSTICS,
             Arc::new(|dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let kind_name = dispatch.kind_name;

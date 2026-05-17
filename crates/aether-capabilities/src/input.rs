@@ -193,15 +193,17 @@ mod native {
     }
 
     /// Shared validation: the mailbox id must name a live (non-dropped)
-    /// closure-bound mailbox. Issue 634 Phase 4 collapsed Component
+    /// dispatchable mailbox. Issue 634 Phase 4 collapsed Component
     /// and chassis-bound mailboxes into a single `Closure` variant —
     /// trampolines and chassis caps both pass this check today.
-    /// Production callers (the input stream fan-out) only address
-    /// trampoline mailboxes here; chassis caps don't subscribe to
-    /// themselves.
+    /// Issue 838 added a `Sink` variant (synchronous-handler
+    /// mailboxes); production callers (the input stream fan-out)
+    /// only address trampoline mailboxes here, but accepting `Sink`
+    /// too keeps the check from rejecting legitimate sync-handler
+    /// subscribers if any future driver wants one.
     fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
         match registry.entry(id) {
-            Some(MailboxEntry::Closure(_)) => Ok(()),
+            Some(MailboxEntry::Closure(_)) | Some(MailboxEntry::Sink(_)) => Ok(()),
             Some(MailboxEntry::Dropped) => Err(format!("mailbox {:?} already dropped", id)),
             None => Err(format!("unknown mailbox id {:?}", id)),
         }

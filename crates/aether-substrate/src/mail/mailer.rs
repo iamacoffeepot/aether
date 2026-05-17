@@ -363,20 +363,18 @@ fn route_mail(
             // and never enter `push`.
             //
             // ADR-0080 §2 producer-hook note (issue 838): no
-            // `Received`/`Finished` bracket fires here. The
-            // `Closure` arm is overloaded — it serves BOTH
-            // synchronous sinks (which would benefit from a bracket
-            // to balance the producer's `Sent`) AND actor-inbox
-            // enqueue closures registered by `spawn.rs::try_register_closure`
-            // (whose dispatch loop already records `Received`/
-            // `Finished` once the actor's worker picks the envelope
-            // up). Adding a bracket here would double-count
-            // `Finished` for the actor case and fire settlement
-            // prematurely. The structural fix is a new
-            // `MailboxEntry::Sink` variant for synchronous sinks —
-            // tracked as a follow-up; the warn-drop / Dropped /
-            // egress / chassis-router arms below close the other
-            // gaps issue 838 catalogued.
+            // `Received`/`Finished` bracket fires here. `Closure`
+            // is the actor-inbox-enqueue variant — the closure body
+            // pushes the envelope onto an mpsc inbox, and the
+            // actor's dispatch loop at `actor/native/dispatch.rs`
+            // records the bracket downstream when its worker picks
+            // the envelope up. Adding a bracket here would
+            // double-count `Finished` and fire settlement
+            // prematurely (surfaced by
+            // `aether-substrate-bundle::rpc_engine_routing` as
+            // ReplyEnd before ReplyEvent). Synchronous sinks live
+            // on the [`MailboxEntry::Sink`] arm below — they get
+            // the bracket because nothing downstream owns it.
             handler(MailDispatch {
                 kind: mail.kind,
                 kind_name: &kind_name,
@@ -388,6 +386,30 @@ fn route_mail(
                 root: mail.root,
                 parent_mail: mail.parent_mail,
             });
+        }
+        Some(MailboxEntry::Sink(handler)) => {
+            let kind_name = registry.kind_name(mail.kind).unwrap_or_default();
+            // ADR-0080 §2 producer hook: synchronous sink. Bracket
+            // the inline handler call with `Received`/`Finished`
+            // so the chain's `in_flight` balances and settlement
+            // subscribers wake (issue 838). Distinct from `Closure`
+            // above — see that arm's doc for the
+            // double-count-prematurely-settle hazard the split
+            // avoids.
+            let thread_name = std::thread::current().name().map(str::to_owned);
+            crate::runtime::trace::record_received(inbound_mail_id, thread_name);
+            handler(MailDispatch {
+                kind: mail.kind,
+                kind_name: &kind_name,
+                origin: None,
+                sender: mail.reply_to,
+                payload: &mail.payload,
+                count: mail.count,
+                mail_id: mail.mail_id,
+                root: mail.root,
+                parent_mail: mail.parent_mail,
+            });
+            crate::runtime::trace::record_finished(inbound_mail_id);
         }
         Some(MailboxEntry::Dropped) => {
             tracing::warn!(
@@ -840,5 +862,486 @@ mod tests {
             finished,
             "expected Finished after egress (per-engine settlement); got {events:?}"
         );
+    }
+
+    /// Issue 838 diff 2: synchronous-sink dispatch via the new `Sink`
+    /// arm runs the handler inline AND emits a `Received`/`Finished`
+    /// bracket so the chain's in_flight balances and settlement
+    /// subscribers wake. Mirrors what the actor-dispatch loop does
+    /// for `Closure` recipients, but on the pushing thread.
+    #[test]
+    fn sink_arm_brackets_handler_with_received_and_finished() {
+        let queue = ensure_trace_queue();
+        let sender = MailboxId(0x8380_0004_0000_0000);
+        let inbound_mail_id = MailId::new(sender, 1);
+
+        let (registry, mailer, _store) = make_mailer();
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_sink("test.838.sink", sink.handler());
+
+        let mail = Mail::new(sink_id, KindId(0xCAFE_BABE), vec![1, 2, 3], 1).with_lineage(
+            inbound_mail_id,
+            inbound_mail_id,
+            None,
+        );
+        mailer.push(mail);
+
+        assert_eq!(
+            sink.delivery_count.load(Ordering::SeqCst),
+            1,
+            "sink handler should have run"
+        );
+
+        let events = drain_events_for(&queue, sender);
+        let received = events.iter().any(
+            |e| matches!(e, TraceEvent::Received { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        let finished = events.iter().any(
+            |e| matches!(e, TraceEvent::Finished { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        assert!(
+            received,
+            "expected Received for sink dispatch; got {events:?}"
+        );
+        assert!(
+            finished,
+            "expected Finished for sink dispatch; got {events:?}"
+        );
+    }
+
+    /// Issue 838 diff 2 regression guard: actor-enqueue closure
+    /// dispatch via `Closure` MUST NOT emit Received/Finished from
+    /// the Mailer side. The actor's dispatch loop at
+    /// `actor/native/dispatch.rs:85` owns the bracket; doubling it
+    /// here fires settlement prematurely and breaks
+    /// `aether-substrate-bundle::rpc_engine_routing` (ReplyEnd
+    /// before ReplyEvent). This test pins the contract so a
+    /// future "let's add the bracket for symmetry" refactor fails
+    /// loudly.
+    #[test]
+    fn closure_arm_does_not_bracket_in_mailer() {
+        let queue = ensure_trace_queue();
+        let sender = MailboxId(0x8380_0005_0000_0000);
+        let inbound_mail_id = MailId::new(sender, 1);
+
+        let (registry, mailer, _store) = make_mailer();
+        let sink = CapturingSink::new();
+        // Register as `register_closure` (the actor-enqueue
+        // contract), NOT `register_sink`.
+        let recipient = registry.register_closure("test.838.closure_regression", sink.handler());
+
+        let mail = Mail::new(recipient, KindId(0xCAFE_BABE), vec![4, 5, 6], 1).with_lineage(
+            inbound_mail_id,
+            inbound_mail_id,
+            None,
+        );
+        mailer.push(mail);
+
+        // Handler still runs — that's how mail reaches the actor's
+        // mpsc inbox in production.
+        assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 1);
+
+        let events = drain_events_for(&queue, sender);
+        let received_from_mailer = events.iter().any(
+            |e| matches!(e, TraceEvent::Received { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        let finished_from_mailer = events.iter().any(
+            |e| matches!(e, TraceEvent::Finished { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        assert!(
+            !received_from_mailer,
+            "Closure arm must not emit Received from Mailer — actor dispatch loop owns it (issue 838 hazard). Got: {events:?}"
+        );
+        assert!(
+            !finished_from_mailer,
+            "Closure arm must not emit Finished from Mailer — actor dispatch loop owns it (issue 838 hazard). Got: {events:?}"
+        );
+    }
+
+    /// Issue 838 diff 2: mail that parks on a missing handle does
+    /// NOT emit Finished. The chain stays elevated until the
+    /// handle is published and the mail is replayed through
+    /// `Mailer::push`, at which point the now-resolved walk
+    /// reaches a terminal arm (Sink here) and that arm's bracket
+    /// fires. Pins "Parked is not Finished" — semantically
+    /// distinct from Ref-walk Err (which IS terminal and fires
+    /// Finished, covered by the existing
+    /// `malformed_ref_payload_drops_mail` plus the issue 839 Ref-
+    /// walk-Err Finished record).
+    #[test]
+    fn ref_walk_parked_defers_finished_until_handle_publish() {
+        use aether_data::HandleId;
+
+        let queue = ensure_trace_queue();
+        let sender = MailboxId(0x8380_0006_0000_0000);
+        let inbound_mail_id = MailId::new(sender, 1);
+
+        let (registry, mailer, store) = make_mailer();
+        // Register both kinds so the mailer walks the outer schema
+        // and the handle store recognises the inner one. The
+        // registry-derived kind id is what `Ref::Handle.kind_id`
+        // must carry (the walker's debug-assert compares stored
+        // kind_id == wire kind_id) — same pattern as the existing
+        // `handle_ref_parks_then_resolves_through_mailer` test.
+        let outer_kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: HeldNote::NAME.into(),
+                schema: held_note_schema(),
+            })
+            .unwrap();
+        let inner_kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: Note::NAME.into(),
+                schema: note_schema(),
+            })
+            .unwrap();
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_sink("test.838.park_defer", sink.handler());
+
+        // Build a payload that references a handle not yet in the
+        // store — the walker returns `Parked`, mail held.
+        let handle = HandleId(0x1234_5678_9ABC_DEF0);
+        let held: HeldNote = HeldNote {
+            held: Ref::Handle {
+                id: handle.0,
+                kind_id: inner_kind_id.0,
+            },
+            seq: 7,
+        };
+        let payload = postcard::to_allocvec(&held).unwrap();
+
+        let mail = Mail::new(sink_id, outer_kind_id, payload, 1).with_lineage(
+            inbound_mail_id,
+            inbound_mail_id,
+            None,
+        );
+        mailer.push(mail);
+
+        // Handler hasn't run; mail is parked. NO Finished yet.
+        assert_eq!(
+            sink.delivery_count.load(Ordering::SeqCst),
+            0,
+            "parked mail must not dispatch"
+        );
+        assert_eq!(
+            store.parked_count(handle),
+            1,
+            "mail should be parked under the missing handle"
+        );
+        let events_before_publish = drain_events_for(&queue, sender);
+        let finished_before = events_before_publish.iter().any(
+            |e| matches!(e, TraceEvent::Finished { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        assert!(
+            !finished_before,
+            "Parked mail must NOT emit Finished — the chain stays elevated until publish (issue 838). Got: {events_before_publish:?}"
+        );
+
+        // Publish the handle with matching `Note` bytes; resolve
+        // and replay through the mailer. The walker reruns,
+        // resolves the ref, and the sink's bracket fires.
+        let note = Note {
+            body: "hi".into(),
+            seq: 99,
+        };
+        let note_bytes = postcard::to_allocvec(&note).unwrap();
+        mailer
+            .resolve_handle(handle, inner_kind_id, note_bytes)
+            .expect("resolve_handle");
+
+        assert_eq!(
+            sink.delivery_count.load(Ordering::SeqCst),
+            1,
+            "after publish + replay, sink should have dispatched once"
+        );
+
+        let events_after = drain_events_for(&queue, sender);
+        let finished_after = events_after.iter().any(
+            |e| matches!(e, TraceEvent::Finished { mail_id, .. } if *mail_id == inbound_mail_id),
+        );
+        assert!(
+            finished_after,
+            "after publish, the resumed dispatch should have fired Finished. Got: {events_after:?}"
+        );
+    }
+
+    /// Issue 838 diff 2: exhaustive meta-test asserting every
+    /// `Mailer::push` short-circuit produces the correct ADR-0080
+    /// §2 lifecycle events for stamped (non-NONE) mail. The
+    /// `DispatchPath` enum mirrors the real dispatch surface; the
+    /// match below is exhaustive, so a contributor adding a new
+    /// path (a new `MailboxEntry` variant, a new `route_mail`
+    /// short-circuit) MUST extend this test — that's the
+    /// forcing function for lifecycle-hook coverage.
+    ///
+    /// Both production bugs we shipped on this work would have
+    /// failed this test immediately:
+    /// - Original iamacoffeepot/aether#838 leak: `Sink` case would have shown no
+    ///   Finished, expected Bracket.
+    /// - iamacoffeepot/aether#839-attempt-1 double-count: `Closure` case would have shown
+    ///   Finished from the Mailer side, expected NeitherFromMailer.
+    #[test]
+    fn every_mailer_push_path_produces_correct_lifecycle_events() {
+        // Static link to `MailboxEntry`: a new variant added there
+        // breaks this `match`, which fails to compile, which
+        // forces the contributor to add a case to `DispatchPath`
+        // and the test loop below. Comment is normative.
+        fn dispatch_path_for_entry(entry: &MailboxEntry) -> &'static str {
+            match entry {
+                MailboxEntry::Closure(_) => "Closure",
+                MailboxEntry::Sink(_) => "Sink",
+                MailboxEntry::Dropped => "Dropped",
+            }
+        }
+        // Touch the helper so the compiler considers it live.
+        let _ = dispatch_path_for_entry(&MailboxEntry::Dropped);
+
+        let queue = ensure_trace_queue();
+        // Each case: (case-name, expectation, push-fn that returns
+        // the stamped mail_id to filter on). Cases construct their
+        // own Mailer fixtures so chassis-router / outbound / handle-
+        // store-Parked setups can vary independently.
+        enum Expect {
+            /// Sync handler ran inline → Received + Finished.
+            Bracket,
+            /// Terminal arm (drop / warn / egress / ref-walk-err /
+            /// router-missing) → Finished only.
+            FinishedOnly,
+            /// Held — mail deferred via `HandleStore::park` → neither.
+            HeldNeither,
+            /// Actor-enqueue Closure → no bracket from Mailer side
+            /// (downstream actor dispatch loop owns it).
+            NeitherFromMailer,
+        }
+
+        struct Case {
+            name: &'static str,
+            expect: Expect,
+            // Returns the `MailId` to filter the trace queue on.
+            run: Box<dyn FnOnce() -> MailId>,
+        }
+
+        let cases: Vec<Case> = vec![
+            // 1. Sink arm — bracket.
+            Case {
+                name: "Sink",
+                expect: Expect::Bracket,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD01_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (registry, mailer, _store) = make_mailer();
+                    let sink = CapturingSink::new();
+                    let id = registry.register_sink("test.meta.sink", sink.handler());
+                    mailer.push(
+                        Mail::new(id, KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 2. Closure arm — no bracket from Mailer (regression
+            // guard for actor-enqueue contract).
+            Case {
+                name: "Closure (actor-enqueue)",
+                expect: Expect::NeitherFromMailer,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD02_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (registry, mailer, _store) = make_mailer();
+                    let sink = CapturingSink::new();
+                    let id = registry.register_closure("test.meta.closure", sink.handler());
+                    mailer.push(
+                        Mail::new(id, KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 3. Dropped arm — Finished only.
+            Case {
+                name: "Dropped",
+                expect: Expect::FinishedOnly,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD03_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (registry, mailer, _store) = make_mailer();
+                    let id = registry.register_closure("test.meta.dropped", Arc::new(|_| {}));
+                    let _ = registry.drop_mailbox(id).expect("drop");
+                    mailer.push(
+                        Mail::new(id, KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 4. None warn-drop (no outbound) — Finished only.
+            Case {
+                name: "None warn-drop (no outbound)",
+                expect: Expect::FinishedOnly,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD04_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (_registry, mailer, _store) = make_mailer();
+                    mailer.push(
+                        Mail::new(MailboxId(0xDEAD_BEEF_0001), KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 5. None egress to hub — Finished only (per-engine
+            // settlement; hub settlement is its own domain).
+            Case {
+                name: "None egress (outbound wired)",
+                expect: Expect::FinishedOnly,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD05_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (outbound, _rx) = crate::mail::outbound::HubOutbound::attached_loopback();
+                    let registry = Arc::new(Registry::new());
+                    let store = Arc::new(HandleStore::new(64 * 1024));
+                    let mailer = Mailer::new(registry, store).with_outbound(outbound);
+                    mailer.push(
+                        Mail::new(MailboxId(0xDEAD_BEEF_0002), KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 6. Ref-walk Err (malformed payload, terminal drop) —
+            // Finished only.
+            Case {
+                name: "Ref-walk Err",
+                expect: Expect::FinishedOnly,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD06_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (registry, mailer, _store) = make_mailer();
+                    let kind_id = registry
+                        .register_kind_with_descriptor(KindDescriptor {
+                            name: HeldNote::NAME.into(),
+                            schema: held_note_schema(),
+                        })
+                        .unwrap();
+                    let sink = CapturingSink::new();
+                    let id = registry.register_sink("test.meta.refwalk_err", sink.handler());
+                    // Truncated payload (1 byte) — walker bails Err.
+                    mailer.push(
+                        Mail::new(id, kind_id, vec![0u8; 1], 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 7. Ref-walk Parked (held for handle publish) — neither.
+            Case {
+                name: "Ref-walk Parked",
+                expect: Expect::HeldNeither,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD07_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (registry, mailer, _store) = make_mailer();
+                    let outer_kind_id = registry
+                        .register_kind_with_descriptor(KindDescriptor {
+                            name: HeldNote::NAME.into(),
+                            schema: held_note_schema(),
+                        })
+                        .unwrap();
+                    let inner_kind_id = registry
+                        .register_kind_with_descriptor(KindDescriptor {
+                            name: Note::NAME.into(),
+                            schema: note_schema(),
+                        })
+                        .unwrap();
+                    let sink = CapturingSink::new();
+                    let id = registry.register_sink("test.meta.refwalk_parked", sink.handler());
+                    let held = HeldNote {
+                        held: Ref::Handle {
+                            id: 0x8888_8888_8888_8888,
+                            kind_id: inner_kind_id.0,
+                        },
+                        seq: 1,
+                    };
+                    let payload = postcard::to_allocvec(&held).unwrap();
+                    mailer.push(
+                        Mail::new(id, outer_kind_id, payload, 1)
+                            .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 8. CHASSIS_MAILBOX_ID with router installed — bracket.
+            Case {
+                name: "Chassis router installed",
+                expect: Expect::Bracket,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD08_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (_registry, mailer, _store) = make_mailer();
+                    mailer.install_chassis_router(Box::new(|_| {}));
+                    mailer.push(
+                        Mail::new(
+                            aether_data::MailboxId::CHASSIS_MAILBOX_ID,
+                            KindId(0xFEED),
+                            vec![],
+                            1,
+                        )
+                        .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+            // 9. CHASSIS_MAILBOX_ID with no router — Finished only.
+            Case {
+                name: "Chassis router missing",
+                expect: Expect::FinishedOnly,
+                run: Box::new(|| {
+                    let sender = MailboxId(0x8380_DD09_0000_0000);
+                    let mail_id = MailId::new(sender, 1);
+                    let (_registry, mailer, _store) = make_mailer();
+                    mailer.push(
+                        Mail::new(
+                            aether_data::MailboxId::CHASSIS_MAILBOX_ID,
+                            KindId(0xFEED),
+                            vec![],
+                            1,
+                        )
+                        .with_lineage(mail_id, mail_id, None),
+                    );
+                    mail_id
+                }),
+            },
+        ];
+
+        for case in cases {
+            let name = case.name;
+            let expect = case.expect;
+            let mail_id = (case.run)();
+            let events = drain_events_for(&queue, mail_id.sender);
+            let received = events
+                .iter()
+                .any(|e| matches!(e, TraceEvent::Received { mail_id: m, .. } if *m == mail_id));
+            let finished = events
+                .iter()
+                .any(|e| matches!(e, TraceEvent::Finished { mail_id: m, .. } if *m == mail_id));
+            match expect {
+                Expect::Bracket => assert!(
+                    received && finished,
+                    "{name}: expected Received+Finished bracket; got received={received} finished={finished}; events={events:?}"
+                ),
+                Expect::FinishedOnly => assert!(
+                    !received && finished,
+                    "{name}: expected Finished only (no Received); got received={received} finished={finished}; events={events:?}"
+                ),
+                Expect::HeldNeither => assert!(
+                    !received && !finished,
+                    "{name}: expected neither Received nor Finished (mail held); got received={received} finished={finished}; events={events:?}"
+                ),
+                Expect::NeitherFromMailer => assert!(
+                    !received && !finished,
+                    "{name}: expected neither (actor dispatch owns bracket downstream); got received={received} finished={finished}; events={events:?}"
+                ),
+            }
+        }
     }
 }

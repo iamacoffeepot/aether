@@ -104,13 +104,34 @@ pub type MailboxHandler = Arc<dyn for<'a> Fn(MailDispatch<'a>) + Send + Sync + '
 /// Issue 634 Phase 4 retired the dedicated `Component` variant —
 /// every loaded wasm component is now a `WasmTrampoline` registered
 /// here as a `Closure` like every other actor.
+///
+/// Issue 838: `Closure` and `Sink` are intentionally distinct even
+/// though both wrap a [`MailboxHandler`]. The variant is the
+/// settlement-protocol contract — see each variant's docs and
+/// `Mailer::push`'s route_mail for the bracket semantics.
 #[derive(Clone)]
 pub enum MailboxEntry {
-    /// Mail is handled inline by a substrate-native closure (the
-    /// actor-as-mailbox wrap installed by `claim_mailbox` /
-    /// `register_closure`, including the wasm trampoline's spawn-time
-    /// registration).
+    /// Actor-inbox enqueue closure. The handler body pushes the
+    /// envelope onto an mpsc inbox; an actor's dispatch loop on
+    /// another thread runs the work and records the
+    /// `Received`/`Finished` lifecycle hooks. `Mailer::push` does
+    /// NOT bracket this arm — the downstream dispatch loop owns the
+    /// bracket. Installed by `claim_mailbox` /
+    /// `Spawner::register_closure` (instanced + singleton actors,
+    /// including the wasm trampoline) and by the public
+    /// [`Registry::register_closure`] / [`Registry::try_register_closure`]
+    /// for callers that own a separate dispatcher loop.
     Closure(MailboxHandler),
+    /// Synchronous sink. The handler body does its work inline on
+    /// the pushing thread; there is no actor dispatch loop behind
+    /// it. `Mailer::push` brackets this arm with `Received` and
+    /// `Finished` so the chain's `in_flight` balances and
+    /// settlement subscribers (`SettlementRegistry`) wake (ADR-0080
+    /// §2, issue 838). Installed by [`Registry::register_sink`] /
+    /// [`Registry::try_register_sink`]. Distinct from `Closure` so
+    /// the bracket isn't double-counted when the closure was an
+    /// actor-enqueue (which would fire settlement prematurely).
+    Sink(MailboxHandler),
     /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
     /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
     /// until the same name is re-registered, at which point the slot
@@ -315,7 +336,7 @@ impl Registry {
             return Err(DropError::UnknownId(id));
         };
         match slot.entry {
-            MailboxEntry::Closure(_) => {}
+            MailboxEntry::Closure(_) | MailboxEntry::Sink(_) => {}
             MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
         }
         slot.entry = MailboxEntry::Dropped;
@@ -357,6 +378,46 @@ impl Registry {
         result
     }
 
+    /// Issue 838: register a synchronous-sink mailbox. The handler
+    /// runs inline on `Mailer::push`'s thread; the mailer brackets
+    /// the call with `Received`/`Finished` so the chain's
+    /// `in_flight` balances and settlement subscribers
+    /// ([`crate::chassis::settlement::SettlementRegistry`]) wake
+    /// (ADR-0080 §2).
+    ///
+    /// Distinct from [`Self::register_closure`] which is for
+    /// actor-inbox enqueue closures whose downstream dispatch loop
+    /// owns the bracket. Miscategorisation is silent: a synchronous
+    /// sink registered as a `Closure` leaks `in_flight` (chains
+    /// never settle); an actor-enqueue closure registered as a
+    /// `Sink` double-counts `Finished` (settlement fires
+    /// prematurely). Panics on a name collision — these are
+    /// substrate-internal names, collisions are bugs.
+    pub fn register_sink(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
+        let name = name.into();
+        match self.insert(name.clone(), MailboxEntry::Sink(handler)) {
+            Ok(id) => {
+                self.notify_mailbox_change();
+                id
+            }
+            Err(_) => panic!("mailbox name already registered: {name}"),
+        }
+    }
+
+    /// Non-panicking variant of [`Self::register_sink`], symmetric
+    /// with [`Self::try_register_closure`].
+    pub fn try_register_sink(
+        &self,
+        name: impl Into<String>,
+        handler: MailboxHandler,
+    ) -> Result<MailboxId, NameConflict> {
+        let result = self.insert(name.into(), MailboxEntry::Sink(handler));
+        if result.is_ok() {
+            self.notify_mailbox_change();
+        }
+        result
+    }
+
     /// Issue 607 Phase 7: fully remove a closure-bound mailbox. Used
     /// in the chassis-boot unwind path when a singleton's `init` fails
     /// after `try_register_closure` claimed the slot — the partial-boot
@@ -372,7 +433,9 @@ impl Registry {
     pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
         let mut inner = self.inner.write().unwrap();
         match inner.mailboxes.get(&id) {
-            Some(slot) if matches!(slot.entry, MailboxEntry::Closure(_)) => {
+            Some(slot)
+                if matches!(slot.entry, MailboxEntry::Closure(_) | MailboxEntry::Sink(_)) =>
+            {
                 inner.mailboxes.remove(&id);
                 true
             }
