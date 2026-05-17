@@ -2,7 +2,8 @@
 // accumulators that don't benefit from FMA, and single-letter names
 // for edge / vertex / face math are canonical. `cast_possible_truncation`
 // fires on the bounded `usize` vertex/face counts cast to `u32` for
-// debug counter formatting.
+// debug counter formatting; the polygon pipeline caps element counts
+// well below `u32::MAX`.
 #![allow(
     clippy::cast_precision_loss,
     clippy::suboptimal_flops,

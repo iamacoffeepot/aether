@@ -1,3 +1,10 @@
+// Wire-encode: serde_json input → bytes laid out per `SchemaType`.
+// The narrowing casts (`u64 → u32 / u16 / u8`, signed varint slot
+// reuse) and sign-loss casts (`i*` to the `u*` zigzag-encoded slot)
+// are the load-bearing byte layout — `From::from` / `try_into` would
+// obscure the wire-format contract these functions implement.
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 // `encode_schema`: serde_json params + `SchemaType` descriptor → wire
 // bytes the substrate's decode path is happy with. Pure function; no
 // hub state, no async.

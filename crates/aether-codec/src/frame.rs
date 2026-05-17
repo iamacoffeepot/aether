@@ -79,6 +79,10 @@ impl From<postcard::Error> for FrameError {
 pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
     let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
     let mut out = Vec::with_capacity(4 + body.len());
+    // 4-byte LE length prefix is the wire format; bodies above 4 GiB
+    // would overflow but no protocol that rides this framing emits
+    // anything close (worst case is a few MiB of MailFrame).
+    #[allow(clippy::cast_possible_truncation)]
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
     out

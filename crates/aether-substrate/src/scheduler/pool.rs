@@ -481,7 +481,10 @@ mod tests {
 
         for (i, slot) in slots.iter().enumerate() {
             for n in 0..1000 {
-                slot.push((i * 1000 + n) as u32);
+                // Test fixture uses tiny indices that fit in u32.
+                #[allow(clippy::cast_possible_truncation)]
+                let value = (i * 1000 + n) as u32;
+                slot.push(value);
             }
             wakes[i].wake();
         }

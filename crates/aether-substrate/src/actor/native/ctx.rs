@@ -440,11 +440,15 @@ impl<'a> Sender for NativeCtx<'a> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        // Batch count rides as `u32` on the wire (matches the FFI ABI);
+        // realistic mail batches stay well below `u32::MAX`.
+        #[allow(clippy::cast_possible_truncation)]
+        let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             bytes,
-            payloads.len() as u32,
+            count,
             self.outbound_parent(),
             self.outbound_root(),
         );
@@ -614,11 +618,15 @@ impl<'a> MailSender for NativeCtx<'a> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        // Batch count rides as `u32` on the wire (matches the FFI ABI);
+        // realistic mail batches stay well below `u32::MAX`.
+        #[allow(clippy::cast_possible_truncation)]
+        let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             bytes,
-            payloads.len() as u32,
+            count,
             self.outbound_parent(),
             self.outbound_root(),
         );

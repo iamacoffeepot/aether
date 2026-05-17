@@ -1,6 +1,15 @@
 // Polygon math: bounded vertex counts cast to f32 for centroid /
 // averaging, scalar accumulators that don't benefit from FMA.
-#![allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
+// Integer-grid arithmetic: `i32 → i64 → i128` widenings on snapped
+// fixed-point coords feed the exact 2D projection and area predicates;
+// bounded `usize` vertex counts cast to `u32` for indexing into wire
+// buffers stay well below `u32::MAX`.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation
+)]
 
 //! Public n-gon polygon API (ADR-0057).
 //!

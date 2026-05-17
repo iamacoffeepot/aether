@@ -129,6 +129,8 @@ mod tests {
         // Smallest representable step on each axis must produce a
         // distinct Point3. Documents that the grid resolution is
         // 1/SCALE = 1/65536 and points closer than that fold together.
+        // SCALE = 2^16; trivially exact in f32 (mantissa fits 24 bits).
+        #[allow(clippy::cast_possible_truncation)]
         let one_ulp = 1.0 / SCALE as f32;
         let origin = Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).unwrap();
         let nudges = [

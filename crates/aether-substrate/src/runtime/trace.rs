@@ -88,6 +88,10 @@ pub fn now_nanos() -> Nanos {
         None => return Nanos(0),
     };
     let elapsed = Instant::now().saturating_duration_since(start);
+    // u128 → u64: trace timestamps overflow after ~584 years; the
+    // substrate's `SUBSTRATE_START` is set at boot, so realistic
+    // runtimes are well within u64 range.
+    #[allow(clippy::cast_possible_truncation)]
     Nanos(elapsed.as_nanos() as u64)
 }
 

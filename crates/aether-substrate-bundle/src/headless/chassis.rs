@@ -181,6 +181,9 @@ impl HeadlessChassis {
             ),
         );
 
+        // Tick rates are bounded well below `u32::MAX` Hz (typically
+        // 60-240 Hz); the `u128 → u32` narrowing is safe in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
         tracing::info!(
             target: "aether_substrate::boot",

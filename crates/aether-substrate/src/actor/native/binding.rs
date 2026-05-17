@@ -1,3 +1,14 @@
+// Wire-encode: the FFI-mirror `wait_reply` ABI returns `i32` with
+// `-1`/`-2`/`-3` reserved for timeout/buffer/cancelled and non-negative
+// values returning the byte length; the `len → i32` cast (and matching
+// `i32 → u64 → Duration` widening on `timeout_ms`) preserve the wire
+// shape `aether-actor`'s sync wrapper expects.
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+
 //! ADR-0074 §Decision (revisited by issue 665): native per-actor
 //! binding state.
 //!

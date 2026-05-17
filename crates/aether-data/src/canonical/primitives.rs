@@ -1,3 +1,9 @@
+// Wire-encode: postcard varint slot writes narrow `u64 → u8` after
+// the LEB128 logic guarantees the high bytes are zero (or the
+// continuation bit is set). The byte layout is the load-bearing
+// contract; `try_into` would obscure the wire-format shape.
+#![allow(clippy::cast_possible_truncation)]
+
 //! Const-fn postcard primitives shared across the canonical
 //! submodules (schema / labels / inputs). Varint encoders, string
 //! length + write helpers, `Option<str>` helpers, and the `Cow`

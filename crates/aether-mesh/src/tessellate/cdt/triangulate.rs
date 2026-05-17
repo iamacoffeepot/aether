@@ -1,3 +1,8 @@
+// Integer-grid arithmetic: `i32 → i64` widenings move snapped
+// fixed-point coords through the 2D projection into the exact CDT
+// predicates. Widening is structurally lossless.
+#![allow(clippy::cast_lossless)]
+
 //! Public CDT entry point: project loops to 2D, build Delaunay, enforce
 //! boundary edges as constraints, mark inside vs outside, return the
 //! triangles inside the polygon.

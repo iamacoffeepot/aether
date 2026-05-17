@@ -1,3 +1,9 @@
+// Wire-encode: `usize → u32` narrowings encode handle-cache byte
+// lengths into the postcard varint slots described in the wire
+// format below; `u32 → u64` widenings move handle ids into the
+// 64-bit id slot. Both are part of the load-bearing wire layout.
+#![allow(clippy::cast_lossless, clippy::cast_possible_truncation)]
+
 //! ADR-0045 typed-handle store and ref-walking dispatch hook.
 //!
 //! The substrate keeps a refcounted, byte-addressed cache of handle

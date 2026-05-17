@@ -305,6 +305,10 @@ mod native {
             // (O(log N + matches) per pass).
             let count = range.clone().count();
             if count > max {
+                // `max` is u32 on the wire; `count` is bounded by the
+                // BTreeSet which can't exceed `u32::MAX` in any realistic
+                // tracing window.
+                #[allow(clippy::cast_possible_truncation)]
                 return DescribeWindowResult::Err {
                     too_many: Some(count as u32),
                 };

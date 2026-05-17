@@ -1,8 +1,9 @@
 // Fixed-point conversion: bounded `i32` snapped grid values cast to
-// f32 are domain-correct at the CSG ↔ float boundary; the
-// truncating casts (`f32 → i32`, `i64 → i32`) in this file are gated
-// by explicit range checks against `MAX_INPUT_MAGNITUDE` / `SCALE`
-// per the module doc.
+// f32 are domain-correct at the CSG ↔ float boundary; the truncating
+// casts in this file (`f32 → i32`, `i64 → i32`) are gated by explicit
+// range checks against `MAX_INPUT_MAGNITUDE` / `SCALE` per the module
+// doc, and the snapped fixed-point value is by construction ≤ 2^24
+// so the narrowing back to `i32` cannot lose data.
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
 //! 16:16 binary fixed-point conversion at the CSG boundary.

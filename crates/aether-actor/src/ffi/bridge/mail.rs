@@ -1,3 +1,8 @@
+// Wire-encode: `usize → u32` narrowings forward `(ptr, len)` pairs
+// to the wasm32 host-fn ABI. wasm32 already has 32-bit addresses;
+// `_p32`-suffixed FFI per ADR-0024 documents the convention.
+#![allow(clippy::cast_possible_truncation)]
+
 //! [`MailBridge`] — outbound-mail FFI bridge.
 //!
 //! ZST whose inherent methods forward to the matching `extern "C"`

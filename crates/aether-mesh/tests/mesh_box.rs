@@ -1,3 +1,8 @@
+// Test geometry uses small integer-valued f32 coords (±1, ±2); casting
+// vertex `f32 → i32` for the corner snap is exact in the value range
+// this test exercises.
+#![allow(clippy::cast_possible_truncation)]
+
 //! Verify the box mesher produces 12 triangles at the expected corners.
 
 use aether_mesh::{mesh, parse};

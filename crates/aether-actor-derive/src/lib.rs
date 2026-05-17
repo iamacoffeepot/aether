@@ -446,6 +446,9 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
 
     let variant_entries = data.variants.iter().enumerate().map(|(idx, v)| {
         let name = v.ident.to_string();
+        // Enum variants past `u32::MAX` aren't a realistic schema; the
+        // canonical-bytes wire format stores discriminants as u32.
+        #[allow(clippy::cast_possible_truncation)]
         let discriminant = idx as u32;
         match &v.fields {
             Fields::Unit => quote! {

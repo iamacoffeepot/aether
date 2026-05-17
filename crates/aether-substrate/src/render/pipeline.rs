@@ -198,6 +198,9 @@ pub fn record_main_pass(
         queue.write_buffer(&pipeline.vertex_buffer, 0, vertices);
     }
     queue.write_buffer(&pipeline.camera_buffer, 0, bytemuck::cast_slice(view_proj));
+    // `wgpu::RenderPass::draw` takes a `u32` vertex count; vertex
+    // buffer is bounded by `MAX_VERTEX_BYTES` (well below `u32::MAX`).
+    #[allow(clippy::cast_possible_truncation)]
     let vertex_count = (vertex_bytes as u64 / VERTEX_STRIDE) as u32;
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
