@@ -43,7 +43,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-aether-actor = { path = "../aether-actor" }
 aether-substrate = { path = "../aether-substrate" }
 
 [lints]
