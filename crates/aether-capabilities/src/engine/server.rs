@@ -222,9 +222,14 @@ mod server_native {
 
             // Forward to the proxy: it SIGKILLs its substrate and
             // self-shuts-down. Fire-and-forget — the proxy doesn't
-            // reply, and the table entry is already gone.
+            // reply, and the table entry is already gone, so the
+            // returned MailId has nothing to subscribe against.
             let payload = mail.encode_into_bytes();
-            ctx.send_envelope_traced(entry.proxy_mailbox, <TerminateEngine as Kind>::ID, &payload);
+            let _ = ctx.send_envelope_traced(
+                entry.proxy_mailbox,
+                <TerminateEngine as Kind>::ID,
+                &payload,
+            );
             ctx.reply(&TerminateEngineResult::Ok);
         }
 

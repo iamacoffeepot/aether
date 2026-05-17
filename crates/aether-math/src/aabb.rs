@@ -475,6 +475,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "axis_index")]
     fn mirror_panics_on_bad_axis() {
-        Aabb::from_half_extents(1.0, 1.0, 1.0).mirror(3);
+        // Panic is the assertion; the returned Aabb is unreachable.
+        let _ = Aabb::from_half_extents(1.0, 1.0, 1.0).mirror(3);
     }
 }

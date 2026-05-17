@@ -372,8 +372,10 @@ mod tests {
             a.push(n);
             b.push(n);
         }
-        wake_a.wake();
-        wake_b.wake();
+        // Test asserts via `wait_until` on `dispatched()` below; the
+        // CAS-win bool is uninteresting at this seeding step.
+        let _ = wake_a.wake();
+        let _ = wake_b.wake();
 
         assert!(wait_until(Duration::from_secs(3), || {
             a.dispatched() == 40 && b.dispatched() == 40
@@ -415,7 +417,9 @@ mod tests {
         slot.push(1);
         slot.push(2); // this one panics
         slot.push(3);
-        wake.wake();
+        // Seeding wake — test asserts on `dispatched()` / panic
+        // outcome, not on the CAS-win bool.
+        let _ = wake.wake();
 
         // Wait for at least the first envelope to dispatch.
         assert!(wait_until(Duration::from_secs(2), || slot.dispatched() >= 1));
@@ -486,7 +490,8 @@ mod tests {
                 let value = (i * 1000 + n) as u32;
                 slot.push(value);
             }
-            wakes[i].wake();
+            // Stress seeding — bool ignored; test asserts via total().
+            let _ = wakes[i].wake();
         }
 
         let total_expected: u32 = 4 * 1000;
