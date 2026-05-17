@@ -335,22 +335,6 @@ impl MessageBuilder {
 }
 
 impl Visit for MessageBuilder {
-    fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
-        if field.name() == "message" {
-            let _ = write!(&mut self.message, "{value:?}");
-        } else {
-            self.append_field(field.name(), "=", format_args!("{value:?}"));
-        }
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message.push_str(value);
-        } else {
-            self.append_field(field.name(), "=", format_args!("{value}"));
-        }
-    }
-
     fn record_i64(&mut self, field: &Field, value: i64) {
         self.append_field(field.name(), "=", format_args!("{value}"));
     }
@@ -361,6 +345,22 @@ impl Visit for MessageBuilder {
 
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.append_field(field.name(), "=", format_args!("{value}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message.push_str(value);
+        } else {
+            self.append_field(field.name(), "=", format_args!("{value}"));
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(&mut self.message, "{value:?}");
+        } else {
+            self.append_field(field.name(), "=", format_args!("{value:?}"));
+        }
     }
 }
 

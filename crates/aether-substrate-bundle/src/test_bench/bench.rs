@@ -1016,14 +1016,14 @@ mod tests {
         impl DataKind for Bump {
             const NAME: &'static str = "test.spawn.bump";
             const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
-            fn encode_into_bytes(&self) -> Vec<u8> {
-                bytemuck::bytes_of(self).to_vec()
-            }
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != core::mem::size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
+            }
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
             }
         }
 
