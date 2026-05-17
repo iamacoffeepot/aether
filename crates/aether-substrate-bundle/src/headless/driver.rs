@@ -29,12 +29,6 @@ use aether_substrate::{
     Mailer, SubstrateBoot, mail::MailboxId, runtime::trace::push_chassis_root_mail,
 };
 
-/// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
-/// component, the scheduler doesn't read this — it's retained on the
-/// hub-protocol wire for compatibility). The shared frame-loop
-/// policy (drain budget, frame-stats cadence) lives in
-/// `aether_substrate::frame_loop`.
-pub const WORKERS: usize = 2;
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
 /// Parse `AETHER_TICK_HZ`. Unset → [`DEFAULT_TICK_HZ`]; non-positive

@@ -30,7 +30,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use super::driver::{HeadlessTimerCapability, WORKERS, parse_tick_hz_env};
+use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -59,6 +59,10 @@ pub struct HeadlessEnv {
     /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
     /// `RpcServerCapability` so existing chassis behavior is unchanged.
     pub rpc_addr: Option<SocketAddr>,
+    /// Issue 745: optional worker-pool size override. Populated from
+    /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
+    /// (`available_parallelism() - 1`, min 1).
+    pub workers: Option<usize>,
 }
 
 impl HeadlessEnv {
@@ -78,11 +82,41 @@ impl HeadlessEnv {
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
+        let workers = parse_workers_env();
         HeadlessEnv {
             namespace_roots,
             http,
             tick_period,
             rpc_addr,
+            workers,
+        }
+    }
+}
+
+/// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
+/// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
+/// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
+/// one worker); unparseable → `None` with a warn. Issue 745.
+fn parse_workers_env() -> Option<usize> {
+    let raw = std::env::var("AETHER_WORKERS").ok()?;
+    match raw.trim().parse::<usize>() {
+        Ok(0) => {
+            tracing::warn!(
+                target: "aether_substrate::boot",
+                value = %raw,
+                "AETHER_WORKERS=0 — clamping to 1",
+            );
+            Some(1)
+        }
+        Ok(n) => Some(n),
+        Err(e) => {
+            tracing::warn!(
+                target: "aether_substrate::boot",
+                value = %raw,
+                error = %e,
+                "AETHER_WORKERS unparseable — falling back to PoolConfig::default",
+            );
+            None
         }
     }
 }
@@ -101,10 +135,10 @@ impl HeadlessChassis {
             http,
             tick_period,
             rpc_addr,
+            workers,
         } = env;
 
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
-        let _ = WORKERS;
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
@@ -151,7 +185,7 @@ impl HeadlessChassis {
         let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
         tracing::info!(
             target: "aether_substrate::boot",
-            workers = WORKERS,
+            workers_override = ?workers,
             tick_hz = tick_hz,
             "componentless boot — load a component via aether.component.load",
         );
@@ -179,6 +213,7 @@ impl HeadlessChassis {
         // through the log capture.
         let mut builder = Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
+            .with_workers(workers)
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<TraceObserverCapability>(())
@@ -207,5 +242,62 @@ impl HeadlessChassis {
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_workers_env;
+    use std::sync::Mutex;
+
+    /// Process-wide guard around `AETHER_WORKERS` env mutation —
+    /// `cargo test` parallelises within a binary, so each parser test
+    /// has to serialise its set/remove pair. Shared with the desktop
+    /// chassis test would require a crate-level module; one per chassis
+    /// is fine given there are four tests total.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Safety: this test owns the AETHER_WORKERS slot for the
+        // duration of the closure via ENV_LOCK; no other thread inside
+        // the same test binary mutates it concurrently. Edition-2024
+        // marked the env mutators unsafe due to non-test signal-handler
+        // races that don't apply here.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("AETHER_WORKERS", v),
+                None => std::env::remove_var("AETHER_WORKERS"),
+            }
+        }
+        let out = f();
+        unsafe {
+            std::env::remove_var("AETHER_WORKERS");
+        }
+        out
+    }
+
+    #[test]
+    fn parse_workers_unset_returns_none() {
+        let parsed = with_env(None, parse_workers_env);
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn parse_workers_positive_returns_some() {
+        let parsed = with_env(Some("4"), parse_workers_env);
+        assert_eq!(parsed, Some(4));
+    }
+
+    #[test]
+    fn parse_workers_zero_clamps_to_one() {
+        let parsed = with_env(Some("0"), parse_workers_env);
+        assert_eq!(parsed, Some(1));
+    }
+
+    #[test]
+    fn parse_workers_unparseable_returns_none() {
+        let parsed = with_env(Some("abc"), parse_workers_env);
+        assert_eq!(parsed, None);
     }
 }
