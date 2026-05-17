@@ -7,8 +7,8 @@ use aether_mesh::{ParseError, mesh, parse};
 fn torus_triangle_count_is_two_per_quad() {
     // 8×6 = 48 quads → 96 triangles.
     let text = "(torus 1.0 0.25 8 6 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: torus DSL parses");
+    let tris = mesh(&ast).expect("test setup: torus meshes");
     assert_eq!(tris.len(), 8 * 6 * 2);
 }
 
@@ -19,8 +19,8 @@ fn torus_face_normals_point_outward() {
     // major circle (i.e., scaled to major_radius in the XZ plane).
     let major_radius: f32 = 1.0;
     let text = "(torus 1.0 0.25 12 8 :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: torus DSL parses");
+    let tris = mesh(&ast).expect("test setup: torus meshes");
     for tri in &tris {
         let a = tri.vertices[0];
         let b = tri.vertices[1];
@@ -48,10 +48,10 @@ fn torus_face_normals_point_outward() {
 
 #[test]
 fn torus_with_under_three_segments_emits_nothing() {
-    let ast = parse("(torus 1.0 0.25 2 6 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 0);
-    let ast = parse("(torus 1.0 0.25 6 2 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 0);
+    let ast = parse("(torus 1.0 0.25 2 6 :color 0)").expect("test setup: torus DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: torus meshes").len(), 0);
+    let ast = parse("(torus 1.0 0.25 6 2 :color 0)").expect("test setup: torus DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: torus meshes").len(), 0);
 }
 
 #[test]
@@ -66,8 +66,8 @@ fn sweep_straight_path_is_an_extruded_polygon() {
         ((0 0 0) (1 0 0))
         :open true
         :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: sweep DSL parses");
+    let tris = mesh(&ast).expect("test setup: sweep meshes");
     assert_eq!(tris.len(), 4 * 2);
 }
 
@@ -81,8 +81,8 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
         ((0 0 0) (1 0 0) (1 1 0))
         :open true
         :color 0)";
-    let ast = parse(text).unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse(text).expect("test setup: sweep DSL parses");
+    let tris = mesh(&ast).expect("test setup: sweep meshes");
     // Square profile, 3 path points → 2 tube segments → 4 quads each
     // → 8 triangles per segment → 16 triangles. `:open true` skips
     // caps so the count is side-only — issue 352.
@@ -116,15 +116,16 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
 
 #[test]
 fn sweep_with_short_path_emits_nothing() {
-    let ast =
-        parse("(sweep ((-0.1 -0.1) (0.1 -0.1) (0.1 0.1) (-0.1 0.1)) ((0 0 0)) :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 0);
+    let ast = parse("(sweep ((-0.1 -0.1) (0.1 -0.1) (0.1 0.1) (-0.1 0.1)) ((0 0 0)) :color 0)")
+        .expect("test setup: sweep DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: sweep meshes").len(), 0);
 }
 
 #[test]
 fn sweep_with_under_three_profile_points_emits_nothing() {
-    let ast = parse("(sweep ((-0.1 0) (0.1 0)) ((0 0 0) (1 0 0)) :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 0);
+    let ast = parse("(sweep ((-0.1 0) (0.1 0)) ((0 0 0) (1 0 0)) :color 0)")
+        .expect("test setup: sweep DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: sweep meshes").len(), 0);
 }
 
 #[test]
@@ -134,7 +135,7 @@ fn sweep_scales_length_must_equal_path_length() {
                        ((0 0 0) (1 0 0) (2 0 0))
                        :scales (1.0 0.5)
                        :color 0)";
-    let err = parse(text).unwrap_err();
+    let err = parse(text).expect_err("test setup: scales/path length mismatch must Err");
     assert!(
         matches!(
             err,
@@ -154,9 +155,9 @@ fn round_trip_torus_and_sweep() {
         (sweep ((0 0.05) (0.05 0) (0 -0.05) (-0.05 0))
                ((0 0.5 0) (0.3 0.6 0) (0.5 0.8 0))
                :color 7))";
-    let ast1 = parse(text).unwrap();
+    let ast1 = parse(text).expect("test setup: composition DSL parses");
     let serialized = aether_mesh::serialize(&ast1);
-    let ast2 = parse(&serialized).unwrap();
+    let ast2 = parse(&serialized).expect("test setup: round-tripped DSL re-parses");
     assert_eq!(ast1, ast2);
 }
 
@@ -172,9 +173,9 @@ fn round_trip_open_sweep() {
                        ((0 0 0) (0 1 0))
                        :open true
                        :color 3)";
-    let ast1 = parse(text).unwrap();
+    let ast1 = parse(text).expect("test setup: sweep DSL parses");
     let serialized = aether_mesh::serialize(&ast1);
-    let ast2 = parse(&serialized).unwrap();
+    let ast2 = parse(&serialized).expect("test setup: round-tripped DSL re-parses");
     assert_eq!(ast1, ast2);
     // Pin the AST shape so a regression in the parser silently
     // dropping `:open` would surface as a structural mismatch.

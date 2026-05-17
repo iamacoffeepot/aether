@@ -629,7 +629,7 @@ mod tests {
     fn singleton_passes_through() {
         let tri =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 5)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let out = weld_then_merge(vec![tri]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].vertices.len(), 3);
@@ -642,9 +642,9 @@ mod tests {
         // The diagonal is a twin pair and cancels; the outer 4 edges
         // form the boundary.
         let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let out = weld_then_merge(vec![t1, t2]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].vertices.len(), 4);
@@ -665,9 +665,9 @@ mod tests {
         // Same triangle wound the other way; opposite plane normal →
         // different bucket key.
         let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(1.0, 0.0, 0.0), 1)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let out = weld_then_merge(vec![t1, t2]);
         assert_eq!(out.len(), 2);
     }
@@ -676,10 +676,10 @@ mod tests {
     fn triangles_in_different_planes_are_unaffected() {
         let t_xy =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let t_yz =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 0)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let out = weld_then_merge(vec![t_xy, t_yz]);
         assert_eq!(out.len(), 2);
     }
@@ -695,10 +695,10 @@ mod tests {
         let se = pt(2.0, 0.0, 0.0);
         let sw = pt(0.0, 0.0, 0.0);
         let polys = vec![
-            Polygon::from_triangle(c, nw, ne, 0).unwrap(),
-            Polygon::from_triangle(c, ne, se, 0).unwrap(),
-            Polygon::from_triangle(c, se, sw, 0).unwrap(),
-            Polygon::from_triangle(c, sw, nw, 0).unwrap(),
+            Polygon::from_triangle(c, nw, ne, 0).expect("test setup: non-degenerate triangle"),
+            Polygon::from_triangle(c, ne, se, 0).expect("test setup: non-degenerate triangle"),
+            Polygon::from_triangle(c, se, sw, 0).expect("test setup: non-degenerate triangle"),
+            Polygon::from_triangle(c, sw, nw, 0).expect("test setup: non-degenerate triangle"),
         ];
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 1, "expected 1 merged polygon, got {}", out.len());
@@ -718,10 +718,10 @@ mod tests {
         let top = pt(1.0, 2.0, 0.0);
         let tl = pt(0.0, 2.0, 0.0);
         let polys = vec![
-            Polygon::from_triangle(bl, br, inner, 0).unwrap(),
-            Polygon::from_triangle(bl, inner, mid, 0).unwrap(),
-            Polygon::from_triangle(bl, mid, top, 0).unwrap(),
-            Polygon::from_triangle(bl, top, tl, 0).unwrap(),
+            Polygon::from_triangle(bl, br, inner, 0).expect("test setup: non-degenerate triangle"),
+            Polygon::from_triangle(bl, inner, mid, 0).expect("test setup: non-degenerate triangle"),
+            Polygon::from_triangle(bl, mid, top, 0).expect("test setup: non-degenerate triangle"),
+            Polygon::from_triangle(bl, top, tl, 0).expect("test setup: non-degenerate triangle"),
         ];
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 3);
@@ -733,9 +733,9 @@ mod tests {
     #[test]
     fn merging_is_deterministic_across_runs() {
         let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let r1 = weld_then_merge(vec![t1.clone(), t2.clone()]);
         let r2 = weld_then_merge(vec![t1, t2]);
         assert_eq!(r1.len(), r2.len());
@@ -1023,8 +1023,16 @@ mod tests {
         };
         let merged = mesh.merge_coplanar();
         assert_eq!(merged.polygons.len(), 2);
-        let xy_poly = merged.polygons.iter().find(|p| p.plane.n_z != 0).unwrap();
-        let xz_poly = merged.polygons.iter().find(|p| p.plane.n_y != 0).unwrap();
+        let xy_poly = merged
+            .polygons
+            .iter()
+            .find(|p| p.plane.n_z != 0)
+            .expect("test setup: xy polygon is present after merge");
+        let xz_poly = merged
+            .polygons
+            .iter()
+            .find(|p| p.plane.n_y != 0)
+            .expect("test setup: xz polygon is present after merge");
         assert!(xy_poly.vertices.contains(&0));
         assert!(xy_poly.vertices.contains(&1));
         assert!(xz_poly.vertices.contains(&0));

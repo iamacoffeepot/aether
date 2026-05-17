@@ -9,15 +9,15 @@ use aether_mesh::{mesh, parse};
 
 #[test]
 fn unit_box_has_twelve_triangles() {
-    let ast = parse("(box 1 1 1 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(box 1 1 1 :color 0)").expect("test setup: box DSL parses");
+    let tris = mesh(&ast).expect("test setup: unit box meshes");
     assert_eq!(tris.len(), 12);
 }
 
 #[test]
 fn unit_box_corners_are_at_half_extents() {
-    let ast = parse("(box 2 2 2 :color 5)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(box 2 2 2 :color 5)").expect("test setup: box DSL parses");
+    let tris = mesh(&ast).expect("test setup: box meshes");
     let mut seen_corners = std::collections::BTreeSet::<[i32; 3]>::new();
     for tri in &tris {
         for v in tri.vertices {
@@ -44,8 +44,9 @@ fn unit_box_corners_are_at_half_extents() {
 
 #[test]
 fn translated_box_is_offset() {
-    let ast = parse("(translate (5 0 0) (box 1 1 1 :color 0))").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(translate (5 0 0) (box 1 1 1 :color 0))")
+        .expect("test setup: translate DSL parses");
+    let tris = mesh(&ast).expect("test setup: translated box meshes");
     for tri in &tris {
         for v in tri.vertices {
             assert!(v.x >= 4.49 && v.x <= 5.51, "vertex x out of range: {v:?}");
@@ -60,8 +61,8 @@ fn composition_concatenates_triangles() {
             (box 1 1 1 :color 0)
             (translate (3 0 0) (box 1 1 1 :color 1)))",
     )
-    .unwrap();
-    let tris = mesh(&ast).unwrap();
+    .expect("test setup: composition DSL parses");
+    let tris = mesh(&ast).expect("test setup: composition meshes");
     assert_eq!(tris.len(), 24);
     let color_0 = tris.iter().filter(|t| t.color == 0).count();
     let color_1 = tris.iter().filter(|t| t.color == 1).count();
@@ -73,8 +74,8 @@ fn composition_concatenates_triangles() {
 fn box_face_normals_point_outward() {
     // For each triangle, (b - a) × (c - a) must point away from the box center
     // (which is at origin for an untranslated box).
-    let ast = parse("(box 2 2 2 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(box 2 2 2 :color 0)").expect("test setup: box DSL parses");
+    let tris = mesh(&ast).expect("test setup: box meshes");
     for tri in &tris {
         let a = tri.vertices[0];
         let b = tri.vertices[1];

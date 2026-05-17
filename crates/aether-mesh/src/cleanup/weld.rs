@@ -158,7 +158,7 @@ mod tests {
     fn single_triangle_keeps_three_distinct_vertices() {
         let tri =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 5)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let mesh = IndexedMesh::weld(vec![tri]);
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.polygons.len(), 1);
@@ -170,9 +170,9 @@ mod tests {
     fn two_triangles_sharing_an_edge_share_two_vertices() {
         // Quad split into two triangles along the (0,0)-(1,1) diagonal.
         let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-            .unwrap();
+            .expect("test setup: non-degenerate triangle");
         let mesh = IndexedMesh::weld(vec![t1, t2]);
         // 4 distinct corners, not 6.
         assert_eq!(mesh.vertices.len(), 4);
@@ -228,10 +228,10 @@ mod tests {
     fn round_trip_preserves_vertex_coords_planes_and_colors() {
         let tri_a =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 7)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let tri_b =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 9)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let original = vec![tri_a, tri_b];
         let round_tripped = IndexedMesh::weld(original.clone()).into_polygons();
 
@@ -250,10 +250,10 @@ mod tests {
     fn welding_is_deterministic_across_runs() {
         let tri_a =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let tri_b =
             Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .unwrap();
+                .expect("test setup: non-degenerate triangle");
         let m1 = IndexedMesh::weld(vec![tri_a.clone(), tri_b.clone()]);
         let m2 = IndexedMesh::weld(vec![tri_a, tri_b]);
         assert_eq!(m1.vertices, m2.vertices);
@@ -273,8 +273,10 @@ mod tests {
     fn shared_vertex_has_identical_id_across_polygons() {
         let shared0 = pt(1.0, 0.0, 0.0);
         let shared1 = pt(1.0, 1.0, 0.0);
-        let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), shared0, shared1, 0).unwrap();
-        let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), shared1, pt(0.0, 1.0, 0.0), 0).unwrap();
+        let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), shared0, shared1, 0)
+            .expect("test setup: non-degenerate triangle");
+        let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), shared1, pt(0.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let mesh = IndexedMesh::weld(vec![t1, t2]);
 
         // Find each shared coordinate's VertexId in each polygon and
@@ -381,7 +383,7 @@ mod tests {
             pt(0.0, 2.0, 0.0), // third
             0,
         )
-        .unwrap();
+        .expect("test setup: non-degenerate triangle");
         let mesh = IndexedMesh::weld(vec![t1]);
         assert_eq!(mesh.vertices[0], pt(2.0, 0.0, 0.0));
         assert_eq!(mesh.vertices[1], pt(0.0, 0.0, 0.0));

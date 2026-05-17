@@ -9,8 +9,8 @@ use crate::point::Point3;
 
 pub fn pt(x: f32, y: f32, z: f32) -> Point3 {
     Point3 {
-        x: f32_to_fixed(x).unwrap(),
-        y: f32_to_fixed(y).unwrap(),
-        z: f32_to_fixed(z).unwrap(),
+        x: f32_to_fixed(x).expect("test setup: x in fixed-point range"),
+        y: f32_to_fixed(y).expect("test setup: y in fixed-point range"),
+        z: f32_to_fixed(z).expect("test setup: z in fixed-point range"),
     }
 }

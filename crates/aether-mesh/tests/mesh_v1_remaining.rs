@@ -35,8 +35,8 @@ fn cylinder_has_28_triangles_after_cap_merge() {
     // (8 axis-fan triangles, all coplanar same-color) collapses to an
     // octagon and CDT emits n−2 = 6 triangles. Sides stay at 16.
     // Total: 6 + 6 + 16 = 28.
-    let ast = parse("(cylinder 1 2 8 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 28);
+    let ast = parse("(cylinder 1 2 8 :color 0)").expect("test setup: cylinder DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: cylinder meshes").len(), 28);
 }
 
 #[test]
@@ -45,8 +45,8 @@ fn cylinder_outward_normals() {
     // from the Y axis; cap normals point along ±Y. The centroid-vs-
     // normal test works because the centroid of every face has a
     // strictly positive component in the outward direction.
-    let ast = parse("(cylinder 1 2 12 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(cylinder 1 2 12 :color 0)").expect("test setup: cylinder DSL parses");
+    let tris = mesh(&ast).expect("test setup: cylinder meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
@@ -77,8 +77,8 @@ fn cone_has_10_triangles_after_cap_merge() {
     // coplanar same-color tris into a hexagon, CDT re-emits as n−2 = 4
     // triangles. Sloped sides are at 6 distinct planes (different
     // angular orientation), unaffected. Total: 4 + 6 = 10.
-    let ast = parse("(cone 1 2 6 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 10);
+    let ast = parse("(cone 1 2 6 :color 0)").expect("test setup: cone DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: cone meshes").len(), 10);
 }
 
 #[test]
@@ -86,8 +86,8 @@ fn cone_outward_normals() {
     // Use a known deeply-interior reference point and check
     // (centroid - interior) · normal > 0 for every face. For a cone
     // with base at y=-1 and apex at y=+1, (0, -0.9, 0) is inside.
-    let ast = parse("(cone 1 2 12 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(cone 1 2 12 :color 0)").expect("test setup: cone DSL parses");
+    let tris = mesh(&ast).expect("test setup: cone meshes");
     let interior = Vec3::new(0.0, -0.9, 0.0);
     for tri in &tris {
         let n = tri_normal(tri);
@@ -107,8 +107,8 @@ fn cone_outward_normals() {
 fn wedge_has_eight_triangles() {
     // Two quads (bottom, back, hypotenuse) → 6 tris; two triangles
     // (left, right side) → 2 tris; total 8.
-    let ast = parse("(wedge 2 1 1 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 8);
+    let ast = parse("(wedge 2 1 1 :color 0)").expect("test setup: wedge DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: wedge meshes").len(), 8);
 }
 
 #[test]
@@ -116,8 +116,8 @@ fn wedge_outward_normals() {
     // The wedge's geometric centroid lies on the hypotenuse face plane,
     // so a centroid-as-interior test is degenerate. Use a known point
     // strictly inside (low-Y, low-Z corner of the wedge volume).
-    let ast = parse("(wedge 2 2 2 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(wedge 2 2 2 :color 0)").expect("test setup: wedge DSL parses");
+    let tris = mesh(&ast).expect("test setup: wedge meshes");
     let interior = Vec3::new(0.0, -0.5, -0.5);
     for tri in &tris {
         let n = tri_normal(tri);
@@ -133,8 +133,8 @@ fn wedge_outward_normals() {
 
 #[test]
 fn wedge_uses_six_unique_vertices() {
-    let ast = parse("(wedge 2 2 2 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(wedge 2 2 2 :color 0)").expect("test setup: wedge DSL parses");
+    let tris = mesh(&ast).expect("test setup: wedge meshes");
     let mut seen = std::collections::BTreeSet::<[i32; 3]>::new();
     for tri in &tris {
         for v in tri.vertices {
@@ -152,15 +152,18 @@ fn sphere_triangle_count_matches_lathe_pole_collapse() {
     // last) emit 1 tri/segment; the remaining n-2 edges emit
     // 2 tris/segment. Total = (2*(n-2) + 2) * segments = (2n - 2) * n.
     // For subdivisions = 8: (16 - 2) * 8 = 112.
-    let ast = parse("(sphere 1 8 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), (2 * 8 - 2) * 8);
+    let ast = parse("(sphere 1 8 :color 0)").expect("test setup: sphere DSL parses");
+    assert_eq!(
+        mesh(&ast).expect("test setup: sphere meshes").len(),
+        (2 * 8 - 2) * 8
+    );
 }
 
 #[test]
 fn sphere_vertices_lie_on_radius() {
     let radius: f32 = 1.5;
-    let ast = parse("(sphere 1.5 12 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(sphere 1.5 12 :color 0)").expect("test setup: sphere DSL parses");
+    let tris = mesh(&ast).expect("test setup: sphere meshes");
     for tri in &tris {
         for v in tri.vertices {
             let r = v.z.mul_add(v.z, v.x.mul_add(v.x, v.y * v.y)).sqrt();
@@ -174,8 +177,8 @@ fn sphere_vertices_lie_on_radius() {
 
 #[test]
 fn sphere_outward_normals() {
-    let ast = parse("(sphere 1 12 :color 0)").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(sphere 1 12 :color 0)").expect("test setup: sphere DSL parses");
+    let tris = mesh(&ast).expect("test setup: sphere meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
@@ -200,8 +203,8 @@ fn extrude_square_produces_walls_and_caps() {
             1
             :color 0)",
     )
-    .unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 12);
+    .expect("test setup: extrude DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: extrude meshes").len(), 12);
 }
 
 #[test]
@@ -214,8 +217,8 @@ fn extrude_cap_normals_face_along_z() {
             1
             :color 0)",
     )
-    .unwrap();
-    let tris = mesh(&ast).unwrap();
+    .expect("test setup: extrude DSL parses");
+    let tris = mesh(&ast).expect("test setup: extrude meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
@@ -239,8 +242,8 @@ fn extrude_cap_normals_face_along_z() {
 
 #[test]
 fn extrude_with_under_three_profile_points_emits_nothing() {
-    let ast = parse("(extrude ((0 0) (1 0)) 1 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 0);
+    let ast = parse("(extrude ((0 0) (1 0)) 1 :color 0)").expect("test setup: extrude DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: extrude meshes").len(), 0);
 }
 
 // ---------- mirror ----------
@@ -249,8 +252,9 @@ fn extrude_with_under_three_profile_points_emits_nothing() {
 fn mirror_x_reflects_box_across_yz_plane() {
     // Box centered at (5, 0, 0), mirrored across YZ plane → centered
     // at (-5, 0, 0).
-    let ast = parse("(mirror x (translate (5 0 0) (box 1 1 1 :color 0)))").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(mirror x (translate (5 0 0) (box 1 1 1 :color 0)))")
+        .expect("test setup: mirror DSL parses");
+    let tris = mesh(&ast).expect("test setup: mirrored box meshes");
     assert_eq!(tris.len(), 12);
     for tri in &tris {
         for v in tri.vertices {
@@ -266,8 +270,9 @@ fn mirror_x_reflects_box_across_yz_plane() {
 fn mirror_preserves_outward_winding() {
     // After reflection + winding swap, normals should still point
     // outward of the reflected box (toward the new centroid at -5).
-    let ast = parse("(mirror x (translate (5 0 0) (box 2 2 2 :color 0)))").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast = parse("(mirror x (translate (5 0 0) (box 2 2 2 :color 0)))")
+        .expect("test setup: mirror DSL parses");
+    let tris = mesh(&ast).expect("test setup: mirrored box meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
@@ -286,8 +291,9 @@ fn mirror_preserves_outward_winding() {
 
 #[test]
 fn array_produces_count_copies() {
-    let ast = parse("(array 4 (2 0 0) (box 1 1 1 :color 0))").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast =
+        parse("(array 4 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
+    let tris = mesh(&ast).expect("test setup: array meshes");
     assert_eq!(tris.len(), 12 * 4);
 }
 
@@ -295,8 +301,9 @@ fn array_produces_count_copies() {
 fn array_copies_are_translated_correctly() {
     // 3 copies of a unit box at spacing (2, 0, 0): copies sit at
     // x=0, x=2, x=4.
-    let ast = parse("(array 3 (2 0 0) (box 1 1 1 :color 0))").unwrap();
-    let tris = mesh(&ast).unwrap();
+    let ast =
+        parse("(array 3 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
+    let tris = mesh(&ast).expect("test setup: array meshes");
     let mut x_centers = std::collections::BTreeSet::<i32>::new();
     for tri in &tris {
         let c = tri_centroid(tri);
@@ -309,8 +316,9 @@ fn array_copies_are_translated_correctly() {
 
 #[test]
 fn array_zero_count_emits_nothing() {
-    let ast = parse("(array 0 (1 0 0) (box 1 1 1 :color 0))").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 0);
+    let ast =
+        parse("(array 0 (1 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
+    assert_eq!(mesh(&ast).expect("test setup: array meshes").len(), 0);
 }
 
 // ---------- round-trip across the full v1 vocabulary ----------
@@ -325,10 +333,10 @@ fn round_trip_full_v1_vocab() {
         (extrude ((-1 -1) (1 -1) (1 1) (-1 1)) 0.5 :color 4)
         (mirror x (translate (2 0 0) (box 1 1 1 :color 5)))
         (array 3 (1.5 0 0) (box 0.5 0.5 0.5 :color 6)))";
-    let ast1 = parse(text).unwrap();
+    let ast1 = parse(text).expect("test setup: full-v1 composition DSL parses");
     let serialized = aether_mesh::serialize(&ast1);
-    let ast2 = parse(&serialized).unwrap();
+    let ast2 = parse(&serialized).expect("test setup: round-tripped DSL re-parses");
     assert_eq!(ast1, ast2);
     // And the whole composition meshes without error.
-    let _ = mesh(&ast1).unwrap();
+    let _ = mesh(&ast1).expect("test setup: full-v1 composition meshes");
 }

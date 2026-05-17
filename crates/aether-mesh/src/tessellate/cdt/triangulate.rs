@@ -297,7 +297,8 @@ mod tests {
     fn triangle_yields_one_triangle() {
         let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
         let loops = vec![vec![0, 1, 2]];
-        let tris = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        let tris = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: triangle is triangulable");
         assert_eq!(tris.len(), 1);
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());
     }
@@ -311,7 +312,8 @@ mod tests {
             pt(0.0, 1.0, 0.0),
         ];
         let loops = vec![vec![0, 1, 2, 3]];
-        let tris = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        let tris = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: unit square is triangulable");
         assert_eq!(tris.len(), 2);
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());
         // Total area = 1 (a unit square).
@@ -336,7 +338,8 @@ mod tests {
             vec![0, 1, 2, 3], // outer CCW
             vec![4, 7, 6, 5], // hole CW (reverse of CCW order)
         ];
-        let tris = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        let tris = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: annular region is triangulable");
         // Topological minimum for a rectangle-with-rectangular-hole on
         // 8 boundary vertices: V + 2H - 2 = 8 triangles.
         assert_eq!(
@@ -368,8 +371,10 @@ mod tests {
             pt(0.5, 1.5, 0.0),
         ];
         let loops = vec![vec![0, 1, 2, 3], vec![4, 7, 6, 5]];
-        let r1 = triangulate(&vertices, &loops, &xy_plane()).unwrap();
-        let r2 = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        let r1 = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: annular region is triangulable");
+        let r2 = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: annular region is triangulable");
         assert_eq!(r1, r2);
     }
 
@@ -542,7 +547,8 @@ mod tests {
             vec![4, 7, 6, 5],   // hole 1 CW
             vec![8, 11, 10, 9], // hole 2 CW
         ];
-        let tris = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        let tris = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: multi-hole region is triangulable");
         // Total area = outer (16) - 2*hole (1 each) = 14.
         let unit = 1_i128 << 16;
         assert_eq!(
@@ -661,7 +667,8 @@ mod tests {
             pt(0.0, 2.0, 0.0), // 5
         ];
         let loops = vec![vec![0, 1, 2, 3, 4, 5]];
-        let tris = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        let tris = triangulate(&vertices, &loops, &xy_plane())
+            .expect("test setup: L-shape is triangulable");
         // 6-vertex non-convex polygon: V - 2 = 4 triangles.
         assert_eq!(tris.len(), 4);
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());

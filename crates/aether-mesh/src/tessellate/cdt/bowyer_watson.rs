@@ -674,7 +674,9 @@ impl Mesh {
             // vid (verts[0]) to a (verts[1]). The fan triangle adjacent
             // here has `a` in its `b` slot.
             let nbr_opp_b = by_b.get(&a).copied();
-            let t = self.triangles[tid].as_mut().unwrap();
+            let t = self.triangles[tid]
+                .as_mut()
+                .expect("fan triangle just inserted at first_new_tid + k must be live");
             t.neighbors[1] = nbr_opp_a;
             t.neighbors[2] = nbr_opp_b;
         }
