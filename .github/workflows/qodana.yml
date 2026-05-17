@@ -27,10 +27,18 @@ jobs:
       - name: Qodana scan
         uses: JetBrains/qodana-action@v2026.1
         with:
-          # Space-separated args. The --env passes CARGO_HOME into the
-          # container so cargo metadata doesn't perm-deny on the
-          # baked /usr/local/cargo (owned by a different user than
-          # Qodana's non-root scan process).
-          args: --linter qodana-rust --env CARGO_HOME=/tmp/qodana-cargo
+          # -u root forwards through `qodana scan` to the underlying
+          # `docker run`, keeping the container's design-default user.
+          # The qodana-action's wrapper otherwise passes `-u $(id -u)`
+          # to preserve the runner user's ownership of the workspace
+          # dir — but that flips the container to non-root, and the
+          # baked /usr/local/cargo (registry + global-cache) is
+          # root-owned, so cargo metadata perm-denies and Qodana
+          # leaves the entire workspace unanalysed. Running as root
+          # inside the container is the documented default — see
+          # https://www.jetbrains.com/help/qodana/docker-image-configuration.html
+          # § "Run as a non-root user". The CARGO_HOME override on
+          # the prior approach (#911) is now unnecessary.
+          args: --linter qodana-rust -u root
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
