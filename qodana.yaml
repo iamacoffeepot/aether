@@ -19,11 +19,21 @@ exclude:
       - archive
       - spikes
 
-# Native deps the linter needs to build before inspecting (mirrors the
-# clippy job in ci.yml — cpal Linux backend pulls ALSA headers).
-# Runs as root now that the workflow passes `-u root` to qodana scan,
-# so apt-get works without sudo. Prior attempts at this line failed
-# because the container was non-root by default (sudo missing, then
-# /var/lib/apt write-denied) — see the `-u root` rationale in
-# .github/workflows/qodana.yml.
-bootstrap: apt-get update && apt-get install -y libasound2-dev
+# Native deps + toolchain bump.
+#
+# - libasound2-dev: cpal Linux backend (mirrors the clippy job in ci.yml).
+# - rustup install/default 1.95.0: the qodana-rust:2026.1-eap image
+#   ships rustc 1.94.0. Our workspace builds with 1.95.0 (stable since
+#   2026-04-14); the gap surfaces as "Failure"-severity false positives
+#   in the inspection results — Qodana's own self-diagnosis flags the 2
+#   findings as "analysis could be incorrect." Bumping the toolchain
+#   inside the container to match what we actually build against
+#   should eliminate them.
+#
+# Both run as root (workflow passes -u root to qodana scan); see the
+# rationale on `args:` in .github/workflows/qodana.yml. Bootstrap
+# adds ~30-60s per run.
+bootstrap: |
+  apt-get update && apt-get install -y libasound2-dev
+  rustup install 1.95.0 --profile minimal --no-self-update
+  rustup default 1.95.0
