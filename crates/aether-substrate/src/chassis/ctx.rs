@@ -17,27 +17,15 @@ use crate::actor::native::envelope::Envelope;
 use crate::chassis::error::BootError;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::{MailDispatch, Registry};
+use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::FatalAborter;
 
-/// Materialise an owned [`Envelope`] from a borrowed [`MailDispatch`].
-/// Used by every `claim_mailbox*` variant's registry closure to copy the
-/// dispatch's borrowed `kind_name` / `origin` / `payload` into owned
-/// fields before the envelope crosses the mpsc boundary into the
-/// capability's dispatcher thread.
-fn build_envelope(dispatch: &MailDispatch<'_>) -> Envelope {
-    Envelope {
-        kind: dispatch.kind,
-        kind_name: dispatch.kind_name.to_owned(),
-        origin: dispatch.origin.map(str::to_owned),
-        sender: dispatch.sender,
-        payload: dispatch.payload.to_vec(),
-        count: dispatch.count,
-        mail_id: dispatch.mail_id,
-        root: dispatch.root,
-        parent_mail: dispatch.parent_mail,
-    }
-}
+// iamacoffeepot/aether#848 PR 3: the `build_envelope(&MailDispatch)`
+// helper retired. Production cap registration closures now take
+// `OwnedDispatch` directly and call `Envelope::from(dispatch)` —
+// payload + kind_name + origin all move rather than clone. The
+// borrowed-dispatch shape is still available through the
+// `MailboxEntry::Inline` path elsewhere.
 
 /// Result returned from [`ChassisCtx::claim_mailbox`].
 ///
@@ -300,12 +288,22 @@ impl<'a> ChassisCtx<'a> {
         let tx = Arc::new(tx);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
-                let env = build_envelope(&dispatch);
-                if tx.send(env).is_err() {
+            // iamacoffeepot/aether#848 PR 3: closure now takes
+            // `OwnedDispatch` directly and moves it into `Envelope`
+            // via `From`. Drops the `legacy_inbox_handler` adapter
+            // (PR 2's transitional wrap) and the prior
+            // `build_envelope(&dispatch)` clone — one `Vec<u8>` +
+            // one `String` saved per Inbox dispatch through this
+            // claim path. `SendError` returns the envelope on
+            // failure so the warn-log reads `env.kind_name` (the
+            // owned String) without needing to clone ahead of the
+            // send.
+            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+                let env = Envelope::from(dispatch);
+                if let Err(mpsc::SendError(env)) = tx.send(env) {
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = dispatch.kind_name,
+                        kind = %env.kind_name,
                         "capability mailbox receiver dropped — mail discarded"
                     );
                 }
@@ -354,20 +352,25 @@ impl<'a> ChassisCtx<'a> {
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
+            // iamacoffeepot/aether#848 PR 3: see `claim_mailbox_with_override`
+            // for the rationale. The pre-send `weak.upgrade()` check
+            // logs `dispatch.kind_name` (still owned by the closure
+            // at that point); the post-send fail branch reads
+            // `env.kind_name` out of the `SendError` payload.
+            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                 let Some(tx) = weak.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = dispatch.kind_name,
+                        kind = %dispatch.kind_name,
                         "capability mailbox sender dropped — mail discarded"
                     );
                     return;
                 };
-                let env = build_envelope(&dispatch);
-                if tx.send(env).is_err() {
+                let env = Envelope::from(dispatch);
+                if let Err(mpsc::SendError(env)) = tx.send(env) {
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = dispatch.kind_name,
+                        kind = %env.kind_name,
                         "capability mailbox receiver dropped — mail discarded"
                     );
                     return;
@@ -424,16 +427,22 @@ impl<'a> ChassisCtx<'a> {
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
-            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
+            // iamacoffeepot/aether#848 PR 3: see `claim_mailbox_with_override`
+            // for the rationale. Pre-send increment + post-fail
+            // decrement bracket the `tx.send` exactly as before;
+            // the only change is that `dispatch` is `OwnedDispatch`
+            // (moved into `env` via `From`) and the failure branch
+            // reads `env.kind_name` out of the `SendError`.
+            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                 let Some(tx) = weak.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = dispatch.kind_name,
+                        kind = %dispatch.kind_name,
                         "frame-bound capability sender dropped — mail discarded"
                     );
                     return;
                 };
-                let env = build_envelope(&dispatch);
+                let env = Envelope::from(dispatch);
                 // Increment before send so the dispatcher's
                 // matching decrement-after-dispatch sees a count
                 // > 0 by the time it tries to decrement. If the
@@ -441,11 +450,11 @@ impl<'a> ChassisCtx<'a> {
                 // upgrade and the send — shutdown race), undo
                 // the increment so the counter doesn't drift up.
                 pending_for_handler.fetch_add(1, Ordering::AcqRel);
-                if tx.send(env).is_err() {
+                if let Err(mpsc::SendError(env)) = tx.send(env) {
                     pending_for_handler.fetch_sub(1, Ordering::AcqRel);
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = dispatch.kind_name,
+                        kind = %env.kind_name,
                         "frame-bound capability receiver dropped — mail discarded"
                     );
                     return;

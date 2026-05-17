@@ -2,6 +2,7 @@
 //! mpsc inbox. Sinks today take borrowed args (`&str`, `&[u8]`); routing
 //! across an mpsc channel forces ownership.
 
+use crate::mail::registry::OwnedDispatch;
 use crate::mail::{KindId, MailId, ReplyTo};
 
 /// One mail delivered to a capability through its mpsc receiver.
@@ -28,4 +29,27 @@ pub struct Envelope {
     pub mail_id: MailId,
     pub root: MailId,
     pub parent_mail: Option<MailId>,
+}
+
+/// Issue iamacoffeepot/aether#848 PR 3: move every field out of
+/// the inbound [`OwnedDispatch`] into a fresh [`Envelope`]. No
+/// allocations — payload + kind_name + origin all transfer
+/// ownership. Replaces the legacy `build_envelope(&MailDispatch)`
+/// path inside production cap registration closures, which paid
+/// `Vec<u8>` + `String` clones per dispatch.
+impl From<OwnedDispatch> for Envelope {
+    #[inline]
+    fn from(dispatch: OwnedDispatch) -> Self {
+        Self {
+            kind: dispatch.kind,
+            kind_name: dispatch.kind_name,
+            origin: dispatch.origin,
+            sender: dispatch.sender,
+            payload: dispatch.payload,
+            count: dispatch.count,
+            mail_id: dispatch.mail_id,
+            root: dispatch.root,
+            parent_mail: dispatch.parent_mail,
+        }
+    }
 }

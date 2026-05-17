@@ -325,7 +325,7 @@ mod tests {
     use aether_data::{KindId, MailboxId};
 
     use crate::handle_store::HandleStore;
-    use crate::mail::registry::{MailDispatch, Registry};
+    use crate::mail::registry::Registry;
     use crate::mail::{Mail, Mailer};
 
     /// Stub actor used as the `A` phantom marker on [`InheritCtx`] /
@@ -358,9 +358,13 @@ mod tests {
     fn register_capture(registry: &Registry, name: &str) -> Arc<Mutex<Vec<CapturedDispatch>>> {
         let captured: Arc<Mutex<Vec<CapturedDispatch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
+        // iamacoffeepot/aether#848 PR 3: synchronous lineage-only
+        // capture; take `OwnedDispatch` directly (no envelope build,
+        // no `to_vec()` clone on the lineage fields which are all
+        // Copy).
         let _ = registry.try_register_inbox(
             name.to_owned(),
-            crate::mail::registry::legacy_inbox_handler(move |dispatch: MailDispatch<'_>| {
+            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
                 captured_for_handler.lock().unwrap().push(CapturedDispatch {
                     mail_id: dispatch.mail_id,
                     root: dispatch.root,
