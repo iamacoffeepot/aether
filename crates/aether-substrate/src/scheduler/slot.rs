@@ -513,20 +513,14 @@ pub(crate) mod tests {
         slot.push(2);
         slot.state.try_wake();
 
-        // Both Idle and Requeue are legitimate per-cycle results under
-        // nextest CPU contention (see PR 747). The invariant is that both
-        // envelopes get dispatched and the slot eventually reaches Idle.
-        for _ in 0..8 {
-            match run_one_cycle(&slot) {
-                CycleResult::Idle | CycleResult::Requeue => {}
-                CycleResult::Closed => panic!("slot closed unexpectedly"),
-            }
-            if slot.dispatched() == 2 {
-                break;
-            }
-            slot.state.try_wake();
-        }
+        // Generous mail + wallclock budget so a single cycle drains both
+        // envelopes regardless of CPU contention. This test validates the
+        // state-machine invariant ("drain-to-empty leaves Idle"), not the
+        // per-cycle budget — `drain_budget_yields_for_requeue` covers that.
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let outcome = slot.run_cycle(budget);
 
+        assert_eq!(outcome, CycleResult::Idle);
         assert_eq!(slot.dispatched(), 2);
         assert_eq!(slot.state.current(), SlotStateLabel::Idle);
     }
