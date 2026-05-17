@@ -117,12 +117,21 @@ impl HeadlessChassis {
         // Audio nop sink — NoteOn/NoteOff fall through silently;
         // SetMasterGain replies Err so agents fail fast rather than
         // hang on a chassis with no audio device.
+        //
+        // Issue 838: registered as `Sink` (not `Closure`) so the
+        // `Mailer::push` route brackets the inline handler with
+        // `Received`/`Finished`. The handler does its work
+        // synchronously (calls `send_reply` directly); there's no
+        // actor dispatch loop behind it, so without the bracket
+        // any chain that mails `aether.audio` from the headless
+        // chassis leaks `in_flight` and never settles. Same shape
+        // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_sink`.
         let kind_set_master_gain = boot
             .registry
             .kind_id(SetMasterGain::NAME)
             .expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
-        boot.registry.register_closure(
+        boot.registry.register_sink(
             "aether.audio",
             Arc::new(
                 move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {
