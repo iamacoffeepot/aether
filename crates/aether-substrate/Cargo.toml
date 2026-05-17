@@ -42,15 +42,6 @@ postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# ADR-0041 I/O namespace defaults. `dirs` resolves XDG on Linux,
-# Application Support on macOS, AppData on Windows without reimple-
-# menting platform-specific path logic per chassis.
-dirs = "5"
-# ADR-0043 net sink — blocking HTTP client with rustls TLS, no
-# tokio. `ureq` 3.x pulls rustls + webpki-roots transitively;
-# `url` parses URLs for allowlist host extraction.
-ureq = { version = "3", features = ["rustls"] }
-url = "2"
 wasmtime = "30"
 # Render-only deps; gated by the `render` feature. Headless + hub
 # don't enable the feature, so wgpu's transitive graph stays out of

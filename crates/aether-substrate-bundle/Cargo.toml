@@ -44,7 +44,6 @@ aether-kinds = { path = "../aether-kinds" }
 # Same crate as `wasmtime::Result` re-exports (issue #571).
 anyhow = "1"
 bytemuck = { version = "1.19", features = ["derive"] }
-os_info = { version = "3", default-features = false }
 png = "0.17"
 pollster = "0.4.0"
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
@@ -52,13 +51,11 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # server (issue 763 P5e) — the harness moved out-of-process into the
 # `aether-mcp` crate, which owns those deps now.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 # `test_bench::visual::ImageError` derives `thiserror::Error` (moved
 # from `aether-scenario` per issue 821). New runtime dep here because
 # `aether-substrate-bundle` had no prior thiserror consumer.
 thiserror = "1"
 tracing = "0.1"
-wasmtime = "30"
 wgpu = "29.0.1"
 winit = "0.30.13"
 
@@ -77,7 +74,6 @@ signal-hook = "0.3"
 ctrlc = "3"
 
 [dev-dependencies]
-wat = "1"
 # Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests
 # boot a `TestBench` and load `aether-test-fixture-probe`'s wasm to
 # exercise input subscription, drop_component, etc. The bench's own
