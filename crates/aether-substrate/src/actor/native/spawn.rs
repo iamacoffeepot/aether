@@ -364,9 +364,9 @@ impl Spawner {
 
         // 5-7. Register sink + Live entry + pre-load mail. The actor
         // registry's `insert_live` and the mailbox registry's
-        // `try_register_closure` each take their own write lock; a
+        // `try_register_inbox` each take their own write lock; a
         // collision on either step rolls back. Sequence chosen so the
-        // sink is the gating step (its `try_register_closure` is the
+        // sink is the gating step (its `try_register_inbox` is the
         // only op that can fail with a name collision against a peer
         // singleton claim — the actor_registry slot is keyed on
         // MailboxId which already passed the tombstone check).
@@ -395,7 +395,7 @@ impl Spawner {
         let wake_slot: Arc<crate::chassis::ctx::MailboxWakeSlot> =
             Arc::new(crate::chassis::ctx::MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
-        let registered = self.registry.try_register_closure(
+        let registered = self.registry.try_register_inbox(
             full_name.clone(),
             Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let Some(tx) = weak_for_handler.upgrade() else {

@@ -58,10 +58,13 @@ pub use observer::TestBenchObserverConfig;
 /// MCP sessions); with that fan-out retired the observer survives as
 /// a test-bench-private cap whose only job is recording kind names
 /// for `count_observed` assertions. The cap is a real `NativeActor`
-/// (not a `register_closure`) so its handler completes through the
-/// framework's ADR-0080 settlement reporting — the bench's Tick
-/// settlement gate would otherwise wait the full 5 s timeout per
-/// tick when a probe component routes observation mail here.
+/// (not a `register_inline` synchronous handler) so its handler
+/// completes through the framework's ADR-0080 settlement reporting
+/// — the bench's Tick settlement gate would otherwise wait the
+/// full 5 s timeout per tick when a probe component routes
+/// observation mail here. (Post-iamacoffeepot/aether#840 a
+/// `register_inline` sink would also settle correctly; retiring
+/// this actor-shaped workaround is a tracked follow-up.)
 #[aether_actor::bridge(singleton)]
 mod observer {
     use std::sync::{Arc, Mutex};

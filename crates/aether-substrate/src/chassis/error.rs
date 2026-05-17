@@ -20,7 +20,8 @@ use crate::mail::registry::NameConflict;
 pub enum BootError {
     /// The mailbox name is already bound, either to another
     /// capability that claimed it earlier or to a legacy
-    /// `Registry::register_closure` call from `SubstrateBoot::build`.
+    /// `Registry::register_inbox` / `Registry::register_inline`
+    /// call from `SubstrateBoot::build`.
     /// Phase 2-5 expect this during the side-by-side period and
     /// remove the legacy registration in the same diff.
     MailboxAlreadyClaimed { name: String },

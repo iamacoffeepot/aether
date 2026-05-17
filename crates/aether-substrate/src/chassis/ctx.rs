@@ -227,9 +227,10 @@ pub struct ChassisCtx<'a> {
     /// so its `LogDrainSlot` resolves to the chassis's declared drain
     /// (`Builder::with_log_drain<T>()`).
     ///
-    /// Sink-only registrations (e.g. `AETHER_DIAGNOSTICS`) go through
-    /// `Registry::register_closure` directly and do *not* land here —
-    /// they're not actors and have no `LogDrainSlot` to install.
+    /// Synchronous-handler registrations (e.g. `AETHER_DIAGNOSTICS`)
+    /// go through `Registry::register_inline` directly and do *not*
+    /// land here — they're not actors and have no `LogDrainSlot` to
+    /// install.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
     /// [`crate::Spawner`], cloned into every booted actor's
@@ -297,7 +298,7 @@ impl<'a> ChassisCtx<'a> {
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
-        let id = self.registry.try_register_closure(
+        let id = self.registry.try_register_inbox(
             name.to_owned(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 let env = build_envelope(&dispatch);
@@ -351,7 +352,7 @@ impl<'a> ChassisCtx<'a> {
         let weak = Arc::downgrade(&tx);
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
-        let id = self.registry.try_register_closure(
+        let id = self.registry.try_register_inbox(
             name.to_owned(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 let Some(tx) = weak.upgrade() else {
@@ -421,7 +422,7 @@ impl<'a> ChassisCtx<'a> {
         let pending_for_handler = Arc::clone(&pending);
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
-        let id = self.registry.try_register_closure(
+        let id = self.registry.try_register_inbox(
             name.to_owned(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 let Some(tx) = weak.upgrade() else {

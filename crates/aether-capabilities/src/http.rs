@@ -628,7 +628,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(
+            registry.register_inbox(
                 HttpCapability::NAMESPACE,
                 aether_substrate::mail::registry::noop_handler(),
             );

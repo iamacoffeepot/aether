@@ -774,7 +774,7 @@ mod tests {
         type CapturedRow = (MailId, MailId, Option<MailId>);
         let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
-        let subscriber_mbox = tb.registry.register_closure(
+        let subscriber_mbox = tb.registry.register_inbox(
             "issue_723_test_subscriber",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured_for_handler.lock().unwrap().push((

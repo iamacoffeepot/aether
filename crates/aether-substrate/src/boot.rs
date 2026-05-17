@@ -24,7 +24,7 @@
 //! through `Builder::with_actor()`. Without this separation, a hub-driven
 //! `load_component` could race ahead of the chassis's main thread
 //! and bind a chassis sink name to a freshly-loaded component before
-//! the chassis's later `register_closure` call, panicking the substrate
+//! the chassis's later `register_inbox` call, panicking the substrate
 //! (issue #262).
 //!
 //! **Env-var reading is the chassis's job.** Per issue 464,
@@ -146,7 +146,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         // (just emits a `tracing::warn!`) — there's no actor
         // dispatch loop behind it, so without the bracket the
         // chain's `in_flight` would leak.
-        registry.register_sink(
+        registry.register_inline(
             AETHER_DIAGNOSTICS,
             Arc::new(|dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let kind_name = dispatch.kind_name;
@@ -219,7 +219,7 @@ mod tests {
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry
-            .register_closure("test_chassis_sink", Arc::new(|_dispatch| {}));
+            .register_inbox("test_chassis_sink", Arc::new(|_dispatch| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `HubClientCapability`
         // themselves through their `Builder`.
