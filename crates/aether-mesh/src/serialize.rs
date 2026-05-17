@@ -197,7 +197,12 @@ fn kw(s: &str) -> Value {
 }
 
 fn num(f: f32) -> Value {
-    Value::Number(Number::from_f64(f64::from(f)).expect("non-finite float in AST"))
+    // Explicit `let widened: f64 = …` keeps Qodana's Rust EAP linter from
+    // mis-inferring `f64::from(f)` as `f32` (false-positive E0308 on the
+    // call to `Number::from_f64`, which clearly takes `f64`). No-op for
+    // cargo / clippy.
+    let widened: f64 = f64::from(f);
+    Value::Number(Number::from_f64(widened).expect("non-finite float in AST"))
 }
 
 fn uint(n: u32) -> Value {

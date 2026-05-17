@@ -72,6 +72,13 @@ pub fn drain_frame_bound_or_abort(pending: &[(MailboxId, Arc<AtomicU64>)], outbo
             None => return,
             Some((mbox, count)) => {
                 if Instant::now() >= deadline {
+                    // Explicit annotation to keep Qodana's Rust EAP linter from
+                    // losing the `u64` type through the Option destructure
+                    // (false-positive "u64 does not implement Display"). The
+                    // tuple's second element is annotated `u64` at the
+                    // `still_pending` declaration above; this is a no-op rebind
+                    // for cargo / clippy.
+                    let count: u64 = count;
                     let reason = format!(
                         "frame-bound dispatcher wedged: mailbox={mbox} pending={count} waited={DRAIN_BUDGET:?}"
                     );
