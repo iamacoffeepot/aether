@@ -1,6 +1,10 @@
 // Camera math: bounded tick counts cast to f32 for orbit angle
 // accumulation are domain-correct.
 #![allow(clippy::cast_precision_loss)]
+// `#[handler]` methods take the decoded mail by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded payload and hands it off, so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
 
 //! Multi-camera runtime. Hosts N named cameras (each in one of two
 //! modes — orbit or orthographic top-down), advances every camera each

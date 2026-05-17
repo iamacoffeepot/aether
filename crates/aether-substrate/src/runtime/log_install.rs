@@ -58,7 +58,7 @@ pub trait MailDispatch: Send + Sync {
 /// `MailDispatch`).
 impl MailDispatch for NativeBinding {
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]) {
-        let _ = NativeBinding::send_mail(self, mailbox.0, kind.0, payload, 1);
+        let _ = Self::send_mail(self, mailbox.0, kind.0, payload, 1);
     }
 }
 

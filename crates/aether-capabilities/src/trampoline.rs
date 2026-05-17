@@ -59,6 +59,11 @@
 //!   ADR-0022 + ADR-0038 invariants hold because the inbox channel is
 //!   the trampoline's `NativeBinding` and outlives the swap.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 // Handler-signature kinds must be importable at file root so the
 // `#[bridge]`-emitted `impl HandlesKind<K> for WasmTrampoline {}`
 // markers (always-on, outside the cfg gate) resolve.

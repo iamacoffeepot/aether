@@ -13,7 +13,7 @@ pub struct Point3 {
 
 impl Point3 {
     pub fn from_f32(p: Vec3) -> Result<Self, FixedError> {
-        Ok(Point3 {
+        Ok(Self {
             x: f32_to_fixed(p.x)?,
             y: f32_to_fixed(p.y)?,
             z: f32_to_fixed(p.z)?,

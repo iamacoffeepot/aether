@@ -49,7 +49,7 @@ pub enum RunError {
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RunError::Other(e) => write!(f, "driver run failed: {e}"),
+            Self::Other(e) => write!(f, "driver run failed: {e}"),
         }
     }
 }
@@ -57,7 +57,7 @@ impl fmt::Display for RunError {
 impl StdError for RunError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            RunError::Other(e) => Some(&**e),
+            Self::Other(e) => Some(&**e),
         }
     }
 }
@@ -1013,7 +1013,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// installed — fail-fast per ADR-0063: the typestate guarantees
     /// `with_driver` has run, so a missing driver is a builder API bug.
     pub fn build(self) -> Result<BuiltChassis<C>, BootError> {
-        let Builder {
+        let Self {
             registry,
             mailer,
             passives,
@@ -1185,6 +1185,12 @@ impl Drop for BootedPassives {
     }
 }
 
+// Linear boot pipeline: claim mailbox -> wire FFI exports -> spawn
+// each passive in declared order, plus rollback bookkeeping. The
+// pieces share enough state that splitting into helpers obscures the
+// boot ordering — leaving it as one function keeps the chassis boot
+// sequence readable in one place.
+#[allow(clippy::too_many_lines)]
 fn boot_passives(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
@@ -1548,7 +1554,7 @@ impl<C: Chassis> BuiltChassis<C> {
     /// as [`RunError`]; passives still tear down before the error
     /// returns to the caller.
     pub fn run(self) -> Result<(), RunError> {
-        let BuiltChassis { booted, driver, .. } = self;
+        let Self { booted, driver, .. } = self;
         let result = driver.run();
         // Passives drop here, triggering reverse-order shutdown via
         // BootedPassives::Drop. Holding `booted` until after `result`
@@ -1685,6 +1691,11 @@ impl<C: Chassis> PassiveChassis<C> {
 }
 
 #[cfg(test)]
+// Chassis-level integration tests stage many caps, sender threads,
+// and assertions in a single test function so the boot-and-route
+// sequence reads top-to-bottom; extracting helpers would either lose
+// the staging context or add fixtures that aren't reused elsewhere.
+#[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
 

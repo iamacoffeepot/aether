@@ -191,6 +191,10 @@ where
     /// Wraps the dispatch call in `local::with_stamped` +
     /// `log_install::with_actor_dispatch` so tracing events carry the
     /// actor's mailbox id and the per-handler `LogBatch` ships at exit.
+    // `env` is taken by value because dispatch may move fields out
+    // (reply_to, payload) into the actor; the helper here doesn't
+    // happen to, but the surface mirrors the owning dispatch loop.
+    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_one(&self, actor: &mut Box<A>, env: crate::actor::native::Envelope) {
         let inbound_mail_id = env.mail_id;
         // Issue 734: capture the OS thread name at the dispatcher's

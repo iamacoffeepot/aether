@@ -90,7 +90,7 @@ impl Mesh {
     /// Build the Delaunay triangulation of the given points. Returns
     /// an empty mesh if `points` is empty.
     pub(super) fn build(points: Vec<Point2>) -> Self {
-        let mut mesh = Mesh {
+        let mut mesh = Self {
             vertices: Vec::new(),
             triangles: Vec::new(),
             super_count: 0,

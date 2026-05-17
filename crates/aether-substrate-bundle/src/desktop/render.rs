@@ -102,6 +102,16 @@ impl Gpu {
     /// Panics if surface creation, adapter selection, or device
     /// acquisition fail — fail-fast per ADR-0063: the desktop chassis
     /// can't proceed without a usable GPU pipeline.
+    // One-shot GPU pipeline setup: instance, surface, adapter, device,
+    // shader, pipeline, depth, uniform — all tied together in a single
+    // boot path. Splitting into helpers would force passing 6+
+    // intermediate `wgpu` handles around without saving readability.
+    //
+    // `window` is owned because the boot path is a one-shot handoff:
+    // the driver builds the `Arc<Window>` once and the GPU pipeline
+    // takes a clone via `Arc::clone(&window)` for the surface; the
+    // owning form mirrors the `RenderHandles` argument.
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     pub fn new(window: Arc<Window>, render_handles: RenderHandles) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());

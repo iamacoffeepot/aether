@@ -326,6 +326,10 @@ where
 }
 
 #[cfg(test)]
+// Test helpers use `Mutex<Vec<...>>` as a capture buffer; the guard
+// is held through `.push(...)` which is the captured payload — that's
+// the intended sequence, not a tightening opportunity.
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use std::sync::Mutex;

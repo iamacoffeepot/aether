@@ -708,6 +708,10 @@ impl TestBench {
     /// the `pump_until_reply` caller surfaces the timeout rather than
     /// waiting on a reply that will never arrive — the substrate is
     /// in a stuck state and the test should fail loudly.
+    // `event` is owned because the match destructures it; clippy
+    // doesn't track the partial-move via the `Advance { reply_to, .. }`
+    // pattern.
+    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), TestBenchError> {
         match event {
             ChassisEvent::Advance { reply_to, ticks } => {
@@ -840,6 +844,12 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 }
 
 #[cfg(test)]
+// Integration tests stage actors, sender threads, and per-step
+// assertions inline so the boot/dispatch sequence reads top-to-bottom;
+// extracting helpers would scatter the staging context across files.
+// Tests also hold capture `Mutex` guards across the assertion block
+// so the snapshot reads atomically against the concurrent push path.
+#[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
 

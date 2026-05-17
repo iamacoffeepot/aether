@@ -40,6 +40,10 @@ fn require_wgpu_only() -> bool {
 /// Read `LogRead` against the bench and unwrap the `Ok` arm. Tests
 /// panic-and-print on `Err` rather than threading match across every
 /// site — the cap's healthy path only returns `Ok`.
+// `request` is owned for the same ergonomic reason `send_mail<K>()`
+// takes `K` by value — tests build the request inline at the call
+// site and immediately hand it off.
+#[allow(clippy::needless_pass_by_value)]
 fn read(
     bench: &mut TestBench,
     request: LogRead,

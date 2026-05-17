@@ -38,7 +38,7 @@ const MAX_TJUNCTION_ITERATIONS: usize = 256;
 
 impl IndexedMesh {
     pub(super) fn repair_tjunctions(self) -> Self {
-        let IndexedMesh {
+        let Self {
             vertices,
             mut polygons,
         } = self;
@@ -122,7 +122,7 @@ impl IndexedMesh {
             polygons = next_polygons;
         }
 
-        IndexedMesh { vertices, polygons }
+        Self { vertices, polygons }
     }
 }
 

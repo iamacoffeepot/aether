@@ -25,6 +25,11 @@
 //! A future user-space TCP observer (monitor-based or session-
 //! targeted mail) is the replacement path.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 // Handler-signature kinds need to be importable at file root for
 // the `#[bridge]`-emitted `HandlesKind` markers.
 use aether_kinds::{SessionClose, SessionDataReady, SessionWrite};
@@ -246,6 +251,9 @@ mod session_native {
         /// Cooperative external close. Peer mails this, we call
         /// `ctx.shutdown()`, the dispatcher drains remaining inbox
         /// mail, runs `unwire` (which joins the read thread).
+        // Stateless close-request handler: `&mut self` is required by
+        // the dispatch ABI (ADR-0033 / ADR-0038); shutdown is via ctx.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_close_request(&mut self, ctx: &mut NativeCtx<'_>, _mail: SessionClose) {
             ctx.shutdown();

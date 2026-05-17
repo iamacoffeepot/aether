@@ -10,6 +10,12 @@
 // client. Reads take a shared lock and are cheap; writes are rare
 // (boot + load/replace/drop).
 
+// Registry RwLock guards are intentionally held across read-then-update
+// sequences — releasing the guard mid-sequence would open a TOCTOU
+// window where a concurrent writer could mutate the map between the
+// `get` and the dependent action. Writes are rare, contention is low.
+#![allow(clippy::significant_drop_tightening)]
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -411,8 +417,8 @@ pub enum DropError {
 impl fmt::Display for DropError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DropError::UnknownId(id) => write!(f, "unknown mailbox id {id:?}"),
-            DropError::AlreadyDropped(id) => write!(f, "mailbox {id:?} already dropped"),
+            Self::UnknownId(id) => write!(f, "unknown mailbox id {id:?}"),
+            Self::AlreadyDropped(id) => write!(f, "mailbox {id:?} already dropped"),
         }
     }
 }

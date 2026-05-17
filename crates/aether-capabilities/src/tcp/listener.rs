@@ -169,6 +169,9 @@ mod listener_native {
         /// `TcpCapability` mails this; we shut down so the dispatcher
         /// drains, runs `unwire`, and the close fan-out fires
         /// `MonitorNotice` to the cap.
+        // Stateless close request: `&mut self` rides the dispatch ABI;
+        // shutdown is requested through `ctx`, not through any field.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_close_request(&mut self, ctx: &mut NativeCtx<'_>, _mail: Close) {
             ctx.shutdown();

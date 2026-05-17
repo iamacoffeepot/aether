@@ -130,7 +130,7 @@ impl ComponentCtx {
         queue: Arc<Mailer>,
         outbound: Arc<HubOutbound>,
     ) -> Self {
-        ComponentCtx {
+        Self {
             sender,
             registry,
             queue,
@@ -672,6 +672,9 @@ impl Component {
 }
 
 #[cfg(test)]
+// Tests hold the capture `Mutex` guard across the assertion block so
+// the snapshot reads atomically against the concurrent push path.
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use std::sync::Arc;
 

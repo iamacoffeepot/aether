@@ -182,6 +182,10 @@ impl Pool {
     /// any worker thread — fail-fast per ADR-0063: worker count is a
     /// chassis-boot invariant and thread spawn is a substrate
     /// prerequisite.
+    // `config` and `aborter` are taken by value for the builder-style
+    // boot path (callers compose the config once and hand it off to
+    // the pool); fields are read but not moved out.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn start(config: PoolConfig, aborter: Arc<dyn FatalAborter>) -> PoolHandle {
         assert!(config.workers >= 1, "pool needs at least one worker");
         let (ready_tx, ready_rx) = unbounded::<Arc<dyn Drainable>>();
@@ -212,6 +216,9 @@ impl Pool {
     }
 }
 
+// All arguments are taken by value so the spawned thread owns them
+// for its lifetime — the function is the worker thread's body.
+#[allow(clippy::needless_pass_by_value)]
 fn worker_loop(
     ready_rx: Receiver<Arc<dyn Drainable>>,
     ready_tx: Sender<Arc<dyn Drainable>>,

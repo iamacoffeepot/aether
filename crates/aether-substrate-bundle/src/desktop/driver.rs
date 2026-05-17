@@ -356,6 +356,11 @@ impl App {
         }
     }
 
+    // `env` is owned because the dispatch borrows `env.sender`,
+    // `env.payload`, and `env.kind` separately as it walks the
+    // window-control kind set; taking `&Envelope` works but loses the
+    // owning-handoff symmetry with the rest of the dispatch surface.
+    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_window_envelope(&mut self, env: Envelope) {
         if env.kind == self.kind_set_window_mode {
             let payload: SetWindowMode = match postcard::from_bytes(&env.payload) {
@@ -465,6 +470,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.publish_window_size(initial_size.width, initial_size.height);
     }
 
+    // winit's `window_event` dispatches one arm per `WindowEvent`
+    // variant; we route every variant through this single fn so the
+    // event-to-engine bridging lives in one place.
+    #[allow(clippy::too_many_lines)]
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),

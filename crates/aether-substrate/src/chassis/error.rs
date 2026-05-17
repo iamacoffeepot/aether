@@ -35,13 +35,13 @@ pub enum BootError {
 impl fmt::Display for BootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BootError::MailboxAlreadyClaimed { name } => {
+            Self::MailboxAlreadyClaimed { name } => {
                 write!(f, "mailbox {name:?} already claimed")
             }
-            BootError::FallbackRouterAlreadyClaimed => {
+            Self::FallbackRouterAlreadyClaimed => {
                 f.write_str("fallback router slot already claimed")
             }
-            BootError::Other(e) => write!(f, "capability boot failed: {e}"),
+            Self::Other(e) => write!(f, "capability boot failed: {e}"),
         }
     }
 }
@@ -49,7 +49,7 @@ impl fmt::Display for BootError {
 impl StdError for BootError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            BootError::Other(e) => Some(&**e),
+            Self::Other(e) => Some(&**e),
             _ => None,
         }
     }
@@ -57,7 +57,7 @@ impl StdError for BootError {
 
 impl From<NameConflict> for BootError {
     fn from(e: NameConflict) -> Self {
-        BootError::MailboxAlreadyClaimed { name: e.name }
+        Self::MailboxAlreadyClaimed { name: e.name }
     }
 }
 
@@ -69,7 +69,7 @@ impl From<NameConflict> for BootError {
 /// per-call `.map_err` glue.
 impl From<wasmtime::Error> for BootError {
     fn from(e: wasmtime::Error) -> Self {
-        BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
+        Self::Other(Box::new(std::io::Error::other(format!("{e}"))))
     }
 }
 

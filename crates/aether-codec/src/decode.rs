@@ -266,6 +266,11 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
     }
 }
 
+// Schema-driven postcard decoder: one match arm per `SchemaType`
+// variant. Each arm is short but the arm count adds up — extracting
+// per-type helpers obscures the schema → wire mapping that's the
+// purpose of this fn.
+#[allow(clippy::too_many_lines)]
 fn decode_postcard(
     cur: &mut Cursor<'_>,
     schema: &SchemaType,
@@ -643,6 +648,10 @@ mod tests {
     /// Encode → decode → assert equal. The single most load-bearing
     /// invariant: every kind shape the encoder accepts, the decoder
     /// inverts.
+    // `value` is owned because the test passes a freshly-built `Value`
+    // (e.g. `Value::String("…".to_owned())`) inline at the call site;
+    // taking `&Value` would force ad-hoc bindings at every site.
+    #[allow(clippy::needless_pass_by_value)]
     fn roundtrip(value: Value, schema: &SchemaType) {
         let bytes = encode_schema(&value, schema)
             .unwrap_or_else(|e| panic!("encode failed for {value:?}: {e}"));

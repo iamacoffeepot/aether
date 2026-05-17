@@ -176,6 +176,10 @@ impl FfiCtx<'_> {
     /// # Panics
     /// Always panics — that's the point. The trap propagates to the
     /// substrate's ADR-0063 fail-fast escalation path.
+    // Mirrors `aether_substrate::actor::native::NativeCtx::fatal_abort`
+    // — `reason` is owned because callers `format!(...)` inline and the
+    // diverging body means no further use.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn fatal_abort(&self, reason: alloc::string::String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
     }

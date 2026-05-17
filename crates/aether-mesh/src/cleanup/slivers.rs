@@ -59,7 +59,7 @@ const MAX_SLIVER_ITERATIONS: usize = 64;
 
 impl IndexedMesh {
     pub(super) fn remove_slivers(self) -> Self {
-        let IndexedMesh {
+        let Self {
             vertices,
             mut polygons,
         } = self;
@@ -105,7 +105,7 @@ impl IndexedMesh {
             });
         }
 
-        IndexedMesh { vertices, polygons }
+        Self { vertices, polygons }
     }
 }
 

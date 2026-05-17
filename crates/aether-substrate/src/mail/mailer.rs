@@ -1,3 +1,9 @@
+// Mailer locks are held across the lookup + dispatch pair on
+// purpose — dropping the guard between resolving the recipient and
+// pushing the envelope would open a TOCTOU window where the mailbox
+// could be unregistered or replaced mid-call.
+#![allow(clippy::significant_drop_tightening)]
+
 // Inline router (ADR-0038 Phase 3 + issue 603).
 //
 // Phase 2 retired the VecDeque + router thread; Phase 3 retired the
@@ -273,6 +279,11 @@ impl Mailer {
 /// splice inline-form bytes into a fresh payload; mail that hits a
 /// missing handle parks in the store and returns immediately
 /// without dispatch.
+// Routing pipeline runs as one function: chassis-mail switch,
+// ref-resolver walk + dispatch, registry lookup, outbound forward.
+// Splitting the steps would scatter the per-mail Vec<u8> buffer reuse
+// and lose the linear "where does this envelope go?" read.
+#[allow(clippy::too_many_lines)]
 fn route_mail(
     mut mail: Mail,
     registry: &Registry,
@@ -490,6 +501,10 @@ fn route_mail(
 }
 
 #[cfg(test)]
+// Mailer integration tests stage senders / receivers / multi-step
+// dispatch fixtures inline so the round-trip read top-to-bottom;
+// extracting helpers would split the path-under-test across files.
+#[allow(clippy::too_many_lines)]
 mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};

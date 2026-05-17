@@ -43,6 +43,7 @@ impl Chassis for HubChassis {
 /// `rpc_addr` is the `aether.rpc.server` bind — the target the
 /// out-of-process `aether-mcp` coordinator dials. `AETHER_RPC_PORT`
 /// overrides the port.
+#[derive(Clone, Copy)]
 pub struct HubEnv {
     pub rpc_addr: SocketAddr,
 }

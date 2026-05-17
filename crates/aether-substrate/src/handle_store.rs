@@ -3,6 +3,12 @@
 // format below; `u32 → u64` widenings move handle ids into the
 // 64-bit id slot. Both are part of the load-bearing wire layout.
 #![allow(clippy::cast_lossless, clippy::cast_possible_truncation)]
+// `HandleStore` Mutex guards are intentionally held across read-then-
+// update sequences (lookup + refcount mutation, eviction scan + drop)
+// — releasing the guard mid-sequence opens a TOCTOU window where
+// another caller could mutate the store between the read and the
+// dependent action.
+#![allow(clippy::significant_drop_tightening)]
 
 //! ADR-0045 typed-handle store and ref-walking dispatch hook.
 //!
@@ -604,6 +610,10 @@ impl<'a> State<'a> {
 /// wire. Returns `Ok(Some((handle, kind)))` to signal "park on this
 /// handle", `Ok(None)` for fully-walked, `Err(...)` for malformed
 /// wire.
+// One match arm per `SchemaType` variant; extracting per-type helpers
+// would force per-arm `&mut State<'_>` plumbing without saving
+// readability.
+#[allow(clippy::too_many_lines)]
 fn walk(
     schema: &SchemaType,
     state: &mut State<'_>,

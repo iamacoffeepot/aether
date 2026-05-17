@@ -266,6 +266,11 @@ impl Spawner {
     /// 6. Insert `Live` entry into the actor registry.
     /// 7. Pre-load `after_init_mail` into the inbox.
     /// 8. Spawn dispatcher thread, move actor in.
+    // Spawn pipeline runs as one linear function so the eight-step
+    // sequence above maps 1:1 to the code. Splitting steps into
+    // helpers would scatter the rollback bookkeeping each step relies
+    // on across multiple sites.
+    #[allow(clippy::too_many_lines)]
     fn spawn_actor<A>(
         self: Arc<Self>,
         subname: Subname<'_>,
@@ -659,6 +664,11 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
     /// `A: HandlesKind<K>` ensures only kinds the actor's handler set
     /// covers can be pre-loaded; the strict-receiver miss path stays
     /// off the bootstrap surface.
+    // `mail` is taken by value so the builder API mirrors the rest of
+    // the spawn surface (`config: A::Config` is also by value); the
+    // value flows straight into `encode_into_bytes` whose owned form
+    // matches `Kind`'s wire-encoding convention.
+    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn after_init<K>(mut self, mail: K) -> Self
     where

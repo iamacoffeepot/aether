@@ -71,6 +71,10 @@ mod test_echo_actor {
             Ok(Self)
         }
 
+        // Stateless echo handler — keeps `&mut self` to match the
+        // dispatch ABI (ADR-0033 / ADR-0038) even though the body
+        // doesn't touch component state.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) {
             ctx.reply(&TestEchoReply { value: mail.value });

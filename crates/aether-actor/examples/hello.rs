@@ -16,6 +16,11 @@
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
+// `#[handler]` methods take `&mut self` to match the dispatch ABI
+// (ADR-0033 / ADR-0038); a stateless handler that ignores `self` is
+// fine but must keep the signature.
+#![allow(clippy::unused_self)]
+
 use aether_actor::{BootError, FfiActor, FfiCtx, KindId, Resolver, actor};
 use aether_capabilities::{InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};

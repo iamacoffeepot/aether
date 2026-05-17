@@ -16,6 +16,10 @@
 //! Component record" check.
 
 #![allow(dead_code)]
+// Manifest-probe fixture's `#[handler]` / `#[fallback]` bodies are
+// stubs that exercise the const-emission path — they have to keep
+// `&mut self` to match the dispatch ABI but don't read state.
+#![allow(clippy::unused_self)]
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_data::Kind;

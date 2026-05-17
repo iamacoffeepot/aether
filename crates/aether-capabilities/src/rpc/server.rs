@@ -17,6 +17,11 @@
 //! connection; the settlement notice closes the call with a
 //! `ReplyEnd`.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 // Handler-signature kinds need to be importable at file root for the
 // `#[bridge]`-emitted `HandlesKind<K>` markers.
 use aether_kinds::{RpcInboundReady, trace::Settled};

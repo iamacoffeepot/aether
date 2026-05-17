@@ -14,6 +14,11 @@
 //! working `Actor + HandlesKind + NativeActor + NativeDispatch`
 //! stack on a real cap shape.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};

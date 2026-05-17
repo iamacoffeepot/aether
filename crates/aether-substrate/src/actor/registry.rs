@@ -16,6 +16,12 @@
 //! sit side-by-side so the lifecycle work doesn't perturb the routing
 //! path.
 
+// Registry RwLock guards are intentionally held across the full
+// read-then-update or match-then-mutate sequence — releasing the
+// guard mid-sequence would open a TOCTOU window where another writer
+// could mutate the map between the `get` and the dependent action.
+#![allow(clippy::significant_drop_tightening)]
+
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
