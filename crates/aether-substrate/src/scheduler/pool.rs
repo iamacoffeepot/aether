@@ -55,8 +55,7 @@ impl Default for PoolConfig {
             // (`num_cpus::get().saturating_sub(reserved)`); for now
             // `reserved == 1` covers the chassis frame loop.
             workers: thread::available_parallelism()
-                .map(|n| n.get().saturating_sub(1).max(1))
-                .unwrap_or(2),
+                .map_or(2, |n| n.get().saturating_sub(1).max(1)),
             budget_template: BudgetTemplate::Standard,
         }
     }

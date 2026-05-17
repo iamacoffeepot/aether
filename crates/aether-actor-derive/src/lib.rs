@@ -46,7 +46,7 @@ use quote::quote;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
     GenericArgument, ImplItem, Item, ItemImpl, ItemMod, Lit, Meta, PathArguments, Signature, Type,
-    parse_macro_input, spanned::Spanned,
+    parse_macro_input,
 };
 
 #[proc_macro_derive(Kind, attributes(kind))]

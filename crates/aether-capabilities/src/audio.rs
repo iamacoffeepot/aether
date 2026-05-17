@@ -114,8 +114,7 @@ mod native {
         #[must_use]
         pub fn from_env() -> Self {
             let disabled = std::env::var("AETHER_AUDIO_DISABLE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
             let requested_sample_rate = std::env::var("AETHER_AUDIO_SAMPLE_RATE")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok());
@@ -878,6 +877,11 @@ mod native {
 
     #[cfg(test)]
     mod tests {
+        // `sender.push(...).unwrap()` reads as test setup — the channel
+        // is local and never full / closed during the test. `.expect`
+        // per call would be pure noise.
+        #![allow(clippy::unwrap_used)]
+
         use super::*;
         use crate::test_chassis::{TestChassis, fresh_substrate};
         use aether_actor::Actor;

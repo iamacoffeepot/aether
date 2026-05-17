@@ -12,6 +12,7 @@ spikes/*/target/
 # the directory itself.
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/audit/

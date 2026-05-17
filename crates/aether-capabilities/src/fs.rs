@@ -668,12 +668,11 @@ mod native {
             let nonce: u64 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 // Nanosecond clock fits comfortably in u64 for the next ~584 years.
-                .map(|d| {
+                .map_or(0, |d| {
                     #[allow(clippy::cast_possible_truncation)]
                     let nanos = d.as_nanos() as u64;
                     nanos
-                })
-                .unwrap_or(0);
+                });
             let path = temp_dir().join(format!("aether-io-cap-{tag}-{pid}-{nonce}"));
             std::fs::create_dir_all(&path).expect("test setup: scratch dir creates");
             path

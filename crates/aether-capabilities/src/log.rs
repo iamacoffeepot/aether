@@ -211,12 +211,11 @@ mod native {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             // Millisecond clock fits comfortably in u64 for the next ~584 million years.
-            .map(|d| {
+            .map_or(0, |d| {
                 #[allow(clippy::cast_possible_truncation)]
                 let ms = d.as_millis() as u64;
                 ms
             })
-            .unwrap_or(0)
     }
 
     #[cfg(test)]
