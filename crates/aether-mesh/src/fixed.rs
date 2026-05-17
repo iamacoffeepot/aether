@@ -124,7 +124,9 @@ mod tests {
         let too_big = MAX_INPUT_MAGNITUDE + 1.0;
         match f32_to_fixed(too_big).unwrap_err() {
             FixedError::OutOfRange { value } => assert_eq!(value, too_big),
-            other => panic!("expected OutOfRange, got {other:?}"),
+            other @ FixedError::NotFinite { .. } => {
+                panic!("expected OutOfRange, got {other:?}")
+            }
         }
     }
 
@@ -133,7 +135,9 @@ mod tests {
         let too_small = -MAX_INPUT_MAGNITUDE - 1.0;
         match f32_to_fixed(too_small).unwrap_err() {
             FixedError::OutOfRange { value } => assert_eq!(value, too_small),
-            other => panic!("expected OutOfRange, got {other:?}"),
+            other @ FixedError::NotFinite { .. } => {
+                panic!("expected OutOfRange, got {other:?}")
+            }
         }
     }
 
@@ -284,7 +288,9 @@ mod tests {
         );
         match f32_to_fixed(just_above).unwrap_err() {
             FixedError::OutOfRange { value } => assert_eq!(value, just_above),
-            other => panic!("expected OutOfRange, got {other:?}"),
+            other @ FixedError::NotFinite { .. } => {
+                panic!("expected OutOfRange, got {other:?}")
+            }
         }
     }
 

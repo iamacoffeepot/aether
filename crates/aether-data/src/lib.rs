@@ -751,7 +751,7 @@ mod tests {
                 assert_eq!(id, 42);
                 assert_eq!(kind_id, TestStruct::ID.0);
             }
-            _ => panic!("expected Handle variant"),
+            Ref::Inline(_) => panic!("expected Handle variant"),
         }
     }
 
@@ -764,7 +764,7 @@ mod tests {
         let r = Ref::inline(v.clone());
         match r {
             Ref::Inline(inner) => assert_eq!(inner, v),
-            _ => panic!("expected Inline variant"),
+            Ref::Handle { .. } => panic!("expected Inline variant"),
         }
     }
 

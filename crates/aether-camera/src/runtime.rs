@@ -387,7 +387,7 @@ impl FfiActor for CameraComponent {
         match self.cameras.get_mut(&msg.name) {
             Some(cam) => match &mut cam.mode {
                 ModeState::Orbit(state) => state.apply(&msg.params),
-                other => tracing::warn!(
+                other @ ModeState::Topdown(_) => tracing::warn!(
                     target: "aether_camera",
                     name = %msg.name,
                     actual = %other.name(),
@@ -410,7 +410,7 @@ impl FfiActor for CameraComponent {
         match self.cameras.get_mut(&msg.name) {
             Some(cam) => match &mut cam.mode {
                 ModeState::Topdown(state) => state.apply(&msg.params),
-                other => tracing::warn!(
+                other @ ModeState::Orbit(_) => tracing::warn!(
                     target: "aether_camera",
                     name = %msg.name,
                     actual = %other.name(),
