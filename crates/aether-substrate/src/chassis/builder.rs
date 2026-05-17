@@ -1699,6 +1699,10 @@ impl<C: Chassis> PassiveChassis<C> {
 // sequence reads top-to-bottom; extracting helpers would either lose
 // the staging context or add fixtures that aren't reused elsewhere.
 #[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
+)]
 mod tests {
     use super::*;
 

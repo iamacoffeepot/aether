@@ -478,7 +478,10 @@ impl<'a> ChassisCtx<'a> {
         // recipient of this `wait_reply` frame-bound?" with a single
         // read-lock — without each transport having to scan the
         // pending-counter Vec on every check.
-        self.frame_bound_set.write().unwrap().insert(id);
+        self.frame_bound_set
+            .write()
+            .expect("frame_bound_set lock poisoned; fail-fast per ADR-0063")
+            .insert(id);
         self.claimed_actor_mailboxes.push(id);
         Ok(FrameBoundClaim {
             id,
@@ -509,7 +512,10 @@ impl<'a> ChassisCtx<'a> {
     pub fn unclaim_mailbox(&mut self, id: MailboxId) {
         self.registry.remove_closure(id);
         self.frame_bound_pending.retain(|(i, _)| *i != id);
-        self.frame_bound_set.write().unwrap().remove(&id);
+        self.frame_bound_set
+            .write()
+            .expect("frame_bound_set lock poisoned; fail-fast per ADR-0063")
+            .remove(&id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
 

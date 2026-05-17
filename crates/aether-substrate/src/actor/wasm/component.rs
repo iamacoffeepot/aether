@@ -675,6 +675,10 @@ impl Component {
 // Tests hold the capture `Mutex` guard across the assertion block so
 // the snapshot reads atomically against the concurrent push path.
 #[allow(clippy::significant_drop_tightening)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
+)]
 mod tests {
     use std::sync::Arc;
 

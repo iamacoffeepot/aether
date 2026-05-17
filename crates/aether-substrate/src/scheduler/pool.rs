@@ -291,6 +291,10 @@ fn format_panic_payload(payload: &Box<dyn Any + Send>, actor_label: &str) -> Str
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: queue recv panic on failure is the assertion"
+)]
 mod tests {
     use super::*;
     use crate::runtime::lifecycle::PanicAborter;

@@ -503,6 +503,10 @@ fn route_mail(
 // dispatch fixtures inline so the round-trip read top-to-bottom;
 // extracting helpers would split the path-under-test across files.
 #[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
+)]
 mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};

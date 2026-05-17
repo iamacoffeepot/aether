@@ -343,6 +343,10 @@ impl WakeHandle {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture inbox `Mutex` lock and decode panic on failure is the assertion"
+)]
 pub mod tests {
     use super::*;
     use std::any::Any;

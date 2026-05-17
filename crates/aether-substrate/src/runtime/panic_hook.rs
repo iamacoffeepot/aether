@@ -127,6 +127,10 @@ fn capture_backtrace_with(forced: bool) -> Option<Backtrace> {
 // Tests hold the capture `Mutex` guard across the assertion block so
 // the event snapshot reads atomically against the panic hook's push.
 #[allow(clippy::significant_drop_tightening)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: backtrace capture and Mutex lock panic on failure is the assertion"
+)]
 mod tests {
     use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};

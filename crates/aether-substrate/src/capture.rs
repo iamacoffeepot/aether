@@ -75,7 +75,10 @@ impl CaptureQueue {
     /// a poisoned mutex means a prior holder panicked under the guard.
     #[must_use]
     pub fn request(&self, pending: PendingCapture) -> bool {
-        let mut slot = self.slot.lock().unwrap();
+        let mut slot = self
+            .slot
+            .lock()
+            .expect("capture slot mutex poisoned; fail-fast per ADR-0063");
         if slot.is_some() {
             return false;
         }
@@ -92,7 +95,10 @@ impl CaptureQueue {
     /// a poisoned mutex means a prior holder panicked under the guard.
     #[must_use]
     pub fn take(&self) -> Option<PendingCapture> {
-        self.slot.lock().unwrap().take()
+        self.slot
+            .lock()
+            .expect("capture slot mutex poisoned; fail-fast per ADR-0063")
+            .take()
     }
 }
 
