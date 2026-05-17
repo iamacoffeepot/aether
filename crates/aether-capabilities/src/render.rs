@@ -327,13 +327,38 @@ mod native {
                     }
                 };
 
+            // iamacoffeepot/aether#860: dispatch each pre-mail as a
+            // fresh chassis-rooted chain via `send_envelope_as_root`
+            // and subscribe to its settlement, so the driver can wait
+            // for the full causal chain (component handler → emitted
+            // DrawTriangle → render cap accumulator) to land before
+            // `render_and_capture` runs. Without this gate the cross-
+            // thread chain races the wake-and-render path and an
+            // empty `frame_vertices` falls back to the (empty) cache
+            // → solid-background frame. Same primitive RpcServer uses
+            // for wire-borne Calls (a pre-mail is causally external
+            // from the cap's perspective — triggered by a wire-borne
+            // CaptureFrame, not forwarded from in-flight context).
+            //
+            // If the chassis didn't install a settlement registry
+            // (some test fixtures), the loop still dispatches the
+            // mails but `pre_settlements` stays empty so the driver
+            // renders immediately — preserving the pre-fix behaviour
+            // on those fixtures.
+            let settlement_registry = self.mailer.settlement_registry().cloned();
+            let mut pre_settlements = Vec::with_capacity(pre.len());
             for envelope in pre {
-                self.mailer.push(envelope);
+                let mail_id =
+                    ctx.send_envelope_as_root(envelope.recipient, envelope.kind, &envelope.payload);
+                if let Some(reg) = settlement_registry.as_deref() {
+                    pre_settlements.push(reg.subscribe_settlement(mail_id));
+                }
             }
 
             let pending = PendingCapture {
                 reply_to: sender,
                 after_mails: after,
+                pre_settlements,
             };
             if !backend.queue.request(pending) {
                 backend.outbound.send_reply(

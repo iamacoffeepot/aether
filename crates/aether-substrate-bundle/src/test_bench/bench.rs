@@ -776,6 +776,24 @@ impl TestBench {
 
         match self.capture_queue.take() {
             Some(req) => {
+                // iamacoffeepot/aether#860: wait for each pre-mail's
+                // causal chain to settle before rendering. Matches the
+                // structural settlement gate the Advance path uses for
+                // `Tick` above — without this, the cross-thread chain
+                // pre-mails kick off (component handler → emitted
+                // DrawTriangle → render cap accumulator) races
+                // `render_and_capture` and an empty `frame_vertices`
+                // falls back to the cache. Empty `pre_settlements`
+                // (no pre-mails, or a chassis without trace pipeline)
+                // skips the loop cleanly.
+                for rx in req.pre_settlements {
+                    if rx.recv_timeout(SETTLEMENT_TIMEOUT).is_err() {
+                        return Err(TestBenchError::SettlementTimeout {
+                            recipient: "capture pre-mail chain".to_owned(),
+                            kind_name: "<pre-mail>",
+                        });
+                    }
+                }
                 let result = match self.gpu.render_and_capture() {
                     Ok(png) => CaptureFrameResult::Ok { png },
                     Err(error) => CaptureFrameResult::Err { error },

@@ -210,9 +210,27 @@ fn run_frame(
 
     match capture_queue.take() {
         Some(req) => {
-            let result = match gpu.render_and_capture() {
-                Ok(png) => CaptureFrameResult::Ok { png },
-                Err(error) => CaptureFrameResult::Err { error },
+            // iamacoffeepot/aether#860: wait for pre-mail settlement
+            // before rendering (mirrors the test-bench lib fix). The
+            // standalone bin replies `Err` on stuck-chain rather than
+            // bailing out of the frame loop.
+            let mut pre_failed: Option<String> = None;
+            for rx in req.pre_settlements {
+                if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                    pre_failed = Some(
+                        "capture pre-mail chain failed to settle within 5s — \
+                         a downstream cap is wedged"
+                            .to_owned(),
+                    );
+                    break;
+                }
+            }
+            let result = match pre_failed {
+                Some(error) => CaptureFrameResult::Err { error },
+                None => match gpu.render_and_capture() {
+                    Ok(png) => CaptureFrameResult::Ok { png },
+                    Err(error) => CaptureFrameResult::Err { error },
+                },
             };
             for mail in req.after_mails {
                 queue.push(mail);
