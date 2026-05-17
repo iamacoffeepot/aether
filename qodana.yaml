@@ -19,11 +19,12 @@ exclude:
       - archive
       - spikes
 
-# Native deps the linter needs to build before inspecting (mirrors the
-# clippy job in ci.yml — cpal Linux backend pulls ALSA headers).
-# Runs inside the Qodana container as root — no `sudo` available. The
-# qodana-rust:2026.1-eap image ships without /var/lib/apt/lists/partial
-# (slimmed to keep the image small), so `apt-get update` fails with
-# 'List directory /var/lib/apt/lists/partial is missing' unless we
-# create it first.
-bootstrap: mkdir -p /var/lib/apt/lists/partial && apt-get update && apt-get install -y libasound2-dev
+# No bootstrap: the qodana-rust:2026.1-eap container runs bootstrap as
+# a non-root user with no sudo binary and no write access to
+# /var/lib/apt, so we cannot apt-get install system packages. Without
+# `libasound2-dev` the `cpal` Linux backend won't link, so any crate
+# that depends on cpal (aether-substrate-bundle desktop chassis,
+# aether-capabilities audio) surfaces as a build error in the scan
+# rather than producing inspection findings. Other crates analyze
+# fine. Revisit via a custom linter Dockerfile if cpal-bearing
+# inspections matter.
