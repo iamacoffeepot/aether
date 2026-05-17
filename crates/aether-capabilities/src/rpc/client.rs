@@ -280,7 +280,6 @@ mod tests {
     use std::io::BufReader;
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -342,18 +341,17 @@ mod tests {
             .expect("RpcServerHandle published")
             .local_port;
 
-        // The on_frame hook bumps a counter — proves the reader fires
-        // it per inbound frame.
-        let frames_seen = Arc::new(AtomicUsize::new(0));
-        let frames_seen_for_hook = Arc::clone(&frames_seen);
-        let mut conn = RpcClient::connect(
-            &format!("127.0.0.1:{port}"),
-            client_peer_kind(),
-            move || {
-                frames_seen_for_hook.fetch_add(1, Ordering::Release);
-            },
-        )
-        .expect("client connects + handshakes");
+        // No on_frame work needed — `recv_timeout` returning is the
+        // observable signal we care about. iamacoffeepot/aether#835:
+        // a prior version asserted `frames_seen >= 2` against an
+        // AtomicUsize bumped inside the hook, but the hook is a
+        // post-enqueue scheduling kick by design (see `connect`'s
+        // doc) — the test thread can wake from `recv_timeout` before
+        // the reader thread reaches `on_frame()`, racing the
+        // assertion. End-to-end correctness here is the two
+        // `recv_timeout` returns below: ReplyEvent then ReplyEnd.
+        let mut conn = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {})
+            .expect("client connects + handshakes");
 
         // The handshake handed back the server's identity.
         match &conn.server {
@@ -410,11 +408,6 @@ mod tests {
             }
             other => panic!("expected ReplyEnd, got {other:?}"),
         }
-
-        assert!(
-            frames_seen.load(Ordering::Acquire) >= 2,
-            "on_frame should fire at least once per inbound frame",
-        );
     }
 
     /// `Ping(nonce)` round-trips as `Pong(nonce)` over the socket.
