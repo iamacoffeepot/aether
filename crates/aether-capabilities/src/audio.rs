@@ -599,6 +599,8 @@ mod native {
         let channels = config.channels;
 
         let (sender, queue) = new_event_channel();
+        // Audio sample rates are bounded well below 2^24 — exact in f32.
+        #[allow(clippy::cast_precision_loss)]
         let mut synth = Synth::new(queue, sample_rate as f32);
 
         let stream = device

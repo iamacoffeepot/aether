@@ -1,3 +1,15 @@
+// Every cast in this file moves an exact integer between explicitly
+// budgeted integer widths (i32 → i64 → i128 → u128) per the magnitude
+// bounds in the module doc. The byte layout is the load-bearing
+// contract; `From::from` / `try_into` would obscure the bit-width
+// reasoning that makes the predicates exact.
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
 //! Integer-coefficient plane representation: `n · P = d`.
 //!
 //! Computed from three integer points via the cross product. Side tests

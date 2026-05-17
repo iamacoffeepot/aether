@@ -1,3 +1,15 @@
+// Integer-grid arithmetic: `i32 → i64 → i128` widenings move snapped
+// fixed-point coords into the exact predicates that classify points
+// against planes; the truncating `i128 → i32` back-cast after the
+// rounding division is bounded by the ±2^24 fixed-coord budget; the
+// `i128 → u128` sign-loss casts feed the absolute-value magnitude
+// comparison used to pick the dominant axis.
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+
 //! Convex polygon over integer-grid vertices, plus the split-against-plane
 //! routine that drives BSP construction and clipping.
 //!

@@ -758,11 +758,15 @@ impl DriverRunning for DesktopDriverRunning {
 
         let total = triangles_rendered.load(Ordering::Relaxed);
         let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
+        // Frame count cast to f64 for FPS report — runs at shutdown,
+        // bounded well below 2^53.
+        #[allow(clippy::cast_precision_loss)]
+        let fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001);
         tracing::info!(
             target: "aether_substrate::shutdown",
             frames = app.frame,
             elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-            fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001),
+            fps = fps,
             triangles = total,
             "frame loop exited",
         );

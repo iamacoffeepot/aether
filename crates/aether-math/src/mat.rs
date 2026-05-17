@@ -1,3 +1,7 @@
+// Matrix math: single-letter names (`a`, `b`, `c`, `d` for matrix
+// elements / rows / columns) are the canonical linear-algebra vocabulary.
+#![allow(clippy::many_single_char_names)]
+
 use core::ops::Mul;
 
 use crate::quat::Quat;

@@ -185,7 +185,7 @@ fn kw(s: &str) -> Value {
 }
 
 fn num(f: f32) -> Value {
-    Value::Number(Number::from_f64(f as f64).expect("non-finite float in AST"))
+    Value::Number(Number::from_f64(f64::from(f)).expect("non-finite float in AST"))
 }
 
 fn uint(n: u32) -> Value {

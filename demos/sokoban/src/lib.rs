@@ -1,3 +1,8 @@
+// Sokoban grid math: bounded `usize` grid coordinates cast to f32 for
+// world-space placement, and single-letter `a` / `b` / `c` for triangle
+// vertices are the canonical vocabulary.
+#![allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
+
 //! Sokoban demo: a grid-based puzzle world. The world owns walls,
 //! boxes, targets, the player's grid position, *and* the player's
 //! visible body — there is no longer a separate player component.
