@@ -41,7 +41,7 @@ cloned_instead_of_copied            = "deny"
 large_stack_arrays                  = "deny"
 match_wildcard_for_single_variants  = "deny"
 uninlined_format_args               = "deny"
-unreadable_literal                  = "warn"  # promote to deny in Phase 1.c.i
+unreadable_literal                  = "deny"
 
 # Warn picks — cherry-picked from restriction + style (not covered by pedantic/nursery baseline).
 unwrap_used                         = "warn"

@@ -513,7 +513,7 @@ mod tests {
 
         let mailer = Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound));
 
-        let unknown = MailboxId(0xDEADBEEF_u64);
+        let unknown = MailboxId(0xDEAD_BEEF_u64);
         let kind = KindId(0xABCD_u64);
         let payload = vec![1, 2, 3];
         mailer.push(Mail::new(unknown, kind, payload.clone(), 1));
@@ -549,7 +549,7 @@ mod tests {
         // Deliberately no `with_outbound` — exercises the local
         // warn-drop path (the hub chassis path).
 
-        let unknown = MailboxId(0xDEADBEEF_u64);
+        let unknown = MailboxId(0xDEAD_BEEF_u64);
         mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 0));
         // No panic is the test; the warn path logs and returns.
     }

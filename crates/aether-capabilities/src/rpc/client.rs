@@ -430,12 +430,12 @@ mod tests {
         let mut conn = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {})
             .expect("client connects");
 
-        conn.client.ping(0xc0ffee).expect("ping writes");
+        conn.client.ping(0x00c0_ffee).expect("ping writes");
         let pong = conn
             .inbound
             .recv_timeout(Duration::from_secs(2))
             .expect("Pong within 2s");
-        assert_eq!(pong, WireFrame::Pong(0xc0ffee));
+        assert_eq!(pong, WireFrame::Pong(0x00c0_ffee));
     }
 
     /// A peer that completes the handshake then closes surfaces as a

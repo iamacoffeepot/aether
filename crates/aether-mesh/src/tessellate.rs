@@ -578,7 +578,7 @@ mod tests {
                 z: 35809,
             },
         ];
-        let normal = Vec3::new(0.25881836, -0.965926, 0.0);
+        let normal = Vec3::new(0.258_818_36, -0.965_926, 0.0);
         let tris = tessellate_polygon_integer(&outer, &[], normal)
             .expect("diagonal cylinder facet must triangulate post-fix");
         assert!(!tris.is_empty());
