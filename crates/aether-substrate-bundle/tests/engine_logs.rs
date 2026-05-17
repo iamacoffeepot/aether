@@ -19,6 +19,10 @@
 //! runners without `mesa-vulkan-drivers`); CI's
 //! `AETHER_REQUIRE_RUNTIME=1` flips that into a hard panic.
 
+// Integration-test skip diagnostic: emit via stderr so `cargo test`
+// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
+#![allow(clippy::print_stderr)]
+
 use aether_kinds::{LogBatch, LogEvent, LogRead, LogReadResult};
 use aether_substrate_bundle::test_bench::{TestBench, test_helpers::has_wgpu_adapter};
 

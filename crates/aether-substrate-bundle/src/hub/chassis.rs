@@ -113,7 +113,7 @@ impl DriverRunning for HubServerDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
         let Self { boot } = *self;
         let sig = shutdown_signal();
-        eprintln!("aether-substrate-hub: {sig} received, shutting down");
+        tracing::info!("aether-substrate-hub: {sig} received, shutting down");
         // `boot` drops here — actor registries shut down, dispatcher
         // threads see their inbox senders drop and exit.
         drop(boot);
@@ -138,7 +138,7 @@ fn shutdown_signal() -> &'static str {
     let mut signals = match Signals::new([SIGINT, SIGTERM]) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
+            tracing::error!(
                 "aether-substrate-hub: signal handler install failed: {e}; \
                  parking thread — SIGKILL is the only exit"
             );
@@ -165,7 +165,7 @@ fn shutdown_signal() -> &'static str {
     if let Err(e) = ctrlc::set_handler(move || {
         let _ = tx.send(());
     }) {
-        eprintln!(
+        tracing::error!(
             "aether-substrate-hub: ctrl-c handler install failed: {e}; \
              parking thread — SIGKILL is the only exit"
         );

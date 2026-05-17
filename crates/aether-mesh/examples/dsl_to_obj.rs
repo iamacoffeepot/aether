@@ -3,6 +3,9 @@
 //! Usage:
 //!   `cargo run --example dsl_to_obj -- examples/box.dsl > out.obj && open out.obj`
 
+// CLI diagnostic before tracing subscriber is installed (issue 891).
+#![allow(clippy::print_stderr)]
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

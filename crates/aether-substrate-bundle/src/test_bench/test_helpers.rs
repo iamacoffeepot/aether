@@ -119,6 +119,11 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 /// not pre-built — fail-fast per ADR-0063: CI relies on the strict
 /// mode to catch missing pre-build entries.
 #[must_use]
+// Test-only skip diagnostic — emitted from `cargo test` runners so a
+// skipped test is visible alongside `test ... ok` lines. Not routed
+// through `tracing` because the test harness already captures stderr
+// and surfaces it on failure (issue 891).
+#[allow(clippy::print_stderr)]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {
