@@ -62,6 +62,11 @@ pub type ComponentCache = Mutex<HashMap<(EngineId, MailboxId), ComponentCapabili
 pub struct Mcp {
     session: Arc<RpcSession>,
     components: Arc<ComponentCache>,
+    // The `#[tool_router]` macro stores the router instance here; it's
+    // consumed by `#[tool_handler]` codegen rather than read by name, so
+    // the dead-code lint fires under `-D warnings` despite the field
+    // being load-bearing. (rmcp 1.7 stopped tagging the field as used.)
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -438,15 +443,13 @@ impl Mcp {
 #[tool_handler]
 impl ServerHandler for Mcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "aether-mcp".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        let mut server_info = Implementation::default();
+        server_info.name = "aether-mcp".into();
+        server_info.version = env!("CARGO_PKG_VERSION").into();
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = server_info;
+        info
     }
 }
 

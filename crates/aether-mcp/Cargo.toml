@@ -30,7 +30,7 @@ aether-kinds = { path = "../aether-kinds" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
-rmcp = { version = "0.8", features = [
+rmcp = { version = "1.7", features = [
     "server",
     "macros",
     "transport-streamable-http-server",
