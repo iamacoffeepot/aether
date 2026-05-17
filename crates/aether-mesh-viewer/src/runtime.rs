@@ -33,9 +33,10 @@
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::fs::FsMailboxExt;
+use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::{FsCapability, InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{DrawTriangle, ReadResult, SubscribeInput, Tick, Vertex};
+use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -89,10 +90,8 @@ impl FfiActor for MeshViewer {
     /// per frame. Lives in `wire` (post-init, mail-allowed); `init`
     /// itself is `Resolver`-only.
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<InputCapability>().send(&SubscribeInput {
-            kind: Tick::ID,
-            mailbox: MailboxId(ctx.mailbox_id()),
-        });
+        ctx.actor::<InputCapability>()
+            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
     }
 
     /// Re-emits every cached triangle to the render sink.

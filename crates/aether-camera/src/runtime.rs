@@ -36,9 +36,10 @@
 use std::collections::HashMap;
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::{InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{Camera, SubscribeInput, Tick, WindowSize};
+use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
 use crate::{
@@ -274,14 +275,8 @@ impl FfiActor for CameraComponent {
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         let me = MailboxId(ctx.mailbox_id());
         let input = ctx.actor::<InputCapability>();
-        input.send(&SubscribeInput {
-            kind: Tick::ID,
-            mailbox: me,
-        });
-        input.send(&SubscribeInput {
-            kind: WindowSize::ID,
-            mailbox: me,
-        });
+        input.subscribe(Tick::ID, me);
+        input.subscribe(WindowSize::ID, me);
     }
 
     /// Advance every camera's per-mode state, then publish the active

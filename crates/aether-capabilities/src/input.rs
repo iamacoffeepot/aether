@@ -17,15 +17,88 @@
 //! domain so the chassis-internal component-host cap (`aether.component`,
 //! formerly `aether.control`) only carries component-lifecycle concerns.
 
+use aether_actor::FfiActorMailbox;
+use aether_data::{KindId, MailboxId};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::SubscribeInputResult;
 use aether_kinds::{
     Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, Tick, UnsubscribeAll,
     UnsubscribeInput, WindowSize,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use aether_substrate::actor::native::NativeActorMailbox;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::InputConfig;
+
+/// Sender-side facade for callers addressing [`InputCapability`] via
+/// `ctx.actor::<InputCapability>()`.
+///
+/// Lifts the cap-shaped operations (`subscribe(kind, mailbox)`,
+/// `unsubscribe(kind, mailbox)`, `unsubscribe_all(mailbox)`) one
+/// indirection above the raw `.send(&SubscribeInput { .. })` so
+/// component code stops reconstructing the kind struct at every call
+/// site. Same shape and rationale as [`crate::fs::FsMailboxExt`]
+/// (issue 580) and [`crate::component::ComponentHostFfiExt`] (issue
+/// 654) — the cap module owns receive-side ([`InputCapability`]) AND
+/// send-side ([`InputMailboxExt`]) so future kind additions land both
+/// surfaces in one place.
+///
+/// Impl'd for both transports `ctx.actor::<InputCapability>()` can
+/// return:
+///
+/// - [`FfiActorMailbox<InputCapability>`] — always-on, for
+///   wasm-component callers.
+/// - [`NativeActorMailbox<'_, InputCapability>`] — native cap-to-cap
+///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+///
+/// All methods are fire-and-forget. `subscribe` / `unsubscribe` reply
+/// via `aether.input.subscribe_result`; reply handling stays on the
+/// caller. `unsubscribe_all` has no reply (issued by the trampoline on
+/// drop, when nobody's listening).
+///
+/// The generic escape hatch is unaffected: `mailbox.send(&SubscribeInput { .. })`
+/// still works for any `K` the cap declares via `HandlesKind<K>`,
+/// since `send` is an inherent method on the underlying mailbox type.
+pub trait InputMailboxExt {
+    /// Mail `aether.input.subscribe { kind, mailbox }` to the cap.
+    /// Add `mailbox` to the subscriber set for `kind`. Idempotent.
+    fn subscribe(&self, kind: KindId, mailbox: MailboxId);
+
+    /// Mail `aether.input.unsubscribe { kind, mailbox }` to the cap.
+    /// Remove `mailbox` from the subscriber set for `kind`. Idempotent.
+    fn unsubscribe(&self, kind: KindId, mailbox: MailboxId);
+
+    /// Mail `aether.input.unsubscribe_all { mailbox }` to the cap.
+    /// Remove `mailbox` from every input stream's subscriber set;
+    /// used by the trampoline on drop. Idempotent; fire-and-forget.
+    fn unsubscribe_all(&self, mailbox: MailboxId);
+}
+
+impl InputMailboxExt for FfiActorMailbox<InputCapability> {
+    fn subscribe(&self, kind: KindId, mailbox: MailboxId) {
+        self.send(&SubscribeInput { kind, mailbox });
+    }
+    fn unsubscribe(&self, kind: KindId, mailbox: MailboxId) {
+        self.send(&UnsubscribeInput { kind, mailbox });
+    }
+    fn unsubscribe_all(&self, mailbox: MailboxId) {
+        self.send(&UnsubscribeAll { mailbox });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> InputMailboxExt for NativeActorMailbox<'a, InputCapability> {
+    fn subscribe(&self, kind: KindId, mailbox: MailboxId) {
+        self.send(&SubscribeInput { kind, mailbox });
+    }
+    fn unsubscribe(&self, kind: KindId, mailbox: MailboxId) {
+        self.send(&UnsubscribeInput { kind, mailbox });
+    }
+    fn unsubscribe_all(&self, mailbox: MailboxId) {
+        self.send(&UnsubscribeAll { mailbox });
+    }
+}
 
 #[aether_actor::bridge(singleton)]
 mod native {
