@@ -408,6 +408,9 @@ impl<'a> PriorState<'a> {
 }
 
 #[cfg(test)]
+// Mail-decode tests hold per-test guards / borrows across the assert
+// block; the snapshot is the test's atomic read.
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use crate::mail::mailbox::KindId;

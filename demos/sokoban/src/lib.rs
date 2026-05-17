@@ -353,6 +353,10 @@ impl Sokoban {
 
     /// Emit one `DrawTriangle` for the player body, centered at the
     /// supplied world coords.
+    // Stateless render helper — kept on `&self` for symmetry with
+    // sibling helpers (`world_to_clip`, future `render_*` methods)
+    // that do read state.
+    #[allow(clippy::unused_self)]
     fn render_player(&self, ctx: &mut FfiCtx<'_>, px: f32, py: f32) {
         let body = DrawTriangle {
             verts: [

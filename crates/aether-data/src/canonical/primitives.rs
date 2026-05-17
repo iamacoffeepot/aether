@@ -175,6 +175,13 @@ pub(super) const fn write_str(s: &str, out: &mut [u8], cursor: usize) -> usize {
 
 /// `Option<Cow<'static, str>>` length/write — used by the labels
 /// serializer where nominal labels ride as owned/borrowed `Cow`s.
+///
+/// Takes `&Option<Cow<...>>` rather than `Option<&Cow<...>>` to keep
+/// the const-fn call sites simple — `Option::as_ref` is only `const`
+/// since Rust 1.83 and the workspace tracks stable, so a per-site
+/// allow here avoids forcing toolchain bumps on every label-emitting
+/// crate.
+#[allow(clippy::ref_option)]
 pub(super) const fn option_str_len(s: &Option<Cow<'static, str>>) -> usize {
     match s {
         None => 1,
@@ -182,6 +189,7 @@ pub(super) const fn option_str_len(s: &Option<Cow<'static, str>>) -> usize {
     }
 }
 
+#[allow(clippy::ref_option)]
 pub(super) const fn write_option_str(
     s: &Option<Cow<'static, str>>,
     out: &mut [u8],

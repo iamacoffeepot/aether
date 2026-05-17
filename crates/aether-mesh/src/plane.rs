@@ -67,7 +67,7 @@ impl Plane3 {
         let d = (n_x as i128) * (a.x as i128)
             + (n_y as i128) * (a.y as i128)
             + (n_z as i128) * (a.z as i128);
-        Plane3 { n_x, n_y, n_z, d }
+        Self { n_x, n_y, n_z, d }
     }
 
     /// Zero-normal plane comes from collinear input (degenerate triangle).
@@ -127,7 +127,7 @@ impl Plane3 {
 
     #[must_use]
     pub fn invert(self) -> Self {
-        Plane3 {
+        Self {
             n_x: -self.n_x,
             n_y: -self.n_y,
             n_z: -self.n_z,
@@ -173,7 +173,7 @@ impl Plane3 {
     /// coplanar-front from coplanar-back when classifying a polygon
     /// against a partitioner whose plane it shares.
     #[must_use]
-    pub fn normal_dot_sign(&self, other: &Plane3) -> i32 {
+    pub fn normal_dot_sign(&self, other: &Self) -> i32 {
         let dot = (self.n_x as i128) * (other.n_x as i128)
             + (self.n_y as i128) * (other.n_y as i128)
             + (self.n_z as i128) * (other.n_z as i128);

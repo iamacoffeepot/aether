@@ -116,6 +116,10 @@ impl LocalFileAdapter {
     /// path is canonicalized so later comparisons (including the
     /// symlink-safety check the v2 asset loader wants) work against
     /// the real filesystem location.
+    // `root` is owned for builder ergonomics — callers pass the result
+    // of `dirs::data_dir()` / a `PathBuf::from(env)` straight in and
+    // we shadow-rebind to the canonicalised form.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(root: PathBuf, writable: bool) -> std::io::Result<Self> {
         std::fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
@@ -202,6 +206,12 @@ impl FileAdapter for LocalFileAdapter {
     }
 }
 
+// `err` taken by value so callers can use it directly as a
+// `.map_err(fs_error_from_std)` callback (the closure-converted form
+// is the natural shape at every call site here); `kind()` and
+// `to_string()` both borrow, so technically `&Error` would work, but
+// it'd force ad-hoc closures at every call site.
+#[allow(clippy::needless_pass_by_value)]
 fn fs_error_from_std(err: std::io::Error) -> FsError {
     match err.kind() {
         ErrorKind::NotFound => FsError::NotFound,

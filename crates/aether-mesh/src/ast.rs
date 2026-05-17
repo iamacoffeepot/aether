@@ -82,28 +82,28 @@ pub enum Node {
     },
 
     // Structural
-    Composition(Vec<Node>),
+    Composition(Vec<Self>),
     Translate {
         offset: Vec3,
-        child: std::boxed::Box<Node>,
+        child: std::boxed::Box<Self>,
     },
     Rotate {
         axis: Vec3,
         angle: f32,
-        child: std::boxed::Box<Node>,
+        child: std::boxed::Box<Self>,
     },
     Scale {
         factor: Vec3,
-        child: std::boxed::Box<Node>,
+        child: std::boxed::Box<Self>,
     },
     Mirror {
         axis: Axis,
-        child: std::boxed::Box<Node>,
+        child: std::boxed::Box<Self>,
     },
     Array {
         count: u32,
         spacing: Vec3,
-        child: std::boxed::Box<Node>,
+        child: std::boxed::Box<Self>,
     },
 }
 
@@ -118,18 +118,18 @@ impl Axis {
     #[must_use]
     pub fn as_symbol(self) -> &'static str {
         match self {
-            Axis::X => "x",
-            Axis::Y => "y",
-            Axis::Z => "z",
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
         }
     }
 
     #[must_use]
     pub fn from_symbol(sym: &str) -> Option<Self> {
         match sym {
-            "x" => Some(Axis::X),
-            "y" => Some(Axis::Y),
-            "z" => Some(Axis::Z),
+            "x" => Some(Self::X),
+            "y" => Some(Self::Y),
+            "z" => Some(Self::Z),
             _ => None,
         }
     }
@@ -140,9 +140,9 @@ impl Axis {
     #[must_use]
     pub fn index(self) -> usize {
         match self {
-            Axis::X => 0,
-            Axis::Y => 1,
-            Axis::Z => 2,
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
         }
     }
 }

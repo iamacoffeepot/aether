@@ -94,6 +94,10 @@ fn polygons_to_triangles(polys: &[LoopPolygon]) -> Vec<Triangle> {
 
 /// Recursive AST evaluator in polygon domain. Primitives emit n-gon
 /// polygons directly; structural ops walk children.
+// One match arm per `Node` variant — each arm delegates to a per-
+// primitive `mesh_*` helper but the dispatch table itself is long;
+// extracting it would obscure the AST → primitive mapping.
+#[allow(clippy::too_many_lines)]
 fn mesh_into_polygons(
     out: &mut Vec<LoopPolygon>,
     node: &Node,

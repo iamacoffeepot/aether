@@ -115,6 +115,10 @@ impl FfiActor for MeshViewer {
     /// `namespace` is the short prefix with no `://` — `"save"`,
     /// `"assets"`, `"config"`. `path` is relative to the namespace
     /// root and must end in `.dsl` or `.obj`.
+    // `&mut self` and `msg: LoadMesh` match the dispatch ABI
+    // (ADR-0033 / ADR-0038); the load body delegates straight to
+    // `FsCapability` via `ctx`.
+    #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
     #[handler]
     fn on_load(&mut self, ctx: &mut FfiCtx<'_>, msg: LoadMesh) {
         tracing::info!(

@@ -28,6 +28,7 @@ use aether_math::Vec3;
 /// has one element via `simplified.len() == 1` before the `unwrap`,
 /// so an unwrap failure would indicate a mid-iter mutation that
 /// cannot occur in safe code.
+#[allow(clippy::too_many_lines)] // one arm per Node variant; splitting obscures the simplify rules table
 pub fn simplify(node: &Node) -> Node {
     match node {
         Node::Box { .. }

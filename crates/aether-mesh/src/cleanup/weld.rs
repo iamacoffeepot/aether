@@ -101,7 +101,7 @@ impl IndexedMesh {
             });
         }
 
-        IndexedMesh {
+        Self {
             vertices: vertex_pool,
             polygons: indexed,
         }

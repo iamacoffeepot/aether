@@ -532,6 +532,9 @@ fn json<T: serde::Serialize>(value: &T) -> Result<String, McpError> {
     serde_json::to_string(value).map_err(|e| McpError::internal_error(e.to_string(), None))
 }
 
+// `e` is owned because callers do `.map_err(internal)` — the closure-
+// converted form needs an `FnOnce(anyhow::Error) -> McpError`.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: anyhow::Error) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }

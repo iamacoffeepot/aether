@@ -92,7 +92,7 @@ fn bucket_key(p: &IndexedPolygon) -> BucketKey {
 
 impl IndexedMesh {
     pub(super) fn merge_coplanar(self) -> Self {
-        let IndexedMesh { vertices, polygons } = self;
+        let Self { vertices, polygons } = self;
 
         let buckets = group_by_bucket(&polygons);
         let mut sorted_keys: Vec<&BucketKey> = buckets.keys().collect();
@@ -111,7 +111,7 @@ impl IndexedMesh {
             process_bucket(&vertices, &polygons, bucket, &global_directed, &mut merged);
         }
 
-        IndexedMesh {
+        Self {
             vertices,
             polygons: merged,
         }

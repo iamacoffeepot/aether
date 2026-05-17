@@ -44,7 +44,7 @@ impl Polygon {
         if plane.is_degenerate() {
             return None;
         }
-        Some(Polygon {
+        Some(Self {
             vertices: vec![v0, v1, v2],
             plane,
             color,
@@ -67,10 +67,10 @@ impl Polygon {
     pub fn split(
         &self,
         partitioner: &Plane3,
-        coplanar_front: &mut Vec<Polygon>,
-        coplanar_back: &mut Vec<Polygon>,
-        front: &mut Vec<Polygon>,
-        back: &mut Vec<Polygon>,
+        coplanar_front: &mut Vec<Self>,
+        coplanar_back: &mut Vec<Self>,
+        front: &mut Vec<Self>,
+        back: &mut Vec<Self>,
     ) {
         // Plane-identity short-circuit: when this polygon's stored plane
         // matches the partitioner structurally (same canonical key), the
@@ -155,14 +155,14 @@ impl Polygon {
                     }
                 }
                 if f.len() >= 3 {
-                    front.push(Polygon {
+                    front.push(Self {
                         vertices: f,
                         plane: self.plane,
                         color: self.color,
                     });
                 }
                 if b.len() >= 3 {
-                    back.push(Polygon {
+                    back.push(Self {
                         vertices: b,
                         plane: self.plane,
                         color: self.color,

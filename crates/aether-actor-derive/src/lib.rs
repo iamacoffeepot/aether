@@ -67,6 +67,11 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
     }
 }
 
+// Single expansion entry point: emits `Kind` impl, optional
+// `CastEligible`, manifest consts, and retention statics — the surface
+// is wide enough that extracting helpers would force per-helper
+// generic-context arguments without saving readability.
+#[allow(clippy::too_many_lines)]
 fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let KindAttr { name: kind_name } = parse_kind_attr(&input.attrs)?;
@@ -879,6 +884,12 @@ fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
     Ok(opts)
 }
 
+// Single-pass `#[bridge]` expander: walks the inner mod, splits wasm
+// stub vs native impl emission, and wires the cardinality marker.
+// The pieces share captured spans / item refs so factoring out helpers
+// would force ad-hoc shared-state structs that read worse than a
+// linear walk.
+#[allow(clippy::too_many_lines)]
 fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenStream2> {
     let BridgeOpts {
         cardinality,
@@ -1458,6 +1469,7 @@ fn attr_is_fallback(attr: &Attribute) -> bool {
 /// init wrapper, `aether.kinds.inputs` manifest consts, kind retention
 /// statics, plus the `HandlesKind<K>` and `Actor` impls common to both
 /// shapes.
+#[allow(clippy::too_many_lines)] // emits the full wasm-actor surface in one go
 fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
@@ -1584,7 +1596,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let helper_methods_tokens = helpers.iter();
 
     let inputs_manifest_consts =
-        build_inputs_manifest_consts(&handlers, fallback.as_ref(), &component_doc);
+        build_inputs_manifest_consts(&handlers, fallback.as_ref(), component_doc.as_ref());
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
     // Issue 525 Phase 4: trait consts (NAMESPACE, FRAME_BARRIER) live
@@ -1673,6 +1685,11 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 ///
 /// `#[fallback]` is rejected — native actors are typed receivers;
 /// unknown kinds are programming errors, not fallback paths.
+// Emits the full `NativeActor` surface in one walk: dispatch table,
+// `init` wrapper, `HandlesKind<K>` impls per handler, plus the
+// dispatch ABI plumbing. Splitting into helpers would force shared
+// per-handler context structs without saving readability.
+#[allow(clippy::too_many_lines)]
 fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
@@ -2256,14 +2273,14 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 fn build_inputs_manifest_consts(
     handlers: &[HandlerFn],
     fallback: Option<&FallbackFn>,
-    component_doc: &Option<String>,
+    component_doc: Option<&String>,
 ) -> TokenStream2 {
     let mut len_terms: Vec<TokenStream2> = Vec::new();
     let mut copy_blocks: Vec<TokenStream2> = Vec::new();
 
     for h in handlers {
         let k = &h.kind_ty;
-        let doc_expr = option_str_token(&h.agent_doc);
+        let doc_expr = option_str_token(h.agent_doc.as_ref());
         // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
         // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so
         // we drop into `.0` here.
@@ -2301,7 +2318,7 @@ fn build_inputs_manifest_consts(
     }
 
     if let Some(f) = fallback {
-        let doc_expr = option_str_token(&f.agent_doc);
+        let doc_expr = option_str_token(f.agent_doc.as_ref());
         len_terms.push(quote! {
             (1 + ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
         });
@@ -2323,7 +2340,7 @@ fn build_inputs_manifest_consts(
         });
     }
 
-    if let Some(doc) = component_doc.as_ref() {
+    if let Some(doc) = component_doc {
         let doc_lit = doc.as_str();
         len_terms.push(quote! {
             (1 + ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit))
@@ -2399,6 +2416,7 @@ fn build_inputs_manifest_consts(
 /// component that declares them, or is the hub with its own server
 /// component). If that assumption ever breaks, extend this emitter to
 /// walk `Sink<K>` resolutions too.
+#[allow(clippy::too_many_lines)] // per-handler retention static block; one walk keeps each emitted static contiguous
 fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn]) -> TokenStream2 {
     let self_ty_hint = type_hint(self_ty);
 
@@ -2550,7 +2568,7 @@ fn type_hint(ty: &Type) -> syn::Ident {
 /// Produce the token stream for `Option<&'static str>` from an
 /// `Option<String>` captured at macro expansion. Used for every
 /// rustdoc-sourced doc field.
-fn option_str_token(doc: &Option<String>) -> TokenStream2 {
+fn option_str_token(doc: Option<&String>) -> TokenStream2 {
     if let Some(s) = doc {
         let lit = s.as_str();
         quote! { ::core::option::Option::Some(#lit) }

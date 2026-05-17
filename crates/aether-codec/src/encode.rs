@@ -152,6 +152,10 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
 /// Recursively encode `value` into postcard wire format under `schema`.
 /// `path` is a dotted breadcrumb (`$.field.subfield[2]`) used to make
 /// error messages locate the offending field in deeply-nested params.
+// One match arm per `SchemaType`; each arm is short but they sum up.
+// Splitting the arms into helpers would force per-arm context structs
+// without saving readability.
+#[allow(clippy::too_many_lines)]
 fn encode_postcard(
     value: &Value,
     schema: &SchemaType,

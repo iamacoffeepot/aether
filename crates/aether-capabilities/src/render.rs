@@ -19,6 +19,17 @@
 //! in place of [`RenderCapability`] (issue 603 Phase 2 § Resolved
 //! Decision 5).
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+// Frame-vertex / last-submitted Mutex guards are held through the
+// per-frame swap and append sequence on purpose — the swap and
+// subsequent length math read the buffer's current state and write
+// back; releasing the guard mid-sequence opens a TOCTOU window
+// where a sibling tick's producer mutates the buffer in between.
+#![allow(clippy::significant_drop_tightening)]
+
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
@@ -874,12 +885,16 @@ mod native_headless {
         /// `DrawTriangle` lands here as a no-op so headless boots of
         /// desktop-designed components (which emit `DrawTriangle` every
         /// tick) don't trip the unknown-mailbox warn path.
+        // `&self` keeps the dispatch ABI (ADR-0033 / ADR-0038); the body
+        // is a no-op by design — see the doc comment above.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_draw_triangle(&self, _ctx: &mut NativeCtx<'_>, _mails: &[DrawTriangle]) {}
 
         /// `Camera` lands here as a no-op for the same reason as
         /// `on_draw_triangle` — desktop-designed components publish
         /// `aether.camera` every tick.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_camera(&self, _ctx: &mut NativeCtx<'_>, _mail: Camera) {}
 

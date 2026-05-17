@@ -93,10 +93,10 @@ impl SettlementSubscriber {
     /// which resolves the recipient inline on the firing thread.
     fn fire(self, root: MailId) {
         match self {
-            SettlementSubscriber::Channel(tx) => {
+            Self::Channel(tx) => {
                 let _ = tx.try_send(());
             }
-            SettlementSubscriber::Mail {
+            Self::Mail {
                 target,
                 kind,
                 mailer,
@@ -277,6 +277,10 @@ fn push_settlement_notice(
 }
 
 #[cfg(test)]
+// Settlement tests hold per-test `Mutex` guards across the assertion
+// sequence so the captured state stays consistent against the
+// concurrent firing thread.
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use crate::handle_store::HandleStore;

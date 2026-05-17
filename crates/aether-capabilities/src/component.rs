@@ -23,6 +23,11 @@
 //! ADR-0078 — the cap is single-threaded, every handler runs on the
 //! cap's dispatcher thread.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 use aether_actor::{Actor, FfiActorMailbox};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::UnsubscribeAll;

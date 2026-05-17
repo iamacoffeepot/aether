@@ -14,6 +14,10 @@
 //! walker retired earlier in #403); components subscribe explicitly
 //! via `ctx.subscribe_input::<K>()` in `init`.
 
+// Stateless logger: each `#[handler]` keeps `&mut self` for the
+// ADR-0033 / ADR-0038 dispatch ABI but doesn't need any field access.
+#![allow(clippy::unused_self)]
+
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::InputCapability;
 use aether_data::{Kind, MailboxId};

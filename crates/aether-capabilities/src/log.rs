@@ -19,6 +19,11 @@
 //! [`LogReadResult`]. ADR-0023 §4 contract restored under the
 //! forward model (RPC pull instead of frame push).
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 use aether_kinds::{LogBatch, LogRead};
 
 #[aether_actor::bridge(singleton)]

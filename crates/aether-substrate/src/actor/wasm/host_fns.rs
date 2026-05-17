@@ -54,6 +54,11 @@ pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
 /// function has been called on.
+//
+// One linker.func_wrap block per host fn — extracting them into per-fn
+// helpers would force per-fn Caller<'_, ComponentCtx> glue without
+// saving readability; the v0 host-fn list is small and stable.
+#[allow(clippy::too_many_lines)]
 pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",

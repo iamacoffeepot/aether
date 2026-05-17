@@ -237,6 +237,11 @@ fn triangulate_indexed(mesh: IndexedMesh) -> Vec<Polygon> {
 }
 
 #[cfg(test)]
+// Geometry regression tests carry inline vertex fixtures (large
+// `Point3` array literals) so the case under test is readable in
+// context; per-fn allow is the cleaner shape than splitting fixtures
+// across helpers each test would have to thread through.
+#[allow(clippy::too_many_lines)]
 mod tests {
     use super::cleanup::mesh::IndexedPolygon;
     use super::*;

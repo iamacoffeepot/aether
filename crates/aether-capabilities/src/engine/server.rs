@@ -29,6 +29,11 @@
 //! emits the wasm-side marker stub so `aether-capabilities` still
 //! compiles for `wasm32`.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.

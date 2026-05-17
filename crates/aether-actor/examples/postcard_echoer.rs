@@ -18,6 +18,11 @@
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
+// `#[handler]` keeps `&mut self` per the ADR-0033 / ADR-0038 dispatch
+// ABI; the echo body decodes the payload and replies without touching
+// component state.
+#![allow(clippy::unused_self)]
+
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_data::{Kind, Schema};
 use serde::{Deserialize, Serialize};

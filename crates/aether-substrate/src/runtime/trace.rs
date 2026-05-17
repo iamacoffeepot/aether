@@ -266,6 +266,9 @@ pub fn start_drainer(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>) -> T
     }
 }
 
+// All arguments are taken by value so the spawned drainer thread
+// owns them for its lifetime.
+#[allow(clippy::needless_pass_by_value)]
 fn drainer_loop(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>, shutdown_rx: Receiver<()>) {
     let recipient = aether_data::mailbox_id_from_name(TRACE_OBSERVER_MAILBOX_NAME);
     let kind = <BatchedTraceEvents as aether_data::Kind>::ID;

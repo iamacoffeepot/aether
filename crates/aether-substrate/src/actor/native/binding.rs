@@ -8,6 +8,11 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap
 )]
+// `ReplyTable` Mutex guards are intentionally held across the
+// register/lookup/dispatch sequence — early-drop opens a TOCTOU
+// window where a sibling thread mutates the pending-reply map between
+// the lookup and the dispatch decision.
+#![allow(clippy::significant_drop_tightening)]
 
 //! ADR-0074 §Decision (revisited by issue 665): native per-actor
 //! binding state.

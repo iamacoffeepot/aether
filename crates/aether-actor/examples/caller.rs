@@ -16,6 +16,11 @@
 //! hatch — the echoer's actor type lives in a sibling cdylib this
 //! crate can't import without colliding FFI exports.
 
+// Handlers take `&mut self` per the ADR-0033 / ADR-0038 dispatch
+// contract; a stub handler that ignores both `self` and the mail
+// payload still has to match the trampoline ABI.
+#![allow(clippy::unused_self)]
+
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::InputCapability;
 use aether_data::{Kind, MailboxId, Schema};

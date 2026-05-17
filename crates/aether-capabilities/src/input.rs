@@ -17,6 +17,11 @@
 //! domain so the chassis-internal component-host cap (`aether.component`,
 //! formerly `aether.control`) only carries component-lifecycle concerns.
 
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
+
 use aether_actor::FfiActorMailbox;
 use aether_data::{KindId, MailboxId};
 #[cfg(not(target_arch = "wasm32"))]

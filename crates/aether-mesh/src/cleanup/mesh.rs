@@ -35,7 +35,7 @@ impl IndexedMesh {
     /// `cleanup::run_to_loops` and by pipeline tests inspecting the
     /// post-merge / post-tjunction state.
     pub(crate) fn into_polygons(self) -> Vec<Polygon> {
-        let IndexedMesh { vertices, polygons } = self;
+        let Self { vertices, polygons } = self;
         let mut out = Vec::with_capacity(polygons.len());
         for poly in polygons {
             let verts = poly.vertices.iter().map(|&i| vertices[i]).collect();

@@ -101,7 +101,10 @@ fn main() -> anyhow::Result<()> {
 /// driver — runs until every `EventSender` clone drops (clean
 /// shutdown via the `chassis_control` handler clones being released)
 /// or a fatal abort tears the process down.
-#[allow(clippy::too_many_arguments)]
+// All arguments take ownership for the lifetime of the main-thread
+// event loop; the borrow form would just be `&` versions threaded
+// through the same closure.
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn drive_events_loop(
     events_rx: events::EventReceiver,
     capture_queue: CaptureQueue,

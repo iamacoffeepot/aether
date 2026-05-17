@@ -43,6 +43,12 @@ pub const FATAL_EXIT_CODE: i32 = 2;
 /// trait threads one through. Pre-#775 it carried the final
 /// `SubstrateDying` broadcast; today the only sink that observed it
 /// retired, and the parameter is unused at this call site.
+// `reason` is owned because every call site constructs it via
+// `format!(...)` directly — taking `&str` would force callers to
+// either bind a `let s = format!(...); &s` first or stamp `&format!`
+// at every site. The aborter consumes the value into a logged
+// `%reason` tracing field; the diverging return means no further use.
+#[allow(clippy::needless_pass_by_value)]
 pub fn fatal_abort(_outbound: &HubOutbound, reason: String) -> ! {
     tracing::error!(
         target: "aether_substrate::lifecycle",
