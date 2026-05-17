@@ -127,7 +127,7 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 
 fn push_log_batch(registry: &Registry, recipient: &str, payload: &[u8]) {
     let id = registry.lookup(recipient).expect("mailbox registered");
-    let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
+    let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient}");
     };
     handler(aether_substrate::mail::registry::MailDispatch {

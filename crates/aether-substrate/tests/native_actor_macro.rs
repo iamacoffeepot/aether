@@ -126,7 +126,7 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
     use aether_substrate::mail::registry::MailboxEntry;
     let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
-    let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
+    let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient}");
     };
     let bytes = payload.encode_into_bytes();

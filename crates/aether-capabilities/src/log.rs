@@ -273,7 +273,7 @@ mod native {
             let id = registry
                 .lookup(LogCapability::NAMESPACE)
                 .expect("mailbox registered");
-            let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry") else {
+            let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry") else {
                 panic!("expected mailbox entry");
             };
 
@@ -300,7 +300,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(
+            registry.register_inbox(
                 LogCapability::NAMESPACE,
                 aether_substrate::mail::registry::noop_handler(),
             );

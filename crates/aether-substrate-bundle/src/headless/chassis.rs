@@ -125,13 +125,13 @@ impl HeadlessChassis {
         // actor dispatch loop behind it, so without the bracket
         // any chain that mails `aether.audio` from the headless
         // chassis leaks `in_flight` and never settles. Same shape
-        // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_sink`.
+        // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_inline`.
         let kind_set_master_gain = boot
             .registry
             .kind_id(SetMasterGain::NAME)
             .expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
-        boot.registry.register_sink(
+        boot.registry.register_inline(
             "aether.audio",
             Arc::new(
                 move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {

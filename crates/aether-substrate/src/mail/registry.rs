@@ -103,39 +103,43 @@ pub type MailboxHandler = Arc<dyn for<'a> Fn(MailDispatch<'a>) + Send + Sync + '
 ///
 /// Issue 634 Phase 4 retired the dedicated `Component` variant —
 /// every loaded wasm component is now a `WasmTrampoline` registered
-/// here as a `Closure` like every other actor.
+/// here as an `Inbox` like every other actor.
 ///
-/// Issue 838: `Closure` and `Sink` are intentionally distinct even
-/// though both wrap a [`MailboxHandler`]. The variant is the
-/// settlement-protocol contract — see each variant's docs and
-/// `Mailer::push`'s route_mail for the bracket semantics.
+/// Issue 838 / iamacoffeepot/aether#841: `Inbox` and `Inline` are
+/// intentionally distinct even though both wrap a [`MailboxHandler`].
+/// The variant *names where the handler runs* — `Inbox` defers the
+/// work to an actor's dispatch thread, `Inline` runs the work on the
+/// pushing thread. That decides who owns the `Received`/`Finished`
+/// lifecycle bracket: the downstream dispatch loop for `Inbox`, the
+/// mailer itself for `Inline`. See each variant's docs and
+/// `Mailer::push`'s `route_mail` for the bracket semantics.
 #[derive(Clone)]
 pub enum MailboxEntry {
-    /// Actor-inbox enqueue closure. The handler body pushes the
-    /// envelope onto an mpsc inbox; an actor's dispatch loop on
-    /// another thread runs the work and records the
-    /// `Received`/`Finished` lifecycle hooks. `Mailer::push` does
-    /// NOT bracket this arm — the downstream dispatch loop owns the
-    /// bracket. Installed by `claim_mailbox` /
-    /// `Spawner::register_closure` (instanced + singleton actors,
-    /// including the wasm trampoline) and by the public
-    /// [`Registry::register_closure`] / [`Registry::try_register_closure`]
-    /// for callers that own a separate dispatcher loop.
-    Closure(MailboxHandler),
-    /// Synchronous sink. The handler body does its work inline on
-    /// the pushing thread; there is no actor dispatch loop behind
-    /// it. `Mailer::push` brackets this arm with `Received` and
-    /// `Finished` so the chain's `in_flight` balances and
-    /// settlement subscribers (`SettlementRegistry`) wake (ADR-0080
-    /// §2, issue 838). Installed by [`Registry::register_sink`] /
-    /// [`Registry::try_register_sink`]. Distinct from `Closure` so
+    /// The handler body forwards the envelope into an actor's mpsc
+    /// inbox; the actor's dispatch loop on another thread runs the
+    /// work and records the `Received`/`Finished` lifecycle hooks.
+    /// `Mailer::push` does NOT bracket this arm — the downstream
+    /// dispatch loop owns the bracket. Installed by
+    /// `claim_mailbox` / `Spawner::register_inbox` (instanced +
+    /// singleton actors, including the wasm trampoline) and by the
+    /// public [`Registry::register_inbox`] /
+    /// [`Registry::try_register_inbox`] for callers that own a
+    /// separate dispatcher loop.
+    Inbox(MailboxHandler),
+    /// The handler body does its work inline on the pushing thread;
+    /// there is no actor dispatch loop behind it. `Mailer::push`
+    /// brackets this arm with `Received` and `Finished` so the
+    /// chain's `in_flight` balances and settlement subscribers
+    /// (`SettlementRegistry`) wake (ADR-0080 §2, issue 838).
+    /// Installed by [`Registry::register_inline`] /
+    /// [`Registry::try_register_inline`]. Distinct from `Inbox` so
     /// the bracket isn't double-counted when the closure was an
     /// actor-enqueue (which would fire settlement prematurely).
-    Sink(MailboxHandler),
+    Inline(MailboxHandler),
     /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
     /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
     /// until the same name is re-registered, at which point the slot
-    /// transitions back to `Closure` under the same id (ADR-0029 ids
+    /// transitions back to `Inbox` under the same id (ADR-0029 ids
     /// are a function of name, so they're stable across drop/reload).
     Dropped,
 }
@@ -218,10 +222,10 @@ impl fmt::Display for KindConflict {
 impl std::error::Error for KindConflict {}
 
 /// A runtime mailbox registration lost to name collision. Returned
-/// from `try_register_closure` (ADR-0010) so a runtime caller can
+/// from `try_register_inbox` (ADR-0010) so a runtime caller can
 /// reply with an error instead of panicking. The boot path that
-/// registers hard-coded mailbox names still uses `register_closure`
-/// and panics — collisions there are bugs.
+/// registers hard-coded mailbox names still uses `register_inbox` /
+/// `register_inline` and panics — collisions there are bugs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameConflict {
     pub name: String,
@@ -274,8 +278,8 @@ impl Registry {
     }
 
     /// Snapshot the inventory and invoke the hook (if installed).
-    /// Called from every successful `register_closure` /
-    /// `try_register_closure`. Snapshot is taken with the inner read
+    /// Called from every successful `register_inbox` /
+    /// `try_register_inbox`. Snapshot is taken with the inner read
     /// lock — separate from the write lock the registration just
     /// released — so a concurrent registration sees a consistent
     /// (post-this-insert) view rather than a torn one.
@@ -318,39 +322,45 @@ impl Registry {
         }
     }
 
-    /// Invalidate a closure-bound mailbox (ADR-0010). Transitions the
-    /// entry to `Dropped` so dispatch-path readers can distinguish an
+    /// Invalidate a live mailbox (ADR-0010). Transitions the entry
+    /// to `Dropped` so dispatch-path readers can distinguish an
     /// intentional drop from an unknown id; the id itself (a function
     /// of the name per ADR-0029) stays addressable and a subsequent
-    /// `try_register_closure` with the same name reuses it. Returns
-    /// the released name on success.
+    /// `try_register_inbox` / `try_register_inline` with the same
+    /// name reuses it. Returns the released name on success.
     ///
     /// Issue 634 Phase 4 retired the dedicated `Component` variant,
-    /// so this now drops any `Closure`-bound mailbox. Production has
-    /// exactly one caller — `WasmTrampoline`'s shutdown path
-    /// transitioning its own slot — chassis-cap mailboxes never
-    /// route here.
+    /// so this now drops any live `Inbox` or `Inline` mailbox.
+    /// Production has exactly one caller — `WasmTrampoline`'s
+    /// shutdown path transitioning its own slot — chassis-cap
+    /// mailboxes never route here.
     pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
         let mut inner = self.inner.write().unwrap();
         let Some(slot) = inner.mailboxes.get_mut(&id) else {
             return Err(DropError::UnknownId(id));
         };
         match slot.entry {
-            MailboxEntry::Closure(_) | MailboxEntry::Sink(_) => {}
+            MailboxEntry::Inbox(_) | MailboxEntry::Inline(_) => {}
             MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
         }
         slot.entry = MailboxEntry::Dropped;
         Ok(slot.name.clone())
     }
 
-    /// Register a chassis-bound mailbox handled by `handler`. Mail to
-    /// this mailbox runs the closure inline on the delivering thread
-    /// (or on the host-function caller thread if a component sent it).
+    /// Register a mailbox whose handler body forwards the envelope
+    /// into an actor's mpsc inbox. The actor's dispatch loop on its
+    /// own thread runs the work and records the lifecycle
+    /// `Received`/`Finished` bracket — `Mailer::push` does NOT
+    /// bracket this arm. Use this for any registration where a
+    /// dispatch loop downstream owns the per-handler invocation
+    /// (chassis caps via `claim_mailbox*`, instanced + singleton
+    /// actors via the spawner).
+    ///
     /// Panics on a name collision — these are substrate-internal
     /// names, collisions are bugs.
-    pub fn register_closure(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
+    pub fn register_inbox(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
         let name = name.into();
-        match self.insert(name.clone(), MailboxEntry::Closure(handler)) {
+        match self.insert(name.clone(), MailboxEntry::Inbox(handler)) {
             Ok(id) => {
                 self.notify_mailbox_change();
                 id
@@ -359,43 +369,43 @@ impl Registry {
         }
     }
 
-    /// Non-panicking variant of `register_closure`. Returns
+    /// Non-panicking variant of [`Self::register_inbox`]. Returns
     /// `NameConflict` on a collision so callers that legitimately
     /// race (ADR-0070 capability boots, where the side-by-side
-    /// extraction period puts legacy `register_closure` and a new
+    /// extraction period puts legacy registrations and a new
     /// capability claim against the same mailbox during the
     /// transition diff) can surface the collision as a typed error
     /// rather than aborting the chassis.
-    pub fn try_register_closure(
+    pub fn try_register_inbox(
         &self,
         name: impl Into<String>,
         handler: MailboxHandler,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert(name.into(), MailboxEntry::Closure(handler));
+        let result = self.insert(name.into(), MailboxEntry::Inbox(handler));
         if result.is_ok() {
             self.notify_mailbox_change();
         }
         result
     }
 
-    /// Issue 838: register a synchronous-sink mailbox. The handler
-    /// runs inline on `Mailer::push`'s thread; the mailer brackets
-    /// the call with `Received`/`Finished` so the chain's
-    /// `in_flight` balances and settlement subscribers
+    /// Issue 838: register a mailbox whose handler runs inline on
+    /// the pushing thread. `Mailer::push` brackets the call with
+    /// `Received`/`Finished` so the chain's `in_flight` balances
+    /// and settlement subscribers
     /// ([`crate::chassis::settlement::SettlementRegistry`]) wake
     /// (ADR-0080 §2).
     ///
-    /// Distinct from [`Self::register_closure`] which is for
+    /// Distinct from [`Self::register_inbox`] which is for
     /// actor-inbox enqueue closures whose downstream dispatch loop
     /// owns the bracket. Miscategorisation is silent: a synchronous
-    /// sink registered as a `Closure` leaks `in_flight` (chains
-    /// never settle); an actor-enqueue closure registered as a
-    /// `Sink` double-counts `Finished` (settlement fires
+    /// handler registered as an `Inbox` leaks `in_flight` (chains
+    /// never settle); an actor-enqueue closure registered as
+    /// `Inline` double-counts `Finished` (settlement fires
     /// prematurely). Panics on a name collision — these are
     /// substrate-internal names, collisions are bugs.
-    pub fn register_sink(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
+    pub fn register_inline(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
         let name = name.into();
-        match self.insert(name.clone(), MailboxEntry::Sink(handler)) {
+        match self.insert(name.clone(), MailboxEntry::Inline(handler)) {
             Ok(id) => {
                 self.notify_mailbox_change();
                 id
@@ -404,37 +414,37 @@ impl Registry {
         }
     }
 
-    /// Non-panicking variant of [`Self::register_sink`], symmetric
-    /// with [`Self::try_register_closure`].
-    pub fn try_register_sink(
+    /// Non-panicking variant of [`Self::register_inline`], symmetric
+    /// with [`Self::try_register_inbox`].
+    pub fn try_register_inline(
         &self,
         name: impl Into<String>,
         handler: MailboxHandler,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert(name.into(), MailboxEntry::Sink(handler));
+        let result = self.insert(name.into(), MailboxEntry::Inline(handler));
         if result.is_ok() {
             self.notify_mailbox_change();
         }
         result
     }
 
-    /// Issue 607 Phase 7: fully remove a closure-bound mailbox. Used
-    /// in the chassis-boot unwind path when a singleton's `init` fails
-    /// after `try_register_closure` claimed the slot — the partial-boot
-    /// state must not leak into a later cap's namespace lookup.
-    /// Returns `true` if the entry existed and was a `Closure` variant
-    /// (and was removed), `false` if the id is unknown or refers to a
-    /// non-closure entry. Component entries go through
-    /// [`Self::drop_mailbox`] (which transitions to `Dropped` rather
-    /// than removing) — the lifecycle difference is intentional:
-    /// components can re-register the same id after a drop, closure-
-    /// bound mailboxes are torn down on cap teardown and the id can be
-    /// freshly recreated.
+    /// Issue 607 Phase 7: fully remove a registered mailbox. Used in
+    /// the chassis-boot unwind path when a singleton's `init` fails
+    /// after `try_register_inbox` claimed the slot — the partial-
+    /// boot state must not leak into a later cap's namespace lookup.
+    /// Returns `true` if the entry existed and was a live (`Inbox`
+    /// or `Inline`) variant and was removed; `false` if the id is
+    /// unknown or already in `Dropped` state. Component entries go
+    /// through [`Self::drop_mailbox`] (which transitions to
+    /// `Dropped` rather than removing) — the lifecycle difference
+    /// is intentional: components can re-register the same id after
+    /// a drop, chassis-bound mailboxes are torn down on cap
+    /// teardown and the id can be freshly recreated.
     pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
         let mut inner = self.inner.write().unwrap();
         match inner.mailboxes.get(&id) {
             Some(slot)
-                if matches!(slot.entry, MailboxEntry::Closure(_) | MailboxEntry::Sink(_)) =>
+                if matches!(slot.entry, MailboxEntry::Inbox(_) | MailboxEntry::Inline(_)) =>
             {
                 inner.mailboxes.remove(&id);
                 true
@@ -459,9 +469,9 @@ impl Registry {
     }
 
     /// Fetch the entry for a mailbox id. Returns an owned clone so the
-    /// caller can drop the internal lock before invoking a `Closure`
-    /// handler (avoids holding the registry lock across arbitrary user
-    /// code).
+    /// caller can drop the internal lock before invoking the handler
+    /// (whether `Inbox` or `Inline`) — avoids holding the registry
+    /// lock across arbitrary user code.
     pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
         self.inner
             .read()
@@ -706,10 +716,10 @@ mod tests {
     #[test]
     fn register_and_lookup_closure_mailbox() {
         let r = Registry::new();
-        let id = r.register_closure("physics", noop_handler());
+        let id = r.register_inbox("physics", noop_handler());
         assert_eq!(id, MailboxId::from_name("physics"));
         assert_eq!(r.lookup("physics"), Some(id));
-        assert!(matches!(r.entry(id), Some(MailboxEntry::Closure(_))));
+        assert!(matches!(r.entry(id), Some(MailboxEntry::Inbox(_))));
     }
 
     #[test]
@@ -717,13 +727,13 @@ mod tests {
         let r = Registry::new();
         let counter = Arc::new(AtomicU32::new(0));
         let c2 = Arc::clone(&counter);
-        let id = r.register_closure(
+        let id = r.register_inbox(
             "heartbeat",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 c2.fetch_add(dispatch.count, Ordering::SeqCst);
             }),
         );
-        let Some(MailboxEntry::Closure(h)) = r.entry(id) else {
+        let Some(MailboxEntry::Inbox(h)) = r.entry(id) else {
             panic!("expected closure entry")
         };
         // Test-side id is irrelevant — the handler ignores it.
@@ -745,9 +755,9 @@ mod tests {
     #[test]
     fn mailbox_ids_are_name_derived() {
         let r = Registry::new();
-        let a = r.register_closure("a", noop_handler());
-        let b = r.register_closure("b", noop_handler());
-        let c = r.register_closure("c", noop_handler());
+        let a = r.register_inbox("a", noop_handler());
+        let b = r.register_inbox("b", noop_handler());
+        let c = r.register_inbox("c", noop_handler());
         assert_eq!(a, MailboxId::from_name("a"));
         assert_eq!(b, MailboxId::from_name("b"));
         assert_eq!(c, MailboxId::from_name("c"));
@@ -762,8 +772,8 @@ mod tests {
     #[should_panic(expected = "mailbox name already registered")]
     fn duplicate_name_panics() {
         let r = Registry::new();
-        r.register_closure("x", noop_handler());
-        r.register_closure("x", noop_handler());
+        r.register_inbox("x", noop_handler());
+        r.register_inbox("x", noop_handler());
     }
 
     #[test]
@@ -776,8 +786,8 @@ mod tests {
     #[test]
     fn mailbox_name_reverse_lookup() {
         let r = Registry::new();
-        let a = r.register_closure("physics", noop_handler());
-        let b = r.register_closure("graphics", noop_handler());
+        let a = r.register_inbox("physics", noop_handler());
+        let b = r.register_inbox("graphics", noop_handler());
         assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
         assert_eq!(r.mailbox_name(b).as_deref(), Some("graphics"));
         assert!(r.mailbox_name(MailboxId(999)).is_none());
@@ -975,13 +985,13 @@ mod tests {
     }
 
     #[test]
-    fn try_register_closure_is_non_panicking_on_collision() {
+    fn try_register_inbox_is_non_panicking_on_collision() {
         let r = Registry::new();
         let first = r
-            .try_register_closure("loaded", noop_handler())
+            .try_register_inbox("loaded", noop_handler())
             .expect("fresh name");
         let err = r
-            .try_register_closure("loaded", noop_handler())
+            .try_register_inbox("loaded", noop_handler())
             .expect_err("collision must not panic");
         assert_eq!(err.name, "loaded");
         assert_eq!(r.lookup("loaded"), Some(first));
@@ -995,10 +1005,10 @@ mod tests {
     /// `CHASSIS_MAILBOX_ID` never reaches the registry). Reject at the
     /// registration boundary so the routing path stays unambiguous.
     #[test]
-    fn try_register_closure_rejects_reserved_chassis_name() {
+    fn try_register_inbox_rejects_reserved_chassis_name() {
         let r = Registry::new();
         let err = r
-            .try_register_closure("aether.chassis", noop_handler())
+            .try_register_inbox("aether.chassis", noop_handler())
             .expect_err("reserved name must reject");
         assert_eq!(err.name, "aether.chassis");
         assert_eq!(r.len(), 0);
@@ -1007,7 +1017,7 @@ mod tests {
     #[test]
     fn drop_mailbox_frees_name_and_marks_entry_dropped() {
         let r = Registry::new();
-        let id = r.try_register_closure("loaded", noop_handler()).unwrap();
+        let id = r.try_register_inbox("loaded", noop_handler()).unwrap();
         let name = r.drop_mailbox(id).expect("drop");
         assert_eq!(name, "loaded");
         assert!(r.lookup("loaded").is_none(), "name should be reusable");
@@ -1018,10 +1028,10 @@ mod tests {
         // Under ADR-0029 the id is a function of the name, so a
         // re-register produces the *same* id and flips the entry back
         // to `Component`.
-        let reloaded = r.try_register_closure("loaded", noop_handler()).unwrap();
+        let reloaded = r.try_register_inbox("loaded", noop_handler()).unwrap();
         assert_eq!(reloaded, id);
         assert_eq!(r.lookup("loaded"), Some(reloaded));
-        assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Closure(_))));
+        assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox(_))));
     }
 
     #[test]
@@ -1031,7 +1041,7 @@ mod tests {
             r.drop_mailbox(MailboxId(999)),
             Err(DropError::UnknownId(_))
         ));
-        let c = r.try_register_closure("x", noop_handler()).unwrap();
+        let c = r.try_register_inbox("x", noop_handler()).unwrap();
         r.drop_mailbox(c).unwrap();
         assert!(matches!(
             r.drop_mailbox(c),
@@ -1047,9 +1057,9 @@ mod tests {
     #[test]
     fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
         let r = Registry::new();
-        r.register_closure("aether.input", noop_handler());
-        r.register_closure("aether.component.trampoline:cam", noop_handler());
-        r.register_closure("user_thing", noop_handler());
+        r.register_inbox("aether.input", noop_handler());
+        r.register_inbox("aether.component.trampoline:cam", noop_handler());
+        r.register_inbox("user_thing", noop_handler());
 
         let snap = r.list_mailbox_descriptors();
         // Four entries: 3 registered + 1 synthetic chassis sentinel.
@@ -1098,7 +1108,7 @@ mod tests {
     #[test]
     fn list_mailbox_descriptors_ids_match_name_hashes() {
         let r = Registry::new();
-        let id = r.register_closure("aether.audio", noop_handler());
+        let id = r.register_inbox("aether.audio", noop_handler());
         let entry = r
             .list_mailbox_descriptors()
             .into_iter()
@@ -1109,13 +1119,13 @@ mod tests {
     }
 
     /// Issue iamacoffeepot/aether#742: every successful
-    /// `register_closure` fires the installed change hook with the
+    /// `register_inbox` fires the installed change hook with the
     /// post-registration inventory snapshot. The chassis wires this
     /// hook to push to the hub via `egress_mailboxes_changed` so any
     /// chassis-builder cap that registers post-Hello shows up in the
     /// hub's inventory cache without an explicit publish.
     #[test]
-    fn mailbox_change_hook_fires_on_register_closure() {
+    fn mailbox_change_hook_fires_on_register_inbox() {
         use std::sync::Mutex;
 
         let r = Arc::new(Registry::new());
@@ -1126,14 +1136,14 @@ mod tests {
             snapshots_for_hook.lock().unwrap().push(names);
         }));
 
-        r.register_closure("aether.input", noop_handler());
-        r.register_closure("aether.render", noop_handler());
+        r.register_inbox("aether.input", noop_handler());
+        r.register_inbox("aether.render", noop_handler());
 
         let captured = snapshots.lock().unwrap();
         assert_eq!(
             captured.len(),
             2,
-            "hook should fire once per successful register_closure"
+            "hook should fire once per successful register_inbox"
         );
         // Each snapshot is the FULL inventory at that moment (matches
         // the wire `MailboxesChanged` semantics — full replace, not
@@ -1143,10 +1153,10 @@ mod tests {
         assert!(captured[1].contains(&"aether.render".to_owned()));
     }
 
-    /// Issue 742: `try_register_closure` fires the hook on the Ok
+    /// Issue 742: `try_register_inbox` fires the hook on the Ok
     /// branch and stays silent on `NameConflict`.
     #[test]
-    fn mailbox_change_hook_fires_on_try_register_closure_ok_only() {
+    fn mailbox_change_hook_fires_on_try_register_inbox_ok_only() {
         use std::sync::Mutex;
 
         let r = Arc::new(Registry::new());
@@ -1157,11 +1167,11 @@ mod tests {
         }));
 
         let _ = r
-            .try_register_closure("aether.input", noop_handler())
+            .try_register_inbox("aether.input", noop_handler())
             .expect("first register OK");
         // Second registration with the same name conflicts.
         let _ = r
-            .try_register_closure("aether.input", noop_handler())
+            .try_register_inbox("aether.input", noop_handler())
             .expect_err("second register should NameConflict");
 
         assert_eq!(*count.lock().unwrap(), 1, "hook fires once on Ok only");
@@ -1175,7 +1185,7 @@ mod tests {
         // mailboxes and kinds from a handler that holds an Arc.
         let r = Arc::new(Registry::new());
         let r2 = Arc::clone(&r);
-        let id = r2.register_closure("late", noop_handler());
+        let id = r2.register_inbox("late", noop_handler());
         assert_eq!(r.lookup("late"), Some(id));
         let kind_id = r.register_kind("aether.late");
         assert_eq!(

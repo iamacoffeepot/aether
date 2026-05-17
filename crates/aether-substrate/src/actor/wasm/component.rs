@@ -230,7 +230,7 @@ impl ComponentCtx {
         // downstream dispatch loop records the bracket. See
         // [`MailboxEntry`] docs for the contract.
         match self.registry.entry(recipient) {
-            Some(MailboxEntry::Closure(handler)) => {
+            Some(MailboxEntry::Inbox(handler)) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any
@@ -253,7 +253,7 @@ impl ComponentCtx {
                 });
                 return;
             }
-            Some(MailboxEntry::Sink(handler)) => {
+            Some(MailboxEntry::Inline(handler)) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 let origin = self.registry.mailbox_name(self.sender);
                 let thread_name = std::thread::current().name().map(str::to_owned);
@@ -1133,7 +1133,7 @@ mod tests {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry
-            .try_register_closure("client", crate::mail::registry::noop_handler())
+            .try_register_inbox("client", crate::mail::registry::noop_handler())
             .expect("register client mailbox");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
@@ -1175,7 +1175,7 @@ mod tests {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry
-            .try_register_closure("client", crate::mail::registry::noop_handler())
+            .try_register_inbox("client", crate::mail::registry::noop_handler())
             .expect("register client mailbox");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
@@ -1218,7 +1218,7 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         let sink_id = registry
-            .try_register_closure(
+            .try_register_inbox(
                 "issue_722_sink",
                 Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                     captured_for_handler.lock().unwrap().push((
@@ -1290,7 +1290,7 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         let sink_id = registry
-            .try_register_closure(
+            .try_register_inbox(
                 "issue_722_fresh_root_sink",
                 Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                     captured_for_handler.lock().unwrap().push((

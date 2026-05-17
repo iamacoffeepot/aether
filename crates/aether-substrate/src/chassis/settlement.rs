@@ -299,7 +299,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         let captured: Arc<StdMutex<Vec<CapturedDispatch>>> = Arc::new(StdMutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
-        let target = registry.register_closure(
+        let target = registry.register_inbox(
             sink_name,
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured_clone.lock().unwrap().push(CapturedDispatch {

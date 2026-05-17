@@ -358,7 +358,7 @@ mod tests {
     fn register_capture(registry: &Registry, name: &str) -> Arc<Mutex<Vec<CapturedDispatch>>> {
         let captured: Arc<Mutex<Vec<CapturedDispatch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
-        let _ = registry.try_register_closure(
+        let _ = registry.try_register_inbox(
             name.to_owned(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured_for_handler.lock().unwrap().push(CapturedDispatch {

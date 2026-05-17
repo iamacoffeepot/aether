@@ -305,7 +305,7 @@ fn ship_batch(
     if !mailer
         .registry()
         .entry(recipient)
-        .map(|e| matches!(e, crate::mail::registry::MailboxEntry::Closure(_)))
+        .map(|e| matches!(e, crate::mail::registry::MailboxEntry::Inbox(_)))
         .unwrap_or(false)
     {
         // Observer not registered (or dropped); silently discard the
