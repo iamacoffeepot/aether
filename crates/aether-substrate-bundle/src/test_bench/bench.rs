@@ -842,7 +842,7 @@ mod tests {
         assert!(
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "captured bytes are not a PNG: first 8 bytes={:?}",
-            &png.iter().take(8).cloned().collect::<Vec<u8>>(),
+            &png.iter().take(8).copied().collect::<Vec<u8>>(),
         );
     }
 

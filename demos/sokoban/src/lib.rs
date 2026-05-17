@@ -386,7 +386,10 @@ impl Sokoban {
         let origin_x = -(w as f32) * 0.5;
         let origin_y = (h as f32) * 0.5;
 
-        let mut tris = [DrawTriangle::default(); CELLS_MAX * 2];
+        // Heap-allocated: `CELLS_MAX * 2` `DrawTriangle`s blow the wasm
+        // stack budget (clippy::large_stack_arrays). `Vec` keeps the
+        // slice-pass-through unchanged at the `send_many` call site.
+        let mut tris = vec![DrawTriangle::default(); CELLS_MAX * 2];
         let mut n = 0;
         for y in 0..h {
             for x in 0..w {
