@@ -222,28 +222,63 @@ impl ComponentCtx {
             kind,
         );
 
-        if let Some(MailboxEntry::Closure(handler)) = self.registry.entry(recipient) {
-            let kind_name = self.registry.kind_name(kind).unwrap_or_default();
-            // Component-originated mail: the sender is this ctx's
-            // mailbox, so its registry name is the `origin` any
-            // sink cares about (ADR-0011), and the same mailbox id
-            // rides on `reply_to.target` so sink handlers that want
-            // to reply (ADR-0041's io sink is the motivating case)
-            // can route `*Result` back to this component via
-            // `Mailer::send_reply`.
-            let origin = self.registry.mailbox_name(self.sender);
-            handler(crate::mail::registry::MailDispatch {
-                kind,
-                kind_name: &kind_name,
-                origin: origin.as_deref(),
-                sender: reply_to,
-                payload: &payload,
-                count,
-                mail_id,
-                root,
-                parent_mail,
-            });
-            return;
+        // Closure-bound (actor-enqueue) and Sink-bound (synchronous
+        // handler) recipients dispatch inline here, bypassing the
+        // mailer's full route. Issue 838: `Sink` gets a
+        // `Received`/`Finished` bracket so the chain's `in_flight`
+        // balances; `Closure` does NOT because the actor's
+        // downstream dispatch loop records the bracket. See
+        // [`MailboxEntry`] docs for the contract.
+        match self.registry.entry(recipient) {
+            Some(MailboxEntry::Closure(handler)) => {
+                let kind_name = self.registry.kind_name(kind).unwrap_or_default();
+                // Component-originated mail: the sender is this ctx's
+                // mailbox, so its registry name is the `origin` any
+                // sink cares about (ADR-0011), and the same mailbox id
+                // rides on `reply_to.target` so sink handlers that want
+                // to reply (ADR-0041's io sink is the motivating case)
+                // can route `*Result` back to this component via
+                // `Mailer::send_reply`.
+                let origin = self.registry.mailbox_name(self.sender);
+                handler(crate::mail::registry::MailDispatch {
+                    kind,
+                    kind_name: &kind_name,
+                    origin: origin.as_deref(),
+                    sender: reply_to,
+                    payload: &payload,
+                    count,
+                    mail_id,
+                    root,
+                    parent_mail,
+                });
+                return;
+            }
+            Some(MailboxEntry::Sink(handler)) => {
+                let kind_name = self.registry.kind_name(kind).unwrap_or_default();
+                let origin = self.registry.mailbox_name(self.sender);
+                let thread_name = std::thread::current().name().map(str::to_owned);
+                crate::runtime::trace::record_received(mail_id, thread_name);
+                handler(crate::mail::registry::MailDispatch {
+                    kind,
+                    kind_name: &kind_name,
+                    origin: origin.as_deref(),
+                    sender: reply_to,
+                    payload: &payload,
+                    count,
+                    mail_id,
+                    root,
+                    parent_mail,
+                });
+                crate::runtime::trace::record_finished(mail_id);
+                return;
+            }
+            Some(MailboxEntry::Dropped) | None => {
+                // Falls through to the `self.queue.push` path below
+                // — Dropped warn-drops in `route_mail` (with the
+                // Finished bracket from issue 839); unknown bubbles
+                // up via ADR-0037 (also with the local-side
+                // Finished from issue 839).
+            }
         }
 
         // Dropped / unknown both funnel through `Mailer::push`:
