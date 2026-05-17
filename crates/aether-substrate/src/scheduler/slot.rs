@@ -616,7 +616,14 @@ pub mod tests {
         slot.state.try_wake();
         slot.close_inbox();
 
-        let result = run_one_cycle(&slot);
+        // Generous wallclock so only inbox-closed-and-empty can decide
+        // the cycle outcome — the standard 200μs wallclock can trip
+        // between the two iterations of `CounterSlot`'s drain loop
+        // (drain envelope 1 → try_recv sees closed && empty → Closed)
+        // under CI CPU contention, flipping the result to `Requeue`
+        // (iamacoffeepot/aether#896; sibling of iamacoffeepot/aether#869).
+        let budget = BatchBudget::custom(BATCH_MAX_MAILS, Duration::from_secs(60));
+        let result = slot.run_cycle(budget);
         // Closed + non-empty: drain remaining first, then return
         // Closed on next try_recv. CounterSlot's loop checks closed +
         // empty first, so the first iteration drains envelope 1, the
