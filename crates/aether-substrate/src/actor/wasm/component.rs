@@ -240,12 +240,11 @@ impl ComponentCtx {
                 // can route `*Result` back to this component via
                 // `Mailer::send_reply`.
                 //
-                // iamacoffeepot/aether#848 PR 2: handler is now
+                // iamacoffeepot/aether#848: handler is
                 // `Arc<dyn InboxHandler>`; build an [`OwnedDispatch`]
                 // and move payload + kind_name into it. The bytes
                 // flow straight into the downstream cap's mpsc
-                // envelope without a `to_vec()` clone (once the cap
-                // migrates off `legacy_inbox_handler` in PR 3).
+                // envelope without a `to_vec()` clone.
                 let origin = self.registry.mailbox_name(self.sender);
                 handler.enqueue(crate::mail::registry::OwnedDispatch {
                     kind,

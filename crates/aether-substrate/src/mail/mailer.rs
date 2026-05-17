@@ -376,15 +376,13 @@ fn route_mail(
             // on the [`MailboxEntry::Inline`] arm below — they get
             // the bracket because nothing downstream owns it.
             //
-            // iamacoffeepot/aether#848 PR 2: payload + kind_name
-            // move into [`OwnedDispatch`] rather than being borrowed.
-            // The handler is now `Arc<dyn InboxHandler>` whose
-            // `enqueue` takes owned bytes — caps that migrate to
-            // `Fn(OwnedDispatch)` in PR 3 send the envelope
-            // downstream with zero payload-bytes copies; legacy cap
-            // closures still wrapped in `legacy_inbox_handler`
-            // re-borrow once back into `MailDispatch<'_>` for the
-            // unchanged body, cost-neutral with today's path.
+            // iamacoffeepot/aether#848: payload + kind_name move
+            // into [`OwnedDispatch`] rather than being borrowed.
+            // The handler is `Arc<dyn InboxHandler>` whose `enqueue`
+            // takes owned bytes — cap closures move directly into
+            // their downstream envelope (via
+            // `Envelope::from(OwnedDispatch)`) with zero payload
+            // copies.
             handler.enqueue(OwnedDispatch {
                 kind: mail.kind,
                 kind_name,

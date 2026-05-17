@@ -83,55 +83,17 @@ pub fn noop_handler() -> Arc<dyn InboxHandler> {
     Arc::new(|_dispatch: OwnedDispatch| {})
 }
 
-/// Issue iamacoffeepot/aether#848 PR 2 adapter: wrap a legacy
-/// `Fn(MailDispatch<'_>)` closure (the pre-PR-2 cap shape) into an
-/// `Arc<dyn InboxHandler>` so existing cap closures keep compiling
-/// through the staged migration. The adapter re-borrows the inbound
-/// [`OwnedDispatch`] back into a [`MailDispatch<'_>`] for the legacy
-/// body. Cost-neutral with today's path (the borrow itself is free;
-/// the legacy body's `to_vec()` / `to_owned()` clones inside the
-/// closure are unchanged), so PR 2 doesn't introduce a perf
-/// regression on the cap dispatch hot path.
-///
-/// Each production cap that's still wrapped here migrates in PR 3
-/// to take `Fn(OwnedDispatch)` directly — moving payload + kind_name
-/// rather than cloning them, which is where iamacoffeepot/aether#848's
-/// documented hot-path win materializes. PR 5 retires this helper
-/// once every wrap is gone.
-pub fn legacy_inbox_handler<F>(closure: F) -> Arc<dyn InboxHandler>
-where
-    F: for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static,
-{
-    struct LegacyAdapter<F>(F);
-    impl<F> InboxHandler for LegacyAdapter<F>
-    where
-        F: for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static,
-    {
-        fn enqueue(&self, dispatch: OwnedDispatch) {
-            let borrowed = MailDispatch {
-                kind: dispatch.kind,
-                kind_name: &dispatch.kind_name,
-                origin: dispatch.origin.as_deref(),
-                sender: dispatch.sender,
-                payload: &dispatch.payload,
-                count: dispatch.count,
-                mail_id: dispatch.mail_id,
-                root: dispatch.root,
-                parent_mail: dispatch.parent_mail,
-            };
-            (self.0)(borrowed);
-        }
-    }
-    Arc::new(LegacyAdapter(closure))
-}
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType};
 
-/// One mail's worth of dispatch metadata handed to a [`MailboxHandler`].
-/// Bundled into a single struct (rather than a positional argument
-/// list) so the producer-minted ADR-0080 §1 / §5 lineage fields
-/// (`mail_id` / `root` / `parent_mail`) ride alongside the existing
-/// envelope-style fields without exploding the closure's call shape.
+/// One mail's worth of dispatch metadata handed to an
+/// [`InlineHandler`]. Bundled into a single struct (rather than a
+/// positional argument list) so the producer-minted ADR-0080 §1 / §5
+/// lineage fields (`mail_id` / `root` / `parent_mail`) ride alongside
+/// the existing envelope-style fields without exploding the closure's
+/// call shape. Inbox handlers receive the owned mirror
+/// [`OwnedDispatch`] instead so they can move payload into a
+/// downstream channel rather than cloning the borrowed slice.
 ///
 /// Handlers that build an [`crate::actor::native::envelope::Envelope`]
 /// for an mpsc downstream copy `mail_id` / `root` / `parent_mail`
@@ -175,11 +137,6 @@ pub struct MailDispatch<'a> {
 /// can't outlive the synchronous push call, so any handler that
 /// wants to enqueue must first clone. `OwnedDispatch` owns its
 /// payload + kind_name so it can be moved cross-thread directly.
-///
-/// Issue iamacoffeepot/aether#848 (Phase 1): introduced alongside
-/// the [`InboxHandler`] trait. No call sites consume this in PR 1 —
-/// the existing `MailboxHandler` keeps the `MailDispatch<'_>` shape
-/// until PR 2 migrates the variant types and the mailer arms.
 #[derive(Clone, Debug)]
 pub struct OwnedDispatch {
     /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
@@ -211,17 +168,6 @@ pub struct OwnedDispatch {
     pub parent_mail: Option<MailId>,
 }
 
-/// Closure invoked when mail is delivered to a chassis-bound mailbox.
-/// Called on the caller's thread (or the platform thread for input
-/// fan-out); must be `Send + Sync`. The single [`MailDispatch`]
-/// argument bundles the per-mail metadata.
-///
-/// Issue iamacoffeepot/aether#848 (Phase 1): retained alongside the
-/// new [`InboxHandler`] / [`InlineHandler`] traits. PR 2 migrates
-/// `MailboxEntry::{Inbox, Inline}` to wrap `Arc<dyn InboxHandler>` /
-/// `Arc<dyn InlineHandler>` and PR 5 retires this alias entirely.
-pub type MailboxHandler = Arc<dyn for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static>;
-
 /// Synchronous handler installed under [`MailboxEntry::Inline`]. Runs
 /// on the mailer thread inside `Mailer::push`; the mailer brackets
 /// the call with `record_received` / `record_finished` so the
@@ -232,13 +178,20 @@ pub type MailboxHandler = Arc<dyn for<'a> Fn(MailDispatch<'a>) + Send + Sync + '
 /// to enqueue the payload across a channel should pick
 /// [`InboxHandler`] instead so the bytes move rather than copy.
 ///
+/// **Wrong-variant symptom.** An actor-enqueue closure (one that
+/// forwards `dispatch` into an mpsc the dispatcher thread drains)
+/// installed here double-counts `Finished`: the mailer brackets the
+/// enqueue, then the dispatcher records its own bracket when the
+/// envelope is picked up. Settlement subscribers wake on the first
+/// `Finished` — before the actual work runs — and the chain reports
+/// settled prematurely (the inverse of the iamacoffeepot/aether#846
+/// failure). Pick [`InboxHandler`] for those bodies; the dispatch
+/// type asymmetry (`MailDispatch<'_>` vs `OwnedDispatch`) is a
+/// structural nudge but not a hard guarantee.
+///
 /// Blanket impl below covers any `Fn(MailDispatch<'_>)` closure;
 /// hand-rolled `impl InlineHandler for MyType` is also supported
 /// for handlers that hold state.
-///
-/// Issue iamacoffeepot/aether#848 (Phase 1): introduced. No call
-/// sites consume this in PR 1 — `MailboxEntry::Inline` still wraps
-/// the legacy `MailboxHandler` alias until PR 2.
 pub trait InlineHandler: Send + Sync + 'static {
     fn dispatch(&self, dispatch: MailDispatch<'_>);
 }
@@ -250,26 +203,24 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// `Received`/`Finished` per envelope. **Contract:** every
 /// [`OwnedDispatch`] you receive must eventually have `Finished`
 /// recorded for its `mail_id` — otherwise the chain's `in_flight`
-/// leaks and any settlement subscriber hangs (the failure mode that
-/// surfaced in iamacoffeepot/aether#846).
+/// leaks and any settlement subscriber hangs. iamacoffeepot/aether#846
+/// is the canonical incident: a synchronous closure that captured
+/// fields off the dispatch but had no downstream owner of the
+/// bracket caused [`TestBench::send_bytes`] to time out at 5s once
+/// strict settlement propagation landed.
 ///
 /// The owned dispatch type is the structural hint: payload arrives
-/// as `Vec<u8>`, so moving it into an mpsc Sender is a single move,
-/// not a clone. A handler that does immediate synchronous work
-/// against the dispatch wastes the move and double-pays the bracket
-/// (the dispatcher downstream finishes the bracket once the
-/// enqueued envelope is picked up; running synchronously here means
-/// nothing picks it up) — those bodies belong on
-/// [`InlineHandler`] instead.
+/// as `Vec<u8>`, so moving it into an mpsc `Sender` is a single
+/// move, not a clone. A handler that does immediate synchronous
+/// work against the dispatch wastes the move and skips the
+/// bracket entirely — those bodies belong on [`InlineHandler`]
+/// instead.
 ///
 /// Blanket impl below covers any `Fn(OwnedDispatch)` closure;
 /// hand-rolled `impl InboxHandler for MyType` is supported for caps
 /// that want to bundle the channel sender with handler state.
 ///
-/// Issue iamacoffeepot/aether#848 (Phase 1): introduced. No call
-/// sites consume this in PR 1; PR 2 wires it through
-/// `MailboxEntry::Inbox` and PR 3 migrates production cap call
-/// sites onto it.
+/// [`TestBench::send_bytes`]: ../../../aether_substrate_bundle/test_bench/struct.TestBench.html#method.send_bytes
 pub trait InboxHandler: Send + Sync + 'static {
     fn enqueue(&self, dispatch: OwnedDispatch);
 }
@@ -304,13 +255,20 @@ where
 /// here as an `Inbox` like every other actor.
 ///
 /// Issue 838 / iamacoffeepot/aether#841: `Inbox` and `Inline` are
-/// intentionally distinct even though both wrap a [`MailboxHandler`].
-/// The variant *names where the handler runs* — `Inbox` defers the
-/// work to an actor's dispatch thread, `Inline` runs the work on the
-/// pushing thread. That decides who owns the `Received`/`Finished`
-/// lifecycle bracket: the downstream dispatch loop for `Inbox`, the
-/// mailer itself for `Inline`. See each variant's docs and
-/// `Mailer::push`'s `route_mail` for the bracket semantics.
+/// intentionally distinct variants — they *name where the handler
+/// runs*. `Inbox` defers the work to an actor's dispatch thread,
+/// `Inline` runs the work on the pushing thread. That decides who
+/// owns the `Received`/`Finished` lifecycle bracket: the downstream
+/// dispatch loop for `Inbox`, the mailer itself for `Inline`. See
+/// each variant's docs and `Mailer::push`'s `route_mail` for the
+/// bracket semantics.
+///
+/// Issue iamacoffeepot/aether#848 PR 2 + 3: the variants wrap
+/// distinct trait objects ([`InboxHandler`] vs [`InlineHandler`])
+/// whose dispatch types (`OwnedDispatch` vs `MailDispatch<'_>`) make
+/// the wrong-shape body uneconomical to write at compile time. Not
+/// a hard proof of correctness, but the affordance gap is wide
+/// enough that the wrong shape genuinely doesn't fit.
 #[derive(Clone)]
 pub enum MailboxEntry {
     /// The handler body forwards the envelope into an actor's mpsc
@@ -322,17 +280,9 @@ pub enum MailboxEntry {
     /// singleton actors, including the wasm trampoline) and by the
     /// public [`Registry::register_inbox`] /
     /// [`Registry::try_register_inbox`] for callers that own a
-    /// separate dispatcher loop.
-    ///
-    /// Issue iamacoffeepot/aether#848 PR 2: the variant now wraps
-    /// `Arc<dyn InboxHandler>` (was `MailboxHandler`). Handler
-    /// bodies receive [`OwnedDispatch`] so payload bytes move into
-    /// the downstream envelope rather than being cloned via
-    /// `to_vec()` — the hot-path perf win documented in iamacoffeepot/aether#848.
-    /// Legacy `Fn(MailDispatch<'_>)` cap closures bridge via
-    /// [`legacy_inbox_handler`] during the staged migration; PR 3
-    /// rewrites each cap to take `OwnedDispatch` directly and the
-    /// adapter retires in PR 5.
+    /// separate dispatcher loop. Handler receives [`OwnedDispatch`]
+    /// so payload + kind_name move into the downstream envelope —
+    /// see [`InboxHandler`] for the full contract.
     Inbox(Arc<dyn InboxHandler>),
     /// The handler body does its work inline on the pushing thread;
     /// there is no actor dispatch loop behind it. `Mailer::push`
@@ -343,12 +293,8 @@ pub enum MailboxEntry {
     /// [`Registry::try_register_inline`]. Distinct from `Inbox` so
     /// the bracket isn't double-counted when the closure was an
     /// actor-enqueue (which would fire settlement prematurely).
-    ///
-    /// Issue iamacoffeepot/aether#848 PR 2: the variant now wraps
-    /// `Arc<dyn InlineHandler>` (was `MailboxHandler`). The handler
-    /// body shape — `Fn(MailDispatch<'_>)` — is unchanged; the
-    /// blanket impl on the `InlineHandler` trait makes existing
-    /// closures coerce into `Arc<dyn InlineHandler>` automatically.
+    /// Handler receives borrowed [`MailDispatch<'_>`] — zero-copy
+    /// reads; see [`InlineHandler`] for the full contract.
     Inline(Arc<dyn InlineHandler>),
     /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
     /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
@@ -570,6 +516,24 @@ impl Registry {
     /// (chassis caps via `claim_mailbox*`, instanced + singleton
     /// actors via the spawner).
     ///
+    /// **Wrong-variant symptom.** Picking [`Self::register_inbox`]
+    /// for a synchronous handler — one that does immediate work on
+    /// the pushing thread rather than enqueueing onto a downstream
+    /// mpsc — leaks `in_flight` forever, because nothing downstream
+    /// ever fires the `Finished` half of the bracket. Settlement
+    /// subscribers on the parent chain hang. iamacoffeepot/aether#846
+    /// is the canonical incident: `tick_fanout_propagates_chassis_root_lineage`
+    /// used `register_inbox` for a `captured.push(...)` closure
+    /// (synchronous Vec append, no downstream dispatcher), and once
+    /// strict settlement propagation landed in
+    /// `TestBench::run_frame` the test surfaced as a 5s
+    /// `SettlementTimeout`. Fix: switch to [`Self::register_inline`].
+    ///
+    /// The dispatch-type asymmetry helps catch this — Inbox
+    /// handlers receive [`OwnedDispatch`] so moving `payload` into a
+    /// channel is natural; a synchronous body that doesn't move
+    /// payload reads as "I should be Inline."
+    ///
     /// Panics on a name collision — these are substrate-internal
     /// names, collisions are bugs.
     pub fn register_inbox(
@@ -613,14 +577,24 @@ impl Registry {
     /// ([`crate::chassis::settlement::SettlementRegistry`]) wake
     /// (ADR-0080 §2).
     ///
-    /// Distinct from [`Self::register_inbox`] which is for
-    /// actor-inbox enqueue closures whose downstream dispatch loop
-    /// owns the bracket. Miscategorisation is silent: a synchronous
-    /// handler registered as an `Inbox` leaks `in_flight` (chains
-    /// never settle); an actor-enqueue closure registered as
-    /// `Inline` double-counts `Finished` (settlement fires
-    /// prematurely). Panics on a name collision — these are
-    /// substrate-internal names, collisions are bugs.
+    /// **Wrong-variant symptom.** Picking [`Self::register_inline`]
+    /// for an actor-enqueue handler — one whose body forwards onto
+    /// a downstream mpsc that another thread drains — double-counts
+    /// `Finished`. The mailer fires the bracket around the enqueue,
+    /// then the downstream dispatcher fires its own bracket when
+    /// the envelope is picked up. Settlement subscribers wake on
+    /// the first `Finished` — before the actual work runs — so
+    /// callers proceed past the gate while the dispatcher is still
+    /// processing the mail. Fix: switch to [`Self::register_inbox`].
+    ///
+    /// The dispatch-type asymmetry helps catch this — Inline
+    /// handlers receive borrowed [`MailDispatch<'_>`] whose
+    /// `payload: &[u8]` can't be moved into an mpsc without a
+    /// `to_vec()` clone; that clone is the visible "I should be
+    /// Inbox" smell.
+    ///
+    /// Panics on a name collision — these are substrate-internal
+    /// names, collisions are bugs.
     pub fn register_inline(
         &self,
         name: impl Into<String>,
