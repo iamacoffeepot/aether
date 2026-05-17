@@ -80,3 +80,6 @@ wat = "1"
 # in for non-test builds.
 aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { version = "1.19", features = ["derive"] }
+
+[lints]
+workspace = true

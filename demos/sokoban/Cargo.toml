@@ -33,3 +33,6 @@ bytemuck = { version = "1", default-features = false, features = ["derive"] }
 # `target/wasm32-unknown-unknown/{debug,release}/`.
 [dev-dependencies]
 aether-substrate-bundle = { path = "../../crates/aether-substrate-bundle" }
+
+[lints]
+workspace = true

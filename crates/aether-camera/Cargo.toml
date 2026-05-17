@@ -60,3 +60,6 @@ inventory = "0.3"
 # and discovered at runtime under `target/wasm32-unknown-unknown/{debug,release}/`.
 [dev-dependencies]
 aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+
+[lints]
+workspace = true

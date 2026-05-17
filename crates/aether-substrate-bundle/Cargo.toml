@@ -85,3 +85,6 @@ wat = "1"
 # module through `crate::test_bench::{visual, test_helpers}` directly
 # (post-issue-821, formerly via `aether-scenario`).
 aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
+
+[lints]
+workspace = true
