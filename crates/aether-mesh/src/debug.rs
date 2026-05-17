@@ -31,6 +31,7 @@
 use crate::polygon::Polygon;
 use aether_math::Vec3;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 /// Default tolerances for geometric validators. All in world units.
 ///
@@ -587,13 +588,20 @@ pub fn dump(polygons: &[Polygon]) -> String {
         let cx: f32 = outer.iter().map(|v| v.x).sum::<f32>() / outer.len() as f32;
         let cy: f32 = outer.iter().map(|v| v.y).sum::<f32>() / outer.len() as f32;
         let cz: f32 = outer.iter().map(|v| v.z).sum::<f32>() / outer.len() as f32;
-        out.push_str(&format!(
-            "[{:>3}] color={} normal=({:+.3},{:+.3},{:+.3}) verts={:>2} holes={} centroid=({:+.3},{:+.3},{:+.3})\n",
-            i, p.color,
-            p.plane_normal.x, p.plane_normal.y, p.plane_normal.z,
-            p.vertices.len(), p.holes.len(),
-            cx, cy, cz,
-        ));
+        let _ = writeln!(
+            out,
+            "[{:>3}] color={} normal=({:+.3},{:+.3},{:+.3}) verts={:>2} holes={} centroid=({:+.3},{:+.3},{:+.3})",
+            i,
+            p.color,
+            p.plane_normal.x,
+            p.plane_normal.y,
+            p.plane_normal.z,
+            p.vertices.len(),
+            p.holes.len(),
+            cx,
+            cy,
+            cz,
+        );
     }
     out
 }
@@ -612,29 +620,32 @@ pub fn report(polygons: &[Polygon]) -> String {
     let violations = validate_manifold(polygons);
     let summ = summary(polygons);
     let mut out = String::new();
-    out.push_str(&format!(
-        "polygon mesh report: {} polygons, {} triangles after fan-tessellate, {} holes total\n",
+    let _ = writeln!(
+        out,
+        "polygon mesh report: {} polygons, {} triangles after fan-tessellate, {} holes total",
         summ.polygon_count, summ.triangle_count_after_fan, summ.hole_count_total
-    ));
-    out.push_str(&format!(
-        "  vertices/poly: min={} max={} avg={:.1}\n",
+    );
+    let _ = writeln!(
+        out,
+        "  vertices/poly: min={} max={} avg={:.1}",
         summ.vertex_count_min, summ.vertex_count_max, summ.vertex_count_avg
-    ));
+    );
     let mut keys: Vec<&(i8, i8, i8)> = summ.by_plane_direction.keys().collect();
     keys.sort();
     out.push_str("  by plane direction (sign x,y,z → count):\n");
     for k in keys {
-        out.push_str(&format!(
-            "    ({:+},{:+},{:+}) → {}\n",
+        let _ = writeln!(
+            out,
+            "    ({:+},{:+},{:+}) → {}",
             k.0, k.1, k.2, summ.by_plane_direction[k]
-        ));
+        );
     }
     if violations.is_empty() {
         out.push_str("  manifold: OK (closed, consistent winding)\n");
     } else {
-        out.push_str(&format!("  manifold: {} VIOLATIONS:\n", violations.len()));
+        let _ = writeln!(out, "  manifold: {} VIOLATIONS:", violations.len());
         for v in &violations {
-            out.push_str(&format!("    {v:?}\n"));
+            let _ = writeln!(out, "    {v:?}");
         }
     }
     let planarity = validate_planarity(polygons);
@@ -645,14 +656,14 @@ pub fn report(polygons: &[Polygon]) -> String {
     if total_geom == 0 {
         out.push_str("  geometry: OK (planar, well-shaped, coherent, no T-junctions)\n");
     } else {
-        out.push_str(&format!("  geometry: {total_geom} VIOLATIONS:\n"));
+        let _ = writeln!(out, "  geometry: {total_geom} VIOLATIONS:");
         for v in planarity
             .iter()
             .chain(&quality)
             .chain(&normals)
             .chain(&tjunctions)
         {
-            out.push_str(&format!("    {v:?}\n"));
+            let _ = writeln!(out, "    {v:?}");
         }
     }
     out.push_str("\nfull dump:\n");

@@ -555,7 +555,7 @@ impl Mesh {
         // Sort for determinism — the BFS pop order depends on stack
         // mechanics and adjacency, but the final cavity set is
         // determined by geometry. Sorting normalizes downstream walks.
-        cavity.sort();
+        cavity.sort_unstable();
         cavity
     }
 

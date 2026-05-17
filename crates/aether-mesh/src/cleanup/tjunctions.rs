@@ -58,7 +58,7 @@ impl IndexedMesh {
             }
 
             let mut sorted_edges: Vec<(VertexId, VertexId)> = edges.into_iter().collect();
-            sorted_edges.sort();
+            sorted_edges.sort_unstable();
 
             let mut subdivisions: HashMap<(VertexId, VertexId), VertexId> = HashMap::new();
             for &(a, b) in &sorted_edges {
@@ -300,10 +300,7 @@ mod tests {
         let plane = xy_plane();
         let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
-        let mesh = IndexedMesh {
-            vertices: vertices.clone(),
-            polygons: polygons.clone(),
-        };
+        let mesh = IndexedMesh { vertices, polygons };
         let repaired = mesh.repair_tjunctions();
         assert_eq!(repaired.polygons.len(), 1);
         assert_eq!(repaired.polygons[0].vertices, vec![0, 1, 2]);

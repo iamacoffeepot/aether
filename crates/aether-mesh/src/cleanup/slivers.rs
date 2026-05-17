@@ -217,10 +217,7 @@ mod tests {
         // through unchanged.
         let vertices = vec![p(0, 0, 0), p(10000, 0, 0), p(0, 10000, 0)];
         let polygons = vec![poly(vec![0, 1, 2])];
-        let mesh = IndexedMesh {
-            vertices: vertices.clone(),
-            polygons: polygons.clone(),
-        };
+        let mesh = IndexedMesh { vertices, polygons };
         let cleaned = mesh.remove_slivers();
         assert_eq!(cleaned.polygons.len(), 1);
         assert_eq!(cleaned.polygons[0].vertices, vec![0, 1, 2]);

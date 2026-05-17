@@ -557,8 +557,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> MailboxId {
-        let name = name.into();
-        match self.insert(name.clone(), MailboxEntry::Inbox(handler)) {
+        match self.insert(name.into(), MailboxEntry::Inbox(handler)) {
             Ok(id) => {
                 self.notify_mailbox_change();
                 id
@@ -627,8 +626,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InlineHandler>,
     ) -> MailboxId {
-        let name = name.into();
-        match self.insert(name.clone(), MailboxEntry::Inline(handler)) {
+        match self.insert(name.into(), MailboxEntry::Inline(handler)) {
             Ok(id) => {
                 self.notify_mailbox_change();
                 id
@@ -755,9 +753,8 @@ impl Registry {
     /// the guard. The internal `expect("Bytes default cannot produce a
     /// conflict")` is unreachable by construction.
     pub fn register_kind(&self, name: impl Into<String>) -> KindId {
-        let name = name.into();
         let descriptor = KindDescriptor {
-            name: name.clone(),
+            name: name.into(),
             schema: SchemaType::Bytes,
         };
         // A fresh `Bytes` descriptor can only conflict with a prior
@@ -1361,7 +1358,7 @@ mod tests {
         // Sorted by name.
         let names: Vec<&str> = snap.iter().map(|d| d.name.as_str()).collect();
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(names, sorted, "snapshot must be sorted by name");
 
         // Each name maps to the expected category.

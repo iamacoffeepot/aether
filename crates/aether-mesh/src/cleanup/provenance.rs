@@ -125,7 +125,7 @@ fn unmatched_edges(directed: &HashMap<(VertexId, VertexId), u32>) -> Vec<(Vertex
     let mut out: Vec<(VertexId, VertexId)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
-    keys.sort();
+    keys.sort_unstable();
     for (a, b) in keys {
         let canonical = if a < b { (a, b) } else { (b, a) };
         if !seen.insert(canonical) {

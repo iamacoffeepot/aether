@@ -518,7 +518,7 @@ mod tests {
         // Correlation ids are monotonic per actor — three sends, three
         // distinct values.
         let mut ids: Vec<u64> = captured.iter().map(|d| d.mail_id.correlation_id).collect();
-        ids.sort();
+        ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 3, "three distinct correlation ids");
     }

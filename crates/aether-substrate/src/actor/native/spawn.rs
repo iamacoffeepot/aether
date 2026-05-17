@@ -457,7 +457,7 @@ impl Spawner {
                 id,
                 Arc::clone(&strong_sender),
                 TypeId::of::<A>(),
-                subname_str.clone(),
+                subname_str,
             )
             .is_err()
         {

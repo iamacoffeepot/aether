@@ -99,7 +99,7 @@ fn group_loops(loops: Vec<loop_polygon::Polygon>) -> Vec<Polygon> {
 
     // Sort keys so output order is deterministic across runs / platforms.
     let mut sorted_keys: Vec<GroupKey> = groups.keys().copied().collect();
-    sorted_keys.sort();
+    sorted_keys.sort_unstable();
 
     let mut out: Vec<Polygon> = Vec::with_capacity(sorted_keys.len());
     for key in sorted_keys {
@@ -757,9 +757,9 @@ mod tests {
 
         let plane = xy_plane_pos_z();
         let loops = vec![
-            loop_poly(outer_a.clone(), plane, 7),
-            loop_poly(outer_b.clone(), plane, 7),
-            loop_poly(hole_a.clone(), plane, 7),
+            loop_poly(outer_a, plane, 7),
+            loop_poly(outer_b, plane, 7),
+            loop_poly(hole_a, plane, 7),
         ];
         let polys = group_loops(loops);
         assert_eq!(polys.len(), 2, "two outers => two output polygons");
@@ -813,8 +813,8 @@ mod tests {
         let loops = vec![
             loop_poly(outer_a, plane, 3),
             loop_poly(outer_b, plane, 3),
-            loop_poly(hole_a.clone(), plane, 3),
-            loop_poly(hole_b.clone(), plane, 3),
+            loop_poly(hole_a, plane, 3),
+            loop_poly(hole_b, plane, 3),
         ];
         let polys = group_loops(loops);
         assert_eq!(polys.len(), 2);
