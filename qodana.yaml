@@ -19,17 +19,11 @@ exclude:
       - archive
       - spikes
 
-# CARGO_HOME override (so cargo metadata doesn't perm-deny on
-# /usr/local/cargo) is passed via `--env CARGO_HOME=…` in the
-# workflow's args, NOT via this file — `env:` is not a recognized
-# qodana.yaml key ("Unexpected keys in qodana.yaml: [env]").
-
-# No bootstrap: the qodana-rust:2026.1-eap container runs bootstrap as
-# a non-root user with no sudo binary and no write access to
-# /var/lib/apt, so we cannot apt-get install system packages. Without
-# `libasound2-dev` the `cpal` Linux backend won't link, so any crate
-# that depends on cpal (aether-substrate-bundle desktop chassis,
-# aether-capabilities audio) surfaces as a build error in the scan
-# rather than producing inspection findings. Other crates analyze
-# fine. Revisit via a custom linter Dockerfile if cpal-bearing
-# inspections matter.
+# Native deps the linter needs to build before inspecting (mirrors the
+# clippy job in ci.yml — cpal Linux backend pulls ALSA headers).
+# Runs as root now that the workflow passes `-u root` to qodana scan,
+# so apt-get works without sudo. Prior attempts at this line failed
+# because the container was non-root by default (sudo missing, then
+# /var/lib/apt write-denied) — see the `-u root` rationale in
+# .github/workflows/qodana.yml.
+bootstrap: apt-get update && apt-get install -y libasound2-dev
