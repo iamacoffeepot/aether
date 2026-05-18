@@ -75,7 +75,7 @@ impl HttpAdapter for DisabledHttpAdapter {
 /// mains read env vars (`AETHER_HTTP_DISABLE`, `AETHER_HTTP_ALLOWLIST`,
 /// `AETHER_HTTP_REQUIRE_HTTPS`, `AETHER_HTTP_MAX_BODY_BYTES`,
 /// `AETHER_HTTP_TIMEOUT_MS`) into a `HttpConfig` and pass it to
-/// [`HttpCapability::new`]. Tests build a `HttpConfig` directly,
+/// `HttpCapability::new`. Tests build a `HttpConfig` directly,
 /// never touching process env (issue 464).
 #[derive(Clone, Debug)]
 pub struct HttpConfig {

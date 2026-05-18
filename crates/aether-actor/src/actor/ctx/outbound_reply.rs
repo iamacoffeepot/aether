@@ -69,6 +69,6 @@ pub trait OutboundReply: MailSender {
     ///
     /// Same wire-shape contract as [`Self::reply`]. Native impls route
     /// through `NativeBinding::send_reply_for_handler`; FFI impls route
-    /// through [`crate::ffi::bridge::MAIL_BRIDGE::reply_mail`].
+    /// through [`crate::ffi::bridge::MailBridge::reply_mail`].
     fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: Self::ReplyHandle, payload: &K);
 }

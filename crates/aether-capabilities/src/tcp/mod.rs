@@ -304,7 +304,7 @@ mod cap_native {
     /// Singleton control-plane cap. Owns the listener fleet directly
     /// — the cap is the supervisor, not a thin shim over the chassis
     /// registry. Each spawn registers a monitor on the new listener
-    /// and inserts a [`ListenerEntry`] into the cap-local map; the
+    /// and inserts a `ListenerEntry` into the cap-local map; the
     /// `on_monitor_notice` handler removes the entry on listener
     /// close.
     ///

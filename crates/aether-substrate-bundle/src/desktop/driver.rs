@@ -4,7 +4,7 @@
 //! drives per-frame work, the small bag of winit/wgpu mapping helpers
 //! the chassis needs to read its own state, and the
 //! `AETHER_WINDOW_MODE` parser. Wraps everything in a
-//! [`DesktopDriverCapability`] so [`crate::chassis::DesktopChassis`]
+//! `DesktopDriverCapability` so `crate::chassis::DesktopChassis`
 //! composes one driver alongside its passive capabilities
 //! (`LogCapability`, `FsCapability`, `HttpCapability`, `AudioCapability`,
 //! `RenderCapability` — composed via `chassis_builder::Builder::with_actor`
@@ -626,7 +626,7 @@ impl ApplicationHandler<UserEvent> for App {
 /// ADR-0071 driver capability for the desktop chassis. Owns the
 /// pieces the winit event-loop body needs at construction time, then
 /// `boot()`-builds the App + `DriverRunning` that drives the loop.
-/// `boot()` looks up [`RenderCapability`] via [`DriverCtx::expect`]
+/// `boot()` looks up `RenderCapability` via `DriverCtx::expect`
 /// (booted earlier in the `.with()` chain) and pulls the accumulator
 /// handles out of it.
 ///

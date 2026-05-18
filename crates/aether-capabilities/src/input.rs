@@ -7,7 +7,7 @@
 //! plain field on `&mut self` (single-threaded — every handler runs on
 //! the cap's dispatcher thread). Drivers don't read the table; they push
 //! input events as mail to `aether.input` and the cap fans out one mail
-//! per subscriber via [`Mailer::push`]. `ComponentHostCapability` mails
+//! per subscriber via `Mailer::push`. `ComponentHostCapability` mails
 //! `SubscribeInput` (one per stream-shaped handler the loaded wasm
 //! declares) on load and `UnsubscribeAll` on drop, so cap-state mutation
 //! is also mail-driven.

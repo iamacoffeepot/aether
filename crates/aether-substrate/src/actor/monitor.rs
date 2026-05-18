@@ -23,7 +23,7 @@ use crate::actor::registry::ActorRegistry;
 /// close (the target's close drains `monitors_of[target]` after firing
 /// `MonitorNotice`; the watcher's close walks `monitoring[watcher]` to
 /// remove `watcher` from each target's forward list). `Drop` calls
-/// [`ActorRegistry::deregister_monitor`] which is idempotent —
+/// the registry's internal `deregister_monitor`, which is idempotent —
 /// dropping a handle whose entry the close path already removed is a
 /// no-op.
 ///

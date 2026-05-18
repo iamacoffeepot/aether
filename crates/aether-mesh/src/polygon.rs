@@ -19,9 +19,9 @@
 //! consumers (notably `aether-mesh-viewer`) hand polygons to
 //! the GPU upload step rather than triangles.
 //!
-//! [`mesh_polygons`] is the polygon-domain analogue of [`crate::mesh`]:
+//! [`mesh_polygons`] is the polygon-domain analogue of [`crate::mesh()`]:
 //! parses the same AST, runs the same CSG, but returns n-gon polygons
-//! instead of triangles. Internally it goes through [`crate::mesh`]
+//! instead of triangles. Internally it goes through [`crate::mesh()`]
 //! then [`crate::cleanup::run_to_loops`] to recover the boundary
 //! loops the cleanup pipeline produces; a future PR will skip the
 //! triangle round-trip by taking the polygon-domain path through
@@ -79,7 +79,7 @@ pub struct Polygon {
 /// product) → polygons`, and `from_triangle` flips `n_z` sign on
 /// CDT-output sliver triangles. Skipping the triangle hop avoids the
 /// re-derivation entirely — n-gon loops travel from CSG cleanup
-/// straight into [`group_loops`].
+/// straight into the crate-internal `group_loops` step.
 pub fn mesh_polygons(node: &crate::ast::Node) -> Result<Vec<Polygon>, MeshError> {
     let loops = crate::mesh::mesh_polygons_internal(node)?;
     Ok(group_loops(loops))

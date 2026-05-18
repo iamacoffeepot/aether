@@ -11,7 +11,7 @@
 //!
 //! ## Shape
 //!
-//! ```ignore
+//! ```text
 //! #[capability]
 //! #[derive(Singleton)]
 //! pub struct ExampleCap { /* plain fields — single-threaded ownership */ }

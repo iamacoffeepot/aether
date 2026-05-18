@@ -38,12 +38,12 @@ use super::{NativeActor, NativeDispatch};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
 /// actor's [`NativeBinding`] for outbound mail and carries the
-/// inbound's reply target so [`MailCtx::reply::<K>(&payload)`] can
-/// route back to the originator without rethreading the handle.
+/// inbound's reply target so the `MailCtx::reply::<K>(&payload)` API
+/// can route back to the originator without rethreading the handle.
 ///
 /// Stage 1 ships the wiring; the actual reply routing through
-/// [`NativeBinding::reply_mail`] / `Mailer::send_reply` is the
-/// stage-2 migration's responsibility (today's caps reply via
+/// [`NativeBinding::send_reply_for_handler`] / `Mailer::send_reply` is
+/// the stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
 pub struct NativeCtx<'a> {
@@ -211,9 +211,10 @@ impl<'a> NativeCtx<'a> {
     /// Diverging — does not return. Used by handlers that observe a
     /// non-recoverable invariant violation (today: the wasm trampoline
     /// on a guest trap). Native impl forwards to
-    /// [`NativeBinding::fatal_abort`]. See also the [`crate::ffi::FfiCtx`]
-    /// counterpart, which `panic!`s — the substrate's wasm runtime
-    /// catches the trap and ADR-0063 escalates symmetrically.
+    /// [`NativeBinding::fatal_abort`]. See also the
+    /// [`aether_actor::ffi::FfiCtx`] counterpart, which `panic!`s — the
+    /// substrate's wasm runtime catches the trap and ADR-0063 escalates
+    /// symmetrically.
     pub fn fatal_abort(&self, reason: String) -> ! {
         self.binding.fatal_abort(reason);
     }

@@ -7,7 +7,7 @@
 //! tick generator (default 60 Hz, `AETHER_TICK_HZ` override) that
 //! pumps `Tick` mail to subscribed mailboxes, drains the mail queue,
 //! and emits frame-stats observation every
-//! [`frame_loop::LOG_EVERY_FRAMES`] frames.
+//! `frame_loop::LOG_EVERY_FRAMES` frames.
 //!
 //! No `Send` bound on the driver capability or its running — the
 //! headless tick loop runs on the chassis main thread end-to-end (no

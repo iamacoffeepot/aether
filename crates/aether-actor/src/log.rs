@@ -160,8 +160,9 @@ pub fn set_native_log_shipper(hook: NativeLogShipper) {
 /// one [`LogBatch`] mail to the configured target. No-op when the
 /// buffer is empty, the [`LogDrainSlot`] is still at its default
 /// (chassis hasn't dispatched `ConfigureLogDrain` yet, or chassis
-/// declared no drain), or (on native) no [`with_actor_dispatch`] is
-/// active.
+/// declared no drain), or (on native) no
+/// `aether_substrate::runtime::log_install::with_actor_dispatch`
+/// envelope is active.
 pub fn drain_buffer() {
     let Some(entries) = LogBuffer::try_with_mut(|b| core::mem::take(&mut b.0)) else {
         return;
@@ -238,7 +239,7 @@ mod pipeline_tls {
 /// `true` iff we're currently inside the drain / host-ship path.
 /// Read by [`crate::log::is_in_pipeline`] consumers (chiefly the
 /// actor-aware layer in `aether-substrate::log_install`); set + cleared
-/// by [`PipelineGuard`].
+/// by the internal `PipelineGuard` RAII helper.
 #[must_use]
 pub fn is_in_pipeline() -> bool {
     pipeline_tls::IN_LOG_PIPELINE.with(core::cell::Cell::get)

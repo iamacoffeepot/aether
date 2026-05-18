@@ -105,8 +105,8 @@ impl Mailer {
 
     /// ADR-0080 §5 chassis-mail router installation. Called once by
     /// the chassis builder at boot to wire the closure that handles
-    /// mail addressed to [`MailboxId::CHASSIS_MAILBOX_ID`]. Subsequent
-    /// calls are no-ops — the router slot is single-claim.
+    /// mail addressed to [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`].
+    /// Subsequent calls are no-ops — the router slot is single-claim.
     pub fn install_chassis_router(&self, router: Box<dyn Fn(Mail) + Send + Sync>) {
         let _ = self.chassis_router.set(router);
     }
@@ -123,9 +123,11 @@ impl Mailer {
         let _ = self.settlement_registry.set(registry);
     }
 
-    /// Borrow the wired [`SettlementRegistry`], or `None` if no
-    /// registry was installed (test fixtures, chassis that don't bring
-    /// up the trace pipeline). Capabilities subscribe via
+    /// Borrow the wired
+    /// [`SettlementRegistry`](crate::chassis::settlement::SettlementRegistry),
+    /// or `None` if no registry was installed (test fixtures, chassis
+    /// that don't bring up the trace pipeline). Capabilities subscribe
+    /// via
     /// [`crate::chassis::settlement::SettlementRegistry::subscribe_settlement_mail`].
     pub fn settlement_registry(
         &self,

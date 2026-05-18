@@ -17,9 +17,10 @@
 //! "fixed" the imbalance by collapsing one endpoint into another.
 //!
 //! The diagnostic re-runs cleanup with snapshots at each stage —
-//! production callers go through [`super::run_to_indexed`] which
-//! doesn't pay the snapshot cost. Designed to debug issue 370
-//! (inter-bucket rim mismatch on curved × sphere CSG); not stable API.
+//! production callers go through the crate-internal `run_to_indexed`
+//! entry point, which doesn't pay the snapshot cost. Designed to debug
+//! issue 370 (inter-bucket rim mismatch on curved × sphere CSG); not
+//! stable API.
 
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
 use crate::loop_polygon::Polygon;

@@ -1,4 +1,4 @@
-//! `WasmTrampoline` — a [`NativeActor`] that delegates to a wasm
+//! `WasmTrampoline` — a `NativeActor` that delegates to a wasm
 //! `Component`. Each loaded wasm component is one trampoline instance
 //! addressed at `aether.component.trampoline:NAME` (issue 634 Phase 4
 //! PR 1).
@@ -10,7 +10,7 @@
 //! constant split across two crates (substrate for the actor; cap-side
 //! mirror for wasm-component senders). The trampoline now sits next to
 //! [`crate::component::ComponentHostCapability`] — its only consumer —
-//! and the namespace is whatever [`WasmTrampoline::NAMESPACE`] says it
+//! and the namespace is whatever `WasmTrampoline::NAMESPACE` says it
 //! is. Single declaration, cap-owned, reachable on every target via
 //! the `Actor` trait const.
 //!
@@ -25,11 +25,11 @@
 //!
 //! ## Shape
 //!
-//! Plain instanced [`NativeActor`]. Anything it doesn't handle natively
+//! Plain instanced `NativeActor`. Anything it doesn't handle natively
 //! (today: `DropComponent`, `ReplaceComponent`) falls through
 //! `#[fallback]` to the wasm guest via `Component::deliver`. The
 //! framework dispatcher reads from the trampoline's `NativeBinding`;
-//! un-handled kinds reach [`forward_to_wasm`]; the guest's
+//! un-handled kinds reach `forward_to_wasm`; the guest's
 //! `wait_reply_p32` / `send_mail_p32` / `reply_mail_p32` host fns
 //! route through the same binding.
 //!
@@ -44,17 +44,17 @@
 //!
 //! ## Lifecycle
 //!
-//! - **Load**: [`crate::component::ComponentHostCapability::on_load_component`]
+//! - **Load**: `crate::component::ComponentHostCapability::on_load_component`
 //!   spawns a trampoline via the runtime spawn machinery (subname = the
 //!   agent-supplied component name); the spawn path runs
-//!   [`WasmTrampoline::init`] which instantiates the wasm `Component`
+//!   `WasmTrampoline::init` which instantiates the wasm `Component`
 //!   against the trampoline's binding.
 //! - **Drop**: `DropComponent` mail addressed to the trampoline's
-//!   mailbox lands on [`Self::on_drop_component`], which calls
+//!   mailbox lands on `Self::on_drop_component`, which calls
 //!   `ctx.shutdown()`. The framework drains the inbox, runs `unwire`,
 //!   and the dispatcher exits.
 //! - **Replace**: `ReplaceComponent` mail lands on
-//!   [`Self::on_replace_component`], which instantiates a new
+//!   `Self::on_replace_component`, which instantiates a new
 //!   `Component` against the same binding and swaps `self.component`.
 //!   ADR-0022 + ADR-0038 invariants hold because the inbox channel is
 //!   the trampoline's `NativeBinding` and outlives the swap.

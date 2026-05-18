@@ -6,9 +6,9 @@
 //! Phase 2 of issue 607 lands the storage shape; Phase 3 wires
 //! `NativeCtx::spawn_child` as the first writer (`Live` slot
 //! insertion); Phase 4a flips `Live` → `Dead` and inserts tombstones
-//! at close; Phase 4b adds [`Self::monitors_of`] / [`Self::monitoring`]
-//! plus the [`Self::register_monitor`] / [`Self::deregister_monitor`]
-//! / [`Self::close_actor`] surface.
+//! at close; Phase 4b adds the crate-internal `monitors_of` /
+//! `monitoring` indices plus the `register_monitor` /
+//! `deregister_monitor` / `close_actor` surface.
 //!
 //! Distinct from [`crate::mail::registry::Registry`] — that one owns
 //! mailbox-name → handler routing and kind descriptors. This one owns
@@ -34,8 +34,8 @@ use crate::mail::MailboxId;
 /// (for direct mail routing into the dispatcher), the actor's
 /// `TypeId` (gates type-keyed `resolve_actors` enumeration), and its
 /// subname (Phase 5 — surfaced through
-/// [`super::PassiveChassis::resolve_actors`] so callers can iterate
-/// `(subname, MailboxId)` pairs). `Dead` is a sentinel for entries
+/// [`crate::chassis::builder::PassiveChassis::resolve_actors`] so callers
+/// can iterate `(subname, MailboxId)` pairs). `Dead` is a sentinel for entries
 /// whose dispatcher has joined and whose actor has dropped — mail
 /// addressed to the slot warn-drops, and `spawn_child` rejects the
 /// name for reuse. ADR-0079 §Drop / lifecycle.
@@ -103,21 +103,21 @@ pub struct ActorRegistry {
     monitoring: RwLock<HashMap<MailboxId, Vec<MailboxId>>>,
 }
 
-/// One entry in [`ActorRegistry::monitors_of`]. Today only carries the
-/// watcher's id; the struct shape leaves room for a future per-monitor
-/// option (monitor reason, reply-target override) without rewriting the
-/// vec storage.
+/// One entry in the registry's internal `monitors_of` index. Today
+/// only carries the watcher's id; the struct shape leaves room for a
+/// future per-monitor option (monitor reason, reply-target override)
+/// without rewriting the vec storage.
 #[derive(Debug, Clone, Copy)]
 pub struct MonitorEntry {
     pub watcher: MailboxId,
 }
 
-/// Failure modes for [`ActorRegistry::register_monitor`] /
-/// [`crate::actor::native::ctx::NativeCtx::monitor`]. ADR-0079 v1: monitors
-/// must address an actor that is currently `Live`. Tombstoned targets
-/// (retired-and-closed full names) can't be monitored — the mail
-/// wouldn't fire anyway, since the close fan-out already ran when the
-/// slot flipped `Live` → `Dead`.
+/// Failure modes for the registry's internal `register_monitor` entry
+/// point (reached from [`crate::actor::native::ctx::NativeCtx::monitor`]).
+/// ADR-0079 v1: monitors must address an actor that is currently `Live`.
+/// Tombstoned targets (retired-and-closed full names) can't be monitored
+/// — the mail wouldn't fire anyway, since the close fan-out already
+/// ran when the slot flipped `Live` → `Dead`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MonitorError {
     /// No `Live` entry at the target id. Either the actor never existed

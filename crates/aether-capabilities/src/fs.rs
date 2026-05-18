@@ -253,7 +253,7 @@ pub fn build_registry(
 impl NamespaceRoots {
     /// Pre-validate the configured roots: create each directory if
     /// missing, then canonicalize. Mirrors what `LocalFileAdapter::new`
-    /// does inside [`FsCapability::init`], but exposed so embedders
+    /// does inside `FsCapability::init`, but exposed so embedders
     /// can validate before building the chassis. Used by chassis
     /// builders that want to surface root-validity as a "skip the
     /// `aether.fs` cap and continue" decision rather than letting

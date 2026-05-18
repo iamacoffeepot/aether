@@ -249,7 +249,7 @@ mod native_impl {
     /// this around each handler dispatch (and around `init`); the
     /// pointer is restored to its prior value (almost always
     /// null) before this returns. Panics propagate out — the TLS
-    /// slot is restored via the [`StampGuard`] drop, not via
+    /// slot is restored via an internal RAII guard's drop, not via
     /// explicit unwind handling.
     pub fn with_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
         let _guard = CURRENT_SLOTS.with(|slot| {

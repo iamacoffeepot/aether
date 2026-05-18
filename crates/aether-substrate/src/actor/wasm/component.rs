@@ -85,15 +85,16 @@ pub struct ComponentCtx {
     /// `dispatch_load_component` reports it like any other
     /// instantiation error. None on the success path.
     pub init_failure: Option<String>,
-    /// Trampoline binding whose `wait_reply` the
-    /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn delegates to.
-    /// `Some` for ctx instances built by [`WasmTrampoline::init`]
-    /// (issue 634 Phase 4 PR 3 — `binding.wait_reply` is now the
-    /// single source of inbox / overflow / correlation-filter
-    /// truth); `None` for the test paths that build `ComponentCtx`
-    /// without a real trampoline (the host fn returns
-    /// [`crate::actor::wasm::host_fns::WAIT_CANCELLED`] in that case, matching
-    /// the pre-Phase-4 "no inbox installed" disposition).
+    /// Trampoline binding whose `wait_reply` the `wait_reply_p32` host
+    /// fn (in [`crate::actor::wasm::host_fns`]) delegates to.
+    /// `Some` for ctx instances built by `WasmTrampoline::init`
+    /// (in `aether-capabilities`; issue 634 Phase 4 PR 3 —
+    /// `binding.wait_reply` is now the single source of inbox /
+    /// overflow / correlation-filter truth); `None` for the test paths
+    /// that build `ComponentCtx` without a real trampoline (the host
+    /// fn returns [`crate::actor::wasm::host_fns::WAIT_CANCELLED`] in
+    /// that case, matching the pre-Phase-4 "no inbox installed"
+    /// disposition).
     pub binding: Option<Arc<NativeBinding>>,
     /// ADR-0042 correlation counter. Per-component (one
     /// `ComponentCtx` per component instance). Holds the *next* id
@@ -147,9 +148,9 @@ impl ComponentCtx {
     }
 
     /// Wire the trampoline's `NativeBinding` into the ctx so the
-    /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn can route through
-    /// it. Called by `WasmTrampoline::init` (in `aether-capabilities`)
-    /// right after constructing the ctx and before
+    /// `wait_reply_p32` host fn (in [`crate::actor::wasm::host_fns`])
+    /// can route through it. Called by `WasmTrampoline::init` (in
+    /// `aether-capabilities`) right after constructing the ctx and before
     /// `Component::instantiate` — the host-fn closure captures the ctx
     /// via the wasmtime `Store` data pointer at instantiation time,
     /// not at host-fn call time, so installing later than that is

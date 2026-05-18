@@ -63,7 +63,7 @@ pub const DEFAULT_HEIGHT: u32 = 600;
 /// `Advance` and `Capture` pass through `Err` variants from the
 /// substrate's reply. `SettlementTimeout` surfaces when a
 /// `send_mail` / `send_bytes` chain didn't drain within
-/// [`SETTLEMENT_TIMEOUT`] — issue 834: the bench waits on each
+/// `SETTLEMENT_TIMEOUT` — issue 834: the bench waits on each
 /// pushed chain's `Settled { root }` so the next observation
 /// (`capture()`, the next typed send, an assertion) is causally
 /// after the producer's full descendant tree dispatched.
@@ -384,7 +384,7 @@ impl TestBench {
     /// Issue 834: this is synchronous-on-settle. The mail is minted
     /// as a chassis-root via [`push_chassis_root_mail`] so the trace
     /// pipeline tracks the chain; the bench then subscribes to
-    /// `Settled { root }` and waits up to [`SETTLEMENT_TIMEOUT`] for
+    /// `Settled { root }` and waits up to `SETTLEMENT_TIMEOUT` for
     /// the chain (the recipient's handler + every descendant mail
     /// it spawned) to drain. By the time this returns, any
     /// subsequent observation (`capture()`, the next send, an

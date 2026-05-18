@@ -35,7 +35,7 @@ use crate::mail::registry::{NameConflict, Registry};
 use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
 use crate::runtime::lifecycle::FatalAborter;
 
-/// How to derive the subname for a [`Spawner::spawn_actor`] call. The
+/// How to derive the subname for a [`SpawnBuilder::finish`] call. The
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
 /// hashes that string deterministically (ADR-0029) to produce the
 /// returned [`MailboxId`].
@@ -53,7 +53,7 @@ pub enum Subname<'a> {
     Named(&'a str),
 }
 
-/// Failure modes for [`Spawner::spawn_actor`] / [`SpawnBuilder::finish`].
+/// Failure modes for the [`SpawnBuilder::finish`] spawn pipeline.
 /// Returned in the order the lifecycle checks them: validate → owner
 /// check → tombstone check → name uniqueness → init.
 #[derive(Debug)]

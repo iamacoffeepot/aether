@@ -87,7 +87,7 @@ impl<R: Actor> FfiActorMailbox<R> {
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
-    /// see [`crate::mail::mailbox::Mailbox::send_many`] for the
+    /// see [`crate::actor::ctx::MailSender::send_many`] for the
     /// wire-shape rationale.
     pub fn send_many<K>(&self, payloads: &[K])
     where

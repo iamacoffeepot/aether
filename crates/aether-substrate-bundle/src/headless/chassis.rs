@@ -34,7 +34,7 @@ use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
-/// by [`Self::build`]. Same shape as [`crate::DesktopChassis`] post
+/// by `Self::build`. Same shape as `crate::DesktopChassis` post
 /// ADR-0071 phase 3.
 pub struct HeadlessChassis;
 

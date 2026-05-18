@@ -217,16 +217,15 @@ pub enum CycleResult {
 
 /// Trait the chassis-side dispatcher slot implements. PR C will
 /// implement this for `DispatcherSlot<A>` (one per `Pooled` actor).
-/// PR B exercises it via the in-module test fixture
-/// [`tests::CounterSlot`].
+/// PR B exercises it via an in-module `CounterSlot` test fixture.
 ///
 /// Implementors own:
 /// - The per-slot [`SlotState`] (so this trait can poll it).
 /// - The actor's inbox (so [`run_cycle`](Self::run_cycle) can drain).
 /// - Whatever the actor's handler invocation needs (a `Box<A>` plus
-///   the per-envelope wrapping that [`crate::actor::native::dispatch::dispatch_loop_run`]
-///   does — `local::with_stamped`, `log_install::with_actor_dispatch`,
-///   etc).
+///   the per-envelope wrapping that the crate-internal
+///   `dispatch_loop_run` does in `crate::actor::native::dispatch` —
+///   `local::with_stamped`, `log_install::with_actor_dispatch`, etc).
 pub trait Drainable: Send + Sync + 'static {
     /// One drain cycle. Sequence:
     /// 1. CAS `Ready → Running` (caller holds the invariant: this
@@ -267,10 +266,11 @@ pub trait Drainable: Send + Sync + 'static {
     /// Issue 714: install a one-shot completion sender the slot fires
     /// when its [`CycleResult::Closed`] cycle finishes — i.e. after
     /// `unwire` + registry close ran and the actor box was taken out.
-    /// [`crate::actor::native::spawn::Spawner::shutdown_instanced`]
-    /// uses this to settle on each spawned slot via `recv_timeout`
-    /// instead of polling [`Self::is_closed`] in a 2 ms loop, which
-    /// flaked under nextest contention.
+    /// The crate-internal `Spawner::shutdown_instanced` (in
+    /// `crate::actor::native::spawn`) uses this to settle on each
+    /// spawned slot via `recv_timeout` instead of polling
+    /// [`Self::is_closed`] in a 2 ms loop, which flaked under nextest
+    /// contention.
     ///
     /// Default no-op: mock fixtures don't have a real close cycle so
     /// they never need to signal. Idempotent — the slot only fires the
