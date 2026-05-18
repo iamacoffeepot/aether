@@ -177,10 +177,7 @@ fn run_frame(
     input_mailbox: MailboxId,
     kind_tick: aether_data::KindId,
     capture_queue: &CaptureQueue,
-    frame_bound_pending: &[(
-        aether_substrate::MailboxId,
-        Arc<std::sync::atomic::AtomicU64>,
-    )],
+    frame_bound_pending: &[(MailboxId, Arc<std::sync::atomic::AtomicU64>)],
     gpu: &mut Gpu,
     chassis_correlation: &std::sync::atomic::AtomicU64,
 ) {
