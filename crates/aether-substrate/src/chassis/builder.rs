@@ -14,7 +14,7 @@
 //!
 //! - Trait family + builder + ctx wiring.
 //! - [`Chassis::Driver`] / [`Chassis::Env`] / [`Chassis::build`] are
-//!   not yet on the [`crate::chassis::Chassis`] trait — they land
+//!   not yet on the [`Chassis`] trait — they land
 //!   alongside the first real driver extraction (phase 3) so every
 //!   chassis can nominate a real driver type rather than a stub.
 
@@ -1088,7 +1088,7 @@ struct BootedPassives {
     /// for its frame loop).
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
     /// Membership view of the same set; shared with every
-    /// [`crate::NativeBinding`] booted under this chassis so the
+    /// [`NativeBinding`](crate::NativeBinding) booted under this chassis so the
     /// cross-class `wait_reply` guard can classify recipients.
     /// Populated alongside `frame_bound_pending` by
     /// [`ChassisCtx::claim_frame_bound_mailbox`].
@@ -1133,7 +1133,7 @@ struct BootedPassives {
     /// subscribers); reachable from `BootedPassives`-holders via
     /// [`Self::settlement_registry`] for PR 4 gate-site
     /// `subscribe_settlement` calls.
-    settlement_registry: Arc<crate::chassis::settlement::SettlementRegistry>,
+    settlement_registry: Arc<super::settlement::SettlementRegistry>,
 }
 
 /// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
@@ -1171,7 +1171,7 @@ impl BootedPassives {
     /// PR 4 gate-site code (lifecycle drains, the per-frame Tick
     /// barrier, `replace_component` drain) reaches for this to call
     /// `subscribe_settlement(root)` and wait on the returned receiver.
-    pub fn settlement_registry(&self) -> &Arc<crate::chassis::settlement::SettlementRegistry> {
+    pub fn settlement_registry(&self) -> &Arc<super::settlement::SettlementRegistry> {
         &self.settlement_registry
     }
 
@@ -1255,7 +1255,7 @@ fn boot_passives(
     // Other chassis-internal kinds (none today; future debugger /
     // describe_tree replies could land here) add matching arms inside
     // the router closure without touching the Mailer's surface.
-    let settlement_registry: Arc<crate::chassis::settlement::SettlementRegistry> =
+    let settlement_registry: Arc<super::settlement::SettlementRegistry> =
         Arc::new(crate::chassis::settlement::SettlementRegistry::new());
     mailer.install_settlement_registry(Arc::clone(&settlement_registry));
     let registry_for_router = Arc::clone(&settlement_registry);
@@ -1619,7 +1619,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// for this to call `subscribe_settlement(root)`; PR 3 surfaces
     /// the accessor for tests that pump synthetic events through the
     /// trace pipeline and wait on the resulting `Settled` signal.
-    pub fn settlement_registry(&self) -> &Arc<crate::chassis::settlement::SettlementRegistry> {
+    pub fn settlement_registry(&self) -> &Arc<super::settlement::SettlementRegistry> {
         self.booted.settlement_registry()
     }
 

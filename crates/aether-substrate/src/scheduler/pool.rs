@@ -1,7 +1,7 @@
 //! [`Pool`] — N worker threads cooperatively draining the ready queue.
 //!
 //! The pool's only inputs at construction time are a worker count, a
-//! shared [`crate::runtime::lifecycle::FatalAborter`], and an optional
+//! shared [`FatalAborter`], and an optional
 //! ready-queue capacity (today the queue is unbounded — backpressure
 //! happens at the per-actor inbox level, not at the scheduler).
 //!

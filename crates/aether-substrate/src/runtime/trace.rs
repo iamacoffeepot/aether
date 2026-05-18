@@ -5,7 +5,7 @@
 //! - **Producer-side helpers** (`record_sent` / `record_received` /
 //!   `record_finished`) push [`TraceEvent`]s onto a process-global
 //!   [`crossbeam_queue::SegQueue`]. The hooks live in
-//!   [`crate::actor::native::binding::NativeBinding::send_mail_with_lineage`]
+//!   [`NativeBinding::send_mail_with_lineage`](crate::actor::native::binding::NativeBinding::send_mail_with_lineage)
 //!   (Sent), the native dispatcher trampoline (Received / Finished),
 //!   and the wasm trampoline forwarder (Received / Finished). Calls
 //!   are no-ops until the chassis [`install_trace_queue`]s the

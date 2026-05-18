@@ -35,7 +35,7 @@
 //!
 //! Cross-thread access from drivers / embedders flows through
 //! cap-exported sub-handles published in `init` via
-//! [`ctx::NativeInitCtx::publish_handle`] and retrieved via
+//! [`NativeInitCtx::publish_handle`] and retrieved via
 //! [`crate::DriverCtx::handle`]. The actor itself never escapes its
 //! dispatcher thread.
 //!

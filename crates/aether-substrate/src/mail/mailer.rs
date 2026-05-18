@@ -585,7 +585,7 @@ mod tests {
     impl Kind for Note {
         const NAME: &'static str = "test.mailer_note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0003_0001);
+        const ID: KindId = KindId(0xDEAD_BEEF_0003_0001);
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -596,7 +596,7 @@ mod tests {
     impl Kind for HeldNote {
         const NAME: &'static str = "test.mailer_held_note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0003_0002);
+        const ID: KindId = KindId(0xDEAD_BEEF_0003_0002);
     }
 
     fn note_schema() -> SchemaType {

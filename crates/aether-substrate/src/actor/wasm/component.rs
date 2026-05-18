@@ -688,7 +688,7 @@ mod tests {
     use super::*;
     use crate::mail::MailboxId;
     use crate::mail::mailer::Mailer;
-    use crate::mail::outbound::HubOutbound;
+    use crate::mail::outbound::{EgressEvent, HubOutbound};
     use crate::mail::registry::Registry;
 
     fn ctx() -> ComponentCtx {
@@ -1081,13 +1081,13 @@ mod tests {
 
     fn plane_ctx_for_reply() -> (
         ComponentCtx,
-        std::sync::mpsc::Receiver<crate::mail::outbound::EgressEvent>,
+        std::sync::mpsc::Receiver<EgressEvent>,
         aether_data::KindId,
     ) {
         use crate::mail::MailboxId as M;
         use aether_data::{KindDescriptor, SchemaType};
 
-        let (outbound, rx) = crate::mail::outbound::HubOutbound::attached_loopback();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let pong_id = registry
             .register_kind_with_descriptor(KindDescriptor {
@@ -1112,7 +1112,6 @@ mod tests {
 
     #[test]
     fn reply_mail_emits_session_addressed_frame() {
-        use crate::mail::outbound::EgressEvent;
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use aether_data::{SessionToken, Uuid};
 
@@ -1156,8 +1155,6 @@ mod tests {
     /// `ReplyTo::EngineMailbox` for the receiving component.
     #[test]
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
-        use crate::mail::outbound::EgressEvent;
-
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry

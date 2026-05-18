@@ -6,7 +6,7 @@
 //! `Arc<ActorRegistry>` can hold.
 //!
 //! See ADR-0079 for the lifecycle semantics; the
-//! [`crate::actor::registry::ActorRegistry`] holds the forward and
+//! [`ActorRegistry`] holds the forward and
 //! reverse indices.
 
 use std::sync::Arc;

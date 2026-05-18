@@ -162,7 +162,7 @@ impl NativeBinding {
     ///
     /// `caller_frame_bound`, `frame_bound_set`, and `aborter` wire
     /// the ADR-0074 §Decision 5 cross-class `wait_reply` guard.
-    /// Capabilities authored under a [`crate::ChassisCtx`] should
+    /// Capabilities authored under a [`ChassisCtx`] should
     /// prefer [`Self::from_ctx`], which inherits the chassis's
     /// shared set + aborter automatically; the explicit constructor
     /// is for harnesses that don't go through a chassis (`TestBench`

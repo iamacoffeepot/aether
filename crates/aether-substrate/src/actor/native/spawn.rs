@@ -1,6 +1,6 @@
 //! Spawn primitive for instanced actors (ADR-0079, issue 607 Phase 3).
 //!
-//! Builds on [`crate::actor::registry::ActorRegistry`] (Phase 2) to add
+//! Builds on [`ActorRegistry`] (Phase 2) to add
 //! the atomic register-and-spawn dance: validate subname → check
 //! tombstones + name-owner uniqueness → call `A::init` on the caller's
 //! thread → register the mailbox sink + insert `Live` entry under one
@@ -60,7 +60,7 @@ pub enum Subname<'a> {
 pub enum SpawnError {
     /// Subname is empty, contains `:`, has control / whitespace
     /// chars, or exceeds the byte cap. See
-    /// [`aether_actor::NamespaceError`].
+    /// [`NamespaceError`].
     SubnameInvalid(NamespaceError),
     /// `A::NAMESPACE` is already owned by a different `TypeId`. Trips
     /// when an `Instanced` type tries to spawn under a namespace a

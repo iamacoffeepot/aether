@@ -1023,7 +1023,7 @@ mod tests {
     impl Kind for Note {
         const NAME: &'static str = "test.note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0002_0001);
+        const ID: KindId = KindId(0xDEAD_BEEF_0002_0001);
     }
 
     fn note_schema() -> SchemaType {

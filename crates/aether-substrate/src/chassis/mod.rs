@@ -59,7 +59,7 @@ pub trait Chassis: Sized + 'static {
     /// The driver capability that owns this chassis's main thread.
     /// Desktop's winit driver, headless's std-timer driver, hub's
     /// listener-and-MCP driver. Passive chassis (test-bench)
-    /// declare [`crate::chassis::builder::NeverDriver`] here.
+    /// declare [`builder::NeverDriver`] here.
     type Driver: DriverCapability;
 
     /// Resolved-config bag the chassis takes at build time. Each
