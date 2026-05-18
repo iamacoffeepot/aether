@@ -7,16 +7,17 @@
 //! forwards each to the addressed trampoline preserving the
 //! original `reply_to`, so the trampoline replies directly to the
 //! agent. The cap holds no per-component bookkeeping; the
-//! trampoline manages its own lifecycle as an instanced
-//! [`NativeActor`].
+//! trampoline manages its own lifecycle as an instanced [`NativeActor`].
 //!
 //! Pre-Phase-4 the cap also owned the wasm dispatcher infrastructure
-//! ([`ComponentEntry`], `dispatcher_loop`, `kill_actor`,
+//! (the retired `ComponentEntry`, `dispatcher_loop`, `kill_actor`,
 //! `splice_inbox`, etc.) and installed itself as the `Mailer`'s
-//! [`ComponentRouter`] for component-bound routing. All of that
+//! `ComponentRouter` for component-bound routing. All of that
 //! retired with the trampoline migration: dispatch lives on the
 //! framework's `NativeActor` loop, replace is `Component`-swap
 //! inside the trampoline, drop flows through `ctx.shutdown()`.
+//!
+//! [`NativeActor`]: aether_substrate::actor::native::NativeActor
 //!
 //! The cap is a `#[bridge] mod native { ... }` per the ADR-0076 /
 //! issue 565 pattern. Plain fields (no `Arc<Inner>` wrapper) per
@@ -123,7 +124,7 @@ mod native {
     /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load instantiates
     /// against (handed through to the trampoline's
-    /// [`Component::instantiate`] call); `hub_outbound` is the egress
+    /// `Component::instantiate` call); `hub_outbound` is the egress
     /// handle the cap uses for `aether.kinds.changed` announcements
     /// after each load. ADR-0021 fan-out is mail-driven post-issue-640
     /// — the cap mails subscribe / unsubscribe to `aether.input`

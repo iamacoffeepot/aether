@@ -1,6 +1,6 @@
 //! `aether.engine.proxy:<id>` — per-engine proxy actor (issue 763 P3).
 //!
-//! An instanced [`NativeActor`] that wraps one *outbound* RPC client
+//! An instanced `NativeActor` that wraps one *outbound* RPC client
 //! connection to a substrate. The forward-model architecture (issue
 //! 763) makes every substrate an RPC server; the hub is the client.
 //! Each substrate the hub talks to gets one proxy, addressed
@@ -9,11 +9,11 @@
 //! ## What it does
 //!
 //! - **`init`** dials the substrate's `RpcServerCapability` via
-//!   [`RpcClient::connect`] and spawns the reader sidecar. The
+//!   `RpcClient::connect` and spawns the reader sidecar. The
 //!   handshake's `HelloAck` identity is kept on `conn.server`.
 //! - **`on_forward`** ([`ForwardEnvelope`]) wraps the `mailbox`,
 //!   `kind`, and `payload` into an RPC `Call` and writes it down the
-//!   connection. The inbound mail's [`ReplyTo`] is parked under the
+//!   connection. The inbound mail's `ReplyTo` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
 //! - **`on_inbound_ready`** ([`RpcInboundReady`]) is the reader
 //!   sidecar's wake: it drains `conn.inbound`, lifting `ReplyEvent`
@@ -30,7 +30,7 @@
 //! engines cap. The cached `HelloAck` manifest the describe handler
 //! will read is already in hand on `conn.server`.
 //!
-//! Native-only: the module owns a `TcpStream` (via [`RpcConnection`])
+//! Native-only: the module owns a `TcpStream` (via `RpcConnection`)
 //! and an OS thread. The `#[bridge]` macro emits the wasm-side marker
 //! stub so `aether-capabilities` still compiles for `wasm32`.
 

@@ -40,7 +40,7 @@ use std::fmt::Write as _;
 /// units above that floor so f32 reconstruction noise and plane
 /// re-derivation drift don't trip the validators on legitimate output.
 pub mod tol {
-    /// Vertex-to-stored-plane distance allowed in [`validate_planarity`].
+    /// Vertex-to-stored-plane distance allowed in [`super::validate_planarity`].
     /// ~46 fixed-point units — enough for f32 round-trip drift on cleanup
     /// output plus the per-canonicalize snap-rounding drift introduced
     /// by ADR-0061's BigInt-rationals-with-deferred-snap pipeline, tight
@@ -54,7 +54,7 @@ pub mod tol {
     pub const PLANARITY: f32 = 7e-4;
 
     /// Edge length below which an edge is "sliver" in
-    /// [`validate_polygon_quality`]. ~65 fixed-point units — smaller
+    /// [`super::validate_polygon_quality`]. ~65 fixed-point units — smaller
     /// than any usable face edge but well above snap noise.
     pub const SLIVER_EDGE: f32 = 1e-3;
 

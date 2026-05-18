@@ -59,7 +59,7 @@ pub struct DropOnShutdownClaim {
     /// Issue 635 PR C: optional wake hook for `Pooled` actors. The
     /// mailbox closure invokes this after a successful inbox push so
     /// the chassis worker pool re-queues the actor's
-    /// [`crate::scheduler::DispatcherSlot`]. `Dedicated` actors
+    /// [`Drainable`](crate::scheduler::Drainable) slot. `Dedicated` actors
     /// (today: every cap) leave this empty — the closure's `get()`
     /// is a single atomic load, ~free.
     ///
@@ -72,7 +72,7 @@ pub struct DropOnShutdownClaim {
 /// Cell holding the optional wake hook a `Pooled` mailbox fires after
 /// each accepted send. The mailbox closure captures `Arc<MailboxWakeSlot>`
 /// at registration time; the spawn path populates it once the
-/// [`crate::scheduler::DispatcherSlot`] exists.
+/// [`Drainable`](crate::scheduler::Drainable) slot exists.
 #[derive(Default)]
 pub struct MailboxWakeSlot {
     inner: std::sync::OnceLock<MailboxWakeFn>,

@@ -7,7 +7,7 @@
 //! mints a correlation; sync wait is one of the strategies for
 //! consuming the reply).
 //!
-//! FFI ctxs route to [`crate::ffi::bridge::SyncWait::wait_reply`].
+//! FFI ctxs route to [`crate::ffi::bridge::SyncWaitBridge::wait_reply`].
 //! Native ctxs route to `NativeBinding::wait_reply` (which carries
 //! the ADR-0074 §Decision 5 cross-class guard inline). Either side
 //! ships the same return-code contract: `>= 0` = bytes written,

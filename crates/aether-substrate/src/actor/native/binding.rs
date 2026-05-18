@@ -193,7 +193,8 @@ impl NativeBinding {
 
     /// Convenience constructor that pulls the cross-class guard
     /// state (frame-bound set + aborter) from a [`ChassisCtx`]. The
-    /// natural call site is inside a [`crate::Capability::boot`]:
+    /// natural call site is inside a
+    /// [`crate::DriverCapability::boot`] body:
     ///
     /// ```ignore
     /// let claim = ctx.claim_mailbox_drop_on_shutdown(NAME)?;
@@ -404,9 +405,10 @@ impl NativeBinding {
     /// ADR-0080 §1 / §5: variant of [`Self::send_mail`] that accepts
     /// the in-flight handler's lineage so the outgoing [`Mail`] picks
     /// up the correct `parent_mail` and inherited `root`. The
-    /// per-handler [`super::ctx::NativeCtx`]'s [`Sender`] impl reads
-    /// from its `in_flight_mail_id()` / `in_flight_root()` accessors
-    /// and threads them in.
+    /// per-handler [`super::ctx::NativeCtx`]'s
+    /// [`aether_actor::actor::sender::Sender`] impl reads from its
+    /// `in_flight_mail_id()` / `in_flight_root()` accessors and threads
+    /// them in.
     ///
     /// `parent_mail = None` and `inherited_root = None` mean
     /// chassis-root: the outgoing mail's `MailId` becomes its own

@@ -14,8 +14,9 @@
 //! - [`Pool`] owns the pool worker threads + the ready-queue sender.
 //!   Constructed once at chassis boot.
 //! - [`Drainable`] is the trait [`crate::actor`]-side dispatcher slots
-//!   implement (PR C wires the concrete `DispatcherSlot<A>` over
-//!   [`crate::actor::native::dispatch::dispatch_loop_run`]'s body).
+//!   implement (PR C wires the concrete `DispatcherSlot<A>` over the
+//!   crate-internal `dispatch_loop_run` body in
+//!   `crate::actor::native::dispatch`).
 //! - [`SlotState`] is the per-slot atomic that orchestrates Idle ↔
 //!   Ready ↔ Running transitions between sender-side wakeups and
 //!   worker-side drain claims.

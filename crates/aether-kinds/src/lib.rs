@@ -649,14 +649,14 @@ mod engine {
 
     /// `aether.engine.list` — ask the engines cap (`aether.engine`) to
     /// enumerate every engine it currently supervises. Fieldless
-    /// request; the reply is an [`EngineList`]. Issue 763 P4.
+    /// request; the reply is a [`ListEnginesResult`]. Issue 763 P4.
     #[derive(
         aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
     )]
     #[kind(name = "aether.engine.list")]
     pub struct ListEngines {}
 
-    /// One supervised engine, as reported in an [`EngineList`].
+    /// One supervised engine, as reported in a [`ListEnginesResult`].
     ///
     /// `engine_id` is the plain UUID string the engines cap minted at
     /// spawn time — `EngineId` itself doesn't implement `Schema`, so
@@ -685,7 +685,7 @@ mod engine {
     /// `RpcServerCapability`, injects it as `AETHER_RPC_PORT`, forks
     /// `binary_path` with `args` forwarded verbatim, then boots an
     /// `aether.engine.proxy:<id>` actor that dials it. Reply:
-    /// [`SpawnResult`].
+    /// [`SpawnEngineResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.spawn")]
     pub struct SpawnEngine {
@@ -713,7 +713,8 @@ mod engine {
     /// The cap forwards this kind to the engine's
     /// `aether.engine.proxy:<id>` actor, which SIGKILLs the child
     /// substrate it forked and self-shuts-down. `engine_id` is the
-    /// plain UUID string from [`SpawnResult`] / [`EngineList`].
+    /// plain UUID string from [`SpawnEngineResult`] /
+    /// [`ListEnginesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.terminate")]
     pub struct TerminateEngine {

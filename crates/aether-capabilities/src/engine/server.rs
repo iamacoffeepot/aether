@@ -1,7 +1,7 @@
 //! `aether.engine` — engines capability (issue 763 P4).
 //!
-//! A `#[bridge(singleton)]` [`NativeActor`] that supervises a fleet of
-//! [`EngineProxy`] actors — the engine-management surface of the
+//! A `#[bridge(singleton)]` `NativeActor` that supervises a fleet of
+//! `EngineProxy` actors — the engine-management surface of the
 //! forward-model architecture (issue 763). Three handlers:
 //!
 //! - **`on_spawn`** ([`SpawnEngine`]) picks a free localhost port,
@@ -9,11 +9,11 @@
 //!   then boots an `aether.engine.proxy:<id>` child actor that dials
 //!   it. The proxy owns the forked child from there — startup-dial
 //!   retry, kill-on-failed-boot, kill-on-drop. Reply:
-//!   [`SpawnEngineResult`].
+//!   `SpawnEngineResult`.
 //! - **`on_list`** ([`ListEngines`]) reports every supervised engine.
 //! - **`on_terminate`** ([`TerminateEngine`]) forwards the kind to the
 //!   engine's proxy (which SIGKILLs its substrate and self-shuts-down)
-//!   and drops the table entry. Reply: [`TerminateEngineResult`].
+//!   and drops the table entry. Reply: `TerminateEngineResult`.
 //!
 //! ## Scope (issue 763 P4 vs P5)
 //!

@@ -36,13 +36,19 @@ edition = "2024"
 unused_qualifications = "warn"
 
 [workspace.lints.rustdoc]
-# Phase 5 of iamacoffeepot/aether#913 doc-comment fix — flag
-# `[`Foo`](crate::path::to::Foo)` when the bracket label already
-# resolves to the same target via intra-doc-link lookup. Enforced by
-# CI's `Docs` job (`cargo doc --workspace --no-deps` under
-# `RUSTDOCFLAGS='-D warnings'`); `warn` here keeps local `cargo doc`
-# usable for developers without forcing -D on every dev run.
+# Phase 5 / 5c of iamacoffeepot/aether#913 doc-comment cleanup.
+# `redundant_explicit_links` flags `[`Foo`](crate::path::to::Foo)`
+# when the bracket label already resolves to the same target via
+# intra-doc-link lookup. `broken_intra_doc_links` catches dangling
+# `[Foo]` after a rename. `private_intra_doc_links` catches public
+# docs pointing at private items. CI's `Docs` job (`cargo doc
+# --workspace --no-deps` under `RUSTDOCFLAGS='-D rustdoc::...'`)
+# escalates these to hard failures; `warn` here keeps local
+# `cargo doc` usable for developers without forcing -D on every
+# dev run.
 redundant_explicit_links = "warn"
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
 
 [workspace.lints.clippy]
 # Baseline — both groups as warn, then opt out of the idiom-fight bucket below.

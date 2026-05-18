@@ -27,7 +27,7 @@
 //! construction. The worker builds the `cpal::Stream`, parks on a
 //! shutdown channel, and drops the stream when the channel
 //! disconnects. The cap itself holds an
-//! [`Arc<ArrayQueue<AudioEvent>>`] (Send) that the cpal callback
+//! `Arc<ArrayQueue<AudioEvent>>` (Send) that the cpal callback
 //! reads from; `on_note_on` / `on_note_off` push to that queue
 //! directly with no thread hop. This is the one cap with a worker
 //! thread — every other cap is single-threaded by design; cpal's
@@ -663,10 +663,10 @@ mod native {
     }
 
     /// `aether.audio` mailbox cap. Holds the producer side of the synth
-    /// event queue ([`AudioEventSender`]), the audio worker thread that
-    /// owns the [`cpal::Stream`] (see module-level "per-cap audio worker"
-    /// docs for the `!Send` rationale), and a shutdown channel that
-    /// signals the worker to exit on drop.
+    /// event queue (the crate-internal `AudioEventSender`), the audio
+    /// worker thread that owns the [`cpal::Stream`] (see module-level
+    /// "per-cap audio worker" docs for the `!Send` rationale), and a
+    /// shutdown channel that signals the worker to exit on drop.
     ///
     /// `sender` is `None` when the cpal pipeline isn't running
     /// (`AETHER_AUDIO_DISABLE=1`, no audio device, init failure). In

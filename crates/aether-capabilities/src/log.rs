@@ -16,7 +16,7 @@
 //!
 //! Issue 776 retired the hub-bound egress path and put a bounded
 //! ring inside this cap; the cap now serves [`LogRead`] requests via
-//! [`LogReadResult`]. ADR-0023 §4 contract restored under the
+//! `LogReadResult`. ADR-0023 §4 contract restored under the
 //! forward model (RPC pull instead of frame push).
 
 // `#[handler]` methods take their decoded payload by value per the

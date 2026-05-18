@@ -36,7 +36,7 @@ use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::slot::{BatchBudget, CycleResult, Drainable};
 
-/// Configuration for [`Pool::new`]. Defaults via [`PoolConfig::default`]
+/// Configuration for [`Pool::start`]. Defaults via [`PoolConfig::default`]
 /// give `num_cpus`-derived sizing; chassis mains override per
 /// `AETHER_WORKERS` once the pool is wired (PR C).
 #[derive(Debug, Clone)]
@@ -85,10 +85,10 @@ impl BudgetTemplate {
 }
 
 /// Handle to a running [`Pool`]. The chassis owns this; calling
-/// [`PoolHandle::shutdown`] drops the shutdown sender, which
-/// disconnects each worker's `select!` arm and tells them to exit
-/// after the current cycle. Joining the worker threads is part of
-/// `shutdown`.
+/// [`PoolHandle::shutdown_with_results`] drops the shutdown sender,
+/// which disconnects each worker's `select!` arm and tells them to
+/// exit after the current cycle. Joining the worker threads is part
+/// of shutdown.
 ///
 /// Why a separate shutdown channel? Workers hold their own clones of
 /// `ready_tx` (for re-queueing yielded slots). That keeps the ready

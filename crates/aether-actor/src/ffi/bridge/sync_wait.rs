@@ -10,7 +10,7 @@
 //! mints a correlation regardless of whether the caller sync-waits,
 //! so correlation lives on the mail bridge, not here.
 //!
-//! Per-stage [`crate::actor::ctx::SyncWaitBridgeer`] impls route through
+//! Per-stage [`crate::actor::ctx::SyncWaiter`] impls route through
 //! [`SYNC_WAIT_BRIDGE`] for FFI guests; native ctxs route through
 //! `NativeBinding::wait_reply` (ADR-0074 §Decision 5 cross-class
 //! guard lives in the native binding's inherent body).
@@ -18,7 +18,7 @@
 use crate::ffi::raw;
 
 /// ZST FFI bridge for `wait_reply`. Borrow [`SYNC_WAIT_BRIDGE`] from a
-/// [`crate::actor::ctx::SyncWaitBridgeer`] impl.
+/// [`crate::actor::ctx::SyncWaiter`] impl.
 pub struct SyncWaitBridge;
 
 /// Process-wide [`SyncWaitBridge`] instance.

@@ -6,18 +6,18 @@
 //!
 //! ZST whose only inherent method is `save_state`, the ADR-0016
 //! deposit hook called inside `on_replace` to hand a typed bundle to
-//! the replacement instance. `PersistBridgeence` is conceptually distinct
+//! the replacement instance. `Persistence` is conceptually distinct
 //! from mail (it's a one-shot byte deposit, not a routed envelope),
 //! so it lives in its own bridge rather than on [`super::mail::MailBridge`].
 //!
 //! Native actors do not have a `replace_component`-style hot reload
 //! path — only wasm components do. The native ctx structs deliberately
-//! do not impl [`crate::actor::ctx::PersistBridgeence`].
+//! do not impl [`crate::actor::ctx::Persistence`].
 
 use crate::ffi::raw;
 
 /// ZST FFI bridge for `save_state`. Borrow [`PERSIST_BRIDGE`] from any ctx
-/// that impls [`crate::actor::ctx::PersistBridgeence`] to forward the
+/// that impls [`crate::actor::ctx::Persistence`] to forward the
 /// typed-bundle bytes through the host fn.
 pub struct PersistBridge;
 

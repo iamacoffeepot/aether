@@ -66,15 +66,17 @@ jobs:
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
-      # `[workspace.lints.rustdoc]` in the root Cargo.toml tracks
-      # specific rustdoc lints at `warn`. RUSTDOCFLAGS escalates the
-      # tracked subset to hard failures here without poisoning local
-      # `cargo doc` runs (which still emit pre-existing broken /
-      # private intra-doc-link warnings we haven't swept yet — those
-      # land under a separate cleanup).
+      # `[workspace.lints.rustdoc]` in the root Cargo.toml tracks the
+      # rustdoc lints at `warn`. RUSTDOCFLAGS escalates the tracked
+      # set to hard failures here without poisoning local `cargo doc`
+      # runs. Phase 5c (iamacoffeepot/aether#913) swept the broken /
+      # private intra-doc-link backlog so all three can deny now.
       - name: cargo doc with tracked rustdoc lints denied
         env:
-          RUSTDOCFLAGS: "-D rustdoc::redundant_explicit_links"
+          RUSTDOCFLAGS: >-
+            -D rustdoc::redundant_explicit_links
+            -D rustdoc::broken_intra_doc_links
+            -D rustdoc::private_intra_doc_links
         run: cargo doc --workspace --no-deps
 
   # Workspace-wide tests run on linux only. Non-chassis crates

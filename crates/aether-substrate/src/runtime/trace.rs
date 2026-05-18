@@ -55,10 +55,10 @@ static SUBSTRATE_START: OnceLock<Instant> = OnceLock::new();
 /// itself on every read.
 static TRACE_QUEUE: OnceLock<Arc<SegQueue<TraceEvent>>> = OnceLock::new();
 
-/// Initialise the [`SUBSTRATE_START`] reference. Called once during
-/// chassis boot before any actor is wired so every subsequent
-/// timestamp has a stable origin. Safe to call multiple times — the
-/// `OnceLock` ignores subsequent calls.
+/// Initialise the crate-internal `SUBSTRATE_START` reference. Called
+/// once during chassis boot before any actor is wired so every
+/// subsequent timestamp has a stable origin. Safe to call multiple
+/// times — the `OnceLock` ignores subsequent calls.
 pub fn init_substrate_start() {
     let _ = SUBSTRATE_START.set(Instant::now());
 }
@@ -78,10 +78,10 @@ pub fn trace_queue() -> Option<&'static Arc<SegQueue<TraceEvent>>> {
     TRACE_QUEUE.get()
 }
 
-/// Compute the current [`Nanos`] timestamp relative to
-/// [`SUBSTRATE_START`]. `0` if `SUBSTRATE_START` was not initialised
-/// (the producer hooks early-out before this in that case, but the
-/// guard makes the function safe to call standalone).
+/// Compute the current [`Nanos`] timestamp relative to the
+/// crate-internal `SUBSTRATE_START` reference. `0` if `SUBSTRATE_START`
+/// was not initialised (the producer hooks early-out before this in
+/// that case, but the guard makes the function safe to call standalone).
 pub fn now_nanos() -> Nanos {
     let start = match SUBSTRATE_START.get() {
         Some(s) => *s,
@@ -241,10 +241,10 @@ impl Drop for TraceDrainerHandle {
 }
 
 /// Spawn the chassis-owned drainer thread. The thread loop-drains up
-/// to [`BATCH_MAX`] events from the trace queue every
-/// [`BATCH_INTERVAL`] and ships a [`BatchedTraceEvents`] mail to the
-/// [`TRACE_OBSERVER_MAILBOX_NAME`] sink. Returns a handle whose
-/// `Drop` joins the thread.
+/// to `BATCH_MAX` events (crate-internal const) from the trace queue
+/// every `BATCH_INTERVAL` (also crate-internal) and ships a
+/// [`BatchedTraceEvents`] mail to the [`TRACE_OBSERVER_MAILBOX_NAME`]
+/// sink. Returns a handle whose `Drop` joins the thread.
 ///
 /// Idempotent in the sense that calling [`install_trace_queue`]
 /// twice with the same `queue` Arc is a no-op; the chassis builder

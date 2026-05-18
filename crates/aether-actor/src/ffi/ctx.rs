@@ -104,8 +104,8 @@ impl Resolver for FfiInitCtx<'_> {
 /// capability handle for FFI guests. Exposes send, reply, and
 /// resolution primitives. Issue 703 added [`Resolver`] + a
 /// `mailbox_id` field so `wire`-stage explicit subscribes
-/// (`ctx.subscribe_input::<K>()`, gated by the [`crate::actor::ctx::Subscriber`]
-/// blanket) can self-address.
+/// (sending [`SubscribeInput`](aether_kinds::SubscribeInput) to the
+/// `InputCapability`) can self-address.
 pub struct FfiCtx<'a> {
     mailbox: u64,
     sender: Option<u32>,

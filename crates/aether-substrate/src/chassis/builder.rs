@@ -1,7 +1,7 @@
 //! ADR-0071 Phase 2A: driver-capability traits + chassis builder
 //! type-state.
 //!
-//! Sibling to ADR-0070's [`Capability`] family (post-issue-525-Phase-2:
+//! Sibling to ADR-0070's [`NativeActor`] family (post-issue-525-Phase-2:
 //! one struct per cap, `Drop` replaces `RunningCapability::shutdown`).
 //! A chassis composes passive capabilities (dispatcher-thread sinks
 //! per ADR-0070) plus exactly one [`DriverCapability`] that owns the
@@ -874,9 +874,10 @@ impl<C: Chassis> Builder<C, NoDriver> {
 
     /// Issue 552 stage 1: boot a [`NativeActor`] with its associated
     /// `Config`. The chassis claims the cap's mailbox under
-    /// `A::NAMESPACE`, runs `A::init(config, ctx)`, stores `Arc<A>`
-    /// in the chassis-side [`Actors`] map, and spawns a dispatcher
-    /// thread that drives the cap via [`NativeDispatch`].
+    /// `A::NAMESPACE`, runs `A::init(config, ctx)`, hands ownership of
+    /// the cap to a freshly-spawned dispatcher thread that drives it
+    /// via [`NativeDispatch`], and tracks the live entry through
+    /// [`crate::ActorRegistry`].
     ///
     /// Boot order is declaration order; `.with_actor` calls before
     /// and after `.driver(_)` boot together before the driver runs.
@@ -1008,8 +1009,9 @@ impl<C: Chassis> Builder<C, HasDriver> {
 
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
-    /// shuts down the passives that already booted (via
-    /// [`BootedPassives::Drop`]) before propagating the error.
+    /// shuts down the passives that already booted (via the
+    /// crate-internal `BootedPassives` Drop) before propagating the
+    /// error.
     ///
     /// # Panics
     /// Panics if the `HasDriver` typestate is reached without a driver
@@ -1569,8 +1571,8 @@ impl<C: Chassis> BuiltChassis<C> {
 
 /// A chassis built without a driver. The embedder (`TestBench`, future
 /// embedded harnesses) drives any loop manually. Passives are booted
-/// and accessible via [`Self::capability`]; they shut down when the
-/// `PassiveChassis` is dropped.
+/// and addressable via [`Self::resolve_actor`] / [`Self::resolve_actors`];
+/// they shut down when the `PassiveChassis` is dropped.
 pub struct PassiveChassis<C: Chassis> {
     booted: BootedPassives,
     _chassis: PhantomData<fn() -> C>,

@@ -1,8 +1,10 @@
 //! Post-CSG mesh cleanup pipeline (ADR-0055, refactored under ADR-0057).
 //!
-//! Runs on the polygon stream produced by `ops::{union, intersection,
-//! difference}`. The pipeline operates in the same fixed-point integer
-//! domain as the BSP CSG core; passes are pure and exact.
+//! Runs on the polygon stream that boolean composition used to produce
+//! (`union` / `intersection` / `difference` retired with ADR-0062 and
+//! archived on the `archive/csg-bsp` branch). The pipeline operates in
+//! the same fixed-point integer domain as the BSP CSG core; passes are
+//! pure and exact.
 //!
 //! Four passes (composed in order):
 //!
@@ -33,8 +35,8 @@
 //! not cleanup. The polygon-domain public API ([`run_to_loops`] +
 //! [`crate::polygon::mesh_polygons`]) skips tessellation entirely
 //! because n-gon polygons are the canonical mesh form per ADR-0057;
-//! the legacy triangle-domain ops in [`super::ops`] compose cleanup
-//! and tessellation explicitly via [`super::tessellate::run`].
+//! the retired triangle-domain ops composed cleanup and tessellation
+//! explicitly via [`super::tessellate::run`].
 
 mod invariants;
 mod merge;

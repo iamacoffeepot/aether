@@ -60,7 +60,8 @@ fn plane_color_key(p: &Plane3, color: u32) -> PlaneColorKey {
 
 /// Run cleanup + CDT triangulation. Returns one `Polygon` per
 /// triangle (3 vertices each) in `Vec<Polygon>` form so the caller can
-/// fan-flatten to `Vec<Triangle>` via [`super::polygons_to_triangles`].
+/// fan-flatten to `Vec<Triangle>` via the crate-internal
+/// `polygons_to_triangles` helper.
 #[must_use]
 pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
     let cleaned = cleanup::run_to_indexed(polygons);

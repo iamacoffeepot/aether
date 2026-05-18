@@ -12,9 +12,9 @@
 //! Two entry points:
 //!   - [`init_subscriber`] — called from `SubstrateBoot::build`.
 //!     Installs `EnvFilter` + `tsfmt::Layer` + [`ActorAwareLayer`]
-//!     as `tracing`'s global default, and registers
-//!     [`ship_via_stamped_dispatch`] as `aether-actor::log`'s native
-//!     log shipper. Idempotent.
+//!     as `tracing`'s global default, and registers a crate-internal
+//!     `ship_via_stamped_dispatch` callback as `aether-actor::log`'s
+//!     native log shipper. Idempotent.
 //!   - [`with_actor_dispatch`] — called from each chassis dispatcher
 //!     trampoline. Stamps an actor's transport into TLS for the
 //!     duration of a handler so the actor's `tracing::*` events drain
@@ -39,9 +39,10 @@ use tracing_subscriber::{Layer, fmt as tsfmt};
 /// — the wasm side ships through `FFI_TRANSPORT` directly. The
 /// chassis stamps an actor's transport per-handler via
 /// [`with_actor_dispatch`]; the substrate-registered
-/// `aether-actor` shipper hook ([`ship_via_stamped_dispatch`])
-/// reads the stamp to route the actor's `LogBatch` through the same
-/// transport every other outbound `send` uses.
+/// `aether-actor` shipper hook (the crate-internal
+/// `ship_via_stamped_dispatch`) reads the stamp to route the actor's
+/// `LogBatch` through the same transport every other outbound `send`
+/// uses.
 pub trait MailDispatch: Send + Sync {
     /// Push `payload` (already postcard-encoded `LogBatch` bytes) to
     /// `mailbox`. The implementer's `send_mail` attaches the actor's
@@ -158,9 +159,10 @@ const FILTER_ENV: &str = "AETHER_LOG_FILTER";
 
 /// Install the tracing subscriber stack: `EnvFilter` (reads
 /// `AETHER_LOG_FILTER`, default `info`) + `tsfmt::Layer` to stderr +
-/// [`ActorAwareLayer`]. Also registers [`ship_via_stamped_dispatch`]
-/// as `aether-actor::log`'s native shipper so `drain_buffer` calls
-/// from native actors route through the chassis-stamped transport.
+/// [`ActorAwareLayer`]. Also registers the crate-internal
+/// `ship_via_stamped_dispatch` callback as `aether-actor::log`'s
+/// native shipper so `drain_buffer` calls from native actors route
+/// through the chassis-stamped transport.
 /// Called from `SubstrateBoot::build`; idempotent (later calls no-op
 /// via `try_init`; the shipper hook overwrite is a no-op since it's
 /// the same pointer).
