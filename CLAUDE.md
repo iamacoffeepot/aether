@@ -111,3 +111,13 @@ Components declare their receive-side kind vocabulary with `#[handlers]` on a si
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
+
+## Qodana pre-flight (local)
+
+Qodana gates merges via the `ci-pass` aggregator (iamacoffeepot/aether#941), but running `qodana scan` locally is blocked: the container's cargo-metadata pass times out on the colima virtiofs bind mount. The local equivalent is RustRover's inspection set — Qodana's `qodana.recommended` profile rehosts most of its checks from the same IntelliJ inspector RustRover runs in-IDE.
+
+- **Per-file**: open the file; the gutter + Problems tool window surface the same inspection ids Qodana reports (`RsUnnecessaryParentheses`, `RsApproxConstant`, `DuplicatedCode`, etc.).
+- **Whole-project**: `Code → Inspect Code…` → scope: `Whole project` (or `Uncommitted files` for a fast pre-push check) → profile: `Project Default`. Export the results via the inspection result toolbar if a diff against CI is needed.
+- **Agent-side** (Claude): `mcp__rustrover__get_file_problems` returns the same problem set for one file (`errorsOnly: false` for the full qodana-equivalent surface). Iterate it over `git diff --name-only` before commits on Qodana-touched files (path-prefix sweeps, duplicated-code refactors, etc.) instead of waiting for the CI gate. RustRover MCP has no project-wide inspect runner — for whole-project pre-flight fall back to the IDE menu above.
+
+Caveats: IDE inspections don't run Qodana's Cargo.toml-level checks (`NewCrateVersionAvailable`, `UnusedDependency`) — those still surface only in CI. Re-baselining (`qodana.sarif.json` updates) still happens by downloading the `qodana-report` workflow artifact from a CI run.
