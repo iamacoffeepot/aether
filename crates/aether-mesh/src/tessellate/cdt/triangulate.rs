@@ -287,6 +287,32 @@ mod tests {
             .sum()
     }
 
+    /// `outer`-side axis-aligned square with a centered square hole at
+    /// 25% / 75% of the outer span. Vertices 0..=3 are the outer ring
+    /// CCW from `(0, 0)`; vertices 4..=7 are the hole ring CCW from
+    /// the hole's BL. `loops` lists the outer CCW and the hole CW (so
+    /// the hole subtracts from the triangulated region per the CDT
+    /// boundary-orientation convention).
+    fn annular_square_with_hole(outer: f32) -> (Vec<Point3>, Vec<Vec<VertexId>>) {
+        let hole_lo = outer * 0.25;
+        let hole_hi = outer * 0.75;
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0),         // 0: outer BL
+            pt(outer, 0.0, 0.0),       // 1: outer BR
+            pt(outer, outer, 0.0),     // 2: outer TR
+            pt(0.0, outer, 0.0),       // 3: outer TL
+            pt(hole_lo, hole_lo, 0.0), // 4: hole BL
+            pt(hole_hi, hole_lo, 0.0), // 5: hole BR
+            pt(hole_hi, hole_hi, 0.0), // 6: hole TR
+            pt(hole_lo, hole_hi, 0.0), // 7: hole TL
+        ];
+        let loops = vec![
+            vec![0, 1, 2, 3], // outer CCW
+            vec![4, 7, 6, 5], // hole CW (reverse of CCW order)
+        ];
+        (vertices, loops)
+    }
+
     #[test]
     fn empty_input_yields_empty_triangulation() {
         let result = triangulate(&[], &[], &xy_plane());
@@ -324,21 +350,7 @@ mod tests {
     #[test]
     fn square_with_square_hole_triangulates_at_topological_minimum() {
         // Outer 2x2 square (CCW around +z), inner 1x1 hole (CW around +z).
-        //noinspection DuplicatedCode
-        let vertices = vec![
-            pt(0.0, 0.0, 0.0), // 0: outer BL
-            pt(2.0, 0.0, 0.0), // 1: outer BR
-            pt(2.0, 2.0, 0.0), // 2: outer TR
-            pt(0.0, 2.0, 0.0), // 3: outer TL
-            pt(0.5, 0.5, 0.0), // 4: hole BL
-            pt(1.5, 0.5, 0.0), // 5: hole BR
-            pt(1.5, 1.5, 0.0), // 6: hole TR
-            pt(0.5, 1.5, 0.0), // 7: hole TL
-        ];
-        let loops = vec![
-            vec![0, 1, 2, 3], // outer CCW
-            vec![4, 7, 6, 5], // hole CW (reverse of CCW order)
-        ];
+        let (vertices, loops) = annular_square_with_hole(2.0);
         let tris = triangulate(&vertices, &loops, &xy_plane())
             .expect("test setup: annular region is triangulable");
         // Topological minimum for a rectangle-with-rectangular-hole on
@@ -361,18 +373,7 @@ mod tests {
 
     #[test]
     fn cdt_is_deterministic_across_runs() {
-        //noinspection DuplicatedCode
-        let vertices = vec![
-            pt(0.0, 0.0, 0.0),
-            pt(2.0, 0.0, 0.0),
-            pt(2.0, 2.0, 0.0),
-            pt(0.0, 2.0, 0.0),
-            pt(0.5, 0.5, 0.0),
-            pt(1.5, 0.5, 0.0),
-            pt(1.5, 1.5, 0.0),
-            pt(0.5, 1.5, 0.0),
-        ];
-        let loops = vec![vec![0, 1, 2, 3], vec![4, 7, 6, 5]];
+        let (vertices, loops) = annular_square_with_hole(2.0);
         let r1 = triangulate(&vertices, &loops, &xy_plane())
             .expect("test setup: annular region is triangulable");
         let r2 = triangulate(&vertices, &loops, &xy_plane())
@@ -625,21 +626,10 @@ mod tests {
                 vec![vec![0, 1, 2, 3]],
                 9 * 2 * unit * unit,
             ),
-            (
-                "annular",
-                vec![
-                    pt(0.0, 0.0, 0.0),
-                    pt(4.0, 0.0, 0.0),
-                    pt(4.0, 4.0, 0.0),
-                    pt(0.0, 4.0, 0.0),
-                    pt(1.0, 1.0, 0.0),
-                    pt(3.0, 1.0, 0.0),
-                    pt(3.0, 3.0, 0.0),
-                    pt(1.0, 3.0, 0.0),
-                ],
-                vec![vec![0, 1, 2, 3], vec![4, 7, 6, 5]],
-                12 * 2 * unit * unit, // 16 - 4 = 12
-            ),
+            {
+                let (vertices, loops) = annular_square_with_hole(4.0);
+                ("annular", vertices, loops, 12 * 2 * unit * unit) // 16 - 4 = 12
+            },
         ];
         for (label, vertices, loops, expected_doubled_area) in cases {
             let tris = triangulate(&vertices, &loops, &xy_plane())
