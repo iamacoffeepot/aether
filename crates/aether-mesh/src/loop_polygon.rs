@@ -57,6 +57,24 @@ impl Polygon {
         self.plane = self.plane.invert();
     }
 
+    /// Push `self.clone()` into either `front` or `back` depending on
+    /// whether `partitioner`'s normal points the same way as
+    /// `self.plane`'s. Used at both the plane-identity short-circuit
+    /// and the COPLANAR match arm in [`Self::split`] — extracted so
+    /// the orientation-dispatch logic lives in exactly one place.
+    fn push_to_coplanar_bucket(
+        &self,
+        partitioner: &Plane3,
+        front: &mut Vec<Self>,
+        back: &mut Vec<Self>,
+    ) {
+        if partitioner.normal_dot_sign(&self.plane) > 0 {
+            front.push(self.clone());
+        } else {
+            back.push(self.clone());
+        }
+    }
+
     /// Classify this polygon against `partitioner` and route it into
     /// one (or two) of the four output buckets.
     ///
@@ -90,12 +108,7 @@ impl Polygon {
         // child nodes (CSG matrix issue 344, smoke test:
         // `(union (box 1 1 1) (translate (0.3 0.15 0.05) (sphere 0.5 8)))`).
         if self.plane.canonical_key() == partitioner.canonical_key() {
-            //noinspection DuplicatedCode
-            if partitioner.normal_dot_sign(&self.plane) > 0 {
-                coplanar_front.push(self.clone());
-            } else {
-                coplanar_back.push(self.clone());
-            }
+            self.push_to_coplanar_bucket(partitioner, coplanar_front, coplanar_back);
             return;
         }
 
@@ -123,12 +136,7 @@ impl Polygon {
 
         match polygon_type {
             COPLANAR => {
-                //noinspection DuplicatedCode
-                if partitioner.normal_dot_sign(&self.plane) > 0 {
-                    coplanar_front.push(self.clone());
-                } else {
-                    coplanar_back.push(self.clone());
-                }
+                self.push_to_coplanar_bucket(partitioner, coplanar_front, coplanar_back);
             }
             FRONT => front.push(self.clone()),
             BACK => back.push(self.clone()),

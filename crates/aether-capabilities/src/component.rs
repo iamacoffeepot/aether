@@ -17,7 +17,7 @@
 //! framework's `NativeActor` loop, replace is `Component`-swap
 //! inside the trampoline, drop flows through `ctx.shutdown()`.
 //!
-//! [`NativeActor`]: aether_substrate::actor::native::NativeActor
+//! [`NativeActor`]: aether_substrate::NativeActor
 //!
 //! The cap is a `#[bridge] mod native { ... }` per the ADR-0076 /
 //! issue 565 pattern. Plain fields (no `Arc<Inner>` wrapper) per

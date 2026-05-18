@@ -246,7 +246,7 @@ mod pipeline_tls {
 }
 
 /// `true` iff we're currently inside the drain / host-ship path.
-/// Read by [`crate::log::is_in_pipeline`] consumers (chiefly the
+/// Read by [`is_in_pipeline`] consumers (chiefly the
 /// actor-aware layer in `aether-substrate::log_install`); set + cleared
 /// by the internal `PipelineGuard` RAII helper.
 #[must_use]

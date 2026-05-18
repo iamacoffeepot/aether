@@ -1088,13 +1088,13 @@ struct BootedPassives {
     /// for its frame loop).
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
     /// Membership view of the same set; shared with every
-    /// [`NativeBinding`](crate::NativeBinding) booted under this chassis so the
+    /// [`NativeBinding`] booted under this chassis so the
     /// cross-class `wait_reply` guard can classify recipients.
     /// Populated alongside `frame_bound_pending` by
     /// [`ChassisCtx::claim_frame_bound_mailbox`].
     frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
     /// Cloned into every `ChassisCtx` and onto every booted
-    /// [`crate::NativeBinding`] so the cross-class `wait_reply`
+    /// [`NativeBinding`] so the cross-class `wait_reply`
     /// guard has somewhere to abort to. Inherited from the
     /// [`Builder`]'s configured aborter.
     aborter: Arc<dyn FatalAborter>,
@@ -1626,8 +1626,8 @@ impl<C: Chassis> PassiveChassis<C> {
     /// Snapshot of every frame-bound mailbox's pending counter
     /// collected during passive boot. Embedders (`TestBench`, bin
     /// drivers) clone this once and feed it to
-    /// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] each frame —
-    /// same role as [`crate::chassis::builder::DriverCtx::frame_bound_pending`]
+    /// [`super::frame_loop::drain_frame_bound_or_abort`] each frame —
+    /// same role as [`DriverCtx::frame_bound_pending`]
     /// on the driver-build path.
     pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
         self.booted.frame_bound_pending.clone()

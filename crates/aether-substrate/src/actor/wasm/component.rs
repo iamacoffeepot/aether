@@ -685,11 +685,42 @@ mod tests {
 
     use wasmtime::{Engine, Linker};
 
+    use std::sync::Mutex;
+
     use super::*;
     use crate::mail::MailboxId;
     use crate::mail::mailer::Mailer;
     use crate::mail::outbound::{EgressEvent, HubOutbound};
     use crate::mail::registry::Registry;
+
+    /// Captured `(mail_id, root, parent_mail)` triple for the
+    /// lineage-propagation tests in this module.
+    type LineageCapture = Arc<Mutex<Vec<(MailId, MailId, Option<MailId>)>>>;
+
+    /// Register a sink that captures every dispatched mail's lineage
+    /// triple into a shared `Vec`. Both lineage tests below share
+    /// this setup; the helper returns the capture handle and the
+    /// registered mailbox id.
+    fn register_lineage_capture_sink(
+        registry: &Arc<Registry>,
+        name: &str,
+    ) -> (LineageCapture, MailboxId) {
+        let captured: LineageCapture = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        let sink_id = registry
+            .try_register_inbox(
+                name,
+                Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+                    captured_for_handler.lock().unwrap().push((
+                        dispatch.mail_id,
+                        dispatch.root,
+                        dispatch.parent_mail,
+                    ));
+                }),
+            )
+            .expect("register sink");
+        (captured, sink_id)
+    }
 
     fn ctx() -> ComponentCtx {
         let registry = Arc::new(Registry::new());
@@ -1231,26 +1262,8 @@ mod tests {
     /// the captured lineage matches.
     #[test]
     fn send_propagates_in_flight_lineage_on_closure_branch() {
-        use std::sync::Mutex;
-
-        type Captured = (MailId, MailId, Option<MailId>);
-        let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_for_handler = Arc::clone(&captured);
-
         let registry = Arc::new(Registry::new());
-        let sink_id = registry
-            .try_register_inbox(
-                "issue_722_sink",
-                Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
-                    captured_for_handler.lock().unwrap().push((
-                        dispatch.mail_id,
-                        dispatch.root,
-                        //noinspection DuplicatedCode
-                        dispatch.parent_mail,
-                    ));
-                }),
-            )
-            .expect("register sink");
+        let (captured, sink_id) = register_lineage_capture_sink(&registry, "issue_722_sink");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
@@ -1300,26 +1313,9 @@ mod tests {
     /// `NativeBinding::send_mail_with_lineage(None, None)` produces.
     #[test]
     fn send_without_in_flight_mints_fresh_root_chain() {
-        use std::sync::Mutex;
-
-        type Captured = (MailId, MailId, Option<MailId>);
-        let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_for_handler = Arc::clone(&captured);
-
         let registry = Arc::new(Registry::new());
-        let sink_id = registry
-            .try_register_inbox(
-                "issue_722_fresh_root_sink",
-                Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
-                    captured_for_handler.lock().unwrap().push((
-                        dispatch.mail_id,
-                        dispatch.root,
-                        dispatch.parent_mail,
-                    ));
-                }),
-            )
-            //noinspection DuplicatedCode
-            .expect("register sink");
+        let (captured, sink_id) =
+            register_lineage_capture_sink(&registry, "issue_722_fresh_root_sink");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));

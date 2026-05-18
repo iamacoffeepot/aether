@@ -425,7 +425,7 @@ impl Spawner {
                     );
                     return;
                 };
-                let env = Envelope::from(dispatch);
+                let env: Envelope = dispatch;
                 pending_for_handler.fetch_add(1, Ordering::AcqRel);
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
                     // Receiver disconnected before we could deliver;

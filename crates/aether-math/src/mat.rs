@@ -243,15 +243,12 @@ impl Mul for Mat4 {
 mod tests {
     use super::*;
     use crate::PI;
+    use crate::test_helpers::approx_eq_vec4 as approx_eq_vec4_helper;
 
     const EPS: f32 = 1e-5;
 
     fn approx_eq_vec4(a: Vec4, b: Vec4) -> bool {
-        //noinspection DuplicatedCode
-        (a.x - b.x).abs() < EPS
-            && (a.y - b.y).abs() < EPS
-            && (a.z - b.z).abs() < EPS
-            && (a.w - b.w).abs() < EPS
+        approx_eq_vec4_helper(a, b, EPS)
     }
 
     #[test]
