@@ -185,7 +185,7 @@ impl<'a> Mail<'a> {
         if !kind_id.matches(self.kind) || self.count != 1 {
             return None;
         }
-        let byte_len = core::mem::size_of::<K>();
+        let byte_len = size_of::<K>();
         // SAFETY: `self.ptr` / `self.byte_len` originate from the
         // substrate's receive ABI (`Mail::__from_raw` / `__from_ptr`),
         // which guarantees the substrate wrote `self.byte_len >=
@@ -207,7 +207,7 @@ impl<'a> Mail<'a> {
         if !kind_id.matches(self.kind) {
             return None;
         }
-        let byte_len = core::mem::size_of::<K>() * self.count as usize;
+        let byte_len = size_of::<K>() * self.count as usize;
         // SAFETY: `self.ptr` / `self.byte_len` originate from the
         // substrate's receive ABI; the substrate guarantees at least
         // `size_of::<K>() * self.count` bytes valid at `self.ptr` for
@@ -241,7 +241,7 @@ impl<'a> Mail<'a> {
         if self.kind != K::ID.0 || self.count != 1 {
             return None;
         }
-        let byte_len = core::mem::size_of::<K>();
+        let byte_len = size_of::<K>();
         if self.byte_len as usize != byte_len {
             return None;
         }
@@ -260,7 +260,7 @@ impl<'a> Mail<'a> {
         if self.kind != K::ID.0 {
             return None;
         }
-        let byte_len = core::mem::size_of::<K>() * self.count as usize;
+        let byte_len = size_of::<K>() * self.count as usize;
         if self.byte_len as usize != byte_len {
             return None;
         }
@@ -445,7 +445,7 @@ mod tests {
     #[kind(name = "test.fake_postcard")]
     struct FakePostcard {
         tag: alloc::string::String,
-        ids: alloc::vec::Vec<u32>,
+        ids: Vec<u32>,
     }
 
     // SAFETY (test fixtures): each `Mail::__from_ptr` / `__from_raw` /
@@ -464,7 +464,7 @@ mod tests {
     fn mail_decode_single_roundtrip() {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
+        let byte_len = size_of::<FakePod>() as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
@@ -478,7 +478,7 @@ mod tests {
     fn mail_decode_wrong_kind_returns_none() {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
+        let byte_len = size_of::<FakePod>() as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let wrong: KindId<FakePod> = KindId::__new(8);
@@ -489,7 +489,7 @@ mod tests {
     fn mail_decode_wrong_count_returns_none() {
         let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
         let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
@@ -501,7 +501,7 @@ mod tests {
     fn mail_decode_slice_roundtrip() {
         let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
         let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let kind: KindId<FakePod> = KindId::__new(7);
@@ -562,7 +562,7 @@ mod tests {
     fn mail_decode_typed_roundtrip() {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
+        let byte_len = size_of::<FakePod>() as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
@@ -576,7 +576,7 @@ mod tests {
     fn mail_decode_typed_wrong_kind_returns_none() {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
+        let byte_len = size_of::<FakePod>() as u32;
         // Kind id deliberately mismatched (FakeKind instead of FakePod).
         // SAFETY: see module-level test fixture justification above.
         let mail =
@@ -588,7 +588,7 @@ mod tests {
     fn mail_decode_typed_wrong_count_returns_none() {
         let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
         let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
@@ -599,7 +599,7 @@ mod tests {
     fn mail_decode_slice_typed_roundtrip() {
         let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
         let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
+        let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
@@ -656,7 +656,7 @@ mod tests {
 
         let value = FakeCastKind { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
-        let byte_len = core::mem::size_of::<FakeCastKind>() as u32;
+        let byte_len = size_of::<FakeCastKind>() as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
             unsafe { Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
@@ -758,7 +758,7 @@ mod tests {
         // decode bails rather than reading the wrong window.
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&raw const value).addr();
-        let bogus_byte_len = (core::mem::size_of::<FakePod>() + 4) as u32;
+        let bogus_byte_len = (size_of::<FakePod>() + 4) as u32;
         // SAFETY: the bogus `byte_len` is intentional; `decode_typed`
         // detects the size mismatch and returns `None` before reading.
         // The pointer is still valid for `size_of::<FakePod>()` bytes
