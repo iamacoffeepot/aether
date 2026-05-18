@@ -26,6 +26,15 @@ exclude = ["spikes/*"]
 version = "0.2.0-alpha"
 edition = "2024"
 
+[workspace.lints.rust]
+# Phase 5 of iamacoffeepot/aether#913 swept ~244 RsUnnecessaryQualifications
+# findings across the workspace. Enabling rustc's matching lint here at
+# `warn` prevents reintroduction — CI's `cargo clippy -- -D warnings`
+# escalates it to a hard fail on any new qualified path that the
+# compiler can elide (e.g. `core::mem::size_of` when the edition-2024
+# prelude has `size_of` in scope).
+unused_qualifications = "warn"
+
 [workspace.lints.clippy]
 # Baseline — both groups as warn, then opt out of the idiom-fight bucket below.
 pedantic = { level = "warn", priority = -1 }
