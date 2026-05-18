@@ -36,7 +36,7 @@ postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wasmtime = "30"
+wasmtime = "44"
 # Render-only deps; gated by the `render` feature. Headless + hub
 # don't enable the feature, so wgpu's transitive graph stays out of
 # their builds.
