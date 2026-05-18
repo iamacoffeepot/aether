@@ -121,11 +121,7 @@ impl IndexedMesh {
 fn build_global_directed(polygons: &[IndexedPolygon]) -> HashMap<(VertexId, VertexId), u32> {
     let mut directed: HashMap<(VertexId, VertexId), u32> = HashMap::new();
     for poly in polygons {
-        let m = poly.vertices.len();
-        //noinspection DuplicatedCode
-        for i in 0..m {
-            let a = poly.vertices[i];
-            let b = poly.vertices[(i + 1) % m];
+        for (a, b) in poly.directed_edges() {
             *directed.entry((a, b)).or_insert(0) += 1;
         }
     }

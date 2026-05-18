@@ -17,19 +17,10 @@
 //! Geometric correctness (manifold-ness, no self-intersection) belongs
 //! in a separate validation pass; this module is about pass composition.
 
-use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
+use super::mesh::{IndexedMesh, VertexId};
 use super::tjunctions::is_strictly_between;
 use crate::plane::Plane3;
 use crate::point::Point3;
-
-/// Iterate `poly`'s directed edges as `(vertices[i], vertices[(i+1) % n])`
-/// pairs in vertex order. Shared by the twin / T-junction invariant
-/// scans so the wrap-around `(i + 1) % n` indexing is written exactly
-/// once.
-fn directed_edges(poly: &IndexedPolygon) -> impl Iterator<Item = (VertexId, VertexId)> + '_ {
-    let n = poly.vertices.len();
-    (0..n).map(move |i| (poly.vertices[i], poly.vertices[(i + 1) % n]))
-}
 
 /// One twin-edge violation surfaced by [`find_twin_edges`].
 #[derive(Debug, Clone)]
@@ -150,7 +141,7 @@ pub fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
     for poly in &mesh.polygons {
         let key = bucket_key(&poly.plane, poly.color);
         let entry = directed.entry(key).or_default();
-        for (a, b) in directed_edges(poly) {
+        for (a, b) in poly.directed_edges() {
             *entry.entry((a, b)).or_insert(0) += 1;
         }
     }
@@ -257,7 +248,7 @@ pub fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJunction
     use std::collections::HashSet;
     let mut edges: HashSet<(VertexId, VertexId)> = HashSet::new();
     for poly in &mesh.polygons {
-        for (a, b) in directed_edges(poly) {
+        for (a, b) in poly.directed_edges() {
             if a == b {
                 continue;
             }
