@@ -1,4 +1,4 @@
-//! Cross-test SchemaType builders shared between `decode` and
+//! Cross-test `SchemaType` builders shared between `decode` and
 //! `encode` test modules. Both module-local copies of `scalar`,
 //! `cast_struct`, `postcard_struct`, and `pending_ok_err_variants`
 //! moved here so adding a new schema test only declares the helper
@@ -11,7 +11,7 @@
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 
 /// A `NamedField` holding a single `Scalar(ty)` shape under `name`.
-pub(crate) fn scalar(name: &str, ty: Primitive) -> NamedField {
+pub fn scalar(name: &str, ty: Primitive) -> NamedField {
     NamedField {
         name: name.to_string().into(),
         ty: SchemaType::Scalar(ty),
@@ -21,7 +21,7 @@ pub(crate) fn scalar(name: &str, ty: Primitive) -> NamedField {
 /// `Struct { repr_c: true, fields }` — the cast-shape struct builder
 /// (`#[repr(C)]` byte layout, `bytemuck`-decodable on the substrate
 /// side).
-pub(crate) fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
+pub fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
     SchemaType::Struct {
         fields: fields.into(),
         repr_c: true,
@@ -32,7 +32,7 @@ pub(crate) fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
 /// builder, for the everything-else wire variant. Decode and encode
 /// modules historically named this `pc_struct` / `postcard_struct`
 /// respectively; the shared name is `postcard_struct`.
-pub(crate) fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
+pub fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
     SchemaType::Struct {
         fields: fields.into(),
         repr_c: false,
@@ -45,7 +45,7 @@ pub(crate) fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
 /// callers can extend the variants (e.g. with `Pending` + a tuple
 /// variant of a different field shape) without going through a
 /// builder method.
-pub(crate) fn pending_ok_err_variants() -> Vec<EnumVariant> {
+pub fn pending_ok_err_variants() -> Vec<EnumVariant> {
     vec![
         EnumVariant::Unit {
             name: "Pending".into(),

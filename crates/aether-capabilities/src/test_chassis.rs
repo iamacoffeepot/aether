@@ -65,7 +65,7 @@ pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 /// let chassis = boot_test_chassis_with::<MyCap>(&registry, &mailer, config);
 /// ```
 ///
-/// Multi-cap tests (e.g. RpcServer + TraceObserver + TestEcho) keep
+/// Multi-cap tests (e.g. `RpcServer` + `TraceObserver` + `TestEcho`) keep
 /// their own inline `Builder::<TestChassis>::new(...)` chain because
 /// the cap list is the load-bearing part of the scenario.
 pub fn boot_test_chassis_with<A>(

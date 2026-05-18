@@ -38,8 +38,8 @@ use aether_actor::local::ActorSlots;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
-use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
@@ -52,11 +52,8 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
 /// Issue 576 framing: catch-all caps that own a `#[fallback]` return
 /// `true` after their fallback runs, which suppresses the warn.
 /// Strict receivers keep the default (`false`) so the miss surfaces.
-pub(crate) fn typed_then_fallback_or_warn<A>(
-    actor: &mut Box<A>,
-    ctx: &mut NativeCtx<'_>,
-    env: &Envelope,
-) where
+pub fn typed_then_fallback_or_warn<A>(actor: &mut Box<A>, ctx: &mut NativeCtx<'_>, env: &Envelope)
+where
     A: NativeActor + NativeDispatch,
 {
     if actor

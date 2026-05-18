@@ -744,7 +744,7 @@ mod tests {
     /// the resulting `HelloAck` so subsequent test traffic sees a
     /// clean stream. Tests that want to assert specifically against
     /// the handshake reply (handshake_*_roundtrip,
-    /// wire_version_mismatch_*) write the `Hello` themselves so the
+    /// `wire_version_mismatch_*`) write the `Hello` themselves so the
     /// `HelloAck` / `Bye` can be matched on.
     fn complete_handshake(stream: &mut TcpStream) {
         write_frame(
