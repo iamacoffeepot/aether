@@ -7,10 +7,10 @@
 //! `PriorState` bundle, and `ReplyTo` opaque handle live here in
 //! `mod.rs` (pure decoders, no transport coupling). The
 //! [`Mailbox<K>`](crate::mail::mailbox) addressing token lives in
-//! the [`mailbox`](crate::mail::mailbox) submodule; the
+//! the [`mailbox`] submodule; the
 //! [`WaitError`](crate::mail::sync::WaitError) trait + the rc-decode
 //! helper for `wait_reply` returns live in
-//! [`sync`](crate::mail::sync).
+//! [`sync`].
 //!
 //! Issue 665 retired the `MailTransport` trait that previously sat at
 //! `transport.rs` here. Per-stage capability traits in

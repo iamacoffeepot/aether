@@ -3,7 +3,7 @@
 //! [`FrameBoundClaim`] / [`DropOnShutdownClaim`] result shapes, and
 //! the [`ChassisCtx`] threaded through every cap's boot. Sibling
 //! modules: error types live in `chassis::error`; the cross-flavour
-//! [`Envelope`](crate::actor::native::envelope::Envelope) shape lives
+//! [`Envelope`] shape lives
 //! in `actor::native::envelope`.
 
 use std::collections::HashSet;
