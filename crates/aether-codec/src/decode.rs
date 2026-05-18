@@ -193,6 +193,7 @@ fn decode_cast_field(
             let id = u64::from_le_bytes(cur.take::<8>(path)?);
             Ok(render_type_id_value(id, *type_id, path)?)
         }
+        //noinspection DuplicatedCode
         SchemaType::Bool
         | SchemaType::String
         | SchemaType::Bytes
@@ -741,6 +742,7 @@ mod tests {
     fn cast_nested_struct_drawtriangle_layout() {
         // Mirror of the encoder test by the same name. The DrawTriangle
         // shape is the load-bearing cast-nested case in the codebase.
+        //noinspection DuplicatedCode
         let vertex = SchemaType::Struct {
             repr_c: true,
             fields: vec![
@@ -869,6 +871,7 @@ mod tests {
 
     fn sum_schema() -> SchemaType {
         SchemaType::Enum {
+            //noinspection DuplicatedCode
             variants: vec![
                 EnumVariant::Unit {
                     name: "Pending".into(),

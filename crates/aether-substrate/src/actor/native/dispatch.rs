@@ -87,6 +87,7 @@ pub fn dispatch_loop_run<A>(
                 &**binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+                    //noinspection DuplicatedCode
                     if actor
                         .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
                         .is_none()

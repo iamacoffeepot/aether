@@ -132,6 +132,7 @@ impl Mat4 {
         let row0 = Vec3::new(r0.x, r0.y, r0.z);
         let row1 = Vec3::new(r1.x, r1.y, r1.z);
         let row2 = Vec3::new(r2.x, r2.y, r2.z);
+        //noinspection DuplicatedCode
         Self {
             cols: [
                 Vec4::new(r0.x, r1.x, r2.x, 0.0),
@@ -152,6 +153,7 @@ impl Mat4 {
         let z = (eye - target).normalize();
         let x = up.cross(z).normalize();
         let y = z.cross(x);
+        //noinspection DuplicatedCode
         Self {
             cols: [
                 Vec4::new(x.x, y.x, z.x, 0.0),
@@ -238,6 +240,7 @@ mod tests {
     const EPS: f32 = 1e-5;
 
     fn approx_eq_vec4(a: Vec4, b: Vec4) -> bool {
+        //noinspection DuplicatedCode
         (a.x - b.x).abs() < EPS
             && (a.y - b.y).abs() < EPS
             && (a.z - b.z).abs() < EPS

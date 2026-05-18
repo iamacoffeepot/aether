@@ -19,6 +19,7 @@ use crate::mail::{KindId, MailId, ReplyTo};
 /// emit `TraceEvent::Received { mail_id, .. }` against the same value
 /// the producer's `Sent` event carried.
 #[derive(Debug)]
+//noinspection DuplicatedCode
 pub struct Envelope {
     pub kind: KindId,
     pub kind_name: String,
@@ -40,6 +41,7 @@ pub struct Envelope {
 impl From<OwnedDispatch> for Envelope {
     #[inline]
     fn from(dispatch: OwnedDispatch) -> Self {
+        //noinspection DuplicatedCode
         Self {
             kind: dispatch.kind,
             kind_name: dispatch.kind_name,

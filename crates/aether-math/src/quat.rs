@@ -133,6 +133,7 @@ mod tests {
     const EPS: f32 = 1e-5;
 
     fn approx_eq_vec3(a: Vec3, b: Vec3) -> bool {
+        //noinspection DuplicatedCode
         (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS && (a.z - b.z).abs() < EPS
     }
 

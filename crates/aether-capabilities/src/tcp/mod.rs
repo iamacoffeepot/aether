@@ -158,6 +158,7 @@ pub trait TcpFfiExt {
 }
 
 impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
+    //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener {
             addr: addr.into(),
@@ -176,6 +177,7 @@ impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
         self.listener::<TcpListenerActor>(listener_name)
             .send(&Close::default());
     }
+    //noinspection DuplicatedCode
     fn session_write(&self, session_name: &str, bytes: &[u8]) {
         self.session::<TcpSessionActor>(session_name)
             .send(&SessionWrite {
@@ -238,6 +240,7 @@ pub trait TcpNativeExt {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
+    //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener {
             addr: addr.into(),
@@ -256,6 +259,7 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
         self.listener::<TcpListenerActor>(listener_name)
             .send(&Close::default());
     }
+    //noinspection DuplicatedCode
     fn session_write(&self, session_name: &str, bytes: &[u8]) {
         self.session::<TcpSessionActor>(session_name)
             .send(&SessionWrite {

@@ -196,6 +196,7 @@ mod native {
         fn capability_routes_publish_through_dispatcher_thread() {
             let (store, mailer, registry, rx) = fresh_substrate();
 
+            //noinspection DuplicatedCode
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())
                 .build_passive()
@@ -267,6 +268,7 @@ mod native {
         fn shutdown_joins_dispatcher_thread() {
             let (_store, mailer, registry, _rx) = fresh_substrate();
 
+            //noinspection DuplicatedCode
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())
                 .build_passive()

@@ -716,6 +716,7 @@ fn encode_field_value(
             out.extend_from_slice(&id.to_le_bytes());
             Ok(8)
         }
+        //noinspection DuplicatedCode
         SchemaType::Bool
         | SchemaType::String
         | SchemaType::Bytes
@@ -947,6 +948,7 @@ mod tests {
 
     #[test]
     fn cast_struct_fixed_array_field() {
+        //noinspection DuplicatedCode
         let schema = cast_struct(vec![NamedField {
             name: "xs".into(),
             ty: SchemaType::Array {
@@ -1017,6 +1019,7 @@ mod tests {
 
     #[test]
     fn cast_struct_array_length_mismatch_errors() {
+        //noinspection DuplicatedCode
         let schema = cast_struct(vec![NamedField {
             name: "xs".into(),
             ty: SchemaType::Array {
@@ -1063,6 +1066,7 @@ mod tests {
 
         // DrawTriangle's shape: { verts: [Vertex; 3] } where Vertex is
         // 5 f32s. Cast wire format = 60 bytes, no internal padding.
+        //noinspection DuplicatedCode
         let vertex = SchemaType::Struct {
             repr_c: true,
             fields: vec![
@@ -1255,6 +1259,7 @@ mod tests {
     }
 
     fn sum_schema() -> SchemaType {
+        //noinspection DuplicatedCode
         enum_schema(vec![
             EnumVariant::Unit {
                 name: "Pending".into(),

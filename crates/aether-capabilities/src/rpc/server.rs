@@ -702,6 +702,7 @@ mod tests {
     #[test]
     fn handshake_hello_to_hello_ack_roundtrip() {
         let (registry, mailer) = fresh_substrate();
+        //noinspection DuplicatedCode
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
@@ -756,6 +757,7 @@ mod tests {
     #[test]
     fn ping_pong_roundtrip() {
         let (registry, mailer) = fresh_substrate();
+        //noinspection DuplicatedCode
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
@@ -776,6 +778,7 @@ mod tests {
 
         // Send a Hello first so the handshake completes, then drain the
         // HelloAck reply before the Ping/Pong roundtrip.
+        //noinspection DuplicatedCode
         write_frame(
             &mut stream,
             &WireFrame::Hello(Hello {
@@ -836,6 +839,7 @@ mod tests {
             .expect("test: set_read_timeout on TcpStream");
 
         // Handshake.
+        //noinspection DuplicatedCode
         write_frame(
             &mut stream,
             &WireFrame::Hello(Hello {
@@ -930,6 +934,7 @@ mod tests {
             .expect("test: set_read_timeout on TcpStream");
 
         // Handshake.
+        //noinspection DuplicatedCode
         write_frame(
             &mut stream,
             &WireFrame::Hello(Hello {
@@ -979,6 +984,7 @@ mod tests {
     #[test]
     fn wire_version_mismatch_kicks_connection() {
         let (registry, mailer) = fresh_substrate();
+        //noinspection DuplicatedCode
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),

@@ -199,6 +199,7 @@ pub trait HttpMailboxExt {
 }
 
 impl HttpMailboxExt for FfiActorMailbox<HttpCapability> {
+    //noinspection DuplicatedCode
     fn get(&self, url: &str) {
         self.send(&Fetch {
             url: url.into(),
@@ -208,6 +209,7 @@ impl HttpMailboxExt for FfiActorMailbox<HttpCapability> {
             timeout_ms: None,
         });
     }
+    //noinspection DuplicatedCode
     fn post(&self, url: &str, body: &[u8]) {
         self.send(&Fetch {
             url: url.into(),
@@ -221,6 +223,7 @@ impl HttpMailboxExt for FfiActorMailbox<HttpCapability> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
+    //noinspection DuplicatedCode
     fn get(&self, url: &str) {
         self.send(&Fetch {
             url: url.into(),
@@ -230,6 +233,7 @@ impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
             timeout_ms: None,
         });
     }
+    //noinspection DuplicatedCode
     fn post(&self, url: &str, body: &[u8]) {
         self.send(&Fetch {
             url: url.into(),

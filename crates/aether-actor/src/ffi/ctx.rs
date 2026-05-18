@@ -200,6 +200,7 @@ impl Resolver for FfiCtx<'_> {
 }
 
 impl MailSender for FfiCtx<'_> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -209,6 +210,7 @@ impl MailSender for FfiCtx<'_> {
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -223,6 +225,7 @@ impl MailSender for FfiCtx<'_> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
@@ -244,6 +247,7 @@ impl OutboundReply for FfiCtx<'_> {
         None
     }
 
+    //noinspection DuplicatedCode
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
@@ -278,6 +282,7 @@ impl SyncWaiter for FfiCtx<'_> {
 }
 
 impl Sender for FfiCtx<'_> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -286,6 +291,7 @@ impl Sender for FfiCtx<'_> {
         <Self as MailSender>::send::<R, K>(self, payload);
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -300,6 +306,7 @@ impl Sender for FfiCtx<'_> {
 }
 
 impl MailCtx for FfiCtx<'_> {
+    //noinspection DuplicatedCode
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
@@ -351,6 +358,7 @@ impl FfiDropCtx<'_> {
 }
 
 impl MailSender for FfiDropCtx<'_> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -360,6 +368,7 @@ impl MailSender for FfiDropCtx<'_> {
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -374,6 +383,7 @@ impl MailSender for FfiDropCtx<'_> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
@@ -395,6 +405,7 @@ impl Persistence for FfiDropCtx<'_> {
 }
 
 impl Sender for FfiDropCtx<'_> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -403,6 +414,7 @@ impl Sender for FfiDropCtx<'_> {
         <Self as MailSender>::send::<R, K>(self, payload);
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,

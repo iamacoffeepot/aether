@@ -90,6 +90,7 @@ impl Polygon {
         // child nodes (CSG matrix issue 344, smoke test:
         // `(union (box 1 1 1) (translate (0.3 0.15 0.05) (sphere 0.5 8)))`).
         if self.plane.canonical_key() == partitioner.canonical_key() {
+            //noinspection DuplicatedCode
             if partitioner.normal_dot_sign(&self.plane) > 0 {
                 coplanar_front.push(self.clone());
             } else {
@@ -122,6 +123,7 @@ impl Polygon {
 
         match polygon_type {
             COPLANAR => {
+                //noinspection DuplicatedCode
                 if partitioner.normal_dot_sign(&self.plane) > 0 {
                     coplanar_front.push(self.clone());
                 } else {

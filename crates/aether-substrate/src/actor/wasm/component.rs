@@ -1247,6 +1247,7 @@ mod tests {
                     captured_for_handler.lock().unwrap().push((
                         dispatch.mail_id,
                         dispatch.root,
+                        //noinspection DuplicatedCode
                         dispatch.parent_mail,
                     ));
                 }),
@@ -1319,6 +1320,7 @@ mod tests {
                     ));
                 }),
             )
+            //noinspection DuplicatedCode
             .expect("register sink");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));

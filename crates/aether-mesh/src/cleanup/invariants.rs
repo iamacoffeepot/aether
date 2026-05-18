@@ -142,6 +142,7 @@ pub fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
         let key = bucket_key(&poly.plane, poly.color);
         let entry = directed.entry(key).or_default();
         let m = poly.vertices.len();
+        //noinspection DuplicatedCode
         for i in 0..m {
             let a = poly.vertices[i];
             let b = poly.vertices[(i + 1) % m];
@@ -252,6 +253,7 @@ pub fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJunction
     let mut edges: HashSet<(VertexId, VertexId)> = HashSet::new();
     for poly in &mesh.polygons {
         let n = poly.vertices.len();
+        //noinspection DuplicatedCode
         for i in 0..n {
             let a = poly.vertices[i];
             let b = poly.vertices[(i + 1) % n];
@@ -342,6 +344,7 @@ mod tests {
 
     #[test]
     fn single_triangle_has_no_twin_edges() {
+        //noinspection DuplicatedCode
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
             polygons: vec![IndexedPolygon {
@@ -480,6 +483,7 @@ mod tests {
 
     #[test]
     fn simple_loop_has_no_violations() {
+        //noinspection DuplicatedCode
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
             polygons: vec![IndexedPolygon {
@@ -547,6 +551,7 @@ mod tests {
 
     #[test]
     fn post_weld_clean_mesh_has_no_violations() {
+        //noinspection DuplicatedCode
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
             polygons: vec![IndexedPolygon {
@@ -688,6 +693,7 @@ mod tests {
 
     #[test]
     fn post_sliver_clean_triangle_has_no_violations() {
+        //noinspection DuplicatedCode
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
             polygons: vec![IndexedPolygon {

@@ -57,5 +57,6 @@ pub fn to_obj(triangles: &[Triangle]) -> String {
 
 fn approx_eq(a: Vec3, b: Vec3) -> bool {
     const EPS: f32 = 1e-6;
+    //noinspection DuplicatedCode
     (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS && (a.z - b.z).abs() < EPS
 }

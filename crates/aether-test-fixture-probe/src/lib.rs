@@ -82,6 +82,7 @@ impl FfiActor for Probe {
         })
     }
 
+    //noinspection DuplicatedCode
     /// Issue 640: explicit subscribe in `wire`; init is `Resolver`-only
     /// post-issue-703 and can't mail.
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {

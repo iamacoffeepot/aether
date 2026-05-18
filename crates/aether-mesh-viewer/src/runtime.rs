@@ -86,6 +86,7 @@ impl FfiActor for MeshViewer {
         })
     }
 
+    //noinspection DuplicatedCode
     /// Issue 640: subscribe to `Tick` so the cached triangles re-emit
     /// per frame. Lives in `wire` (post-init, mail-allowed); `init`
     /// itself is `Resolver`-only.

@@ -181,6 +181,7 @@ impl<'a> NativeCtx<'a> {
         NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
     }
 
+    //noinspection DuplicatedCode
     /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
     /// from a runtime instance name.
     #[must_use]
@@ -418,6 +419,7 @@ impl NativeCtx<'_> {
 }
 
 impl Sender for NativeCtx<'_> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -434,6 +436,7 @@ impl Sender for NativeCtx<'_> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -454,6 +457,7 @@ impl Sender for NativeCtx<'_> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
@@ -572,6 +576,7 @@ impl<'a> NativeInitCtx<'a> {
         NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
     }
 
+    //noinspection DuplicatedCode
     /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
     /// from a runtime instance name.
     #[must_use]
@@ -596,6 +601,7 @@ impl<'a> NativeInitCtx<'a> {
 // the trait the same way native callers do.
 
 impl MailSender for NativeCtx<'_> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -612,6 +618,7 @@ impl MailSender for NativeCtx<'_> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -632,6 +639,7 @@ impl MailSender for NativeCtx<'_> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(

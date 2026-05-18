@@ -122,6 +122,7 @@ fn build_global_directed(polygons: &[IndexedPolygon]) -> HashMap<(VertexId, Vert
     let mut directed: HashMap<(VertexId, VertexId), u32> = HashMap::new();
     for poly in polygons {
         let m = poly.vertices.len();
+        //noinspection DuplicatedCode
         for i in 0..m {
             let a = poly.vertices[i];
             let b = poly.vertices[(i + 1) % m];
@@ -158,6 +159,7 @@ fn process_bucket(
     for &pid in bucket {
         let poly = &polygons[pid];
         let m = poly.vertices.len();
+        //noinspection DuplicatedCode
         for i in 0..m {
             let a = poly.vertices[i];
             let b = poly.vertices[(i + 1) % m];
@@ -206,6 +208,7 @@ fn boundary_edges_after_twin_cancellation(
     let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
     keys.sort_unstable();
 
+    //noinspection DuplicatedCode
     for (a, b) in keys {
         let canonical = if a < b { (a, b) } else { (b, a) };
         if !seen.insert(canonical) {
@@ -694,6 +697,7 @@ mod tests {
         let ne = pt(2.0, 2.0, 0.0);
         let se = pt(2.0, 0.0, 0.0);
         let sw = pt(0.0, 0.0, 0.0);
+        //noinspection DuplicatedCode
         let polys = vec![
             Polygon::from_triangle(c, nw, ne, 0).expect("test setup: non-degenerate triangle"),
             Polygon::from_triangle(c, ne, se, 0).expect("test setup: non-degenerate triangle"),
@@ -717,6 +721,7 @@ mod tests {
         let mid = pt(1.0, 1.0, 0.0);
         let top = pt(1.0, 2.0, 0.0);
         let tl = pt(0.0, 2.0, 0.0);
+        //noinspection DuplicatedCode
         let polys = vec![
             Polygon::from_triangle(bl, br, inner, 0).expect("test setup: non-degenerate triangle"),
             Polygon::from_triangle(bl, inner, mid, 0).expect("test setup: non-degenerate triangle"),
@@ -755,6 +760,7 @@ mod tests {
             d: 0,
         };
         let color = 7;
+        //noinspection DuplicatedCode
         let vertices = vec![
             pt(0.0, 0.0, 0.0), // 0: A bottom-left
             pt(2.0, 0.0, 0.0), // 1: B bottom-right

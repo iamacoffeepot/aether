@@ -21,6 +21,7 @@ use aether_substrate::chassis::error::BootError;
 /// rather than going through `TestChassis::build(())`.
 pub struct TestChassis;
 
+//noinspection DuplicatedCode
 impl Chassis for TestChassis {
     const PROFILE: &'static str = "test";
     type Driver = NeverDriver;
