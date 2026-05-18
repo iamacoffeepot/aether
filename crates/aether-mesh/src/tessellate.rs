@@ -19,8 +19,8 @@
 //! mesh as triangles for the GPU. The two were grouped together
 //! historically because both ran on the post-CSG polygon stream, but
 //! they answer different questions and have different consumers — the
-//! polygon-domain public API ([`crate::cleanup::run_to_loops`] +
-//! [`crate::polygon::mesh_polygons`]) skips tessellation entirely
+//! polygon-domain public API ([`cleanup::run_to_loops`] +
+//! [`polygon::mesh_polygons`](crate::polygon::mesh_polygons)) skips tessellation entirely
 //! because n-gon polygons are the canonical mesh form per ADR-0057.
 //!
 //! Two entry points:
