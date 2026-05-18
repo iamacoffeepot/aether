@@ -773,8 +773,8 @@ mod native {
                 .expect("test setup: adapter accepts atomic write");
             let siblings: Vec<String> = std::fs::read_dir(a.root())
                 .expect("test setup: adapter root is readable")
-                .filter_map(std::result::Result::ok)
-                .filter_map(|e| e.file_name().to_str().map(std::string::ToString::to_string))
+                .filter_map(Result::ok)
+                .filter_map(|e| e.file_name().to_str().map(ToString::to_string))
                 .collect();
             assert!(
                 !siblings.iter().any(|s| s.contains(".tmp-")),

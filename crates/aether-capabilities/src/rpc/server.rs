@@ -225,7 +225,7 @@ mod server_native {
             // Stop the accept thread.
             self.accept_shutdown.store(true, Ordering::Release);
             let addr_str = format!("127.0.0.1:{}", self.listener_port);
-            if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+            if let Ok(addr) = addr_str.parse::<SocketAddr>() {
                 let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
             }
             if let Some(t) = self.accept_thread.take() {

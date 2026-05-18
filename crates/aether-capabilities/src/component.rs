@@ -309,7 +309,7 @@ mod native {
             if let Some(drain) = aether_actor::log::current_drain() {
                 let cfg = aether_kinds::ConfigureLogDrain { mailbox: drain };
                 let cfg_payload = bytemuck::bytes_of(&cfg).to_vec();
-                let kind = <aether_kinds::ConfigureLogDrain as aether_data::Kind>::ID;
+                let kind = <aether_kinds::ConfigureLogDrain as Kind>::ID;
                 self.mailer
                     .push(Mail::new(mailbox_id, kind, cfg_payload, 1));
             }
