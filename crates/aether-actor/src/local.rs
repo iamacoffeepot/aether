@@ -71,28 +71,36 @@ mod wasm {
             }
         }
 
+        /// Resolve (or lazily insert) the per-type `RefCell<T>` slot
+        /// and return a raw pointer to it. The caller owns the outer
+        /// borrow lifetime and is responsible for not aliasing.
+        ///
+        /// # Safety
+        /// * `self.inner` must point at a live `RefCell<BTreeMap<...>>`
+        ///   (constructor invariant — `inner` is initialized in `new()`
+        ///   and never replaced).
+        /// * The returned pointer is stable across nested `with`/`with_mut`
+        ///   calls on different `T` because we never remove entries and
+        ///   `Box` keeps the inner `RefCell<T>` heap-pinned.
+        unsafe fn slot_ptr_for<T: Default + 'static>(&self) -> *const RefCell<T> {
+            let map_cell = unsafe { &*self.inner.get() };
+            let mut map = map_cell.borrow_mut();
+            let entry = map
+                .entry(TypeId::of::<T>())
+                .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any>);
+            entry
+                .downcast_ref::<RefCell<T>>()
+                .expect("TypeId<T> ⇒ RefCell<T>") as *const RefCell<T>
+        }
+
         pub(super) fn with_mut<T, R>(&self, f: impl FnOnce(&mut T) -> R) -> R
         where
             T: Default + 'static,
         {
-            // SAFETY: the wasm linear memory is single-threaded;
-            // the static is reachable only from this actor's code.
-            let map_cell = unsafe { &*self.inner.get() };
-            //noinspection DuplicatedCode
-            let cell_ptr: *const RefCell<T> = {
-                let mut map = map_cell.borrow_mut();
-                let entry = map
-                    .entry(TypeId::of::<T>())
-                    .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any>);
-                entry
-                    .downcast_ref::<RefCell<T>>()
-                    .expect("TypeId<T> ⇒ RefCell<T>") as *const RefCell<T>
-            };
-            // SAFETY: stable heap pointer (Box never moves the
-            // pointed-to RefCell when the BTreeMap rebalances);
-            // we never remove entries; the outer borrow released
-            // at end of the inner block so nested with_mut on a
-            // different T re-enters the map fine.
+            // SAFETY: see `slot_ptr_for`'s doc — `inner` is live, and
+            // the wasm linear memory is single-threaded so the stamp /
+            // borrow pair below cannot race.
+            let cell_ptr = unsafe { self.slot_ptr_for::<T>() };
             let cell = unsafe { &*cell_ptr };
             let mut borrow = cell.borrow_mut();
             f(&mut *borrow)
@@ -102,17 +110,8 @@ mod wasm {
         where
             T: Default + 'static,
         {
-            let map_cell = unsafe { &*self.inner.get() };
-            //noinspection DuplicatedCode
-            let cell_ptr: *const RefCell<T> = {
-                let mut map = map_cell.borrow_mut();
-                let entry = map
-                    .entry(TypeId::of::<T>())
-                    .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any>);
-                entry
-                    .downcast_ref::<RefCell<T>>()
-                    .expect("TypeId<T> ⇒ RefCell<T>") as *const RefCell<T>
-            };
+            // SAFETY: see `slot_ptr_for`.
+            let cell_ptr = unsafe { self.slot_ptr_for::<T>() };
             let cell = unsafe { &*cell_ptr };
             let borrow = cell.borrow();
             f(&*borrow)
@@ -163,29 +162,38 @@ mod native_impl {
             }
         }
 
+        /// Resolve (or lazily insert) the per-type `RefCell<T>` slot
+        /// and return a raw pointer to it.
+        ///
+        /// # Safety
+        /// The returned pointer is into a heap-allocated `Box<RefCell<T>>`
+        /// owned by `self.by_type`. The pointer is stable across nested
+        /// `with`/`with_mut` calls on different `T` because we never
+        /// remove entries and `HashMap` rehashes move the `Box` header
+        /// in the bucket, not the pointed-to `RefCell<T>`. The caller
+        /// must drop the outer borrow before re-entering the map.
+        fn slot_ptr_for<T: Default + Send + 'static>(&self) -> *const RefCell<T> {
+            let mut map = self.by_type.borrow_mut();
+            let entry = map
+                .entry(TypeId::of::<T>())
+                .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
+            core::ptr::from_ref::<RefCell<T>>(
+                entry
+                    .downcast_ref::<RefCell<T>>()
+                    .expect("TypeId<T> ⇒ RefCell<T>"),
+            )
+        }
+
         pub(super) fn with_mut<T, R>(&self, f: impl FnOnce(&mut T) -> R) -> R
         where
             T: Default + Send + 'static,
         {
-            //noinspection DuplicatedCode
-            let cell_ptr: *const RefCell<T> = {
-                let mut map = self.by_type.borrow_mut();
-                let entry = map
-                    .entry(TypeId::of::<T>())
-                    .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-                core::ptr::from_ref::<RefCell<T>>(
-                    entry
-                        .downcast_ref::<RefCell<T>>()
-                        .expect("TypeId<T> ⇒ RefCell<T>"),
-                )
-            };
-            // SAFETY: the pointer is into a heap-allocated
-            // `Box<RefCell<T>>` owned by `self.by_type`. The
-            // outer borrow released at end of `cell_ptr` so a
-            // nested `with_mut::<U>` can re-enter the map; the
-            // box's heap address is stable (HashMap rehashes
-            // move the `Box` header in the bucket, not the
-            // pointed-to `RefCell<T>`); we never remove entries.
+            let cell_ptr = self.slot_ptr_for::<T>();
+            // SAFETY: see `slot_ptr_for` — pointer is to a heap-pinned
+            // `RefCell<T>`. The outer map borrow released at end of
+            // `slot_ptr_for`, so a nested `with_mut::<U>` can re-enter
+            // the map. The `&RefCell<T>` reborrow is unique for the
+            // closure's run.
             let cell = unsafe { &*cell_ptr };
             let mut borrow = cell.borrow_mut();
             f(&mut *borrow)
@@ -195,25 +203,8 @@ mod native_impl {
         where
             T: Default + Send + 'static,
         {
-            //noinspection DuplicatedCode
-            let cell_ptr: *const RefCell<T> = {
-                let mut map = self.by_type.borrow_mut();
-                let entry = map
-                    .entry(TypeId::of::<T>())
-                    .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-                core::ptr::from_ref::<RefCell<T>>(
-                    entry
-                        .downcast_ref::<RefCell<T>>()
-                        .expect("TypeId<T> ⇒ RefCell<T>"),
-                )
-            };
-            // SAFETY: same justification as `with_mut` above — the
-            // pointer is into a heap-allocated `Box<RefCell<T>>` owned
-            // by `self.by_type`. The outer borrow released so a nested
-            // `with::<U>` can re-enter the map; the box's heap address
-            // is stable across `HashMap` rehashes; we never remove
-            // entries. The `&RefCell<T>` reborrow is unique for the
-            // closure's run.
+            let cell_ptr = self.slot_ptr_for::<T>();
+            // SAFETY: see `slot_ptr_for` — same justification as `with_mut`.
             let cell = unsafe { &*cell_ptr };
             let borrow = cell.borrow();
             f(&*borrow)
