@@ -4,8 +4,8 @@
 //!
 //! - **Producer-side helpers** (`record_sent` / `record_received` /
 //!   `record_finished`) push [`TraceEvent`]s onto a process-global
-//!   [`crossbeam_queue::SegQueue`]. The hooks live in
-//!   [`NativeBinding::send_mail_with_lineage`]
+//!   [`SegQueue`]. The hooks live in
+//!   [`NativeBinding::send_mail_with_lineage`](crate::NativeBinding::send_mail_with_lineage)
 //!   (Sent), the native dispatcher trampoline (Received / Finished),
 //!   and the wasm trampoline forwarder (Received / Finished). Calls
 //!   are no-ops until the chassis [`install_trace_queue`]s the
@@ -42,14 +42,6 @@ use crossbeam_queue::SegQueue;
 
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
-// Brought into scope only so the `[NativeBinding::send_mail_with_lineage]`
-// intra-doc link in the module doc above resolves against the
-// crate-root re-export without an explicit `(crate::NativeBinding)`
-// target. `as _` is the rustc idiom for trait-only-for-method imports
-// but doesn't suppress the unused warning for non-trait types, so the
-// allow attribute is required here.
-#[allow(unused_imports)]
-use crate::NativeBinding;
 
 /// Monotonic-since-boot reference. Set once at chassis boot via
 /// [`init_substrate_start`]; producer-side hooks subtract from it to
