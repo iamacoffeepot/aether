@@ -275,7 +275,7 @@ pub trait Drainable: Send + Sync + 'static {
     /// Default no-op: mock fixtures don't have a real close cycle so
     /// they never need to signal. Idempotent — the slot only fires the
     /// first installed sender once; a re-install after close is a no-op.
-    fn set_close_done_tx(&self, _tx: crossbeam_channel::Sender<()>) {}
+    fn set_close_done_tx(&self, _tx: Sender<()>) {}
 
     /// Upcast helper for downcasting in tests. Production code doesn't
     /// reach for this.

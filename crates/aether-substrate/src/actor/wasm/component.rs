@@ -1235,11 +1235,7 @@ mod tests {
     fn send_propagates_in_flight_lineage_on_closure_branch() {
         use std::sync::Mutex;
 
-        type Captured = (
-            crate::mail::MailId,
-            crate::mail::MailId,
-            Option<crate::mail::MailId>,
-        );
+        type Captured = (MailId, MailId, Option<MailId>);
         let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
 
@@ -1272,8 +1268,8 @@ mod tests {
 
         // Inbound lineage: the chassis-driven tick chain we're "in"
         // when the wasm guest's on_tick handler fires its outbound.
-        let inbound_root = crate::mail::MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
-        let inbound_mail = crate::mail::MailId::new(
+        let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
+        let inbound_mail = MailId::new(
             MailboxId(aether_data::with_tag(
                 aether_data::tagged_id::Tag::Mailbox,
                 0x99,
@@ -1307,11 +1303,7 @@ mod tests {
     fn send_without_in_flight_mints_fresh_root_chain() {
         use std::sync::Mutex;
 
-        type Captured = (
-            crate::mail::MailId,
-            crate::mail::MailId,
-            Option<crate::mail::MailId>,
-        );
+        type Captured = (MailId, MailId, Option<MailId>);
         let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
 

@@ -307,7 +307,7 @@ mod tests {
 
     fn root(sender: u64, cid: u64) -> MailId {
         MailId {
-            sender: aether_data::MailboxId(sender),
+            sender: MailboxId(sender),
             correlation_id: cid,
         }
     }

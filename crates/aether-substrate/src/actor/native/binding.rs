@@ -914,8 +914,8 @@ mod tests {
             sender: ReplyTo::with_correlation(ReplyTarget::None, correlation),
             payload,
             count: 1,
-            mail_id: crate::mail::MailId::NONE,
-            root: crate::mail::MailId::NONE,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
             parent_mail: None,
         }
     }
