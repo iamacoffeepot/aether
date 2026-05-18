@@ -56,6 +56,7 @@ impl FfiActor for Caller {
         Ok(Caller { next_seq: 0 })
     }
 
+    //noinspection DuplicatedCode
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         ctx.actor::<InputCapability>().send(&SubscribeInput {
             kind: Tick::ID,

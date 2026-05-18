@@ -78,6 +78,7 @@ mod wasm {
             // SAFETY: the wasm linear memory is single-threaded;
             // the static is reachable only from this actor's code.
             let map_cell = unsafe { &*self.inner.get() };
+            //noinspection DuplicatedCode
             let cell_ptr: *const RefCell<T> = {
                 let mut map = map_cell.borrow_mut();
                 let entry = map
@@ -102,6 +103,7 @@ mod wasm {
             T: Default + 'static,
         {
             let map_cell = unsafe { &*self.inner.get() };
+            //noinspection DuplicatedCode
             let cell_ptr: *const RefCell<T> = {
                 let mut map = map_cell.borrow_mut();
                 let entry = map
@@ -165,6 +167,7 @@ mod native_impl {
         where
             T: Default + Send + 'static,
         {
+            //noinspection DuplicatedCode
             let cell_ptr: *const RefCell<T> = {
                 let mut map = self.by_type.borrow_mut();
                 let entry = map
@@ -192,6 +195,7 @@ mod native_impl {
         where
             T: Default + Send + 'static,
         {
+            //noinspection DuplicatedCode
             let cell_ptr: *const RefCell<T> = {
                 let mut map = self.by_type.borrow_mut();
                 let entry = map

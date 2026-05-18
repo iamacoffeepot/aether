@@ -108,6 +108,7 @@ impl<A> InheritCtx<A> {
 }
 
 impl<A: Actor> Sender for InheritCtx<A> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -124,6 +125,7 @@ impl<A: Actor> Sender for InheritCtx<A> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -144,6 +146,7 @@ impl<A: Actor> Sender for InheritCtx<A> {
         );
     }
 
+    //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
@@ -158,6 +161,7 @@ impl<A: Actor> Sender for InheritCtx<A> {
 }
 
 impl<A: Actor> MailSender for InheritCtx<A> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -166,6 +170,7 @@ impl<A: Actor> MailSender for InheritCtx<A> {
         <Self as Sender>::send::<R, K>(self, payload);
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
@@ -258,6 +263,7 @@ impl<A: Actor> Sender for RootCtx<A> {
 }
 
 impl<A: Actor> MailSender for RootCtx<A> {
+    //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -266,6 +272,7 @@ impl<A: Actor> MailSender for RootCtx<A> {
         <Self as Sender>::send::<R, K>(self, payload);
     }
 
+    //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,

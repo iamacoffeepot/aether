@@ -60,6 +60,7 @@ impl Vec2 {
         libm::sqrtf(self.length_squared())
     }
 
+    //noinspection DuplicatedCode
     #[inline]
     #[must_use]
     pub fn normalize(self) -> Self {
@@ -139,6 +140,7 @@ impl Vec3 {
         libm::sqrtf(self.length_squared())
     }
 
+    //noinspection DuplicatedCode
     /// Returns `self / length(self)`. Zero-length input returns
     /// `Self::ZERO` rather than NaN; callers that need to distinguish
     /// must check length themselves.
@@ -268,6 +270,7 @@ impl Vec4 {
         libm::sqrtf(self.length_squared())
     }
 
+    //noinspection DuplicatedCode
     #[inline]
     #[must_use]
     pub fn normalize(self) -> Self {

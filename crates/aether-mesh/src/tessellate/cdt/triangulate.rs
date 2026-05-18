@@ -324,6 +324,7 @@ mod tests {
     #[test]
     fn square_with_square_hole_triangulates_at_topological_minimum() {
         // Outer 2x2 square (CCW around +z), inner 1x1 hole (CW around +z).
+        //noinspection DuplicatedCode
         let vertices = vec![
             pt(0.0, 0.0, 0.0), // 0: outer BL
             pt(2.0, 0.0, 0.0), // 1: outer BR
@@ -360,6 +361,7 @@ mod tests {
 
     #[test]
     fn cdt_is_deterministic_across_runs() {
+        //noinspection DuplicatedCode
         let vertices = vec![
             pt(0.0, 0.0, 0.0),
             pt(2.0, 0.0, 0.0),

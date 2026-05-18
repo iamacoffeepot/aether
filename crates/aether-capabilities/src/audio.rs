@@ -1025,6 +1025,7 @@ mod native {
         #[test]
         fn capability_boots_and_registers_mailbox() {
             let (registry, mailer) = fresh_substrate();
+            //noinspection DuplicatedCode
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<AudioCapability>(AudioConfig {
                     disabled: true,
@@ -1048,6 +1049,7 @@ mod native {
                 aether_substrate::mail::registry::noop_handler(),
             );
 
+            //noinspection DuplicatedCode
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<AudioCapability>(AudioConfig {
                     disabled: true,

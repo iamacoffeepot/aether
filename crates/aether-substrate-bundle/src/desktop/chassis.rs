@@ -151,6 +151,7 @@ impl DesktopEnv {
     }
 }
 
+//noinspection DuplicatedCode
 /// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
 /// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
 /// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
@@ -263,6 +264,7 @@ impl DesktopChassis {
         // capabilities' boot tracing routes through the log capture;
         // render last so it claims its mailboxes after every other
         // chassis cap.
+        //noinspection DuplicatedCode
         let mut builder = Builder::<Self>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
             .with_workers(workers)

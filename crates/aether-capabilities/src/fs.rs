@@ -324,6 +324,7 @@ impl FsMailboxExt for FfiActorMailbox<FsCapability> {
             path: path.into(),
         });
     }
+    //noinspection DuplicatedCode
     fn write(&self, namespace: &str, path: &str, bytes: &[u8]) {
         self.send(&Write {
             namespace: namespace.into(),
@@ -353,6 +354,7 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
             path: path.into(),
         });
     }
+    //noinspection DuplicatedCode
     fn write(&self, namespace: &str, path: &str, bytes: &[u8]) {
         self.send(&Write {
             namespace: namespace.into(),

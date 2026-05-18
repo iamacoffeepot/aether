@@ -702,6 +702,7 @@ mod tests {
         // into the forwarded [`Envelope`] without `to_vec()` /
         // `to_owned()` clones.
         Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            //noinspection DuplicatedCode
             let _ = tx.send(Envelope {
                 kind: dispatch.kind,
                 kind_name: dispatch.kind_name,

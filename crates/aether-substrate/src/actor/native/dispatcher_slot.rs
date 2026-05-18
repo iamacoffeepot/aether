@@ -210,6 +210,7 @@ where
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
+                    //noinspection DuplicatedCode
                     if actor
                         .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
                         .is_none()

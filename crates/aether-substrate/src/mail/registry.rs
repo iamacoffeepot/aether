@@ -145,6 +145,7 @@ pub struct MailDispatch<'a> {
 /// wants to enqueue must first clone. `OwnedDispatch` owns its
 /// payload + `kind_name` so it can be moved cross-thread directly.
 #[derive(Clone, Debug)]
+//noinspection DuplicatedCode
 pub struct OwnedDispatch {
     /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
     pub kind: KindId,

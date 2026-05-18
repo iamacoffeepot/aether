@@ -536,6 +536,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 |error| CaptureFrameResult::Err { error },
                             );
                             for mail in req.after_mails {
+                                //noinspection DuplicatedCode
                                 self.queue.push(mail);
                             }
                             self.outbound.send_reply(req.reply_to, &result);

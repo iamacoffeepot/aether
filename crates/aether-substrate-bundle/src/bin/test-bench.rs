@@ -227,6 +227,7 @@ fn run_frame(
             let result = pre_failed.map_or_else(
                 || match gpu.render_and_capture() {
                     Ok(png) => CaptureFrameResult::Ok { png },
+                    //noinspection DuplicatedCode
                     Err(error) => CaptureFrameResult::Err { error },
                 },
                 |error| CaptureFrameResult::Err { error },

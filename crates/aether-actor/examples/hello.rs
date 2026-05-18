@@ -81,6 +81,7 @@ impl FfiActor for Hello {
         })
     }
 
+    //noinspection DuplicatedCode
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         ctx.actor::<InputCapability>().send(&SubscribeInput {
             kind: Tick::ID,

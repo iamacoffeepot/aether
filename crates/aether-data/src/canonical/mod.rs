@@ -113,6 +113,7 @@ mod tests {
     /// the three-variant Unit/Tuple/Struct enum exercised by the all-variants
     /// round-trip test.
     fn result_enum_shape() -> SchemaShape {
+        //noinspection DuplicatedCode
         SchemaShape::Enum {
             variants: vec![
                 VariantShape::Unit { discriminant: 0 },

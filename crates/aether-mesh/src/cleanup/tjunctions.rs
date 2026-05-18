@@ -47,6 +47,7 @@ impl IndexedMesh {
             let mut edges: HashSet<(VertexId, VertexId)> = HashSet::new();
             for poly in &polygons {
                 let n = poly.vertices.len();
+                //noinspection DuplicatedCode
                 for i in 0..n {
                     let a = poly.vertices[i];
                     let b = poly.vertices[(i + 1) % n];
