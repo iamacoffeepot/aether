@@ -203,36 +203,7 @@ fn process_bucket(
 fn boundary_edges_after_twin_cancellation(
     directed: &HashMap<(VertexId, VertexId), u32>,
 ) -> Vec<(VertexId, VertexId)> {
-    let mut edges = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
-    keys.sort_unstable();
-
-    //noinspection DuplicatedCode
-    for (a, b) in keys {
-        let canonical = if a < b { (a, b) } else { (b, a) };
-        if !seen.insert(canonical) {
-            continue;
-        }
-
-        let forward = directed.get(&(a, b)).copied().unwrap_or(0);
-        let reverse = directed.get(&(b, a)).copied().unwrap_or(0);
-        match forward.cmp(&reverse) {
-            std::cmp::Ordering::Greater => {
-                for _ in 0..(forward - reverse) {
-                    edges.push((a, b));
-                }
-            }
-            std::cmp::Ordering::Less => {
-                for _ in 0..(reverse - forward) {
-                    edges.push((b, a));
-                }
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-
-    edges
+    super::twin_edges::surviving_directed_edges(directed)
 }
 
 /// Remove "spurious" interior vertices from a boundary loop that have no
