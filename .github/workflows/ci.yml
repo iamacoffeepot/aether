@@ -167,6 +167,91 @@ jobs:
         env:
           AETHER_REQUIRE_RUNTIME: "1"
 
+  # Qodana scan folded in from .github/workflows/qodana.yml so the
+  # ci-pass aggregator can needs: it directly (iamacoffeepot/aether#941).
+  # No `needs: changes` gate — Qodana scans the whole workspace and we
+  # want it to fire on docs/workflow-only PRs too. The cache cycle is
+  # split out of qodana-action so we can interleave an ownership chown
+  # between the root-written scan and the tar save (qodana-action's
+  # built-in save runs inside its own step, before any post-scan step
+  # we could add, so we can't fix the ownership in time without taking
+  # over the save side).
+  qodana:
+    name: Qodana scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Restore Qodana cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/qodana/caches
+          key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            qodana-2026.1-${{ github.ref }}-
+            qodana-2026.1-
+
+      - name: Qodana scan
+        uses: JetBrains/qodana-action@v2026.1
+        with:
+          # -u root forwards through `qodana scan` to the underlying
+          # `docker run`, keeping the container's design-default user.
+          # The qodana-action's wrapper otherwise passes `-u $(id -u)`
+          # to preserve the runner user's ownership of the workspace
+          # dir — but that flips the container to non-root, and the
+          # baked /usr/local/cargo (registry + global-cache) is
+          # root-owned, so cargo metadata perm-denies and Qodana
+          # leaves the entire workspace unanalysed. Running as root
+          # inside the container is the documented default — see
+          # https://www.jetbrains.com/help/qodana/docker-image-configuration.html
+          # § "Run as a non-root user". The CARGO_HOME override on
+          # the prior approach (iamacoffeepot/aether#911) is now
+          # unnecessary.
+          #
+          # --fail-threshold 0 pins the action to fail on any finding
+          # instead of relying on the action's default threshold,
+          # which could shift across version bumps
+          # (iamacoffeepot/aether#941).
+          args: --linter qodana-rust -u root --fail-threshold 0
+          # We own restore/save (steps above + below); qodana-action's
+          # built-in cache save runs root-owned and trips tar exit 2.
+          use-caches: false
+          # Upload SARIF + qodana.sarif.json as a workflow artifact
+          # ('qodana-report') so triagers can grab findings without
+          # depending on the JB web dashboard.
+          upload-result: true
+        env:
+          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
+
+      - name: Reclaim qodana cache ownership for tar
+        # Qodana ran as root in the container; new cache files inherit
+        # uid 0 on the bind-mount. The save step below runs as the
+        # runner user (uid 1001) and would tar-exit-2 on those files.
+        # Chown the tree back so save can read everything.
+        #
+        # `if: always()` so the chown still runs when qodana itself
+        # exits non-zero on findings. `|| true` because the cache dir
+        # may not exist at all if the scan crashed before populating.
+        if: always()
+        run: |
+          if [ -d "${RUNNER_TEMP}/qodana/caches" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/qodana/caches" || true
+          fi
+
+      - name: Save Qodana cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/qodana/caches
+          key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
+
   # Desktop chassis tests run the full OS matrix because winit event
   # loops, wgpu driver init, and platform-specific frame capture are
   # the only places per-OS coverage catches real bugs. Linux is covered
@@ -198,7 +283,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, clippy, docs, test, desktop ]
+    needs: [ changes, fmt, clippy, docs, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -209,6 +294,7 @@ jobs:
           echo "docs:    ${{ needs.docs.result }}"
           echo "test:    ${{ needs.test.result }}"
           echo "desktop: ${{ needs.desktop.result }}"
+          echo "qodana:  ${{ needs.qodana.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
@@ -216,4 +302,5 @@ jobs:
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.desktop.result }}" == "success" || "${{ needs.desktop.result }}" == "skipped" ]] || fail=1
+          [[ "${{ needs.qodana.result }}"  == "success" ]] || fail=1
           exit $fail
