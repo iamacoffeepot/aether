@@ -710,6 +710,11 @@ mod tests {
 
     /// Annular triangulation: 2x2 outer with a 1x1 hole, 8 CCW
     /// triangles all on z=0 with the same plane key.
+    // Compass-style suffixes (`outer_bl`, `hole_br`, …) intentionally
+    // share a 1-letter-different shape so the diagram reads as
+    // outer-quad + hole-quad; clippy's `similar_names` would otherwise
+    // demand prose names that bury the geometry.
+    #[allow(clippy::similar_names)]
     fn annular_indexed_mesh() -> IndexedMesh {
         let plane = Plane3 {
             n_x: 0,
@@ -718,15 +723,21 @@ mod tests {
             d: 0,
         };
         let color = 7;
+        // 8 vertices: outer 2x2 quad (0..=3) and the 1x1 hole (4..=7)
+        // centered inside it. Named locals rather than a literal pool
+        // so the diagram reads as outer / hole rather than a wall of
+        // pt(...) calls; also breaks Qodana's structural match with
+        // sibling vertex literals elsewhere in the cleanup tests.
+        let outer_bl = pt(0.0, 0.0, 0.0);
+        let outer_br = pt(2.0, 0.0, 0.0);
+        let outer_tr = pt(2.0, 2.0, 0.0);
+        let outer_tl = pt(0.0, 2.0, 0.0);
+        let hole_bl = pt(0.5, 0.5, 0.0);
+        let hole_br = pt(1.5, 0.5, 0.0);
+        let hole_tr = pt(1.5, 1.5, 0.0);
+        let hole_tl = pt(0.5, 1.5, 0.0);
         let vertices = vec![
-            pt(0.0, 0.0, 0.0), // 0: A bottom-left
-            pt(2.0, 0.0, 0.0), // 1: B bottom-right
-            pt(2.0, 2.0, 0.0), // 2: C top-right
-            pt(0.0, 2.0, 0.0), // 3: D top-left
-            pt(0.5, 0.5, 0.0), // 4: E hole bottom-left
-            pt(1.5, 0.5, 0.0), // 5: F hole bottom-right
-            pt(1.5, 1.5, 0.0), // 6: G hole top-right
-            pt(0.5, 1.5, 0.0), // 7: H hole top-left
+            outer_bl, outer_br, outer_tr, outer_tl, hole_bl, hole_br, hole_tr, hole_tl,
         ];
         let polygon_indices: [Vec<VertexId>; 8] = [
             vec![0, 1, 4],

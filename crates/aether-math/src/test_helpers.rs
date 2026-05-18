@@ -8,17 +8,22 @@
 
 use crate::{Vec3, Vec4};
 
-/// Per-component absolute-difference check for a `Vec4`. Returns
-/// `true` iff every component differs from its counterpart by less
-/// than `eps`.
+/// Scalar `|a - b| < eps` predicate. The per-component primitive both
+/// vector wrappers below feed each axis through.
+fn near(a: f32, b: f32, eps: f32) -> bool {
+    (a - b).abs() < eps
+}
+
+/// `true` iff every `Vec4` component pair is within `eps`.
 pub fn approx_eq_vec4(a: Vec4, b: Vec4, eps: f32) -> bool {
-    (a.x - b.x).abs() < eps
-        && (a.y - b.y).abs() < eps
-        && (a.z - b.z).abs() < eps
-        && (a.w - b.w).abs() < eps
+    [(a.x, b.x), (a.y, b.y), (a.z, b.z), (a.w, b.w)]
+        .iter()
+        .all(|&(p, q)| near(p, q, eps))
 }
 
 /// `Vec3` counterpart of [`approx_eq_vec4`].
 pub fn approx_eq_vec3(a: Vec3, b: Vec3, eps: f32) -> bool {
-    (a.x - b.x).abs() < eps && (a.y - b.y).abs() < eps && (a.z - b.z).abs() < eps
+    [(a.x, b.x), (a.y, b.y), (a.z, b.z)]
+        .iter()
+        .all(|&(p, q)| near(p, q, eps))
 }

@@ -42,7 +42,7 @@ use aether_data::tagged_id;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::Value;
 
-use crate::cast::{NON_CAST_VARIANTS_MSG, align_of_primitive};
+use crate::cast::{align_of_primitive, non_cast_variant_error};
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -650,6 +650,11 @@ fn encode_field_value(
     ty: &SchemaType,
     value: &Value,
 ) -> Result<usize, EncodeError> {
+    // Non-cast variants share the same error message across encode +
+    // decode; `cast::non_cast_variant_error` owns the classification.
+    if let Some(msg) = non_cast_variant_error(ty) {
+        return Err(EncodeError::UnsupportedSchema(msg));
+    }
     match ty {
         SchemaType::Scalar(p) => {
             let a = align_of_primitive(*p);
@@ -716,16 +721,10 @@ fn encode_field_value(
             out.extend_from_slice(&id.to_le_bytes());
             Ok(8)
         }
-        //noinspection DuplicatedCode
-        SchemaType::Bool
-        | SchemaType::String
-        | SchemaType::Bytes
-        | SchemaType::Option(_)
-        | SchemaType::Vec(_)
-        | SchemaType::Enum { .. }
-        | SchemaType::Unit
-        | SchemaType::Ref(_)
-        | SchemaType::Map { .. } => Err(EncodeError::UnsupportedSchema(NON_CAST_VARIANTS_MSG)),
+        _ => unreachable!(
+            "non-cast SchemaType variants returned early via non_cast_variant_error; \
+             a new cast-eligible variant must be classified there and added here"
+        ),
     }
 }
 
