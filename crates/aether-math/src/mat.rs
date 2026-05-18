@@ -361,6 +361,6 @@ mod tests {
 
     #[test]
     fn repr_c_size() {
-        assert_eq!(core::mem::size_of::<Mat4>(), 64);
+        assert_eq!(size_of::<Mat4>(), 64);
     }
 }

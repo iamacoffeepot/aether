@@ -1507,8 +1507,7 @@ mod tests {
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0)
-            .expect("test setup: encode tagged mailbox id");
+        let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let bytes = encode_schema(&json!({ "mailbox": s }), &schema)
             .expect("test setup: encode typed-id postcard field");
         let mut expected = Vec::new();
@@ -1541,11 +1540,9 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let knd_string = aether_data::tagged_id::encode(aether_data::with_tag(
-            aether_data::Tag::Kind,
-            0xdead_beef,
-        ))
-        .expect("test setup: encode wrongly-tagged kind id");
+        let knd_string =
+            tagged_id::encode(aether_data::with_tag(aether_data::Tag::Kind, 0xdead_beef))
+                .expect("test setup: encode wrongly-tagged kind id");
         let err = encode_schema(&json!({ "mailbox": knd_string }), &schema)
             .expect_err("wrong tag must surface OutOfRange");
         assert!(matches!(err, EncodeError::OutOfRange { .. }));
@@ -1565,8 +1562,7 @@ mod tests {
             },
         ]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0)
-            .expect("test setup: encode tagged mailbox id");
+        let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema)
             .expect("test setup: encode typed-id cast field");
         assert_eq!(bytes.len(), 16);

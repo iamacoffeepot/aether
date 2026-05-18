@@ -465,9 +465,9 @@ mod tests {
 
     #[test]
     fn repr_c_layout() {
-        assert_eq!(core::mem::size_of::<Vec2>(), 8);
-        assert_eq!(core::mem::size_of::<Vec3>(), 12);
-        assert_eq!(core::mem::size_of::<Vec4>(), 16);
-        assert_eq!(core::mem::align_of::<Vec4>(), 4);
+        assert_eq!(size_of::<Vec2>(), 8);
+        assert_eq!(size_of::<Vec3>(), 12);
+        assert_eq!(size_of::<Vec4>(), 16);
+        assert_eq!(align_of::<Vec4>(), 4);
     }
 }

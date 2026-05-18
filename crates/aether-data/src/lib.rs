@@ -179,7 +179,7 @@ impl<T: CastEligible, const N: usize> CastEligible for [T; N] {
 impl CastEligible for alloc::string::String {
     const ELIGIBLE: bool = false;
 }
-impl<T> CastEligible for alloc::vec::Vec<T> {
+impl<T> CastEligible for Vec<T> {
     const ELIGIBLE: bool = false;
 }
 impl<T> CastEligible for Option<T> {
@@ -487,7 +487,7 @@ pub mod __derive_runtime {
     /// cast kinds aren't poisoned by a trait they can't satisfy.
     #[must_use]
     pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<T> {
-        if bytes.len() != core::mem::size_of::<T>() {
+        if bytes.len() != size_of::<T>() {
             return None;
         }
         Some(bytemuck::pod_read_unaligned(bytes))
@@ -522,14 +522,14 @@ pub mod __derive_runtime {
     /// call without the user crate needing `bytemuck` in scope. The
     /// `NoUninit` bound lives on the helper so non-cast kinds aren't
     /// poisoned by a trait their `#[repr(C)]`-less layout can't satisfy.
-    pub fn encode_cast<T: bytemuck::NoUninit>(value: &T) -> alloc::vec::Vec<u8> {
+    pub fn encode_cast<T: bytemuck::NoUninit>(value: &T) -> Vec<u8> {
         ::bytemuck::bytes_of(value).to_vec()
     }
 
     /// Postcard-shape encode helper. Mirror of `decode_postcard`. The
     /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
     /// independent of `serde`.
-    pub fn encode_postcard<T: serde::Serialize>(value: &T) -> alloc::vec::Vec<u8> {
+    pub fn encode_postcard<T: serde::Serialize>(value: &T) -> Vec<u8> {
         ::postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
     }
 }
@@ -598,9 +598,9 @@ pub fn encode_slice<T: Kind + bytemuck::NoUninit>(items: &[T]) -> Vec<u8> {
 /// Decode a single POD value. The input must match `size_of::<T>()`
 /// exactly and meet `T`'s alignment requirement.
 pub fn decode<T: Kind + bytemuck::AnyBitPattern + Copy>(bytes: &[u8]) -> Result<T, DecodeError> {
-    if bytes.len() != core::mem::size_of::<T>() {
+    if bytes.len() != size_of::<T>() {
         return Err(DecodeError::SizeMismatch {
-            expected: core::mem::size_of::<T>(),
+            expected: size_of::<T>(),
             actual: bytes.len(),
         });
     }

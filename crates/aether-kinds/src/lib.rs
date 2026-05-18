@@ -186,7 +186,7 @@ pub struct DrawTriangle {
 /// has one canonical source. `repr(C)` + `Pod` + `[Vertex; 3]` packs
 /// without padding, so `size_of::<DrawTriangle>()` is exactly the
 /// per-triangle wire footprint.
-pub const DRAW_TRIANGLE_BYTES: usize = core::mem::size_of::<DrawTriangle>();
+pub const DRAW_TRIANGLE_BYTES: usize = size_of::<DrawTriangle>();
 
 /// Camera state: column-major `view_proj` matrix (world → clip). The
 /// desktop chassis's `camera` sink writes the latest payload into the

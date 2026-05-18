@@ -138,7 +138,7 @@ pub struct BatchedTraceEvents {
 )]
 #[kind(name = "aether.trace.describe_tree")]
 pub struct DescribeTree {
-    pub root: aether_data::MailId,
+    pub root: MailId,
 }
 
 /// Issue 718: reply to [`DescribeTree`]. `Ok` carries the root's
@@ -152,12 +152,12 @@ pub struct DescribeTree {
 #[kind(name = "aether.trace.describe_tree_result")]
 pub enum DescribeTreeResult {
     Ok {
-        root: aether_data::MailId,
+        root: MailId,
         in_flight: u32,
         mails: Vec<MailNodeWire>,
     },
     Err {
-        not_found: aether_data::MailId,
+        not_found: MailId,
     },
 }
 
@@ -336,5 +336,5 @@ pub enum DescribeWindowResult {
 )]
 #[kind(name = "aether.trace.settled")]
 pub struct Settled {
-    pub root: aether_data::MailId,
+    pub root: MailId,
 }

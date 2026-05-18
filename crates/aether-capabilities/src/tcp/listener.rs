@@ -152,7 +152,7 @@ mod listener_native {
             // connect timeout so a misconfigured listener (port
             // unreachable) doesn't hang the close path.
             let addr_str = format!("127.0.0.1:{}", self.local_port);
-            if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+            if let Ok(addr) = addr_str.parse::<SocketAddr>() {
                 let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
             }
             if let Some(thread) = self.accept_thread.take() {

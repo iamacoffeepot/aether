@@ -196,6 +196,6 @@ mod tests {
 
     #[test]
     fn repr_c_size() {
-        assert_eq!(core::mem::size_of::<Quat>(), 16);
+        assert_eq!(size_of::<Quat>(), 16);
     }
 }

@@ -591,7 +591,7 @@ mod native {
             (mailer, rx)
         }
 
-        fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
+        fn decode_reply<K: Kind + serde::de::DeserializeOwned>(
             rx: &std::sync::mpsc::Receiver<EgressEvent>,
         ) -> K {
             let event = rx
