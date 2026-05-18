@@ -6,7 +6,7 @@
 //! [`MailBridge`] — outbound-mail FFI bridge.
 //!
 //! ZST whose inherent methods forward to the matching `extern "C"`
-//! host fns in [`crate::ffi::raw`]. `send_mail` pushes a typed payload
+//! host fns in [`super::super::raw`]. `send_mail` pushes a typed payload
 //! at a recipient mailbox; `reply_mail` routes to the originator of
 //! the mail currently being dispatched; `prev_correlation` reads the
 //! correlation id the host minted for the most-recent `send_mail`.

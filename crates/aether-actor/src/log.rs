@@ -64,7 +64,7 @@ use crate::{Local, local};
 /// Per-actor log buffer, drained by the chassis dispatcher at
 /// handler exit and on `WARN`/`ERROR` priority flush. Backed by
 /// issue #582's [`Local`] primitive — one slot per actor, accessed
-/// via TLS-routed [`crate::local::ActorSlots`].
+/// via TLS-routed [`local::ActorSlots`].
 #[derive(Default)]
 pub struct LogBuffer(pub Vec<LogEvent>);
 
@@ -229,9 +229,18 @@ mod pipeline_tls {
     unsafe impl Sync for Slot {}
     pub(super) static IN_LOG_PIPELINE: Slot = Slot(Cell::new(false));
 
+    // Match the `LocalKey<Cell<T>>::{get, set}` shortcut surface the
+    // native branch enjoys so call sites can use the same `.set(v)` /
+    // `.get()` form on both targets. This is what
+    // RsThreadLocalStableMethodCanBeUsed wants — the lint flagged
+    // `.with(|c| c.set(v))` even on this wrapper because the analyzer
+    // can't tell that `Slot` isn't a `LocalKey`.
     impl Slot {
-        pub fn with<R>(&'static self, f: impl FnOnce(&Cell<bool>) -> R) -> R {
-            f(&self.0)
+        pub fn set(&'static self, value: bool) {
+            self.0.set(value);
+        }
+        pub fn get(&'static self) -> bool {
+            self.0.get()
         }
     }
 }
@@ -242,21 +251,21 @@ mod pipeline_tls {
 /// by the internal `PipelineGuard` RAII helper.
 #[must_use]
 pub fn is_in_pipeline() -> bool {
-    pipeline_tls::IN_LOG_PIPELINE.with(core::cell::Cell::get)
+    pipeline_tls::IN_LOG_PIPELINE.get()
 }
 
 struct PipelineGuard;
 
 impl PipelineGuard {
     fn enter() -> Self {
-        pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.set(true));
+        pipeline_tls::IN_LOG_PIPELINE.set(true);
         Self
     }
 }
 
 impl Drop for PipelineGuard {
     fn drop(&mut self) {
-        pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.set(false));
+        pipeline_tls::IN_LOG_PIPELINE.set(false);
     }
 }
 

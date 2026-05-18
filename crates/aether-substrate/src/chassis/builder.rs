@@ -441,7 +441,14 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // frame loop. Free-running caps take the regular drop-on-
         // shutdown claim. Both share the same dispatcher trampoline
         // shape apart from the post-dispatch decrement.
-        let claim_result = if A::FRAME_BARRIER {
+        //
+        // The const is read through a local binding rather than used
+        // directly in the `if` so Qodana's `RsConstantConditionIf`
+        // inspector doesn't evaluate it against the trait default
+        // (false) and report "always false" — concrete `impl Actor`
+        // for frame-bound caps overrides it to `true`.
+        let frame_bound = A::FRAME_BARRIER;
+        let claim_result = if frame_bound {
             ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
                 (
                     claim.id,

@@ -209,7 +209,6 @@ dependencies = [
  "aether-actor",
  "aether-data",
  "aether-kinds",
- "anyhow",
  "bytemuck",
  "cpal",
  "crossbeam-channel",

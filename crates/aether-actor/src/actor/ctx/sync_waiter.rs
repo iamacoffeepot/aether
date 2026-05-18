@@ -13,7 +13,7 @@
 //! ships the same return-code contract: `>= 0` = bytes written,
 //! `-1` = timeout, `-2` = payload exceeds buffer, `-3` = host tore the
 //! actor down mid-wait. The pure rc → `Result<K, E>` mapping lives in
-//! [`crate::mail::sync::decode_wait_reply`] for callers that want to
+//! [`decode_wait_reply`] for callers that want to
 //! reuse the sentinel decoding without going through the trait.
 
 use alloc::vec;
