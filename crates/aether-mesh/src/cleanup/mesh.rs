@@ -29,6 +29,19 @@ pub struct IndexedPolygon {
     pub color: u32,
 }
 
+impl IndexedPolygon {
+    /// Iterate the polygon's directed edges as `(vertices[i], vertices[(i+1) % n])`
+    /// pairs in vertex order. Shared by the twin-edge scans
+    /// ([`super::invariants::find_twin_edges`],
+    /// [`super::invariants::find_unrepaired_tjunctions`]) and by the
+    /// directed-edge multiplicity build in [`super::merge`] so the
+    /// wrap-around `(i + 1) % n` indexing is written exactly once.
+    pub(super) fn directed_edges(&self) -> impl Iterator<Item = (VertexId, VertexId)> + '_ {
+        let n = self.vertices.len();
+        (0..n).map(move |i| (self.vertices[i], self.vertices[(i + 1) % n]))
+    }
+}
+
 impl IndexedMesh {
     /// Convert back to the owned-vertex polygon form (n-gon). The entry
     /// point for the polygon-domain public API per ADR-0057 — used by
