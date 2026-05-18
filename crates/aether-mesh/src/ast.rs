@@ -85,25 +85,25 @@ pub enum Node {
     Composition(Vec<Self>),
     Translate {
         offset: Vec3,
-        child: std::boxed::Box<Self>,
+        child: Box<Self>,
     },
     Rotate {
         axis: Vec3,
         angle: f32,
-        child: std::boxed::Box<Self>,
+        child: Box<Self>,
     },
     Scale {
         factor: Vec3,
-        child: std::boxed::Box<Self>,
+        child: Box<Self>,
     },
     Mirror {
         axis: Axis,
-        child: std::boxed::Box<Self>,
+        child: Box<Self>,
     },
     Array {
         count: u32,
         spacing: Vec3,
-        child: std::boxed::Box<Self>,
+        child: Box<Self>,
     },
 }
 

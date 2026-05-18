@@ -408,7 +408,7 @@ fn parse_translate(
     check_no_extra_keywords("translate", keywords, &[])?;
     Ok(Node::Translate {
         offset: as_vec3("translate", positional[0])?,
-        child: std::boxed::Box::new(parse_node(positional[1])?),
+        child: Box::new(parse_node(positional[1])?),
     })
 }
 
@@ -418,7 +418,7 @@ fn parse_rotate(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<
     Ok(Node::Rotate {
         axis: as_vec3("rotate", positional[0])?,
         angle: as_f32(positional[1])?,
-        child: std::boxed::Box::new(parse_node(positional[2])?),
+        child: Box::new(parse_node(positional[2])?),
     })
 }
 
@@ -427,7 +427,7 @@ fn parse_scale(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
     check_no_extra_keywords("scale", keywords, &[])?;
     Ok(Node::Scale {
         factor: as_vec3("scale", positional[0])?,
-        child: std::boxed::Box::new(parse_node(positional[1])?),
+        child: Box::new(parse_node(positional[1])?),
     })
 }
 
@@ -441,7 +441,7 @@ fn parse_mirror(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<
         Axis::from_symbol(axis_sym).ok_or_else(|| ParseError::InvalidAxis(axis_sym.to_string()))?;
     Ok(Node::Mirror {
         axis,
-        child: std::boxed::Box::new(parse_node(positional[1])?),
+        child: Box::new(parse_node(positional[1])?),
     })
 }
 
@@ -451,7 +451,7 @@ fn parse_array(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
     Ok(Node::Array {
         count: as_u32(positional[0])?,
         spacing: as_vec3("array", positional[1])?,
-        child: std::boxed::Box::new(parse_node(positional[2])?),
+        child: Box::new(parse_node(positional[2])?),
     })
 }
 

@@ -304,8 +304,8 @@ impl TestBenchChassis {
         // bundle on the chassis's `ExportedHandles` map during `init`.
         // Embedders retrieve via `PassiveChassis::handle::<H>()` — no
         // `Arc<RenderCapability>` ever escapes the dispatcher thread.
-        let render_handles: aether_capabilities::RenderHandles =
-            passive.handle::<aether_capabilities::RenderHandles>().ok_or_else(|| {
+        let render_handles: RenderHandles =
+            passive.handle::<RenderHandles>().ok_or_else(|| {
                 anyhow::anyhow!(
                     "TestBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before TestBench builds",
                 )

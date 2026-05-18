@@ -341,7 +341,7 @@ mod tests {
         let mesh = IndexedMesh { vertices, polygons };
         let repaired = mesh.repair_tjunctions();
         let target = &repaired.polygons[1].vertices;
-        let mut counts = std::collections::HashMap::new();
+        let mut counts = HashMap::new();
         for &v in target {
             *counts.entry(v).or_insert(0) += 1;
         }
@@ -554,7 +554,7 @@ mod tests {
 
         // Every emitted polygon must be simple (no repeated vertex).
         for p in &repaired.polygons {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = HashSet::new();
             for &v in &p.vertices {
                 assert!(
                     seen.insert(v),
