@@ -732,18 +732,13 @@ mod tests {
     fn cast_nested_struct_drawtriangle_layout() {
         // Mirror of the encoder test by the same name. The DrawTriangle
         // shape is the load-bearing cast-nested case in the codebase.
-        //noinspection DuplicatedCode
-        let vertex = SchemaType::Struct {
-            repr_c: true,
-            fields: vec![
-                scalar("x", Primitive::F32),
-                scalar("y", Primitive::F32),
-                scalar("r", Primitive::F32),
-                scalar("g", Primitive::F32),
-                scalar("b", Primitive::F32),
-            ]
-            .into(),
-        };
+        let vertex = cast_struct(vec![
+            scalar("x", Primitive::F32),
+            scalar("y", Primitive::F32),
+            scalar("r", Primitive::F32),
+            scalar("g", Primitive::F32),
+            scalar("b", Primitive::F32),
+        ]);
         let triangle = cast_struct(vec![NamedField {
             name: "verts".into(),
             ty: SchemaType::Array {
