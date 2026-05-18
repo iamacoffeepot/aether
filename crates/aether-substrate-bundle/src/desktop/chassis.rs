@@ -14,13 +14,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    AudioCapability, CaptureBackend, ComponentHostCapability, ComponentHostConfig, FsCapability,
-    HandleCapability, HttpCapability, InputCapability, InputConfig, LogCapability,
-    RenderCapability, RenderConfig, TcpCapability, UnsupportedTestBenchCapability,
+    AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig, LogCapability,
+    RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
     audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
-    trace::TraceObserverCapability,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -30,6 +27,7 @@ use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
+use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Just one variant today: a wake-up so the loop picks up a queued
@@ -260,38 +258,23 @@ impl DesktopChassis {
             boot_title,
         };
 
-        // Boot order is declaration order — log first so other
-        // capabilities' boot tracing routes through the log capture;
-        // render last so it claims its mailboxes after every other
-        // chassis cap.
-        //noinspection DuplicatedCode
-        let mut builder = Builder::<Self>::new(registry, Arc::clone(&mailer))
-            .with_aborter(aborter)
-            .with_workers(workers)
-            .with_actor::<HandleCapability>(())
-            .with_actor::<LogCapability>(())
-            .with_actor::<TraceObserverCapability>(())
-            .with_actor::<InputCapability>(input_config)
-            .with_actor::<ComponentHostCapability>(component_host_config)
-            .with_actor::<FsCapability>(namespace_roots)
-            .with_actor::<HttpCapability>(http)
-            .with_actor::<TcpCapability>(())
+        // Boot order is declaration order — `with_common_caps` runs
+        // log first so other capabilities' boot tracing routes
+        // through the log capture; render last so it claims its
+        // mailboxes after every other chassis cap.
+        let common = CommonBoot {
+            aborter,
+            workers,
+            input_config,
+            component_host_config,
+            namespace_roots,
+            http,
+        };
+        let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(());
-        // Issue 763 P2: boot the RPC server only when `AETHER_RPC_PORT`
-        // is set, mirroring the hub chassis. The substrate becomes an
-        // RPC server peer that a hub (or any client) connects out to.
-        if let Some(rpc_addr) = rpc_addr {
-            builder = builder.with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: rpc_addr.to_string(),
-                peer_kind: PeerKind::Substrate {
-                    engine_name: "aether-desktop".into(),
-                    engine_version: env!("CARGO_PKG_VERSION").into(),
-                    kinds: vec![],
-                },
-            });
-        }
+        let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         builder
             .with_log_drain::<LogCapability>()
             .driver(driver)

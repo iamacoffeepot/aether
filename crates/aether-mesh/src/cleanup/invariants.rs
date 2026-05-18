@@ -325,6 +325,26 @@ mod tests {
         }
     }
 
+    /// Build an `IndexedMesh` on the XY plane (z = 0, color = 0) from
+    /// a vertex pool and a list of polygon-vertex-index slices. Every
+    /// `IndexedMesh` fixture in this module shares the same per-polygon
+    /// `{ plane: xy_plane(), color: 0 }` boilerplate — hoisting it
+    /// here keeps each test reading as "what vertices and which
+    /// polygons" rather than that plus four lines of struct shell.
+    fn xy_mesh(vertices: Vec<Point3>, polygons: Vec<Vec<VertexId>>) -> IndexedMesh {
+        IndexedMesh {
+            vertices,
+            polygons: polygons
+                .into_iter()
+                .map(|verts| IndexedPolygon {
+                    vertices: verts,
+                    plane: xy_plane(),
+                    color: 0,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn empty_mesh_has_no_violations() {
         let mesh = IndexedMesh {
@@ -336,15 +356,10 @@ mod tests {
 
     #[test]
     fn single_triangle_has_no_twin_edges() {
-        //noinspection DuplicatedCode
-        let mesh = IndexedMesh {
-            vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            polygons: vec![IndexedPolygon {
-                vertices: vec![0, 1, 2],
-                plane: xy_plane(),
-                color: 0,
-            }],
-        };
+        let mesh = xy_mesh(
+            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
+            vec![vec![0, 1, 2]],
+        );
         assert!(find_twin_edges(&mesh).is_empty());
     }
 

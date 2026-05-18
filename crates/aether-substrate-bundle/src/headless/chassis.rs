@@ -17,12 +17,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    ComponentHostCapability, ComponentHostConfig, FsCapability, HandleCapability,
-    HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, InputCapability,
-    InputConfig, LogCapability, TcpCapability, UnsupportedTestBenchCapability, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf, trace::TraceObserverCapability,
+    ComponentHostConfig, HeadlessRenderCapability, HeadlessWindowCapability, InputConfig,
+    LogCapability, UnsupportedTestBenchCapability, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
@@ -31,6 +29,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
+use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -212,36 +211,21 @@ impl HeadlessChassis {
 
         // ADR-0071 phase B: io / http / log compose through the
         // chassis_builder `.with()` chain. Boot order is declaration
-        // order — log first so other capabilities' boot tracing routes
-        // through the log capture.
-        //noinspection DuplicatedCode
-        let mut builder = Builder::<Self>::new(registry, Arc::clone(&mailer))
-            .with_aborter(aborter)
-            .with_workers(workers)
-            .with_actor::<HandleCapability>(())
-            .with_actor::<LogCapability>(())
-            .with_actor::<TraceObserverCapability>(())
-            .with_actor::<InputCapability>(input_config)
-            .with_actor::<ComponentHostCapability>(component_host_config)
-            .with_actor::<FsCapability>(namespace_roots)
-            .with_actor::<HttpCapability>(http)
-            .with_actor::<TcpCapability>(())
+        // order — `with_common_caps` runs log first so other
+        // capabilities' boot tracing routes through the log capture.
+        let common = CommonBoot {
+            aborter,
+            workers,
+            input_config,
+            component_host_config,
+            namespace_roots,
+            http,
+        };
+        let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(());
-        // Issue 763 P2: boot the RPC server only when `AETHER_RPC_PORT`
-        // is set, mirroring the hub chassis. The substrate becomes an
-        // RPC server peer that a hub (or any client) connects out to.
-        if let Some(rpc_addr) = rpc_addr {
-            builder = builder.with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: rpc_addr.to_string(),
-                peer_kind: PeerKind::Substrate {
-                    engine_name: "aether-headless".into(),
-                    engine_version: env!("CARGO_PKG_VERSION").into(),
-                    kinds: vec![],
-                },
-            });
-        }
+        let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         builder
             .with_log_drain::<LogCapability>()
             .driver(driver)

@@ -848,7 +848,9 @@ fn oor(name: &str, ty: &str) -> EncodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{cast_struct, pending_ok_err_variants, postcard_struct, scalar};
+    use crate::test_fixtures::{
+        cast_struct, named, pending_ok_err_variants, postcard_struct, scalar,
+    };
     use aether_data::SchemaCell;
     use serde_json::json;
 
@@ -928,14 +930,13 @@ mod tests {
 
     #[test]
     fn cast_struct_fixed_array_field() {
-        //noinspection DuplicatedCode
-        let schema = cast_struct(vec![NamedField {
-            name: "xs".into(),
-            ty: SchemaType::Array {
+        let schema = cast_struct(vec![named(
+            "xs",
+            SchemaType::Array {
                 element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
                 len: 4,
             },
-        }]);
+        )]);
         let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema)
             .expect("test setup: encode fixed array");
         assert_eq!(bytes, vec![1, 2, 3, 4]);

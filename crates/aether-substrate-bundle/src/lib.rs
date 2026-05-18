@@ -24,6 +24,7 @@
 //! `aether-substrate` — depend on that directly when you don't need
 //! chassis surface.
 
+mod chassis_common;
 pub mod desktop;
 pub mod headless;
 pub mod hub;

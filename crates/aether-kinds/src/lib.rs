@@ -1033,6 +1033,19 @@ mod control_plane {
         Err { error: String },
     }
 
+    /// Build a [`CaptureFrameResult`] from the raw GPU `render_and_capture`
+    /// result shape. Every capture handler in `aether-substrate-bundle`
+    /// (test-bench inline, in-process bench, desktop driver) needs this
+    /// same `Ok(png) → Ok { png }` / `Err(error) → Err { error }` flip.
+    impl From<Result<Vec<u8>, String>> for CaptureFrameResult {
+        fn from(result: Result<Vec<u8>, String>) -> Self {
+            match result {
+                Ok(png) => Self::Ok { png },
+                Err(error) => Self::Err { error },
+            }
+        }
+    }
+
     /// The three window presentation modes. `Windowed` has no fields —
     /// the current size lives on `SetWindowModeResult`.
     /// `FullscreenExclusive` carries the specific video mode; the

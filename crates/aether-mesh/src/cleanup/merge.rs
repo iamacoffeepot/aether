@@ -153,12 +153,7 @@ fn process_bucket(
 
     let mut directed: HashMap<(VertexId, VertexId), u32> = HashMap::new();
     for &pid in bucket {
-        let poly = &polygons[pid];
-        let m = poly.vertices.len();
-        //noinspection DuplicatedCode
-        for i in 0..m {
-            let a = poly.vertices[i];
-            let b = poly.vertices[(i + 1) % m];
+        for (a, b) in polygons[pid].directed_edges() {
             *directed.entry((a, b)).or_insert(0) += 1;
         }
     }
@@ -589,7 +584,7 @@ fn drop_axis(plane: &Plane3) -> (usize, usize) {
 mod tests {
     use super::*;
     use crate::loop_polygon::Polygon;
-    use crate::test_helpers::pt;
+    use crate::test_helpers::{indexed_mesh_on, pt, triangle_fan};
 
     fn weld_then_merge(polys: Vec<Polygon>) -> Vec<Polygon> {
         IndexedMesh::weld(polys).merge_coplanar().into_polygons()
@@ -664,13 +659,7 @@ mod tests {
         let ne = pt(2.0, 2.0, 0.0);
         let se = pt(2.0, 0.0, 0.0);
         let sw = pt(0.0, 0.0, 0.0);
-        //noinspection DuplicatedCode
-        let polys = vec![
-            Polygon::from_triangle(c, nw, ne, 0).expect("test setup: non-degenerate triangle"),
-            Polygon::from_triangle(c, ne, se, 0).expect("test setup: non-degenerate triangle"),
-            Polygon::from_triangle(c, se, sw, 0).expect("test setup: non-degenerate triangle"),
-            Polygon::from_triangle(c, sw, nw, 0).expect("test setup: non-degenerate triangle"),
-        ];
+        let polys = triangle_fan(&[(c, nw, ne), (c, ne, se), (c, se, sw), (c, sw, nw)], 0);
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 1, "expected 1 merged polygon, got {}", out.len());
         assert_eq!(out[0].vertices.len(), 4);
@@ -688,13 +677,15 @@ mod tests {
         let mid = pt(1.0, 1.0, 0.0);
         let top = pt(1.0, 2.0, 0.0);
         let tl = pt(0.0, 2.0, 0.0);
-        //noinspection DuplicatedCode
-        let polys = vec![
-            Polygon::from_triangle(bl, br, inner, 0).expect("test setup: non-degenerate triangle"),
-            Polygon::from_triangle(bl, inner, mid, 0).expect("test setup: non-degenerate triangle"),
-            Polygon::from_triangle(bl, mid, top, 0).expect("test setup: non-degenerate triangle"),
-            Polygon::from_triangle(bl, top, tl, 0).expect("test setup: non-degenerate triangle"),
-        ];
+        let polys = triangle_fan(
+            &[
+                (bl, br, inner),
+                (bl, inner, mid),
+                (bl, mid, top),
+                (bl, top, tl),
+            ],
+            0,
+        );
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 3);
         let lens: std::collections::BTreeSet<usize> =
@@ -727,7 +718,6 @@ mod tests {
             d: 0,
         };
         let color = 7;
-        //noinspection DuplicatedCode
         let vertices = vec![
             pt(0.0, 0.0, 0.0), // 0: A bottom-left
             pt(2.0, 0.0, 0.0), // 1: B bottom-right
@@ -738,24 +728,17 @@ mod tests {
             pt(1.5, 1.5, 0.0), // 6: G hole top-right
             pt(0.5, 1.5, 0.0), // 7: H hole top-left
         ];
-        let polygons = [
-            [0, 1, 4],
-            [1, 5, 4],
-            [1, 2, 5],
-            [2, 6, 5],
-            [2, 3, 6],
-            [3, 7, 6],
-            [3, 0, 7],
-            [0, 4, 7],
-        ]
-        .into_iter()
-        .map(|verts| IndexedPolygon {
-            vertices: verts.to_vec(),
-            plane,
-            color,
-        })
-        .collect();
-        IndexedMesh { vertices, polygons }
+        let polygon_indices: [Vec<VertexId>; 8] = [
+            vec![0, 1, 4],
+            vec![1, 5, 4],
+            vec![1, 2, 5],
+            vec![2, 6, 5],
+            vec![2, 3, 6],
+            vec![3, 7, 6],
+            vec![3, 0, 7],
+            vec![0, 4, 7],
+        ];
+        indexed_mesh_on(plane, color, vertices, polygon_indices)
     }
 
     fn shoelace_2d(vertices: &[Point3], indices: &[VertexId]) -> i128 {
