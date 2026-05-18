@@ -14,11 +14,14 @@ jobs:
       contents: write
       pull-requests: write
       checks: write
-    # Report-only while the EAP linter beds in — Qodana action defaults
-    # to exit-non-zero on findings, which would fail PR CI on every
-    # false positive. Flip to required by removing this line once the
-    # noise floor is understood.
-    continue-on-error: true
+    # Strictness flip: PR 935 + 936 walked the 88-then-21 backlog
+    # down to zero baseline findings, so a new "N new problems" Qodana
+    # PR comment now gates the merge instead of just reporting. The
+    # earlier `continue-on-error: true` was kept while the EAP linter's
+    # false-positive floor was unknown; that argument retires once the
+    # baseline reaches zero (iamacoffeepot/aether#936). Re-add the flag
+    # only if a future linter bump regresses on confirmed false
+    # positives we can't suppress at source.
     steps:
       - uses: actions/checkout@v4
         with:
