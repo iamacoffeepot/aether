@@ -14,7 +14,7 @@
 //!
 //! Both fire when the [`crate::actor::native`] dispatcher routes a
 //! `Settled { root }` mail addressed to
-//! [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`] through the
+//! [`MailboxId::CHASSIS_MAILBOX_ID`] through the
 //! registry's [`SettlementRegistry::fire_settled`] hook.
 //!
 //! ADR-0080 §6 framing: settlement is eventually-consistent, not

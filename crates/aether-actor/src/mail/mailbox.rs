@@ -152,13 +152,18 @@ pub const fn resolve_mailbox<K: Kind>(mailbox_name: &str) -> Mailbox<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::KindId as DataKindId;
+
+    // `super::*` brings the local generic `KindId<K>` into scope;
+    // tests need the raw `aether_data::KindId` newtype for the
+    // const-init sentinel so we alias it.
 
     /// Hand-rolled Kind with a stable test sentinel id — distinct
     /// from the schema-hashed ids real types get from the derive.
     struct FakeKind;
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0001);
+        const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0001);
     }
 
     #[test]

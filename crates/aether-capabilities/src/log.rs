@@ -230,15 +230,14 @@ mod native {
         use aether_data::Kind;
         use aether_kinds::LogEvent;
         use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             {
                 let registry = Arc::new(Registry::new());
-                let store = ::std::sync::Arc::new(
-                    ::aether_substrate::handle_store::HandleStore::new(1024 * 1024),
-                );
+                let store = Arc::new(HandleStore::new(1024 * 1024));
                 let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
                 (registry, mailer)
             }

@@ -117,38 +117,13 @@ fn build_directed(mesh: &IndexedMesh) -> HashMap<(VertexId, VertexId), u32> {
     directed
 }
 
-/// Surviving directed edges after twin cancellation. Same shape as
-/// `merge::boundary_edges_after_twin_cancellation` but global (across
-/// the whole mesh, not per bucket): the count imbalance survives in
-/// the dominant direction, with multiplicity preserved.
+/// Surviving directed edges after twin cancellation, global across
+/// the whole mesh (vs `merge::boundary_edges_after_twin_cancellation`
+/// which runs the same primitive per `(plane, color)` bucket). The
+/// count imbalance survives in the dominant direction, with
+/// multiplicity preserved (issue #350).
 fn unmatched_edges(directed: &HashMap<(VertexId, VertexId), u32>) -> Vec<(VertexId, VertexId)> {
-    let mut out: Vec<(VertexId, VertexId)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
-    keys.sort_unstable();
-    //noinspection DuplicatedCode
-    for (a, b) in keys {
-        let canonical = if a < b { (a, b) } else { (b, a) };
-        if !seen.insert(canonical) {
-            continue;
-        }
-        let forward = directed.get(&(a, b)).copied().unwrap_or(0);
-        let reverse = directed.get(&(b, a)).copied().unwrap_or(0);
-        match forward.cmp(&reverse) {
-            std::cmp::Ordering::Greater => {
-                for _ in 0..(forward - reverse) {
-                    out.push((a, b));
-                }
-            }
-            std::cmp::Ordering::Less => {
-                for _ in 0..(reverse - forward) {
-                    out.push((b, a));
-                }
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    out
+    super::twin_edges::surviving_directed_edges(directed)
 }
 
 fn find_polygon_with_edge(polygons: &[IndexedPolygon], a: VertexId, b: VertexId) -> Option<usize> {

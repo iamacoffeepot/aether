@@ -883,7 +883,7 @@ mod native {
         #![allow(clippy::unwrap_used)]
 
         use super::*;
-        use crate::test_chassis::{TestChassis, fresh_substrate};
+        use crate::test_chassis::{TestChassis, boot_test_chassis_with, fresh_substrate};
         use aether_actor::Actor;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
@@ -1025,14 +1025,14 @@ mod native {
         #[test]
         fn capability_boots_and_registers_mailbox() {
             let (registry, mailer) = fresh_substrate();
-            //noinspection DuplicatedCode
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<AudioCapability>(AudioConfig {
+            let chassis = boot_test_chassis_with::<AudioCapability>(
+                &registry,
+                &mailer,
+                AudioConfig {
                     disabled: true,
                     ..AudioConfig::default()
-                })
-                .build_passive()
-                .expect("audio capability boots");
+                },
+            );
             assert!(
                 registry.lookup(AudioCapability::NAMESPACE).is_some(),
                 "audio mailbox registered"

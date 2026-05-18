@@ -157,7 +157,7 @@ mod native {
         use super::{
             Arc, BootError, HandleCapability, HandlePublish, HandlePublishResult, HandleStore,
         };
-        use crate::test_chassis::TestChassis;
+        use crate::test_chassis::{TestChassis, boot_test_chassis_with};
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::EgressEvent;
@@ -196,11 +196,7 @@ mod native {
         fn capability_routes_publish_through_dispatcher_thread() {
             let (store, mailer, registry, rx) = fresh_substrate();
 
-            //noinspection DuplicatedCode
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<HandleCapability>(())
-                .build_passive()
-                .expect("capability boots");
+            let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());
 
             let id = registry
                 .lookup(HandleCapability::NAMESPACE)

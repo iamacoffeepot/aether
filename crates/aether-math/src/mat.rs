@@ -120,6 +120,27 @@ impl Mat4 {
         }
     }
 
+    /// Build a 4×4 matrix from three world-space basis row vectors
+    /// `(rx, ry, rz)` and an affine translation `t`. The basis rows
+    /// land in the first three columns transposed (so the resulting
+    /// matrix's 3×3 block is `[rx; ry; rz]^T`); `t` fills the last
+    /// column with `w = 1` for an affine transform.
+    ///
+    /// Private helper shared by [`Self::inverse_rigid`] and
+    /// [`Self::look_at_rh`] — both build the same shape from a triple
+    /// of orthonormal basis vectors plus a derived translation.
+    #[inline]
+    fn from_basis_rows_and_translation(rx: Vec3, ry: Vec3, rz: Vec3, t: Vec3) -> Self {
+        Self {
+            cols: [
+                Vec4::new(rx.x, ry.x, rz.x, 0.0),
+                Vec4::new(rx.y, ry.y, rz.y, 0.0),
+                Vec4::new(rx.z, ry.z, rz.z, 0.0),
+                Vec4::new(t.x, t.y, t.z, 1.0),
+            ],
+        }
+    }
+
     /// Inverse of a rigid transform (rotation + translation only, no
     /// scale or skew): transpose the 3×3 rotation block and apply to
     /// the negated translation. Produces garbage on a non-rigid
@@ -132,15 +153,8 @@ impl Mat4 {
         let row0 = Vec3::new(r0.x, r0.y, r0.z);
         let row1 = Vec3::new(r1.x, r1.y, r1.z);
         let row2 = Vec3::new(r2.x, r2.y, r2.z);
-        //noinspection DuplicatedCode
-        Self {
-            cols: [
-                Vec4::new(r0.x, r1.x, r2.x, 0.0),
-                Vec4::new(r0.y, r1.y, r2.y, 0.0),
-                Vec4::new(r0.z, r1.z, r2.z, 0.0),
-                Vec4::new(-row0.dot(t_xyz), -row1.dot(t_xyz), -row2.dot(t_xyz), 1.0),
-            ],
-        }
+        let translation = Vec3::new(-row0.dot(t_xyz), -row1.dot(t_xyz), -row2.dot(t_xyz));
+        Self::from_basis_rows_and_translation(row0, row1, row2, translation)
     }
 
     /// Right-handed look-at view matrix. Camera at `eye`, looking
@@ -153,15 +167,8 @@ impl Mat4 {
         let z = (eye - target).normalize();
         let x = up.cross(z).normalize();
         let y = z.cross(x);
-        //noinspection DuplicatedCode
-        Self {
-            cols: [
-                Vec4::new(x.x, y.x, z.x, 0.0),
-                Vec4::new(x.y, y.y, z.y, 0.0),
-                Vec4::new(x.z, y.z, z.z, 0.0),
-                Vec4::new(-x.dot(eye), -y.dot(eye), -z.dot(eye), 1.0),
-            ],
-        }
+        let translation = Vec3::new(-x.dot(eye), -y.dot(eye), -z.dot(eye));
+        Self::from_basis_rows_and_translation(x, y, z, translation)
     }
 
     /// Right-handed perspective projection, wgpu-style clip space

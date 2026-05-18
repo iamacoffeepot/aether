@@ -848,29 +848,9 @@ fn oor(name: &str, ty: &str) -> EncodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::{cast_struct, pending_ok_err_variants, postcard_struct, scalar};
     use aether_data::SchemaCell;
     use serde_json::json;
-
-    fn scalar(name: &str, ty: Primitive) -> NamedField {
-        NamedField {
-            name: name.to_string().into(),
-            ty: SchemaType::Scalar(ty),
-        }
-    }
-
-    fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
-        SchemaType::Struct {
-            fields: fields.into(),
-            repr_c: true,
-        }
-    }
-
-    fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
-        SchemaType::Struct {
-            fields: fields.into(),
-            repr_c: false,
-        }
-    }
 
     fn enum_schema(variants: Vec<EnumVariant>) -> SchemaType {
         SchemaType::Enum {
@@ -1259,27 +1239,7 @@ mod tests {
     }
 
     fn sum_schema() -> SchemaType {
-        //noinspection DuplicatedCode
-        enum_schema(vec![
-            EnumVariant::Unit {
-                name: "Pending".into(),
-                discriminant: 0,
-            },
-            EnumVariant::Tuple {
-                name: "Ok".into(),
-                discriminant: 1,
-                fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
-            },
-            EnumVariant::Struct {
-                name: "Err".into(),
-                discriminant: 2,
-                fields: vec![NamedField {
-                    name: "reason".into(),
-                    ty: SchemaType::String,
-                }]
-                .into(),
-            },
-        ])
+        enum_schema(pending_ok_err_variants())
     }
 
     #[test]

@@ -193,7 +193,11 @@ fn decode_cast_field(
             let id = u64::from_le_bytes(cur.take::<8>(path)?);
             Ok(render_type_id_value(id, *type_id, path)?)
         }
-        //noinspection DuplicatedCode
+        // Intentionally parallel with the matching arm in `encode.rs`
+        // — the OR-pattern enumerates every `SchemaType` variant that
+        // can't live in cast-shape position. Extracting to a helper
+        // would erase the compile-time exhaustiveness check that keeps
+        // a new variant from silently falling through.
         SchemaType::Bool
         | SchemaType::String
         | SchemaType::Bytes
@@ -619,28 +623,14 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::encode_schema;
+    use crate::test_fixtures::{cast_struct, pending_ok_err_variants, postcard_struct, scalar};
     use aether_data::SchemaCell;
     use serde_json::json;
 
-    fn scalar(name: &str, ty: Primitive) -> NamedField {
-        NamedField {
-            name: name.to_string().into(),
-            ty: SchemaType::Scalar(ty),
-        }
-    }
-
-    fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
-        SchemaType::Struct {
-            fields: fields.into(),
-            repr_c: true,
-        }
-    }
-
+    /// Local alias preserving the decode-side spelling that the test
+    /// bodies below already use.
     fn pc_struct(fields: Vec<NamedField>) -> SchemaType {
-        SchemaType::Struct {
-            fields: fields.into(),
-            repr_c: false,
-        }
+        postcard_struct(fields)
     }
 
     /// Encode → decode → assert equal. The single most load-bearing
@@ -742,18 +732,13 @@ mod tests {
     fn cast_nested_struct_drawtriangle_layout() {
         // Mirror of the encoder test by the same name. The DrawTriangle
         // shape is the load-bearing cast-nested case in the codebase.
-        //noinspection DuplicatedCode
-        let vertex = SchemaType::Struct {
-            repr_c: true,
-            fields: vec![
-                scalar("x", Primitive::F32),
-                scalar("y", Primitive::F32),
-                scalar("r", Primitive::F32),
-                scalar("g", Primitive::F32),
-                scalar("b", Primitive::F32),
-            ]
-            .into(),
-        };
+        let vertex = cast_struct(vec![
+            scalar("x", Primitive::F32),
+            scalar("y", Primitive::F32),
+            scalar("r", Primitive::F32),
+            scalar("g", Primitive::F32),
+            scalar("b", Primitive::F32),
+        ]);
         let triangle = cast_struct(vec![NamedField {
             name: "verts".into(),
             ty: SchemaType::Array {
@@ -871,28 +856,7 @@ mod tests {
 
     fn sum_schema() -> SchemaType {
         SchemaType::Enum {
-            //noinspection DuplicatedCode
-            variants: vec![
-                EnumVariant::Unit {
-                    name: "Pending".into(),
-                    discriminant: 0,
-                },
-                EnumVariant::Tuple {
-                    name: "Ok".into(),
-                    discriminant: 1,
-                    fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
-                },
-                EnumVariant::Struct {
-                    name: "Err".into(),
-                    discriminant: 2,
-                    fields: vec![NamedField {
-                        name: "reason".into(),
-                        ty: SchemaType::String,
-                    }]
-                    .into(),
-                },
-            ]
-            .into(),
+            variants: pending_ok_err_variants().into(),
         }
     }
 

@@ -7,8 +7,8 @@
 //! `NativeBinding::send_mail` — no trait-method round-trip, no
 //! FFI-shaped wrapper.
 //!
-//! Built via [`super::ctx::NativeCtx::actor`] /
-//! [`super::ctx::NativeCtx::resolve_actor`] and their init variants.
+//! Built via [`NativeCtx::actor`] /
+//! [`NativeCtx::resolve_actor`] and their init variants.
 //! The compile-time `R: HandlesKind<K>` gate is the same as the prior
 //! parametric form: `ctx.actor::<RenderCapability>().send(&triangle)`
 //! compiles only when `RenderCapability: HandlesKind<DrawTriangle>`.

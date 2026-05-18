@@ -8,7 +8,7 @@
 //! per-side types so the `MailTransport` trait can retire. The FFI
 //! variant is lifetime-free — it carries no transport reference
 //! because the FFI imports are global to the loaded module
-//! ([`crate::ffi::bridge::MAIL_BRIDGE`] is the dispatch surface).
+//! ([`MAIL_BRIDGE`] is the dispatch surface).
 //!
 //! Built via [`crate::ffi::ctx::FfiCtx::actor`] /
 //! [`crate::ffi::ctx::FfiCtx::resolve_actor`] and their init/drop

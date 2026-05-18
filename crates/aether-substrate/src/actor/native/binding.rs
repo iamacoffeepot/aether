@@ -162,7 +162,7 @@ impl NativeBinding {
     ///
     /// `caller_frame_bound`, `frame_bound_set`, and `aborter` wire
     /// the ADR-0074 §Decision 5 cross-class `wait_reply` guard.
-    /// Capabilities authored under a [`crate::ChassisCtx`] should
+    /// Capabilities authored under a [`ChassisCtx`] should
     /// prefer [`Self::from_ctx`], which inherits the chassis's
     /// shared set + aborter automatically; the explicit constructor
     /// is for harnesses that don't go through a chassis (`TestBench`
@@ -704,18 +704,10 @@ mod tests {
         // into the forwarded [`Envelope`] without `to_vec()` /
         // `to_owned()` clones.
         Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
-            //noinspection DuplicatedCode
-            let _ = tx.send(Envelope {
-                kind: dispatch.kind,
-                kind_name: dispatch.kind_name,
-                origin: dispatch.origin,
-                sender: dispatch.sender,
-                payload: dispatch.payload,
-                count: dispatch.count,
-                mail_id: dispatch.mail_id,
-                root: dispatch.root,
-                parent_mail: dispatch.parent_mail,
-            });
+            // Reuse the production `From<OwnedDispatch> for Envelope`
+            // so the test path moves payload + kind_name through the
+            // same single source of truth as the dispatcher.
+            let _ = tx.send(Envelope::from(dispatch));
         })
     }
 

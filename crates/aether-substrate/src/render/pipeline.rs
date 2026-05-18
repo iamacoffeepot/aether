@@ -5,7 +5,7 @@
 //! uniform bound at group 0, drawing into a paired offscreen color
 //! target + `Depth32Float` depth target with `LessEqual` testing.
 //! Desktop additionally builds its own wireframe-overlay pipeline
-//! (using [`super::vertex_buffer_layout`] + [`super::MAIN_SHADER_WGSL`])
+//! (using [`vertex_buffer_layout`] + [`MAIN_SHADER_WGSL`])
 //! and runs it as an extra draw inside [`record_main_pass`].
 
 use super::targets::Targets;

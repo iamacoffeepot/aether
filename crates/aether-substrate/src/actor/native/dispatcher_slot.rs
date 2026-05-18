@@ -13,7 +13,7 @@
 //!
 //! 1. CAS `Ready → Running` on the [`SlotState`] (caller invariant:
 //!    the slot was just popped from the ready queue).
-//! 2. Drains envelopes via [`crate::NativeBinding::try_recv`] until
+//! 2. Drains envelopes via [`NativeBinding::try_recv`] until
 //!    inbox is empty, the budget is exhausted, or shutdown fires.
 //!    Per-envelope wrapping is `local::with_stamped(slots, ...)` +
 //!    `log_install::with_actor_dispatch(binding, ...)` — same as
@@ -210,19 +210,7 @@ where
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
-                    //noinspection DuplicatedCode
-                    if actor
-                        .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
-                        .is_none()
-                        && !actor.__aether_dispatch_fallback(&mut ctx, &env)
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::dispatch",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "actor dispatch missed: kind not handled or decode failed"
-                        );
-                    }
+                    super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
                     aether_actor::log::drain_buffer();
                 },
             );

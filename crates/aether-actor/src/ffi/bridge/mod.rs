@@ -4,14 +4,14 @@
 //! Issue 665 split the prior monolithic `MailTransport` trait + its
 //! `FfiTransport` ZST impl into one ZST per FFI op family:
 //!
-//! - [`mail::MailBridge`] — outbound mail (`send_mail`, `reply_mail`,
+//! - [`MailBridge`] — outbound mail (`send_mail`, `reply_mail`,
 //!   `prev_correlation`). Correlation lives here because every send
 //!   mints one regardless of whether the caller sync-waits or
 //!   async-handles the reply — it's mail-level metadata, not a
 //!   sync-wait artifact.
-//! - [`persist::PersistBridge`] — migration-bundle deposit
+//! - [`PersistBridge`] — migration-bundle deposit
 //!   (`save_state`), used during `on_replace` only.
-//! - [`sync_wait::SyncWaitBridge`] — blocking reply receive
+//! - [`SyncWaitBridge`] — blocking reply receive
 //!   (`wait_reply`), the ADR-0042 sync round-trip path.
 //!
 //! Each ZST has a process-wide `static` instance (`MAIL_BRIDGE`,

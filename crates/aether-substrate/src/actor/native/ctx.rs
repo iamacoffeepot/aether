@@ -193,9 +193,9 @@ impl<'a> NativeCtx<'a> {
     /// flag the actor's dispatcher polls after each handler returns;
     /// when set, the trampoline drains any remaining inbox mail
     /// synchronously, runs `NativeActor::unwire`, and exits the
-    /// dispatch loop. After exit the actor's [`crate::MailboxId`]
+    /// dispatch loop. After exit the actor's [`MailboxId`]
     /// transitions from `Live` to `Dead` in the chassis's
-    /// [`crate::ActorRegistry`] and is added to `tombstones` —
+    /// [`ActorRegistry`](crate::ActorRegistry) and is added to `tombstones` —
     /// `spawn_child` rejects reuse of the retired full name with
     /// `SpawnError::SubnameRetired`.
     ///
@@ -231,10 +231,10 @@ impl<'a> NativeCtx<'a> {
     /// field to identify the closing actor.
     ///
     /// Validation: `target` must currently be `Live` in the
-    /// [`crate::ActorRegistry`]; tombstoned (closed) and unknown ids
+    /// [`ActorRegistry`](crate::ActorRegistry); tombstoned (closed) and unknown ids
     /// surface as [`MonitorError`]. Singletons today don't sit
     /// in the actor registry as `Live` entries (their entries live in
-    /// the routing [`crate::Registry`] only); a future lift inserts
+    /// the routing [`Registry`](crate::Registry) only); a future lift inserts
     /// them so monitoring a singleton works the same way. Until then,
     /// monitor only addresses instanced actors.
     ///
@@ -255,11 +255,11 @@ impl<'a> NativeCtx<'a> {
     }
 
     /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a
-    /// child of the calling actor. The new actor's [`crate::ReplyTo`]
+    /// child of the calling actor. The new actor's [`ReplyTo`]
     /// stamps the calling actor's mailbox so any reply addressed to
     /// `ReplyTarget::Component` routes back here.
     ///
-    /// Returns a [`crate::SpawnBuilder`] the caller chains
+    /// Returns a [`SpawnBuilder`](crate::SpawnBuilder) the caller chains
     /// `after_init` / `finish` against. Mirrors the chassis-level
     /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`
     /// shape; both flow through the same [`crate::Spawner`].

@@ -44,6 +44,7 @@ pub(crate) mod mesh;
 pub mod provenance;
 mod slivers;
 mod tjunctions;
+mod twin_edges;
 mod weld;
 
 use crate::loop_polygon::Polygon;

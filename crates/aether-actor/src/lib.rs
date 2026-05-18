@@ -34,8 +34,8 @@
 //!     round-trip helpers; the per-target wait primitive plugs into
 //!     `actor::ctx::sync_waiter::wait_reply_via`.
 //!   - [`ffi`] — FFI binding layer: [`ffi::bridge`] dispatch ZSTs +
-//!     [`ffi::FfiActor`] trait + [`ffi::Replaceable`] hook trait +
-//!     [`ffi::FfiActorMailbox`] for the actor-typed sender chain +
+//!     [`FfiActor`] trait + [`Replaceable`] hook trait +
+//!     [`FfiActorMailbox`] for the actor-typed sender chain +
 //!     the [`export!`] macro that pins `init` / `receive` /
 //!     lifecycle FFI exports plus the `aether.kinds.inputs` /
 //!     `aether.namespace` custom-section statics.

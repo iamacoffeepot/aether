@@ -61,12 +61,10 @@ impl From<NameConflict> for BootError {
     }
 }
 
-/// Forward `anyhow::Error` (which `wasmtime::Error` is a re-export
-/// of) into [`BootError::Other`]. Used by every boot-path that
-/// bubbles a catch-all error: wasmtime calls in `SubstrateBoot::build`,
-/// the chassis-bundle's `connect_hub_client` (anyhow over TCP), etc.
-/// Chassis trait impls can `?` either kind of error directly without
-/// per-call `.map_err` glue.
+/// Forward `wasmtime::Error` into [`BootError::Other`]. Used by every
+/// boot-path that bubbles a wasmtime fault: `Engine::new` / `Module::new`
+/// in `SubstrateBoot::build`, etc. Chassis trait impls can `?` such
+/// errors directly without per-call `.map_err` glue.
 impl From<wasmtime::Error> for BootError {
     fn from(e: wasmtime::Error) -> Self {
         Self::Other(Box::new(std::io::Error::other(format!("{e}"))))

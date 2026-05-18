@@ -696,13 +696,20 @@ mod tests {
         }
     }
 
-    /// Boot a `RpcServerCapability` bound to OS-picked port, connect a
-    /// real TCP client, exchange `Hello` for `HelloAck`. Sanity-check
-    /// the wire's framing + handshake path end-to-end.
-    #[test]
-    fn handshake_hello_to_hello_ack_roundtrip() {
+    /// Boot a chassis hosting only `RpcServerCapability`, connect a
+    /// client `TcpStream` to its OS-picked port, and apply
+    /// `read_timeout`. Tests that need additional caps (e.g.
+    /// `TestEchoActor`, `TraceObserverCapability`) build their own
+    /// chassis and reach for [`connect_to_rpc_server`] for the
+    /// connect / timeout half. Returns `(chassis, stream)`; both must
+    /// stay alive for the listener to keep accepting.
+    fn boot_with_rpc_server_only(
+        timeout: Duration,
+    ) -> (
+        aether_substrate::chassis::builder::PassiveChassis<TestChassis>,
+        TcpStream,
+    ) {
         let (registry, mailer) = fresh_substrate();
-        //noinspection DuplicatedCode
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
@@ -710,19 +717,61 @@ mod tests {
             })
             .build_passive()
             .expect("rpc server boots");
+        let stream = connect_to_rpc_server(&chassis, timeout);
+        (chassis, stream)
+    }
 
-        let handle = chassis
+    /// Lift the published `RpcServerHandle`'s `local_port`, open a
+    /// `TcpStream`, set `read_timeout`. Shared by every test whose
+    /// boot path is more elaborate than `boot_with_rpc_server_only`.
+    fn connect_to_rpc_server(
+        chassis: &aether_substrate::chassis::builder::PassiveChassis<TestChassis>,
+        timeout: Duration,
+    ) -> TcpStream {
+        let port = chassis
             .handle::<RpcServerHandle>()
-            .expect("RpcServerHandle published");
-        let port = handle.local_port;
-        assert!(port > 0, "OS-picked port should be non-zero");
-
-        let mut stream =
+            .expect("RpcServerHandle published")
+            .local_port;
+        let stream =
             TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(timeout))
             .expect("test: set_read_timeout on TcpStream");
+        stream
+    }
 
+    /// Send a `Hello` carrying the current `WIRE_VERSION` and drain
+    /// the resulting `HelloAck` so subsequent test traffic sees a
+    /// clean stream. Tests that want to assert specifically against
+    /// the handshake reply (handshake_*_roundtrip,
+    /// `wire_version_mismatch_*`) write the `Hello` themselves so the
+    /// `HelloAck` / `Bye` can be matched on.
+    fn complete_handshake(stream: &mut TcpStream) {
+        write_frame(
+            stream,
+            &WireFrame::Hello(Hello {
+                wire_version: WIRE_VERSION,
+                peer: PeerKind::Client {
+                    client_name: "test-client".into(),
+                    client_version: "0.0.1".into(),
+                },
+            }),
+        )
+        .expect("test: write_frame Hello to rpc server");
+        let _: WireFrame =
+            read_frame(stream).expect("test: read_frame after Hello returns HelloAck");
+    }
+
+    /// Boot a `RpcServerCapability` bound to OS-picked port, connect a
+    /// real TCP client, exchange `Hello` for `HelloAck`. Sanity-check
+    /// the wire's framing + handshake path end-to-end.
+    #[test]
+    fn handshake_hello_to_hello_ack_roundtrip() {
+        // Specifically tests the handshake path end-to-end, so it
+        // writes the `Hello` itself rather than using
+        // `complete_handshake` (which would discard the `HelloAck`
+        // before the asserts can inspect it).
+        let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(2));
         write_frame(
             &mut stream,
             &WireFrame::Hello(Hello {
@@ -756,42 +805,8 @@ mod tests {
     /// `Ping(token)` round-trips as `Pong(token)`.
     #[test]
     fn ping_pong_roundtrip() {
-        let (registry, mailer) = fresh_substrate();
-        //noinspection DuplicatedCode
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                peer_kind: test_peer_kind(),
-            })
-            .build_passive()
-            .expect("rpc server boots");
-
-        let port = chassis
-            .handle::<RpcServerHandle>()
-            .expect("RpcServerHandle published")
-            .local_port;
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("test: set_read_timeout on TcpStream");
-
-        // Send a Hello first so the handshake completes, then drain the
-        // HelloAck reply before the Ping/Pong roundtrip.
-        //noinspection DuplicatedCode
-        write_frame(
-            &mut stream,
-            &WireFrame::Hello(Hello {
-                wire_version: WIRE_VERSION,
-                peer: PeerKind::Client {
-                    client_name: "test-client".into(),
-                    client_version: "0.0.1".into(),
-                },
-            }),
-        )
-        .expect("test: write_frame Hello to rpc server");
-        let _: WireFrame =
-            read_frame(&mut stream).expect("test: read_frame after Hello returns HelloAck");
+        let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(2));
+        complete_handshake(&mut stream);
 
         write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee)).expect("write Ping");
         let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
@@ -828,31 +843,8 @@ mod tests {
             .build_passive()
             .expect("caps boot");
 
-        let port = chassis
-            .handle::<RpcServerHandle>()
-            .expect("RpcServerHandle published")
-            .local_port;
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("test: set_read_timeout on TcpStream");
-
-        // Handshake.
-        //noinspection DuplicatedCode
-        write_frame(
-            &mut stream,
-            &WireFrame::Hello(Hello {
-                wire_version: WIRE_VERSION,
-                peer: PeerKind::Client {
-                    client_name: "test-client".into(),
-                    client_version: "0.0.1".into(),
-                },
-            }),
-        )
-        .expect("test: write_frame Hello to rpc server");
-        let _: WireFrame =
-            read_frame(&mut stream).expect("test: read_frame after Hello returns HelloAck");
+        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
+        complete_handshake(&mut stream);
 
         // Fire a Call against the echo actor. cid = 0xabc; the cap
         // correlates and ends with ReplyEnd matching the same cid.
@@ -923,31 +915,8 @@ mod tests {
             .build_passive()
             .expect("caps boot");
 
-        let port = chassis
-            .handle::<RpcServerHandle>()
-            .expect("RpcServerHandle published")
-            .local_port;
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("test: set_read_timeout on TcpStream");
-
-        // Handshake.
-        //noinspection DuplicatedCode
-        write_frame(
-            &mut stream,
-            &WireFrame::Hello(Hello {
-                wire_version: WIRE_VERSION,
-                peer: PeerKind::Client {
-                    client_name: "test-client".into(),
-                    client_version: "0.0.1".into(),
-                },
-            }),
-        )
-        .expect("test: write_frame Hello to rpc server");
-        let _: WireFrame =
-            read_frame(&mut stream).expect("test: read_frame after Hello returns HelloAck");
+        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(2));
+        complete_handshake(&mut stream);
 
         // Fire-and-forget Call (cid = None). The echo actor will
         // still reply, but with cid None there's no in-flight entry
@@ -983,26 +952,10 @@ mod tests {
     /// and connection close on the server side.
     #[test]
     fn wire_version_mismatch_kicks_connection() {
-        let (registry, mailer) = fresh_substrate();
-        //noinspection DuplicatedCode
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                peer_kind: test_peer_kind(),
-            })
-            .build_passive()
-            .expect("rpc server boots");
-
-        let port = chassis
-            .handle::<RpcServerHandle>()
-            .expect("RpcServerHandle published")
-            .local_port;
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("test: set_read_timeout on TcpStream");
-
+        // Sends a deliberately wrong `wire_version` and asserts the
+        // server responds with `Bye`, so it can't use
+        // `complete_handshake` (which sends the current version).
+        let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(2));
         write_frame(
             &mut stream,
             &WireFrame::Hello(Hello {

@@ -6,9 +6,9 @@
 //! Mail layer of the actor SDK: the inbound `Mail` envelope,
 //! `PriorState` bundle, and `ReplyTo` opaque handle live here in
 //! `mod.rs` (pure decoders, no transport coupling). The
-//! [`Mailbox<K>`](crate::mail::mailbox) addressing token lives in
+//! [`Mailbox<K>`](mailbox) addressing token lives in
 //! the [`mailbox`] submodule; the
-//! [`WaitError`](crate::mail::sync::WaitError) trait + the rc-decode
+//! [`WaitError`](sync::WaitError) trait + the rc-decode
 //! helper for `wait_reply` returns live in
 //! [`sync`].
 //!
@@ -413,9 +413,13 @@ impl<'a> PriorState<'a> {
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
-    use crate::mail::mailbox::KindId;
+    use aether_data::KindId as DataKindId;
     use alloc::vec::Vec;
     use serde::{Deserialize, Serialize};
+
+    // The local `crate::mail::mailbox::KindId<K>` shadows the
+    // crate-level `aether_data::KindId` newtype; tests construct the
+    // raw newtype via the aliased import to keep both available.
 
     /// Hand-rolled `Kind` with a stable test sentinel id so the
     /// decode tests can fabricate matching `Mail` frames without
@@ -423,7 +427,7 @@ mod tests {
     struct FakeKind;
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0001);
+        const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0001);
     }
 
     /// Cast-shape Pod kind for the slice / single-decode happy paths.
@@ -435,7 +439,7 @@ mod tests {
     }
     impl Kind for FakePod {
         const NAME: &'static str = "test.fake_pod";
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0002);
+        const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0002);
     }
 
     /// Postcard-shape kind for the schema-driven `decode_kind` path.

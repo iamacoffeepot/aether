@@ -63,7 +63,7 @@ impl MailDispatch for NativeBinding {
     }
 }
 
-std::thread_local! {
+thread_local! {
     static ACTOR_DISPATCH: Cell<Option<&'static dyn MailDispatch>> =
         const { Cell::new(None) };
 }

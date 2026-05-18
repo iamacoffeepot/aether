@@ -523,14 +523,14 @@ pub mod __derive_runtime {
     /// `NoUninit` bound lives on the helper so non-cast kinds aren't
     /// poisoned by a trait their `#[repr(C)]`-less layout can't satisfy.
     pub fn encode_cast<T: bytemuck::NoUninit>(value: &T) -> Vec<u8> {
-        ::bytemuck::bytes_of(value).to_vec()
+        bytemuck::bytes_of(value).to_vec()
     }
 
     /// Postcard-shape encode helper. Mirror of `decode_postcard`. The
     /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
     /// independent of `serde`.
     pub fn encode_postcard<T: serde::Serialize>(value: &T) -> Vec<u8> {
-        ::postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
+        postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
     }
 }
 

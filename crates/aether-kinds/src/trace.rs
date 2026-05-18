@@ -307,10 +307,10 @@ pub enum DescribeWindowResult {
 }
 
 /// ADR-0080 §6 settlement notification. Emitted by
-/// [`crate::trace::BatchedTraceEvents`]'s consumer
+/// [`BatchedTraceEvents`]'s consumer
 /// (`TraceObserverCapability`) when a causal chain's `in_flight`
 /// counter hits zero, addressed to
-/// [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`]. The chassis-side
+/// [`MailboxId::CHASSIS_MAILBOX_ID`]. The chassis-side
 /// dispatcher switch routes this kind into the gate-site
 /// notification map and signals every subscriber waiting on `root`.
 ///
