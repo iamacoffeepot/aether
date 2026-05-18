@@ -1497,7 +1497,7 @@ impl<C: Chassis> BuiltChassis<C> {
         subname: &str,
     ) -> Option<MailboxId> {
         let full_name = format!("{}:{}", A::NAMESPACE, subname);
-        let id = MailboxId(aether_data::mailbox_id_from_name(&full_name).0);
+        let id = MailboxId(mailbox_id_from_name(&full_name).0);
         let type_id = self.booted.actor_registry.type_id_at(id)?;
         if type_id != std::any::TypeId::of::<A>() {
             return None;
@@ -1644,7 +1644,7 @@ impl<C: Chassis> PassiveChassis<C> {
         subname: &str,
     ) -> Option<MailboxId> {
         let full_name = format!("{}:{}", A::NAMESPACE, subname);
-        let id = MailboxId(aether_data::mailbox_id_from_name(&full_name).0);
+        let id = MailboxId(mailbox_id_from_name(&full_name).0);
         let type_id = self.booted.actor_registry.type_id_at(id)?;
         if type_id != std::any::TypeId::of::<A>() {
             return None;
@@ -1711,22 +1711,19 @@ mod tests {
     /// (per-cap dispatch coverage lives in `aether-capabilities`); the
     /// real caps would force a circular dep, so this stub stands in.
     struct StubLog;
-    impl aether_actor::Actor for StubLog {
+    impl Actor for StubLog {
         const NAMESPACE: &'static str = "test.chassis_builder.stub_log";
     }
     impl aether_actor::Singleton for StubLog {}
 
-    impl crate::actor::native::NativeActor for StubLog {
+    impl NativeActor for StubLog {
         type Config = ();
-        fn init(
-            (): Self::Config,
-            _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-        ) -> Result<Self, BootError> {
+        fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
     }
 
-    impl crate::actor::native::NativeDispatch for StubLog {
+    impl NativeDispatch for StubLog {
         fn __aether_dispatch_envelope(
             &mut self,
             _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -1839,23 +1836,20 @@ mod tests {
     #[test]
     fn failed_singleton_init_releases_namespace_and_sink() {
         struct FailingCap;
-        impl aether_actor::Actor for FailingCap {
+        impl Actor for FailingCap {
             const NAMESPACE: &'static str = "test.phase7.failing_cap";
         }
         impl aether_actor::Singleton for FailingCap {}
 
-        impl crate::actor::native::NativeActor for FailingCap {
+        impl NativeActor for FailingCap {
             type Config = ();
-            fn init(
-                (): (),
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Err(BootError::Other(Box::new(std::io::Error::other(
                     "intentional init failure for Phase 7 cleanup test",
                 ))))
             }
         }
-        impl crate::actor::native::NativeDispatch for FailingCap {
+        impl NativeDispatch for FailingCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -1911,7 +1905,7 @@ mod tests {
             const NAME: &'static str = "test.with_actor.ping";
             const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0001);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -1926,18 +1920,15 @@ mod tests {
         struct ProbeCap {
             received: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for ProbeCap {
+        impl Actor for ProbeCap {
             const NAMESPACE: &'static str = "test.with_actor.probe";
         }
         impl aether_actor::Singleton for ProbeCap {}
-        impl aether_actor::HandlesKind<Ping> for ProbeCap {}
+        impl HandlesKind<Ping> for ProbeCap {}
 
-        impl crate::actor::native::NativeActor for ProbeCap {
+        impl NativeActor for ProbeCap {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
@@ -1945,7 +1936,7 @@ mod tests {
         // Hand-rolled NativeDispatch — what the macro arm emits in
         // task #731. The if-arm decodes Ping bytes, calls the
         // handler, returns Some(()) on success.
-        impl crate::actor::native::NativeDispatch for ProbeCap {
+        impl NativeDispatch for ProbeCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -1977,7 +1968,7 @@ mod tests {
         // sink handler. The dispatcher thread pulls from its inbox
         // and routes through __aether_dispatch_envelope → on_ping.
         let mailbox_id = registry
-            .lookup(<ProbeCap as aether_actor::Actor>::NAMESPACE)
+            .lookup(<ProbeCap as Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
         let MailboxEntry::Inbox(handler) = registry.entry(mailbox_id).expect("sink registered")
         else {
@@ -2017,23 +2008,20 @@ mod tests {
     #[test]
     fn with_actor_supports_frame_barrier_caps() {
         struct FrameBoundProbe;
-        impl aether_actor::Actor for FrameBoundProbe {
+        impl Actor for FrameBoundProbe {
             const NAMESPACE: &'static str = "test.with_actor.frame_bound";
             const FRAME_BARRIER: bool = true;
         }
         impl aether_actor::Singleton for FrameBoundProbe {}
 
-        impl crate::actor::native::NativeActor for FrameBoundProbe {
+        impl NativeActor for FrameBoundProbe {
             type Config = ();
-            fn init(
-                (): (),
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
 
-        impl crate::actor::native::NativeDispatch for FrameBoundProbe {
+        impl NativeDispatch for FrameBoundProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2080,7 +2068,7 @@ mod tests {
             const NAME: &'static str = "test.local.tick";
             const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0002);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2097,11 +2085,11 @@ mod tests {
         struct LocalProbe {
             observed: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for LocalProbe {
+        impl Actor for LocalProbe {
             const NAMESPACE: &'static str = "test.local.probe";
         }
         impl aether_actor::Singleton for LocalProbe {}
-        impl aether_actor::HandlesKind<Tick> for LocalProbe {}
+        impl HandlesKind<Tick> for LocalProbe {}
 
         // Newtype-per-slot is the Local convention: each
         // logical storage gets its own type, so two probes that
@@ -2112,12 +2100,9 @@ mod tests {
         #[aether_actor::local]
         struct Counter(u32);
 
-        impl crate::actor::native::NativeActor for LocalProbe {
+        impl NativeActor for LocalProbe {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 // Init runs inside the chassis builder's stamp guard
                 // — write a sentinel so the handler test below proves
                 // the same slots are reused across init→dispatch.
@@ -2126,7 +2111,7 @@ mod tests {
             }
         }
 
-        impl crate::actor::native::NativeDispatch for LocalProbe {
+        impl NativeDispatch for LocalProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2152,7 +2137,7 @@ mod tests {
             .expect("LocalProbe boots");
 
         let mailbox_id = registry
-            .lookup(<LocalProbe as aether_actor::Actor>::NAMESPACE)
+            .lookup(<LocalProbe as Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
         let MailboxEntry::Inbox(handler) = registry.entry(mailbox_id).expect("sink registered")
         else {
@@ -2210,7 +2195,7 @@ mod tests {
             const NAME: &'static str = "test.spawn_child.hatch";
             const ID: DataKindId = DataKindId(0xC0C1_C2C3_C4C5_C6C7);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2229,7 +2214,7 @@ mod tests {
             const NAME: &'static str = "test.spawn_child.ping";
             const ID: DataKindId = DataKindId(0xD0D1_D2D3_D4D5_D6D7);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2242,21 +2227,18 @@ mod tests {
         struct ChildCap {
             received: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for ChildCap {
+        impl Actor for ChildCap {
             const NAMESPACE: &'static str = "test.spawn_child.child";
         }
         impl Instanced for ChildCap {}
         impl HandlesKind<Ping> for ChildCap {}
-        impl crate::actor::native::NativeActor for ChildCap {
+        impl NativeActor for ChildCap {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
-        impl crate::actor::native::NativeDispatch for ChildCap {
+        impl NativeDispatch for ChildCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2276,16 +2258,16 @@ mod tests {
             spawn_count: Arc<AtomicU32>,
             child_received: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for ParentCap {
+        impl Actor for ParentCap {
             const NAMESPACE: &'static str = "test.spawn_child.parent";
         }
         impl aether_actor::Singleton for ParentCap {}
         impl HandlesKind<Hatch> for ParentCap {}
-        impl crate::actor::native::NativeActor for ParentCap {
+        impl NativeActor for ParentCap {
             type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
             fn init(
                 (spawn_count, child_received): Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+                _ctx: &mut NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self {
                     spawn_count,
@@ -2293,7 +2275,7 @@ mod tests {
                 })
             }
         }
-        impl crate::actor::native::NativeDispatch for ParentCap {
+        impl NativeDispatch for ParentCap {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2327,7 +2309,7 @@ mod tests {
         // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
         // Ping at the new child via the after_init bootstrap.
         let parent_id = registry
-            .lookup(<ParentCap as aether_actor::Actor>::NAMESPACE)
+            .lookup(<ParentCap as Actor>::NAMESPACE)
             .expect("ParentCap claimed");
         let MailboxEntry::Inbox(handler) = registry.entry(parent_id).expect("sink") else {
             panic!("expected mailbox entry");
@@ -2358,8 +2340,7 @@ mod tests {
         );
 
         // Child is Live in the chassis's actor registry.
-        let child_id =
-            crate::mail::MailboxId(aether_data::mailbox_id_from_name("test.spawn_child.child:0").0);
+        let child_id = MailboxId(mailbox_id_from_name("test.spawn_child.child:0").0);
         assert!(
             chassis.actor_registry().is_live(child_id),
             "spawned child should be Live in the actor registry under the deterministic full-name id"
@@ -2390,7 +2371,7 @@ mod tests {
             const NAME: &'static str = "test.shutdown.quit";
             const ID: DataKindId = DataKindId(0xE0E1_E2E3_E4E5_E6E7);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2403,17 +2384,14 @@ mod tests {
         struct Closer {
             close_observed: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Closer {
+        impl Actor for Closer {
             const NAMESPACE: &'static str = "test.shutdown.closer";
         }
         impl Instanced for Closer {}
         impl HandlesKind<Quit> for Closer {}
-        impl crate::actor::native::NativeActor for Closer {
+        impl NativeActor for Closer {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self {
                     close_observed: config,
                 })
@@ -2422,7 +2400,7 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for Closer {
+        impl NativeDispatch for Closer {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2526,16 +2504,13 @@ mod tests {
         struct Quiet {
             close_observed: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Quiet {
+        impl Actor for Quiet {
             const NAMESPACE: &'static str = "test.teardown.quiet";
         }
         impl Instanced for Quiet {}
-        impl crate::actor::native::NativeActor for Quiet {
+        impl NativeActor for Quiet {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self {
                     close_observed: config,
                 })
@@ -2544,7 +2519,7 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for Quiet {
+        impl NativeDispatch for Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2600,16 +2575,13 @@ mod tests {
         struct Quiet {
             close_observed: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Quiet {
+        impl Actor for Quiet {
             const NAMESPACE: &'static str = "test.teardown.quiet_many";
         }
         impl Instanced for Quiet {}
-        impl crate::actor::native::NativeActor for Quiet {
+        impl NativeActor for Quiet {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self {
                     close_observed: config,
                 })
@@ -2618,7 +2590,7 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for Quiet {
+        impl NativeDispatch for Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2687,7 +2659,7 @@ mod tests {
             const NAME: &'static str = "test.monitor.quit";
             const ID: DataKindId = DataKindId(0xC0DE_C0DE_4B4B_4B4B);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2708,7 +2680,7 @@ mod tests {
             const NAME: &'static str = "test.monitor.watch_order";
             const ID: DataKindId = DataKindId(0x4B4B_C0DE_C0DE_C0DE);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2720,21 +2692,18 @@ mod tests {
 
         // Target — handles Quit by self-shutting.
         struct Target;
-        impl aether_actor::Actor for Target {
+        impl Actor for Target {
             const NAMESPACE: &'static str = "test.monitor.target";
         }
         impl Instanced for Target {}
         impl HandlesKind<Quit> for Target {}
-        impl crate::actor::native::NativeActor for Target {
+        impl NativeActor for Target {
             type Config = ();
-            fn init(
-                (): Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::actor::native::NativeDispatch for Target {
+        impl NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2758,18 +2727,15 @@ mod tests {
             last_target: Arc<AtomicU64>,
             handle: Mutex<Option<crate::actor::monitor::MonitorHandle>>,
         }
-        impl aether_actor::Actor for Watcher {
+        impl Actor for Watcher {
             const NAMESPACE: &'static str = "test.monitor.watcher";
         }
         impl Instanced for Watcher {}
         impl HandlesKind<WatchOrder> for Watcher {}
         impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
-        impl crate::actor::native::NativeActor for Watcher {
+        impl NativeActor for Watcher {
             type Config = (Arc<AtomicU32>, Arc<AtomicU64>);
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self {
                     notice_count: config.0,
                     last_target: config.1,
@@ -2777,7 +2743,7 @@ mod tests {
                 })
             }
         }
-        impl crate::actor::native::NativeDispatch for Watcher {
+        impl NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -2786,18 +2752,15 @@ mod tests {
             ) -> Option<()> {
                 if kind.0 == WatchOrder::ID.0 {
                     let order = WatchOrder::decode_from_bytes(payload)?;
-                    let target = aether_data::MailboxId(order.target_id);
+                    let target = MailboxId(order.target_id);
                     let h = ctx
                         .monitor(target)
                         .expect("target must be Live at order time");
                     *self.handle.lock().unwrap() = Some(h);
                     return Some(());
                 }
-                if kind.0 == <aether_kinds::MonitorNotice as aether_data::Kind>::ID.0 {
-                    let notice =
-                        <aether_kinds::MonitorNotice as aether_data::Kind>::decode_from_bytes(
-                            payload,
-                        )?;
+                if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
+                    let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
                     self.last_target
                         .store(notice.target.0, AtomicOrdering::SeqCst);
                     self.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
@@ -2944,7 +2907,7 @@ mod tests {
             const NAME: &'static str = "test.monitor.quit2";
             const ID: DataKindId = DataKindId(0xCAFE_BABE_DEAD_BEEF);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2962,7 +2925,7 @@ mod tests {
             const NAME: &'static str = "test.monitor.watch_order2";
             const ID: DataKindId = DataKindId(0xBEEF_DEAD_BABE_CAFE);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -2973,20 +2936,17 @@ mod tests {
         }
 
         struct Target;
-        impl aether_actor::Actor for Target {
+        impl Actor for Target {
             const NAMESPACE: &'static str = "test.monitor.target2";
         }
         impl Instanced for Target {}
-        impl crate::actor::native::NativeActor for Target {
+        impl NativeActor for Target {
             type Config = ();
-            fn init(
-                (): Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::actor::native::NativeDispatch for Target {
+        impl NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3001,18 +2961,15 @@ mod tests {
             handle: Mutex<Option<crate::actor::monitor::MonitorHandle>>,
             close_observed: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Watcher {
+        impl Actor for Watcher {
             const NAMESPACE: &'static str = "test.monitor.watcher2";
         }
         impl Instanced for Watcher {}
         impl HandlesKind<WatchOrder> for Watcher {}
         impl HandlesKind<Quit> for Watcher {}
-        impl crate::actor::native::NativeActor for Watcher {
+        impl NativeActor for Watcher {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self {
                     handle: Mutex::new(None),
                     close_observed: config,
@@ -3022,7 +2979,7 @@ mod tests {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for Watcher {
+        impl NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3031,7 +2988,7 @@ mod tests {
             ) -> Option<()> {
                 if kind.0 == WatchOrder::ID.0 {
                     let order = WatchOrder::decode_from_bytes(payload)?;
-                    let target = aether_data::MailboxId(order.target_id);
+                    let target = MailboxId(order.target_id);
                     let h = ctx.monitor(target).expect("target Live");
                     *self.handle.lock().unwrap() = Some(h);
                     return Some(());
@@ -3154,7 +3111,7 @@ mod tests {
             const NAME: &'static str = "test.resolve.quit";
             const ID: DataKindId = DataKindId(0xF00D_F00D_F00D_F00D);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -3173,21 +3130,18 @@ mod tests {
         struct Member {
             tag: u32,
         }
-        impl aether_actor::Actor for Member {
+        impl Actor for Member {
             const NAMESPACE: &'static str = "test.resolve.member";
         }
         impl Instanced for Member {}
         impl HandlesKind<Quit> for Member {}
-        impl crate::actor::native::NativeActor for Member {
+        impl NativeActor for Member {
             type Config = u32;
-            fn init(
-                tag: u32,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(tag: u32, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { tag })
             }
         }
-        impl crate::actor::native::NativeDispatch for Member {
+        impl NativeDispatch for Member {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3303,20 +3257,17 @@ mod tests {
         use aether_actor::Instanced;
 
         struct Foo;
-        impl aether_actor::Actor for Foo {
+        impl Actor for Foo {
             const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
         }
         impl Instanced for Foo {}
-        impl crate::actor::native::NativeActor for Foo {
+        impl NativeActor for Foo {
             type Config = ();
-            fn init(
-                (): (),
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::actor::native::NativeDispatch for Foo {
+        impl NativeDispatch for Foo {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3328,20 +3279,17 @@ mod tests {
         }
 
         struct Bar;
-        impl aether_actor::Actor for Bar {
+        impl Actor for Bar {
             const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
         }
         impl Instanced for Bar {}
-        impl crate::actor::native::NativeActor for Bar {
+        impl NativeActor for Bar {
             type Config = ();
-            fn init(
-                (): (),
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::actor::native::NativeDispatch for Bar {
+        impl NativeDispatch for Bar {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3411,7 +3359,7 @@ mod tests {
             const NAME: &'static str = "test.recursive.hatch";
             const ID: DataKindId = DataKindId(0xA00A_A00A_A00A_A00A);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -3431,7 +3379,7 @@ mod tests {
             const NAME: &'static str = "test.recursive.ping";
             const ID: DataKindId = DataKindId(0xB00B_B00B_B00B_B00B);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -3451,7 +3399,7 @@ mod tests {
             const NAME: &'static str = "test.recursive.quit";
             const ID: DataKindId = DataKindId(0xC00C_C00C_C00C_C00C);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -3464,21 +3412,18 @@ mod tests {
         struct Grandchild {
             received: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Grandchild {
+        impl Actor for Grandchild {
             const NAMESPACE: &'static str = "test.recursive.grandchild";
         }
         impl Instanced for Grandchild {}
         impl HandlesKind<Ping> for Grandchild {}
-        impl crate::actor::native::NativeActor for Grandchild {
+        impl NativeActor for Grandchild {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
-        impl crate::actor::native::NativeDispatch for Grandchild {
+        impl NativeDispatch for Grandchild {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3497,24 +3442,21 @@ mod tests {
         struct Parent {
             grandchild_received: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Parent {
+        impl Actor for Parent {
             const NAMESPACE: &'static str = "test.recursive.parent";
         }
         impl Instanced for Parent {}
         impl HandlesKind<Hatch> for Parent {}
         impl HandlesKind<Quit> for Parent {}
-        impl crate::actor::native::NativeActor for Parent {
+        impl NativeActor for Parent {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self {
                     grandchild_received: config,
                 })
             }
         }
-        impl crate::actor::native::NativeDispatch for Parent {
+        impl NativeDispatch for Parent {
             fn __aether_dispatch_envelope(
                 &mut self,
                 ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3588,9 +3530,7 @@ mod tests {
         // Grandchild is Live in the registry under the deterministic
         // full-name id (NAMESPACE = "test.recursive.grandchild",
         // subname = "only").
-        let grandchild_id = crate::mail::MailboxId(
-            aether_data::mailbox_id_from_name("test.recursive.grandchild:only").0,
-        );
+        let grandchild_id = MailboxId(mailbox_id_from_name("test.recursive.grandchild:only").0);
         assert!(
             chassis.actor_registry().is_live(grandchild_id),
             "grandchild should be Live in the registry under the deterministic full-name id",
@@ -3652,23 +3592,20 @@ mod tests {
         struct WireProbe {
             wire_count: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for WireProbe {
+        impl Actor for WireProbe {
             const NAMESPACE: &'static str = "test.wire.singleton";
         }
         impl aether_actor::Singleton for WireProbe {}
-        impl crate::actor::native::NativeActor for WireProbe {
+        impl NativeActor for WireProbe {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_count: config })
             }
             fn wire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for WireProbe {
+        impl NativeDispatch for WireProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3730,7 +3667,7 @@ mod tests {
             const NAME: &'static str = "test.barrier.wire_ping";
             const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -3743,16 +3680,13 @@ mod tests {
         struct Pinger {
             wire_ran: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Pinger {
+        impl Actor for Pinger {
             const NAMESPACE: &'static str = "test.barrier.pinger";
         }
         impl aether_actor::Singleton for Pinger {}
-        impl crate::actor::native::NativeActor for Pinger {
+        impl NativeActor for Pinger {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_ran: config })
             }
             fn wire(&mut self, ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
@@ -3763,7 +3697,7 @@ mod tests {
                 self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for Pinger {
+        impl NativeDispatch for Pinger {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3777,21 +3711,18 @@ mod tests {
         struct Ponger {
             received: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for Ponger {
+        impl Actor for Ponger {
             const NAMESPACE: &'static str = "test.barrier.ponger";
         }
         impl aether_actor::Singleton for Ponger {}
-        impl aether_actor::HandlesKind<WireBarrierPing> for Ponger {}
-        impl crate::actor::native::NativeActor for Ponger {
+        impl HandlesKind<WireBarrierPing> for Ponger {}
+        impl NativeActor for Ponger {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
-        impl crate::actor::native::NativeDispatch for Ponger {
+        impl NativeDispatch for Ponger {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
@@ -3858,23 +3789,20 @@ mod tests {
         struct WireSpawnProbe {
             wire_count: Arc<AtomicU32>,
         }
-        impl aether_actor::Actor for WireSpawnProbe {
+        impl Actor for WireSpawnProbe {
             const NAMESPACE: &'static str = "test.spawn_wire.probe";
         }
         impl Instanced for WireSpawnProbe {}
-        impl crate::actor::native::NativeActor for WireSpawnProbe {
+        impl NativeActor for WireSpawnProbe {
             type Config = Arc<AtomicU32>;
-            fn init(
-                config: Self::Config,
-                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
-            ) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_count: config })
             }
             fn wire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::actor::native::NativeDispatch for WireSpawnProbe {
+        impl NativeDispatch for WireSpawnProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,

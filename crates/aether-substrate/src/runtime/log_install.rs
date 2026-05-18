@@ -113,7 +113,7 @@ pub fn with_actor_dispatch<R>(dispatch: &dyn MailDispatch, f: impl FnOnce() -> R
 /// it. No-op when no dispatch is stamped (out-of-actor `drain_buffer`
 /// calls — shouldn't happen in normal flow).
 fn ship_via_stamped_dispatch(mailbox: MailboxId, kind: KindId, payload: &[u8]) {
-    let Some(dispatch) = ACTOR_DISPATCH.with(std::cell::Cell::get) else {
+    let Some(dispatch) = ACTOR_DISPATCH.with(Cell::get) else {
         return;
     };
     dispatch.send(mailbox, kind, payload);

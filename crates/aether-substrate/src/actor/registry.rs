@@ -562,14 +562,9 @@ mod tests {
     /// doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         struct Stub;
-        let (tx, _rx) = std::sync::mpsc::channel::<crate::actor::native::envelope::Envelope>();
-        r.insert_live(
-            id,
-            Arc::new(tx),
-            std::any::TypeId::of::<Stub>(),
-            String::new(),
-        )
-        .expect("fresh slot");
+        let (tx, _rx) = std::sync::mpsc::channel::<Envelope>();
+        r.insert_live(id, Arc::new(tx), TypeId::of::<Stub>(), String::new())
+            .expect("fresh slot");
     }
 
     #[test]

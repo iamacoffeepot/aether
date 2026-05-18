@@ -302,7 +302,7 @@ fn ship_batch(
     queue: &Arc<SegQueue<TraceEvent>>,
     mailer: &Arc<Mailer>,
     recipient: MailboxId,
-    kind: aether_data::KindId,
+    kind: KindId,
 ) {
     let mut batch = Vec::with_capacity(BATCH_MAX);
     for _ in 0..BATCH_MAX {

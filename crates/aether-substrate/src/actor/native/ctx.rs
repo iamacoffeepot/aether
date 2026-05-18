@@ -167,7 +167,7 @@ impl<'a> NativeCtx<'a> {
     /// reads this to populate `LogEntry::origin` from the envelope
     /// rather than the payload.
     #[must_use]
-    pub fn origin(&self) -> Option<aether_data::MailboxId> {
+    pub fn origin(&self) -> Option<MailboxId> {
         match self.sender.target {
             crate::mail::ReplyTarget::Component(id) => Some(id),
             _ => None,
@@ -241,7 +241,7 @@ impl<'a> NativeCtx<'a> {
     /// [`NativeBinding::new_for_test`] (no spawner / actor registry
     /// wired) — fail-fast per ADR-0063: production transports always
     /// carry both, so handler code never reaches the panic.
-    pub fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
+    pub fn monitor(&self, target: MailboxId) -> Result<MonitorHandle, MonitorError> {
         let spawner = self
             .binding
             .spawner()
@@ -537,7 +537,7 @@ impl<'a> NativeInitCtx<'a> {
     /// registration completes; replies route correctly once the spawn
     /// lifecycle finishes inserting the entry.
     #[must_use]
-    pub fn self_id(&self) -> crate::mail::MailboxId {
+    pub fn self_id(&self) -> MailboxId {
         self.binding.self_mailbox()
     }
 
@@ -663,7 +663,7 @@ impl OutboundReply for NativeCtx<'_> {
         Some(self.sender)
     }
 
-    fn origin(&self) -> Option<aether_data::MailboxId> {
+    fn origin(&self) -> Option<MailboxId> {
         match self.sender.target {
             crate::mail::ReplyTarget::Component(id) => Some(id),
             _ => None,
@@ -687,7 +687,7 @@ impl SyncWaiter for NativeCtx<'_> {
         expected_correlation: u64,
     ) -> Result<K, E>
     where
-        K: aether_data::Kind + serde::de::DeserializeOwned,
+        K: Kind + serde::de::DeserializeOwned,
         E: WaitError,
     {
         aether_actor::actor::ctx::sync_waiter::wait_reply_via::<K, E>(
@@ -707,7 +707,7 @@ impl LifecycleControl for NativeCtx<'_> {
         self.binding.signal_shutdown();
     }
 
-    fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
+    fn monitor(&self, target: MailboxId) -> Result<MonitorHandle, MonitorError> {
         let spawner = self.binding.spawner().expect(
             "NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)",
         );
@@ -794,7 +794,7 @@ mod tests {
         const SCHEDULING: aether_actor::Scheduling = aether_actor::Scheduling::Dedicated;
     }
 
-    impl aether_actor::Singleton for StubActor {}
+    impl Singleton for StubActor {}
 
     impl NativeActor for StubActor {
         type Config = ();

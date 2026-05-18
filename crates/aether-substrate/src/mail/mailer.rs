@@ -524,7 +524,7 @@ mod tests {
     /// mailbox id / kind / payload / count the caller pushed.
     #[test]
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
-        let (outbound, outbound_rx) = crate::mail::outbound::HubOutbound::attached_loopback();
+        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let store = Arc::new(HandleStore::new(64 * 1024));
 
@@ -599,13 +599,13 @@ mod tests {
 
     fn note_schema() -> SchemaType {
         SchemaType::Struct {
-            fields: std::borrow::Cow::Owned(vec![
+            fields: Cow::Owned(vec![
                 NamedField {
-                    name: std::borrow::Cow::Borrowed("body"),
+                    name: Cow::Borrowed("body"),
                     ty: SchemaType::String,
                 },
                 NamedField {
-                    name: std::borrow::Cow::Borrowed("seq"),
+                    name: Cow::Borrowed("seq"),
                     ty: SchemaType::Scalar(Primitive::U32),
                 },
             ]),
@@ -615,13 +615,13 @@ mod tests {
 
     fn held_note_schema() -> SchemaType {
         SchemaType::Struct {
-            fields: std::borrow::Cow::Owned(vec![
+            fields: Cow::Owned(vec![
                 NamedField {
-                    name: std::borrow::Cow::Borrowed("held"),
+                    name: Cow::Borrowed("held"),
                     ty: SchemaType::Ref(SchemaCell::owned(note_schema())),
                 },
                 NamedField {
-                    name: std::borrow::Cow::Borrowed("seq"),
+                    name: Cow::Borrowed("seq"),
                     ty: SchemaType::Scalar(Primitive::U32),
                 },
             ]),
@@ -881,7 +881,7 @@ mod tests {
         let sender = MailboxId(0x8380_0003_0000_0000);
         let inbound_mail_id = MailId::new(sender, 1);
 
-        let (outbound, outbound_rx) = crate::mail::outbound::HubOutbound::attached_loopback();
+        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound));
@@ -1243,7 +1243,7 @@ mod tests {
                 run: Box::new(|| {
                     let sender = MailboxId(0x8380_DD05_0000_0000);
                     let mail_id = MailId::new(sender, 1);
-                    let (outbound, _rx) = crate::mail::outbound::HubOutbound::attached_loopback();
+                    let (outbound, _rx) = HubOutbound::attached_loopback();
                     let registry = Arc::new(Registry::new());
                     let store = Arc::new(HandleStore::new(64 * 1024));
                     let mailer = Mailer::new(registry, store).with_outbound(outbound);
@@ -1328,13 +1328,8 @@ mod tests {
                     let (_registry, mailer, _store) = make_mailer();
                     mailer.install_chassis_router(Box::new(|_| {}));
                     mailer.push(
-                        Mail::new(
-                            aether_data::MailboxId::CHASSIS_MAILBOX_ID,
-                            KindId(0xFEED),
-                            vec![],
-                            1,
-                        )
-                        .with_lineage(mail_id, mail_id, None),
+                        Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
                     );
                     mail_id
                 }),
@@ -1348,13 +1343,8 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (_registry, mailer, _store) = make_mailer();
                     mailer.push(
-                        Mail::new(
-                            aether_data::MailboxId::CHASSIS_MAILBOX_ID,
-                            KindId(0xFEED),
-                            vec![],
-                            1,
-                        )
-                        .with_lineage(mail_id, mail_id, None),
+                        Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)
+                            .with_lineage(mail_id, mail_id, None),
                     );
                     mail_id
                 }),

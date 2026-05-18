@@ -563,7 +563,7 @@ mod tests {
             inherited_mail_id,
             inherited_root,
             move |mut inherit| {
-                std::thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
                 pause_done_clone.store(true, Ordering::SeqCst);
                 <InheritCtx<StubActor> as Sender>::send_to_named(
                     &mut inherit,
@@ -593,7 +593,7 @@ mod tests {
         let recipient = registry
             .lookup("test.spawn_thread.recipient")
             .expect("recipient registered");
-        let kind = <aether_kinds::Tick as aether_data::Kind>::ID;
+        let kind = <aether_kinds::Tick as Kind>::ID;
         let payload = aether_data::encode_empty::<aether_kinds::Tick>();
         mailer.push(Mail::new(recipient, KindId(kind.0), payload, 1));
 
