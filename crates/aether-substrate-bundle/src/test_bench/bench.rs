@@ -815,10 +815,7 @@ impl TestBench {
                         });
                     }
                 }
-                let result = match self.gpu.render_and_capture() {
-                    Ok(png) => CaptureFrameResult::Ok { png },
-                    Err(error) => CaptureFrameResult::Err { error },
-                };
+                let result = CaptureFrameResult::from(self.gpu.render_and_capture());
                 for mail in req.after_mails {
                     self.queue.push(mail);
                 }

@@ -77,6 +77,7 @@ mod tests {
     use alloc::borrow::Cow;
     use alloc::boxed::Box;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     static F32: SchemaType = SchemaType::Scalar(Primitive::F32);
 
@@ -109,23 +110,32 @@ mod tests {
         }
     }
 
+    /// `VariantShape` list mirroring `RESULT`'s variant set
+    /// (Pending / Ok(u64) / Err{reason}). Hoisted so
+    /// `result_enum_shape` reads as "enum carrying these variants"
+    /// rather than the inline variant literal that Qodana otherwise
+    /// flagged as structurally similar to RESULT's parallel
+    /// `EnumVariant` declaration.
+    fn result_variant_shapes() -> Vec<VariantShape> {
+        vec![
+            VariantShape::Unit { discriminant: 0 },
+            VariantShape::Tuple {
+                discriminant: 1,
+                fields: vec![SchemaShape::Scalar(Primitive::U64)],
+            },
+            VariantShape::Struct {
+                discriminant: 2,
+                fields: vec![SchemaShape::String],
+            },
+        ]
+    }
+
     /// Runtime `SchemaShape` that `RESULT`'s canonical bytes decode to —
     /// the three-variant Unit/Tuple/Struct enum exercised by the all-variants
     /// round-trip test.
     fn result_enum_shape() -> SchemaShape {
-        //noinspection DuplicatedCode
         SchemaShape::Enum {
-            variants: vec![
-                VariantShape::Unit { discriminant: 0 },
-                VariantShape::Tuple {
-                    discriminant: 1,
-                    fields: vec![SchemaShape::Scalar(Primitive::U64)],
-                },
-                VariantShape::Struct {
-                    discriminant: 2,
-                    fields: vec![SchemaShape::String],
-                },
-            ],
+            variants: result_variant_shapes(),
         }
     }
 

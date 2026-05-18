@@ -34,6 +34,8 @@
 mod aabb;
 mod mat;
 mod quat;
+#[cfg(test)]
+mod test_helpers;
 mod vec;
 
 pub use aabb::Aabb;

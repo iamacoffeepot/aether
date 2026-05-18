@@ -1035,17 +1035,27 @@ mod tests {
         }
     }
 
+    /// One-line `NamedField { name: Cow::Borrowed(name), ty }` builder.
+    /// Cuts the per-field boilerplate that otherwise repeats for every
+    /// field across every test schema in this module.
+    fn named(name: &'static str, ty: SchemaType) -> NamedField {
+        NamedField {
+            name: Cow::Borrowed(name),
+            ty,
+        }
+    }
+
+    /// The `seq: u32` trailing field every test type in this module
+    /// (`Note`, `HeldNote`, …) carries to disambiguate stored entries.
+    /// Hoisted because both `note_schema` and `held_note_schema` end
+    /// with this exact field — the same `seq: u32` Rust field both
+    /// test structs declare.
+    fn seq_field() -> NamedField {
+        named("seq", SchemaType::Scalar(Primitive::U32))
+    }
+
     fn note_schema() -> SchemaType {
-        postcard_struct(vec![
-            NamedField {
-                name: Cow::Borrowed("body"),
-                ty: SchemaType::String,
-            },
-            NamedField {
-                name: Cow::Borrowed("seq"),
-                ty: SchemaType::Scalar(Primitive::U32),
-            },
-        ])
+        postcard_struct(vec![named("body", SchemaType::String), seq_field()])
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -1056,14 +1066,8 @@ mod tests {
 
     fn held_note_schema() -> SchemaType {
         postcard_struct(vec![
-            NamedField {
-                name: Cow::Borrowed("held"),
-                ty: SchemaType::Ref(SchemaCell::owned(note_schema())),
-            },
-            NamedField {
-                name: Cow::Borrowed("seq"),
-                ty: SchemaType::Scalar(Primitive::U32),
-            },
+            named("held", SchemaType::Ref(SchemaCell::owned(note_schema()))),
+            seq_field(),
         ])
     }
 

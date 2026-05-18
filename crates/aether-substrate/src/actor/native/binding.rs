@@ -704,10 +704,10 @@ mod tests {
         // into the forwarded [`Envelope`] without `to_vec()` /
         // `to_owned()` clones.
         Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
-            // Reuse the production `From<OwnedDispatch> for Envelope`
-            // so the test path moves payload + kind_name through the
-            // same single source of truth as the dispatcher.
-            let _ = tx.send(Envelope::from(dispatch));
+            // `Envelope` is now a type alias for `OwnedDispatch`, so
+            // the inbox-handler value moves straight onto the actor
+            // mpsc with no field-by-field translation.
+            let _ = tx.send(dispatch);
         })
     }
 

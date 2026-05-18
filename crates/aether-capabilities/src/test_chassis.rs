@@ -1,8 +1,7 @@
 //! Shared `TestChassis` fixture for unit tests across `aether-capabilities`.
 //!
 //! Every cap's `#[cfg(test)] mod tests` exercises its `init` / handlers
-//! by booting a real [`Builder`](aether_substrate::chassis::builder::Builder)
-//! against a no-op chassis declaration. Pre-extraction every site copied
+//! by booting a real [`Builder`] against a no-op chassis declaration. Pre-extraction every site copied
 //! the same 8-line `impl Chassis for TestChassis` block; this module is
 //! the single canonical declaration so test modules just
 //! `use crate::test_chassis::TestChassis;` and address it by the typename

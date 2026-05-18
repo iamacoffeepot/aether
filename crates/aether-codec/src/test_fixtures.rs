@@ -12,9 +12,16 @@ use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 
 /// A `NamedField` holding a single `Scalar(ty)` shape under `name`.
 pub fn scalar(name: &str, ty: Primitive) -> NamedField {
+    named(name, SchemaType::Scalar(ty))
+}
+
+/// Generic `NamedField { name, ty }` builder for the test fixtures
+/// that wrap a non-`Scalar` `SchemaType` (arrays, struct nests, refs).
+/// `scalar` is the common-case wrapper over this.
+pub fn named(name: &str, ty: SchemaType) -> NamedField {
     NamedField {
         name: name.to_string().into(),
-        ty: SchemaType::Scalar(ty),
+        ty,
     }
 }
 

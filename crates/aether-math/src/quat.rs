@@ -129,12 +129,12 @@ impl Mul<Vec3> for Quat {
 mod tests {
     use super::*;
     use crate::PI;
+    use crate::test_helpers::approx_eq_vec3 as approx_eq_vec3_helper;
 
     const EPS: f32 = 1e-5;
 
     fn approx_eq_vec3(a: Vec3, b: Vec3) -> bool {
-        //noinspection DuplicatedCode
-        (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS && (a.z - b.z).abs() < EPS
+        approx_eq_vec3_helper(a, b, EPS)
     }
 
     #[test]

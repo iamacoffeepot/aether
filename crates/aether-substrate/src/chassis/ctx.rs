@@ -296,7 +296,7 @@ impl<'a> ChassisCtx<'a> {
             // the warn-log reads `env.kind_name` (the owned String)
             // without needing to clone ahead of the send.
             Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
-                let env = Envelope::from(dispatch);
+                let env: Envelope = dispatch;
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -363,7 +363,7 @@ impl<'a> ChassisCtx<'a> {
                     );
                     return;
                 };
-                let env = Envelope::from(dispatch);
+                let env: Envelope = dispatch;
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -444,7 +444,7 @@ impl<'a> ChassisCtx<'a> {
                     );
                     return;
                 };
-                let env = Envelope::from(dispatch);
+                let env: Envelope = dispatch;
                 // Increment before send so the dispatcher's
                 // matching decrement-after-dispatch sees a count
                 // > 0 by the time it tries to decrement. If the
