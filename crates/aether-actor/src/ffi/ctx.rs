@@ -130,7 +130,7 @@ impl FfiCtx<'_> {
     /// broadcast mail (which have no reply target) land as `None`.
     #[doc(hidden)]
     pub fn __set_reply_to(&mut self, sender: Option<ReplyTo>) {
-        self.sender = sender.map(super::super::mail::ReplyTo::raw);
+        self.sender = sender.map(ReplyTo::raw);
     }
 
     /// Reply with an explicit `sender` + cached `KindId<K>`. Sits

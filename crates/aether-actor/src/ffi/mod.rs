@@ -179,7 +179,7 @@ pub trait FfiActor: crate::Actor {
     /// Concrete `&mut FfiCtx<'_>` (mirrors native's
     /// `NativeActor::wire(&mut NativeCtx<'_>)`) so overrides reach for
     /// the inherent `ctx.actor::<R>().send(&payload)` shape directly.
-    fn wire(&mut self, ctx: &mut crate::ffi::ctx::FfiCtx<'_>) {
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         let _ = ctx;
     }
 
@@ -189,7 +189,7 @@ pub trait FfiActor: crate::Actor {
     /// mailboxes; sends to a dead peer warn-drop. Default no-op;
     /// override to publish a final broadcast, signal monitors, or
     /// flush state.
-    fn unwire(&mut self, ctx: &mut crate::ffi::ctx::FfiCtx<'_>) {
+    fn unwire(&mut self, ctx: &mut FfiCtx<'_>) {
         let _ = ctx;
     }
 }

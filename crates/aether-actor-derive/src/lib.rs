@@ -362,7 +362,7 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
                     let fname = f
                         .ident
                         .as_ref()
-                        .map(std::string::ToString::to_string)
+                        .map(ToString::to_string)
                         .unwrap_or_default();
                     quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#fname) }
                 });
@@ -477,7 +477,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
             }
             Fields::Named(named) => {
                 let field_exprs = named.named.iter().map(|f| {
-                    let fname = f.ident.as_ref().map(std::string::ToString::to_string).unwrap_or_default();
+                    let fname = f.ident.as_ref().map(ToString::to_string).unwrap_or_default();
                     let ty_expr = field_type_schema_expr(&f.ty);
                     quote! {
                         ::aether_data::__derive_runtime::NamedField {
@@ -1358,7 +1358,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // marker), which is what typed `ctx.actor::<R>().send(...)` needs;
     // host builds see the full struct.
     match &mut item.fields {
-        syn::Fields::Named(fields) => {
+        Fields::Named(fields) => {
             for field in &mut fields.named {
                 let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
                 if !already_cfg {
@@ -1368,7 +1368,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-        syn::Fields::Unnamed(fields) => {
+        Fields::Unnamed(fields) => {
             for field in &mut fields.unnamed {
                 let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
                 if !already_cfg {
@@ -1378,7 +1378,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-        syn::Fields::Unit => {
+        Fields::Unit => {
             // Marker structs: nothing to gate.
         }
     }
