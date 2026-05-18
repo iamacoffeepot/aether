@@ -35,6 +35,15 @@ edition = "2024"
 # prelude has `size_of` in scope).
 unused_qualifications = "warn"
 
+[workspace.lints.rustdoc]
+# Phase 5 of iamacoffeepot/aether#913 doc-comment fix — flag
+# `[`Foo`](crate::path::to::Foo)` when the bracket label already
+# resolves to the same target via intra-doc-link lookup. Enforced by
+# CI's `Docs` job (`cargo doc --workspace --no-deps` under
+# `RUSTDOCFLAGS='-D warnings'`); `warn` here keeps local `cargo doc`
+# usable for developers without forcing -D on every dev run.
+redundant_explicit_links = "warn"
+
 [workspace.lints.clippy]
 # Baseline — both groups as warn, then opt out of the idiom-fight bucket below.
 pedantic = { level = "warn", priority = -1 }

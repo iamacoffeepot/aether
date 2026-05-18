@@ -1,8 +1,8 @@
 //! Actor SDK primitive: the marker trait surface (here in `mod.rs`)
 //! plus per-mail / per-init / per-drop ctx machinery
-//! ([`ctx`](crate::actor::ctx)), the `Sender` / `MailCtx` traits
-//! ([`sender`](crate::actor::sender)), and the `Slot` single-instance
-//! backing store ([`slot`](crate::actor::slot)). Marker traits are
+//! ([`ctx`]), the `Sender` / `MailCtx` traits
+//! ([`sender`]), and the `Slot` single-instance
+//! backing store ([`slot`]). Marker traits are
 //! pure compile-time markers — no transport machinery, no lifecycle
 //! methods, just identity (`Actor`), singleton-ness (`Singleton`),
 //! and per-handler-kind gating (`HandlesKind`).

@@ -88,7 +88,7 @@ pub trait DriverRunning: 'static {
 }
 
 /// Phantom [`DriverCapability`] for passive chassis (test-bench, future
-/// embedder-driven chassis kinds). The [`Chassis`](crate::chassis::Chassis)
+/// embedder-driven chassis kinds). The [`Chassis`]
 /// trait requires `type Driver: DriverCapability`; passive chassis
 /// declare this as their driver to satisfy the bound, but the value is
 /// never instantiated (the `Builder<C, NoDriver>` path produces a

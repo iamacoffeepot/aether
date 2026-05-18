@@ -53,6 +53,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  docs:
+    name: Docs
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install ALSA dev headers (cpal Linux backend)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+      # `[workspace.lints.rustdoc]` in the root Cargo.toml tracks
+      # specific rustdoc lints at `warn`. RUSTDOCFLAGS escalates the
+      # tracked subset to hard failures here without poisoning local
+      # `cargo doc` runs (which still emit pre-existing broken /
+      # private intra-doc-link warnings we haven't swept yet — those
+      # land under a separate cleanup).
+      - name: cargo doc with tracked rustdoc lints denied
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::redundant_explicit_links"
+        run: cargo doc --workspace --no-deps
+
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,
   # demo components) are pure Rust with no per-OS behavior — a matrix
@@ -172,7 +196,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, clippy, test, desktop ]
+    needs: [ changes, fmt, clippy, docs, test, desktop ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -180,12 +204,14 @@ jobs:
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
+          echo "docs:    ${{ needs.docs.result }}"
           echo "test:    ${{ needs.test.result }}"
           echo "desktop: ${{ needs.desktop.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
+          [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.desktop.result }}" == "success" || "${{ needs.desktop.result }}" == "skipped" ]] || fail=1
           exit $fail
