@@ -1026,20 +1026,26 @@ mod tests {
         const ID: KindId = KindId(0xDEAD_BEEF_0002_0001);
     }
 
-    fn note_schema() -> SchemaType {
+    /// Postcard-shape `Struct { repr_c: false, fields }` builder
+    /// shared by the test schemas in this module.
+    fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
         SchemaType::Struct {
-            fields: Cow::Owned(vec![
-                NamedField {
-                    name: Cow::Borrowed("body"),
-                    ty: SchemaType::String,
-                },
-                NamedField {
-                    name: Cow::Borrowed("seq"),
-                    ty: SchemaType::Scalar(Primitive::U32),
-                },
-            ]),
+            fields: Cow::Owned(fields),
             repr_c: false,
         }
+    }
+
+    fn note_schema() -> SchemaType {
+        postcard_struct(vec![
+            NamedField {
+                name: Cow::Borrowed("body"),
+                ty: SchemaType::String,
+            },
+            NamedField {
+                name: Cow::Borrowed("seq"),
+                ty: SchemaType::Scalar(Primitive::U32),
+            },
+        ])
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -1049,19 +1055,16 @@ mod tests {
     }
 
     fn held_note_schema() -> SchemaType {
-        SchemaType::Struct {
-            fields: Cow::Owned(vec![
-                NamedField {
-                    name: Cow::Borrowed("held"),
-                    ty: SchemaType::Ref(SchemaCell::owned(note_schema())),
-                },
-                NamedField {
-                    name: Cow::Borrowed("seq"),
-                    ty: SchemaType::Scalar(Primitive::U32),
-                },
-            ]),
-            repr_c: false,
-        }
+        postcard_struct(vec![
+            NamedField {
+                name: Cow::Borrowed("held"),
+                ty: SchemaType::Ref(SchemaCell::owned(note_schema())),
+            },
+            NamedField {
+                name: Cow::Borrowed("seq"),
+                ty: SchemaType::Scalar(Primitive::U32),
+            },
+        ])
     }
 
     #[test]
