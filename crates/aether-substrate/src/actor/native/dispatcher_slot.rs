@@ -210,19 +210,7 @@ where
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
-                    //noinspection DuplicatedCode
-                    if actor
-                        .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
-                        .is_none()
-                        && !actor.__aether_dispatch_fallback(&mut ctx, &env)
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::dispatch",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "actor dispatch missed: kind not handled or decode failed"
-                        );
-                    }
+                    super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
                     aether_actor::log::drain_buffer();
                 },
             );

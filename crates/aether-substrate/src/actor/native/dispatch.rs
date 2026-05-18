@@ -39,9 +39,39 @@ use aether_actor::local::ActorSlots;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::{NativeActor, NativeDispatch};
+use crate::actor::native::envelope::Envelope;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
+
+/// Try the typed `#[handler]` dispatch; if no typed arm matches and
+/// the actor's `#[fallback]` also returns `false`, warn that the kind
+/// fell through. Shared by `dispatch_loop_run`'s main loop and
+/// `DispatcherSlot::run_cycle`'s pool path.
+///
+/// Issue 576 framing: catch-all caps that own a `#[fallback]` return
+/// `true` after their fallback runs, which suppresses the warn.
+/// Strict receivers keep the default (`false`) so the miss surfaces.
+pub(crate) fn typed_then_fallback_or_warn<A>(
+    actor: &mut Box<A>,
+    ctx: &mut NativeCtx<'_>,
+    env: &Envelope,
+) where
+    A: NativeActor + NativeDispatch,
+{
+    if actor
+        .__aether_dispatch_envelope(ctx, env.kind, &env.payload)
+        .is_none()
+        && !actor.__aether_dispatch_fallback(ctx, env)
+    {
+        tracing::warn!(
+            target: "aether_substrate::dispatch",
+            actor = A::NAMESPACE,
+            kind = env.kind_name.as_str(),
+            "actor dispatch missed: kind not handled or decode failed"
+        );
+    }
+}
 
 /// Run one actor's dispatcher loop on the calling thread. Returns
 /// when the binding signals shutdown (self-shutdown flag set or
@@ -87,25 +117,7 @@ pub fn dispatch_loop_run<A>(
                 &**binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-                    //noinspection DuplicatedCode
-                    if actor
-                        .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
-                        .is_none()
-                        && !actor.__aether_dispatch_fallback(&mut ctx, &env)
-                    {
-                        // Issue 576: catch-all caps override
-                        // `__aether_dispatch_fallback` and return
-                        // `true` after their fallback runs,
-                        // suppressing this warn. Strict receivers
-                        // keep the default (returns `false`) and
-                        // surface the miss.
-                        tracing::warn!(
-                            target: "aether_substrate::dispatch",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "actor dispatch missed: kind not handled or decode failed"
-                        );
-                    }
+                    typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
                     aether_actor::log::drain_buffer();
                 },
             );
