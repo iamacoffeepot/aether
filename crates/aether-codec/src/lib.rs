@@ -26,6 +26,8 @@ mod cast;
 mod decode;
 mod encode;
 pub mod frame;
+#[cfg(test)]
+mod test_fixtures;
 
 pub use decode::{DecodeError, decode_schema};
 pub use encode::{EncodeError, encode_schema};
