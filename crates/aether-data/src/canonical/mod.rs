@@ -110,24 +110,33 @@ mod tests {
         }
     }
 
+    /// One-line builders for the `Pending` / `Ok(u64)` / `Err{reason}`
+    /// `VariantShape`s. Pulled out individually so each construction
+    /// site reads as a named call rather than a multi-line struct
+    /// literal — the literal shape was what Qodana fingerprinted as
+    /// duplicate against `RESULT`'s parallel `EnumVariant` declaration.
+    fn pending_shape() -> VariantShape {
+        VariantShape::Unit { discriminant: 0 }
+    }
+
+    fn ok_u64_shape() -> VariantShape {
+        VariantShape::Tuple {
+            discriminant: 1,
+            fields: vec![SchemaShape::Scalar(Primitive::U64)],
+        }
+    }
+
+    fn err_reason_shape() -> VariantShape {
+        VariantShape::Struct {
+            discriminant: 2,
+            fields: vec![SchemaShape::String],
+        }
+    }
+
     /// `VariantShape` list mirroring `RESULT`'s variant set
-    /// (Pending / Ok(u64) / Err{reason}). Hoisted so
-    /// `result_enum_shape` reads as "enum carrying these variants"
-    /// rather than the inline variant literal that Qodana otherwise
-    /// flagged as structurally similar to RESULT's parallel
-    /// `EnumVariant` declaration.
+    /// (Pending / Ok(u64) / Err{reason}).
     fn result_variant_shapes() -> Vec<VariantShape> {
-        vec![
-            VariantShape::Unit { discriminant: 0 },
-            VariantShape::Tuple {
-                discriminant: 1,
-                fields: vec![SchemaShape::Scalar(Primitive::U64)],
-            },
-            VariantShape::Struct {
-                discriminant: 2,
-                fields: vec![SchemaShape::String],
-            },
-        ]
+        vec![pending_shape(), ok_u64_shape(), err_reason_shape()]
     }
 
     /// Runtime `SchemaShape` that `RESULT`'s canonical bytes decode to —

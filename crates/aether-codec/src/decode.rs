@@ -30,7 +30,7 @@ use std::fmt;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::{Map, Value};
 
-use crate::cast::{NON_CAST_VARIANTS_MSG, align_of_primitive};
+use crate::cast::{align_of_primitive, non_cast_variant_error};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -156,6 +156,13 @@ fn decode_cast_field(
     ty: &SchemaType,
     path: &str,
 ) -> Result<Value, DecodeError> {
+    // Non-cast variants share the same error message across encode +
+    // decode; `cast::non_cast_variant_error` owns the classification
+    // (and its own exhaustiveness check forces new SchemaType variants
+    // to declare which side they fall on).
+    if let Some(msg) = non_cast_variant_error(ty) {
+        return Err(DecodeError::UnsupportedSchema(msg));
+    }
     match ty {
         SchemaType::Scalar(p) => {
             let a = align_of_primitive(*p);
@@ -193,20 +200,10 @@ fn decode_cast_field(
             let id = u64::from_le_bytes(cur.take::<8>(path)?);
             Ok(render_type_id_value(id, *type_id, path)?)
         }
-        // Intentionally parallel with the matching arm in `encode.rs`
-        // — the OR-pattern enumerates every `SchemaType` variant that
-        // can't live in cast-shape position. Extracting to a helper
-        // would erase the compile-time exhaustiveness check that keeps
-        // a new variant from silently falling through.
-        SchemaType::Bool
-        | SchemaType::String
-        | SchemaType::Bytes
-        | SchemaType::Option(_)
-        | SchemaType::Vec(_)
-        | SchemaType::Enum { .. }
-        | SchemaType::Unit
-        | SchemaType::Ref(_)
-        | SchemaType::Map { .. } => Err(DecodeError::UnsupportedSchema(NON_CAST_VARIANTS_MSG)),
+        _ => unreachable!(
+            "non-cast SchemaType variants returned early via non_cast_variant_error; \
+             a new cast-eligible variant must be classified there and added here"
+        ),
     }
 }
 
