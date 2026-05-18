@@ -281,7 +281,7 @@ mod tests {
 
         // Find each shared coordinate's VertexId in each polygon and
         // assert they match.
-        let id_for = |poly_idx: usize, coord: Point3| -> super::VertexId {
+        let id_for = |poly_idx: usize, coord: Point3| -> VertexId {
             let poly = &mesh.polygons[poly_idx];
             for &id in &poly.vertices {
                 if mesh.vertices[id] == coord {

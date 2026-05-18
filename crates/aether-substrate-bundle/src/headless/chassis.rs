@@ -40,7 +40,7 @@ pub struct HeadlessChassis;
 
 impl Chassis for HeadlessChassis {
     const PROFILE: &'static str = "headless";
-    type Driver = super::driver::HeadlessTimerCapability;
+    type Driver = HeadlessTimerCapability;
     type Env = HeadlessEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {

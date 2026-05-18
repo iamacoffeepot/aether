@@ -163,7 +163,7 @@ pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
     }
 
     let mut violations = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for &(a, b) in directed.keys() {
         let canonical = if a < b { (a, b) } else { (b, a) };
         if !seen.insert(canonical) {

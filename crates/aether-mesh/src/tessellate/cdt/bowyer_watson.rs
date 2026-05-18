@@ -302,7 +302,7 @@ impl Mesh {
                     // (inherited from the parent triangle's CCW winding,
                     // since cyclic permutation preserves orientation).
                     let v_self = tri.verts[i];
-                    if super::predicates::in_circle(
+                    if in_circle(
                         self.vertices[v_self],
                         self.vertices[a],
                         self.vertices[b],

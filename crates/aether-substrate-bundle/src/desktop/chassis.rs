@@ -51,7 +51,7 @@ pub struct DesktopChassis;
 
 impl Chassis for DesktopChassis {
     const PROFILE: &'static str = "desktop";
-    type Driver = super::driver::DesktopDriverCapability;
+    type Driver = DesktopDriverCapability;
     type Env = DesktopEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {

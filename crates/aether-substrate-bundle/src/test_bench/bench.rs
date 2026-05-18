@@ -114,7 +114,7 @@ impl fmt::Display for TestBenchError {
 /// Per-send settlement timeout. Mirrors the `run_frame` tick wait at
 /// `bench.rs::run_frame`; long enough to absorb wasm compile + cap
 /// dispatcher wake under nextest CPU contention.
-const SETTLEMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl std::error::Error for TestBenchError {}
 
@@ -315,7 +315,7 @@ impl TestBench {
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
         let input_mailbox = aether_data::mailbox_id_from_name(
-            <aether_capabilities::InputCapability as aether_actor::Actor>::NAMESPACE,
+            <aether_capabilities::InputCapability as Actor>::NAMESPACE,
         );
         let frame_bound_pending = passive.frame_bound_pending();
 
@@ -433,7 +433,7 @@ impl TestBench {
         &self,
         recipient_name: &str,
         kind_name: &'static str,
-        mailbox: aether_data::MailboxId,
+        mailbox: MailboxId,
         kind: KindId,
         payload: Vec<u8>,
     ) -> Result<(), TestBenchError> {
@@ -583,7 +583,7 @@ impl TestBench {
     /// chassis-peripheral kinds; each one now routes to its own cap
     /// (`aether.render.capture_frame`, `aether.test_bench.advance`,
     /// `aether.window.set_mode`, etc.).
-    fn push_to_mailbox<K>(&self, mailbox: aether_data::MailboxId, mail: &K, cid: u64)
+    fn push_to_mailbox<K>(&self, mailbox: MailboxId, mail: &K, cid: u64)
     where
         K: Kind + serde::Serialize,
     {
@@ -950,7 +950,7 @@ mod tests {
         tb.send_mail(
             "aether.input",
             &SubscribeInput {
-                kind: aether_kinds::Tick::ID,
+                kind: Tick::ID,
                 mailbox: subscriber_mbox,
             },
         )
@@ -1017,7 +1017,7 @@ mod tests {
             const NAME: &'static str = "test.spawn.bump";
             const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-                if bytes.len() != core::mem::size_of::<Self>() {
+                if bytes.len() != size_of::<Self>() {
                     return None;
                 }
                 Some(bytemuck::pod_read_unaligned(bytes))
@@ -1045,7 +1045,7 @@ mod tests {
             fn __aether_dispatch_envelope(
                 &mut self,
                 _ctx: &mut NativeCtx<'_>,
-                kind: aether_substrate::KindId,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Bump::ID.0 {
@@ -1102,9 +1102,9 @@ mod tests {
 
         // Wait briefly for the two pre-loaded `Bump` mails to land in
         // the first instance's dispatcher.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while received.load(AtomicOrdering::SeqCst) < 2 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             received.load(AtomicOrdering::SeqCst),
