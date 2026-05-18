@@ -39,3 +39,28 @@ exclude:
 # rationale on `args:` in .github/workflows/qodana.yml. Bootstrap
 # adds ~60-90s per run.
 bootstrap: apt-get update && apt-get install -y libasound2-dev && rustup install 1.95.0 --profile default --no-self-update && rustup default 1.95.0 && rustup component add rust-src rust-analyzer
+
+# Baseline absorbs the 88 remaining findings on main as of commit
+# abc9f38 (post the iamacoffeepot/aether#913 Phase 1-6 sweep). The
+# baseline file is a snapshot SARIF; Qodana suppresses anything
+# already present there. Only NEW findings beyond the baseline
+# surface as failures. The 88 are all known-acceptable patterns:
+# - 55 RsUnnecessaryQualifications: rustdoc / defensive leading
+#   `::` / cross-crate paths the rustc lint can't catch.
+# - 28 DuplicatedCode: trait-impl-facade and mirror patterns.
+#   //noinspection annotations from PR iamacoffeepot/aether#931
+#   serve as in-source documentation but Qodana CLI does not
+#   honour them (works only in the IDE).
+# - 2 RsThreadLocalStableMethodCanBeUsed: IN_LOG_PIPELINE pair
+#   intentionally retains `.with(|c| c.set(...))` because the
+#   wasm32 branch wraps Cell in a custom `Slot` type that lacks
+#   the LocalKey<Cell<T>>::set shortcut.
+# - 1 TomlUnresolvedReference: the workspace `exclude =
+#   ["spikes/*"]` glob; valid cargo syntax Qodana misparses.
+# - 1 CargoUnusedDependency: `anyhow` in aether-substrate kept
+#   per its Cargo.toml comment reserving it for the planned
+#   wasmtime::Result -> anyhow::Result rename (issue 571).
+# - 1 RsConstantConditionIf: generic trait const `A::FRAME_BARRIER`
+#   evaluated against trait default (false); concrete impls
+#   override it to true.
+baseline: qodana.sarif.json

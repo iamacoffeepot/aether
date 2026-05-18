@@ -14,11 +14,10 @@ jobs:
       contents: write
       pull-requests: write
       checks: write
-    # Report-only while the EAP linter beds in — Qodana action defaults
-    # to exit-non-zero on findings, which would fail PR CI on every
-    # false positive. Flip to required by removing this line once the
-    # noise floor is understood.
-    continue-on-error: true
+    # Strictness flip (iamacoffeepot/aether#913 Phase Final): the
+    # `continue-on-error: true` is gone now that the noise floor is
+    # baselined. The Qodana action exits non-zero only on findings
+    # NEW relative to the qodana.sarif.json baseline at repo root.
     steps:
       - uses: actions/checkout@v4
         with:
