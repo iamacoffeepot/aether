@@ -33,7 +33,12 @@ use aether_kinds::{
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{HubOutbound, Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId};
+use aether_substrate::runtime::lifecycle;
+use aether_substrate::{
+    HubOutbound, Mailer, SubstrateBoot,
+    chassis::frame_loop,
+    mail::{MailId, MailboxId},
+};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -79,12 +84,6 @@ pub struct App {
     /// Hub outbound — shared with the log-capture layer and the
     /// capture-reply path.
     outbound: Arc<HubOutbound>,
-    /// Snapshot of every frame-bound capability's pending counter
-    /// (ADR-0074 §Decision 5). Today: render. Cloned out of
-    /// `DriverCtx::frame_bound_pending` at driver boot; `RedrawRequested`
-    /// hands it to `frame_loop::drain_frame_bound_or_abort` after the
-    /// component drain so render's inbox quiesces before submit.
-    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     pub(crate) started: Option<Instant>,
@@ -292,20 +291,22 @@ impl App {
     /// ADR-0080 §6 chassis-source push helper (issue
     /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
     /// `push_chassis_root_mail` so the trace observer sees a `Sent`
-    /// event for every input/window/frame-stats emission.
+    /// event for every input/window/frame-stats emission. Returns the
+    /// minted chain-root [`MailId`] so frame-gating callers can
+    /// subscribe its settlement (ADR-0082 §6).
     fn push_chassis_root(
         &self,
         recipient: MailboxId,
         kind: aether_data::KindId,
         payload: Vec<u8>,
         count: u32,
-    ) {
+    ) -> MailId {
         let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
         if correlation == 0 {
             correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
         }
         self.queue
-            .push_chassis_root_mail(correlation, recipient, kind, payload, count);
+            .push_chassis_root_mail(correlation, recipient, kind, payload, count)
     }
 
     fn apply_window_mode(
@@ -494,13 +495,17 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.occluded && pending_capture.is_none() {
                     return;
                 }
-                // ADR-0082 PR 3b: redraw fires `LifecycleAdvance` to
-                // the lifecycle driver, which broadcasts Tick to
+                // ADR-0082 §6 / PR 3c: redraw fires `LifecycleAdvance`
+                // to the lifecycle driver, which broadcasts Tick to
                 // `aether.input` (via the chassis's `initial_subscribers`
-                // relay) plus any other subscribers. Settlement on the
-                // broadcast root replaces the prior
-                // `drain_frame_bound_or_abort` gate.
-                self.push_chassis_root(
+                // relay) plus any other subscribers. Components emit
+                // their `DrawTriangle` / `aether.camera` mail into render
+                // as descendants of this advance's chain root. Waiting
+                // for that root to settle before submit guarantees the
+                // frame's geometry is integrated — the causal-completion
+                // replacement for the retired `drain_frame_bound_or_abort`
+                // pending-counter poll.
+                let advance_root = self.push_chassis_root(
                     self.lifecycle_mailbox,
                     self.kind_lifecycle_advance,
                     encode_empty::<aether_kinds::LifecycleAdvance>(),
@@ -512,13 +517,23 @@ impl ApplicationHandler<UserEvent> for App {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                // ADR-0074 §Decision 5: render's inbox must quiesce
-                // before submit so any DrawTriangle / aether.camera
-                // mail this frame is integrated into the recorded
-                // pass. (The pre-Phase-4 component drain barrier is
-                // retired; trampoline traps fail-fast directly via
-                // `NativeBinding::fatal_abort`.)
-                frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
+                if let Some(registry) = self.queue.settlement_registry() {
+                    let rx = registry.subscribe_settlement(advance_root);
+                    if rx.recv_timeout(frame_loop::DRAIN_BUDGET).is_err() {
+                        // A frame chain that doesn't settle within the
+                        // drain budget is a wedged dispatcher — same
+                        // fail-fast disposition the old drain barrier
+                        // had (ADR-0063).
+                        lifecycle::fatal_abort(
+                            &self.outbound,
+                            format!(
+                                "frame chain wedged: LifecycleAdvance root {advance_root:?} did \
+                                 not settle within {:?}",
+                                frame_loop::DRAIN_BUDGET
+                            ),
+                        );
+                    }
+                }
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
                         Some(req) => {
@@ -690,7 +705,6 @@ impl DriverCapability for DesktopDriverCapability {
             )))
         })?;
         let triangles_rendered = Arc::clone(&render_handles.triangles_rendered);
-        let frame_bound_pending = ctx.frame_bound_pending();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
@@ -745,7 +759,6 @@ impl DriverCapability for DesktopDriverCapability {
             render_handles,
             capture_queue,
             outbound: Arc::clone(&boot.outbound),
-            frame_bound_pending,
             window: None,
             gpu: None,
             started: None,
