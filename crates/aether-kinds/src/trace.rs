@@ -21,6 +21,8 @@ use alloc::vec::Vec;
 use aether_data::{KindId, MailId, MailboxId};
 use serde::{Deserialize, Serialize};
 
+use crate::MailEnvelope;
+
 /// ADR-0080 §3: well-known mailbox name the chassis-owned drainer
 /// thread sends [`BatchedTraceEvents`] to. The
 /// `TraceObserverCapability` (in `aether-capabilities`) registers
@@ -337,4 +339,41 @@ pub enum DescribeWindowResult {
 #[kind(name = "aether.trace.settled")]
 pub struct Settled {
     pub root: MailId,
+}
+
+/// Issue 749: request kind for the atomic batched-dispatch MCP tool
+/// `send_mail_traced`. Sent to [`TRACE_OBSERVER_MAILBOX_NAME`]; the
+/// observer dispatches every envelope inheriting the inbound chain so
+/// all children share a single root with the inbound itself, then
+/// replies synchronously with [`DispatchTracedAck`] carrying that root
+/// id.
+///
+/// Carries [`MailEnvelope`]s — the same name-addressed batch shape
+/// `CaptureFrame` uses. The substrate-side handler resolves the
+/// recipient and kind names against its registry at dispatch time.
+///
+/// **Two-call protocol.** The synchronous ack closes round 1. The
+/// caller waits for the wire `ReplyEnd` (substrate-side chain
+/// settlement) and then issues a separate [`DescribeTree`] against the
+/// returned root to fetch the populated tree. This sidesteps the
+/// settle/reply race that a single-call shape would inherit from
+/// `RpcServerCapability`'s settlement-driven `ReplyEnd`.
+#[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.trace.dispatch_traced")]
+pub struct DispatchTraced {
+    pub mails: Vec<MailEnvelope>,
+}
+
+/// Issue 749: synchronous reply to [`DispatchTraced`]. `Ok` carries
+/// the chassis-root [`MailId`] every dispatched envelope inherited, so
+/// the caller can issue a follow-up [`DescribeTree`] once the wire
+/// `ReplyEnd` signals chain settlement. `Err` aborts the batch before
+/// any mail moved — typically a bad recipient or kind name in the
+/// batch (matches `CaptureFrameResult::Err`'s bundle-resolution
+/// failure shape).
+#[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.trace.dispatch_traced_ack")]
+pub enum DispatchTracedAck {
+    Ok { root: MailId },
+    Err { error: String },
 }

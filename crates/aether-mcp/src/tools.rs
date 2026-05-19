@@ -16,14 +16,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
+use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
     EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name, tagged_id,
 };
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, ComponentCapabilities, ListEngines, ListEnginesResult,
-    LoadComponent, LoadResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult,
-    TerminateEngine, TerminateEngineResult,
+    LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult,
+    SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult,
+    trace::{
+        DescribeTree, DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire,
+        TRACE_OBSERVER_MAILBOX_NAME,
+    },
 };
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -33,8 +38,9 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 
 use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, EngineInfo, LoadComponentArgs,
-    MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs, SpawnSubstrateArgs,
-    TerminateSubstrateArgs,
+    MailIdJson, MailNodeJson, MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs,
+    SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    TracedMailSpec,
 };
 use crate::rpc::RpcSession;
 
@@ -180,6 +186,90 @@ impl Mcp {
             statuses.push(MailStatus { index, status });
         }
         json(&statuses)
+    }
+
+    #[tool(
+        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 5000, max 30000); on timeout the response carries status:timeout with no root or tree."
+    )]
+    pub async fn send_mail_traced(
+        &self,
+        Parameters(args): Parameters<SendMailTracedArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let descriptors = aether_kinds::descriptors::all();
+        // Encode the batch before sending — a bad spec produces a
+        // clean invalid-params error and never touches the wire.
+        // Same shape `CaptureFrame` carries: `Vec<MailEnvelope>` with
+        // name-level addressing the substrate resolves at dispatch
+        // time via `resolve_bundle`.
+        let mails = encode_traced_bundle(&descriptors, &args.mails)
+            .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
+        let timeout_ms = args.settlement_timeout_ms.unwrap_or(5000).min(30000);
+        let dispatch_envelope = engine_envelope(
+            engine,
+            TRACE_OBSERVER_MAILBOX_NAME,
+            &DispatchTraced { mails },
+        );
+
+        // Round 1: ack carries the chassis-root MailId; ReplyEnd
+        // closes when the chain settles substrate-side.
+        let ack_reply = match tokio::time::timeout(
+            std::time::Duration::from_millis(u64::from(timeout_ms)),
+            self.session.call_one(dispatch_envelope),
+        )
+        .await
+        {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(e)) => return Err(internal(e)),
+            Err(_) => {
+                return json(&SendMailTracedResponse {
+                    status: "timeout".into(),
+                    root: None,
+                    mails: None,
+                    in_flight: None,
+                });
+            }
+        };
+        let ack = DispatchTracedAck::decode_from_bytes(&ack_reply.payload)
+            .ok_or_else(|| internal_msg("undecodable DispatchTracedAck"))?;
+        let root = match ack {
+            DispatchTracedAck::Ok { root } => root,
+            DispatchTracedAck::Err { error } => {
+                return Err(internal_msg(&format!(
+                    "send_mail_traced dispatch failed: {error}"
+                )));
+            }
+        };
+
+        // Round 2: pull the populated tree. Microseconds — already
+        // in-memory in the substrate's TraceObserver at this point.
+        let tree_reply = self
+            .session
+            .call_one(engine_envelope(
+                engine,
+                TRACE_OBSERVER_MAILBOX_NAME,
+                &DescribeTree { root },
+            ))
+            .await
+            .map_err(internal)?;
+        let tree = DescribeTreeResult::decode_from_bytes(&tree_reply.payload)
+            .ok_or_else(|| internal_msg("undecodable DescribeTreeResult"))?;
+
+        match tree {
+            DescribeTreeResult::Ok {
+                root,
+                in_flight,
+                mails,
+            } => json(&SendMailTracedResponse {
+                status: "settled".into(),
+                root: Some(mail_id_to_json(root)),
+                mails: Some(mails.into_iter().map(mail_node_to_json).collect()),
+                in_flight: Some(in_flight),
+            }),
+            DescribeTreeResult::Err { not_found } => Err(internal_msg(&format!(
+                "describe_tree: root {not_found:?} not found"
+            ))),
+        }
     }
 
     #[tool(
@@ -501,6 +591,68 @@ fn parse_mailbox_id(s: &str) -> Result<MailboxId, McpError> {
         .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))
 }
 
+/// Encode a `send_mail_traced` batch into the same `MailEnvelope`
+/// shape `CaptureFrame` carries: name-level addressing + schema-encoded
+/// payload. The substrate's `TraceObserver` resolves the names through
+/// its registry at dispatch time. Same `resolve_payload` path
+/// `encode_capture_bundle` uses, just over `TracedMailSpec` instead of
+/// `CaptureMailSpec`.
+fn encode_traced_bundle(
+    descriptors: &[KindDescriptor],
+    specs: &[TracedMailSpec],
+) -> anyhow::Result<Vec<KindMailEnvelope>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let desc = descriptors
+                .iter()
+                .find(|d| d.name == spec.kind_name)
+                .ok_or_else(|| anyhow::anyhow!("unknown kind: {}", spec.kind_name))?;
+            let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
+            let payload = aether_codec::encode_schema(&params, &desc.schema)
+                .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
+            Ok(KindMailEnvelope {
+                recipient_name: spec.recipient_name.clone(),
+                kind_name: spec.kind_name.clone(),
+                payload,
+                count: 1,
+            })
+        })
+        .collect()
+}
+
+/// Encode an unwrapped raw `u64` mailbox id as the tagged-id string the
+/// MCP wire surfaces (`mbx-…`, ADR-0064). Panics only if the id has
+/// no tag bits set — chassis-minted ids always do.
+fn mailbox_id_to_tagged(id: MailboxId) -> String {
+    tagged_id::encode(id.0).expect("mailbox id is taggable")
+}
+
+fn kind_id_to_tagged(id: KindId) -> String {
+    tagged_id::encode(id.0).expect("kind id is taggable")
+}
+
+fn mail_id_to_json(id: MailId) -> MailIdJson {
+    MailIdJson {
+        sender: mailbox_id_to_tagged(id.sender),
+        correlation_id: id.correlation_id,
+    }
+}
+
+fn mail_node_to_json(node: MailNodeWire) -> MailNodeJson {
+    MailNodeJson {
+        mail_id: mail_id_to_json(node.mail_id),
+        parent: node.parent.map(mail_id_to_json),
+        sender: mailbox_id_to_tagged(node.sender),
+        recipient: mailbox_id_to_tagged(node.recipient),
+        kind: kind_id_to_tagged(node.kind),
+        t_sent: node.t_sent.0,
+        t_received: node.t_received.map(|n| n.0),
+        t_finished: node.t_finished.map(|n| n.0),
+        thread_name: node.thread_name,
+    }
+}
+
 /// Encode a `capture_frame` mail bundle: resolve each spec's kind
 /// against the substrate descriptor inventory, schema-encode its
 /// params, and wrap into the substrate-side `aether_kinds::MailEnvelope`
@@ -584,7 +736,8 @@ mod tests {
     use super::*;
     use crate::args::{
         CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, LoadComponentArgs, MailSpec,
-        ReplaceComponentArgs, SendMailArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+        ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
+        TerminateSubstrateArgs, TracedMailSpec,
     };
     use aether_capabilities::EngineServer;
     use aether_capabilities::rpc::{
@@ -776,6 +929,30 @@ mod tests {
         assert!(
             result.is_err(),
             "a malformed mailbox_id should be a tool error"
+        );
+    }
+
+    /// `send_mail_traced` with an unknown kind in the batch is
+    /// rejected up front — the batch is encoded before any RPC,
+    /// mirroring `capture_frame`'s all-or-fail bundle semantics.
+    #[tokio::test]
+    async fn send_mail_traced_bad_spec_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .send_mail_traced(Parameters(SendMailTracedArgs {
+                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                mails: vec![TracedMailSpec {
+                    recipient_name: "aether.render".to_owned(),
+                    kind_name: "not.a.real.kind".to_owned(),
+                    params: None,
+                }],
+                settlement_timeout_ms: None,
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "an unknown kind in the batch should be a tool error",
         );
     }
 
