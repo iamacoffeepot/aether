@@ -1,6 +1,6 @@
 ---
 name: secretary
-description: Surface everything that needs your attention as a ranked queue of documents-to-read and multi-choice prompts. Bidirectional — invoke as `/secretary` to see what's pending, or have Claude/agents post a blocker via `/secretary --post-blocker` when mid-task work needs a user decision. Scans observable state (open PRs, project board phases, failing CI, unanswered audit comments) plus a posted-blockers file. Output is two shapes: documents to read with a follow-up command, or multi-choice with explicit options.
+description: Surface everything that needs your attention as a ranked queue, then prompt with `AskUserQuestion` selectors so resolution is click-driven instead of typed. Bidirectional — invoke as `/secretary` to see what's pending, or have Claude/agents post a blocker via `/secretary --post-blocker` when mid-task work needs a user decision. Scans observable state (open PRs, project board phases, failing CI, unanswered audit comments) plus a posted-blockers file. Output is a printed queue followed by selector questions (HIGH/MED) — LOW items print-only.
 ---
 
 # /secretary — pending-attention queue
@@ -12,7 +12,7 @@ description: Surface everything that needs your attention as a ranked queue of d
 
 Bidirectional: the user invokes `/secretary` to see what's queued; Claude or any agent invokes `/secretary --post-blocker` when it's stuck mid-task and needs a user decision to continue. Posted blockers join the queue automatically.
 
-Resolution is conversational. The user reads the queue, picks what to address, and replies in chat (*"approve #973 and #974, bounce #984 with reason X, save memories 1 and 3"*). No `--resolve` flag needed — the next-Claude-turn acts on the chat reply.
+Resolution is selector-driven. After printing the queue, Claude calls `AskUserQuestion` with one question per actionable HIGH/MED item — the user clicks options instead of typing replies. Inline-text resolution still works as a fallback (*"approve #973 and #974, bounce #984 with reason X, save memories 1 and 3"*) and for items that need free-form input the selector's automatic "Other" option captures it.
 
 ## Invocation
 
@@ -69,13 +69,17 @@ Posted blockers are HIGH priority unless the poster sets `priority: "low"` (rare
 
 ## Output format
 
+Two-pass: print the ranked queue first (so the user can see everything at a glance), then call `AskUserQuestion` for actionable items.
+
+**Pass 1 — print:**
+
 ```
 SECRETARY — <ISO-date>
 
 HIGH (<n>):
 
 1. <title>
-   Type: <choice|document>
+   Type: <choice|document|memory|review>
    <one-paragraph description>
    <if choice:>
      a) <option text>
@@ -83,22 +87,44 @@ HIGH (<n>):
      c) <option text>
    <if document:>
      Read: <command to view the artifact>
-     Then: <command to act on it, or "reply with decision">
+     Then: <command to act on it, or "use the selector below">
 
 2. ...
 
 MED (<n>):
    <same shape>
 
-LOW (<n>):
+LOW (<n>):  (print-only, no selector)
    <same shape>
 
-Total: <n>. Reply with decisions inline, or:
-  /secretary --high       refilter to just HIGH
-  /secretary --since <D>  filter to recent
+Total: <n>.
 ```
 
-The output stays in chat (printed to stdout). No new file written by the read pass. The user replies inline; the next Claude turn parses the reply and acts.
+**Pass 2 — selector:** immediately after the print, call `AskUserQuestion` once for HIGH items, again (if needed) for MED items. LOW items are surfaced for awareness only — no selector pressure.
+
+`AskUserQuestion` constraints (these are the load-bearing ones to plan around):
+
+- Max 4 questions per call → batch items in groups of 4; if more remain, the user picks first 4, then Claude makes a second `AskUserQuestion` call.
+- Each question has 2-4 options → if a posted blocker has 5+ options, take the top 3 and let the automatic "Other" cover the rest (the user can free-text the omitted choice).
+- `header` field is max 12 chars → derive a short tag (`#973`, `flake-983`, `mem:audit-fp`, etc).
+- `multiSelect: false` for these items — each prompt is one decision.
+
+**Per-type option mapping:**
+
+| Type | Default options | header |
+|------|-----------------|--------|
+| `choice` (posted blocker) | The blocker's own `options` array, truncated to 3 + auto-Other if >3 | first 12 chars of title |
+| `document` — PR awaiting review | "Approve", "Bounce to Plan", "Skip for now" | `#NNN` |
+| `document` — wish report awaiting triage | "File issues", "Skip for now", "Delete tree" | wish slug head |
+| `document` — Bounced project item | "Re-scope (Plan)", "Re-define (Define)", "Skip for now" | `#NNN` |
+| `memory` (pending memory write) | "Save", "Drop", "Edit then save" | `mem:slug` |
+| `review` (changes-requested PR) | "Address comments", "Bounce to Plan", "Skip for now" | `#NNN` |
+
+The first option is always the default-recommended action when one exists (e.g. for a PR with CI green and a clean diff, "Approve" goes first).
+
+For document items the user typically wants to read first: present the selector with the "Open in browser" / "View first" action absent from the options (use the Read column above the selector) — the selector is for what to do *after* reading. If the user picks an action without reading, that's their call.
+
+After the user picks, act on each one (run `/approve`, `/bounce`, save memory file, edit JSONL `resolved: true`, etc.) and report what was done.
 
 ## Priority rules
 
@@ -127,20 +153,21 @@ The blocker writes to the posted-blockers JSONL. The agent can then exit cleanly
 
 **Post sparingly.** A blocker is "I cannot proceed without you." If you can make a reasonable judgment call, do so and surface it as a decision in your reply, not a blocker.
 
-## Resolution (conversational, no special command)
+## Resolution
 
-The user reads the queue and replies in chat — e.g.:
+**Selector path (primary):** the user clicks options in the `AskUserQuestion` UI. Claude reads the answers, then for each picked option:
 
-> *Approve #973 and #976. Bounce #984 to Plan with note "needs the scenario harness from #868 first." Save memories 1 and 3. Skip the rest for now.*
+1. Maps the option text back to its concrete action (`/approve <N>`, `/bounce <N> <phase> --reason "..."`, save a memory file, edit blocker JSONL `resolved: true`, etc.).
+2. Runs the action and captures the result.
+3. Confirms back what was done in a brief reply.
 
-The next Claude turn:
+If the user picked **"Other"** for any item, Claude reads the free-text and acts on the user's intent — or, if it's ambiguous, asks one clarifying `AskUserQuestion` follow-up with a tighter option set before acting.
 
-1. Parses the reply.
-2. Runs `/approve 973`, `/approve 976`, `/bounce 984 Plan --reason "..."`, etc.
-3. For each posted-blocker addressed, edits the JSONL entry to `resolved: true` with `resolution: <chosen-option-or-text>`.
-4. Confirms back what was done.
+**Inline-text path (fallback):** if the user dismisses the selector and replies in chat instead — e.g. *"approve #973 and #976, bounce #984 to Plan with note 'needs the scenario harness from #868 first', skip the rest"* — parse the reply and act the same way. Both paths converge on the same action set.
 
-If the user wants to handle one item interactively (asks a clarifying question, requests higher LOD), Claude expands that item before applying anything. The blockers stay queued until explicitly resolved.
+**Clarification path:** if any item needs a longer conversation (the user asks *"why is #984 bounced?"* or *"show me the diff first"*), expand that item with a focused answer, then re-prompt the selector for the remaining items.
+
+Posted blockers stay in the JSONL with `resolved: false` until explicitly resolved through either path. `--clear-resolved` garbage-collects the entries afterward.
 
 ## What `/secretary` does NOT do
 
