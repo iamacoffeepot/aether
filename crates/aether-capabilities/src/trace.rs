@@ -18,14 +18,16 @@
 
 use aether_kinds::trace::{
     BatchedTraceEvents, DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult,
-    ListActiveRoots, ListActiveRootsResult, MailNodeWire, RootSummaryWire, TraceWindow,
+    DispatchTraced, DispatchTracedAck, ListActiveRoots, ListActiveRootsResult, MailNodeWire,
+    RootSummaryWire, TraceWindow,
 };
 
 #[aether_actor::bridge(singleton)]
 mod native {
     use super::{
         BatchedTraceEvents, DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult,
-        ListActiveRoots, ListActiveRootsResult, MailNodeWire, RootSummaryWire, TraceWindow,
+        DispatchTraced, DispatchTracedAck, ListActiveRoots, ListActiveRootsResult, MailNodeWire,
+        RootSummaryWire, TraceWindow,
     };
     use std::collections::{BTreeSet, HashMap};
     use std::ops::Bound;
@@ -39,7 +41,9 @@ mod native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::Mail;
+    use aether_substrate::mail::helpers::resolve_bundle;
     use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::registry::Registry;
 
     /// ADR-0080 §11 retention defaults. Override via env vars.
     /// `AETHER_TRACE_RETENTION_MS` — drop roots older than this many
@@ -109,6 +113,12 @@ mod native {
         /// Cached `Settled` kind id; computed once at init to avoid
         /// re-resolving for every settlement event.
         settled_kind: KindId,
+        /// Issue 749: substrate registry handle for `DispatchTraced`'s
+        /// per-envelope name resolution (recipient mailbox name → id,
+        /// kind name → id). Cloned from `ctx.mailer().registry()` at
+        /// init; matches the `RenderCapability` pattern that resolves
+        /// `CaptureFrame` mail bundles through the same registry.
+        registry: Arc<Registry>,
     }
 
     impl TraceObserverCapability {
@@ -434,14 +444,17 @@ mod native {
         fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let retention_ms = parse_env_u64("AETHER_TRACE_RETENTION_MS", RETENTION_MS_DEFAULT);
             let max_roots = parse_env_usize("AETHER_TRACE_MAX_ROOTS", MAX_ROOTS_DEFAULT);
+            let mailer = ctx.mailer();
+            let registry = Arc::clone(mailer.registry());
             Ok(Self {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
                 retention: Duration::from_millis(retention_ms),
                 max_roots,
-                mailer: ctx.mailer(),
+                mailer,
                 settled_kind: <Settled as aether_data::Kind>::ID,
+                registry,
             })
         }
 
@@ -506,6 +519,37 @@ mod native {
             let result = self.build_describe_window(request, now);
             ctx.reply(&result);
         }
+
+        /// # Agent
+        /// Atomic batched dispatch with shared trace root, backing the
+        /// MCP `send_mail_traced` tool. Captures this handler's inbound
+        /// `MailId` as the batch root, dispatches every spec inheriting
+        /// the chain (so all children appear under one tree), and
+        /// replies synchronously with [`DispatchTracedAck`] carrying
+        /// the root. The caller waits for the wire `ReplyEnd` (chain
+        /// settled) and then issues a follow-up [`DescribeTree`] for
+        /// the populated tree. Issue 749.
+        #[handler]
+        fn on_dispatch_traced(&mut self, ctx: &mut NativeCtx<'_>, batch: DispatchTraced) {
+            let root = ctx.in_flight_mail_id();
+            let DispatchTraced { mails } = batch;
+            // Resolve every envelope's name addressing through the
+            // substrate registry — same path `CaptureFrame`'s bundle
+            // resolution uses (`render::on_capture_frame`). A single
+            // unresolved name aborts the whole batch, surfaced as the
+            // ack's `Err` variant so the MCP caller fails fast.
+            let resolved = match resolve_bundle(&self.registry, &mails, "dispatch_traced batch") {
+                Ok(v) => v,
+                Err(error) => {
+                    ctx.reply(&DispatchTracedAck::Err { error });
+                    return;
+                }
+            };
+            for mail in resolved {
+                let _ = ctx.send_envelope_traced(mail.recipient, mail.kind, &mail.payload);
+            }
+            ctx.reply(&DispatchTracedAck::Ok { root });
+        }
     }
 
     #[cfg(test)]
@@ -515,8 +559,13 @@ mod native {
     #[allow(clippy::significant_drop_tightening)]
     mod tests {
         use super::*;
+        use aether_data::{SessionToken, Uuid};
+        use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::handle_store::HandleStore;
-        use aether_substrate::mail::registry::Registry;
+        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+        use aether_substrate::mail::registry::{MailDispatch, Registry};
+        use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use std::sync::mpsc::Receiver;
 
         /// Construct an observer for state-fold tests. Stash a fresh
         /// `Mailer` so `fire_settled` has somewhere to push (the
@@ -540,7 +589,7 @@ mod native {
         fn observer_with(retention: Duration, max_roots: usize) -> TraceObserverCapability {
             let registry = Arc::new(Registry::new());
             let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(registry, store));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
             TraceObserverCapability {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
@@ -549,6 +598,7 @@ mod native {
                 max_roots,
                 mailer,
                 settled_kind: <Settled as aether_data::Kind>::ID,
+                registry,
             }
         }
 
@@ -740,7 +790,7 @@ mod native {
             // pushes through the Mailer; the router intercepts.
             let registry = Arc::new(Registry::new());
             let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(registry, store));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
             let captured: Arc<Mutex<Vec<Settled>>> = Arc::new(Mutex::new(Vec::new()));
             let captured_for_router = Arc::clone(&captured);
             let settled_kind = <Settled as aether_data::Kind>::ID;
@@ -763,6 +813,7 @@ mod native {
                 max_roots: 1000,
                 mailer: Arc::clone(&mailer),
                 settled_kind,
+                registry: Arc::clone(&registry),
             };
 
             let root = mail(1, 1);
@@ -1232,6 +1283,195 @@ mod native {
             obs.evict();
             assert!(obs.roots.is_empty());
             assert!(obs.mails.is_empty());
+        }
+
+        /// Shared scaffolding for the `on_dispatch_traced` tests:
+        /// fresh registry + mailer + outbound + transport + observer
+        /// wired together with the `mailer.outbound -> rx` egress
+        /// recorder. The observer doesn't go through `init` (which
+        /// reads env vars and ctx state); construct it directly with
+        /// the registry handle the resolve path needs.
+        struct DispatchTracedFixture {
+            registry: Arc<Registry>,
+            rx: Receiver<EgressEvent>,
+            transport: Arc<NativeBinding>,
+            cap: TraceObserverCapability,
+        }
+
+        fn dispatch_traced_fixture() -> DispatchTracedFixture {
+            let registry = Arc::new(Registry::new());
+            let store = Arc::new(HandleStore::new(1024 * 1024));
+            let (outbound, rx) = HubOutbound::attached_loopback();
+            let mailer = Arc::new(
+                Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0x7ACE),
+            ));
+            let cap = TraceObserverCapability {
+                roots: HashMap::new(),
+                mails: HashMap::new(),
+                t_sent_index: BTreeSet::new(),
+                retention: Duration::from_mins(1),
+                max_roots: 1000,
+                mailer,
+                settled_kind: <Settled as aether_data::Kind>::ID,
+                registry: Arc::clone(&registry),
+            };
+            DispatchTracedFixture {
+                registry,
+                rx,
+                transport,
+                cap,
+            }
+        }
+
+        /// Build a chassis-root `NativeCtx` against the fixture's
+        /// transport, anchoring the in-flight + reply-to fields to a
+        /// session sender so the ack reply egresses as `ToSession`.
+        fn chassis_root_ctx(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_> {
+            let sender = ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())));
+            NativeCtx::new(transport, sender, inbound, inbound)
+        }
+
+        /// Drain `rx` until it goes quiet, decoding every
+        /// `DispatchTracedAck` `ToSession` egress it sees. Exactly
+        /// one ack is the success shape; the test asserts on `len()`.
+        fn drain_ack_replies(rx: &Receiver<EgressEvent>) -> Vec<DispatchTracedAck> {
+            let mut acks = Vec::new();
+            while let Ok(event) = rx.recv_timeout(Duration::from_millis(250)) {
+                if let EgressEvent::ToSession {
+                    kind_name, payload, ..
+                } = event
+                    && kind_name == <DispatchTracedAck as aether_data::Kind>::NAME
+                {
+                    acks.push(postcard::from_bytes(&payload).expect("ack payload decodes"));
+                }
+            }
+            acks
+        }
+
+        /// Issue 749: `on_dispatch_traced` resolves each envelope's
+        /// name addressing through the registry (matching
+        /// `CaptureFrame`'s bundle pattern), dispatches each via
+        /// `send_envelope_traced` so children inherit the chain, and
+        /// replies synchronously with `DispatchTracedAck::Ok { root }`
+        /// carrying the inbound mail id.
+        #[test]
+        fn on_dispatch_traced_resolves_each_envelope_and_acks_with_root() {
+            use aether_kinds::MailEnvelope;
+            use std::sync::Mutex;
+
+            type Capture = (KindId, MailId, Option<MailId>, Vec<u8>);
+
+            /// Inline handler that records every dispatched mail's
+            /// `(kind, root, parent, payload)` into the shared
+            /// `Vec`. Used twice to register two stub recipients.
+            fn register_capture(registry: &Registry, name: &str, sink: Arc<Mutex<Vec<Capture>>>) {
+                registry.register_inline(
+                    name,
+                    Arc::new(move |d: MailDispatch<'_>| {
+                        sink.lock()
+                            .expect("test stub: captured mutex poisoned")
+                            .push((d.kind, d.root, d.parent_mail, d.payload.to_vec()));
+                    }),
+                );
+            }
+
+            let mut fix = dispatch_traced_fixture();
+            // Resolve_bundle needs both mailbox (by name) and kind to
+            // be registered, else it short-circuits with the early-
+            // abort `Err` path the other test exercises.
+            let captured: Arc<Mutex<Vec<Capture>>> = Arc::new(Mutex::new(Vec::new()));
+            register_capture(&fix.registry, "aether.test.spec_a", Arc::clone(&captured));
+            register_capture(&fix.registry, "aether.test.spec_b", Arc::clone(&captured));
+            let kind_alpha = fix.registry.register_kind("aether.test.kind_a");
+            let kind_beta = fix.registry.register_kind("aether.test.kind_b");
+
+            let inbound = MailId::new(MailboxId(0xC0DE), 7);
+            let mut ctx = chassis_root_ctx(&fix.transport, inbound);
+            fix.cap.on_dispatch_traced(
+                &mut ctx,
+                DispatchTraced {
+                    mails: vec![
+                        MailEnvelope {
+                            recipient_name: "aether.test.spec_a".into(),
+                            kind_name: "aether.test.kind_a".into(),
+                            payload: vec![1u8, 2],
+                            count: 1,
+                        },
+                        MailEnvelope {
+                            recipient_name: "aether.test.spec_b".into(),
+                            kind_name: "aether.test.kind_b".into(),
+                            payload: vec![3u8, 4, 5],
+                            count: 1,
+                        },
+                    ],
+                },
+            );
+
+            let snapshot = captured
+                .lock()
+                .expect("test stub: captured mutex poisoned")
+                .clone();
+            assert_eq!(snapshot.len(), 2, "expected each envelope to dispatch");
+            assert!(
+                snapshot.iter().any(|(k, root, parent, p)| *k == kind_alpha
+                    && *root == inbound
+                    && *parent == Some(inbound)
+                    && p == &vec![1u8, 2]),
+                "envelope A missing or chain not inherited; captured: {snapshot:?}"
+            );
+            assert!(
+                snapshot.iter().any(|(k, root, parent, p)| *k == kind_beta
+                    && *root == inbound
+                    && *parent == Some(inbound)
+                    && p == &vec![3u8, 4, 5]),
+                "envelope B missing or chain not inherited; captured: {snapshot:?}"
+            );
+
+            let acks = drain_ack_replies(&fix.rx);
+            assert_eq!(acks.len(), 1, "expected exactly one ack reply");
+            match &acks[0] {
+                DispatchTracedAck::Ok { root } => assert_eq!(
+                    *root, inbound,
+                    "Ok ack must echo the in-flight inbound mail id as the chassis root"
+                ),
+                DispatchTracedAck::Err { error } => {
+                    panic!("expected Ok ack, got Err: {error}")
+                }
+            }
+        }
+
+        /// Issue 749: an unresolvable name in the batch short-circuits
+        /// to `DispatchTracedAck::Err`; no envelope dispatches.
+        #[test]
+        fn on_dispatch_traced_replies_err_on_unknown_recipient() {
+            use aether_kinds::MailEnvelope;
+
+            let mut fix = dispatch_traced_fixture();
+            let inbound = MailId::new(MailboxId(0xC0DE), 99);
+            let mut ctx = chassis_root_ctx(&fix.transport, inbound);
+            fix.cap.on_dispatch_traced(
+                &mut ctx,
+                DispatchTraced {
+                    mails: vec![MailEnvelope {
+                        recipient_name: "aether.test.does_not_exist".into(),
+                        kind_name: "aether.test.also_missing".into(),
+                        payload: vec![],
+                        count: 1,
+                    }],
+                },
+            );
+
+            let acks = drain_ack_replies(&fix.rx);
+            assert_eq!(acks.len(), 1);
+            assert!(
+                matches!(&acks[0], DispatchTracedAck::Err { error } if error.contains("unknown recipient")),
+                "expected Err with 'unknown recipient' message, got: {:?}",
+                acks[0]
+            );
         }
     }
 }

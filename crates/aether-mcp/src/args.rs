@@ -183,6 +183,100 @@ pub struct EngineLogsResponse {
     pub truncated_before: Option<u64>,
 }
 
+/// `send_mail_traced` arguments — atomic batched dispatch with a shared
+/// trace root (issue iamacoffeepot/aether#749). Every spec lands on the
+/// same engine and inherits the same chassis root, so the response carries one
+/// combined trace tree covering the whole batch.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendMailTracedArgs {
+    /// Engine UUID the batch targets (from `list_engines`). All specs
+    /// share this engine — atomic dispatch is per-engine.
+    pub engine_id: String,
+    /// One or more mail items, dispatched as children of one shared
+    /// trace root. A bad spec aborts the whole batch before any mail
+    /// moves (mirrors `capture_frame`'s bundle semantics).
+    pub mails: Vec<TracedMailSpec>,
+    /// Cap on wall-clock wait for the batch's chain to settle, in
+    /// milliseconds. Defaults to 5000; clamped to 30000.
+    #[serde(default)]
+    pub settlement_timeout_ms: Option<u32>,
+}
+
+/// One mail in a `send_mail_traced` batch. Like [`CaptureMailSpec`] but
+/// scoped to the trace-dispatch surface — the engine is fixed once at
+/// the batch level by [`SendMailTracedArgs::engine_id`].
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TracedMailSpec {
+    /// Mailbox name on the target engine (e.g. `"aether.render"`).
+    pub recipient_name: String,
+    /// Kind name, resolved against the substrate kind vocabulary.
+    pub kind_name: String,
+    /// Structured params, schema-encoded to wire bytes. Omit or
+    /// `null` for a fieldless kind.
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+/// `send_mail_traced` response. One combined trace tree for the whole
+/// batch (shared-root atomic dispatch), or a `status` telling the
+/// caller the batch never settled.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SendMailTracedResponse {
+    /// `"settled"` once the batch's chain settled and the tree is
+    /// populated, `"timeout"` when the substrate didn't reply within
+    /// the `settlement_timeout_ms` window.
+    pub status: String,
+    /// Chassis-root `MailId` every spec inherited. Populated on
+    /// `settled`, `null` on `timeout`.
+    pub root: Option<MailIdJson>,
+    /// Mail nodes in the settled tree. Order is unspecified — agents
+    /// reconstruct chains via `parent` edges.
+    pub mails: Option<Vec<MailNodeJson>>,
+    /// Root's `in_flight` count at describe time. `0` for a fully-
+    /// settled batch; non-zero indicates the chain re-armed after the
+    /// initial settle (rare; reflects late-arriving descendants).
+    pub in_flight: Option<u32>,
+}
+
+/// `MailId` rendered for MCP: the sender mailbox as a tagged-id
+/// string (ADR-0064) plus the per-actor correlation counter.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MailIdJson {
+    /// Tagged mailbox id (`mbx-…`) of the producer that minted this
+    /// `MailId`. `mbx-aaaa-aaaa-aaaa` is the `aether.chassis` sender,
+    /// the marker for chassis-originated roots (ADR-0080 §1).
+    pub sender: String,
+    /// Per-actor monotonic counter at mint time. Combined with
+    /// `sender` it uniquely identifies the mail across the substrate.
+    pub correlation_id: u64,
+}
+
+/// One mail node in a `send_mail_traced` tree (`MailNodeWire`
+/// transcoded for MCP — tagged-id strings, JSON-shaped timestamps).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MailNodeJson {
+    pub mail_id: MailIdJson,
+    /// `null` for chassis-root mail (no producer-side parent).
+    pub parent: Option<MailIdJson>,
+    /// Tagged mailbox id (`mbx-…`) of the producer.
+    pub sender: String,
+    /// Tagged mailbox id (`mbx-…`) of the recipient.
+    pub recipient: String,
+    /// Tagged kind id (`knd-…`) of the payload schema.
+    pub kind: String,
+    /// Monotonic nanoseconds since substrate boot.
+    pub t_sent: u64,
+    /// Set once the recipient dispatcher entered the handler; `null`
+    /// until then.
+    pub t_received: Option<u64>,
+    /// Set once the recipient dispatcher exited the handler; `null`
+    /// until then (i.e. mail still in flight).
+    pub t_finished: Option<u64>,
+    /// OS thread the handler ran on (issue 734). `None` until the
+    /// `Received` event lands or for anonymous threads.
+    pub thread_name: Option<String>,
+}
+
 /// `capture_frame` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CaptureFrameArgs {
