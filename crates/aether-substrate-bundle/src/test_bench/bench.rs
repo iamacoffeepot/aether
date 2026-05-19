@@ -42,7 +42,6 @@ use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
     SubstrateBoot,
     capture::CaptureQueue,
-    chassis::frame_loop,
     mail::{Mail, MailboxId},
 };
 
@@ -152,13 +151,6 @@ pub struct TestBench {
     /// Kind id of [`LifecycleAdvance`], pre-resolved so the advance
     /// loop body stays alloc-free per tick.
     kind_lifecycle_advance: KindId,
-    /// Snapshot of every frame-bound capability's pending counter
-    /// (ADR-0074 §Decision 5). Today: render. Cloned out of
-    /// `PassiveChassis::frame_bound_pending` at boot; `advance` /
-    /// the bin's `run_frame` hand it to
-    /// `frame_loop::drain_frame_bound_or_abort` so render's inbox
-    /// quiesces before `record_frame`.
-    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
 
     frame: u64,
     next_correlation_id: AtomicU64,
@@ -329,7 +321,6 @@ impl TestBench {
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
         // build result for wire-compat with binaries that haven't migrated yet.
-        let frame_bound_pending = passive.frame_bound_pending();
 
         Ok(Self {
             queue,
@@ -341,7 +332,6 @@ impl TestBench {
             gpu,
             lifecycle_mailbox,
             kind_lifecycle_advance,
-            frame_bound_pending,
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
@@ -806,16 +796,12 @@ impl TestBench {
                 });
             }
         }
-        // ADR-0074 §Decision 5: render's inbox must quiesce before
-        // submit so any DrawTriangle / aether.camera mail this frame
-        // is integrated into the recorded pass. Settlement above
-        // covers the causal-chain invariant; this preserves the
-        // separate per-frame ordering invariant for frame-bound caps.
-        // (The pre-Phase-4 component drain barrier is retired;
-        // trampoline traps fail-fast directly via
-        // `NativeBinding::fatal_abort`.)
-        frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
-
+        // ADR-0082 §6 / PR 3c: the advance settlement above already
+        // waited for the whole frame chain (Tick → component →
+        // DrawTriangle → render cap accumulator) to drain, so render's
+        // inbox is quiesced by the time we reach submit. The prior
+        // `drain_frame_bound_or_abort` pending-counter poll is
+        // redundant under settlement gating and retired.
         match self.capture_queue.take() {
             Some(req) => {
                 // iamacoffeepot/aether#860: wait for each pre-mail's
@@ -846,13 +832,6 @@ impl TestBench {
                 self.gpu.render();
             }
         }
-
-        // ADR-0074 §Decision 5 ordering invariant: keep the frame-bound
-        // drain so render and any future frame-bound cap quiesces before
-        // the next frame. Pre-#775 this was paired with a periodic
-        // FrameStats settlement gate every `LOG_EVERY_FRAMES`; with the
-        // observation path retired the drain stands on its own.
-        frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
 
         Ok(())
     }

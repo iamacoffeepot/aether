@@ -18,11 +18,13 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use aether_actor::Actor;
-use aether_capabilities::InputCapability;
 use aether_capabilities::fs::NamespaceRoots;
-use aether_data::{encode_empty, mailbox_id_from_name};
-use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
-use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId};
+use aether_data::{Kind, encode_empty, mailbox_id_from_name};
+use aether_kinds::{AdvanceResult, CaptureFrameResult, LifecycleAdvance};
+use aether_substrate::chassis::settlement::SettlementRegistry;
+use aether_substrate::{
+    Chassis, LifecycleDriverCapability, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId,
+};
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
@@ -120,11 +122,15 @@ fn drive_events_loop(
 ) {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
-    let input_mailbox = mailbox_id_from_name(InputCapability::NAMESPACE);
-    let frame_bound_pending = passive.frame_bound_pending();
+    let _ = kind_tick; // PR 3c retired the direct Tick push; the bin now
+    // drives `LifecycleAdvance` and the lifecycle driver broadcasts Tick.
+    let lifecycle_mailbox =
+        mailbox_id_from_name(<LifecycleDriverCapability<()> as Actor>::NAMESPACE);
+    let kind_lifecycle_advance = <LifecycleAdvance as Kind>::ID;
+    let settlement_registry = Arc::clone(passive.settlement_registry());
     // ADR-0080 §6 chassis-root correlation counter (issue
     // iamacoffeepot/aether#723). Threaded through `run_frame` so each
-    // tick push carries observable lineage like the desktop and
+    // advance push carries observable lineage like the desktop and
     // headless drivers do.
     let chassis_correlation = AtomicU64::new(1);
 
@@ -136,10 +142,10 @@ fn drive_events_loop(
                         true,
                         &queue,
                         &outbound,
-                        input_mailbox,
-                        kind_tick,
+                        lifecycle_mailbox,
+                        kind_lifecycle_advance,
+                        &settlement_registry,
                         &capture_queue,
-                        &frame_bound_pending,
                         &mut gpu,
                         &chassis_correlation,
                     );
@@ -156,10 +162,10 @@ fn drive_events_loop(
                     false,
                     &queue,
                     &outbound,
-                    input_mailbox,
-                    kind_tick,
+                    lifecycle_mailbox,
+                    kind_lifecycle_advance,
+                    &settlement_registry,
                     &capture_queue,
-                    &frame_bound_pending,
                     &mut gpu,
                     &chassis_correlation,
                 );
@@ -179,28 +185,35 @@ fn run_frame(
     dispatch_tick: bool,
     queue: &Arc<aether_substrate::Mailer>,
     outbound: &Arc<aether_substrate::HubOutbound>,
-    input_mailbox: MailboxId,
-    kind_tick: aether_data::KindId,
+    lifecycle_mailbox: MailboxId,
+    kind_lifecycle_advance: aether_data::KindId,
+    settlement_registry: &Arc<SettlementRegistry>,
     capture_queue: &CaptureQueue,
-    frame_bound_pending: &[(MailboxId, Arc<AtomicU64>)],
     gpu: &mut Gpu,
     chassis_correlation: &AtomicU64,
 ) {
     if dispatch_tick {
-        queue.push_chassis_root_mail(
+        // ADR-0082 §6 / PR 3c: push LifecycleAdvance and wait for the
+        // frame chain to settle before submit. Settlement replaces the
+        // retired `drain_frame_bound_or_abort` pending-counter poll —
+        // it waits for the whole Tick → component → DrawTriangle →
+        // render chain rather than just render's inbox counter.
+        let advance_root = queue.push_chassis_root_mail(
             next_chassis_correlation(chassis_correlation),
-            input_mailbox,
-            kind_tick,
-            encode_empty::<Tick>(),
+            lifecycle_mailbox,
+            kind_lifecycle_advance,
+            encode_empty::<LifecycleAdvance>(),
             1,
         );
+        let rx = settlement_registry.subscribe_settlement(advance_root);
+        if rx.recv_timeout(frame_loop::DRAIN_BUDGET).is_err() {
+            tracing::error!(
+                target: "aether_substrate::lifecycle",
+                root = ?advance_root,
+                "frame chain did not settle within drain budget; submitting anyway",
+            );
+        }
     }
-    // ADR-0074 §Decision 5: render's inbox must quiesce before
-    // submit so any DrawTriangle / aether.camera mail this frame is
-    // integrated into the recorded pass. (The pre-Phase-4 component
-    // drain barrier is retired; trampoline traps fail-fast directly
-    // via `NativeBinding::fatal_abort`.)
-    frame_loop::drain_frame_bound_or_abort(frame_bound_pending, outbound);
 
     match capture_queue.take() {
         Some(req) => {
