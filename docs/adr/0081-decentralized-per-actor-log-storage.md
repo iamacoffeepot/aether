@@ -60,6 +60,14 @@ Substrate-host events (substrate boot, scheduler, panic hook itself, anything ou
 
 `EnvFilter` (reads `AETHER_LOG_FILTER`, default `info`) and `tsfmt::Layer` to stderr stay in the subscriber stack as ADR-0077 §3 specified. Operators running a substrate from a terminal see logs locally regardless of any of this ADR's changes.
 
+### 7. Wasm trampolines need no special path
+
+Each loaded wasm component is a `WasmTrampoline` registered as a `NativeActor` at `aether.component.trampoline:NAME` (ADR-0074, issue 634 Phase 4). Under this ADR, a trampoline owns an `ActorLogRing` like any other actor. Guest emits cross the FFI synchronously inside `receive_p32` (or similar exports) on the trampoline's dispatcher thread, so the host-side `ActorAwareLayer` sees the trampoline's `ActorSlots` and lands the entry in the trampoline's ring through the same in-actor branch native actors take.
+
+The `cfg(target_arch)` split ADR-0077 §2 introduced for the drain path — process-global `WASM_TRANSPORT` for the wasm side, per-handler `ACTOR_DISPATCH` TLS for the native side — retires. Both were artifacts of needing to stamp the destination mailbox for the `LogBatch` flush hop. With no flush hop, no stamp is needed.
+
+The fan-out query side picks up trampolines naturally: `engine_logs` walks the actor registry, which already includes every loaded trampoline; each trampoline's *host-side* handler answers `aether.log.tail` with its ring slice. The guest doesn't implement the tail handler — it lives on the trampoline actor next to the host-side load/replace/drop trampoline logic, same way other built-in maintenance kinds are handled.
+
 ## Consequences
 
 ### Positive
@@ -69,6 +77,7 @@ Substrate-host events (substrate boot, scheduler, panic hook itself, anything ou
 - **Architectural symmetry.** ADR-0077 already decentralized the buffer; this ADR completes the move. Both write *and* storage are per-actor.
 - **Per-actor query is the natural surface.** "What did actor X log?" no longer requires filtering a merged stream — it's the actor's own ring. Aggregation is a query-time merge, not a steady-state cost.
 - **Cap-side complexity drops.** `LogCapability` retires entirely. The TLS re-entry guard from ADR-0077 §4 (`IN_LOG_PIPELINE`) may also retire if no other site emits `tracing::*` events from the push path.
+- **Wasm asymmetry collapses.** ADR-0077 §2's `cfg(target_arch)` split for the drain path retires (`WASM_TRANSPORT` process-global, `ACTOR_DISPATCH` per-handler TLS). Wasm trampolines route logs the same way as native actors — §7 above.
 
 ### Negative
 
