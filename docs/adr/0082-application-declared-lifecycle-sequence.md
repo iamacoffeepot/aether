@@ -145,6 +145,15 @@ Non-lifecycle chassis sources (input fan-in, window events, hub-bridge, MCP-brid
 
 Stage kinds in one namespace make the lifecycle category visually distinct from interrupt kinds (`aether.key`, `aether.mouse_move`) and content kinds (`aether.draw_triangle`, `aether.audio.note_on`). The rename is the bulk of PR 4 in the migration sequence below.
 
+### 12. Relationship to actor-framework `wire` / `unwire` hooks
+
+The actor framework's per-actor boot sequence (`claim → init → wire → spawn`) and its `unwire` teardown counterpart sit at a layer below the lifecycle graph. They keep their existing shape under this ADR — they run once per actor instance and are not driven by stage broadcasts. Two interactions are load-bearing:
+
+- **`wire` is where stage subscriptions install.** An actor that wants `Tick` mail subscribes during `wire` — `ctx.actor::<LifecycleDriverCapability>().subscribe(Tick::ID, my_mailbox)` — the same shape `InputCapability` already uses for `Key` / `MouseMove` subscribes (issue 640 phase 2). The fail-fast `Err(UnsupportedStage)` rejection from §7 fires at this site, so an actor authored against a stage the local chassis hasn't declared learns at boot, not at runtime.
+- **`Shutdown` stage and `unwire` are not the same teardown.** The `aether.lifecycle.shutdown` broadcast arrives as mail with the actor's full mail surface still operational — cleanup that needs to talk to peers (save game state, flush a write, post a metric) belongs in a `#[handler] fn on_shutdown` body. The driver waits for the `Shutdown` root to settle before exiting its loop. *Then* the chassis tears actors down, which runs each actor's `unwire` on its own dispatcher thread — release native handles, drop wgpu resources, write the per-actor log ring per ADR-0081 §4. Two distinct phases with non-interchangeable surface: `Shutdown` is the graceful "everything still works" cleanup; `unwire` is the post-lifecycle "the world is going away" finaliser.
+
+Initialisation has the symmetric split: actor-framework `init` is the per-actor "construct your state" callback before mail can arrive; `InitCaps` / `InitComponents` stage broadcasts (§5) are mail that arrives once the actor is fully wired and the driver enters its loop. Use `init` for "load-bearing state that must exist before any handler runs"; use an `InitCaps` / `InitComponents` handler for cross-actor wiring that depends on peers being ready (e.g. a cap that needs to send the hub its kind manifest after the hub cap has wired its receive side).
+
 ## Consequences
 
 ### Positive
