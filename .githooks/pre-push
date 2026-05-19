@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Pre-push hook: runs scripts/preflight.sh against the ref(s) being pushed.
+#
+# Enable with: scripts/setup-githooks.sh  (sets core.hooksPath -> .githooks)
+# Bypass once with: git push --no-verify
+#
+# Stamp short-circuit: if .git/aether-preflight-passed records the current
+# HEAD sha, the pre-flight is skipped (you just ran it). Any new commit
+# invalidates the stamp.
+
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+z40=$(printf '%040d' 0)
+stamp_file="$(git rev-parse --git-dir)/aether-preflight-passed"
+
+if [[ -f "$stamp_file" ]]; then
+    head_sha=$(git rev-parse HEAD)
+    stamped_sha=$(awk '{print $1}' "$stamp_file" 2>/dev/null || echo)
+    if [[ "$stamped_sha" == "$head_sha" ]]; then
+        echo "[pre-push] HEAD $(git rev-parse --short HEAD) already passed; skipping."
+        exit 0
+    fi
+fi
+
+# Pre-push stdin: one line per ref being pushed.
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+# Collect the changed-file union across all pushed refs.
+changed_files=()
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ -z "${local_sha:-}" ]] && continue
+    # Skip deletions (local_sha is all-zero).
+    [[ "$local_sha" == "$z40" ]] && continue
+
+    if [[ "${remote_sha:-}" == "$z40" || -z "${remote_sha:-}" ]]; then
+        # New branch: compare against origin/main if it exists.
+        if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            base=$(git merge-base "$local_sha" origin/main 2>/dev/null \
+                || git rev-parse origin/main)
+        else
+            base=$(git rev-parse "$local_sha"~1 2>/dev/null || echo "$local_sha")
+        fi
+    else
+        base="$remote_sha"
+    fi
+
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && changed_files+=("$f")
+    done < <(git diff --name-only "$base..$local_sha" 2>/dev/null || true)
+done
+
+if [[ ${#changed_files[@]} -eq 0 ]]; then
+    echo "[pre-push] no refs / no changed files; allowing push."
+    exit 0
+fi
+
+# Dedupe and forward to preflight.sh.
+unique_files=()
+while IFS= read -r f; do
+    [[ -n "$f" ]] && unique_files+=("$f")
+done < <(printf '%s\n' "${changed_files[@]}" | sort -u)
+
+exec "$ROOT/scripts/preflight.sh" --files "${unique_files[@]}"
