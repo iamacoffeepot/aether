@@ -43,11 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::actor::native::Envelope;
-use crate::runtime::log_install;
-use crate::runtime::log_install::MailDispatch;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
-use aether_actor::log;
 use std::ops::Deref;
 use std::sync::PoisonError;
 use std::thread;
@@ -196,9 +193,10 @@ where
 
     /// Per-envelope dispatch matching
     /// [`crate::actor::native::dispatch::dispatch_loop_run`]'s body.
-    /// Wraps the dispatch call in `local::with_stamped` +
-    /// `log_install::with_actor_dispatch` so tracing events carry the
-    /// actor's mailbox id and the per-handler `LogBatch` ships at exit.
+    /// Wraps the dispatch call in `local::with_stamped` so per-actor
+    /// `Local<T>` lookups (including the ADR-0081 `ActorLogRing`)
+    /// resolve to this actor's slots. ADR-0081 retired the prior
+    /// `log_install::with_actor_dispatch` wrap + per-handler flush hop.
     // `env` is taken by value because dispatch may move fields out
     // (reply_to, payload) into the actor; the helper here doesn't
     // happen to, but the surface mirrors the owning dispatch loop.
@@ -216,11 +214,12 @@ where
             .mailer()
             .record_received(inbound_mail_id, thread_name);
         local::with_stamped(&self.slots, || {
-            log_install::with_actor_dispatch(&*self.binding as &dyn MailDispatch, || {
-                let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
+            let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
+            // ADR-0081 framework-built-in dispatch arm for
+            // `aether.log.tail`. See `dispatch::dispatch_loop_run`.
+            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &env) {
                 super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
-                log::drain_buffer();
-            });
+            }
         });
         self.binding.mailer().record_finished(inbound_mail_id);
         if let Some(p) = &self.pending {
@@ -229,21 +228,17 @@ where
     }
 
     /// Phase 3 of the `dispatch_loop_run` lifecycle. Wraps `actor.unwire`
-    /// in the same `with_stamped` + `with_actor_dispatch` envelope so a
-    /// final tracing event from the close hook still routes to
-    /// `LogCapability`.
+    /// in `with_stamped` so any final tracing or `Local<T>` access from
+    /// the close hook resolves to this actor's slots.
     fn run_close_hook(&self, actor: &mut Box<A>) {
         local::with_stamped(&self.slots, || {
-            log_install::with_actor_dispatch(&*self.binding as &dyn MailDispatch, || {
-                let mut close_ctx = NativeCtx::new(
-                    &self.binding,
-                    ReplyTo::NONE,
-                    aether_data::MailId::NONE,
-                    aether_data::MailId::NONE,
-                );
-                actor.unwire(&mut close_ctx);
-                log::drain_buffer();
-            });
+            let mut close_ctx = NativeCtx::new(
+                &self.binding,
+                ReplyTo::NONE,
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            actor.unwire(&mut close_ctx);
         });
     }
 

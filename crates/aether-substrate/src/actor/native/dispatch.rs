@@ -4,8 +4,8 @@
 //! thread runs. Singleton boots through `chassis::builder` and
 //! instanced spawns through `actor::native::spawn` both call into
 //! this — eliminating the historical divergence where instanced
-//! actors lacked the `local::with_stamped` + `log_install::with_actor_dispatch`
-//! wrapping the singleton path had.
+//! actors lacked the `local::with_stamped` wrapping the singleton
+//! path had.
 //!
 //! ## Lifecycle
 //!
@@ -14,18 +14,20 @@
 //!    signal exits the loop.
 //! 2. **Per-envelope dispatch.** Each envelope runs inside
 //!    `local::with_stamped(slots, ...)` so the per-actor `ActorSlots`
-//!    are visible to `Local<T>` lookups, and inside
-//!    `log_install::with_actor_dispatch(binding, ...)` so the actor-
-//!    aware `tracing` layer attributes events with the actor's
-//!    `MailboxId` and the priority-flush + post-handler drain ship a
-//!    `LogBatch` to `LogCapability`. Two-step typed → fallback dispatch.
+//!    are visible to `Local<T>` lookups — including the per-actor
+//!    [`aether_actor::log::ActorLogRing`] the `ActorAwareLayer`
+//!    pushes into and the framework-built-in `aether.log.tail`
+//!    handler reads from (ADR-0081 §1). Before the user dispatch
+//!    runs, the framework intercepts `aether.log.tail` envelopes
+//!    and replies from the actor's ring directly. Two-step typed →
+//!    fallback dispatch follows for everything else.
 //! 3. **Drain after shutdown.** Any envelope already in the inbox
 //!    when the shutdown signal fired is processed synchronously
 //!    before `unwire` runs (matches the existing singleton
 //!    semantics).
 //! 4. **`unwire`.** Last-chance hook with `ReplyTo::NONE`. Wrapped
-//!    in the same `with_stamped` + `with_actor_dispatch` so any
-//!    final tracing or `Local<T>` access works.
+//!    in the same `with_stamped` so any final tracing or `Local<T>`
+//!    access works.
 //! 5. **Registry close + monitor fan-out.** `actor_registry.close_actor(id)`
 //!    drains `monitors_of[id]`, prunes `monitoring[id]` from each
 //!    target, marks the slot Dead. Returned watchers receive a
@@ -34,7 +36,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use aether_actor::Local;
+use aether_actor::MailCtx;
 use aether_actor::local::ActorSlots;
+use aether_actor::log::ActorLogRing;
+use aether_data::Kind;
+use aether_kinds::{LogTail, LogTailResult};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -43,10 +50,7 @@ use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
-use crate::runtime::log_install;
-use crate::runtime::log_install::MailDispatch;
 use aether_actor::local;
-use aether_actor::log;
 use std::thread;
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
@@ -73,6 +77,37 @@ where
             "actor dispatch missed: kind not handled or decode failed"
         );
     }
+}
+
+/// ADR-0081 framework-built-in dispatch arm for `aether.log.tail`.
+/// Returns `true` when the envelope's kind matches `LogTail` (the
+/// reply is sent from inside this fn); the dispatcher then skips
+/// the user's typed/fallback dispatch for this envelope. Reads the
+/// caller's `ActorLogRing` via the currently-stamped `ActorSlots` —
+/// the framework arm runs *inside* the same `local::with_stamped`
+/// the dispatch loop already opens, so `try_with` resolves to the
+/// receiving actor's ring without any extra plumbing.
+///
+/// Returning `Err` is reserved for a future "ring not materialised"
+/// failure mode; today the per-actor ring is initialised in the
+/// dispatcher's `local::with_stamped` setup unconditionally, so a
+/// missing ring would be a substrate-level invariant violation.
+pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
+    if env.kind.0 != <LogTail as Kind>::ID.0 {
+        return false;
+    }
+    let Some(request) = <LogTail as Kind>::decode_from_bytes(&env.payload) else {
+        ctx.reply(&LogTailResult::Err {
+            error: "aether.log.tail: payload failed to decode".to_owned(),
+        });
+        return true;
+    };
+    let reply =
+        ActorLogRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| LogTailResult::Err {
+            error: "aether.log.tail: actor has no stamped slots".to_owned(),
+        });
+    ctx.reply(&reply);
+    true
 }
 
 /// Run one actor's dispatcher loop on the calling thread. Returns
@@ -107,28 +142,20 @@ pub fn dispatch_loop_run<A>(
         };
         let inbound_mail_id = env.mail_id;
         // ADR-0080 §2 producer hook: `Received` at handler entry.
-        // Issue 734: capture the OS thread name so the trace renderer
-        // can stamp per-thread tids + emit thread_name M events. With
-        // the default `Pooled` scheduler (issue 635) this surfaces as
-        // `aether-worker-N` shared across actors; `Thread`-scheduled
-        // actors get per-actor names.
         let thread_name = thread::current().name().map(str::to_owned);
         binding
             .mailer()
             .record_received(inbound_mail_id, thread_name);
         local::with_stamped(slots, || {
-            log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
-                let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+            let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+            // ADR-0081: framework intercepts `aether.log.tail` before
+            // the actor's typed/fallback dispatch. The actor never
+            // sees the envelope; the framework reads its ring and
+            // replies inline.
+            if !dispatch_log_tail_if_matching(&mut ctx, &env) {
                 typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
-                log::drain_buffer();
-            });
+            }
         });
-        // ADR-0080 §2 producer hook: `Finished` at handler exit. PR 2
-        // does not bracket the panic-unwind path; if a handler panics
-        // mid-dispatch the actor's process-level panic hook brings
-        // the substrate down anyway, so a missing `Finished` is
-        // moot. A future PR may add `catch_unwind` here for graceful
-        // settlement-on-panic.
         binding.mailer().record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
@@ -147,11 +174,10 @@ pub fn dispatch_loop_run<A>(
             .mailer()
             .record_received(inbound_mail_id, thread_name);
         local::with_stamped(slots, || {
-            log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
-                let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+            let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+            if !dispatch_log_tail_if_matching(&mut ctx, &env) {
                 let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
-                log::drain_buffer();
-            });
+            }
         });
         binding.mailer().record_finished(inbound_mail_id);
         if let Some(p) = pending {
@@ -162,11 +188,8 @@ pub fn dispatch_loop_run<A>(
     // Phase 3: last-chance close hook. ReplyTo is None — no inbound
     // envelope produced this call.
     local::with_stamped(slots, || {
-        log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
-            let mut close_ctx = NativeCtx::new(binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
-            actor.unwire(&mut close_ctx);
-            log::drain_buffer();
-        });
+        let mut close_ctx = NativeCtx::new(binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+        actor.unwire(&mut close_ctx);
     });
 
     // Phase 4: close in the registry — drains `monitors_of[id]` for
@@ -178,9 +201,8 @@ pub fn dispatch_loop_run<A>(
     let watchers = actor_registry.close_actor(self_id);
     if !watchers.is_empty() {
         let notice = aether_kinds::MonitorNotice { target: self_id };
-        let payload =
-            <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(&notice);
-        let kind = KindId(<aether_kinds::MonitorNotice as aether_data::Kind>::ID.0);
+        let payload = <aether_kinds::MonitorNotice as Kind>::encode_into_bytes(&notice);
+        let kind = KindId(<aether_kinds::MonitorNotice as Kind>::ID.0);
         for watcher in watchers {
             mailer.push(Mail::new(watcher, kind, payload.clone(), 1));
         }

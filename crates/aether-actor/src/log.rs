@@ -1,307 +1,217 @@
-//! Issue #581 unified actor-aware logging — actor-bound only.
+//! ADR-0081 per-actor log storage. Every actor — native or wasm
+//! trampoline — owns an [`ActorLogRing`] in its [`crate::local::ActorSlots`].
+//! `tracing::*` events fired inside a dispatched handler land in the
+//! ring directly; the host's `aether-substrate::runtime::log_install::ActorAwareLayer`
+//! is the producer side (native), and the wasm trampoline's per-event
+//! FFI host fn re-fires the event on the trampoline thread so the
+//! same layer catches it (guest events ride the trampoline's
+//! `ActorSlots` — see ADR-0081 §7).
 //!
-//! Per-actor `tracing::*` events buffer into [`LogBuffer`] (a
-//! [`Local`]); the chassis-pushed `ConfigureLogDrain` mail (auto-
-//! handled by every `#[handlers]` derive, issue #601) installs
-//! [`LogDrainSlot`] with the chassis-declared drain mailbox.
-//! [`drain_buffer`] reads both slots and ships a [`LogBatch`] to that
-//! mailbox at handler exit (and on `WARN`/`ERROR` priority flush
-//! within the layer).
+//! Out-of-actor `tracing::*` events (substrate boot, scheduler
+//! thread, panic hook) keep hitting stderr via the substrate's
+//! registered `tsfmt::Layer` — they do not enter any ring and do not
+//! surface in `engine_logs` (matches today's post-#601 behaviour).
 //!
-//! Native send path is plumbed via a fn-pointer hook the substrate
-//! registers at boot ([`set_native_log_shipper`]). This keeps the
-//! TLS-stamped dispatch + `MailDispatch` trait + dispatcher trampoline
-//! plumbing in `aether-substrate` (where chassis machinery lives) while
-//! the SDK contract — `LogBuffer`, `LogDrainSlot`, `drain_buffer`
-//! itself — stays in this crate so the `#[handlers]` derive can emit
-//! a single path that resolves on both wasm and native targets.
-//! Wasm doesn't need a hook: it ships through [`crate::ffi::bridge::MAIL_BRIDGE`]
-//! directly since the linear memory IS the actor.
-//!
-//! There is no host branch. `tracing::*` events fired outside any
-//! actor stamp (substrate boot, scheduler thread, panic hook) do NOT
-//! enter the mail system — they hit stderr via the substrate's
-//! registered `fmt::Layer` for operator visibility but never reach
-//! `engine_logs`. The actor model's invariant is that every piece of
-//! engine logic eventually runs as an actor; the host-branch shortcut
-//! retired in issue #601 alongside `PROCESS` / `install_log_target` /
-//! `ship_host_event`. Code that wants to surface in `engine_logs`
-//! emits its events from inside an actor.
-//!
-//! Recursion guard: code inside [`drain_buffer`] routes through the
-//! stamped transport's `send_mail`, which can emit its own
-//! `tracing::*` events (e.g. the `capability mailbox sender dropped`
-//! warn fired from a dead sink handler). Without a guard, those
-//! events re-enter the layer, push the actor's buffer, priority-flush
-//! at WARN, and recurse — observable as a stack overflow during
-//! shutdown. The [`is_in_pipeline`] TLS flag short-circuits the
-//! actor-aware path while a drain is in flight; events still flow to
-//! the registered `fmt::Layer` so operators see them on stderr.
+//! ADR-0081 retires the pre-ADR flush-hop machinery alongside this
+//! rewrite: `LogBuffer`, `drain_buffer`, the `IN_LOG_PIPELINE`
+//! re-entry guard, the chassis-pushed `ConfigureLogDrain` mail, the
+//! `set_native_log_shipper` hook, the wasm `MAIL_BRIDGE` route for
+//! `LogBatch`, and `LogCapability` itself. The new query path
+//! ([`aether_kinds::LogTail`] / [`aether_kinds::LogTailResult`]) is
+//! served by a framework-built-in dispatch arm every actor inherits
+//! — no `#[handler]` for it on user types.
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_data::KindId;
-use aether_data::{Kind, MailboxId};
-use aether_kinds::{LogBatch, LogEvent};
+use aether_kinds::{LogEntry, LogTail, LogTailResult};
 use tracing::{
     Event, Level,
     field::{Field, Visit},
 };
 // Wasm-only `tracing` imports needed by [`WasmSubscriber`]'s
-// `Subscriber` impl. Kept under cfg so the host build doesn't warn
-// about unused imports — `aether-substrate::log_install`'s
-// `ActorAwareLayer` is the host-target hookup, not this subscriber.
+// `Subscriber` impl.
 #[cfg(target_arch = "wasm32")]
 use tracing::{Subscriber, span};
 
-use crate::{Local, local};
+use crate::Local;
 use core::fmt;
-use core::mem;
 
-/// Per-actor log buffer, drained by the chassis dispatcher at
-/// handler exit and on `WARN`/`ERROR` priority flush. Backed by
-/// issue #582's [`Local`] primitive — one slot per actor, accessed
-/// via TLS-routed [`local::ActorSlots`].
-#[derive(Default)]
-pub struct LogBuffer(pub Vec<LogEvent>);
+/// Default per-actor ring capacity. Overridable at substrate boot
+/// via `AETHER_ACTOR_LOG_RING_SIZE` — the substrate parses the env
+/// var and threads the value into [`ActorLogRing::with_capacity`]
+/// when the chassis materialises each actor's slots. 1024 keeps the
+/// worst-case memory at ~1024 × ~300B = ~300 KiB per actor on
+/// typical traffic; ADR-0081 §Negative consequences for the N-actor
+/// total-memory call.
+pub const DEFAULT_RING_CAP: usize = 1024;
 
-impl Local for LogBuffer {}
+/// Substrate-default cap on entries returned per [`LogTail`] when
+/// the caller passes `max == 0`. Same value ADR-0023 §4 used for the
+/// pre-ADR-0081 centralized `LogRead`; the upper clamp is the ring
+/// capacity itself (one ring at a time can never reply with more
+/// than it holds).
+pub const DEFAULT_TAIL_MAX: u32 = 100;
 
-/// Per-actor log drain target — the `aether.log` (or chassis-
-/// configured override) mailbox id [`drain_buffer`] ships
-/// [`LogBatch`] mails to. Issue #601: replaces the retired
-/// `PROCESS.log_mailbox` cell with a per-actor slot the chassis
-/// installs via the `aether.log.configure_drain` mail every
-/// actor's `#[handlers]` derive auto-handles.
-///
-/// Default `MailboxId(0)` — meaning "no drain configured." Until
-/// the chassis-pushed `ConfigureLogDrain` mail arrives, drain calls
-/// are no-ops, so init-body events buffer in [`LogBuffer`] without
-/// being shipped (they flush at the first handler exit, which is
-/// the `ConfigureLogDrain` handler installing this slot).
-#[derive(Default)]
-#[local]
-pub struct LogDrainSlot(pub MailboxId);
+/// Absolute ceiling on entries returned per [`LogTail`]. Caller-
+/// supplied `max` values above this clamp down. Same value
+/// ADR-0023 §4 used.
+pub const MAX_TAIL_MAX: u32 = 1_000;
 
-/// Install `mailbox` as this actor's log drain target. Called from
-/// the `#[handlers]`-derived `ConfigureLogDrain` handler the chassis
-/// dispatches at instantiation; user code never names this directly.
-///
-/// Idempotent — overwriting is fine; the chassis sends one
-/// `ConfigureLogDrain` per actor at boot, and a future per-actor
-/// override extension would call this from the actor's own init.
-pub fn set_drain(mailbox: MailboxId) {
-    let _ = LogDrainSlot::try_with_mut(|s| s.0 = mailbox);
-}
-
-/// The currently-installed drain mailbox for the active actor, if
-/// any. Returns `None` when no actor is stamped (host code, panic
-/// hook) or when the slot is still at its default `MailboxId(0)`
-/// (chassis hasn't dispatched `ConfigureLogDrain` yet, or chassis
-/// declared no drain).
-#[must_use]
-pub fn current_drain() -> Option<MailboxId> {
-    let raw = LogDrainSlot::try_with(|s| s.0)?;
-    if raw.0 == 0 { None } else { Some(raw) }
-}
-
-/// Native log-shipper hook signature. Substrate registers an
-/// implementation at boot via [`set_native_log_shipper`]; the native
-/// arm of [`drain_buffer`] calls through the registered pointer.
-/// The shipper resolves the per-thread stamped dispatch internally
-/// (the TLS storage + dispatcher trampoline live in
-/// `aether-substrate::runtime::log_install`).
-///
-/// Bytes are postcard-encoded `LogBatch` payloads — the actor side
-/// owns the encoding because `LogBatch` is the same kind on both
-/// targets and the wasm arm encodes the same way.
-#[cfg(not(target_arch = "wasm32"))]
-pub type NativeLogShipper = fn(mailbox: MailboxId, kind: KindId, payload: &[u8]);
-
-#[cfg(not(target_arch = "wasm32"))]
-mod shipper {
-    extern crate std;
-    use super::NativeLogShipper;
-    use core::mem;
-    use core::ptr;
-    use core::sync::atomic::{AtomicPtr, Ordering};
-
-    pub(super) static HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
-
-    pub(super) fn store(hook: NativeLogShipper) {
-        HOOK.store(hook as *mut (), Ordering::Release);
-    }
-
-    pub(super) fn load() -> Option<NativeLogShipper> {
-        let raw = HOOK.load(Ordering::Acquire);
-        if raw.is_null() {
-            None
-        } else {
-            // SAFETY: the only way a non-null pointer lands in `HOOK` is
-            // through `store(hook: NativeLogShipper)`, which casts a
-            // valid `fn` pointer of that exact signature. Round-trips
-            // through `*mut ()` for `AtomicPtr` storage.
-            Some(unsafe { mem::transmute::<*mut (), NativeLogShipper>(raw) })
-        }
-    }
-}
-
-/// Install the native log-shipper hook. Called from
-/// `aether-substrate`'s boot path before any actor dispatcher runs.
-/// Idempotent — overwriting is fine; the substrate registers the same
-/// shipper across reinitialisation in tests.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn set_native_log_shipper(hook: NativeLogShipper) {
-    shipper::store(hook);
-}
-
-/// Pop the current actor's [`LogBuffer`] and ship the contents as
-/// one [`LogBatch`] mail to the configured target. No-op when the
-/// buffer is empty, the [`LogDrainSlot`] is still at its default
-/// (chassis hasn't dispatched `ConfigureLogDrain` yet, or chassis
-/// declared no drain), or (on native) no
-/// `aether_substrate::runtime::log_install::with_actor_dispatch`
-/// envelope is active.
-pub fn drain_buffer() {
-    let Some(entries) = LogBuffer::try_with_mut(|b| mem::take(&mut b.0)) else {
-        return;
-    };
-    if entries.is_empty() {
-        return;
-    }
-    // Issue #601: read the per-actor `LogDrainSlot` instead of the
-    // retired `PROCESS.log_mailbox` cell. The chassis-pushed
-    // `ConfigureLogDrain` mail (auto-handled by every `#[handlers]`
-    // derive) installs the slot at the actor's first dispatched
-    // handler.
-    let Some(mailbox) = current_drain() else {
-        return;
-    };
-    let batch = LogBatch { entries };
-
-    let _guard = PipelineGuard::enter();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let Some(shipper) = shipper::load() else {
-            return;
-        };
-        let Ok(bytes) = postcard::to_allocvec(&batch) else {
-            return;
-        };
-        shipper(mailbox, <LogBatch as Kind>::ID, &bytes);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        ship_batch_via_wasm_transport(mailbox, batch);
-    }
-}
-
-/// Re-entry guard for the log pipeline. While set, [`is_in_pipeline`]
-/// returns `true` and the actor-aware tracing layer skips its
-/// in-actor branch (events still reach the registered `tsfmt::Layer`
-/// for stderr). The guard wraps the [`drain_buffer`] code path,
-/// whose `MailDispatch::send` ↦ sink-handler chain can emit its own
-/// `tracing::*` events (e.g. the `capability mailbox sender dropped`
-/// warn fired from a dead sink handler). Without the guard, those
-/// events re-enter the layer, push the actor's buffer, priority-
-/// flush at WARN, and recurse — observable as a stack overflow
-/// during shutdown.
-#[cfg(not(target_arch = "wasm32"))]
-mod pipeline_tls {
-    extern crate std;
-    use core::cell::Cell;
-
-    std::thread_local! {
-        pub(super) static IN_LOG_PIPELINE: Cell<bool> = const { Cell::new(false) };
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-mod pipeline_tls {
-    use core::cell::Cell;
-
-    pub(super) struct Slot(pub Cell<bool>);
-    // SAFETY: wasm linear memory is single-threaded; the static is
-    // reachable only from this actor's code.
-    unsafe impl Sync for Slot {}
-    pub(super) static IN_LOG_PIPELINE: Slot = Slot(Cell::new(false));
-
-    // Match the `LocalKey<Cell<T>>::{get, set}` shortcut surface the
-    // native branch enjoys so call sites can use the same `.set(v)` /
-    // `.get()` form on both targets. This is what
-    // RsThreadLocalStableMethodCanBeUsed wants — the lint flagged
-    // `.with(|c| c.set(v))` even on this wrapper because the analyzer
-    // can't tell that `Slot` isn't a `LocalKey`.
-    impl Slot {
-        pub fn set(&'static self, value: bool) {
-            self.0.set(value);
-        }
-        pub fn get(&'static self) -> bool {
-            self.0.get()
-        }
-    }
-}
-
-/// `true` iff we're currently inside the drain / host-ship path.
-/// Read by [`is_in_pipeline`] consumers (chiefly the
-/// actor-aware layer in `aether-substrate::log_install`); set + cleared
-/// by the internal `PipelineGuard` RAII helper.
-#[must_use]
-pub fn is_in_pipeline() -> bool {
-    pipeline_tls::IN_LOG_PIPELINE.get()
-}
-
-struct PipelineGuard;
-
-impl PipelineGuard {
-    fn enter() -> Self {
-        pipeline_tls::IN_LOG_PIPELINE.set(true);
-        Self
-    }
-}
-
-impl Drop for PipelineGuard {
-    fn drop(&mut self) {
-        pipeline_tls::IN_LOG_PIPELINE.set(false);
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
-    let bytes = match postcard::to_allocvec(&batch) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-    crate::ffi::bridge::MAIL_BRIDGE.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
-}
-
-/// Hard cap on the per-event message bytes. Trims oversize
-/// payloads with a `" [truncated]"` suffix so a reader of
-/// `engine_logs` can tell the source was longer.
+/// Hard cap on the per-event message bytes. Trims oversize payloads
+/// with a `" [truncated]"` suffix so a reader of `engine_logs` can
+/// tell the source was longer.
 const MAX_MESSAGE_BYTES: usize = 4096;
 const TRUNCATED_SUFFIX: &str = " [truncated]";
 
-#[must_use]
-pub fn encode_event(event: &Event<'_>) -> LogEvent {
-    let metadata = event.metadata();
-    let level = level_to_u8(*metadata.level());
-    let target = metadata.target().to_string();
+/// Per-actor bounded ring of [`LogEntry`]. ADR-0081 §1. Single-
+/// writer: the actor's dispatcher thread is the sole producer
+/// (post-ADR-0038 — one OS thread per actor), so the `sequence`
+/// counter and the underlying `VecDeque` need no lock or atomic
+/// internally. Cross-thread reads run through the `Local`
+/// [`crate::local::with_stamped`] path on the responding actor's
+/// dispatcher (the framework-built-in `aether.log.tail` handler
+/// invokes [`Self::tail`] from inside the dispatcher loop, holding
+/// `&mut` exclusively for the duration of the read).
+///
+/// Eviction is FIFO drop-oldest once the ring is at cap; readers
+/// detect the gap via the computed-at-read-time `truncated_before`
+/// cursor.
+///
+/// Mirrors the shape `LogCapability::ring` had pre-ADR-0081 — same
+/// `(ring, ring_cap, sequence)` triple and the same push/read
+/// semantics — relocated to the actor's `ActorSlots` and reachable
+/// only through the framework dispatch arm.
+pub struct ActorLogRing {
+    ring: VecDeque<LogEntry>,
+    ring_cap: usize,
+    /// Monotonic per-actor sequence; starts at 1. Persists across
+    /// eviction — the next entry after the ring evicts gets
+    /// `last_sequence + 1`, so a caller's `since` cursor stays
+    /// meaningful even after eviction (it just resolves into a
+    /// `truncated_before` gap signal).
+    sequence: u64,
+}
 
-    let mut visitor = MessageBuilder::new();
-    event.record(&mut visitor);
-    let message = visitor.finish();
+impl Default for ActorLogRing {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_RING_CAP)
+    }
+}
 
-    LogEvent {
-        level,
-        target,
-        message,
+impl Local for ActorLogRing {}
+
+impl ActorLogRing {
+    /// Build an empty ring with the supplied capacity. `ring_cap` is
+    /// clamped to `max(1, _)` — a zero-cap ring would drop every
+    /// entry and is never the intent. Used by the substrate's
+    /// per-actor `ActorSlots` materialisation path so the boot-time
+    /// `AETHER_ACTOR_LOG_RING_SIZE` reading lands in the right
+    /// place.
+    #[must_use]
+    pub fn with_capacity(ring_cap: usize) -> Self {
+        let ring_cap = ring_cap.max(1);
+        Self {
+            ring: VecDeque::with_capacity(ring_cap),
+            ring_cap,
+            sequence: 1,
+        }
+    }
+
+    /// Push one event onto the ring, stamping it with the next-
+    /// available `sequence` + caller-supplied `timestamp_unix_ms`.
+    /// `origin` is left `None` here — the entry's *owner* is the
+    /// actor; the aggregator stamps `origin = Some(responder)` at
+    /// merge time (`EngineLogs` fan-out) so the wire reply carries
+    /// attribution without each ring duplicating its own id.
+    /// Evicts the oldest entry when the ring is at cap.
+    pub fn push(&mut self, level: u8, target: String, message: String, timestamp_unix_ms: u64) {
+        let sequence = self.sequence;
+        self.sequence += 1;
+        let entry = LogEntry {
+            timestamp_unix_ms,
+            level,
+            target,
+            message,
+            sequence,
+            origin: None,
+        };
+        if self.ring.len() == self.ring_cap {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(entry);
+    }
+
+    /// Pure read-side: filter on `min_level` + `since`, cap at `max`
+    /// (with the documented `0 → DEFAULT_TAIL_MAX` and `> MAX_TAIL_MAX
+    /// → MAX_TAIL_MAX` clamping), compute the `truncated_before`
+    /// cursor. Mirrors the pre-ADR-0081 `LogCapability::read` shape
+    /// so callers' stable cursor semantics survive intact.
+    #[must_use]
+    pub fn tail(&self, request: &LogTail) -> LogTailResult {
+        let max = resolve_max(request.max) as usize;
+        let min_level = request.min_level.unwrap_or(0);
+        let since = request.since.unwrap_or(0);
+
+        let earliest = self.ring.front().map(|e| e.sequence);
+        let truncated_before = match earliest {
+            Some(e) if e > since + 1 => Some(e),
+            _ => None,
+        };
+
+        let entries: Vec<LogEntry> = self
+            .ring
+            .iter()
+            .filter(|e| e.sequence > since && e.level >= min_level)
+            .take(max)
+            .cloned()
+            .collect();
+
+        let next_since = entries.last().map_or(since, |e| e.sequence);
+
+        LogTailResult::Ok {
+            entries,
+            next_since,
+            truncated_before,
+        }
+    }
+
+    /// Drain a snapshot of the current ring entries oldest-to-newest
+    /// without filtering. Used by the panic hook to dump the
+    /// panicking actor's recent history to disk (ADR-0081 §4); not
+    /// reachable through the wire surface.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<LogEntry> {
+        self.ring.iter().cloned().collect()
+    }
+
+    /// Number of entries currently in the ring. Test-facing
+    /// observability.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ring.len()
+    }
+
+    /// Is the ring empty? Mirrors `len()`'s test-facing role.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ring.is_empty()
+    }
+}
+
+/// Clamp `max == 0` to [`DEFAULT_TAIL_MAX`] and any value over
+/// [`MAX_TAIL_MAX`] down to the ceiling. Surfaced as a free
+/// function so the framework dispatch arm reads cleanly and unit
+/// tests can pin the boundaries without materialising a ring.
+fn resolve_max(max: u32) -> u32 {
+    if max == 0 {
+        DEFAULT_TAIL_MAX
+    } else {
+        max.min(MAX_TAIL_MAX)
     }
 }
 
@@ -315,10 +225,25 @@ pub(crate) fn level_to_u8(level: Level) -> u8 {
     }
 }
 
-/// Walks an `Event`'s fields and renders them in fields-first order:
-/// `key1=val1 key2=val2 message_body`. Matches `tracing-subscriber`'s
-/// default fmt layer so a reader of `engine_logs` sees the same
-/// shape regardless of which side emitted the event.
+/// Walks an `Event`'s fields and renders them in fields-first
+/// order: `key1=val1 key2=val2 message_body`. Matches
+/// `tracing-subscriber`'s default fmt layer so a reader of
+/// `engine_logs` sees the same shape regardless of which side
+/// emitted the event. Returns `(level, target, message)`; callers
+/// stamp the timestamp + push into the ring themselves.
+#[must_use]
+pub fn render_event(event: &Event<'_>) -> (u8, String, String) {
+    let metadata = event.metadata();
+    let level = level_to_u8(*metadata.level());
+    let target = metadata.target().to_string();
+
+    let mut visitor = MessageBuilder::new();
+    event.record(&mut visitor);
+    let message = visitor.finish();
+
+    (level, target, message)
+}
+
 struct MessageBuilder {
     fields: String,
     message: String,
@@ -391,17 +316,13 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-/// Wasm linear memory's tracing global default — every `tracing::*`
-/// event in component code lands here. The component runs as one
-/// actor, so [`LogBuffer::try_with_mut`] always succeeds; we never
-/// reach the host branch on this target.
-///
-/// Native chassis composes `ActorAwareLayer` (in `aether-capabilities`)
-/// with `EnvFilter` + `tsfmt::Layer` via `tracing-subscriber`; that
-/// crate is `std`-only so we can't pull it into `aether-actor`'s
-/// `no_std` build. The wasm path runs without a filter or stderr
-/// formatter — every event ships back to the chassis where its own
-/// subscriber stack handles it.
+/// Wasm-side tracing subscriber. Each `tracing::*` event the guest
+/// fires walks through this subscriber's `event()` and rides the
+/// trampoline's per-event FFI host fn back into the host process,
+/// where the host-side `ActorAwareLayer` lands it in the
+/// trampoline's [`ActorLogRing`]. ADR-0081 §7 — the previous
+/// guest-side `LogBuffer` + `drain_buffer` + `LogBatch` flush hop
+/// retired alongside this rewrite.
 #[cfg(target_arch = "wasm32")]
 pub struct WasmSubscriber {
     next_span: core::sync::atomic::AtomicU64,
@@ -445,22 +366,8 @@ impl Subscriber for WasmSubscriber {
     fn exit(&self, _: &span::Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        // Re-entry guard: we're inside `drain_buffer` /
-        // `ship_host_event`. Drop the event to keep the pipeline
-        // from looping.
-        if is_in_pipeline() {
-            return;
-        }
-        let entry = encode_event(event);
-        let level = entry.level;
-        // Push to the actor's buffer. `try_with_mut` is `Some` on
-        // wasm (linear memory IS the actor); we ignore the `None`
-        // arm because it can't fire on this target.
-        let _ = LogBuffer::try_with_mut(|b| b.0.push(entry));
-        // Priority flush on warn/error so trap-time data survives.
-        if level >= 3 {
-            drain_buffer();
-        }
+        let (level, target, message) = render_event(event);
+        crate::ffi::bridge::MAIL_BRIDGE.emit_log_event(level, &target, &message);
     }
 }
 
@@ -515,6 +422,8 @@ macro_rules! log_error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::borrow::ToOwned;
+    use alloc::format;
 
     #[test]
     fn level_mapping() {
@@ -548,5 +457,208 @@ mod tests {
         }
         let out = truncate(s);
         assert!(out.ends_with(TRUNCATED_SUFFIX));
+    }
+
+    #[test]
+    fn resolve_max_clamps_to_documented_bounds() {
+        assert_eq!(resolve_max(0), DEFAULT_TAIL_MAX);
+        assert_eq!(resolve_max(50), 50);
+        assert_eq!(resolve_max(MAX_TAIL_MAX), MAX_TAIL_MAX);
+        assert_eq!(resolve_max(5_000), MAX_TAIL_MAX);
+    }
+
+    fn push_three(ring: &mut ActorLogRing) {
+        ring.push(2, "test".to_owned(), "first".to_owned(), 100);
+        ring.push(2, "test".to_owned(), "second".to_owned(), 200);
+        ring.push(2, "test".to_owned(), "third".to_owned(), 300);
+    }
+
+    /// Round-trip push + tail with no filter returns the entries in
+    /// push order with monotonically-increasing sequence from 1.
+    #[test]
+    fn tail_returns_entries_in_push_order_with_monotonic_sequence() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        push_three(&mut ring);
+        let LogTailResult::Ok {
+            entries,
+            next_since,
+            truncated_before,
+        } = ring.tail(&LogTail {
+            max: 0,
+            min_level: None,
+            since: None,
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].message, "first");
+        assert_eq!(entries[0].sequence, 1);
+        assert_eq!(entries[2].sequence, 3);
+        assert_eq!(next_since, 3);
+        assert_eq!(truncated_before, None);
+        // ADR-0081 contract: tail entries carry origin = None; the
+        // aggregator stamps it at merge time.
+        assert_eq!(entries[0].origin, None);
+    }
+
+    #[test]
+    fn tail_filters_below_min_level() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        ring.push(0, "t".to_owned(), "trace".to_owned(), 0);
+        ring.push(2, "t".to_owned(), "info".to_owned(), 0);
+        ring.push(3, "t".to_owned(), "warn".to_owned(), 0);
+        ring.push(4, "t".to_owned(), "error".to_owned(), 0);
+        let LogTailResult::Ok { entries, .. } = ring.tail(&LogTail {
+            max: 0,
+            min_level: Some(3),
+            since: None,
+        }) else {
+            panic!("expected Ok");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].message, "warn");
+        assert_eq!(entries[1].message, "error");
+    }
+
+    #[test]
+    fn tail_since_cursor_paginates_without_double_pulling() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        for i in 1..=5 {
+            ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
+        }
+        let LogTailResult::Ok {
+            entries,
+            next_since,
+            ..
+        } = ring.tail(&LogTail {
+            max: 0,
+            min_level: None,
+            since: Some(2),
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].sequence, 3);
+        assert_eq!(next_since, 5);
+
+        let LogTailResult::Ok {
+            entries,
+            next_since,
+            ..
+        } = ring.tail(&LogTail {
+            max: 0,
+            min_level: None,
+            since: Some(next_since),
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert!(entries.is_empty());
+        assert_eq!(next_since, 5);
+    }
+
+    #[test]
+    fn tail_max_caps_returned_slice_and_cursor_walks_remainder() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        for i in 1..=5 {
+            ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
+        }
+        let LogTailResult::Ok {
+            entries,
+            next_since,
+            ..
+        } = ring.tail(&LogTail {
+            max: 2,
+            min_level: None,
+            since: None,
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(next_since, 2);
+
+        let LogTailResult::Ok {
+            entries,
+            next_since,
+            ..
+        } = ring.tail(&LogTail {
+            max: 2,
+            min_level: None,
+            since: Some(next_since),
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sequence, 3);
+        assert_eq!(next_since, 4);
+    }
+
+    /// FIFO eviction with a 3-entry ring drops seq 1 + 2 once the
+    /// 5th entry pushes; a reader with `since = 0` (expecting the
+    /// prefix) sees `truncated_before = Some(3)`.
+    #[test]
+    fn tail_signals_truncated_before_when_ring_evicted_prefix() {
+        let mut ring = ActorLogRing::with_capacity(3);
+        for i in 1..=5 {
+            ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
+        }
+        let LogTailResult::Ok {
+            entries,
+            truncated_before,
+            ..
+        } = ring.tail(&LogTail {
+            max: 0,
+            min_level: None,
+            since: None,
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].sequence, 3);
+        assert_eq!(truncated_before, Some(3));
+    }
+
+    #[test]
+    fn tail_does_not_signal_truncated_before_when_since_covers_eviction() {
+        let mut ring = ActorLogRing::with_capacity(3);
+        for i in 1..=5 {
+            ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
+        }
+        let LogTailResult::Ok {
+            truncated_before, ..
+        } = ring.tail(&LogTail {
+            max: 0,
+            min_level: None,
+            since: Some(2),
+        })
+        else {
+            panic!("expected Ok");
+        };
+        assert_eq!(truncated_before, None);
+    }
+
+    /// `snapshot()` returns every entry currently in the ring with
+    /// no filter, oldest-to-newest. Used by the panic hook (ADR-0081
+    /// §4).
+    #[test]
+    fn snapshot_returns_current_entries_oldest_first() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        push_three(&mut ring);
+        let snap = ring.snapshot();
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[0].sequence, 1);
+        assert_eq!(snap[2].sequence, 3);
+    }
+
+    #[test]
+    fn zero_cap_is_clamped_to_one() {
+        let mut ring = ActorLogRing::with_capacity(0);
+        ring.push(2, "t".to_owned(), "only".to_owned(), 0);
+        assert_eq!(ring.len(), 1);
     }
 }

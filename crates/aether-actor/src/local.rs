@@ -32,10 +32,13 @@
 //!   is called outside an active stamp (substrate boot code,
 //!   init-before-stamp, etc.).
 //!
-//! First consumer: issue 581's per-actor log buffer (a named
-//! `LogBuffer` newtype around `Vec<LogEvent>`), drained to
-//! `LogCapability` at handler exit by an actor-aware composite
-//! tracing subscriber.
+//! First consumer: ADR-0081's per-actor [`crate::log::ActorLogRing`],
+//! the bounded `VecDeque<LogEntry>` every actor owns. The host's
+//! actor-aware tracing subscriber pushes into the ring through
+//! `Local::try_with_mut`; the framework's `aether.log.tail` dispatch
+//! arm reads through the same stamped slot when serving queries.
+//! Pre-ADR-0081 this was the `LogBuffer` flush-hop staging area;
+//! ADR-0081 §1 collapsed buffer + central store into one ring.
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
@@ -268,9 +271,10 @@ mod native_impl {
 
     /// Like [`with_current`] but tolerates "no actor stamped" by
     /// returning `None`. Used by callers that legitimately run on
-    /// both sides of an actor boundary — issue 581's actor-aware
+    /// both sides of an actor boundary — ADR-0081's actor-aware
     /// tracing layer is the first consumer: in-actor → push to the
-    /// `LogBuffer`; no actor → fall through to the host branch.
+    /// per-actor `ActorLogRing`; no actor → drop on the floor (the
+    /// substrate's `tsfmt::Layer` already handles stderr surfacing).
     pub(super) fn try_with_current<R>(f: impl FnOnce(&ActorSlots) -> R) -> Option<R> {
         CURRENT_SLOTS.with(|slot| {
             let ptr = slot.get();

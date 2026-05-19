@@ -35,26 +35,22 @@ use crate::chassis::ctx::MailboxWakeSlot;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
-use crate::mail::Mail;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
-use crate::runtime::log_install;
-use crate::runtime::log_install::MailDispatch;
 use crate::runtime::trace;
 use crate::runtime::trace::TraceDrainerHandle;
 use crate::scheduler::Drainable;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Actor;
+#[cfg(test)]
 use aether_actor::HandlesKind;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
-use aether_actor::log;
 use aether_data::mailbox_id_from_name;
 use aether_kinds::trace::Settled;
-use aether_kinds::{ConfigureLogDrain, LogBatch};
 use std::any::Any;
 use std::any::TypeId;
 use std::io;
@@ -545,20 +541,14 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
             panic!("PassiveBoot::init called in non-Claimed state");
         };
 
-        // Issue #581: stamp the actor's transport as the in-actor
-        // `MailDispatch` around `init` so any `tracing::*` event the
-        // cap fires during boot drains to LogCapability when init
-        // returns.
+        // ADR-0081: wrap `init` in `local::with_stamped` so any
+        // `tracing::*` event the cap fires lands in its per-actor
+        // `ActorLogRing`. The pre-ADR `with_actor_dispatch` +
+        // `drain_buffer` flush hop retired alongside `LogBatch`.
         let init_result = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
-            local::with_stamped(&resources.slots, || {
-                log_install::with_actor_dispatch(&*resources.transport as &dyn MailDispatch, || {
-                    let r = A::init(config, &mut init_ctx);
-                    log::drain_buffer();
-                    r
-                })
-            })
+            local::with_stamped(&resources.slots, || A::init(config, &mut init_ctx))
         };
         let actor = match init_result {
             Ok(a) => a,
@@ -601,20 +591,17 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // passes, so every peer mailbox is published and addressable;
         // wire-emitted mail queues in recipient inboxes (no dispatcher
         // is running yet — spawn pass is next). Wrapped in the same
-        // `with_stamped` + `with_actor_dispatch` envelope as `init`
-        // and per-envelope dispatch so `Local<T>` and `tracing::*`
-        // route identically.
+        // `with_stamped` envelope as `init` and per-envelope dispatch
+        // so `Local<T>` and `tracing::*` route into this actor's
+        // `ActorLogRing` identically.
         local::with_stamped(&resources.slots, || {
-            log_install::with_actor_dispatch(&*resources.transport as &dyn MailDispatch, || {
-                let mut wire_ctx = crate::actor::native::NativeCtx::new(
-                    &resources.transport,
-                    aether_data::ReplyTo::NONE,
-                    aether_data::MailId::NONE,
-                    aether_data::MailId::NONE,
-                );
-                actor.wire(&mut wire_ctx);
-                log::drain_buffer();
-            });
+            let mut wire_ctx = crate::actor::native::NativeCtx::new(
+                &resources.transport,
+                aether_data::ReplyTo::NONE,
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            actor.wire(&mut wire_ctx);
         });
 
         self.state = BootState::Wired { resources, actor };
@@ -818,18 +805,6 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     passives: Vec<Box<dyn PassiveBoot>>,
     driver: Option<DriverBoot>,
     aborter: Arc<dyn FatalAborter>,
-    /// Issue #601: chassis-declared log-drain target. `None` until the
-    /// chassis calls [`Self::with_log_drain`]; on `build()` the
-    /// mailbox id is dispatched as `aether.log.configure_drain` mail
-    /// to every booted actor so each actor's `LogDrainSlot` is
-    /// installed. `ComponentHostCapability` snapshots the same drain
-    /// for the runtime `load_component` path — runtime-loaded
-    /// components receive `ConfigureLogDrain` themselves on
-    /// registration. The chassis Builder declares the drain; the
-    /// runtime state lives entirely in `ComponentHostCapability` and per-actor
-    /// `LogDrainSlot`s, set the same way every actor's slot is set:
-    /// via mail.
-    log_drain: Option<MailboxId>,
     /// Issue 745: override [`PoolConfig::workers`]. `None` means
     /// [`PoolConfig::default`] (`available_parallelism() - 1`, min 1);
     /// `Some(n)` plumbs `n` into the pool at boot. Production chassis
@@ -852,7 +827,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
             passives: Vec::new(),
             driver: None,
             aborter: Arc::new(PanicAborter),
-            log_drain: None,
             workers: None,
             _chassis: PhantomData,
             _state: PhantomData,
@@ -913,27 +887,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
-    /// Issue #601: declare the chassis-wide log drain target. `T` must
-    /// be a [`NativeActor`] that handles [`LogBatch`] (the cap's
-    /// mailbox id is derived from `T::NAMESPACE` at compile time).
-    /// On `build()` / `build_passive()` the chassis dispatches a
-    /// `aether.log.configure_drain` mail to every booted actor so each
-    /// actor's `LogDrainSlot` resolves to this mailbox; the
-    /// auto-emitted handler in `#[actor]` does the install.
-    ///
-    /// No call → `log_drain` stays `None`, no `ConfigureLogDrain`
-    /// dispatched, actors keep their default unset slot, and
-    /// `drain_buffer` is a silent no-op (chassis intentionally
-    /// skipping logging).
-    #[must_use]
-    pub fn with_log_drain<T>(mut self) -> Self
-    where
-        T: NativeActor + HandlesKind<LogBatch>,
-    {
-        self.log_drain = Some(mailbox_id_from_name(T::NAMESPACE));
-        self
-    }
-
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
     /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
@@ -947,7 +900,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
             passives: self.passives,
             driver: self.driver,
             aborter: self.aborter,
-            log_drain: self.log_drain,
             workers: self.workers,
             _chassis: PhantomData,
             _state: PhantomData,
@@ -965,18 +917,9 @@ impl<C: Chassis> Builder<C, NoDriver> {
             self.workers,
             self.passives,
         )?;
-        // Issue #601: push `ConfigureLogDrain` to every booted actor
-        // and to `aether.component` so every per-actor `LogDrainSlot`
-        // (auto-emitted handler) plus the `ComponentHostCapability`'s
-        // drain slot (for the runtime load path) resolve to the
-        // chassis-declared target. No-op if the chassis didn't call
-        // `with_log_drain`.
-        dispatch_configure_log_drain(
-            &self.registry,
-            &self.mailer,
-            &booted.claimed_actor_mailboxes,
-            self.log_drain,
-        );
+        // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
+        // — each actor owns its own `ActorLogRing` and there is no
+        // drain target to configure.
         Ok(PassiveChassis {
             booted,
             _chassis: PhantomData,
@@ -1005,17 +948,6 @@ impl<C: Chassis> Builder<C, HasDriver> {
     {
         self.passives
             .push(Box::new(NativeActorBoot::<A>::new(config)));
-        self
-    }
-
-    /// Mirror of [`Builder::with_log_drain`][Builder<C, NoDriver>::with_log_drain]
-    /// for the post-driver state. Issue #601.
-    #[must_use]
-    pub fn with_log_drain<T>(mut self) -> Self
-    where
-        T: NativeActor + HandlesKind<LogBatch>,
-    {
-        self.log_drain = Some(mailbox_id_from_name(T::NAMESPACE));
         self
     }
 
@@ -1050,16 +982,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
         let mut booted = boot_passives(&registry, &mailer, &aborter, workers, passives)?;
-        // Issue #601: push `ConfigureLogDrain` to every booted actor
-        // and to `aether.component` so the runtime load path picks up
-        // the chassis-declared drain through the same mail every
-        // actor receives.
-        dispatch_configure_log_drain(
-            &registry,
-            &mailer,
-            &booted.claimed_actor_mailboxes,
-            self.log_drain,
-        );
+        // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
+        // — each actor owns its own `ActorLogRing`.
         let driver_running = {
             let chassis_ctx = ChassisCtx::new(
                 &registry,
@@ -1147,36 +1071,6 @@ struct BootedPassives {
     /// [`Self::settlement_registry`] for PR 4 gate-site
     /// `subscribe_settlement` calls.
     settlement_registry: Arc<SettlementRegistry>,
-}
-
-/// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
-/// to every actor whose mailbox was claimed during boot. Called by
-/// `Builder::build` / `build_passive` after `boot_passives` returns.
-/// No-op if `drain` is `None` (chassis didn't declare a log target).
-///
-/// Sends through the same `Mailer` every other mail uses — each actor
-/// mailbox routes the envelope to the auto-emitted `ConfigureLogDrain`
-/// arm in `#[handlers]`, which installs the per-actor `LogDrainSlot`.
-/// Issue 603: `ComponentHostCapability` is now a normal actor booted
-/// through this Builder, so its mailbox lands in
-/// `claimed_actor_mailboxes` like every other cap and the pre-603
-/// special-case lookup of `aether.control` retired.
-fn dispatch_configure_log_drain(
-    _registry: &Arc<Registry>,
-    mailer: &Arc<Mailer>,
-    targets: &[MailboxId],
-    drain: Option<MailboxId>,
-) {
-    let Some(drain) = drain else {
-        return;
-    };
-    let kind = <ConfigureLogDrain as aether_data::Kind>::ID;
-    for target in targets {
-        let cfg = ConfigureLogDrain { mailbox: drain };
-        let payload = bytemuck::bytes_of(&cfg).to_vec();
-        let mail = Mail::new(*target, kind, payload, 1);
-        mailer.push(mail);
-    }
 }
 
 impl BootedPassives {

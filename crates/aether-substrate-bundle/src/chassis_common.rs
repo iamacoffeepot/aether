@@ -17,8 +17,8 @@ use std::sync::Arc;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     ComponentHostCapability, ComponentHostConfig, FsCapability, HandleCapability, HttpCapability,
-    InputCapability, InputConfig, LogCapability, TcpCapability, fs::NamespaceRoots,
-    http::HttpConfig, trace::TraceObserverCapability,
+    InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
+    trace::TraceObserverCapability,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
@@ -36,18 +36,18 @@ pub struct CommonBoot {
     pub http: HttpConfig,
 }
 
-/// Wire the aborter, worker count, and the 10 caps every full-stack
-/// chassis carries. The renderer / window caps each chassis adds
-/// after this in `.with_actor::<_>()` chains.
+/// Wire the aborter, worker count, and the common caps every full-
+/// stack chassis carries. The renderer / window caps each chassis
+/// adds after this in `.with_actor::<_>()` chains.
 ///
-/// Boot order matters — log first so other capabilities' boot tracing
-/// routes through the log capture.
+/// Boot order is declaration order. ADR-0081 retired the central
+/// `LogCapability` — every actor owns its own per-actor log ring; no
+/// boot ordering is needed for logging anymore.
 pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
         .with_actor::<HandleCapability>(())
-        .with_actor::<LogCapability>(())
         .with_actor::<TraceObserverCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)

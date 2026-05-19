@@ -33,7 +33,6 @@ pub mod fs;
 pub mod handle;
 pub mod http;
 pub mod input;
-pub mod log;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod rpc;
@@ -68,7 +67,6 @@ pub use input::InputCapability;
 pub use input::InputConfig;
 
 pub use fs::FsCapability;
-pub use log::LogCapability;
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;
 #[cfg(feature = "render")]

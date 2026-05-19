@@ -347,9 +347,6 @@ macro_rules! __export_internal {
                     1
                 }
             };
-            // Issue #598: flush any tracing events emitted during init
-            // so the substrate can surface them.
-            $crate::log::drain_buffer();
             status
         }
 
@@ -371,7 +368,6 @@ macro_rules! __export_internal {
             };
             let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             <$component as $crate::FfiActor>::wire(instance, &mut ctx);
-            $crate::log::drain_buffer();
             0
         }
 
@@ -388,7 +384,6 @@ macro_rules! __export_internal {
             };
             let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             <$component as $crate::FfiActor>::unwire(instance, &mut ctx);
-            $crate::log::drain_buffer();
             0
         }
 
@@ -416,10 +411,7 @@ macro_rules! __export_internal {
             ).0;
             let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
-            let status = instance.__aether_dispatch(&mut ctx, mail);
-            // Issue #598: ship buffered tracing events at handler exit.
-            $crate::log::drain_buffer();
-            status
+            instance.__aether_dispatch(&mut ctx, mail)
         }
 
         /// # Safety
@@ -433,7 +425,6 @@ macro_rules! __export_internal {
             };
             let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new();
             $crate::__export_internal!(@on_replace $replaceable, $component, instance, ctx);
-            $crate::log::drain_buffer();
             0
         }
 
@@ -454,7 +445,6 @@ macro_rules! __export_internal {
             let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             $crate::__export_internal!(@on_rehydrate $replaceable, $component, instance, ctx, prior);
-            $crate::log::drain_buffer();
             0
         }
     };

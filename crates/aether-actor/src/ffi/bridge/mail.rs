@@ -110,4 +110,32 @@ impl MailBridge {
         // (the host-target stub panics rather than returning garbage).
         unsafe { raw::prev_correlation() }
     }
+
+    /// ADR-0081 §7: re-emit one `tracing::*` event on the host side.
+    /// Called by the wasm subscriber per event so the host's
+    /// `ActorAwareLayer` lands the entry in the trampoline's
+    /// `ActorLogRing`. `level` is the `0 = trace .. 4 = error`
+    /// mapping the rest of `aether.log.*` uses; `target` and
+    /// `message` are the pre-rendered tracing field text.
+    ///
+    /// Fire-and-forget: no return code. The host copies before
+    /// returning; the guest's borrows are released as soon as the
+    /// FFI call completes.
+    pub fn emit_log_event(&self, level: u8, target: &str, message: &str) {
+        let target_bytes = target.as_bytes();
+        let message_bytes = message.as_bytes();
+        // SAFETY: forwards to `raw::log_event`, whose ABI is documented
+        // at the import site in `ffi/raw.rs`. The `(ptr, len)` pairs are
+        // derived from `&str` references valid for `len` bytes for the
+        // call's duration; the host copies before returning.
+        unsafe {
+            raw::log_event(
+                u32::from(level),
+                target_bytes.as_ptr().addr() as u32,
+                target_bytes.len() as u32,
+                message_bytes.as_ptr().addr() as u32,
+                message_bytes.len() as u32,
+            );
+        }
+    }
 }

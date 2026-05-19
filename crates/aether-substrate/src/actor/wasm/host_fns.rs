@@ -8,6 +8,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
 use crate::mail::{KindId, MailboxId, ReplyTarget};
+use crate::runtime::log_install;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -360,6 +361,58 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let msg = String::from_utf8_lossy(&data[start..end]).into_owned();
             caller.data_mut().init_failure = Some(msg);
+        },
+    )?;
+
+    // ADR-0081 §7: `log_event_p32` re-fires a guest `tracing::*` event
+    // on the host side. `WasmSubscriber::event` calls this per event
+    // (no buffer, no flush hop — the pre-ADR-0081 `LogBatch` route
+    // retired alongside `LogCapability`). The host re-emits via
+    // `emit_host_event` on the trampoline's dispatcher thread, where
+    // the `ActorAwareLayer` is already stamped against the
+    // trampoline's `ActorSlots` and lands the entry in the
+    // trampoline's `ActorLogRing`. Bytes are copied out of guest
+    // memory before the call returns; OOB or missing-memory drops
+    // silently.
+    //
+    // HOST_FN_OK: ADR-0081 §7 — log emission is intentionally a host
+    // fn, not a mail sink. The mail surface is the *query* path
+    // (`aether.log.tail` / `aether.log.engine`); emission lives on the
+    // hot path of every guest `tracing::*` event and going through
+    // mail would add an inbox round-trip per log line. The pre-
+    // ADR-0081 batched `LogBatch` flush hop was the cost this ADR
+    // retires.
+    linker.func_wrap(
+        "aether",
+        "log_event_p32",
+        |mut caller: Caller<'_, ComponentCtx>,
+         level: u32,
+         target_ptr: u32,
+         target_len: u32,
+         message_ptr: u32,
+         message_len: u32| {
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
+                return;
+            };
+            let data = memory.data(&caller);
+            let copy = |ptr: u32, len: u32| -> Option<String> {
+                let start = ptr as usize;
+                let end = start.checked_add(len as usize)?;
+                if end > data.len() {
+                    return None;
+                }
+                Some(String::from_utf8_lossy(&data[start..end]).into_owned())
+            };
+            let Some(target) = copy(target_ptr, target_len) else {
+                return;
+            };
+            let Some(message) = copy(message_ptr, message_len) else {
+                return;
+            };
+            log_install::emit_host_event(level, &target, &message);
         },
     )?;
 
