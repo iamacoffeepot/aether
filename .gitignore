@@ -24,6 +24,7 @@ spikes/*/target/
 !.claude/skills/release-init/
 !.claude/skills/scope/
 !.claude/skills/scope-spinoff/
+!.claude/skills/secretary/
 !.claude/skills/sweep/
 # Agent audit artifacts — runs of an audit workflow that examines
 # the repo and emits findings. Outputs are per-run and per-machine,
