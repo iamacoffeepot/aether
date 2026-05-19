@@ -14,15 +14,20 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aether_actor::Actor;
 use aether_capabilities::{
-    AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig, RenderCapability,
-    RenderConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AudioCapability, CaptureBackend, ComponentHostConfig, InputCapability, InputConfig,
+    RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
+    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
-use aether_kinds::WindowMode;
+use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
+use aether_kinds::{Shutdown, Tick, WindowMode};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{
+    Chassis, LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph, SubstrateBoot,
+    capture::CaptureQueue,
+};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
@@ -270,10 +275,32 @@ impl DesktopChassis {
             namespace_roots,
             http,
         };
+        // ADR-0082 §1 / PR 3b: desktop lifecycle graph mirrors the
+        // headless / test_bench shape today — Tick self-loops, Quit
+        // escapes to Shutdown. A future PR adds `Render` / `Present`
+        // states so the render cap subscribes per ADR-0082 §11; for
+        // now Tick is the only stage and `aether.input` relays it as
+        // before.
+        let lifecycle_graph = LifecycleGraph::<()>::builder()
+            .state::<Tick, _>(|()| Tick {})
+            .next::<Tick>()
+            .quit::<Shutdown>()
+            .terminal::<Shutdown, _>(|()| Shutdown {})
+            .start::<Tick>()
+            .build()
+            .expect("desktop lifecycle graph is structurally valid");
+        let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
+        let lifecycle_config = LifecycleDriverConfig {
+            graph: lifecycle_graph,
+            context: (),
+            initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
+        };
+
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
-            .with_actor::<UnsupportedTestBenchCapability>(());
+            .with_actor::<UnsupportedTestBenchCapability>(())
+            .with_actor::<LifecycleDriverCapability<()>>(lifecycle_config);
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         builder.driver(driver).build()
     }

@@ -31,7 +31,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
-use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
+#[cfg(test)]
+use aether_kinds::Tick;
+use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_actor::Actor;
@@ -321,7 +323,9 @@ impl TestBench {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
-        let lifecycle_mailbox = aether_data::mailbox_id_from_name("aether.lifecycle");
+        let lifecycle_mailbox = aether_data::mailbox_id_from_name(
+            <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE,
+        );
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
         // build result for wire-compat with binaries that haven't migrated yet.
@@ -795,7 +799,9 @@ impl TestBench {
             let rx = registry.subscribe_settlement(advance_root);
             if rx.recv_timeout(SETTLEMENT_TIMEOUT).is_err() {
                 return Err(TestBenchError::SettlementTimeout {
-                    recipient: "aether.lifecycle".to_owned(),
+                    recipient:
+                        <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE
+                            .to_owned(),
                     kind_name: aether_kinds::LifecycleAdvance::NAME,
                 });
             }

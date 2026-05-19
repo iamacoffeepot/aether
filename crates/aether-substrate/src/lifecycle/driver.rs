@@ -363,7 +363,7 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
         if let Some(registry) = self.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 root,
-                mailbox_id_from_name("aether.lifecycle"),
+                mailbox_id_from_name(<Self as aether_actor::Actor>::NAMESPACE),
                 <Settled as Kind>::ID,
                 Arc::clone(&self.mailer),
             );

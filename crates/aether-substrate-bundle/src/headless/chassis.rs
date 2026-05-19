@@ -22,8 +22,8 @@ use aether_capabilities::{
     ComponentHostConfig, HeadlessRenderCapability, HeadlessWindowCapability, InputCapability,
     InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
-use aether_data::{MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_data::Kind;
+use aether_data::{MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Shutdown, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;

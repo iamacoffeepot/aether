@@ -177,6 +177,7 @@ impl TestBenchChassis {
     /// vocabulary the substrate registers from
     /// `aether_kinds::descriptors::all()`, so a missing entry indicates
     /// a substrate-build bug.
+    #[allow(clippy::too_many_lines)] // PR 3b growth from lifecycle graph + relay wiring.
     pub fn build_passive(env: TestBenchEnv) -> anyhow::Result<TestBenchBuild> {
         let TestBenchEnv {
             name,

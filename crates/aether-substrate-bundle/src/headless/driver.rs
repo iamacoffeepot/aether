@@ -20,11 +20,12 @@ use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::Actor;
 use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
 use aether_kinds::LifecycleAdvance;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};
+use aether_substrate::{LifecycleDriverCapability, Mailer, SubstrateBoot, mail::MailboxId};
 
 use crate::chassis_root::next_chassis_correlation;
 
@@ -104,7 +105,9 @@ impl DriverCapability for HeadlessTimerCapability {
 
         Ok(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
-            lifecycle_mailbox: mailbox_id_from_name("aether.lifecycle"),
+            lifecycle_mailbox: mailbox_id_from_name(
+                <LifecycleDriverCapability<()> as Actor>::NAMESPACE,
+            ),
             kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             tick_period,
             _boot: boot,
