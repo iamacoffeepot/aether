@@ -34,6 +34,10 @@ aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
+# ADR-0081 §4 crash dump: serialize the panicking actor's ring as
+# JSONL on a panic-hook write path. Read-side consumers (operator
+# `jq` queries) match.
+serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasmtime = "44"
