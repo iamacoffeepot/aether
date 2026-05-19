@@ -15,8 +15,14 @@ spikes/*/target/
 .claude/worktrees/
 .claude/skills/*
 !.claude/skills/adr/
+!.claude/skills/approve/
 !.claude/skills/audit/
+!.claude/skills/bounce/
 !.claude/skills/delegate/
+!.claude/skills/implement/
+!.claude/skills/release-init/
+!.claude/skills/scope/
+!.claude/skills/scope-spinoff/
 !.claude/skills/sweep/
 # Agent audit artifacts — runs of an audit workflow that examines
 # the repo and emits findings. Outputs are per-run and per-machine,
@@ -30,3 +36,4 @@ spikes/*/target/
 # discoverable; everything else under it is ignored.
 /traces/*
 !/traces/.gitkeep
+.claude/release-state.json
