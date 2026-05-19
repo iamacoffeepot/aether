@@ -57,7 +57,7 @@ pub enum MeshError {
 /// Wire entry: evaluate `node` polygon-domain, run the cleanup +
 /// CDT-tessellation pipeline, then fan back to wire `Triangle`s.
 ///
-/// Runs [`crate::simplify::simplify`] as a pre-pass so identity
+/// Runs [`simplify::simplify`] as a pre-pass so identity
 /// transforms collapse before they reach the mesher.
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
     let simplified = simplify::simplify(node);

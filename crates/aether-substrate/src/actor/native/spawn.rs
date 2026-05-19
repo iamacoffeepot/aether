@@ -109,13 +109,13 @@ pub struct Spawner {
     /// chassis runs its own sequence; not shared across substrates.
     counter: AtomicU64,
     /// Issue 635 PR C: chassis worker pool's ready-queue sender.
-    /// Cloned into [`crate::scheduler::WakeHandle`]s when the
+    /// Cloned into [`WakeHandle`]s when the
     /// Pooled spawn branch lands a slot.
     pool_ready_tx: crossbeam_channel::Sender<Arc<dyn Drainable>>,
     /// Issue 635 Phase 3: strong-Arc store for instanced
-    /// [`crate::scheduler::Drainable`] slots spawned via the Pooled
+    /// [`Drainable`] slots spawned via the Pooled
     /// branch. Without this the slot dropped at end of `spawn_actor`
-    /// and the [`crate::scheduler::WakeHandle`]'s `Weak` failed to
+    /// and the [`WakeHandle`]'s `Weak` failed to
     /// upgrade — every wake after spawn would silently no-op.
     /// Slots live until the Spawner itself drops (chassis teardown);
     /// self-closing actors leave their slot Arc here as a small
@@ -131,7 +131,7 @@ pub struct Spawner {
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
 /// `Arc<dyn Drainable>` (so the wake handle's `Weak` upgrades) and a
-/// [`crate::scheduler::WakeHandle`] clone (so the chassis-teardown
+/// [`WakeHandle`] clone (so the chassis-teardown
 /// path can wake the slot after signaling shutdown). Issue 685.
 struct InstancedSlotEntry {
     slot: Arc<dyn Drainable>,
@@ -183,7 +183,7 @@ impl Spawner {
     /// workers can drain the close cycles we just queued.
     ///
     /// Issue 714: the original implementation polled
-    /// [`crate::scheduler::Drainable::is_closed`] every 2 ms with a
+    /// [`Drainable::is_closed`] every 2 ms with a
     /// `timeout`-bounded loop. Under nextest contention the worker that
     /// observed the wake could be scheduled out long enough that the
     /// 2 s deadline elapsed before the close cycle ran, surfacing as

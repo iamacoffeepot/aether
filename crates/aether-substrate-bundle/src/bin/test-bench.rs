@@ -28,7 +28,8 @@ use aether_substrate_bundle::test_bench::{
 };
 use std::env;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+
+use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use std::time::Duration;
 
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
@@ -187,14 +188,7 @@ fn run_frame(
     gpu: &mut Gpu,
     chassis_correlation: &AtomicU64,
 ) {
-    let next_correlation = || -> u64 {
-        let id = chassis_correlation.fetch_add(1, Ordering::Relaxed);
-        if id == 0 {
-            chassis_correlation.fetch_add(1, Ordering::Relaxed)
-        } else {
-            id
-        }
-    };
+    let next_correlation = || -> u64 { next_chassis_correlation(chassis_correlation) };
 
     if dispatch_tick {
         trace::push_chassis_root_mail(

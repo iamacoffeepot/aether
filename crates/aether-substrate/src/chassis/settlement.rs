@@ -48,7 +48,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 /// Chassis-owned settlement notification registry. Owned by the
 /// chassis (one per substrate); cloned via `Arc` into the
-/// [`crate::mail::Mailer`]'s chassis-router closure so the
+/// [`Mailer`]'s chassis-router closure so the
 /// dispatcher's `Settled` switch can fire.
 #[derive(Default)]
 pub struct SettlementRegistry {
@@ -91,7 +91,7 @@ enum SettlementSubscriber {
 impl SettlementSubscriber {
     /// Fire this subscriber for the settled `root`. Channel sends are
     /// non-blocking (`try_send`, so a closed receiver doesn't panic);
-    /// mail sends go through the chassis [`crate::mail::mailer::Mailer`]
+    /// mail sends go through the chassis [`Mailer`]
     /// which resolves the recipient inline on the firing thread.
     fn fire(self, root: MailId) {
         match self {
@@ -155,7 +155,7 @@ impl SettlementRegistry {
     }
 
     /// Subscribe a mailbox to receive a notification mail when `root`
-    /// settles. The notification is a [`crate::mail::Mail`] with the
+    /// settles. The notification is a [`Mail`] with the
     /// given `kind`, the [`MailId`] of the settled root postcard-encoded
     /// as payload, and `count = 1`. Pre-fires immediately (synchronously
     /// pushes the mail) if `root` has already settled at least once.

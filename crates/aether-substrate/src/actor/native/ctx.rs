@@ -93,7 +93,7 @@ impl<'a> NativeCtx<'a> {
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`
-    /// receives a [`crate::actor::native::InheritCtx<A>`] — sends
+    /// receives a [`InheritCtx<A>`] — sends
     /// from inside `f` carry `parent_mail = self.in_flight_mail_id()`
     /// and `root = self.in_flight_root()` automatically.
     ///
@@ -123,7 +123,7 @@ impl<'a> NativeCtx<'a> {
 
     /// ADR-0080 §12 spawn primitive: launch a worker thread with no
     /// in-flight inheritance. The closure `f` receives a
-    /// [`crate::actor::native::RootCtx<A>`] — each send mints a
+    /// [`RootCtx<A>`] — each send mints a
     /// fresh root chain with `A`'s mailbox as the producer.
     ///
     /// Use for long-lived workers that respond to external events

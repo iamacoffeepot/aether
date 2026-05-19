@@ -64,7 +64,7 @@ pub struct Mailer {
     /// [`MailboxId::CHASSIS_MAILBOX_ID`], `route_mail` short-circuits
     /// the registry lookup and invokes this closure instead. Today
     /// the chassis installs a router that decodes `Settled { root }`
-    /// and signals the [`crate::chassis::settlement::SettlementRegistry`]
+    /// and signals the [`SettlementRegistry`]
     /// — keeping the Mailer ignorant of trace kinds while still
     /// providing the dispatch surface those kinds need.
     ///
@@ -128,7 +128,7 @@ impl Mailer {
     /// or `None` if no registry was installed (test fixtures, chassis
     /// that don't bring up the trace pipeline). Capabilities subscribe
     /// via
-    /// [`crate::chassis::settlement::SettlementRegistry::subscribe_settlement_mail`].
+    /// [`SettlementRegistry::subscribe_settlement_mail`].
     pub fn settlement_registry(&self) -> Option<&Arc<SettlementRegistry>> {
         self.settlement_registry.get()
     }

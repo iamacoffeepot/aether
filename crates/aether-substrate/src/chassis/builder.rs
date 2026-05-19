@@ -735,7 +735,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
 /// 1. Sets the binding's `should_shutdown` flag so the next
 ///    [`crate::scheduler::DispatcherSlot::run_cycle`] observes the
 ///    signal and runs `unwire` + registry finalize.
-/// 2. Drops the [`crate::chassis::ctx::MailboxSender`] so subsequent
+/// 2. Drops the [`MailboxSender`] so subsequent
 ///    sends warn-and-discard.
 /// 3. Drops the slot Arc — the chassis-held strong ref. The pool
 ///    worker's strong ref (via the ready queue) drops at end of the
@@ -779,7 +779,7 @@ fn alloc_native_actor_thread_name<A: Actor>() -> String {
 }
 
 /// Shutdown adapter for a [`NativeActor`] booted through
-/// [`Builder::with_actor`]. Drops the [`crate::chassis::ctx::MailboxSender`]
+/// [`Builder::with_actor`]. Drops the [`MailboxSender`]
 /// to disconnect the channel (the dispatcher's `recv_blocking` returns
 /// `None` and the thread exits), then joins the thread.
 struct NativeActorShutdown {
@@ -2078,7 +2078,7 @@ mod tests {
     }
 
     /// Issue 582: the chassis dispatcher trampoline stamps the
-    /// per-actor [`aether_actor::local::ActorSlots`] into TLS
+    /// per-actor [`ActorSlots`] into TLS
     /// for the duration of `init` and each handler call. A cap that
     /// reaches for `Local::with_mut` from inside both lifecycle
     /// stages must see its own state — verified end-to-end here so

@@ -74,7 +74,7 @@ pub struct Polygon {
 
 /// Mesh `node` and return the result as n-gon polygons.
 ///
-/// Goes directly through [`crate::mesh::mesh_polygons_internal`] —
+/// Goes directly through [`mesh::mesh_polygons_internal`] —
 /// the polygon-domain mesh evaluator that operates polygon-in /
 /// polygon-out throughout (no triangle round-trip). This is the fix
 /// for the `protruding_sphere` `SingularEdges`: the previous path went

@@ -541,13 +541,9 @@ mod native {
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
-        use aether_substrate::mail::mailer::Mailer;
 
         use crate::test_chassis::{TestChassis, fresh_substrate};
-        use aether_substrate::handle_store::HandleStore;
-        use aether_substrate::mail::outbound::HubOutbound;
         use aether_substrate::mail::registry;
-        use aether_substrate::mail::registry::Registry;
         use serde::de::DeserializeOwned;
         use std::sync::mpsc::Receiver;
 
@@ -593,13 +589,7 @@ mod native {
             ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
 
-        fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
-            let (outbound, rx) = HubOutbound::attached_loopback();
-            let registry = Arc::new(Registry::new());
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
-            (mailer, rx)
-        }
+        use crate::test_chassis::test_mailer_and_rx;
 
         fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
             let event = rx

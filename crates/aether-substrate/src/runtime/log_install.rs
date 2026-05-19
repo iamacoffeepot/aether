@@ -6,7 +6,7 @@
 //! `fmt::Layer` for operator visibility but do not enter the mail
 //! system. Until those code paths run as actors, their events stay
 //! out of `engine_logs`. The chassis-pushed `ConfigureLogDrain` mail
-//! and per-actor [`aether_actor::log::LogDrainSlot`] handle every
+//! and per-actor [`log::LogDrainSlot`] handle every
 //! actor-bound case.
 //!
 //! Two entry points:

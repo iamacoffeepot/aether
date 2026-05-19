@@ -738,7 +738,6 @@ mod native {
         use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::MailId;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::OwnedDispatch;
@@ -746,15 +745,7 @@ mod native {
         use aether_substrate::mail::{KindId, ReplyTo};
         use std::thread;
 
-        fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-            let registry = Arc::new(Registry::new());
-            // Issue 603 Phase 2: `RenderCapability::init` reads
-            // `mailer.registry()` to keep the substrate registry handle
-            // for `capture_frame`'s resolve-bundle path.
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-            (registry, mailer)
-        }
+        use crate::test_chassis::fresh_substrate;
 
         /// Boots a passive `TestChassis` with a default `RenderCapability`.
         /// Collapses the four-line `Builder::<TestChassis>::new(...)` chain
