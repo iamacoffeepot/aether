@@ -21,7 +21,11 @@ jobs:
             // Allowed types match the existing `type:*` label set.
             const TYPES = ['feat', 'fix', 'chore', 'docs', 'perf', 'refactor', 'flake'];
 
-            // {type}({crate}): <subject>  OR  {type}({crate}/{subfeat}): <subject>
+            // Meta-scopes: cross-cutting work that isn't a single crate.
+            // No `crate:*` label is applied for these.
+            const META_SCOPES = ['ci', 'docs', 'adr', 'qodana', 'repo', 'release', 'workflow'];
+
+            // {type}({scope}): <subject>  OR  {type}({scope}/{subfeat}): <subject>
             const titleRegex = new RegExp(
               '^(' + TYPES.join('|') + ')\\(([a-z0-9-]+)(?:/[a-z0-9-]+)?\\): .+$'
             );
@@ -57,19 +61,25 @@ jobs:
                 .map(l => l.name.slice('crate:'.length))
                 .sort();
 
-              if (!validCrates.includes(crateFromTitle)) {
+              const isCrate = validCrates.includes(crateFromTitle);
+              const isMeta = META_SCOPES.includes(crateFromTitle);
+
+              if (!isCrate && !isMeta) {
                 messages.push(
-                  'Scope `' + crateFromTitle + '` is not a known crate. ' +
-                  'Valid: ' + validCrates.join(', ') + '.'
+                  'Scope `' + crateFromTitle + '` is not a known crate or meta-scope. ' +
+                  'Valid crates: ' + validCrates.join(', ') + '. ' +
+                  'Valid meta-scopes: ' + META_SCOPES.join(', ') + '.'
                 );
                 if (!labels.includes('invalid-title')) {
                   labelsToAdd.push('invalid-title');
                 }
               } else {
                 const wantType = 'type:' + typeFromTitle;
-                const wantCrate = 'crate:' + crateFromTitle;
                 if (!labels.includes(wantType)) labelsToAdd.push(wantType);
-                if (!labels.includes(wantCrate)) labelsToAdd.push(wantCrate);
+                if (isCrate) {
+                  const wantCrate = 'crate:' + crateFromTitle;
+                  if (!labels.includes(wantCrate)) labelsToAdd.push(wantCrate);
+                }
                 if (labels.includes('invalid-title')) {
                   labelsToRemove.push('invalid-title');
                 }
