@@ -59,9 +59,17 @@ mod native {
     /// settlement is the moment this hits zero (PR 3 wires the
     /// `Settled` mail emission). PR 2 keeps the count for tests and
     /// future consumers.
+    ///
+    /// `held_open` tracks ADR-0080 §12 settlement holds — currently
+    /// only `InheritCtx<A>` from `NativeCtx::spawn_inherit` produces
+    /// these via [`aether_substrate::runtime::trace::acquire_settlement_hold`].
+    /// `Settled` emission gates on `(in_flight == 0 && held_open == 0)`
+    /// so a worker thread that outlives its spawning handler keeps the
+    /// chain open until it drops.
     #[derive(Debug, Clone)]
     pub struct RootState {
         pub in_flight: u32,
+        pub held_open: u32,
         pub last_event_at: Instant,
     }
 
@@ -151,6 +159,7 @@ mod native {
                     let now = Instant::now();
                     let root_state = self.roots.entry(root).or_insert(RootState {
                         in_flight: 0,
+                        held_open: 0,
                         last_event_at: now,
                     });
                     root_state.in_flight = root_state.in_flight.saturating_add(1);
@@ -194,19 +203,54 @@ mod native {
                         if let Some(state) = self.roots.get_mut(&root) {
                             state.in_flight = state.in_flight.saturating_sub(1);
                             state.last_event_at = Instant::now();
-                            // ADR-0080 §6: settlement fires when the
-                            // chain's in-flight count transitions to
-                            // zero. We push `Settled { root }` to
-                            // `CHASSIS_MAILBOX_ID` via the bare mailer
-                            // so the outbound doesn't generate trace
-                            // events; the chassis-router decodes the
-                            // payload and signals every gate-site
-                            // subscriber waiting on this root.
-                            if state.in_flight == 0 {
+                            // ADR-0080 §6 / §12: settlement fires when
+                            // BOTH `in_flight` and `held_open` reach zero
+                            // (the latter gates thread-spawn primitives
+                            // — see iamacoffeepot/aether#716). We push
+                            // `Settled { root }` to `CHASSIS_MAILBOX_ID`
+                            // via the bare mailer so the outbound
+                            // doesn't generate trace events; the chassis-
+                            // router decodes the payload and signals every
+                            // gate-site subscriber waiting on this root.
+                            if state.in_flight == 0 && state.held_open == 0 {
                                 self.fire_settled(root);
                             }
                         }
                     }
+                }
+                // ADR-0080 §12 / iamacoffeepot/aether#716: spawn-thread
+                // primitives push HoldOpen on acquire and Release on the
+                // hold's Drop. Both ride the same trace queue as Sent /
+                // Received / Finished so ordering is preserved: a
+                // HoldOpen pushed by the parent thread before the worker
+                // starts is folded into the observer's state before the
+                // parent handler's Finished arrives.
+                TraceEvent::HoldOpen { root, t: _ } => {
+                    let now = Instant::now();
+                    let root_state = self.roots.entry(root).or_insert(RootState {
+                        in_flight: 0,
+                        held_open: 0,
+                        last_event_at: now,
+                    });
+                    root_state.held_open = root_state.held_open.saturating_add(1);
+                    root_state.last_event_at = now;
+                }
+                TraceEvent::Release { root, t: _ } => {
+                    if let Some(state) = self.roots.get_mut(&root) {
+                        state.held_open = state.held_open.saturating_sub(1);
+                        state.last_event_at = Instant::now();
+                        // Symmetric with Finished: re-check the joint
+                        // gate. A Release that brings held_open to 0
+                        // while in_flight is also 0 fires settlement
+                        // (the spawned thread outlived its handler).
+                        if state.in_flight == 0 && state.held_open == 0 {
+                            self.fire_settled(root);
+                        }
+                    }
+                    // Orphan Release (no matching HoldOpen ever observed
+                    // — trace queue not installed when the hold was
+                    // acquired, or the root was evicted) is dropped.
+                    // Eventual-consistency per ADR-0080 §6.
                 }
             }
         }
@@ -565,6 +609,7 @@ mod native {
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::{MailDispatch, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use std::sync::Mutex;
         use std::sync::mpsc::Receiver;
 
         /// Construct an observer for state-fold tests. Stash a fresh
@@ -783,11 +828,36 @@ mod native {
 
         #[test]
         fn finished_to_zero_fires_settled() {
-            use std::sync::Mutex;
+            let (mut obs, captured, root) = observer_with_settled_capture();
+            apply_sent_event(
+                &mut obs,
+                root,
+                root,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
+            // No Settled yet — in_flight is 1.
+            assert!(captured.lock().expect("captured mutex").is_empty());
+            obs.apply_event(TraceEvent::Finished {
+                mail_id: root,
+                t: Nanos(200),
+            });
+            // Settled fired; chassis-router decoded the mail.
+            let captured = captured.lock().expect("captured mutex");
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].root, root);
+        }
 
-            // Build a Mailer with a chassis-router that records every
-            // chassis-addressed mail. The observer's `fire_settled`
-            // pushes through the Mailer; the router intercepts.
+        /// ADR-0080 §12 / iamacoffeepot/aether#716 — shared fixture
+        /// for settlement-hold tests. Returns the observer +
+        /// `Mutex<Vec<Settled>>` capture (chassis-router-routed) +
+        /// the chassis-root `MailId` so the tests can apply events
+        /// against the same root the capture sees.
+        fn observer_with_settled_capture()
+        -> (TraceObserverCapability, Arc<Mutex<Vec<Settled>>>, MailId) {
             let registry = Arc::new(Registry::new());
             let store = Arc::new(HandleStore::new(1024 * 1024));
             let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
@@ -805,7 +875,7 @@ mod native {
                 }
             }));
 
-            let mut obs = TraceObserverCapability {
+            let obs = TraceObserverCapability {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
@@ -815,8 +885,17 @@ mod native {
                 settled_kind,
                 registry: Arc::clone(&registry),
             };
+            (obs, captured, mail(1, 1))
+        }
 
-            let root = mail(1, 1);
+        /// Spawn completes before handler returns: `HoldOpen` +
+        /// `Release` land before `Finished`. Settlement fires when
+        /// `Finished` drops `in_flight` to 0 because `held_open` is
+        /// already 0 by then.
+        #[test]
+        fn hold_acquired_then_released_before_finished() {
+            let (mut obs, captured, root) = observer_with_settled_capture();
+
             apply_sent_event(
                 &mut obs,
                 root,
@@ -827,21 +906,172 @@ mod native {
                 KindId(0xABCD),
                 Nanos(100),
             );
-            // No Settled yet — in_flight is 1.
+            obs.apply_event(TraceEvent::HoldOpen {
+                root,
+                t: Nanos(150),
+            });
+            obs.apply_event(TraceEvent::Release {
+                root,
+                t: Nanos(160),
+            });
+            // in_flight=1, held_open=0 — Release on its own doesn't fire.
             assert!(
-                captured
-                    .lock()
-                    .expect("test stub: captured mutex poisoned")
-                    .is_empty()
+                captured.lock().expect("captured mutex").is_empty(),
+                "Release with in_flight > 0 must not fire Settled"
             );
+
             obs.apply_event(TraceEvent::Finished {
                 mail_id: root,
                 t: Nanos(200),
             });
-            // Settled fired; chassis-router decoded the mail.
-            let captured = captured.lock().expect("test stub: captured mutex poisoned");
-            assert_eq!(captured.len(), 1);
+            let captured = captured.lock().expect("captured mutex");
+            assert_eq!(captured.len(), 1, "Finished with held_open=0 fires");
             assert_eq!(captured[0].root, root);
+        }
+
+        /// The iamacoffeepot/aether#716 bug: spawn outlives handler.
+        /// `Finished` fires before `Release`. With the gate the
+        /// `Finished` event must NOT trigger `Settled`; only the
+        /// subsequent `Release` (which drops `held_open` to 0 while
+        /// `in_flight` is already 0) fires settlement.
+        #[test]
+        fn hold_outlives_finished_blocks_then_release_fires_settled() {
+            let (mut obs, captured, root) = observer_with_settled_capture();
+
+            apply_sent_event(
+                &mut obs,
+                root,
+                root,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
+            obs.apply_event(TraceEvent::HoldOpen {
+                root,
+                t: Nanos(150),
+            });
+            obs.apply_event(TraceEvent::Finished {
+                mail_id: root,
+                t: Nanos(200),
+            });
+
+            // The bug: in_flight=0 but held_open=1, so Settled must NOT
+            // have fired yet. Pre-fix this assertion would fail (Settled
+            // would have been captured).
+            assert!(
+                captured.lock().expect("captured mutex").is_empty(),
+                "Settled must be gated by held_open > 0"
+            );
+
+            // Worker thread "drops" — Release event arrives.
+            obs.apply_event(TraceEvent::Release {
+                root,
+                t: Nanos(300),
+            });
+            let captured = captured.lock().expect("captured mutex");
+            assert_eq!(
+                captured.len(),
+                1,
+                "Release with in_flight=0 fires the previously-gated Settled"
+            );
+            assert_eq!(captured[0].root, root);
+        }
+
+        /// Multiple concurrent spawns: each `InheritCtx` acquires its
+        /// own hold; the observer accumulates `held_open` to N. Only
+        /// the last Release brings both counters to zero, firing
+        /// exactly one Settled.
+        #[test]
+        fn multiple_holds_each_gate_settlement() {
+            let (mut obs, captured, root) = observer_with_settled_capture();
+
+            apply_sent_event(
+                &mut obs,
+                root,
+                root,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
+            obs.apply_event(TraceEvent::HoldOpen {
+                root,
+                t: Nanos(110),
+            });
+            obs.apply_event(TraceEvent::HoldOpen {
+                root,
+                t: Nanos(120),
+            });
+            obs.apply_event(TraceEvent::HoldOpen {
+                root,
+                t: Nanos(130),
+            });
+            assert_eq!(
+                obs.roots.get(&root).expect("root").held_open,
+                3,
+                "three holds → counter at 3"
+            );
+
+            obs.apply_event(TraceEvent::Finished {
+                mail_id: root,
+                t: Nanos(200),
+            });
+            obs.apply_event(TraceEvent::Release {
+                root,
+                t: Nanos(210),
+            });
+            obs.apply_event(TraceEvent::Release {
+                root,
+                t: Nanos(220),
+            });
+            // Two of three holds released; held_open=1, in_flight=0.
+            assert!(
+                captured.lock().expect("captured mutex").is_empty(),
+                "partial release does not fire Settled"
+            );
+
+            obs.apply_event(TraceEvent::Release {
+                root,
+                t: Nanos(230),
+            });
+            let captured = captured.lock().expect("captured mutex");
+            assert_eq!(captured.len(), 1, "last Release fires exactly one Settled");
+            assert_eq!(captured[0].root, root);
+        }
+
+        /// `HoldOpen` for a never-seen root creates the `RootState`
+        /// entry with `in_flight = 0`. A subsequent `Sent` ticks
+        /// `in_flight` up alongside the existing `held_open`. Order
+        /// `Sent`-before-`HoldOpen` vs `HoldOpen`-before-`Sent` is
+        /// producer-order-sensitive in practice but the observer is
+        /// symmetric.
+        #[test]
+        fn hold_open_creates_root_state_with_zero_in_flight() {
+            let mut obs = boot_observer();
+            let root = mail(1, 1);
+            obs.apply_event(TraceEvent::HoldOpen { root, t: Nanos(50) });
+            let state = obs.roots.get(&root).expect("HoldOpen creates root");
+            assert_eq!(state.in_flight, 0);
+            assert_eq!(state.held_open, 1);
+        }
+
+        /// Orphan `Release` (no matching `HoldOpen` — chassis didn't
+        /// have the trace queue installed when the hold was acquired,
+        /// or the root was evicted) drops silently. No state change,
+        /// no panic.
+        #[test]
+        fn orphan_release_drops_silently() {
+            let mut obs = boot_observer();
+            let root = mail(7, 7);
+            obs.apply_event(TraceEvent::Release {
+                root,
+                t: Nanos(100),
+            });
+            assert!(obs.roots.is_empty(), "orphan Release does not create state");
+            assert!(obs.mails.is_empty());
         }
 
         #[test]

@@ -21,18 +21,19 @@
 //!   shape for long-lived workers that respond to external events
 //!   with no caller context — TCP per-connection workers, etc.
 //!
-//! ## Settlement contract gap (issue iamacoffeepot/aether#716)
+//! ## Settlement contract (ADR-0080 §12, iamacoffeepot/aether#716)
 //!
 //! ADR-0080 §12 says "the spawning handler's tree does not settle
-//! until every spawned-thread send completes." The send semantics
-//! here are correct (every send carries the right `root` and
-//! `parent_mail`), but the settlement contract is **not enforced**:
-//! a parent chain can settle before the spawned thread's first
-//! send arrives. There's no in-tree consumer surfacing this today;
-//! future caps that use `spawn_inherit` for non-trivial work will
-//! need the enforcement landed via the synthetic Sent/Finished
-//! anchor (issue iamacoffeepot/aether#716 Option B) or the
-//! `SettlementRegistry::hold_open / release` mechanism (Option C).
+//! until every spawned-thread send completes." Enforced here via the
+//! [`SettlementHold`] RAII guard from [`acquire_settlement_hold`]:
+//! `spawn_inherit` acquires a hold against the parent's
+//! `in_flight_root` BEFORE the worker thread is spawned (so the
+//! `HoldOpen` trace event lands ahead of the parent handler's
+//! `Finished`), then moves the hold into the `InheritCtx<A>` so the
+//! worker thread owns it. Drop fires `Release`.
+//! The observer gates `Settled` emission on
+//! `(in_flight == 0 && held_open == 0)`, so a worker thread that
+//! outlives its handler keeps the chain open until it exits.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -43,6 +44,7 @@ use aether_actor::{MailSender, Sender, Singleton};
 use aether_data::{Kind, MailId, mailbox_id_from_name};
 
 use super::binding::NativeBinding;
+use crate::runtime::trace::{SettlementHold, acquire_settlement_hold};
 
 /// ADR-0080 §12 spawn-context that captures the spawning handler's
 /// in-flight `(mail_id, root)`. Outbound sends from the worker
@@ -57,6 +59,15 @@ pub struct InheritCtx<A> {
     binding: Arc<NativeBinding>,
     inherited_mail_id: MailId,
     inherited_root: MailId,
+    /// ADR-0080 §12 settlement hold. Acquired on the parent thread
+    /// before the worker is spawned (so the `HoldOpen` trace event is
+    /// visible before the parent handler's `Finished` lands) and moved
+    /// into the worker via this field. The hold's `Drop` impl fires
+    /// `Release`, gated jointly with `in_flight` so the parent chain
+    /// stays open until the worker exits. `Option` so callers without
+    /// an in-flight root (`MailId::NONE`) skip the hold cleanly — no
+    /// chain to keep open.
+    _hold: Option<SettlementHold>,
     _phantom: PhantomData<fn() -> A>,
 }
 
@@ -67,11 +78,13 @@ impl<A> InheritCtx<A> {
         binding: Arc<NativeBinding>,
         inherited_mail_id: MailId,
         inherited_root: MailId,
+        hold: Option<SettlementHold>,
     ) -> Self {
         Self {
             binding,
             inherited_mail_id,
             inherited_root,
+            _hold: hold,
             _phantom: PhantomData,
         }
     }
@@ -306,10 +319,26 @@ where
     A: Actor + Singleton + 'static,
     F: FnOnce(InheritCtx<A>) + Send + 'static,
 {
+    // ADR-0080 §12 / iamacoffeepot/aether#716: acquire the settlement
+    // hold on the parent thread BEFORE spawning. The `HoldOpen` event
+    // hits the trace queue ahead of the parent handler's `Finished`,
+    // so by the time the observer sees `in_flight` reach zero the
+    // `held_open` counter is already non-zero. Move the hold into the
+    // spawned closure via the `InheritCtx<A>` so release fires on
+    // worker exit.
+    //
+    // `MailId::NONE` skips the hold: a ctx without an in-flight root
+    // has no chain to keep open. Symmetric with the `outbound_root`
+    // / `outbound_parent` `None` cases.
+    let hold = if in_flight_root == MailId::NONE {
+        None
+    } else {
+        Some(acquire_settlement_hold(in_flight_root))
+    };
     thread::Builder::new()
         .name(format!("aether-inherit-{}", A::NAMESPACE))
         .spawn(move || {
-            let ctx = InheritCtx::<A>::new(binding, in_flight_mail_id, in_flight_root);
+            let ctx = InheritCtx::<A>::new(binding, in_flight_mail_id, in_flight_root, hold);
             f(ctx);
         })
         .expect("spawn aether-inherit thread")
@@ -403,10 +432,10 @@ mod tests {
 
     /// `InheritCtx`-spawned thread's `send_to_named` carries the
     /// inherited root and stamps `parent_mail = inherited_mail_id`.
-    /// This is the load-bearing semantic in PR-5-without-anchor:
-    /// even though settlement may fire prematurely (issue iamacoffeepot/aether#716),
-    /// the trace graph correctly attributes the spawned-thread mail
-    /// to the parent chain.
+    /// Settlement is held open until the worker thread exits per
+    /// ADR-0080 §12 / iamacoffeepot/aether#716; see
+    /// `spawn_inherit_acquires_and_releases_settlement_hold` below
+    /// for the held-open verification.
     #[test]
     fn inherit_ctx_send_carries_root_and_parent_mail() {
         let (registry, mailer) = fresh_substrate();
@@ -587,6 +616,142 @@ mod tests {
         let dispatch = &captured[0];
         assert_eq!(dispatch.root, inherited_root);
         assert_eq!(dispatch.parent_mail, Some(inherited_mail_id));
+    }
+
+    /// ADR-0080 §12 / iamacoffeepot/aether#716: `spawn_inherit`
+    /// acquires a `SettlementHold` on the parent root before spawning
+    /// and drops it on thread exit. Both events ride the global trace
+    /// queue (installed by `install_trace_queue`).
+    ///
+    /// Test filters the queue by the unique sender mailbox id we
+    /// allocate locally so the assertion is robust against other
+    /// parallel tests sharing the queue (the same drain-and-restore
+    /// pattern `mailer::drain_events_for` uses).
+    #[test]
+    fn spawn_inherit_acquires_and_releases_settlement_hold() {
+        use aether_kinds::trace::TraceEvent;
+        use crossbeam_queue::SegQueue;
+
+        crate::runtime::trace::init_substrate_start();
+        let queue = Arc::new(SegQueue::<TraceEvent>::new());
+        crate::runtime::trace::install_trace_queue(Arc::clone(&queue));
+        // After install_trace_queue, the global may already point at a
+        // queue from a prior test. Read the live one and drain from
+        // there so we observe the same queue spawn_inherit pushes to.
+        let live = crate::runtime::trace::trace_queue()
+            .expect("trace queue installed")
+            .clone();
+
+        let (_registry, mailer) = fresh_substrate();
+        let producer_mailbox = MailboxId(0xC0FE_C0FE_C0FE_C0FE);
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            producer_mailbox,
+        ));
+        // Root the test cares about — sender prefix is unique so we can
+        // filter events out of a shared queue.
+        let inherited_root = MailId::new(MailboxId(0xC0FE_C0FE_C0FE_C0FE), 9001);
+        let inherited_mail_id = MailId::new(MailboxId(0xC0FE_C0FE_C0FE_C0FE), 9002);
+
+        let join = spawn_inherit::<StubActor, _>(
+            Arc::clone(&binding),
+            inherited_mail_id,
+            inherited_root,
+            move |_inherit| {
+                // No-op body — we're verifying the hold lifecycle, not
+                // outbound sends.
+            },
+        );
+        join.join().expect("inherit worker thread joins");
+
+        // Drain queue, partition into "ours" (root matches inherited_root)
+        // vs "others" (put back so other parallel tests aren't disturbed).
+        let mut ours: Vec<TraceEvent> = Vec::new();
+        let mut leftover: Vec<TraceEvent> = Vec::new();
+        while let Some(event) = live.pop() {
+            let belongs = match &event {
+                TraceEvent::HoldOpen { root, .. } | TraceEvent::Release { root, .. } => {
+                    *root == inherited_root
+                }
+                _ => false,
+            };
+            if belongs {
+                ours.push(event);
+            } else {
+                leftover.push(event);
+            }
+        }
+        for ev in leftover {
+            live.push(ev);
+        }
+
+        assert_eq!(ours.len(), 2, "expected one HoldOpen + one Release");
+        assert!(
+            matches!(ours[0], TraceEvent::HoldOpen { root, .. } if root == inherited_root),
+            "first event is HoldOpen for inherited root, got {:?}",
+            ours[0]
+        );
+        assert!(
+            matches!(ours[1], TraceEvent::Release { root, .. } if root == inherited_root),
+            "second event is Release for inherited root, got {:?}",
+            ours[1]
+        );
+    }
+
+    /// `MailId::NONE` inherited root skips the hold — there's no chain
+    /// to keep open. Verify no `HoldOpen` / `Release` events surface
+    /// from a `NONE`-rooted spawn.
+    #[test]
+    fn spawn_inherit_with_none_root_skips_hold() {
+        use aether_kinds::trace::TraceEvent;
+        use crossbeam_queue::SegQueue;
+
+        crate::runtime::trace::init_substrate_start();
+        let queue = Arc::new(SegQueue::<TraceEvent>::new());
+        crate::runtime::trace::install_trace_queue(Arc::clone(&queue));
+        let live = crate::runtime::trace::trace_queue()
+            .expect("trace queue installed")
+            .clone();
+
+        let (_registry, mailer) = fresh_substrate();
+        // Different unique sender so this test's filter doesn't catch
+        // the other hold-lifecycle test's events.
+        let producer_mailbox = MailboxId(0xC0FE_DEAD_C0FE_DEAD);
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            producer_mailbox,
+        ));
+
+        let join = spawn_inherit::<StubActor, _>(
+            Arc::clone(&binding),
+            MailId::NONE,
+            MailId::NONE,
+            move |_inherit| {},
+        );
+        join.join().expect("inherit worker thread joins");
+
+        // Drain and inspect — there should be ZERO HoldOpen/Release
+        // events for `MailId::NONE` since spawn_inherit short-circuits
+        // the hold acquisition for NONE roots.
+        let mut leftover: Vec<TraceEvent> = Vec::new();
+        let mut none_events = 0usize;
+        while let Some(event) = live.pop() {
+            match &event {
+                TraceEvent::HoldOpen { root, .. } | TraceEvent::Release { root, .. }
+                    if *root == MailId::NONE =>
+                {
+                    none_events += 1;
+                }
+                _ => leftover.push(event),
+            }
+        }
+        for ev in leftover {
+            live.push(ev);
+        }
+        assert_eq!(
+            none_events, 0,
+            "MailId::NONE root must not produce HoldOpen/Release"
+        );
     }
 
     /// Setup smoke: a `Mail` pushed bare via `Mailer` doesn't trigger
