@@ -540,10 +540,11 @@ mod tests {
 
     #[test]
     fn build_rejects_no_terminals() {
+        // Self-loop on a single state — sufficient to register a
+        // state with a satisfied `next` edge while declaring no
+        // terminal at all.
         let err = LifecycleGraph::<()>::builder()
             .state::<InitCaps, _>(|()| InitCaps {})
-            .next::<InitComponents>()
-            .state::<InitComponents, _>(|()| InitComponents {})
             .next::<InitCaps>()
             .start::<InitCaps>()
             .build()
