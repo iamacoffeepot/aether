@@ -24,16 +24,17 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::thread;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
-use crate::runtime::trace;
+use crate::runtime::trace::{SettlementHold, TraceHandle};
 use aether_data::{HandleId, KindId};
+use aether_kinds::trace::Nanos;
 use std::sync::OnceLock;
-use std::thread;
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Owned for
@@ -87,6 +88,21 @@ pub struct Mailer {
     /// expect to subscribe must check for the presence and surface a
     /// clear error otherwise.
     settlement_registry: OnceLock<Arc<SettlementRegistry>>,
+    /// ADR-0080 per-chassis trace handle. Holds the trace event queue
+    /// and the boot-time anchor for `Nanos` timestamps. Producer-side
+    /// hooks (`record_sent` / `record_received` / `record_finished`,
+    /// `acquire_settlement_hold`) reach for it via the shortcut
+    /// methods on this `Mailer`.
+    ///
+    /// Per-`Mailer` (not process-global) since iamacoffeepot/aether#953
+    /// — see the module doc on [`crate::runtime::trace`]. Always
+    /// present (allocated by [`Self::new`] with a fresh `SegQueue` +
+    /// boot anchor); chassis that want to share a queue across
+    /// multiple `Mailer`s swap in via [`Self::with_trace_handle`]
+    /// before the `Arc` wrap. Tests get a real handle for free;
+    /// `start_drainer` is independent — without it, events accumulate
+    /// in the queue but aren't shipped.
+    trace_handle: TraceHandle,
 }
 
 impl Mailer {
@@ -103,6 +119,7 @@ impl Mailer {
             outbound: None,
             chassis_router: OnceLock::new(),
             settlement_registry: OnceLock::new(),
+            trace_handle: TraceHandle::new(),
         }
     }
 
@@ -123,14 +140,117 @@ impl Mailer {
         let _ = self.settlement_registry.set(registry);
     }
 
-    /// Borrow the wired
-    /// [`SettlementRegistry`],
-    /// or `None` if no registry was installed (test fixtures, chassis
+    /// Borrow the wired [`SettlementRegistry`], or `None` if no
+    /// registry was installed (test fixtures, chassis
     /// that don't bring up the trace pipeline). Capabilities subscribe
     /// via
     /// [`SettlementRegistry::subscribe_settlement_mail`].
     pub fn settlement_registry(&self) -> Option<&Arc<SettlementRegistry>> {
         self.settlement_registry.get()
+    }
+
+    /// Swap in a non-default [`TraceHandle`].
+    /// Production chassis use the default handle that [`Self::new`]
+    /// allocates (fresh `SegQueue` + boot anchor). Tests that need
+    /// multiple `Mailer`s to share a queue construct one with
+    /// [`TraceHandle::with_queue`] and pass
+    /// it here before the `Arc` wrap. Filed under
+    /// iamacoffeepot/aether#953 — per-chassis trace state.
+    #[must_use]
+    pub fn with_trace_handle(mut self, handle: TraceHandle) -> Self {
+        self.trace_handle = handle;
+        self
+    }
+
+    /// Borrow the [`TraceHandle`]. Always
+    /// present — `Mailer::new` allocates a default handle, and
+    /// chassis swap in via [`Self::with_trace_handle`] if they want a
+    /// non-default queue. Producer-side call sites usually reach for
+    /// the shortcut methods on this `Mailer` instead (`record_sent` /
+    /// `record_received` / `record_finished` /
+    /// `acquire_settlement_hold` / `now_nanos`).
+    pub fn trace_handle(&self) -> &TraceHandle {
+        &self.trace_handle
+    }
+
+    /// ADR-0080 §2 producer hook for the `Sent` event. Always pushes
+    /// — every `Mailer` carries a trace handle; the drainer is the
+    /// optional piece (without [`crate::runtime::trace::start_drainer`]
+    /// events accumulate in the queue but aren't shipped).
+    pub fn record_sent(
+        &self,
+        mail_id: aether_data::MailId,
+        root: aether_data::MailId,
+        parent_mail: Option<aether_data::MailId>,
+        sender: aether_data::MailboxId,
+        recipient: aether_data::MailboxId,
+        kind: KindId,
+    ) {
+        self.trace_handle
+            .record_sent(mail_id, root, parent_mail, sender, recipient, kind);
+    }
+
+    /// ADR-0080 §2 producer hook for the `Received` event.
+    pub fn record_received(&self, mail_id: aether_data::MailId, thread_name: Option<String>) {
+        self.trace_handle.record_received(mail_id, thread_name);
+    }
+
+    /// ADR-0080 §2 producer hook for the `Finished` event.
+    pub fn record_finished(&self, mail_id: aether_data::MailId) {
+        self.trace_handle.record_finished(mail_id);
+    }
+
+    /// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a settlement
+    /// hold on `root`. The returned guard fires `Release` on drop;
+    /// every `Mailer` carries a real handle so the contract is
+    /// structural.
+    #[must_use = "SettlementHold gates root settlement; storing _ silently fires Release"]
+    pub fn acquire_settlement_hold(&self, root: aether_data::MailId) -> SettlementHold {
+        self.trace_handle.acquire_settlement_hold(root)
+    }
+
+    /// Current monotonic `Nanos` timestamp relative to the trace
+    /// handle's boot anchor.
+    #[must_use]
+    pub fn now_nanos(&self) -> Nanos {
+        self.trace_handle.now_nanos()
+    }
+
+    /// ADR-0080 chassis-root push helper. Combines `MailId` minting,
+    /// the `Sent` trace event emission, and the [`Mailer::push`]
+    /// into one call so chassis-side mail (Tick fanout from the
+    /// frame loop, hub-bridged inbound, MCP-bridged) gets observable
+    /// lineage without duplicating the producer-side hook in
+    /// `NativeBinding::send_mail_with_lineage`.
+    ///
+    /// Returns the freshly minted `MailId` so the caller can
+    /// subscribe to its settlement via the chassis
+    /// [`SettlementRegistry`] before
+    /// waiting on the chain.
+    ///
+    /// `correlation_id` is allocated by the caller (the chassis
+    /// owns its own `AtomicU64` counter, symmetric with each
+    /// per-actor `NativeBinding`'s counter).
+    pub fn push_chassis_root_mail(
+        &self,
+        correlation_id: u64,
+        recipient: aether_data::MailboxId,
+        kind: KindId,
+        payload: Vec<u8>,
+        count: u32,
+    ) -> aether_data::MailId {
+        let mail_id =
+            aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
+        self.record_sent(
+            mail_id,
+            mail_id,
+            None,
+            aether_data::MailboxId::CHASSIS_MAILBOX_ID,
+            recipient,
+            kind,
+        );
+        self.push(Mail::new(recipient, kind, payload, count).with_lineage(mail_id, mail_id, None));
+        mail_id
     }
 
     /// Attach a `HubOutbound` so mail to unknown mailbox ids bubbles
@@ -182,6 +302,7 @@ impl Mailer {
             self.outbound.as_ref(),
             &self.handle_store,
             self.chassis_router.get().map(|b| &**b),
+            &self.trace_handle,
         );
     }
 
@@ -214,6 +335,7 @@ impl Mailer {
                 outbound,
                 &self.handle_store,
                 chassis_router,
+                &self.trace_handle,
             );
         }
         Ok(())
@@ -288,6 +410,7 @@ fn route_mail(
     outbound: Option<&Arc<HubOutbound>>,
     store: &Arc<HandleStore>,
     chassis_router: Option<&(dyn Fn(Mail) + Send + Sync)>,
+    trace_handle: &TraceHandle,
 ) {
     // ADR-0080 §5 chassis-mail switch — routed ahead of the registry
     // lookup so mail to `CHASSIS_MAILBOX_ID` reaches the chassis-
@@ -306,7 +429,7 @@ fn route_mail(
         let inbound_mail_id = mail.mail_id;
         if let Some(router) = chassis_router {
             let thread_name = thread::current().name().map(str::to_owned);
-            trace::record_received(inbound_mail_id, thread_name);
+            trace_handle.record_received(inbound_mail_id, thread_name);
             router(mail);
         } else {
             tracing::warn!(
@@ -315,7 +438,7 @@ fn route_mail(
                 "chassis-addressed mail dropped — no chassis router installed",
             );
         }
-        trace::record_finished(inbound_mail_id);
+        trace_handle.record_finished(inbound_mail_id);
         return;
     }
 
@@ -353,7 +476,7 @@ fn route_mail(
                 // drain (issue 838). Parked mail (the `Ok(WalkOutcome::Parked)`
                 // arm above) is deliberately NOT finished — it's held
                 // for replay when the handle resolves.
-                trace::record_finished(mail.mail_id);
+                trace_handle.record_finished(mail.mail_id);
                 return;
             }
         }
@@ -414,7 +537,7 @@ fn route_mail(
             // double-count-prematurely-settle hazard the split
             // avoids.
             let thread_name = thread::current().name().map(str::to_owned);
-            trace::record_received(inbound_mail_id, thread_name);
+            trace_handle.record_received(inbound_mail_id, thread_name);
             handler.dispatch(MailDispatch {
                 kind: mail.kind,
                 kind_name: &kind_name,
@@ -426,7 +549,7 @@ fn route_mail(
                 root: mail.root,
                 parent_mail: mail.parent_mail,
             });
-            trace::record_finished(inbound_mail_id);
+            trace_handle.record_finished(inbound_mail_id);
         }
         Some(MailboxEntry::Dropped) => {
             tracing::warn!(
@@ -436,7 +559,7 @@ fn route_mail(
             );
             // ADR-0080 §2: balance the `Sent` so settlement chains
             // drain (issue 838). No `Received` — no handler ran.
-            trace::record_finished(inbound_mail_id);
+            trace_handle.record_finished(inbound_mail_id);
         }
         None => {
             // ADR-0037 Phase 1: unknown-locally mailboxes bubble up
@@ -480,7 +603,7 @@ fn route_mail(
                 // bubbled-up mail on its own settlement domain; no
                 // wire signal exists today for federated cross-engine
                 // settlement (and the issue body parks that design).
-                trace::record_finished(inbound_mail_id);
+                trace_handle.record_finished(inbound_mail_id);
                 return;
             }
             tracing::warn!(
@@ -493,7 +616,7 @@ fn route_mail(
             // unloaded `"camera"` mailbox every tick; without this
             // every Tick chain has an orphaned `Sent` and never
             // settles.
-            trace::record_finished(inbound_mail_id);
+            trace_handle.record_finished(inbound_mail_id);
         }
     }
 }
@@ -515,9 +638,7 @@ mod tests {
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
-    use crate::mail::registry::InboxHandler;
-    use crate::mail::registry::InlineHandler;
-    use crate::runtime::trace;
+    use crate::mail::registry::{InboxHandler, InlineHandler};
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -808,18 +929,14 @@ mod tests {
     use aether_kinds::trace::TraceEvent;
     use crossbeam_queue::SegQueue;
 
-    /// Install a fresh process-global trace queue if none is wired
-    /// yet (e.g. when this test runs in isolation), otherwise return
-    /// the existing one. Either way the queue is ready for `push` —
-    /// these tests don't assume ownership, they filter their own
-    /// events out of whatever's in flight.
-    fn ensure_trace_queue() -> Arc<SegQueue<TraceEvent>> {
-        if let Some(q) = trace::trace_queue() {
-            return Arc::clone(q);
-        }
-        let q = Arc::new(SegQueue::<TraceEvent>::new());
-        trace::install_trace_queue(Arc::clone(&q));
-        trace::trace_queue().cloned().unwrap_or(q)
+    /// Borrow the queue Arc from a `Mailer`'s default trace handle.
+    /// `Mailer::new` allocates a fresh handle per construction
+    /// (iamacoffeepot/aether#953 retired the process-global), so each
+    /// test's queue is naturally isolated. The `drain_events_for`
+    /// filter by `sender` is no longer strictly necessary but kept
+    /// to match the original assertion shape.
+    fn install_test_trace_handle(mailer: &Mailer) -> Arc<SegQueue<TraceEvent>> {
+        Arc::clone(mailer.trace_handle().queue())
     }
 
     /// Drain the trace queue and return only events whose `mail_id`
@@ -854,13 +971,13 @@ mod tests {
     /// subscribers don't hang.
     #[test]
     fn unknown_mailbox_warn_drop_records_finished() {
-        let queue = ensure_trace_queue();
         let sender = MailboxId(0x8380_0002_0000_0000);
         let inbound_mail_id = MailId::new(sender, 1);
 
         let registry = Arc::new(Registry::new());
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Mailer::new(Arc::clone(&registry), store);
+        let queue = install_test_trace_handle(&mailer);
 
         let unknown = MailboxId(0xDEAD_BEEF_BABE);
         let mail = Mail::new(unknown, KindId(0xABCD), vec![], 1).with_lineage(
@@ -883,7 +1000,6 @@ mod tests {
     /// doesn't exist on the wire today.
     #[test]
     fn unknown_mailbox_egress_records_finished_locally() {
-        let queue = ensure_trace_queue();
         let sender = MailboxId(0x8380_0003_0000_0000);
         let inbound_mail_id = MailId::new(sender, 1);
 
@@ -891,6 +1007,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound));
+        let queue = install_test_trace_handle(&mailer);
 
         let unknown = MailboxId(0xDEAD_BEEF_F00D);
         let mail = Mail::new(unknown, KindId(0xABCD), vec![9, 9], 1).with_lineage(
@@ -920,11 +1037,11 @@ mod tests {
     /// for `Inbox` recipients, but on the pushing thread.
     #[test]
     fn inline_arm_brackets_handler_with_received_and_finished() {
-        let queue = ensure_trace_queue();
         let sender = MailboxId(0x8380_0004_0000_0000);
         let inbound_mail_id = MailId::new(sender, 1);
 
         let (registry, mailer, _store) = make_mailer();
+        let queue = install_test_trace_handle(&mailer);
         let sink = CapturingSink::new();
         let sink_id = registry.register_inline("test.838.sink", sink.inline_handler());
 
@@ -969,11 +1086,11 @@ mod tests {
     /// loudly.
     #[test]
     fn inbox_arm_does_not_bracket_in_mailer() {
-        let queue = ensure_trace_queue();
         let sender = MailboxId(0x8380_0005_0000_0000);
         let inbound_mail_id = MailId::new(sender, 1);
 
         let (registry, mailer, _store) = make_mailer();
+        let queue = install_test_trace_handle(&mailer);
         let sink = CapturingSink::new();
         // Register as `register_inbox` (the actor-enqueue
         // contract), NOT `register_inline`.
@@ -1022,11 +1139,11 @@ mod tests {
     fn ref_walk_parked_defers_finished_until_handle_publish() {
         use aether_data::HandleId;
 
-        let queue = ensure_trace_queue();
         let sender = MailboxId(0x8380_0006_0000_0000);
         let inbound_mail_id = MailId::new(sender, 1);
 
         let (registry, mailer, store) = make_mailer();
+        let queue = install_test_trace_handle(&mailer);
         // Register both kinds so the mailer walks the outer schema
         // and the handle store recognises the inner one. The
         // registry-derived kind id is what `Ref::Handle.kind_id`
@@ -1160,18 +1277,21 @@ mod tests {
         struct Case {
             name: &'static str,
             expect: Expect,
-            // Returns the `MailId` to filter the trace queue on.
-            run: Box<dyn FnOnce() -> MailId>,
+            // Returns the stamped `MailId` plus the filtered trace
+            // events for that case. Each case builds its own
+            // `Mailer` whose default trace handle holds the queue
+            // we drain at the end of the closure (per-mailer queues
+            // post iamacoffeepot/aether#953 — no process-global).
+            run: Box<dyn FnOnce() -> (MailId, Vec<TraceEvent>)>,
         }
 
         // Touch the helper so the compiler considers it live.
         let _ = dispatch_path_for_entry(&MailboxEntry::Dropped);
 
-        let queue = ensure_trace_queue();
         // Each case: (case-name, expectation, push-fn that returns
-        // the stamped mail_id to filter on). Cases construct their
-        // own Mailer fixtures so chassis-router / outbound / handle-
-        // store-Parked setups can vary independently.
+        // the stamped mail_id + drained events). Cases construct
+        // their own Mailer fixtures so chassis-router / outbound /
+        // handle-store-Parked setups can vary independently.
 
         let cases: Vec<Case> = vec![
             // 1. Inline arm — bracket.
@@ -1182,13 +1302,14 @@ mod tests {
                     let sender = MailboxId(0x8380_DD01_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     let sink = CapturingSink::new();
                     let id = registry.register_inline("test.meta.sink", sink.inline_handler());
                     mailer.push(
                         Mail::new(id, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 2. Inbox arm — no bracket from Mailer (regression
@@ -1200,13 +1321,14 @@ mod tests {
                     let sender = MailboxId(0x8380_DD02_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     let sink = CapturingSink::new();
                     let id = registry.register_inbox("test.meta.closure", sink.inbox_handler());
                     mailer.push(
                         Mail::new(id, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 3. Dropped arm — Finished only.
@@ -1217,13 +1339,14 @@ mod tests {
                     let sender = MailboxId(0x8380_DD03_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     let id = registry.register_inbox("test.meta.dropped", Arc::new(|_| {}));
                     let _ = registry.drop_mailbox(id).expect("drop");
                     mailer.push(
                         Mail::new(id, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 4. None warn-drop (no outbound) — Finished only.
@@ -1234,11 +1357,12 @@ mod tests {
                     let sender = MailboxId(0x8380_DD04_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (_registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     mailer.push(
                         Mail::new(MailboxId(0xDEAD_BEEF_0001), KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 5. None egress to hub — Finished only (per-engine
@@ -1253,11 +1377,12 @@ mod tests {
                     let registry = Arc::new(Registry::new());
                     let store = Arc::new(HandleStore::new(64 * 1024));
                     let mailer = Mailer::new(registry, store).with_outbound(outbound);
+                    let queue = install_test_trace_handle(&mailer);
                     mailer.push(
                         Mail::new(MailboxId(0xDEAD_BEEF_0002), KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 6. Ref-walk Err (malformed payload, terminal drop) —
@@ -1269,6 +1394,7 @@ mod tests {
                     let sender = MailboxId(0x8380_DD06_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     let kind_id = registry
                         .register_kind_with_descriptor(KindDescriptor {
                             name: HeldNote::NAME.into(),
@@ -1283,7 +1409,7 @@ mod tests {
                         Mail::new(id, kind_id, vec![0u8; 1], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 7. Ref-walk Parked (held for handle publish) — neither.
@@ -1294,6 +1420,7 @@ mod tests {
                     let sender = MailboxId(0x8380_DD07_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     let outer_kind_id = registry
                         .register_kind_with_descriptor(KindDescriptor {
                             name: HeldNote::NAME.into(),
@@ -1321,7 +1448,7 @@ mod tests {
                         Mail::new(id, outer_kind_id, payload, 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 8. CHASSIS_MAILBOX_ID with router installed — bracket.
@@ -1332,12 +1459,13 @@ mod tests {
                     let sender = MailboxId(0x8380_DD08_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (_registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     mailer.install_chassis_router(Box::new(|_| {}));
                     mailer.push(
                         Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
             // 9. CHASSIS_MAILBOX_ID with no router — Finished only.
@@ -1348,11 +1476,12 @@ mod tests {
                     let sender = MailboxId(0x8380_DD09_0000_0000);
                     let mail_id = MailId::new(sender, 1);
                     let (_registry, mailer, _store) = make_mailer();
+                    let queue = install_test_trace_handle(&mailer);
                     mailer.push(
                         Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)
                             .with_lineage(mail_id, mail_id, None),
                     );
-                    mail_id
+                    (mail_id, drain_events_for(&queue, sender))
                 }),
             },
         ];
@@ -1360,8 +1489,7 @@ mod tests {
         for case in cases {
             let name = case.name;
             let expect = case.expect;
-            let mail_id = (case.run)();
-            let events = drain_events_for(&queue, mail_id.sender);
+            let (mail_id, events) = (case.run)();
             let received = events
                 .iter()
                 .any(|e| matches!(e, TraceEvent::Received { mail_id: m, .. } if *m == mail_id));

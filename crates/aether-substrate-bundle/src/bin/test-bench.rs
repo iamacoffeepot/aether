@@ -12,25 +12,23 @@
 // (the `TestBench::start()` API ADR-0067 introduced); both paths
 // share `TestBenchChassis::build_passive`.
 
+use std::env;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use aether_actor::Actor;
 use aether_capabilities::InputCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{encode_empty, mailbox_id_from_name};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
-use aether_substrate::runtime::trace;
 use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId};
+use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
 };
-use std::env;
-use std::sync::atomic::AtomicU64;
-
-use aether_substrate_bundle::chassis_root::next_chassis_correlation;
-use std::time::Duration;
 
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
 /// missing/unparseable input with a warn log so scenario scripts can
@@ -188,12 +186,9 @@ fn run_frame(
     gpu: &mut Gpu,
     chassis_correlation: &AtomicU64,
 ) {
-    let next_correlation = || -> u64 { next_chassis_correlation(chassis_correlation) };
-
     if dispatch_tick {
-        trace::push_chassis_root_mail(
-            queue,
-            next_correlation(),
+        queue.push_chassis_root_mail(
+            next_chassis_correlation(chassis_correlation),
             input_mailbox,
             kind_tick,
             encode_empty::<Tick>(),

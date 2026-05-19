@@ -33,10 +33,7 @@ use aether_kinds::{
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{
-    HubOutbound, Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId,
-    runtime::trace::push_chassis_root_mail,
-};
+use aether_substrate::{HubOutbound, Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -302,7 +299,8 @@ impl App {
         if correlation == 0 {
             correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
         }
-        push_chassis_root_mail(&self.queue, correlation, recipient, kind, payload, count);
+        self.queue
+            .push_chassis_root_mail(correlation, recipient, kind, payload, count);
     }
 
     fn apply_window_mode(

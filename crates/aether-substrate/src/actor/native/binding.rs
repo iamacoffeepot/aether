@@ -49,7 +49,6 @@ use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
-use crate::runtime::trace;
 
 /// Per-actor binding state every native capability owns. Each
 /// capability constructs one at boot via [`NativeBinding::new`] and
@@ -260,6 +259,15 @@ impl NativeBinding {
         self.self_mailbox
     }
 
+    /// Borrow the wired `Mailer`. Surfaced so cross-file producer
+    /// hooks (`dispatch`, `dispatcher_slot`, `spawn_thread`) can
+    /// reach the trace handle via `binding.mailer().record_*(...)`
+    /// without the field having to be `pub(crate)`. Filed under
+    /// iamacoffeepot/aether#953 (per-chassis trace state).
+    pub fn mailer(&self) -> &Arc<Mailer> {
+        &self.mailer
+    }
+
     /// The chassis's [`crate::Spawner`], if one was wired in at
     /// construction. `Some` for production transports built through
     /// [`Self::from_ctx`] (the chassis builds + threads its `Spawner`
@@ -464,10 +472,10 @@ impl NativeBinding {
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // ADR-0080 §2 producer hook: emit `Sent` before pushing the
-        // mail. No-op when the global trace queue isn't installed
-        // (test fixtures bypassing the chassis); the drainer is the
-        // only consumer.
-        trace::record_sent(
+        // mail. Every `Mailer` carries a trace handle by default
+        // (per-chassis post iamacoffeepot/aether#953), so producer
+        // calls are unconditional; the drainer is the optional piece.
+        self.mailer.record_sent(
             mail_id,
             root,
             parent_mail,
@@ -683,8 +691,7 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 )]
 mod tests {
     use super::*;
-    use crate::mail::registry::InboxHandler;
-    use crate::mail::registry::OwnedDispatch;
+    use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::test_util::fresh_substrate;
     use std::sync::mpsc;
 

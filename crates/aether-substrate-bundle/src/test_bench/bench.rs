@@ -42,7 +42,6 @@ use aether_substrate::{
     capture::CaptureQueue,
     chassis::frame_loop,
     mail::{Mail, MailboxId},
-    runtime::trace::push_chassis_root_mail,
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -386,7 +385,7 @@ impl TestBench {
     /// doesn't need to look anything up.
     ///
     /// Issue 834: this is synchronous-on-settle. The mail is minted
-    /// as a chassis-root via [`push_chassis_root_mail`] so the trace
+    /// as a chassis-root via [`Mailer::push_chassis_root_mail`] so the trace
     /// pipeline tracks the chain; the bench then subscribes to
     /// `Settled { root }` and waits up to `SETTLEMENT_TIMEOUT` for
     /// the chain (the recipient's handler + every descendant mail
@@ -443,7 +442,9 @@ impl TestBench {
     ) -> Result<(), TestBenchError> {
         let cid = self.fresh_correlation_id();
         let registry = self.passive.settlement_registry();
-        let root = push_chassis_root_mail(&self.queue, cid, mailbox, kind, payload, 1);
+        let root = self
+            .queue
+            .push_chassis_root_mail(cid, mailbox, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
         match rx.recv_timeout(SETTLEMENT_TIMEOUT) {
             Ok(()) => Ok(()),
@@ -773,8 +774,7 @@ impl TestBench {
             // test name the actual cause instead of timing out
             // generically on the reply pump.
             let registry = self.passive.settlement_registry();
-            let tick_root = push_chassis_root_mail(
-                &self.queue,
+            let tick_root = self.queue.push_chassis_root_mail(
                 self.fresh_correlation_id(),
                 self.input_mailbox,
                 self.kind_tick,

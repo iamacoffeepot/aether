@@ -14,10 +14,9 @@
 //! winit, but the `chassis_builder`'s single-threaded
 //! Builder→BuiltChassis→run path applies all the same).
 
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-
-use crate::chassis_root::next_chassis_correlation;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,10 +26,9 @@ use aether_data::{KindId, encode_empty, mailbox_id_from_name};
 use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{
-    Mailer, SubstrateBoot, mail::MailboxId, runtime::trace::push_chassis_root_mail,
-};
-use std::env;
+use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};
+
+use crate::chassis_root::next_chassis_correlation;
 
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
@@ -117,7 +115,6 @@ impl DriverRunning for HeadlessTimerRunning {
         // per-actor counter on `NativeBinding`. Skipping 0 keeps the
         // sentinel slot reserved.
         let chassis_correlation = AtomicU64::new(1);
-        let next_correlation = || -> u64 { next_chassis_correlation(&chassis_correlation) };
 
         let mut next_deadline = Instant::now() + tick_period;
         loop {
@@ -132,9 +129,8 @@ impl DriverRunning for HeadlessTimerRunning {
             // backlog, which would just compound the stall.
             next_deadline = Instant::now() + tick_period;
 
-            push_chassis_root_mail(
-                &queue,
-                next_correlation(),
+            queue.push_chassis_root_mail(
+                next_chassis_correlation(&chassis_correlation),
                 input_mailbox,
                 kind_tick,
                 encode_empty::<Tick>(),

@@ -21,7 +21,6 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailboxId, ReplyTarget, ReplyTo};
-use crate::runtime::trace;
 use std::thread;
 
 const MAIL_OFFSET: u32 = 1024;
@@ -217,7 +216,8 @@ impl ComponentCtx {
             id => Some(id),
         };
         let root = inherited_root.unwrap_or(mail_id);
-        trace::record_sent(mail_id, root, parent_mail, self.sender, recipient, kind);
+        self.queue
+            .record_sent(mail_id, root, parent_mail, self.sender, recipient, kind);
 
         // Closure-bound (actor-enqueue) and Sink-bound (synchronous
         // handler) recipients dispatch inline here, bypassing the
@@ -260,7 +260,7 @@ impl ComponentCtx {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 let origin = self.registry.mailbox_name(self.sender);
                 let thread_name = thread::current().name().map(str::to_owned);
-                trace::record_received(mail_id, thread_name);
+                self.queue.record_received(mail_id, thread_name);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,
                     kind_name: &kind_name,
@@ -272,7 +272,7 @@ impl ComponentCtx {
                     root,
                     parent_mail,
                 });
-                trace::record_finished(mail_id);
+                self.queue.record_finished(mail_id);
                 return;
             }
             Some(MailboxEntry::Dropped) | None => {

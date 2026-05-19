@@ -45,7 +45,6 @@ use std::time::Instant;
 use crate::actor::native::Envelope;
 use crate::runtime::log_install;
 use crate::runtime::log_install::MailDispatch;
-use crate::runtime::trace;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use aether_actor::log;
@@ -213,7 +212,9 @@ where
         // `aether-worker-N` name (shared across actors); `Thread`-
         // scheduled actors land on a per-actor name.
         let thread_name = thread::current().name().map(str::to_owned);
-        trace::record_received(inbound_mail_id, thread_name);
+        self.binding
+            .mailer()
+            .record_received(inbound_mail_id, thread_name);
         local::with_stamped(&self.slots, || {
             log_install::with_actor_dispatch(&*self.binding as &dyn MailDispatch, || {
                 let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
@@ -221,7 +222,7 @@ where
                 log::drain_buffer();
             });
         });
-        trace::record_finished(inbound_mail_id);
+        self.binding.mailer().record_finished(inbound_mail_id);
         if let Some(p) = &self.pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
