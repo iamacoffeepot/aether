@@ -683,18 +683,10 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 )]
 mod tests {
     use super::*;
-    use crate::handle_store::HandleStore;
     use crate::mail::registry::InboxHandler;
     use crate::mail::registry::OwnedDispatch;
-    use crate::mail::registry::Registry;
+    use crate::test_util::fresh_substrate;
     use std::sync::mpsc;
-
-    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-        (registry, mailer)
-    }
 
     /// Build a registry handler that forwards every [`MailDispatch`]
     /// it receives onto `tx` as an owned [`Envelope`]. Used by tests

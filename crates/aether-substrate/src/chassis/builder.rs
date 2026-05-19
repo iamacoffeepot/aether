@@ -1727,9 +1727,9 @@ mod tests {
     use super::*;
     use crate::actor::monitor::MonitorHandle;
     use crate::actor::native::ctx::NativeCtx;
-    use crate::handle_store::HandleStore;
     use crate::mail::KindId;
     use crate::mail::registry;
+    use crate::test_util::fresh_substrate;
     use std::io;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
@@ -1810,13 +1810,6 @@ mod tests {
             self.ran.store(true, Ordering::SeqCst);
             Ok(())
         }
-    }
-
-    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-        (registry, mailer)
     }
 
     /// Driver build path: passives boot, driver runs, passives tear

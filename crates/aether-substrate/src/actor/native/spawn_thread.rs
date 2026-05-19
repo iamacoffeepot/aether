@@ -378,11 +378,11 @@ mod tests {
     use aether_actor::Singleton;
     use aether_data::{KindId, MailboxId};
 
-    use crate::handle_store::HandleStore;
+    use crate::mail::Mail;
     use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
-    use crate::mail::{Mail, Mailer};
     use crate::runtime::trace;
+    use crate::test_util::fresh_substrate;
 
     /// Stub actor used as the `A` phantom marker on [`InheritCtx`] /
     /// [`RootCtx`]. Must impl `Singleton` because the spawn helpers
@@ -402,13 +402,6 @@ mod tests {
         root: MailId,
         parent_mail: Option<MailId>,
         sender: aether_data::ReplyTo,
-    }
-
-    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        let registry = Arc::new(Registry::new());
-        let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-        (registry, mailer)
     }
 
     fn register_capture(registry: &Registry, name: &str) -> Arc<Mutex<Vec<CapturedDispatch>>> {
