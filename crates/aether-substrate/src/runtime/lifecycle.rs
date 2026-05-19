@@ -28,6 +28,8 @@
 use std::sync::Arc;
 
 use crate::mail::outbound::HubOutbound;
+use aether_actor::log;
+use std::process;
 
 /// Process exit code on fatal abort. Distinct from `0` (clean exit)
 /// and `1` (which Rust uses for panics from `main`).
@@ -63,9 +65,9 @@ pub fn fatal_abort(_outbound: &HubOutbound, reason: String) -> ! {
     // ring retired, `aether-actor::log::drain_buffer` is the
     // closest equivalent — it hands buffered events to the cap
     // via the actor's transport.)
-    aether_actor::log::drain_buffer();
+    log::drain_buffer();
 
-    std::process::exit(FATAL_EXIT_CODE);
+    process::exit(FATAL_EXIT_CODE);
 }
 
 /// Indirection over [`fatal_abort`] for call sites that don't

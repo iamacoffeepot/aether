@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use aether_kinds::descriptors;
 use aether_substrate::actor::native::{NativeActor, NativeDispatch};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -47,7 +48,7 @@ impl Chassis for TestChassis {
 /// (rpc, engine proxy) get the connected backend they need.
 pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let registry = Arc::new(Registry::new());
-    for d in aether_kinds::descriptors::all() {
+    for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();

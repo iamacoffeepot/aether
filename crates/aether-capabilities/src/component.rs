@@ -119,7 +119,9 @@ mod native {
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{KindId, Mail, MailboxId};
 
+    use crate::input::InputCapability;
     use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
+    use aether_actor::log;
 
     /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load instantiates
@@ -210,10 +212,9 @@ mod native {
             // trampoline from every fan-out set. Mail rather than
             // direct mutation post-issue-640 — `aether.input` is the
             // sole owner of the subscriber table.
-            ctx.actor::<crate::input::InputCapability>()
-                .send(&UnsubscribeAll {
-                    mailbox: payload.mailbox_id,
-                });
+            ctx.actor::<InputCapability>().send(&UnsubscribeAll {
+                mailbox: payload.mailbox_id,
+            });
             self.forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
         }
 
@@ -307,7 +308,7 @@ mod native {
             // spawned trampoline. The trampoline's `#[handlers]`-
             // emitted `ConfigureLogDrain` handler stamps its per-
             // actor slot. Issue #601.
-            if let Some(drain) = aether_actor::log::current_drain() {
+            if let Some(drain) = log::current_drain() {
                 let cfg = aether_kinds::ConfigureLogDrain { mailbox: drain };
                 let cfg_payload = bytemuck::bytes_of(&cfg).to_vec();
                 let kind = <aether_kinds::ConfigureLogDrain as Kind>::ID;

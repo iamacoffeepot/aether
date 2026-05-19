@@ -555,21 +555,24 @@ mod cap_native {
         use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
         use aether_data::{Kind, SessionToken, Uuid};
+        use aether_kinds::descriptors;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::MailId;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+        use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use serde::de::DeserializeOwned;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
             let registry = Arc::new(Registry::new());
-            for d in aether_kinds::descriptors::all() {
+            for d in descriptors::all() {
                 let _ = registry.register_kind_with_descriptor(d);
             }
             let (outbound, rx) = HubOutbound::attached_loopback();
-            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
-                1024 * 1024,
-            ));
+            let store = Arc::new(HandleStore::new(1024 * 1024));
             let mailer =
                 Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
             (registry, mailer, rx)
@@ -613,7 +616,7 @@ mod cap_native {
         ) -> R
         where
             K: Kind + serde::Serialize,
-            R: serde::de::DeserializeOwned,
+            R: DeserializeOwned,
         {
             let id = registry
                 .lookup(cap_namespace)
@@ -622,15 +625,15 @@ mod cap_native {
                 panic!("expected mailbox entry");
             };
             let bytes = postcard::to_allocvec(mail).expect("encode");
-            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
+            handler.enqueue(OwnedDispatch {
                 kind: K::ID,
                 kind_name: K::NAME.to_owned(),
                 origin: None,
                 sender: session_reply(),
                 payload: bytes,
                 count: 1,
-                mail_id: aether_substrate::mail::MailId::NONE,
-                root: aether_substrate::mail::MailId::NONE,
+                mail_id: MailId::NONE,
+                root: MailId::NONE,
                 parent_mail: None,
             });
 

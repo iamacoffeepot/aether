@@ -348,6 +348,7 @@ impl_vec_ops!(Vec4 { x, y, z, w });
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::f32::consts::FRAC_PI_2;
 
     #[test]
     fn vec3_dot_cross() {
@@ -428,7 +429,7 @@ mod tests {
 
     #[test]
     fn vec3_rotate_axis_angle_y_quarter_turn_takes_x_to_negz() {
-        let r = Vec3::X.rotate_axis_angle(Vec3::Y, core::f32::consts::FRAC_PI_2);
+        let r = Vec3::X.rotate_axis_angle(Vec3::Y, FRAC_PI_2);
         assert!(r.x.abs() < 1e-6);
         assert!(r.y.abs() < 1e-6);
         assert!((r.z + 1.0).abs() < 1e-6);

@@ -24,6 +24,9 @@ use super::predicates::orient2d;
 use crate::cleanup::mesh::VertexId;
 use crate::plane::{Axis, Plane3, projection_axes};
 use crate::point::Point3;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 
 fn project_point(p: Point3, axis_a: Axis, axis_b: Axis) -> Point2 {
     let pick = |a: Axis| -> i64 {
@@ -56,11 +59,10 @@ pub(in crate::tessellate) fn triangulate(
     // first appearance. Build the index translation table.
     let (axis_a, axis_b) = projection_axes(plane);
     let mut input_ids: Vec<VertexId> = Vec::new();
-    let mut id_to_local: std::collections::HashMap<VertexId, usize> =
-        std::collections::HashMap::new();
+    let mut id_to_local: HashMap<VertexId, usize> = HashMap::new();
     for loop_ in loops {
         for &vid in loop_ {
-            if let std::collections::hash_map::Entry::Vacant(e) = id_to_local.entry(vid) {
+            if let Entry::Vacant(e) = id_to_local.entry(vid) {
                 e.insert(input_ids.len());
                 input_ids.push(vid);
             }
@@ -81,8 +83,7 @@ pub(in crate::tessellate) fn triangulate(
     let super_count = mesh.super_count;
 
     // 3. Convert each loop edge to a constraint and enforce it.
-    let mut constraints: std::collections::HashSet<(usize, usize)> =
-        std::collections::HashSet::new();
+    let mut constraints: HashSet<(usize, usize)> = HashSet::new();
     for loop_ in loops {
         let n = loop_.len();
         for i in 0..n {

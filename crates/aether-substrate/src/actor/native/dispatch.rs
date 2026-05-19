@@ -43,6 +43,12 @@ use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
+use crate::runtime::log_install;
+use crate::runtime::log_install::MailDispatch;
+use crate::runtime::trace;
+use aether_actor::local;
+use aether_actor::log;
+use std::thread;
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
@@ -107,17 +113,14 @@ pub fn dispatch_loop_run<A>(
         // the default `Pooled` scheduler (issue 635) this surfaces as
         // `aether-worker-N` shared across actors; `Thread`-scheduled
         // actors get per-actor names.
-        let thread_name = std::thread::current().name().map(str::to_owned);
-        crate::runtime::trace::record_received(inbound_mail_id, thread_name);
-        aether_actor::local::with_stamped(slots, || {
-            crate::runtime::log_install::with_actor_dispatch(
-                &**binding as &dyn crate::runtime::log_install::MailDispatch,
-                || {
-                    let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-                    typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
-                    aether_actor::log::drain_buffer();
-                },
-            );
+        let thread_name = thread::current().name().map(str::to_owned);
+        trace::record_received(inbound_mail_id, thread_name);
+        local::with_stamped(slots, || {
+            log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
+                let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+                typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
+                log::drain_buffer();
+            });
         });
         // ADR-0080 §2 producer hook: `Finished` at handler exit. PR 2
         // does not bracket the panic-unwind path; if a handler panics
@@ -125,7 +128,7 @@ pub fn dispatch_loop_run<A>(
         // the substrate down anyway, so a missing `Finished` is
         // moot. A future PR may add `catch_unwind` here for graceful
         // settlement-on-panic.
-        crate::runtime::trace::record_finished(inbound_mail_id);
+        trace::record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -138,19 +141,16 @@ pub fn dispatch_loop_run<A>(
     // the full inbox.
     while let Some(env) = binding.try_recv() {
         let inbound_mail_id = env.mail_id;
-        let thread_name = std::thread::current().name().map(str::to_owned);
-        crate::runtime::trace::record_received(inbound_mail_id, thread_name);
-        aether_actor::local::with_stamped(slots, || {
-            crate::runtime::log_install::with_actor_dispatch(
-                &**binding as &dyn crate::runtime::log_install::MailDispatch,
-                || {
-                    let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-                    let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
-                    aether_actor::log::drain_buffer();
-                },
-            );
+        let thread_name = thread::current().name().map(str::to_owned);
+        trace::record_received(inbound_mail_id, thread_name);
+        local::with_stamped(slots, || {
+            log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
+                let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
+                let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
+                log::drain_buffer();
+            });
         });
-        crate::runtime::trace::record_finished(inbound_mail_id);
+        trace::record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -158,16 +158,12 @@ pub fn dispatch_loop_run<A>(
 
     // Phase 3: last-chance close hook. ReplyTo is None — no inbound
     // envelope produced this call.
-    aether_actor::local::with_stamped(slots, || {
-        crate::runtime::log_install::with_actor_dispatch(
-            &**binding as &dyn crate::runtime::log_install::MailDispatch,
-            || {
-                let mut close_ctx =
-                    NativeCtx::new(binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
-                actor.unwire(&mut close_ctx);
-                aether_actor::log::drain_buffer();
-            },
-        );
+    local::with_stamped(slots, || {
+        log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
+            let mut close_ctx = NativeCtx::new(binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            actor.unwire(&mut close_ctx);
+            log::drain_buffer();
+        });
     });
 
     // Phase 4: close in the registry — drains `monitors_of[id]` for

@@ -10,6 +10,9 @@
 //! server keeps running on its own port; this binary is additive and
 //! defaults to a distinct port so the two coexist.
 
+use std::env;
+use tokio::net::TcpListener;
+use tokio::task;
 mod args;
 mod rpc;
 #[cfg(test)]
@@ -41,8 +44,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let hub_addr =
-        std::env::var("AETHER_HUB_RPC_ADDR").unwrap_or_else(|_| DEFAULT_HUB_RPC_ADDR.to_owned());
-    let mcp_port: u16 = std::env::var("AETHER_MCP_PORT")
+        env::var("AETHER_HUB_RPC_ADDR").unwrap_or_else(|_| DEFAULT_HUB_RPC_ADDR.to_owned());
+    let mcp_port: u16 = env::var("AETHER_MCP_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MCP_PORT);
@@ -51,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
     // Dial the hub. The handshake is blocking, so run it on a
     // blocking-pool thread rather than stalling a runtime worker.
     tracing::info!(target: "aether_mcp", hub = %hub_addr, "dialing hub rpc server");
-    let session = tokio::task::spawn_blocking({
+    let session = task::spawn_blocking({
         let hub_addr = hub_addr.clone();
         move || RpcSession::connect(&hub_addr)
     })
@@ -83,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let app = axum::Router::new().nest_service("/mcp", service);
-    let listener = tokio::net::TcpListener::bind(&mcp_addr).await?;
+    let listener = TcpListener::bind(&mcp_addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(target: "aether_mcp", "mcp listener bound on http://{bound}/mcp");
     axum::serve(listener, app).await?;

@@ -24,10 +24,14 @@ use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, ReplyTo};
+use aether_substrate::handle_store::HandleStore;
+use aether_substrate::mail::MailId;
+use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::{
     Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
     NativeInitCtx, NeverDriver, PassiveChassis, Registry, mail::MailboxId,
 };
+use std::thread;
 
 /// Postcard-shape kind via the derive — exercises the
 /// `decode_from_bytes` postcard path the macro's dispatch arm uses.
@@ -120,9 +124,7 @@ impl Chassis for TestChassis {
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
-            1024 * 1024,
-        ));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         (registry, mailer)
     }
@@ -135,15 +137,15 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         panic!("expected mailbox entry under {recipient}");
     };
     let bytes = payload.encode_into_bytes();
-    handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
+    handler.enqueue(OwnedDispatch {
         kind: <K as Kind>::ID,
         kind_name: K::NAME.to_owned(),
         origin: None,
         sender: ReplyTo::NONE,
         payload: bytes,
         count: 1,
-        mail_id: aether_substrate::mail::MailId::NONE,
-        root: aether_substrate::mail::MailId::NONE,
+        mail_id: MailId::NONE,
+        root: MailId::NONE,
         parent_mail: None,
     });
 }
@@ -151,7 +153,7 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
 fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     while counter.load(AtomicOrdering::SeqCst) < target && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(5));
     }
     counter.load(AtomicOrdering::SeqCst) >= target
 }
@@ -262,7 +264,7 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
     // Settle: give the dispatcher time to observe + drop the envelope.
     // The macro-emitted dispatch returns None; the chassis-side
     // dispatcher logs a warn but doesn't increment any handler counter.
-    std::thread::sleep(Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(50));
     assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
     assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
 

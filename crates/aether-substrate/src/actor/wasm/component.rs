@@ -18,8 +18,11 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry, ReplyTable};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
+use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailboxId, ReplyTarget, ReplyTo};
+use crate::runtime::trace;
+use std::thread;
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -214,14 +217,7 @@ impl ComponentCtx {
             id => Some(id),
         };
         let root = inherited_root.unwrap_or(mail_id);
-        crate::runtime::trace::record_sent(
-            mail_id,
-            root,
-            parent_mail,
-            self.sender,
-            recipient,
-            kind,
-        );
+        trace::record_sent(mail_id, root, parent_mail, self.sender, recipient, kind);
 
         // Closure-bound (actor-enqueue) and Sink-bound (synchronous
         // handler) recipients dispatch inline here, bypassing the
@@ -247,7 +243,7 @@ impl ComponentCtx {
                 // flow straight into the downstream cap's mpsc
                 // envelope without a `to_vec()` clone.
                 let origin = self.registry.mailbox_name(self.sender);
-                handler.enqueue(crate::mail::registry::OwnedDispatch {
+                handler.enqueue(OwnedDispatch {
                     kind,
                     kind_name,
                     origin,
@@ -263,8 +259,8 @@ impl ComponentCtx {
             Some(MailboxEntry::Inline(handler)) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 let origin = self.registry.mailbox_name(self.sender);
-                let thread_name = std::thread::current().name().map(str::to_owned);
-                crate::runtime::trace::record_received(mail_id, thread_name);
+                let thread_name = thread::current().name().map(str::to_owned);
+                trace::record_received(mail_id, thread_name);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,
                     kind_name: &kind_name,
@@ -276,7 +272,7 @@ impl ComponentCtx {
                     root,
                     parent_mail,
                 });
-                crate::runtime::trace::record_finished(mail_id);
+                trace::record_finished(mail_id);
                 return;
             }
             Some(MailboxEntry::Dropped) | None => {
@@ -688,10 +684,16 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::actor::wasm::host_fns;
+    use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::mail::mailer::Mailer;
     use crate::mail::outbound::{EgressEvent, HubOutbound};
+    use crate::mail::registry;
+    use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
+    use aether_data::tagged_id::Tag;
+    use std::sync::mpsc::Receiver;
 
     /// Captured `(mail_id, root, parent_mail)` triple for the
     /// lineage-propagation tests in this module.
@@ -710,7 +712,7 @@ mod tests {
         let sink_id = registry
             .try_register_inbox(
                 name,
-                Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+                Arc::new(move |dispatch: OwnedDispatch| {
                     captured_for_handler.lock().unwrap().push((
                         dispatch.mail_id,
                         dispatch.root,
@@ -724,7 +726,7 @@ mod tests {
 
     fn ctx() -> ComponentCtx {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         ComponentCtx::new(
             MailboxId(0),
             Arc::clone(&registry),
@@ -736,7 +738,7 @@ mod tests {
     fn instantiate(wat: &str) -> Component {
         let engine = Engine::default();
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
-        crate::actor::wasm::host_fns::register(&mut linker).expect("register host fns");
+        host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
         Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate")
@@ -1110,11 +1112,7 @@ mod tests {
         );
     }
 
-    fn plane_ctx_for_reply() -> (
-        ComponentCtx,
-        std::sync::mpsc::Receiver<EgressEvent>,
-        aether_data::KindId,
-    ) {
+    fn plane_ctx_for_reply() -> (ComponentCtx, Receiver<EgressEvent>, aether_data::KindId) {
         use crate::mail::MailboxId as M;
         use aether_data::{KindDescriptor, SchemaType};
 
@@ -1126,7 +1124,7 @@ mod tests {
                 schema: SchemaType::Unit,
             })
             .expect("register kind");
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         let ctx = ComponentCtx::new(M(0), registry, mailer, outbound);
         (ctx, rx, pong_id)
@@ -1135,7 +1133,7 @@ mod tests {
     fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
         let engine = Engine::default();
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
-        crate::actor::wasm::host_fns::register(&mut linker).expect("register host fns");
+        host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).unwrap();
         let module = Module::new(&engine, &wasm).unwrap();
         Component::instantiate(&engine, &linker, &module, ctx).unwrap()
@@ -1189,10 +1187,10 @@ mod tests {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry
-            .try_register_inbox("client", crate::mail::registry::noop_handler())
+            .try_register_inbox("client", registry::noop_handler())
             .expect("register client mailbox");
 
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(
             Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound)),
         );
@@ -1231,10 +1229,10 @@ mod tests {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry
-            .try_register_inbox("client", crate::mail::registry::noop_handler())
+            .try_register_inbox("client", registry::noop_handler())
             .expect("register client mailbox");
 
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
@@ -1265,12 +1263,9 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (captured, sink_id) = register_lineage_capture_sink(&registry, "issue_722_sink");
 
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-        let sender = MailboxId(aether_data::with_tag(
-            aether_data::tagged_id::Tag::Mailbox,
-            0x42,
-        ));
+        let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
         let ctx = ComponentCtx::new(
             sender,
             Arc::clone(&registry),
@@ -1281,13 +1276,7 @@ mod tests {
         // Inbound lineage: the chassis-driven tick chain we're "in"
         // when the wasm guest's on_tick handler fires its outbound.
         let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
-        let inbound_mail = MailId::new(
-            MailboxId(aether_data::with_tag(
-                aether_data::tagged_id::Tag::Mailbox,
-                0x99,
-            )),
-            42,
-        );
+        let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
         ctx.set_in_flight(inbound_mail, inbound_root);
 
         ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1);
@@ -1317,12 +1306,9 @@ mod tests {
         let (captured, sink_id) =
             register_lineage_capture_sink(&registry, "issue_722_fresh_root_sink");
 
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-        let sender = MailboxId(aether_data::with_tag(
-            aether_data::tagged_id::Tag::Mailbox,
-            0x33,
-        ));
+        let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x33));
         let ctx = ComponentCtx::new(
             sender,
             Arc::clone(&registry),

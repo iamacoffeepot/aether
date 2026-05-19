@@ -40,6 +40,7 @@ mod native {
 
     use super::Advance;
     use crate::test_bench::events::{ChassisEvent, EventSender};
+    use std::io;
 
     /// Configuration for [`TestBenchCapability`]. Carries the
     /// `EventSender` the embedder loop reads on, so the handler can
@@ -68,7 +69,7 @@ mod native {
             ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-                BootError::Other(Box::new(std::io::Error::other(
+                BootError::Other(Box::new(io::Error::other(
                     "HubOutbound must be wired on Mailer before \
                      TestBenchCapability::init (test-bench attaches its loopback before \
                      the Builder chain)",

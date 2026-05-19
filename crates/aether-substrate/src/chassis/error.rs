@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::mail::MailboxId;
 use crate::mail::registry::NameConflict;
+use std::io;
 
 /// Failure modes capability boot can raise. Per ADR-0063, any boot
 /// error aborts the chassis before user code runs — no partial boots.
@@ -67,7 +68,7 @@ impl From<NameConflict> for BootError {
 /// errors directly without per-call `.map_err` glue.
 impl From<wasmtime::Error> for BootError {
     fn from(e: wasmtime::Error) -> Self {
-        Self::Other(Box::new(std::io::Error::other(format!("{e}"))))
+        Self::Other(Box::new(io::Error::other(format!("{e}"))))
     }
 }
 

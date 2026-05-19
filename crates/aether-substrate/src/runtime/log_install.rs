@@ -27,6 +27,9 @@ use aether_actor::log::{LogBuffer, NativeLogShipper, drain_buffer, encode_event}
 use aether_data::{KindId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
+use aether_actor::log;
+use core::mem;
+use std::io;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -100,7 +103,7 @@ pub fn with_actor_dispatch<R>(dispatch: &dyn MailDispatch, f: impl FnOnce() -> R
     // by the `DispatchGuard` drop, so no `'static` reference escapes
     // past `with_actor_dispatch`'s return.
     let static_ref: &'static dyn MailDispatch =
-        unsafe { core::mem::transmute::<&dyn MailDispatch, &'static dyn MailDispatch>(dispatch) };
+        unsafe { mem::transmute::<&dyn MailDispatch, &'static dyn MailDispatch>(dispatch) };
     let _guard = ACTOR_DISPATCH.with(|slot| {
         let prev = slot.get();
         slot.set(Some(static_ref));
@@ -140,7 +143,7 @@ where
         // (e.g. the `capability mailbox sender dropped` warn fired
         // during shutdown) would otherwise loop the pipeline. Stderr
         // fmt still receives the event via the registered fmt::Layer.
-        if aether_actor::log::is_in_pipeline() {
+        if log::is_in_pipeline() {
             return;
         }
         let entry = encode_event(event);
@@ -170,8 +173,8 @@ pub fn init_subscriber() {
     let filter = EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(tsfmt::layer().with_writer(std::io::stderr))
+        .with(tsfmt::layer().with_writer(io::stderr))
         .with(ActorAwareLayer)
         .try_init();
-    aether_actor::log::set_native_log_shipper(ship_via_stamped_dispatch as NativeLogShipper);
+    log::set_native_log_shipper(ship_via_stamped_dispatch as NativeLogShipper);
 }

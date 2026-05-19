@@ -12,6 +12,7 @@
 
 use aether_math::Vec3;
 use aether_mesh::{mesh, parse};
+use std::collections::BTreeSet;
 
 fn tri_normal(tri: &aether_mesh::Triangle) -> Vec3 {
     let a = tri.vertices[0];
@@ -135,7 +136,7 @@ fn wedge_outward_normals() {
 fn wedge_uses_six_unique_vertices() {
     let ast = parse("(wedge 2 2 2 :color 0)").expect("test setup: wedge DSL parses");
     let tris = mesh(&ast).expect("test setup: wedge meshes");
-    let mut seen = std::collections::BTreeSet::<[i32; 3]>::new();
+    let mut seen = BTreeSet::<[i32; 3]>::new();
     for tri in &tris {
         for v in tri.vertices {
             seen.insert([v.x as i32, v.y as i32, v.z as i32]);
@@ -304,7 +305,7 @@ fn array_copies_are_translated_correctly() {
     let ast =
         parse("(array 3 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
     let tris = mesh(&ast).expect("test setup: array meshes");
-    let mut x_centers = std::collections::BTreeSet::<i32>::new();
+    let mut x_centers = BTreeSet::<i32>::new();
     for tri in &tris {
         let c = tri_centroid(tri);
         x_centers.insert(c.x.round() as i32);

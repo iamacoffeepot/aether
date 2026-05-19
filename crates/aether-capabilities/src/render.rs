@@ -70,6 +70,8 @@ mod native {
     };
 
     use super::{Camera, CaptureFrame, DrawTriangle};
+    use aether_substrate::render::VERTEX_BUFFER_BYTES;
+    use std::mem;
 
     /// Configuration for [`RenderCapability`]. `vertex_buffer_bytes` is
     /// the maximum bytes the render accumulator will hold before
@@ -103,7 +105,7 @@ mod native {
     impl Default for RenderConfig {
         fn default() -> Self {
             Self {
-                vertex_buffer_bytes: aether_substrate::render::VERTEX_BUFFER_BYTES,
+                vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
                 observed_kinds: None,
                 capture_backend: None,
             }
@@ -534,7 +536,7 @@ mod native {
                     .expect("mutex poisoned; fail-fast per ADR-0063");
                 if !live.is_empty() {
                     // Producer emitted: swap into cache.
-                    std::mem::swap(&mut *live, &mut *last);
+                    mem::swap(&mut *live, &mut *last);
                     // Post-swap, `live` holds what `last` held before
                     // — stale geometry from however many frames ago.
                     // Clear (preserves capacity) so the next tick's
@@ -736,18 +738,20 @@ mod native {
         use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::MailId;
         use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{KindId, ReplyTo};
+        use std::thread;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());
             // Issue 603 Phase 2: `RenderCapability::init` reads
             // `mailer.registry()` to keep the substrate registry handle
             // for `capture_frame`'s resolve-bundle path.
-            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
-                1024 * 1024,
-            ));
+            let store = Arc::new(HandleStore::new(1024 * 1024));
             let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
             (registry, mailer)
         }
@@ -770,15 +774,15 @@ mod native {
             let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry exists") else {
                 panic!("expected mailbox entry for {name}");
             };
-            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
+            handler.enqueue(OwnedDispatch {
                 kind,
                 kind_name: "test.kind".to_owned(),
                 origin: None,
                 sender: ReplyTo::NONE,
                 payload: payload.to_vec(),
                 count: 1,
-                mail_id: aether_substrate::mail::MailId::NONE,
-                root: aether_substrate::mail::MailId::NONE,
+                mail_id: MailId::NONE,
+                root: MailId::NONE,
                 parent_mail: None,
             });
         }
@@ -821,7 +825,7 @@ mod native {
                 if pending.is_empty() || pending[0].1.load(Ordering::Acquire) == 0 {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                thread::sleep(Duration::from_millis(5));
             }
             // The pending counter must have hit zero — the dispatcher
             // ran the handler.
@@ -867,7 +871,7 @@ mod native {
                 &[1u8; 16],
             );
 
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
             // No further assertion on internal state — passive chassis
             // doesn't expose `Arc<RenderCapability>`. Decode failure is
             // observable via the macro miss path's warn-log; this test
@@ -889,6 +893,7 @@ mod native_headless {
     use aether_substrate::mail::outbound::HubOutbound;
 
     use super::{Camera, CaptureFrame, DrawTriangle};
+    use std::io;
 
     /// Chassis-without-GPU companion to [`super::RenderCapability`].
     /// Claims the same `aether.render` mailbox so desktop-designed
@@ -914,7 +919,7 @@ mod native_headless {
 
         fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-                BootError::Other(Box::new(std::io::Error::other(
+                BootError::Other(Box::new(io::Error::other(
                     "HubOutbound must be wired on Mailer before \
                          HeadlessRenderCapability::init (chassis main connects the hub before \
                          the Builder chain)",

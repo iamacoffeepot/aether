@@ -52,6 +52,7 @@ mod session_native {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+    use std::thread;
     use std::thread::JoinHandle;
 
     /// Default per-read buffer size. 64 KiB matches the typical
@@ -122,7 +123,7 @@ mod session_native {
             let data_ready_kind = KindId(<SessionDataReady as Kind>::ID.0);
 
             let thread_name = format!("aether-tcp-read-{}", config.session_name);
-            let thread = std::thread::Builder::new()
+            let thread = thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || {
                     let mut read_half = read_half;

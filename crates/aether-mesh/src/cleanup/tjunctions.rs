@@ -194,6 +194,7 @@ mod tests {
     use crate::test_helpers::pt;
 
     use super::super::mesh::IndexedPolygon;
+    use std::collections::BTreeSet;
 
     fn xy_plane() -> Plane3 {
         Plane3 {
@@ -569,13 +570,12 @@ mod tests {
         // simple loops sharing w. Compare loops as multisets to
         // tolerate rotation / order-of-emission differences.
         assert_eq!(repaired.polygons.len(), 3);
-        let actual_loops: std::collections::BTreeSet<std::collections::BTreeSet<VertexId>> =
-            repaired
-                .polygons
-                .iter()
-                .map(|p| p.vertices.iter().copied().collect())
-                .collect();
-        let expected_loops: std::collections::BTreeSet<std::collections::BTreeSet<VertexId>> =
+        let actual_loops: BTreeSet<BTreeSet<VertexId>> = repaired
+            .polygons
+            .iter()
+            .map(|p| p.vertices.iter().copied().collect())
+            .collect();
+        let expected_loops: BTreeSet<BTreeSet<VertexId>> =
             [vec![0, 3, 4], vec![0, 3, 4, 5, 6], vec![3, 1, 2]]
                 .into_iter()
                 .map(|v| v.into_iter().collect())

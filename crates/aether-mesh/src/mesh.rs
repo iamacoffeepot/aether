@@ -28,11 +28,17 @@
 //! face-normal-direction tests.
 
 use crate::ast::{Axis, Node};
+use crate::cleanup;
 use crate::fixed::FixedError;
 use crate::loop_polygon::Polygon as LoopPolygon;
 use crate::plane::Plane3;
 use crate::point::Point3;
+use crate::simplify;
+use crate::tessellate;
 use aether_math::Vec3;
+use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::PI;
+use std::f32::consts::TAU;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
@@ -54,20 +60,20 @@ pub enum MeshError {
 /// Runs [`crate::simplify::simplify`] as a pre-pass so identity
 /// transforms collapse before they reach the mesher.
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
-    let simplified = crate::simplify::simplify(node);
+    let simplified = simplify::simplify(node);
     let mut polys = Vec::new();
     mesh_into_polygons(&mut polys, &simplified, Vec3::ZERO)?;
-    Ok(polygons_to_triangles(&crate::tessellate::run(polys)))
+    Ok(polygons_to_triangles(&tessellate::run(polys)))
 }
 
 /// Polygon-domain entry: same composition as [`mesh`] but stops at the
 /// n-gon boundary loops cleanup produces (no triangulation). The public
 /// polygon API in `crate::polygon` is the consumer.
 pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<LoopPolygon>, MeshError> {
-    let simplified = crate::simplify::simplify(node);
+    let simplified = simplify::simplify(node);
     let mut polys = Vec::new();
     mesh_into_polygons(&mut polys, &simplified, Vec3::ZERO)?;
-    Ok(crate::cleanup::run_to_loops(polys))
+    Ok(cleanup::run_to_loops(polys))
 }
 
 /// Fan-triangulate a convex polygon list to wire `Triangle`s. Each
@@ -393,7 +399,7 @@ fn mesh_lathe(
         return Ok(());
     }
     let segments = segments as usize;
-    let two_pi = std::f32::consts::TAU;
+    let two_pi = TAU;
     let cos_sin: Vec<(f32, f32)> = (0..segments)
         .map(|i| {
             let theta = two_pi * (i as f32) / (segments as f32);
@@ -443,7 +449,7 @@ fn mesh_torus(
     }
     let m = major_segments as usize;
     let n = minor_segments as usize;
-    let two_pi = std::f32::consts::TAU;
+    let two_pi = TAU;
     let position = |i: usize, j: usize| -> Vec3 {
         let alpha = two_pi * (i as f32) / (m as f32);
         let beta = two_pi * (j as f32) / (n as f32);
@@ -620,7 +626,7 @@ fn mesh_sphere(
     let n = subdivisions as usize;
     let mut profile: Vec<[f32; 2]> = Vec::with_capacity(n + 1);
     for i in 0..=n {
-        let theta = -std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::PI / (n as f32);
+        let theta = -FRAC_PI_2 + (i as f32) * PI / (n as f32);
         profile.push([radius * theta.cos(), radius * theta.sin()]);
     }
     mesh_lathe(out, &profile, subdivisions, color, offset)

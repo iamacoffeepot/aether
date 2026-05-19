@@ -21,6 +21,7 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
+use std::error;
 
 /// Test-only helper that builds a [`MailDispatch`] with empty
 /// `origin` / `ReplyTo::NONE` / `MailId::NONE` defaults from the
@@ -387,7 +388,7 @@ impl fmt::Display for KindConflict {
     }
 }
 
-impl std::error::Error for KindConflict {}
+impl error::Error for KindConflict {}
 
 /// A runtime mailbox registration lost to name collision. Returned
 /// from `try_register_inbox` (ADR-0010) so a runtime caller can
@@ -405,7 +406,7 @@ impl fmt::Display for NameConflict {
     }
 }
 
-impl std::error::Error for NameConflict {}
+impl error::Error for NameConflict {}
 
 /// Reasons `Registry::drop_mailbox` can refuse. Distinct from the
 /// post-drop dispatch log, which the scheduler handles independently.
@@ -424,7 +425,7 @@ impl fmt::Display for DropError {
     }
 }
 
-impl std::error::Error for DropError {}
+impl error::Error for DropError {}
 
 impl Registry {
     #[must_use]
@@ -1048,6 +1049,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn register_and_lookup_closure_mailbox() {
@@ -1561,7 +1563,7 @@ mod tests {
     /// called out in iamacoffeepot/aether#848.
     #[test]
     fn inbox_handler_blanket_impl_moves_owned_payload() {
-        let collected = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        let collected = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let collected_for_handler = Arc::clone(&collected);
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
             // Payload moves straight into the captured Vec — no clone

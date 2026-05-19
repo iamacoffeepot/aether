@@ -6,6 +6,7 @@
 
 use super::COPY_ROW_ALIGN;
 use super::targets::{Readback, Targets, align_up};
+use std::sync::mpsc;
 
 /// Dimensions + wire-format info captured at `copy_texture_to_buffer`
 /// time and consumed after the buffer is mapped. Owned by the caller
@@ -117,7 +118,7 @@ pub fn finish_capture(
         .ok_or_else(|| "readback buffer missing".to_owned())?;
 
     let slice = readback.buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |res| {
         let _ = tx.send(res);
     });

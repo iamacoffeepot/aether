@@ -58,6 +58,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 
 use crate::actor::ctx::{MailSender, OutboundReply, Persistence, Resolver};
+use core::fmt;
 
 pub mod bridge;
 pub mod ctx;
@@ -108,8 +109,8 @@ impl BootError {
     }
 }
 
-impl core::fmt::Display for BootError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for BootError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
 }

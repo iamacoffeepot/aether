@@ -49,6 +49,7 @@ use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+use crate::runtime::trace;
 
 /// Per-actor binding state every native capability owns. Each
 /// capability constructs one at boot via [`NativeBinding::new`] and
@@ -466,7 +467,7 @@ impl NativeBinding {
         // mail. No-op when the global trace queue isn't installed
         // (test fixtures bypassing the chassis); the drainer is the
         // only consumer.
-        crate::runtime::trace::record_sent(
+        trace::record_sent(
             mail_id,
             root,
             parent_mail,
@@ -682,12 +683,15 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 )]
 mod tests {
     use super::*;
+    use crate::handle_store::HandleStore;
+    use crate::mail::registry::InboxHandler;
+    use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
     use std::sync::mpsc;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         (registry, mailer)
     }
@@ -696,14 +700,12 @@ mod tests {
     /// it receives onto `tx` as an owned [`Envelope`]. Used by tests
     /// that need a registered recipient but only care about
     /// observing — or just not warn-dropping — the mail.
-    fn forward_to_envelope_sender(
-        tx: mpsc::Sender<Envelope>,
-    ) -> Arc<dyn crate::mail::registry::InboxHandler> {
+    fn forward_to_envelope_sender(tx: mpsc::Sender<Envelope>) -> Arc<dyn InboxHandler> {
         // iamacoffeepot/aether#848: the helper takes
         // [`OwnedDispatch`] directly so payload + kind_name move
         // into the forwarded [`Envelope`] without `to_vec()` /
         // `to_owned()` clones.
-        Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+        Arc::new(move |dispatch: OwnedDispatch| {
             // `Envelope` is now a type alias for `OwnedDispatch`, so
             // the inbox-handler value moves straight onto the actor
             // mpsc with no field-by-field translation.

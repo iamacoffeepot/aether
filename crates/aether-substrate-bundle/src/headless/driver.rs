@@ -28,6 +28,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
     Mailer, SubstrateBoot, mail::MailboxId, runtime::trace::push_chassis_root_mail,
 };
+use std::env;
 
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
@@ -39,7 +40,7 @@ pub fn parse_tick_hz_env() -> u32 {
     // Match arms read cleaner than `map_or` here because the Ok arm
     // is a chained iterator/closure that warn-logs on parse failure.
     #[allow(clippy::option_if_let_else)]
-    match std::env::var("AETHER_TICK_HZ") {
+    match env::var("AETHER_TICK_HZ") {
         Ok(s) => s
             .trim()
             .parse::<u32>()

@@ -31,11 +31,14 @@ use std::time::{Duration, Instant};
 use aether_data::{Kind, ReplyTo};
 use aether_kinds::LogBatch;
 
+use aether_substrate::mail::MailId;
+use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::{
     Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
     NativeInitCtx, NeverDriver, PassiveChassis, Registry, handle_store::HandleStore,
     mail::registry::MailboxEntry,
 };
+use std::thread;
 
 const STRESS_BATCHES: u32 = 10_000;
 /// Pooled-vs-dedicated wallclock ratio cap. Issue 635 Phase 2 spec is
@@ -134,15 +137,15 @@ fn push_log_batch(registry: &Registry, recipient: &str, payload: &[u8]) {
     let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient}");
     };
-    handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
+    handler.enqueue(OwnedDispatch {
         kind: <LogBatch as Kind>::ID,
         kind_name: LogBatch::NAME.to_owned(),
         origin: None,
         sender: ReplyTo::NONE,
         payload: payload.to_vec(),
         count: 1,
-        mail_id: aether_substrate::mail::MailId::NONE,
-        root: aether_substrate::mail::MailId::NONE,
+        mail_id: MailId::NONE,
+        root: MailId::NONE,
         parent_mail: None,
     });
 }
@@ -157,7 +160,7 @@ fn await_counter(counter: &AtomicU64, target: u64) -> u64 {
         if value >= target || Instant::now() >= deadline {
             return value;
         }
-        std::thread::yield_now();
+        thread::yield_now();
     }
 }
 

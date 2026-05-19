@@ -38,6 +38,8 @@
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
 use aether_kinds::{ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
@@ -56,6 +58,7 @@ mod server_native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{ReplyTarget, ReplyTo};
     use std::collections::HashMap;
+    use std::io;
     use std::net::TcpListener;
     use std::process::{Command, Stdio};
     use std::sync::Arc;
@@ -332,7 +335,7 @@ mod server_native {
     /// rebinds the port, but on localhost it's negligible — and this
     /// sidesteps both a wire change to report an ephemeral port back
     /// from the substrate and an un-recycled incrementing port pool.
-    fn free_local_port() -> std::io::Result<u16> {
+    fn free_local_port() -> io::Result<u16> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         drop(listener);
@@ -357,9 +360,9 @@ use aether_kinds::{ListEnginesResult, SpawnEngineResult, TerminateEngineResult};
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct ReplyCells {
-    pub list: std::sync::Arc<std::sync::Mutex<Option<ListEnginesResult>>>,
-    pub spawn: std::sync::Arc<std::sync::Mutex<Option<SpawnEngineResult>>>,
-    pub terminate: std::sync::Arc<std::sync::Mutex<Option<TerminateEngineResult>>>,
+    pub list: Arc<Mutex<Option<ListEnginesResult>>>,
+    pub spawn: Arc<Mutex<Option<SpawnEngineResult>>>,
+    pub terminate: Arc<Mutex<Option<TerminateEngineResult>>>,
 }
 
 #[cfg(test)]
@@ -418,6 +421,7 @@ mod tests {
     use crate::test_chassis::TestChassis;
     use aether_actor::Actor;
     use aether_data::{Kind, mailbox_id_from_name};
+    use aether_kinds::descriptors;
     use aether_kinds::{
         ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult,
     };
@@ -428,6 +432,7 @@ mod tests {
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
     use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     /// Boot a passive chassis hosting `EngineServer` + the reply sink.
@@ -435,7 +440,7 @@ mod tests {
     /// mailer to push requests through, and the sink's cells.
     fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
         let registry = Arc::new(Registry::new());
-        for d in aether_kinds::descriptors::all() {
+        for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
         let (outbound, _rx) = HubOutbound::attached_loopback();
@@ -470,7 +475,7 @@ mod tests {
                 return value;
             }
             assert!(Instant::now() < deadline, "no reply within deadline");
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 

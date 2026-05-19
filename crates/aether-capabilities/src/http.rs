@@ -22,6 +22,7 @@ use aether_actor::FfiActorMailbox;
 use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
+use std::env;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -126,16 +127,15 @@ impl HttpConfig {
 }
 
 fn disable_flag_env() -> bool {
-    std::env::var("AETHER_HTTP_DISABLE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    env::var("AETHER_HTTP_DISABLE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn https_flag_env() -> bool {
-    std::env::var("AETHER_HTTP_REQUIRE_HTTPS")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    env::var("AETHER_HTTP_REQUIRE_HTTPS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn parse_allowlist_env() -> HashSet<String> {
-    std::env::var("AETHER_HTTP_ALLOWLIST")
+    env::var("AETHER_HTTP_ALLOWLIST")
         .ok()
         .map(|s| {
             s.split(',')
@@ -148,14 +148,14 @@ fn parse_allowlist_env() -> HashSet<String> {
 }
 
 fn parse_max_body_bytes_env() -> usize {
-    std::env::var("AETHER_HTTP_MAX_BODY_BYTES")
+    env::var("AETHER_HTTP_MAX_BODY_BYTES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_BODY_BYTES)
 }
 
 fn parse_default_timeout_env() -> Duration {
-    let ms = std::env::var("AETHER_HTTP_TIMEOUT_MS")
+    let ms = env::var("AETHER_HTTP_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_TIMEOUT_MS);
@@ -259,6 +259,8 @@ mod native {
     use aether_kinds::FetchResult;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use ureq::http::Method;
+    use ureq::http::Request;
 
     /// `ureq`-backed adapter. Holds the shared agent, the allowlist
     /// (empty = deny all), the response cap, and the `require_https`
@@ -321,7 +323,7 @@ mod native {
                 return Err(HttpError::BodyTooLarge);
             }
 
-            let mut builder = ureq::http::Request::builder()
+            let mut builder = Request::builder()
                 .method(http_method_to_http_crate(req.method))
                 .uri(&req.url);
 
@@ -396,15 +398,15 @@ mod native {
         }
     }
 
-    fn http_method_to_http_crate(m: HttpMethod) -> ureq::http::Method {
+    fn http_method_to_http_crate(m: HttpMethod) -> Method {
         match m {
-            HttpMethod::Get => ureq::http::Method::GET,
-            HttpMethod::Post => ureq::http::Method::POST,
-            HttpMethod::Put => ureq::http::Method::PUT,
-            HttpMethod::Delete => ureq::http::Method::DELETE,
-            HttpMethod::Patch => ureq::http::Method::PATCH,
-            HttpMethod::Head => ureq::http::Method::HEAD,
-            HttpMethod::Options => ureq::http::Method::OPTIONS,
+            HttpMethod::Get => Method::GET,
+            HttpMethod::Post => Method::POST,
+            HttpMethod::Put => Method::PUT,
+            HttpMethod::Delete => Method::DELETE,
+            HttpMethod::Patch => Method::PATCH,
+            HttpMethod::Head => Method::HEAD,
+            HttpMethod::Options => Method::OPTIONS,
         }
     }
 
@@ -542,6 +544,12 @@ mod native {
         use aether_substrate::mail::mailer::Mailer;
 
         use crate::test_chassis::{TestChassis, fresh_substrate};
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::outbound::HubOutbound;
+        use aether_substrate::mail::registry;
+        use aether_substrate::mail::registry::Registry;
+        use serde::de::DeserializeOwned;
+        use std::sync::mpsc::Receiver;
 
         struct StubAdapter {
             response: Mutex<Option<Result<FetchResponse, HttpError>>>,
@@ -585,19 +593,15 @@ mod native {
             ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
 
-        fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-            let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
-            let registry = Arc::new(aether_substrate::mail::registry::Registry::new());
-            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
-                1024 * 1024,
-            ));
+        fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
+            let (outbound, rx) = HubOutbound::attached_loopback();
+            let registry = Arc::new(Registry::new());
+            let store = Arc::new(HandleStore::new(1024 * 1024));
             let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
             (mailer, rx)
         }
 
-        fn decode_reply<K: Kind + serde::de::DeserializeOwned>(
-            rx: &std::sync::mpsc::Receiver<EgressEvent>,
-        ) -> K {
+        fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
             let event = rx
                 .recv_timeout(Duration::from_secs(1))
                 .expect("test: egress event arrives within 1s deadline");
@@ -635,10 +639,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_inbox(
-                HttpCapability::NAMESPACE,
-                aether_substrate::mail::registry::noop_handler(),
-            );
+            registry.register_inbox(HttpCapability::NAMESPACE, registry::noop_handler());
             let config = HttpConfig {
                 disabled: true,
                 ..HttpConfig::default()

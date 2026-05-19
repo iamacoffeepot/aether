@@ -46,6 +46,11 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use super::chassis::UserEvent;
 use super::render::Gpu;
+use aether_substrate::capture::CaptureQueue;
+use std::io;
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
+use winit::dpi::PhysicalSize;
 
 pub struct App {
     queue: Arc<Mailer>,
@@ -68,7 +73,7 @@ pub struct App {
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
     /// `render_and_capture`, then reply-to-sender on `outbound`.
-    capture_queue: aether_substrate::capture::CaptureQueue,
+    capture_queue: CaptureQueue,
     /// Hub outbound — shared with the log-capture layer and the
     /// capture-reply path.
     outbound: Arc<HubOutbound>,
@@ -110,7 +115,7 @@ pub struct App {
     /// occludes) `about_to_wait` only fires after a winit event, so
     /// window-kind mail can stall briefly until the user nudges the
     /// window — accepted limitation for v1.
-    window_inbox: std::sync::mpsc::Receiver<Envelope>,
+    window_inbox: Receiver<Envelope>,
     kind_set_window_mode: aether_data::KindId,
     kind_set_window_title: aether_data::KindId,
     /// ADR-0080 §6 chassis-root correlation counter (issue
@@ -320,7 +325,7 @@ impl App {
         if matches!(mode, WindowMode::Windowed)
             && let (Some(w), Some(h)) = (width, height)
         {
-            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+            let _ = window.request_inner_size(PhysicalSize::new(w, h));
         }
 
         self.current_mode = mode.clone();
@@ -429,7 +434,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let mut attrs = Window::default_attributes().with_title(&self.boot_title);
         if let Some((w, h)) = self.boot_size {
-            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+            attrs = attrs.with_inner_size(PhysicalSize::new(w, h));
         }
         match resolve_fullscreen(&self.boot_mode, event_loop.primary_monitor().as_ref()) {
             Ok(fs) => attrs = attrs.with_fullscreen(fs),
@@ -519,7 +524,7 @@ impl ApplicationHandler<UserEvent> for App {
                             // the chassis).
                             let mut pre_failed: Option<String> = None;
                             for rx in req.pre_settlements {
-                                if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                                if rx.recv_timeout(Duration::from_secs(5)).is_err() {
                                     pre_failed = Some(
                                         "capture pre-mail chain failed to settle within 5s — \
                                          a downstream cap is wedged"
@@ -632,7 +637,7 @@ impl ApplicationHandler<UserEvent> for App {
 pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
-    pub capture_queue: aether_substrate::capture::CaptureQueue,
+    pub capture_queue: CaptureQueue,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
     pub boot_title: String,
@@ -670,7 +675,7 @@ impl DriverCapability for DesktopDriverCapability {
         // the FRAME_BARRIER claim machinery and surfaces via
         // `ctx.frame_bound_pending()`.
         let render_handles: RenderHandles = ctx.handle::<RenderHandles>().ok_or_else(|| {
-            BootError::Other(Box::new(std::io::Error::other(
+            BootError::Other(Box::new(io::Error::other(
                 "DesktopDriverCapability::boot: RenderHandles must be published before the driver \
                  (verify the chassis builder calls `with_actor::<RenderCapability>(config)` before `driver(...)`)",
             )))

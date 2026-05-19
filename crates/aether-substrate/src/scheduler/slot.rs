@@ -355,13 +355,16 @@ pub mod tests {
     use std::time::Duration;
 
     use crossbeam_channel::unbounded;
+    use std::collections::VecDeque;
+    use std::hint;
+    use std::thread;
 
     /// Test fixture: a slot with a `Vec<u32>` inbox and a counter
     /// incremented per dispatch. Exercises the [`Drainable`] surface
     /// without dragging in the real chassis machinery.
     pub struct CounterSlot {
         pub state: Arc<SlotState>,
-        pub inbox: Mutex<std::collections::VecDeque<u32>>,
+        pub inbox: Mutex<VecDeque<u32>>,
         pub closed: AtomicBool,
         pub dispatched: AtomicU32,
         /// If `Some(n)`, the n-th dispatch (1-indexed) panics. Used by
@@ -376,7 +379,7 @@ pub mod tests {
         pub fn new(label: &'static str) -> Arc<Self> {
             Arc::new(Self {
                 state: Arc::new(SlotState::new()),
-                inbox: Mutex::new(std::collections::VecDeque::new()),
+                inbox: Mutex::new(VecDeque::new()),
                 closed: AtomicBool::new(false),
                 dispatched: AtomicU32::new(0),
                 panic_at: None,
@@ -418,9 +421,9 @@ pub mod tests {
                 self.panic_at,
                 "CounterSlot panic at envelope #{n} (test-induced)"
             );
-            std::hint::black_box(env);
+            hint::black_box(env);
             if !self.work_per_env.is_zero() {
-                std::thread::sleep(self.work_per_env);
+                thread::sleep(self.work_per_env);
             }
         }
     }

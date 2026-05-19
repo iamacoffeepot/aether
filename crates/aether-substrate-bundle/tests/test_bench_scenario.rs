@@ -47,6 +47,8 @@ use aether_test_fixture_probe::SetRender;
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
 #[allow(unused_imports)]
 use aether_test_fixture_probe as _;
+use std::env;
+use std::fs;
 
 /// Caller-supplied component name passed to `LoadComponent`.
 const PROBE_NAME: &str = "probe";
@@ -86,7 +88,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
 /// `aether.test_bench`, so load is no longer naturally ordered ahead
 /// of advance — the test must await `LoadResult` explicitly.
 fn load_probe(bench: &mut TestBench, wasm_path: &Path) {
-    let wasm = std::fs::read(wasm_path).expect("read fixture wasm");
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let result: aether_kinds::LoadResult = bench
         .send_and_await_reply(
             "aether.component",
@@ -276,7 +278,7 @@ fn replace_component_preserves_mailbox_identity() {
     // replace mail no longer naturally orders ahead of the next
     // advance. Await `ReplaceResult` explicitly.
     let probe_mbox = mailbox_id_from_name(&probe_address());
-    let wasm = std::fs::read(&wasm_path).expect("re-read fixture wasm");
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
     let replace_result: aether_kinds::ReplaceResult = bench
         .send_and_await_reply(
             "aether.component",
@@ -313,7 +315,7 @@ fn require_wgpu_only() -> bool {
     if has_wgpu_adapter() {
         return true;
     }
-    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     assert!(
         !strict,
         "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",

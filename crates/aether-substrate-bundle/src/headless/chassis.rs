@@ -30,6 +30,11 @@ use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
+use crate::hub;
+use aether_substrate::mail::registry::MailDispatch;
+use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
+use std::env;
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -78,8 +83,8 @@ impl HeadlessEnv {
         let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
         // `AETHER_RPC_PORT` has no default — absent means RpcServer
         // doesn't boot. Binds `127.0.0.1`, matching the hub chassis.
-        let rpc_addr = crate::hub::rpc_port_from_env()
-            .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
+        let rpc_addr =
+            hub::rpc_port_from_env().map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = parse_workers_env();
         Self {
             namespace_roots,
@@ -97,7 +102,7 @@ impl HeadlessEnv {
 /// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
 /// one worker); unparseable → `None` with a warn. Issue 745.
 fn parse_workers_env() -> Option<usize> {
-    let raw = std::env::var("AETHER_WORKERS").ok()?;
+    let raw = env::var("AETHER_WORKERS").ok()?;
     match raw.trim().parse::<usize>() {
         Ok(0) => {
             tracing::warn!(
@@ -166,19 +171,16 @@ impl HeadlessChassis {
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_inline(
             "aether.audio",
-            Arc::new(
-                move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {
-                    if dispatch.kind == kind_set_master_gain {
-                        outbound_for_audio_sink.send_reply(
-                            dispatch.sender,
-                            &SetMasterGainResult::Err {
-                                error: "unsupported on headless chassis — no audio device"
-                                    .to_owned(),
-                            },
-                        );
-                    }
-                },
-            ),
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                if dispatch.kind == kind_set_master_gain {
+                    outbound_for_audio_sink.send_reply(
+                        dispatch.sender,
+                        &SetMasterGainResult::Err {
+                            error: "unsupported on headless chassis — no audio device".to_owned(),
+                        },
+                    );
+                }
+            }),
         );
 
         // Tick rates are bounded well below `u32::MAX` Hz (typically
@@ -197,11 +199,8 @@ impl HeadlessChassis {
         // ADR-0074 §Decision 5: production chassis configures the
         // cross-class `wait_reply` aborter so the substrate exits via
         // `lifecycle::fatal_abort` instead of unwinding.
-        let aborter: Arc<dyn aether_substrate::runtime::lifecycle::FatalAborter> = Arc::new(
-            aether_substrate::runtime::lifecycle::OutboundFatalAborter::new(Arc::clone(
-                &boot.outbound,
-            )),
-        );
+        let aborter: Arc<dyn FatalAborter> =
+            Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
 
         let driver = HeadlessTimerCapability {
             boot,
@@ -236,7 +235,9 @@ impl HeadlessChassis {
 #[cfg(test)]
 mod tests {
     use super::parse_workers_env;
+    use std::env;
     use std::sync::Mutex;
+    use std::sync::PoisonError;
 
     /// Process-wide guard around `AETHER_WORKERS` env mutation —
     /// `cargo test` parallelises within a binary, so each parser test
@@ -246,9 +247,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         // Safety: this test owns the AETHER_WORKERS slot for the
         // duration of the closure via ENV_LOCK; no other thread inside
         // the same test binary mutates it concurrently. Edition-2024
@@ -256,15 +255,15 @@ mod tests {
         // races that don't apply here.
         unsafe {
             match value {
-                Some(v) => std::env::set_var("AETHER_WORKERS", v),
-                None => std::env::remove_var("AETHER_WORKERS"),
+                Some(v) => env::set_var("AETHER_WORKERS", v),
+                None => env::remove_var("AETHER_WORKERS"),
             }
         }
         let out = f();
         // SAFETY: same justification as the prior block — this test
         // still owns the `AETHER_WORKERS` slot via `ENV_LOCK`.
         unsafe {
-            std::env::remove_var("AETHER_WORKERS");
+            env::remove_var("AETHER_WORKERS");
         }
         out
     }

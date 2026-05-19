@@ -20,6 +20,7 @@
 //! `-2` / `-3`) map onto the [`WaitError`] constructors below.
 
 use alloc::string::String;
+use serde::de::DeserializeOwned;
 
 /// Error contract every sync wrapper's error enum needs to implement
 /// so [`decode_wait_reply`] (and the per-target
@@ -40,7 +41,7 @@ pub trait WaitError {
 /// into the scratch buffer.
 pub fn decode_wait_reply<K, E>(rc: i32, buf: &[u8]) -> Result<K, E>
 where
-    K: serde::de::DeserializeOwned,
+    K: DeserializeOwned,
     E: WaitError,
 {
     match rc {

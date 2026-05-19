@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ids::{KindId, MailboxId};
+use core::ops::Deref;
 
 /// One entry in `Hello.kinds`: a kind-name plus its schema. The hub
 /// uses the schema to encode agent-supplied params into the exact
@@ -167,7 +168,7 @@ impl SchemaCell {
     }
 }
 
-impl core::ops::Deref for SchemaCell {
+impl Deref for SchemaCell {
     type Target = SchemaType;
     fn deref(&self) -> &SchemaType {
         match self {
@@ -439,7 +440,7 @@ impl LabelCell {
     }
 }
 
-impl core::ops::Deref for LabelCell {
+impl Deref for LabelCell {
     type Target = LabelNode;
     fn deref(&self) -> &LabelNode {
         match self {

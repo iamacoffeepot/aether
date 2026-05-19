@@ -31,6 +31,8 @@ use aether_substrate_bundle::test_bench::{
 // PR 432 / PR 434 used for the trunk-rlib pattern.
 #[allow(unused_imports)]
 use aether_demo_sokoban as _;
+use std::fs;
+use std::path::Path;
 
 /// User-facing component name passed to `LoadComponent`.
 const COMPONENT_NAME: &str = "world";
@@ -54,8 +56,8 @@ fn component_address() -> String {
 /// Load this crate's pre-built wasm into the bench and await
 /// `LoadResult`. Panics on load failure so the calling test surfaces
 /// the error message rather than wedging on a missing subscription.
-fn load_sokoban(bench: &mut TestBench, wasm_path: &std::path::Path) {
-    let wasm = std::fs::read(wasm_path).expect("read sokoban wasm");
+fn load_sokoban(bench: &mut TestBench, wasm_path: &Path) {
+    let wasm = fs::read(wasm_path).expect("read sokoban wasm");
     let result: LoadResult = bench
         .send_and_await_reply(
             "aether.component",

@@ -24,6 +24,7 @@ mod native {
     use aether_substrate::mail::outbound::HubOutbound;
 
     use super::{SetWindowMode, SetWindowTitle};
+    use std::io;
 
     /// Chassis-without-window companion to the desktop driver's
     /// driver-as-actor `aether.window` claim. Mirrors
@@ -46,7 +47,7 @@ mod native {
 
         fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-                BootError::Other(Box::new(std::io::Error::other(
+                BootError::Other(Box::new(io::Error::other(
                     "HubOutbound must be wired on Mailer before \
                      HeadlessWindowCapability::init (chassis main connects the hub before \
                      the Builder chain)",

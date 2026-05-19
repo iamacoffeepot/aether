@@ -9,16 +9,18 @@
 // (see the usage line above).
 #![allow(clippy::print_stdout)]
 
+use std::env;
+use std::fs;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = env::args().collect();
     let Some(path) = args.get(1) else {
         eprintln!("usage: {} <path-to-.dsl>", args[0]);
         return ExitCode::from(2);
     };
 
-    let text = match std::fs::read_to_string(path) {
+    let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("read {path}: {e}");

@@ -40,10 +40,14 @@ use std::sync::Arc;
 use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
+use crate::mail::registry::MailDispatch;
+use crate::runtime::log_install;
+use crate::runtime::panic_hook;
 use crate::{
     AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns,
     handle_store::HandleStore,
 };
+use aether_kinds::descriptors;
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the
@@ -123,16 +127,16 @@ impl SubstrateBootBuilder<'_> {
         // crashes surface in `engine_logs` instead of vanishing to
         // stderr. Idempotent — chassis re-entries / repeated builds in
         // tests are safe.
-        crate::runtime::panic_hook::init_panic_hook();
+        panic_hook::init_panic_hook();
 
         let outbound = HubOutbound::disconnected();
         // Issue #581: install the actor-aware tracing subscriber stack.
-        crate::runtime::log_install::init_subscriber();
+        log_install::init_subscriber();
 
         let engine = Arc::new(Engine::default());
         let registry = Arc::new(Registry::new());
 
-        let boot_descriptors = aether_kinds::descriptors::all();
+        let boot_descriptors = descriptors::all();
         for d in &boot_descriptors {
             registry
                 .register_kind_with_descriptor(d.clone())
@@ -156,7 +160,7 @@ impl SubstrateBootBuilder<'_> {
         // chain's `in_flight` would leak.
         registry.register_inline(
             AETHER_DIAGNOSTICS,
-            Arc::new(|dispatch: crate::mail::registry::MailDispatch<'_>| {
+            Arc::new(|dispatch: MailDispatch<'_>| {
                 let kind_name = dispatch.kind_name;
                 let bytes = dispatch.payload;
                 if kind_name == <aether_kinds::UnresolvedMail as aether_data::Kind>::NAME

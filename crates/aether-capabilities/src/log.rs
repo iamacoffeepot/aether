@@ -231,7 +231,11 @@ mod native {
         use aether_kinds::LogEvent;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::MailId;
+        use aether_substrate::mail::ReplyTo;
         use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry;
+        use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
@@ -289,15 +293,15 @@ mod native {
                 entries: vec![event(3, "parse failed: missing close paren")],
             };
             let bytes = postcard::to_allocvec(&batch).expect("encode");
-            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
+            handler.enqueue(OwnedDispatch {
                 kind: <LogBatch as Kind>::ID,
                 kind_name: "aether.log".to_owned(),
                 origin: None,
-                sender: aether_substrate::mail::ReplyTo::NONE,
+                sender: ReplyTo::NONE,
                 payload: bytes,
                 count: 1,
-                mail_id: aether_substrate::mail::MailId::NONE,
-                root: aether_substrate::mail::MailId::NONE,
+                mail_id: MailId::NONE,
+                root: MailId::NONE,
                 parent_mail: None,
             });
 
@@ -308,10 +312,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_inbox(
-                LogCapability::NAMESPACE,
-                aether_substrate::mail::registry::noop_handler(),
-            );
+            registry.register_inbox(LogCapability::NAMESPACE, registry::noop_handler());
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<LogCapability>(())

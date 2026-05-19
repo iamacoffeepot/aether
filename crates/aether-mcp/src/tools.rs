@@ -36,6 +36,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 
+use crate::args::EngineLogEntry;
+use crate::args::EngineLogsArgs;
+use crate::args::EngineLogsResponse;
 use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, EngineInfo, LoadComponentArgs,
     MailIdJson, MailNodeJson, MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs,
@@ -43,6 +46,11 @@ use crate::args::{
     TracedMailSpec,
 };
 use crate::rpc::RpcSession;
+use aether_kinds::descriptors;
+use base64::engine::general_purpose::STANDARD;
+use std::time::Duration;
+use tokio::fs;
+use tokio::time;
 
 /// Mailbox name of the hub's engines cap — the `engine = None` target
 /// for the engine-management tools.
@@ -176,7 +184,7 @@ impl Mcp {
     ) -> Result<String, McpError> {
         // Snapshot the substrate descriptor inventory once for the
         // whole batch rather than per item.
-        let descriptors = aether_kinds::descriptors::all();
+        let descriptors = descriptors::all();
         let mut statuses = Vec::with_capacity(args.mails.len());
         for (index, spec) in args.mails.into_iter().enumerate() {
             let status = match self.deliver_one(&descriptors, spec).await {
@@ -196,7 +204,7 @@ impl Mcp {
         Parameters(args): Parameters<SendMailTracedArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        let descriptors = aether_kinds::descriptors::all();
+        let descriptors = descriptors::all();
         // Encode the batch before sending — a bad spec produces a
         // clean invalid-params error and never touches the wire.
         // Same shape `CaptureFrame` carries: `Vec<MailEnvelope>` with
@@ -213,8 +221,8 @@ impl Mcp {
 
         // Round 1: ack carries the chassis-root MailId; ReplyEnd
         // closes when the chain settles substrate-side.
-        let ack_reply = match tokio::time::timeout(
-            std::time::Duration::from_millis(u64::from(timeout_ms)),
+        let ack_reply = match time::timeout(
+            Duration::from_millis(u64::from(timeout_ms)),
             self.session.call_one(dispatch_envelope),
         )
         .await
@@ -280,7 +288,7 @@ impl Mcp {
         Parameters(args): Parameters<LoadComponentArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
+        let wasm = fs::read(&args.binary_path).await.map_err(|e| {
             McpError::invalid_params(
                 format!("reading binary_path {:?}: {e}", args.binary_path),
                 None,
@@ -328,7 +336,7 @@ impl Mcp {
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
         let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
-        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
+        let wasm = fs::read(&args.binary_path).await.map_err(|e| {
             McpError::invalid_params(
                 format!("reading binary_path {:?}: {e}", args.binary_path),
                 None,
@@ -370,7 +378,7 @@ impl Mcp {
         let engine = parse_engine_id(&args.engine_id)?;
         // Encode both bundles before sending — a bad entry produces a
         // clean invalid-params error and never touches the wire.
-        let descriptors = aether_kinds::descriptors::all();
+        let descriptors = descriptors::all();
         let mails = encode_capture_bundle(&descriptors, &args.mails).map_err(|e| {
             McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None)
         })?;
@@ -388,7 +396,7 @@ impl Mcp {
             .map_err(internal)?;
         match CaptureFrameResult::decode_from_bytes(&reply.payload) {
             Some(CaptureFrameResult::Ok { png }) => {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+                let encoded = STANDARD.encode(&png);
                 Ok(CallToolResult::success(vec![Content::image(
                     encoded,
                     "image/png",
@@ -403,7 +411,7 @@ impl Mcp {
         description = "List the substrate kind vocabulary — every aether.* kind with its full schema, enough to build send_mail params. This is the static vocabulary aether-mcp ships with, not a per-engine query; component-defined kinds aren't included (use describe_component for a loaded component's handlers)."
     )]
     pub async fn describe_kinds(&self) -> Result<String, McpError> {
-        json(&aether_kinds::descriptors::all())
+        json(&descriptors::all())
     }
 
     #[tool(
@@ -446,7 +454,7 @@ impl Mcp {
     )]
     pub async fn engine_logs(
         &self,
-        Parameters(args): Parameters<crate::args::EngineLogsArgs>,
+        Parameters(args): Parameters<EngineLogsArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
         let engine_id_str = args.engine_id.clone();
@@ -470,11 +478,11 @@ impl Mcp {
                 next_since,
                 truncated_before,
             }) => {
-                let response = crate::args::EngineLogsResponse {
+                let response = EngineLogsResponse {
                     engine_id: engine_id_str,
                     entries: entries
                         .into_iter()
-                        .map(|e| crate::args::EngineLogEntry {
+                        .map(|e| EngineLogEntry {
                             timestamp_unix_ms: e.timestamp_unix_ms,
                             level: level_to_str(e.level).to_owned(),
                             target: e.target,
@@ -750,7 +758,9 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
 
+    use crate::args::EngineLogsArgs;
     use crate::test_chassis::TestChassis;
+    use aether_kinds::descriptors;
 
     /// Boot a hub-shaped passive chassis: a forwarding
     /// `RpcServerCapability` + the engines cap + `TraceObserver` (so
@@ -759,7 +769,7 @@ mod tests {
     /// port an `RpcSession` dials.
     fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
         let registry = Arc::new(Registry::new());
-        for d in aether_kinds::descriptors::all() {
+        for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
         let (outbound, _rx) = HubOutbound::attached_loopback();
@@ -1067,7 +1077,7 @@ mod tests {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let result = mcp
-            .engine_logs(Parameters(crate::args::EngineLogsArgs {
+            .engine_logs(Parameters(EngineLogsArgs {
                 engine_id: "not-a-uuid".to_owned(),
                 max: None,
                 level: None,
@@ -1087,7 +1097,7 @@ mod tests {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let result = mcp
-            .engine_logs(Parameters(crate::args::EngineLogsArgs {
+            .engine_logs(Parameters(EngineLogsArgs {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
                 max: None,
                 level: Some("verbose".to_owned()),

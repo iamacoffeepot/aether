@@ -7,11 +7,14 @@ use lexpr::Value;
 
 use crate::ast::{Axis, Node};
 use aether_math::Vec3;
+use lexpr::parse;
+use lexpr::parse::KeywordSyntax;
+use lexpr::parse::Options;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("lexpr read error: {0}")]
-    Read(#[from] lexpr::parse::Error),
+    Read(#[from] parse::Error),
     #[error("expected a list, got {0}")]
     NotAList(String),
     #[error("expected a proper list (nil-terminated), got dotted pair")]
@@ -60,8 +63,7 @@ pub enum ParseError {
 }
 
 pub fn parse(text: &str) -> Result<Node, ParseError> {
-    let opts = lexpr::parse::Options::default()
-        .with_keyword_syntax(lexpr::parse::KeywordSyntax::ColonPrefix);
+    let opts = Options::default().with_keyword_syntax(KeywordSyntax::ColonPrefix);
     let mut parser = lexpr::Parser::from_str_custom(text, opts);
     let value = parser
         .next_value()?

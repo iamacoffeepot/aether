@@ -17,6 +17,7 @@
 // were rejected with `RpcError::UnsupportedTarget`.
 
 use aether_capabilities::EngineServer;
+use aether_capabilities::rpc::RpcServerHandle;
 use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
     WIRE_VERSION, WireFrame,
@@ -24,6 +25,7 @@ use aether_capabilities::rpc::{
 use aether_capabilities::trace::TraceObserverCapability;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
+use aether_kinds::descriptors;
 use aether_kinds::{List, ListResult, SpawnEngine, SpawnEngineResult, TerminateEngine};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -52,7 +54,7 @@ impl Chassis for TestChassis {
 /// (`spawn`, `terminate`) settle and close.
 fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
-    for d in aether_kinds::descriptors::all() {
+    for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
@@ -72,7 +74,7 @@ fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
         .build_passive()
         .expect("hub caps boot");
     let port = chassis
-        .handle::<aether_capabilities::rpc::RpcServerHandle>()
+        .handle::<RpcServerHandle>()
         .expect("RpcServerHandle published")
         .local_port;
     (chassis, port)

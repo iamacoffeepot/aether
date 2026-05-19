@@ -11,6 +11,7 @@ use aether_capabilities::{RenderGpu, RenderHandles};
 use aether_substrate::render::RenderError;
 
 pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
+use std::iter;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-
@@ -107,7 +108,7 @@ impl Gpu {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return,
         }
-        queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(iter::once(encoder.finish()));
     }
 
     /// Variant of `render` that also copies the offscreen texture
@@ -138,7 +139,7 @@ impl Gpu {
             }
         }
         let meta = self.render_handles.record_capture_copy(&mut encoder);
-        queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(iter::once(encoder.finish()));
         self.render_handles.finish_capture(&meta)
     }
 }

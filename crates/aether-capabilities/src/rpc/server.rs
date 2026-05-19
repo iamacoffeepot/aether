@@ -40,6 +40,7 @@ mod server_native {
         Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
     };
     use aether_actor::actor;
+    use aether_codec::frame::FrameError;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
     use aether_kinds::{CallSettled, RouteEnvelope};
@@ -51,10 +52,12 @@ mod server_native {
     use aether_substrate::mail::mailer::Mailer;
     use std::collections::HashMap;
     use std::io::{self, BufReader};
+    use std::net::Shutdown;
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+    use std::thread;
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -174,7 +177,7 @@ mod server_native {
             let self_id = ctx.self_id();
             let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
 
-            let thread = std::thread::Builder::new()
+            let thread = thread::Builder::new()
                 .name(format!("aether-rpc-accept-{port}"))
                 .spawn(move || {
                     while !accept_shutdown_for_thread.load(Ordering::Acquire) {
@@ -236,7 +239,7 @@ mod server_native {
             // shutdown flag and exits.
             for conn in self.connections.values_mut() {
                 conn.shutdown.store(true, Ordering::Release);
-                let _ = conn.write_half.shutdown(std::net::Shutdown::Read);
+                let _ = conn.write_half.shutdown(Shutdown::Read);
                 if let Some(t) = conn.reader_thread.take() {
                     let _ = t.join();
                 }
@@ -400,7 +403,7 @@ mod server_native {
             let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
             let inbound_tx = self.inbound_tx.clone();
 
-            let thread = match std::thread::Builder::new()
+            let thread = match thread::Builder::new()
                 .name(format!("aether-rpc-reader-{conn_id}"))
                 .spawn(move || {
                     let mut reader = BufReader::new(read_half);
@@ -410,7 +413,7 @@ mod server_native {
                         }
                         let frame: WireFrame = match read_frame(&mut reader) {
                             Ok(f) => f,
-                            Err(aether_codec::frame::FrameError::Io(io_err))
+                            Err(FrameError::Io(io_err))
                                 if io_err.kind() == io::ErrorKind::UnexpectedEof =>
                             {
                                 let _ = inbound_tx.send(InboundEvent::ReaderClosed {
@@ -618,7 +621,7 @@ mod server_native {
                 return;
             };
             conn.shutdown.store(true, Ordering::Release);
-            let _ = conn.write_half.shutdown(std::net::Shutdown::Both);
+            let _ = conn.write_half.shutdown(Shutdown::Both);
             // Drop reader_thread without joining inline — the
             // dispatcher must not block on the reader. The thread sees
             // the shutdown flag (or its own EOF) and exits; the
@@ -642,7 +645,7 @@ mod server_native {
             };
             if let Err(e) = write_frame(&mut conn.write_half, frame) {
                 let reason = match &e {
-                    aether_codec::frame::FrameError::Io(io_err)
+                    FrameError::Io(io_err)
                         if matches!(
                             io_err.kind(),
                             io::ErrorKind::BrokenPipe
@@ -652,7 +655,7 @@ mod server_native {
                     {
                         "peer hung up"
                     }
-                    aether_codec::frame::FrameError::Io(_) => "write error",
+                    FrameError::Io(_) => "write error",
                     _ => "frame encode error",
                 };
                 tracing::debug!(
@@ -684,6 +687,7 @@ mod tests {
     use crate::test_chassis::{TestChassis, fresh_substrate};
     use aether_codec::frame::{read_frame, write_frame};
     use aether_substrate::chassis::builder::Builder;
+    use aether_substrate::chassis::builder::PassiveChassis;
     use std::net::TcpStream;
     use std::sync::Arc;
     use std::time::Duration;
@@ -703,12 +707,7 @@ mod tests {
     /// chassis and reach for [`connect_to_rpc_server`] for the
     /// connect / timeout half. Returns `(chassis, stream)`; both must
     /// stay alive for the listener to keep accepting.
-    fn boot_with_rpc_server_only(
-        timeout: Duration,
-    ) -> (
-        aether_substrate::chassis::builder::PassiveChassis<TestChassis>,
-        TcpStream,
-    ) {
+    fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>, TcpStream) {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
@@ -725,7 +724,7 @@ mod tests {
     /// `TcpStream`, set `read_timeout`. Shared by every test whose
     /// boot path is more elaborate than `boot_with_rpc_server_only`.
     fn connect_to_rpc_server(
-        chassis: &aether_substrate::chassis::builder::PassiveChassis<TestChassis>,
+        chassis: &PassiveChassis<TestChassis>,
         timeout: Duration,
     ) -> TcpStream {
         let port = chassis

@@ -17,6 +17,8 @@ use aether_data::{CastEligible, Kind, Ref, Schema};
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -120,8 +122,7 @@ fn postcard_struct_marks_repr_c_false_and_specializes_bytes() {
         panic!("expected Struct schema");
     };
     assert!(!*repr_c);
-    let by_name: std::collections::HashMap<&str, &SchemaType> =
-        fields.iter().map(|f| (&*f.name, &f.ty)).collect();
+    let by_name: HashMap<&str, &SchemaType> = fields.iter().map(|f| (&*f.name, &f.ty)).collect();
     assert_eq!(by_name["body"], &SchemaType::String);
     assert!(matches!(by_name["tags"], SchemaType::Vec(inner) if **inner == SchemaType::String));
     assert!(
@@ -329,14 +330,14 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
 #[kind(name = "test.headers")]
 #[allow(dead_code)]
 struct Headers {
-    headers: std::collections::BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.lookup")]
 #[allow(dead_code)]
 struct Lookup {
-    counters: std::collections::BTreeMap<u32, u64>,
+    counters: BTreeMap<u32, u64>,
 }
 
 #[test]

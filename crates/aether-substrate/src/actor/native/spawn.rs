@@ -26,14 +26,29 @@ use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_se
 use aether_data::{Kind, mailbox_id_from_name};
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::dispatch;
+use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
+use crate::chassis::ctx::MailboxWakeSlot;
 use crate::chassis::error::BootError;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
 use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
 use crate::runtime::lifecycle::FatalAborter;
+use crate::runtime::log_install;
+use crate::runtime::log_install::MailDispatch;
+use crate::scheduler::Drainable;
+use crate::scheduler::WakeHandle;
+use aether_actor::local;
+use aether_actor::local::ActorSlots;
+use aether_actor::log;
+use std::sync::Weak;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 /// How to derive the subname for a [`SpawnBuilder::finish`] call. The
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
@@ -96,7 +111,7 @@ pub struct Spawner {
     /// Issue 635 PR C: chassis worker pool's ready-queue sender.
     /// Cloned into [`crate::scheduler::WakeHandle`]s when the
     /// Pooled spawn branch lands a slot.
-    pool_ready_tx: crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>>,
+    pool_ready_tx: crossbeam_channel::Sender<Arc<dyn Drainable>>,
     /// Issue 635 Phase 3: strong-Arc store for instanced
     /// [`crate::scheduler::Drainable`] slots spawned via the Pooled
     /// branch. Without this the slot dropped at end of `spawn_actor`
@@ -119,8 +134,8 @@ pub struct Spawner {
 /// [`crate::scheduler::WakeHandle`] clone (so the chassis-teardown
 /// path can wake the slot after signaling shutdown). Issue 685.
 struct InstancedSlotEntry {
-    slot: Arc<dyn crate::scheduler::Drainable>,
-    wake: crate::scheduler::WakeHandle,
+    slot: Arc<dyn Drainable>,
+    wake: WakeHandle,
 }
 
 impl Spawner {
@@ -130,7 +145,7 @@ impl Spawner {
         mailer: Arc<Mailer>,
         frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
         aborter: Arc<dyn FatalAborter>,
-        pool_ready_tx: crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>>,
+        pool_ready_tx: crossbeam_channel::Sender<Arc<dyn Drainable>>,
     ) -> Self {
         Self {
             registry,
@@ -147,9 +162,7 @@ impl Spawner {
     /// Borrow the chassis worker pool's ready-queue sender. PR D
     /// reaches for this when a Pooled instanced actor spawns.
     #[allow(dead_code)] // wired in PR D
-    pub(crate) fn pool_ready_tx(
-        &self,
-    ) -> &crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>> {
+    pub(crate) fn pool_ready_tx(&self) -> &crossbeam_channel::Sender<Arc<dyn Drainable>> {
         &self.pool_ready_tx
     }
 
@@ -183,7 +196,7 @@ impl Spawner {
     /// drained out of `instanced_slots` will then drop, and any actor
     /// whose close cycle didn't run misses its `unwire` (matches
     /// the today behavior pre-685).
-    pub(crate) fn shutdown_instanced(&self, timeout: std::time::Duration) {
+    pub(crate) fn shutdown_instanced(&self, timeout: Duration) {
         let entries: Vec<InstancedSlotEntry> = {
             let mut guard = self
                 .instanced_slots
@@ -213,10 +226,10 @@ impl Spawner {
             // we just need *some* worker to pick the slot up.
             let _ = entry.wake.wake();
         }
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         let mut stuck = 0usize;
         for rx in &waiters {
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             let remaining = deadline.saturating_duration_since(now);
             // `remaining == 0` means the deadline has passed; pass
             // `Duration::ZERO` to `recv_timeout` and treat as a
@@ -342,7 +355,7 @@ impl Spawner {
         // slots) can reach `Local::with_mut` without threading a
         // ctx through. Mirrors the singleton path in
         // `chassis::builder::make_native_actor_boot` (issue 672).
-        let slots = Box::new(aether_actor::local::ActorSlots::new());
+        let slots = Box::new(ActorSlots::new());
 
         let actor = {
             // Instanced actors don't publish driver-facing sub-handles
@@ -358,15 +371,12 @@ impl Spawner {
             // sender attribution when init returns. Singletons get
             // this through `make_native_actor_boot`; instanced
             // actors join the pattern in issue 672.
-            let init_result = aether_actor::local::with_stamped(&slots, || {
-                crate::runtime::log_install::with_actor_dispatch(
-                    &*transport as &dyn crate::runtime::log_install::MailDispatch,
-                    || {
-                        let r = A::init(config, &mut init_ctx);
-                        aether_actor::log::drain_buffer();
-                        r
-                    },
-                )
+            let init_result = local::with_stamped(&slots, || {
+                log_install::with_actor_dispatch(&*transport as &dyn MailDispatch, || {
+                    let r = A::init(config, &mut init_ctx);
+                    log::drain_buffer();
+                    r
+                })
             });
             match init_result {
                 Ok(a) => a,
@@ -404,8 +414,7 @@ impl Spawner {
         // Populated post-init by the `Pooled` branch below; left empty
         // for `Dedicated` (today's only path) so the closure's `get()`
         // is a single relaxed atomic load.
-        let wake_slot: Arc<crate::chassis::ctx::MailboxWakeSlot> =
-            Arc::new(crate::chassis::ctx::MailboxWakeSlot::default());
+        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
         // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
         // directly. Payload + kind_name + origin all move into the
@@ -416,7 +425,7 @@ impl Spawner {
         // since `dispatch` was already moved into `env`.
         let registered = self.registry.try_register_inbox(
             full_name.clone(),
-            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 let Some(tx) = weak_for_handler.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::spawn",
@@ -498,20 +507,17 @@ impl Spawner {
         // already steady-state when `Spawner::spawn_actor` runs — the
         // child wire→dispatcher transition is sequential within this
         // ctx, peers are running, all mailboxes claimed.
-        aether_actor::local::with_stamped(&slots, || {
-            crate::runtime::log_install::with_actor_dispatch(
-                &*transport as &dyn crate::runtime::log_install::MailDispatch,
-                || {
-                    let mut wire_ctx = crate::actor::native::NativeCtx::new(
-                        &transport,
-                        ReplyTo::NONE,
-                        MailId::NONE,
-                        MailId::NONE,
-                    );
-                    actor.wire(&mut wire_ctx);
-                    aether_actor::log::drain_buffer();
-                },
-            );
+        local::with_stamped(&slots, || {
+            log_install::with_actor_dispatch(&*transport as &dyn MailDispatch, || {
+                let mut wire_ctx = crate::actor::native::NativeCtx::new(
+                    &transport,
+                    ReplyTo::NONE,
+                    MailId::NONE,
+                    MailId::NONE,
+                );
+                actor.wire(&mut wire_ctx);
+                log::drain_buffer();
+            });
         });
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
@@ -540,10 +546,10 @@ impl Spawner {
                 let mailer_for_thread = Arc::clone(&self.mailer);
                 let pending_for_thread = Arc::clone(&pending);
                 let thread_name = alloc_instanced_thread_name(&full_name);
-                let _ = std::thread::Builder::new()
+                let _ = thread::Builder::new()
                     .name(thread_name)
                     .spawn(move || {
-                        crate::actor::native::dispatch::dispatch_loop_run::<A>(
+                        dispatch::dispatch_loop_run::<A>(
                             &transport_for_thread,
                             &mut actor,
                             &slots,
@@ -560,7 +566,7 @@ impl Spawner {
                 // with the chassis worker pool. No per-actor thread.
                 // The wake hook on the closure pushes the slot to the
                 // ready queue when an envelope lands.
-                let slot = crate::actor::native::dispatcher_slot::DispatcherSlot::<A>::new(
+                let slot = DispatcherSlot::<A>::new(
                     actor,
                     Arc::clone(&transport),
                     slots,
@@ -569,14 +575,10 @@ impl Spawner {
                     Arc::clone(&self.mailer),
                     id,
                 );
-                let slot_dyn: Arc<dyn crate::scheduler::Drainable> = slot.clone();
-                let weak: std::sync::Weak<dyn crate::scheduler::Drainable> =
-                    Arc::downgrade(&slot_dyn);
-                let wake = crate::scheduler::WakeHandle::new(
-                    Arc::clone(slot.state()),
-                    weak,
-                    self.pool_ready_tx.clone(),
-                );
+                let slot_dyn: Arc<dyn Drainable> = slot.clone();
+                let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+                let wake =
+                    WakeHandle::new(Arc::clone(slot.state()), weak, self.pool_ready_tx.clone());
                 // Stash the slot's strong Arc so wakes can upgrade their
                 // `Weak`. PR C dropped it here, which broke every wake
                 // after spawn (the registry only holds the inbox

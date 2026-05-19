@@ -43,6 +43,7 @@ use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::Value;
 
 use crate::cast::{align_of_primitive, non_cast_variant_error};
+use std::error;
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -97,7 +98,7 @@ impl fmt::Display for EncodeError {
     }
 }
 
-impl std::error::Error for EncodeError {}
+impl error::Error for EncodeError {}
 
 /// ADR-0019: encode `params` against a `SchemaType` descriptor.
 /// Dispatches on the schema's wire shape:
@@ -852,6 +853,7 @@ mod tests {
     };
     use aether_data::SchemaCell;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn enum_schema(variants: Vec<EnumVariant>) -> SchemaType {
         SchemaType::Enum {
@@ -1352,8 +1354,7 @@ mod tests {
             ty: map_schema(SchemaType::String, SchemaType::String),
         }]);
 
-        let mut reference: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
+        let mut reference: BTreeMap<String, String> = BTreeMap::new();
         reference.insert("content-type".into(), "application/json".into());
         reference.insert("x-trace".into(), "abc123".into());
 
@@ -1388,8 +1389,7 @@ mod tests {
     fn map_u32_keys_match_postcard_btreemap() {
         let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
 
-        let mut reference: std::collections::BTreeMap<u32, String> =
-            std::collections::BTreeMap::new();
+        let mut reference: BTreeMap<u32, String> = BTreeMap::new();
         reference.insert(1, "one".into());
         reference.insert(42, "answer".into());
         reference.insert(255, "max-u8".into());
@@ -1408,8 +1408,7 @@ mod tests {
     #[test]
     fn map_bool_keys_match_postcard_btreemap() {
         let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
-        let mut reference: std::collections::BTreeMap<bool, u32> =
-            std::collections::BTreeMap::new();
+        let mut reference: BTreeMap<bool, u32> = BTreeMap::new();
         reference.insert(false, 0);
         reference.insert(true, 1);
         let expected = postcard::to_allocvec(&reference)

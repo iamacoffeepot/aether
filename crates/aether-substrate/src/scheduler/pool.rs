@@ -35,6 +35,9 @@ use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::slot::{BatchBudget, CycleResult, Drainable};
+use std::mem;
+use std::panic;
+use std::time::Duration;
 
 /// Configuration for [`Pool::start`]. Defaults via [`PoolConfig::default`]
 /// give `num_cpus`-derived sizing; chassis mains override per
@@ -79,7 +82,7 @@ impl BudgetTemplate {
             Self::Custom {
                 max_mails,
                 max_usec,
-            } => BatchBudget::custom(max_mails, std::time::Duration::from_micros(max_usec)),
+            } => BatchBudget::custom(max_mails, Duration::from_micros(max_usec)),
         }
     }
 }
@@ -138,7 +141,7 @@ impl PoolHandle {
         // (empty) workers Vec and returns an empty Vec.
         self.shutdown_tx.take();
         self.ready_tx.take();
-        std::mem::take(&mut self.workers)
+        mem::take(&mut self.workers)
             .into_iter()
             .map(|w| w.handle.join())
             .collect()
@@ -243,7 +246,7 @@ fn worker_loop(
             }
         };
         let budget = template.build();
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
+        let result = panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
         match result {
             Ok(CycleResult::Idle | CycleResult::Closed) => {
                 // Slot done for now; drop the popped Arc. The chassis
@@ -297,10 +300,12 @@ fn format_panic_payload(payload: &Box<dyn Any + Send>, actor_label: &str) -> Str
 mod tests {
     use super::*;
     use crate::runtime::lifecycle::PanicAborter;
+    use crate::scheduler::slot::BATCH_MAX_USEC;
     use crate::scheduler::slot::tests::CounterSlot;
     use crate::scheduler::{SlotStateLabel, WakeHandle};
     use std::sync::Weak;
     use std::time::Duration;
+    use std::time::Instant;
 
     fn standard_handle(workers: usize) -> PoolHandle {
         Pool::start(
@@ -313,7 +318,7 @@ mod tests {
     }
 
     fn wait_until<F: Fn() -> bool>(timeout: Duration, f: F) -> bool {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         while start.elapsed() < timeout {
             if f() {
                 return true;
@@ -522,5 +527,5 @@ mod tests {
     // Reuse the standard wallclock budget for fairness tests — 200µs
     // is enough for the test harness to dispatch a handful of
     // counters before yielding.
-    const BATCH_MAX_USEC_TEST: u64 = crate::scheduler::slot::BATCH_MAX_USEC;
+    const BATCH_MAX_USEC_TEST: u64 = BATCH_MAX_USEC;
 }

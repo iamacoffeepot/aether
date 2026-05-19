@@ -127,6 +127,7 @@ mod native_impl {
 
     use core::any::{Any, TypeId};
     use core::cell::{Cell, RefCell};
+    use core::ptr;
     use std::boxed::Box;
     use std::collections::HashMap;
 
@@ -177,7 +178,7 @@ mod native_impl {
             let entry = map
                 .entry(TypeId::of::<T>())
                 .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-            core::ptr::from_ref::<RefCell<T>>(
+            ptr::from_ref::<RefCell<T>>(
                 entry
                     .downcast_ref::<RefCell<T>>()
                     .expect("TypeId<T> ⇒ RefCell<T>"),
@@ -218,7 +219,7 @@ mod native_impl {
     }
 
     std::thread_local! {
-        static CURRENT_SLOTS: Cell<*const ActorSlots> = const { Cell::new(core::ptr::null()) };
+        static CURRENT_SLOTS: Cell<*const ActorSlots> = const { Cell::new(ptr::null()) };
     }
 
     /// RAII guard restoring the prior `CURRENT_SLOTS` value on
@@ -245,7 +246,7 @@ mod native_impl {
     pub fn with_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
         let _guard = CURRENT_SLOTS.with(|slot| {
             let prev = slot.get();
-            slot.set(core::ptr::from_ref::<ActorSlots>(slots));
+            slot.set(ptr::from_ref::<ActorSlots>(slots));
             StampGuard { prev }
         });
         f()
@@ -387,6 +388,9 @@ mod tests {
     use crate::local;
     use alloc::boxed::Box;
     use alloc::string::String;
+    use std::panic;
+    use std::panic::AssertUnwindSafe;
+    use std::thread;
 
     // Probe newtypes via the `#[local]` attribute — exercises
     // the macro and keeps the test bodies focused on the storage
@@ -463,7 +467,7 @@ mod tests {
         with_stamped(&slots, || {
             Probe::with_mut(|outer| {
                 outer.0 = 1;
-                let inner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let inner = panic::catch_unwind(AssertUnwindSafe(|| {
                     Probe::with_mut(|p| p.0 = 2);
                 }));
                 assert!(inner.is_err(), "nested same-type with_mut must panic");
@@ -488,12 +492,12 @@ mod tests {
         // an out-of-stamp access *after* a panicking stamp still
         // trips debug_assert.
         let slots = ActorSlots::new();
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             with_stamped(&slots, || panic!("handler trapped"));
         }));
         assert!(outcome.is_err(), "inner panic propagates");
 
-        let outside = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outside = panic::catch_unwind(AssertUnwindSafe(|| {
             Probe::with_mut(|p| p.0 = 1);
         }));
         assert!(
@@ -523,7 +527,7 @@ mod tests {
         // Move the Box into a freshly-spawned thread and read
         // back — same slots, same data, despite the thread
         // boundary.
-        let observed = std::thread::spawn(move || with_stamped(&slots, || Probe::with(|p| p.0)))
+        let observed = thread::spawn(move || with_stamped(&slots, || Probe::with(|p| p.0)))
             .join()
             .expect("worker thread joined cleanly");
 

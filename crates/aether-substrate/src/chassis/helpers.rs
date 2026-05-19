@@ -7,6 +7,7 @@
 /// Postcard-decode a control-plane payload with the one error-message
 /// shape every handler uses. Handlers wrap the `String` in their own
 /// `*Result::Err` variant — the shape is uniform, the enum differs.
-pub fn decode_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+use serde::de::DeserializeOwned;
+pub fn decode_payload<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     postcard::from_bytes(bytes).map_err(|e| format!("postcard decode failed: {e}"))
 }

@@ -14,6 +14,7 @@
 //! vocabulary that supported it — the forward-model RPC architecture
 //! never used those paths and they were unreachable in practice.
 
+use std::env;
 mod chassis;
 
 pub use aether_substrate::Chassis;
@@ -32,7 +33,7 @@ pub const DEFAULT_RPC_PORT: u16 = 8901;
 /// server" instead.
 #[must_use]
 pub fn rpc_port_from_env() -> Option<u16> {
-    std::env::var("AETHER_RPC_PORT")
+    env::var("AETHER_RPC_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
 }

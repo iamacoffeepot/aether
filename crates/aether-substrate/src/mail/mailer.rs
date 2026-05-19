@@ -25,12 +25,15 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use crate::chassis::settlement::SettlementRegistry;
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
+use crate::runtime::trace;
 use aether_data::{HandleId, KindId};
 use std::sync::OnceLock;
+use std::thread;
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Owned for
@@ -83,7 +86,7 @@ pub struct Mailer {
     /// / chassis that don't bring up the trace pipeline; callers that
     /// expect to subscribe must check for the presence and surface a
     /// clear error otherwise.
-    settlement_registry: OnceLock<Arc<crate::chassis::settlement::SettlementRegistry>>,
+    settlement_registry: OnceLock<Arc<SettlementRegistry>>,
 }
 
 impl Mailer {
@@ -116,10 +119,7 @@ impl Mailer {
     /// so capability handlers can reach the registry via
     /// `ctx.mailer().settlement_registry()`. Single-claim; subsequent
     /// calls are no-ops.
-    pub fn install_settlement_registry(
-        &self,
-        registry: Arc<crate::chassis::settlement::SettlementRegistry>,
-    ) {
+    pub fn install_settlement_registry(&self, registry: Arc<SettlementRegistry>) {
         let _ = self.settlement_registry.set(registry);
     }
 
@@ -129,9 +129,7 @@ impl Mailer {
     /// that don't bring up the trace pipeline). Capabilities subscribe
     /// via
     /// [`crate::chassis::settlement::SettlementRegistry::subscribe_settlement_mail`].
-    pub fn settlement_registry(
-        &self,
-    ) -> Option<&Arc<crate::chassis::settlement::SettlementRegistry>> {
+    pub fn settlement_registry(&self) -> Option<&Arc<SettlementRegistry>> {
         self.settlement_registry.get()
     }
 
@@ -307,8 +305,8 @@ fn route_mail(
         // replies) get the symmetric `Received`/`Finished` bracket.
         let inbound_mail_id = mail.mail_id;
         if let Some(router) = chassis_router {
-            let thread_name = std::thread::current().name().map(str::to_owned);
-            crate::runtime::trace::record_received(inbound_mail_id, thread_name);
+            let thread_name = thread::current().name().map(str::to_owned);
+            trace::record_received(inbound_mail_id, thread_name);
             router(mail);
         } else {
             tracing::warn!(
@@ -317,7 +315,7 @@ fn route_mail(
                 "chassis-addressed mail dropped — no chassis router installed",
             );
         }
-        crate::runtime::trace::record_finished(inbound_mail_id);
+        trace::record_finished(inbound_mail_id);
         return;
     }
 
@@ -355,7 +353,7 @@ fn route_mail(
                 // drain (issue 838). Parked mail (the `Ok(WalkOutcome::Parked)`
                 // arm above) is deliberately NOT finished — it's held
                 // for replay when the handle resolves.
-                crate::runtime::trace::record_finished(mail.mail_id);
+                trace::record_finished(mail.mail_id);
                 return;
             }
         }
@@ -415,8 +413,8 @@ fn route_mail(
             // above — see that arm's doc for the
             // double-count-prematurely-settle hazard the split
             // avoids.
-            let thread_name = std::thread::current().name().map(str::to_owned);
-            crate::runtime::trace::record_received(inbound_mail_id, thread_name);
+            let thread_name = thread::current().name().map(str::to_owned);
+            trace::record_received(inbound_mail_id, thread_name);
             handler.dispatch(MailDispatch {
                 kind: mail.kind,
                 kind_name: &kind_name,
@@ -428,7 +426,7 @@ fn route_mail(
                 root: mail.root,
                 parent_mail: mail.parent_mail,
             });
-            crate::runtime::trace::record_finished(inbound_mail_id);
+            trace::record_finished(inbound_mail_id);
         }
         Some(MailboxEntry::Dropped) => {
             tracing::warn!(
@@ -438,7 +436,7 @@ fn route_mail(
             );
             // ADR-0080 §2: balance the `Sent` so settlement chains
             // drain (issue 838). No `Received` — no handler ran.
-            crate::runtime::trace::record_finished(inbound_mail_id);
+            trace::record_finished(inbound_mail_id);
         }
         None => {
             // ADR-0037 Phase 1: unknown-locally mailboxes bubble up
@@ -482,7 +480,7 @@ fn route_mail(
                 // bubbled-up mail on its own settlement domain; no
                 // wire signal exists today for federated cross-engine
                 // settlement (and the issue body parks that design).
-                crate::runtime::trace::record_finished(inbound_mail_id);
+                trace::record_finished(inbound_mail_id);
                 return;
             }
             tracing::warn!(
@@ -495,7 +493,7 @@ fn route_mail(
             // unloaded `"camera"` mailbox every tick; without this
             // every Tick chain has an orphaned `Sent` and never
             // settles.
-            crate::runtime::trace::record_finished(inbound_mail_id);
+            trace::record_finished(inbound_mail_id);
         }
     }
 }
@@ -517,6 +515,9 @@ mod tests {
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
+    use crate::mail::registry::InboxHandler;
+    use crate::mail::registry::InlineHandler;
+    use crate::runtime::trace;
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -647,7 +648,7 @@ mod tests {
         /// Inline-variant handler: synchronous capture body. Used by
         /// the `register_inline` test sites; mailer brackets the
         /// call so settlement balances.
-        fn inline_handler(&self) -> Arc<dyn crate::mail::registry::InlineHandler> {
+        fn inline_handler(&self) -> Arc<dyn InlineHandler> {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(move |dispatch: MailDispatch<'_>| {
@@ -663,7 +664,7 @@ mod tests {
         /// — these tests don't subscribe to settlement so the
         /// "downstream never finishes" path is intentional and
         /// harmless.
-        fn inbox_handler(&self) -> Arc<dyn crate::mail::registry::InboxHandler> {
+        fn inbox_handler(&self) -> Arc<dyn InboxHandler> {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(move |dispatch: OwnedDispatch| {
@@ -813,12 +814,12 @@ mod tests {
     /// these tests don't assume ownership, they filter their own
     /// events out of whatever's in flight.
     fn ensure_trace_queue() -> Arc<SegQueue<TraceEvent>> {
-        if let Some(q) = crate::runtime::trace::trace_queue() {
+        if let Some(q) = trace::trace_queue() {
             return Arc::clone(q);
         }
         let q = Arc::new(SegQueue::<TraceEvent>::new());
-        crate::runtime::trace::install_trace_queue(Arc::clone(&q));
-        crate::runtime::trace::trace_queue().cloned().unwrap_or(q)
+        trace::install_trace_queue(Arc::clone(&q));
+        trace::trace_queue().cloned().unwrap_or(q)
     }
 
     /// Drain the trace queue and return only events whose `mail_id`

@@ -29,6 +29,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::actor::native::envelope::Envelope;
 use crate::mail::MailboxId;
+use std::any::Any;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
 /// (for direct mail routing into the dispatcher), the actor's
@@ -340,7 +341,7 @@ impl ActorRegistry {
     /// lock drops before the caller iterates.
     pub(crate) fn live_subnames_of_type<T>(&self) -> Vec<(String, MailboxId)>
     where
-        T: std::any::Any + 'static,
+        T: Any + 'static,
     {
         let actors = self
             .actors
@@ -544,6 +545,7 @@ impl ActorRegistry {
 )]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     #[test]
     fn fresh_registry_is_empty() {
@@ -562,7 +564,7 @@ mod tests {
     /// doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         struct Stub;
-        let (tx, _rx) = std::sync::mpsc::channel::<Envelope>();
+        let (tx, _rx) = mpsc::channel::<Envelope>();
         r.insert_live(id, Arc::new(tx), TypeId::of::<Stub>(), String::new())
             .expect("fresh slot");
     }

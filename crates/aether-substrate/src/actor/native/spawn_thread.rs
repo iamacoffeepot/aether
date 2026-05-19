@@ -379,8 +379,10 @@ mod tests {
     use aether_data::{KindId, MailboxId};
 
     use crate::handle_store::HandleStore;
+    use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
     use crate::mail::{Mail, Mailer};
+    use crate::runtime::trace;
 
     /// Stub actor used as the `A` phantom marker on [`InheritCtx`] /
     /// [`RootCtx`]. Must impl `Singleton` because the spawn helpers
@@ -418,7 +420,7 @@ mod tests {
         // Copy).
         let _ = registry.try_register_inbox(
             name.to_owned(),
-            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 captured_for_handler.lock().unwrap().push(CapturedDispatch {
                     mail_id: dispatch.mail_id,
                     root: dispatch.root,
@@ -632,15 +634,13 @@ mod tests {
         use aether_kinds::trace::TraceEvent;
         use crossbeam_queue::SegQueue;
 
-        crate::runtime::trace::init_substrate_start();
+        trace::init_substrate_start();
         let queue = Arc::new(SegQueue::<TraceEvent>::new());
-        crate::runtime::trace::install_trace_queue(Arc::clone(&queue));
+        trace::install_trace_queue(Arc::clone(&queue));
         // After install_trace_queue, the global may already point at a
         // queue from a prior test. Read the live one and drain from
         // there so we observe the same queue spawn_inherit pushes to.
-        let live = crate::runtime::trace::trace_queue()
-            .expect("trace queue installed")
-            .clone();
+        let live = trace::trace_queue().expect("trace queue installed").clone();
 
         let (_registry, mailer) = fresh_substrate();
         let producer_mailbox = MailboxId(0xC0FE_C0FE_C0FE_C0FE);
@@ -706,12 +706,10 @@ mod tests {
         use aether_kinds::trace::TraceEvent;
         use crossbeam_queue::SegQueue;
 
-        crate::runtime::trace::init_substrate_start();
+        trace::init_substrate_start();
         let queue = Arc::new(SegQueue::<TraceEvent>::new());
-        crate::runtime::trace::install_trace_queue(Arc::clone(&queue));
-        let live = crate::runtime::trace::trace_queue()
-            .expect("trace queue installed")
-            .clone();
+        trace::install_trace_queue(Arc::clone(&queue));
+        let live = trace::trace_queue().expect("trace queue installed").clone();
 
         let (_registry, mailer) = fresh_substrate();
         // Different unique sender so this test's filter doesn't catch

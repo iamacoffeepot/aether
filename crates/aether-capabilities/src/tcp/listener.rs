@@ -39,6 +39,7 @@ mod listener_native {
     use std::time::Duration;
 
     use crate::tcp::session::{TcpSessionActor, TcpSessionConfig};
+    use std::thread;
 
     /// Init config for [`TcpListenerActor`]. `TcpCapability::on_bind`
     /// binds the socket on the dispatcher thread (so addr-parse / port-
@@ -102,7 +103,7 @@ mod listener_native {
             let self_id = ctx.self_id();
             let connection_ready_kind = KindId(<ConnectionReady as Kind>::ID.0);
 
-            let thread = std::thread::Builder::new()
+            let thread = thread::Builder::new()
                 .name(format!("aether-tcp-accept-{port}"))
                 .spawn(move || {
                     while !shutdown_for_thread.load(Ordering::Acquire) {

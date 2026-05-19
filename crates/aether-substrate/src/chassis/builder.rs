@@ -26,19 +26,44 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::dispatch;
+use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeDispatch, NativeInitCtx};
 use crate::chassis::Chassis;
+use crate::chassis::ctx::MailboxSender;
+use crate::chassis::ctx::MailboxWakeSlot;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
+use crate::chassis::settlement::SettlementRegistry;
+use crate::mail::Mail;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+use crate::runtime::log_install;
+use crate::runtime::log_install::MailDispatch;
+use crate::runtime::trace;
+use crate::runtime::trace::TraceDrainerHandle;
+use crate::scheduler::Drainable;
+use crate::scheduler::WakeHandle;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Actor;
 use aether_actor::HandlesKind;
+use aether_actor::local;
+use aether_actor::local::ActorSlots;
+use aether_actor::log;
 use aether_data::mailbox_id_from_name;
+use aether_kinds::trace::Settled;
+use aether_kinds::trace::TraceEvent;
 use aether_kinds::{ConfigureLogDrain, LogBatch};
+use std::any::Any;
+use std::any::TypeId;
+use std::io;
+use std::mem;
+use std::sync::Weak;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// Failure mode raised by [`DriverRunning::run`].
 #[derive(Debug)]
@@ -199,7 +224,7 @@ impl<'a> DriverCtx<'a> {
     /// driver-facing sub-handle bundles without reaching for the cap
     /// itself.
     #[must_use]
-    pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
+    pub fn handle<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
         self.handles.get::<H>()
     }
 }
@@ -337,10 +362,10 @@ impl PassiveBoot for FallbackRouterBoot {
 struct ClaimResources {
     mailbox_id: MailboxId,
     transport: Arc<NativeBinding>,
-    mailbox_sender: crate::chassis::ctx::MailboxSender,
+    mailbox_sender: MailboxSender,
     pending: Option<Arc<AtomicU64>>,
-    wake_slot: Arc<crate::chassis::ctx::MailboxWakeSlot>,
-    slots: Box<aether_actor::local::ActorSlots>,
+    wake_slot: Arc<MailboxWakeSlot>,
+    slots: Box<ActorSlots>,
 }
 
 /// Phase state of a [`NativeActorBoot`] — variants carry exactly the
@@ -407,8 +432,7 @@ impl<A: NativeActor + NativeDispatch> NativeActorBoot<A> {
 
 impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
-        let BootState::Pending { config } =
-            std::mem::replace(&mut self.state, BootState::Transitioning)
+        let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
             panic!("PassiveBoot::claim called in non-Pending state");
         };
@@ -423,14 +447,14 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         if ctx
             .spawner_arc()
             .actor_registry()
-            .try_claim_namespace(A::NAMESPACE, std::any::TypeId::of::<A>())
+            .try_claim_namespace(A::NAMESPACE, TypeId::of::<A>())
             .is_err()
         {
             // The other claim is on the same namespace by a different
             // TypeId — a chassis-build collision. State stays
             // `Transitioning` (no resources held); cleanup_after_failure
             // sees that and does nothing.
-            return Err(BootError::Other(Box::new(std::io::Error::other(format!(
+            return Err(BootError::Other(Box::new(io::Error::other(format!(
                 "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
                 A::NAMESPACE
             )))));
@@ -477,7 +501,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 // claiming the same namespace can't (issue 607 Phase 7).
                 ctx.spawner_arc()
                     .actor_registry()
-                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 // State stays `Transitioning` — no further cleanup
                 // for the rollback loop to do.
                 return Err(e);
@@ -495,7 +519,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // `init`, `wire`, and each handler dispatch so library code
         // inside the actor (e.g., the issue-581 log buffer) can reach
         // `Local::with_mut` without threading a ctx through.
-        let slots = Box::new(aether_actor::local::ActorSlots::new());
+        let slots = Box::new(ActorSlots::new());
 
         self.state = BootState::Claimed {
             resources: ClaimResources {
@@ -517,7 +541,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         handles: &mut ExportedHandles,
     ) -> Result<(), BootError> {
         let BootState::Claimed { resources, config } =
-            std::mem::replace(&mut self.state, BootState::Transitioning)
+            mem::replace(&mut self.state, BootState::Transitioning)
         else {
             panic!("PassiveBoot::init called in non-Claimed state");
         };
@@ -529,15 +553,12 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         let init_result = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
-            aether_actor::local::with_stamped(&resources.slots, || {
-                crate::runtime::log_install::with_actor_dispatch(
-                    &*resources.transport as &dyn crate::runtime::log_install::MailDispatch,
-                    || {
-                        let r = A::init(config, &mut init_ctx);
-                        aether_actor::log::drain_buffer();
-                        r
-                    },
-                )
+            local::with_stamped(&resources.slots, || {
+                log_install::with_actor_dispatch(&*resources.transport as &dyn MailDispatch, || {
+                    let r = A::init(config, &mut init_ctx);
+                    log::drain_buffer();
+                    r
+                })
             })
         };
         let actor = match init_result {
@@ -551,7 +572,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 ctx.unclaim_mailbox(resources.mailbox_id);
                 ctx.spawner_arc()
                     .actor_registry()
-                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 drop(resources);
                 // State stays `Transitioning` — no further work for
                 // the rollback loop to do.
@@ -571,7 +592,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         let BootState::Initialized {
             resources,
             mut actor,
-        } = std::mem::replace(&mut self.state, BootState::Transitioning)
+        } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
             panic!("PassiveBoot::wire called in non-Initialized state");
         };
@@ -584,20 +605,17 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // `with_stamped` + `with_actor_dispatch` envelope as `init`
         // and per-envelope dispatch so `Local<T>` and `tracing::*`
         // route identically.
-        aether_actor::local::with_stamped(&resources.slots, || {
-            crate::runtime::log_install::with_actor_dispatch(
-                &*resources.transport as &dyn crate::runtime::log_install::MailDispatch,
-                || {
-                    let mut wire_ctx = crate::actor::native::NativeCtx::new(
-                        &resources.transport,
-                        aether_data::ReplyTo::NONE,
-                        aether_data::MailId::NONE,
-                        aether_data::MailId::NONE,
-                    );
-                    actor.wire(&mut wire_ctx);
-                    aether_actor::log::drain_buffer();
-                },
-            );
+        local::with_stamped(&resources.slots, || {
+            log_install::with_actor_dispatch(&*resources.transport as &dyn MailDispatch, || {
+                let mut wire_ctx = crate::actor::native::NativeCtx::new(
+                    &resources.transport,
+                    aether_data::ReplyTo::NONE,
+                    aether_data::MailId::NONE,
+                    aether_data::MailId::NONE,
+                );
+                actor.wire(&mut wire_ctx);
+                log::drain_buffer();
+            });
         });
 
         self.state = BootState::Wired { resources, actor };
@@ -626,10 +644,10 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 let mailer_for_thread = ctx.mail_send_handle();
                 let self_id_for_thread = mailbox_id;
                 let thread_name = alloc_native_actor_thread_name::<A>();
-                let thread = std::thread::Builder::new()
+                let thread = thread::Builder::new()
                     .name(thread_name)
                     .spawn(move || {
-                        crate::actor::native::dispatch::dispatch_loop_run::<A>(
+                        dispatch::dispatch_loop_run::<A>(
                             &transport_for_thread,
                             &mut actor,
                             &slots,
@@ -653,7 +671,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 // pool wake hook on every accepted send.
                 let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
                 let mailer_clone = ctx.mail_send_handle();
-                let slot = crate::actor::native::dispatcher_slot::DispatcherSlot::<A>::new(
+                let slot = DispatcherSlot::<A>::new(
                     actor,
                     Arc::clone(&transport),
                     slots,
@@ -662,15 +680,11 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                     mailer_clone,
                     mailbox_id,
                 );
-                let slot_dyn: Arc<dyn crate::scheduler::Drainable> = slot.clone();
-                let weak: std::sync::Weak<dyn crate::scheduler::Drainable> =
-                    Arc::downgrade(&slot_dyn);
+                let slot_dyn: Arc<dyn Drainable> = slot.clone();
+                let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
                 drop(slot_dyn);
-                let wake = crate::scheduler::WakeHandle::new(
-                    Arc::clone(slot.state()),
-                    weak,
-                    ctx.pool_ready_tx().clone(),
-                );
+                let wake =
+                    WakeHandle::new(Arc::clone(slot.state()), weak, ctx.pool_ready_tx().clone());
                 // Issue 697 multi-pass: mail addressed at this actor
                 // during the wire pass landed in its inbox before the
                 // wake hook was installed, so the closure-side wake
@@ -710,7 +724,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 ctx.unclaim_mailbox(resources.mailbox_id);
                 ctx.spawner_arc()
                     .actor_registry()
-                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
             }
         }
     }
@@ -734,8 +748,8 @@ struct PooledActorShutdown<A>
 where
     A: NativeActor + NativeDispatch,
 {
-    slot: Option<Arc<crate::actor::native::dispatcher_slot::DispatcherSlot<A>>>,
-    mailbox_sender: Option<crate::chassis::ctx::MailboxSender>,
+    slot: Option<Arc<DispatcherSlot<A>>>,
+    mailbox_sender: Option<MailboxSender>,
 }
 
 impl<A> DynShutdown for PooledActorShutdown<A>
@@ -769,8 +783,8 @@ fn alloc_native_actor_thread_name<A: Actor>() -> String {
 /// to disconnect the channel (the dispatcher's `recv_blocking` returns
 /// `None` and the thread exits), then joins the thread.
 struct NativeActorShutdown {
-    thread: Option<std::thread::JoinHandle<()>>,
-    mailbox_sender: Option<crate::chassis::ctx::MailboxSender>,
+    thread: Option<JoinHandle<()>>,
+    mailbox_sender: Option<MailboxSender>,
 }
 
 impl DynShutdown for NativeActorShutdown {
@@ -1126,14 +1140,14 @@ struct BootedPassives {
     /// order, so the last batch may target an already-dead
     /// `TraceObserver` mailbox — that's acceptable: the observer cap
     /// drained its inbox during its own dispatcher's phase-2 drain.
-    _trace_drainer: crate::runtime::trace::TraceDrainerHandle,
+    _trace_drainer: TraceDrainerHandle,
     /// ADR-0080 §6 settlement registry. Cloned into the Mailer's
     /// chassis-router closure (which decodes `Settled { root }`
     /// mail addressed to `CHASSIS_MAILBOX_ID` and signals
     /// subscribers); reachable from `BootedPassives`-holders via
     /// [`Self::settlement_registry`] for PR 4 gate-site
     /// `subscribe_settlement` calls.
-    settlement_registry: Arc<super::settlement::SettlementRegistry>,
+    settlement_registry: Arc<SettlementRegistry>,
 }
 
 /// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
@@ -1161,7 +1175,7 @@ fn dispatch_configure_log_drain(
     for target in targets {
         let cfg = ConfigureLogDrain { mailbox: drain };
         let payload = bytemuck::bytes_of(&cfg).to_vec();
-        let mail = crate::mail::Mail::new(*target, kind, payload, 1);
+        let mail = Mail::new(*target, kind, payload, 1);
         mailer.push(mail);
     }
 }
@@ -1171,7 +1185,7 @@ impl BootedPassives {
     /// PR 4 gate-site code (lifecycle drains, the per-frame Tick
     /// barrier, `replace_component` drain) reaches for this to call
     /// `subscribe_settlement(root)` and wait on the returned receiver.
-    pub fn settlement_registry(&self) -> &Arc<super::settlement::SettlementRegistry> {
+    pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         &self.settlement_registry
     }
 
@@ -1183,8 +1197,7 @@ impl BootedPassives {
         // point (drops via `_pool` field order after this method
         // returns), so workers can drain the close cycles the
         // `shutdown_instanced` wakes queue.
-        self.spawner
-            .shutdown_instanced(std::time::Duration::from_secs(2));
+        self.spawner.shutdown_instanced(Duration::from_secs(2));
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
@@ -1241,12 +1254,11 @@ fn boot_passives(
     // owns the thread that batches events into mail addressed to the
     // `aether.trace` sink. The handle in `BootedPassives` joins the
     // thread on chassis tear down.
-    crate::runtime::trace::init_substrate_start();
-    let trace_queue: Arc<crossbeam_queue::SegQueue<aether_kinds::trace::TraceEvent>> =
+    trace::init_substrate_start();
+    let trace_queue: Arc<crossbeam_queue::SegQueue<TraceEvent>> =
         Arc::new(crossbeam_queue::SegQueue::new());
-    crate::runtime::trace::install_trace_queue(Arc::clone(&trace_queue));
-    let trace_drainer =
-        crate::runtime::trace::start_drainer(Arc::clone(&trace_queue), Arc::clone(mailer));
+    trace::install_trace_queue(Arc::clone(&trace_queue));
+    let trace_drainer = trace::start_drainer(Arc::clone(&trace_queue), Arc::clone(mailer));
 
     // ADR-0080 §6 settlement registry + chassis-mail router. The
     // registry owns the gate-site notification map; the router
@@ -1255,14 +1267,13 @@ fn boot_passives(
     // Other chassis-internal kinds (none today; future debugger /
     // describe_tree replies could land here) add matching arms inside
     // the router closure without touching the Mailer's surface.
-    let settlement_registry: Arc<super::settlement::SettlementRegistry> =
-        Arc::new(crate::chassis::settlement::SettlementRegistry::new());
+    let settlement_registry: Arc<SettlementRegistry> = Arc::new(SettlementRegistry::new());
     mailer.install_settlement_registry(Arc::clone(&settlement_registry));
     let registry_for_router = Arc::clone(&settlement_registry);
-    let settled_kind = <aether_kinds::trace::Settled as aether_data::Kind>::ID;
+    let settled_kind = <Settled as aether_data::Kind>::ID;
     mailer.install_chassis_router(Box::new(move |mail| {
         if mail.kind == settled_kind {
-            match postcard::from_bytes::<aether_kinds::trace::Settled>(&mail.payload) {
+            match postcard::from_bytes::<Settled>(&mail.payload) {
                 Ok(notice) => registry_for_router.fire_settled(notice.root),
                 Err(e) => tracing::warn!(
                     target: "aether_substrate::chassis::settlement",
@@ -1508,7 +1519,7 @@ impl<C: Chassis> BuiltChassis<C> {
         let full_name = format!("{}:{}", A::NAMESPACE, subname);
         let id = MailboxId(mailbox_id_from_name(&full_name).0);
         let type_id = self.booted.actor_registry.type_id_at(id)?;
-        if type_id != std::any::TypeId::of::<A>() {
+        if type_id != TypeId::of::<A>() {
             return None;
         }
         Some(id)
@@ -1610,7 +1621,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// that drive a `PassiveChassis` directly (`TestBench`, integration
     /// harnesses). `None` if no booted cap published a handle of that
     /// type.
-    pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
+    pub fn handle<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
         self.booted.handles.get::<H>()
     }
 
@@ -1619,7 +1630,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// for this to call `subscribe_settlement(root)`; PR 3 surfaces
     /// the accessor for tests that pump synthetic events through the
     /// trace pipeline and wait on the resulting `Settled` signal.
-    pub fn settlement_registry(&self) -> &Arc<super::settlement::SettlementRegistry> {
+    pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         self.booted.settlement_registry()
     }
 
@@ -1655,7 +1666,7 @@ impl<C: Chassis> PassiveChassis<C> {
         let full_name = format!("{}:{}", A::NAMESPACE, subname);
         let id = MailboxId(mailbox_id_from_name(&full_name).0);
         let type_id = self.booted.actor_registry.type_id_at(id)?;
-        if type_id != std::any::TypeId::of::<A>() {
+        if type_id != TypeId::of::<A>() {
             return None;
         }
         Some(id)
@@ -1714,6 +1725,17 @@ impl<C: Chassis> PassiveChassis<C> {
 )]
 mod tests {
     use super::*;
+    use crate::actor::monitor::MonitorHandle;
+    use crate::actor::native::ctx::NativeCtx;
+    use crate::handle_store::HandleStore;
+    use crate::mail::KindId;
+    use crate::mail::registry;
+    use std::io;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::Duration;
+    use std::time::Instant;
 
     /// Lightweight passive-cap fixture for chassis-level boot tests.
     /// The chassis-builder tests don't care about handler dispatch
@@ -1735,8 +1757,8 @@ mod tests {
     impl NativeDispatch for StubLog {
         fn __aether_dispatch_envelope(
             &mut self,
-            _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-            _kind: crate::mail::KindId,
+            _ctx: &mut NativeCtx<'_>,
+            _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
             None
@@ -1769,11 +1791,11 @@ mod tests {
 
     /// Test driver: records that it ran, then exits.
     struct RanDriver {
-        ran: Arc<std::sync::atomic::AtomicBool>,
+        ran: Arc<AtomicBool>,
     }
 
     struct RanDriverRunning {
-        ran: Arc<std::sync::atomic::AtomicBool>,
+        ran: Arc<AtomicBool>,
     }
 
     impl DriverCapability for RanDriver {
@@ -1785,14 +1807,14 @@ mod tests {
 
     impl DriverRunning for RanDriverRunning {
         fn run(self: Box<Self>) -> Result<(), RunError> {
-            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.ran.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
-        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         (registry, mailer)
     }
@@ -1804,7 +1826,7 @@ mod tests {
     #[test]
     fn driver_build_runs_driver_and_tears_down_passives() {
         let (registry, mailer) = fresh_substrate();
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran = Arc::new(AtomicBool::new(false));
 
         let chassis = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
             .with_actor::<StubLog>(())
@@ -1815,7 +1837,7 @@ mod tests {
             .expect("build succeeds");
 
         chassis.run().expect("driver run succeeds");
-        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(ran.load(Ordering::SeqCst));
     }
 
     /// Boot-time mailbox-claim collision aborts the build (and runs
@@ -1853,7 +1875,7 @@ mod tests {
         impl NativeActor for FailingCap {
             type Config = ();
             fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Err(BootError::Other(Box::new(std::io::Error::other(
+                Err(BootError::Other(Box::new(io::Error::other(
                     "intentional init failure for Phase 7 cleanup test",
                 ))))
             }
@@ -1861,8 +1883,8 @@ mod tests {
         impl NativeDispatch for FailingCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -1912,7 +1934,7 @@ mod tests {
         }
         impl Kind for Ping {
             const NAME: &'static str = "test.with_actor.ping";
-            const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0001);
+            const ID: KindId = KindId(0xA1B2_C3D4_E5F6_0001);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != size_of::<Self>() {
                     return None;
@@ -1948,8 +1970,8 @@ mod tests {
         impl NativeDispatch for ProbeCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Ping::ID.0 {
@@ -1986,7 +2008,7 @@ mod tests {
 
         let payload = Ping { tag: 0xDEAD_BEEF };
         let bytes = payload.encode_into_bytes();
-        handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        handler.enqueue(registry::test_owned_dispatch(
             <Ping as Kind>::ID,
             Ping::NAME,
             &bytes,
@@ -1994,9 +2016,9 @@ mod tests {
         ));
 
         // Wait briefly for the dispatcher thread to dispatch.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while received.load(AtomicOrdering::SeqCst) == 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             received.load(AtomicOrdering::SeqCst),
@@ -2033,8 +2055,8 @@ mod tests {
         impl NativeDispatch for FrameBoundProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -2075,7 +2097,7 @@ mod tests {
         }
         impl Kind for Tick {
             const NAME: &'static str = "test.local.tick";
-            const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0002);
+            const ID: KindId = KindId(0xA1B2_C3D4_E5F6_0002);
             fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != size_of::<Self>() {
                     return None;
@@ -2123,8 +2145,8 @@ mod tests {
         impl NativeDispatch for LocalProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Tick::ID.0 {
@@ -2160,7 +2182,7 @@ mod tests {
         for seq in 0..3 {
             let payload = Tick { seq };
             let bytes = payload.encode_into_bytes();
-            handler.enqueue(crate::mail::registry::test_owned_dispatch(
+            handler.enqueue(registry::test_owned_dispatch(
                 <Tick as Kind>::ID,
                 Tick::NAME,
                 &bytes,
@@ -2168,9 +2190,9 @@ mod tests {
             ));
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while observed.load(AtomicOrdering::SeqCst) != 103 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while observed.load(AtomicOrdering::SeqCst) != 103 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             observed.load(AtomicOrdering::SeqCst),
@@ -2250,8 +2272,8 @@ mod tests {
         impl NativeDispatch for ChildCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Ping::ID.0 {
@@ -2287,8 +2309,8 @@ mod tests {
         impl NativeDispatch for ParentCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Hatch::ID.0 {
@@ -2324,18 +2346,16 @@ mod tests {
             panic!("expected mailbox entry");
         };
         let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-        handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        handler.enqueue(registry::test_owned_dispatch(
             <Hatch as Kind>::ID,
             Hatch::NAME,
             &bytes,
             1,
         ));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while child_received.load(AtomicOrdering::SeqCst) < 1
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while child_received.load(AtomicOrdering::SeqCst) < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             spawn_count.load(AtomicOrdering::SeqCst),
@@ -2405,15 +2425,15 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl NativeDispatch for Closer {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Quit::ID.0 {
@@ -2444,7 +2464,7 @@ mod tests {
             panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
-        handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        handler.enqueue(registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &bytes,
@@ -2452,11 +2472,9 @@ mod tests {
         ));
 
         // Wait for unwire to run + the registry slot to flip Dead.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while close_observed.load(AtomicOrdering::SeqCst) == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             close_observed.load(AtomicOrdering::SeqCst),
@@ -2467,9 +2485,9 @@ mod tests {
         // thread runs `mark_dead` after `unwire`, so there's a
         // small window between the close-observed bump above and the
         // registry update.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().is_live(id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert!(
             !chassis.actor_registry().is_live(id),
@@ -2524,15 +2542,15 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl NativeDispatch for Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -2595,15 +2613,15 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl NativeDispatch for Quiet {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -2715,8 +2733,8 @@ mod tests {
         impl NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Quit::ID.0 {
@@ -2734,7 +2752,7 @@ mod tests {
         struct Watcher {
             notice_count: Arc<AtomicU32>,
             last_target: Arc<AtomicU64>,
-            handle: Mutex<Option<crate::actor::monitor::MonitorHandle>>,
+            handle: Mutex<Option<MonitorHandle>>,
         }
         impl Actor for Watcher {
             const NAMESPACE: &'static str = "test.monitor.watcher";
@@ -2755,8 +2773,8 @@ mod tests {
         impl NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == WatchOrder::ID.0 {
@@ -2812,7 +2830,7 @@ mod tests {
         let order = WatchOrder {
             target_id: target_id.0,
         };
-        watcher_handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        watcher_handler.enqueue(registry::test_owned_dispatch(
             <WatchOrder as Kind>::ID,
             WatchOrder::NAME,
             &order.encode_into_bytes(),
@@ -2820,11 +2838,9 @@ mod tests {
         ));
 
         // Wait until the registry sees the monitor entry.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().monitor_count(target_id) == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().monitor_count(target_id) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             chassis.actor_registry().monitor_count(target_id),
@@ -2845,7 +2861,7 @@ mod tests {
         else {
             panic!("expected mailbox entry for target");
         };
-        target_handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        target_handler.enqueue(registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
@@ -2853,10 +2869,9 @@ mod tests {
         ));
 
         // Wait for the notice to land at the watcher.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while notice_count.load(AtomicOrdering::SeqCst) == 0 && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while notice_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             notice_count.load(AtomicOrdering::SeqCst),
@@ -2871,9 +2886,9 @@ mod tests {
 
         // Wait for target slot to flip Dead (the close path runs
         // close_actor → mark_dead after fan-out).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().is_live(target_id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(target_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert!(
             !chassis.actor_registry().is_live(target_id),
@@ -2958,8 +2973,8 @@ mod tests {
         impl NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -2967,7 +2982,7 @@ mod tests {
         }
 
         struct Watcher {
-            handle: Mutex<Option<crate::actor::monitor::MonitorHandle>>,
+            handle: Mutex<Option<MonitorHandle>>,
             close_observed: Arc<AtomicU32>,
         }
         impl Actor for Watcher {
@@ -2984,15 +2999,15 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == WatchOrder::ID.0 {
@@ -3035,7 +3050,7 @@ mod tests {
         let order = WatchOrder {
             target_id: target_id.0,
         };
-        watcher_handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        watcher_handler.enqueue(registry::test_owned_dispatch(
             <WatchOrder as Kind>::ID,
             WatchOrder::NAME,
             &order.encode_into_bytes(),
@@ -3043,28 +3058,24 @@ mod tests {
         ));
 
         // Wait for register to land.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().monitor_count(target_id) == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().monitor_count(target_id) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(chassis.actor_registry().monitor_count(target_id), 1);
 
         // Quit watcher — its close path walks `monitoring[watcher]` and
         // prunes watcher from `monitors_of[target]`.
-        watcher_handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        watcher_handler.enqueue(registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
             1,
         ));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while close_observed.load(AtomicOrdering::SeqCst) == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             close_observed.load(AtomicOrdering::SeqCst),
@@ -3074,9 +3085,9 @@ mod tests {
 
         // Watcher slot tombstones; target slot still Live; target's
         // forward index drained of the dead watcher.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().is_live(watcher_id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(watcher_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert!(
             chassis.actor_registry().is_tombstoned(watcher_id),
@@ -3153,8 +3164,8 @@ mod tests {
         impl NativeDispatch for Member {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Quit::ID.0 {
@@ -3219,7 +3230,7 @@ mod tests {
         let MailboxEntry::Inbox(handler) = registry.entry(id_c).expect("c sink registered") else {
             panic!("expected mailbox entry for c");
         };
-        handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        handler.enqueue(registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
@@ -3227,9 +3238,9 @@ mod tests {
         ));
 
         // Wait for c's slot to flip Dead.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().is_live(id_c) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(id_c) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
 
         assert!(
@@ -3279,8 +3290,8 @@ mod tests {
         impl NativeDispatch for Foo {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -3301,8 +3312,8 @@ mod tests {
         impl NativeDispatch for Bar {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -3435,8 +3446,8 @@ mod tests {
         impl NativeDispatch for Grandchild {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Ping::ID.0 {
@@ -3468,8 +3479,8 @@ mod tests {
         impl NativeDispatch for Parent {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == Hatch::ID.0 {
@@ -3514,7 +3525,7 @@ mod tests {
         else {
             panic!("expected mailbox entry for parent");
         };
-        parent_handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        parent_handler.enqueue(registry::test_owned_dispatch(
             <Hatch as Kind>::ID,
             Hatch::NAME,
             &(Hatch { tag: 1 }).encode_into_bytes(),
@@ -3524,11 +3535,9 @@ mod tests {
         // Wait for the grandchild's after_init Ping to dispatch (proves
         // the recursive spawn happened AND the after_init plumbing
         // works through it).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while grandchild_received.load(AtomicOrdering::SeqCst) == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while grandchild_received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             grandchild_received.load(AtomicOrdering::SeqCst),
@@ -3562,7 +3571,7 @@ mod tests {
         // Closing the parent does NOT cascade-close the grandchild.
         // Parent-child shutdown coupling is opt-in via monitor; without
         // it, the grandchild keeps running.
-        parent_handler.enqueue(crate::mail::registry::test_owned_dispatch(
+        parent_handler.enqueue(registry::test_owned_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
             &(Quit { tag: 1 }).encode_into_bytes(),
@@ -3570,9 +3579,9 @@ mod tests {
         ));
 
         // Wait for parent slot to flip Dead.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().is_live(parent_id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while chassis.actor_registry().is_live(parent_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert!(
             chassis.actor_registry().is_tombstoned(parent_id),
@@ -3610,15 +3619,15 @@ mod tests {
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_count: config })
             }
-            fn wire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl NativeDispatch for WireProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -3698,7 +3707,7 @@ mod tests {
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_ran: config })
             }
-            fn wire(&mut self, ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
                 ctx.send_to_named::<WireBarrierPing>(
                     Ponger::NAMESPACE,
                     &WireBarrierPing { tag: 1 },
@@ -3709,8 +3718,8 @@ mod tests {
         impl NativeDispatch for Pinger {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -3734,8 +3743,8 @@ mod tests {
         impl NativeDispatch for Ponger {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
                 if kind.0 == WireBarrierPing::ID.0 {
@@ -3770,9 +3779,9 @@ mod tests {
         );
 
         // Wait for Ponger's dispatcher to drain the wire-emitted ping.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while received.load(AtomicOrdering::SeqCst) == 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             received.load(AtomicOrdering::SeqCst),
@@ -3807,15 +3816,15 @@ mod tests {
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { wire_count: config })
             }
-            fn wire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
                 self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl NativeDispatch for WireSpawnProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
-                _kind: crate::mail::KindId,
+                _ctx: &mut NativeCtx<'_>,
+                _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
                 None
@@ -3876,7 +3885,7 @@ mod tests {
     #[test]
     fn with_workers_survives_driver_transition() {
         let (registry, mailer) = fresh_substrate();
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran = Arc::new(AtomicBool::new(false));
         let builder = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
             .with_workers(Some(3))
             .driver(RanDriver {
