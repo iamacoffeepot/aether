@@ -18,27 +18,35 @@
 //! states with no declared quit edge — only states that declare
 //! `.quit::<K>()` consume the flag.
 //!
-//! **PR 2 scope.** This implementation is fire-and-advance — the driver
-//! broadcasts then advances without awaiting settlement. ADR-0082 §6
-//! settlement gating lands in PR 3 (chassis migration) when settlement
-//! integration becomes load-bearing. The `LifecycleAdvance` mail itself is
-//! fire-and-forget (no reply); subscribe / unsubscribe return
-//! [`LifecycleSubscribeResult`] so callers learn fail-fast about
-//! unsupported stages per ADR-0082 §7.
+//! **Settlement gating (ADR-0082 §6).** `on_advance` broadcasts to
+//! subscribers, captures the inbound chain root, and subscribes the
+//! settlement registry's mail notice for that root. State pointer
+//! mutation is deferred to `on_settled`, where the driver also
+//! replies [`LifecycleAdvanceComplete`] to the chassis main loop
+//! that issued the [`LifecycleAdvance`] — chassis loops wait-reply
+//! on it, so cadence couples to actual subscriber drain time. When
+//! no settlement registry is wired (test harness, future chassis
+//! without trace pipeline) the driver falls back to fire-and-advance.
+//! Subscribe / unsubscribe return [`LifecycleSubscribeResult`] so
+//! callers learn fail-fast about unsupported stages per §7.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use aether_actor::{OutboundReply, actor};
-use aether_data::{KindId, MailboxId as DataMailboxId};
+use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
+use aether_kinds::trace::Settled;
 use aether_kinds::{
-    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeResult, LifecycleUnsubscribe, Quit,
+    LifecycleAdvance, LifecycleAdvanceComplete, LifecycleSubscribe, LifecycleSubscribeResult,
+    LifecycleUnsubscribe, Quit,
 };
 
 use super::graph::{LifecycleGraph, LifecycleState};
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::error::BootError;
-use crate::mail::MailboxId;
+use crate::mail::mailer::Mailer;
+use crate::mail::{MailId, MailboxId, ReplyTo};
 
 /// Internal state-advance decision produced by `on_advance` before the
 /// driver mutates its own fields. Declared at module scope to keep the
@@ -97,9 +105,46 @@ pub struct LifecycleDriverCapability<C: 'static + Send + Sync> {
     /// Quit flag (ADR-0082 §3). Set by inbound [`Quit`] mail; consumed
     /// at the next state whose graph declares a `quit` edge.
     quit_pending: bool,
+    /// In-flight advance awaiting settlement (ADR-0082 §6). Set in
+    /// `on_advance` after the broadcast subscribes settlement on the
+    /// chain root; consumed in `on_settled` when the matching
+    /// `Settled` mail arrives. While `Some`, additional inbound
+    /// `LifecycleAdvance` mails warn-and-drop — the chassis main loop
+    /// `wait_reply`s on `LifecycleAdvanceComplete` so duplicates only
+    /// happen on broken cadence sources.
+    pending: Option<PendingAdvance>,
+    /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
+    /// calls inside handlers (which only have `&mut self` + `&mut
+    /// NativeCtx`, not a way to clone the mailer cheaply otherwise).
+    mailer: Arc<Mailer>,
     /// Marker so the unused `C` type parameter is retained even when
     /// the only direct use of `C` is through the graph's factories.
     _marker: PhantomData<fn() -> C>,
+}
+
+/// Per-advance state tracked across `on_advance` → `on_settled`. Holds
+/// the chain root for matching the inbound `Settled` mail and the
+/// reply target / payload fields needed to emit
+/// [`LifecycleAdvanceComplete`] once settlement fires.
+struct PendingAdvance {
+    /// Causal-chain root of the in-flight broadcast (ADR-0080 §6).
+    /// Compared against the [`Settled`] payload's `root` to confirm
+    /// the inbound notice corresponds to *this* advance rather than a
+    /// stale subscription from a prior root that hasn't been GC'd.
+    root: MailId,
+    /// Kind id of the state the driver just broadcast — echoed in the
+    /// `completed` field of [`LifecycleAdvanceComplete`].
+    completed_kind: KindId,
+    /// Kind id of the state the driver will broadcast on the *next*
+    /// advance — echoed in the `next` field. `KindId(0)` when the
+    /// settling broadcast was a terminal (`terminal_reached` flips
+    /// alongside).
+    next_kind: KindId,
+    /// True if the settling broadcast is a terminal state.
+    is_terminal: bool,
+    /// Original chassis sender of the [`LifecycleAdvance`] mail.
+    /// `LifecycleAdvanceComplete` reply target.
+    reply_to: ReplyTo,
 }
 
 #[actor]
@@ -109,10 +154,11 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
 
     fn init(
         config: LifecycleDriverConfig<C>,
-        _ctx: &mut NativeInitCtx<'_>,
+        ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
         let LifecycleDriverConfig { graph, context } = config;
         let current_state = graph.start();
+        let mailer = ctx.mailer();
         Ok(Self {
             graph,
             context,
@@ -120,6 +166,8 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
             current_state,
             terminal_reached: false,
             quit_pending: false,
+            pending: None,
+            mailer,
             _marker: PhantomData,
         })
     }
@@ -196,26 +244,46 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
 
     /// Drive the lifecycle one step (ADR-0082 §2). Broadcast the
     /// current state's payload to every subscriber registered for
-    /// that stage, then advance the state pointer along the resolved
-    /// edge (`quit` if `quit_pending` is set and the state declares
-    /// a quit edge, otherwise `next`).
-    ///
-    /// Fire-and-advance: PR 2 does not await settlement before
-    /// advancing. PR 3's chassis migration adds settlement gating.
-    /// Fire-and-forget mail — no reply is sent.
+    /// that stage, subscribe settlement on the broadcast root, and
+    /// stash a [`PendingAdvance`] until [`Settled`] arrives. The
+    /// state pointer mutates *in* [`Self::on_settled`], not here,
+    /// so a chassis that overruns its cadence and sends two
+    /// `LifecycleAdvance` mails in close succession sees the second
+    /// warn-drop rather than skipping ahead through unsettled
+    /// states.
     ///
     /// # Agent
-    /// `LifecycleAdvance {}`. Sent by the chassis main loop each frame
-    /// (winit redraw, headless std-timer, etc.).
+    /// `LifecycleAdvance {}`. Sent by the chassis main loop each
+    /// frame (winit redraw, headless std-timer, etc.). Reply:
+    /// [`LifecycleAdvanceComplete`] once the broadcast root settles.
     #[handler]
     fn on_advance(&mut self, ctx: &mut NativeCtx<'_>, _payload: LifecycleAdvance) {
         if self.terminal_reached {
+            // Already done — reply immediately with zeros so the
+            // chassis main loop unblocks and can break its loop on
+            // `next == 0`.
+            ctx.reply(&LifecycleAdvanceComplete {
+                completed: 0,
+                next: 0,
+            });
             return;
         }
 
-        // Decide what to broadcast and what edge to take. Borrow the
-        // immutable graph data first so we can release before mutating
-        // self.quit_pending / self.current_state.
+        if self.pending.is_some() {
+            // Overlap: a prior advance hasn't settled yet. The
+            // contract is that the chassis main loop wait-replies on
+            // every Advance, so this is a programmer error or a
+            // duplicate-cadence-source bug. Warn-and-drop the duplicate
+            // without state mutation.
+            tracing::warn!(
+                target: "aether_substrate::lifecycle",
+                current = ?self.current_state,
+                "LifecycleAdvance received while a prior advance is still in flight; dropping"
+            );
+            return;
+        }
+
+        // Decide what to broadcast and the post-settlement state.
         let step = if let Some(state) = self.graph.state(self.current_state) {
             let bytes = (state.factory)(&self.context);
             let next = resolve_edge(state, &mut self.quit_pending);
@@ -231,27 +299,107 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
                 broadcast: self.current_state,
             }
         } else {
-            // Should not be reachable — current_state always points to
-            // a registered state or terminal per builder finalize.
-            // Defensive no-op.
+            // Defensive — builder finalize prevents this.
             Step::Unknown
         };
 
-        match step {
+        let (bytes, broadcast, next_kind, is_terminal) = match step {
             Step::StateAdvance {
                 bytes,
                 broadcast,
                 next,
-            } => {
-                broadcast_to_subscribers(ctx, &self.subscribers, broadcast, &bytes);
-                self.current_state = next;
+            } => (bytes, broadcast, next, false),
+            Step::Terminal { bytes, broadcast } => (bytes, broadcast, KindId(0), true),
+            Step::Unknown => {
+                ctx.reply(&LifecycleAdvanceComplete {
+                    completed: 0,
+                    next: 0,
+                });
+                return;
             }
-            Step::Terminal { bytes, broadcast } => {
-                broadcast_to_subscribers(ctx, &self.subscribers, broadcast, &bytes);
+        };
+
+        // Broadcast first — children inherit the inbound's chain root
+        // and parent edge. ADR-0080 settlement counts each child as
+        // in-flight against the root.
+        broadcast_to_subscribers(ctx, &self.subscribers, broadcast, &bytes);
+
+        // Subscribe settlement on the inbound's chain root. The
+        // broadcast subtree is part of that chain; settlement fires
+        // once the inbound's `Finished` event drops the in-flight
+        // count to zero (which includes every fan-out descendant).
+        let root = ctx.in_flight_root();
+        let reply_to = ctx.reply_target();
+        if let Some(registry) = self.mailer.settlement_registry() {
+            registry.subscribe_settlement_mail(
+                root,
+                mailbox_id_from_name("aether.lifecycle"),
+                <Settled as Kind>::ID,
+                Arc::clone(&self.mailer),
+            );
+            self.pending = Some(PendingAdvance {
+                root,
+                completed_kind: broadcast,
+                next_kind,
+                is_terminal,
+                reply_to,
+            });
+        } else {
+            // No settlement registry wired (test harness without
+            // tracing). Fall back to fire-and-advance: reply
+            // immediately and mutate state inline.
+            if is_terminal {
                 self.terminal_reached = true;
+            } else {
+                self.current_state = next_kind;
             }
-            Step::Unknown => {}
+            ctx.reply(&LifecycleAdvanceComplete {
+                completed: broadcast.0,
+                next: next_kind.0,
+            });
         }
+    }
+
+    /// Settlement notice for the broadcast root pending in
+    /// [`Self::pending`] (ADR-0082 §6). Advances the state pointer,
+    /// flips `terminal_reached` if the settling broadcast was a
+    /// terminal, and replies [`LifecycleAdvanceComplete`] to the
+    /// chassis main loop that issued the [`LifecycleAdvance`].
+    ///
+    /// `Settled` notices for unrelated roots (stale subscriptions
+    /// from a torn-down session, post-terminal cleanup events) drop
+    /// without state mutation.
+    ///
+    /// # Agent
+    /// `Settled { root }`. Synthesised by the settlement registry
+    /// when the in-flight count for `root` reaches zero; not a
+    /// public API for user code.
+    #[handler]
+    fn on_settled(&mut self, ctx: &mut NativeCtx<'_>, payload: Settled) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        if payload.root != pending.root {
+            return;
+        }
+        let LifecycleAdvanceComplete { completed, next } = LifecycleAdvanceComplete {
+            completed: pending.completed_kind.0,
+            next: pending.next_kind.0,
+        };
+        let reply_to = pending.reply_to;
+        let is_terminal = pending.is_terminal;
+        let next_kind = pending.next_kind;
+        // Drop pending before reply so the reply-side mutation is
+        // visible if a follow-on Advance lands inside the reply path.
+        self.pending = None;
+        if is_terminal {
+            self.terminal_reached = true;
+        } else {
+            self.current_state = next_kind;
+        }
+        // Route the reply to whoever issued the LifecycleAdvance —
+        // chassis main loops `wait_reply` on it to gate the next frame.
+        ctx.reply_to(reply_to, &LifecycleAdvanceComplete { completed, next });
     }
 }
 
@@ -323,7 +471,9 @@ mod tests {
     //! advance integration is delayed.
 
     use super::*;
+    use crate::handle_store::HandleStore;
     use crate::lifecycle::graph::{LifecycleGraph, LifecycleState};
+    use crate::mail::registry::Registry;
     use aether_data::Kind;
     use aether_kinds::{Present, Render, Shutdown};
 
@@ -392,6 +542,10 @@ mod tests {
             .build()
             .expect("test setup: graph builds");
 
+        let mailer = Arc::new(Mailer::new(
+            Arc::new(Registry::default()),
+            Arc::new(HandleStore::new(1024)),
+        ));
         let driver: LifecycleDriverCapability<()> = LifecycleDriverCapability {
             current_state: graph.start(),
             graph,
@@ -399,6 +553,8 @@ mod tests {
             subscribers: BTreeMap::new(),
             terminal_reached: false,
             quit_pending: false,
+            pending: None,
+            mailer,
             _marker: PhantomData,
         };
 

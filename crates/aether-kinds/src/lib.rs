@@ -211,6 +211,32 @@ pub struct Quit;
 #[kind(name = "aether.lifecycle.advance")]
 pub struct LifecycleAdvance;
 
+/// Reply to [`LifecycleAdvance`] signalling that the stage's broadcast
+/// root has settled (ADR-0082 §6). The chassis main loop wait-replies
+/// on this so cadence couples to actual work completion — back-pressure
+/// flows from subscriber drain time back to the chassis. `completed`
+/// is the kind id of the state the driver just finished broadcasting;
+/// `next` is the kind id of the state the driver will broadcast on the
+/// next [`LifecycleAdvance`], or `0` when the lifecycle reached a
+/// terminal state.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.lifecycle.advance_complete")]
+pub struct LifecycleAdvanceComplete {
+    pub completed: u64,
+    pub next: u64,
+}
+
 /// Subscribe a mailbox to a lifecycle stage broadcast (ADR-0082 §7).
 /// `stage` is the [`KindId`](aether_data::KindId) of the stage kind
 /// (e.g. `<Tick as Kind>::ID.0`); `mailbox` is the subscriber's mailbox
@@ -2012,6 +2038,10 @@ mod tests {
         assert_eq!(Shutdown::NAME, "aether.lifecycle.shutdown");
         assert_eq!(Quit::NAME, "aether.lifecycle.quit");
         assert_eq!(LifecycleAdvance::NAME, "aether.lifecycle.advance");
+        assert_eq!(
+            LifecycleAdvanceComplete::NAME,
+            "aether.lifecycle.advance_complete"
+        );
         assert_eq!(LifecycleSubscribe::NAME, "aether.lifecycle.subscribe");
         assert_eq!(LifecycleUnsubscribe::NAME, "aether.lifecycle.unsubscribe");
         assert_eq!(
