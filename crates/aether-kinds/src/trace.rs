@@ -96,6 +96,25 @@ pub enum TraceEvent {
         mail_id: MailId,
         t: Nanos,
     },
+    /// ADR-0080 §12 / iamacoffeepot/aether#716: a thread-spawn primitive
+    /// (currently `InheritCtx<A>` via `NativeCtx::spawn_inherit`) acquired
+    /// a `SettlementHold` against `root`. The observer increments the
+    /// root's `held_open` counter and gates `Settled` emission on
+    /// `(in_flight == 0 && held_open == 0)`. Pushed by the parent thread
+    /// before the worker thread is spawned, so by the time `Finished`
+    /// lands for the parent handler the hold is already visible.
+    HoldOpen {
+        root: MailId,
+        t: Nanos,
+    },
+    /// Companion to [`Self::HoldOpen`]. Pushed by `SettlementHold`'s
+    /// `Drop` impl when the worker thread exits; the observer decrements
+    /// the root's `held_open` counter and may fire `Settled` if both
+    /// counters reached zero.
+    Release {
+        root: MailId,
+        t: Nanos,
+    },
 }
 
 /// ADR-0080 §3: a batch of [`TraceEvent`]s the chassis drainer ships

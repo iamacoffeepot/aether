@@ -832,6 +832,9 @@ mod tests {
                 TraceEvent::Sent { mail_id, .. }
                 | TraceEvent::Received { mail_id, .. }
                 | TraceEvent::Finished { mail_id, .. } => mail_id.sender == sender,
+                TraceEvent::HoldOpen { root, .. } | TraceEvent::Release { root, .. } => {
+                    root.sender == sender
+                }
             };
             if belongs {
                 out.push(event);

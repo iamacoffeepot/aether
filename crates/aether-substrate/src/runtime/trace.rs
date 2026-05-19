@@ -169,6 +169,65 @@ pub fn record_finished(mail_id: MailId) {
     });
 }
 
+/// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a `SettlementHold`
+/// against `root`. The returned guard increments the root's `held_open`
+/// counter (via a [`TraceEvent::HoldOpen`] pushed inline) and decrements
+/// it again on `Drop` (via [`TraceEvent::Release`]). Settlement for
+/// `root` gates on `(in_flight == 0 && held_open == 0)`, so any thread
+/// that outlives its spawning handler (`InheritCtx<A>` from
+/// [`crate::actor::native::NativeCtx::spawn_inherit`]) keeps the chain
+/// open until it drops.
+///
+/// Acquired on the parent thread before the worker is spawned so the
+/// `HoldOpen` event is visible in the trace queue before the parent
+/// handler's `Finished` lands. Moving the guard into the worker thread
+/// (via the `InheritCtx<A>` ctor) ties release to the worker's lifetime.
+///
+/// No-op when the trace queue isn't installed (early-test paths,
+/// fixtures that bypass chassis boot). The returned guard still pushes
+/// `Release` on drop, but the observer simply ignores both events.
+#[must_use = "SettlementHold gates root settlement; storing _ silently fires Release"]
+pub fn acquire_settlement_hold(root: MailId) -> SettlementHold {
+    if let Some(queue) = TRACE_QUEUE.get() {
+        queue.push(TraceEvent::HoldOpen {
+            root,
+            t: now_nanos(),
+        });
+    }
+    SettlementHold { root }
+}
+
+/// RAII guard for an ADR-0080 §12 settlement hold. Construct via
+/// [`acquire_settlement_hold`]; drop fires [`TraceEvent::Release`] for
+/// the same root. The only public surface is the guard — `Release` is
+/// never a free function, so a paired `hold`/`release` mismatch is
+/// structurally impossible.
+#[derive(Debug)]
+pub struct SettlementHold {
+    root: MailId,
+}
+
+impl SettlementHold {
+    /// The root this hold gates. Exposed for diagnostics / tests; the
+    /// hold itself releases via `Drop`.
+    #[must_use]
+    pub fn root(&self) -> MailId {
+        self.root
+    }
+}
+
+impl Drop for SettlementHold {
+    fn drop(&mut self) {
+        let Some(queue) = TRACE_QUEUE.get() else {
+            return;
+        };
+        queue.push(TraceEvent::Release {
+            root: self.root,
+            t: now_nanos(),
+        });
+    }
+}
+
 /// ADR-0080 chassis-root push helper. Combines `MailId` minting,
 /// the `Sent` trace event emission, and the `Mailer::push` into one
 /// call so chassis-side mail (Tick fanout from the frame loop, hub-
