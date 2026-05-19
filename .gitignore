@@ -20,6 +20,7 @@ spikes/*/target/
 !.claude/skills/bounce/
 !.claude/skills/delegate/
 !.claude/skills/implement/
+!.claude/skills/wish/
 !.claude/skills/release-init/
 !.claude/skills/scope/
 !.claude/skills/scope-spinoff/
@@ -29,6 +30,10 @@ spikes/*/target/
 # not part of the source tree; issues filed from them link back to
 # the source instead.
 /audits/
+# Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run
+# markdown, not part of the source tree. Read locally, file the wishes you
+# like as issues, discard the file.
+/wishes/
 # Trace dumps from `dump_trace` (issue #730 / ADR-0080). Per-run
 # JSON, not part of the source tree — keep them out of /tmp so
 # they survive shell sessions and land somewhere predictable. The
