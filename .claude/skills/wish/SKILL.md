@@ -102,6 +102,58 @@ One `wish.md` per node. Directory nesting encodes wish nesting. Slugs are lowerc
 
 `index.md` at the top of the pass holds: date, theme, role, sources scanned, the list of root wishes with one-line summaries, the considered-and-dropped list, and notes. It's the navigation surface, not a duplicate of content.
 
+### Realistic shape — anti-shallow-bias example
+
+The abstract tree above shows depth 3 with placeholders. Real trees vary in depth per branch — some chains bottom out at depth 2, others spill 6+ deep. The shape emerges from the chain, not from a target. Here is a concrete worked example demonstrating that variance, so agents reading this skill don't anchor on the shallow placeholder layout:
+
+```
+wishes/2026-05-19-persistent-multiplayer/
+├── index.md
+├── persistent-world/
+│   ├── wish.md                                      ← system-level vision
+│   ├── alternatives/
+│   │   ├── eventually-consistent-shards/wish.md
+│   │   ├── single-authoritative-server/wish.md
+│   │   └── peer-mesh-no-server/wish.md
+│   ├── player-state-persistence/
+│   │   ├── wish.md                                  ← capability-level
+│   │   ├── alternatives/
+│   │   │   ├── per-component-disk-write/wish.md
+│   │   │   └── periodic-snapshot/wish.md
+│   │   ├── content-addressed-serialization/
+│   │   │   ├── wish.md                              ← mechanism-level
+│   │   │   ├── alternatives/
+│   │   │   │   └── time-keyed-serialization/wish.md
+│   │   │   ├── component-state-trait/
+│   │   │   │   ├── wish.md                          ← trait-level
+│   │   │   │   └── alternatives/
+│   │   │   │       └── runtime-reflection-based/wish.md
+│   │   │   └── on-disk-layout-for-handles/
+│   │   │       └── wish.md                          ← struct-level (leaf-plan)
+│   │   └── restore-on-reconnect/
+│   │       ├── wish.md                              ← interface-level
+│   │       └── correlation-id-for-resume/
+│   │           └── wish.md                          ← leaf-plan
+│   └── authoritative-simulation/
+│       ├── wish.md
+│       └── tick-rate-governor/
+│           └── wish.md                              ← leaf-plan
+└── concurrent-many-players/
+    ├── wish.md                                      ← shallow chain
+    └── per-actor-substrate-load-shedding/
+        └── wish.md                                  ← leaf-plan (depth 2 total)
+```
+
+Discipline checks visible in this example:
+
+- **Depth is non-uniform.** `persistent-world` spills six levels deep through state-persistence. `concurrent-many-players` bottoms out at depth 2. Both are honest. Don't pad shallow chains; don't truncate deep ones.
+- **Alternatives can themselves have alternatives.** `component-state-trait` has a competing `runtime-reflection-based` shape; that competitor stays shallow until someone drills it via `/wish --under`. Alternatives nest recursively the same way wishes do.
+- **LOD coarsens upward naturally.** `persistent-world` is crate-and-system level; six levels down, `on-disk-layout-for-handles` is struct fields and byte layout. LOD emerges from depth, not from a fixed schema.
+- **Bottom-out is producibility, not a target depth.** Some branches reach "I can write this" at the first level (`tick-rate-governor` is a single mechanism). Others descend through capability → mechanism → trait → struct. Both are valid; the chain stops when the chain stops.
+- **The shallow chain is just as valid as the deep one.** Not every root wish needs a deep tree. Some have simpler answers; that's honest, not lazy. The skeptical filter is *"did this chain reach producibility?"*, not *"did this chain match my prior tree's depth?"*.
+
+If you find yourself padding a chain to match a sibling's depth, you've drifted. The chain stops when producibility says so.
+
 ### `wish.md` shape (chosen path)
 
 Minimal frontmatter, then free-form prose. No internal `##` headers — the prose flows.
