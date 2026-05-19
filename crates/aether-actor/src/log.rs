@@ -17,9 +17,9 @@
 //! re-entry guard, the chassis-pushed `ConfigureLogDrain` mail, the
 //! `set_native_log_shipper` hook, the wasm `MAIL_BRIDGE` route for
 //! `LogBatch`, and `LogCapability` itself. The new query path
-//! ([`aether_kinds::LogTail`] / [`aether_kinds::LogTailResult`]) is
-//! served by a framework-built-in dispatch arm every actor inherits
-//! — no `#[handler]` for it on user types.
+//! ([`LogTail`] / [`LogTailResult`]) is served by a framework-built-
+//! in dispatch arm every actor inherits — no `#[handler]` for it on
+//! user types.
 
 extern crate alloc;
 

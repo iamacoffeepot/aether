@@ -15,12 +15,12 @@
 //! 2. **Per-envelope dispatch.** Each envelope runs inside
 //!    `local::with_stamped(slots, ...)` so the per-actor `ActorSlots`
 //!    are visible to `Local<T>` lookups — including the per-actor
-//!    [`aether_actor::log::ActorLogRing`] the `ActorAwareLayer`
-//!    pushes into and the framework-built-in `aether.log.tail`
-//!    handler reads from (ADR-0081 §1). Before the user dispatch
-//!    runs, the framework intercepts `aether.log.tail` envelopes
-//!    and replies from the actor's ring directly. Two-step typed →
-//!    fallback dispatch follows for everything else.
+//!    [`ActorLogRing`] the `ActorAwareLayer` pushes into and the
+//!    framework-built-in `aether.log.tail` handler reads from
+//!    (ADR-0081 §1). Before the user dispatch runs, the framework
+//!    intercepts `aether.log.tail` envelopes and replies from the
+//!    actor's ring directly. Two-step typed → fallback dispatch
+//!    follows for everything else.
 //! 3. **Drain after shutdown.** Any envelope already in the inbox
 //!    when the shutdown signal fired is processed synchronously
 //!    before `unwire` runs (matches the existing singleton

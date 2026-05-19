@@ -7,8 +7,7 @@
 //!   - [`emit_host_event`] — host-side bridge the wasm `log_event_p32`
 //!     host fn calls to re-fire one guest `tracing::*` event on the
 //!     trampoline's dispatcher thread, where the `ActorAwareLayer`
-//!     lands it in the trampoline's [`aether_actor::log::ActorLogRing`]
-//!     (ADR-0081 §7).
+//!     lands it in the trampoline's [`ActorLogRing`] (ADR-0081 §7).
 //!
 //! Host-target events emitted outside any actor stamp (substrate
 //! boot, scheduler thread, panic hook) hit stderr via the registered
@@ -68,7 +67,7 @@ pub fn emit_host_event(level: u32, target: &str, message: &str) {
     let timestamp = now_unix_ms();
     let target = target.to_owned();
     let message = message.to_owned();
-    let level_u8 = (level.min(4)) as u8;
+    let level_u8 = level.min(4) as u8;
     let _ = ActorLogRing::try_with_mut(|ring| {
         ring.push(level_u8, target, message, timestamp);
     });
