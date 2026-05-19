@@ -112,6 +112,22 @@ Components declare their receive-side kind vocabulary with `#[handlers]` on a si
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 
+## Pre-push pre-flight
+
+`scripts/preflight.sh` runs the CI-equivalent local checks (fmt + clippy + doc + nextest + wasm32 component cross-build) over the workspace. The pre-push git hook at `.githooks/pre-push` invokes it automatically against the changed-file set for each push, and stamps `.git/aether-preflight-passed` with the HEAD sha on success so a re-push of the same commit short-circuits.
+
+Enable once per clone: `scripts/setup-githooks.sh` (sets `core.hooksPath -> .githooks`).
+
+Exception classes — pushes that skip the Rust pre-flight:
+
+- **Docs-only**: every changed path matches `docs/**` or `*.md` at the root.
+- **CI / repo-config-only**: every changed path is `.github/**`, `.claude/**`, `.githooks/**`, `scripts/**`, `qodana.{yaml,sarif.json}`, `.mcp.json`, `.gitignore`, `.gitattributes`, or `{rust-toolchain,rustfmt,clippy}.toml`. CI itself runs on workflow changes and validates the workflow shape.
+- A mixed push (e.g. one `.rs` + one `.md`) runs the full pre-flight; the exception only applies when every file matches the class.
+
+A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of `git push` / `gh pr create`. If HEAD doesn't have a matching stamp, the hook blocks the push and prompts Claude to run `scripts/preflight.sh` plus `mcp__rustrover__get_file_problems` over each changed `.rs` file — the qodana-equivalent surface the shell-only git hook can't reach.
+
+Bypass either layer with `git push --no-verify` (or omit the matching stamp deliberately and skip the Claude hook by tagging the override per the existing hook conventions).
+
 ## Qodana pre-flight (local)
 
 Qodana gates merges via the `ci-pass` aggregator (iamacoffeepot/aether#941), but running `qodana scan` locally is blocked: the container's cargo-metadata pass times out on the colima virtiofs bind mount. The local equivalent is RustRover's inspection set — Qodana's `qodana.recommended` profile rehosts most of its checks from the same IntelliJ inspector RustRover runs in-IDE.
