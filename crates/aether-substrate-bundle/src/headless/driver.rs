@@ -21,12 +21,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Actor;
-use aether_capabilities::InputCapability;
-use aether_data::{KindId, encode_empty, mailbox_id_from_name};
-use aether_kinds::Tick;
+use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
+use aether_kinds::LifecycleAdvance;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};
+use aether_substrate::{LifecycleDriverCapability, Mailer, SubstrateBoot, mail::MailboxId};
 
 use crate::chassis_root::next_chassis_correlation;
 
@@ -61,19 +60,33 @@ pub fn parse_tick_hz_env() -> u32 {
 /// ADR-0071 driver capability for the headless chassis. Owns the
 /// pieces the timer loop needs at construction time, then `boot()`
 /// captures them on a [`HeadlessTimerRunning`] that drives the loop.
+///
+/// Pre-ADR-0082 this drove `Tick` mail directly to `aether.input`;
+/// PR 3b reroutes through `LifecycleDriverCapability` so the driver
+/// owns the broadcast vocabulary and the substrate observes a
+/// labelled `aether.lifecycle` root for every frame chain.
 pub struct HeadlessTimerCapability {
     pub boot: SubstrateBoot,
+    /// Field kept for wire compatibility; the timer body no longer
+    /// touches `Tick` directly post-ADR-0082, but chassis builders
+    /// resolve the kind id from `SubstrateBoot::registry` once and
+    /// hand it through this struct. Removing the field would touch
+    /// every chassis call site; left as a no-op.
+    #[allow(dead_code)]
     pub kind_tick: KindId,
     pub tick_period: Duration,
 }
 
 pub struct HeadlessTimerRunning {
     queue: Arc<Mailer>,
-    /// `aether.input` mailbox id, cached at boot. Each generated tick
-    /// pushes one mail here and the input cap fans out per
-    /// subscriber (issue 640).
-    input_mailbox: MailboxId,
-    kind_tick: KindId,
+    /// `aether.lifecycle` mailbox id, cached at boot. Each tick fires
+    /// one `LifecycleAdvance` here; the lifecycle driver broadcasts
+    /// the current stage (Tick) to its subscriber set, including
+    /// `aether.input` per the chassis's `initial_subscribers`.
+    lifecycle_mailbox: MailboxId,
+    /// Kind id of [`LifecycleAdvance`], pre-resolved so the timer
+    /// loop body stays alloc-free per tick.
+    kind_lifecycle_advance: KindId,
     tick_period: Duration,
     /// `SubstrateBoot` drops at the end of `run()` so its scheduler
     /// joins workers before the chassis exits.
@@ -86,14 +99,16 @@ impl DriverCapability for HeadlessTimerCapability {
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self {
             boot,
-            kind_tick,
+            kind_tick: _,
             tick_period,
         } = self;
 
         Ok(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
-            input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
-            kind_tick,
+            lifecycle_mailbox: mailbox_id_from_name(
+                <LifecycleDriverCapability<()> as Actor>::NAMESPACE,
+            ),
+            kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             tick_period,
             _boot: boot,
         })
@@ -104,8 +119,8 @@ impl DriverRunning for HeadlessTimerRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
         let Self {
             queue,
-            input_mailbox,
-            kind_tick,
+            lifecycle_mailbox,
+            kind_lifecycle_advance,
             tick_period,
             _boot,
         } = *self;
@@ -129,11 +144,15 @@ impl DriverRunning for HeadlessTimerRunning {
             // backlog, which would just compound the stall.
             next_deadline = Instant::now() + tick_period;
 
+            // Fire-and-forget LifecycleAdvance. The driver's settlement
+            // gating tracks one pending advance at a time — frames that
+            // overlap (settlement still pending when the next deadline
+            // hits) warn-drop at the driver per ADR-0082 §6.
             queue.push_chassis_root_mail(
                 next_chassis_correlation(&chassis_correlation),
-                input_mailbox,
-                kind_tick,
-                encode_empty::<Tick>(),
+                lifecycle_mailbox,
+                kind_lifecycle_advance,
+                encode_empty::<LifecycleAdvance>(),
                 1,
             );
         }

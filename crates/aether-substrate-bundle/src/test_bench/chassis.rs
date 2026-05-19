@@ -22,11 +22,13 @@ use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Chassis, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
+    Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue,
+    render::VERTEX_BUFFER_BYTES,
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
 use super::events::{ChassisEvent, EventSender};
+use crate::chassis_common::tick_only_lifecycle_config;
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
 
@@ -174,6 +176,7 @@ impl TestBenchChassis {
     /// vocabulary the substrate registers from
     /// `aether_kinds::descriptors::all()`, so a missing entry indicates
     /// a substrate-build bug.
+    #[allow(clippy::too_many_lines)] // PR 3b growth from lifecycle graph + relay wiring.
     pub fn build_passive(env: TestBenchEnv) -> anyhow::Result<TestBenchBuild> {
         let TestBenchEnv {
             name,
@@ -285,6 +288,10 @@ impl TestBenchChassis {
             );
         }
 
+        // ADR-0082 §1 / PR 3b: test-bench uses the shared Tick-only
+        // lifecycle graph. The embedder pushes `LifecycleAdvance` via
+        // TestBench's own pumping logic; the driver broadcasts Tick to
+        // `aether.input` via the relay subscriber.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_actor::<HandleCapability>(())
             .with_actor::<TraceObserverCapability>(())
@@ -293,7 +300,8 @@ impl TestBenchChassis {
             .with_actor::<TcpCapability>(())
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<TestBenchCapability>(test_bench_cap_config);
+            .with_actor::<TestBenchCapability>(test_bench_cap_config)
+            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

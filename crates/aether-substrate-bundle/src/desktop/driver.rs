@@ -56,7 +56,12 @@ pub struct App {
     /// `InputCapability` actor owns the subscriber table and fans
     /// out per-subscriber on its own dispatcher (issue 640).
     input_mailbox: MailboxId,
-    kind_tick: aether_data::KindId,
+    /// `aether.lifecycle` mailbox id, cached at boot. Each redraw
+    /// fires one `LifecycleAdvance` here; the driver broadcasts
+    /// Tick to `aether.input` via the chassis's `initial_subscribers`
+    /// relay, then waits for settlement before submitting the frame.
+    lifecycle_mailbox: MailboxId,
+    kind_lifecycle_advance: aether_data::KindId,
     kind_key: aether_data::KindId,
     kind_key_release: aether_data::KindId,
     kind_mouse_button: aether_data::KindId,
@@ -489,10 +494,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.occluded && pending_capture.is_none() {
                     return;
                 }
+                // ADR-0082 PR 3b: redraw fires `LifecycleAdvance` to
+                // the lifecycle driver, which broadcasts Tick to
+                // `aether.input` (via the chassis's `initial_subscribers`
+                // relay) plus any other subscribers. Settlement on the
+                // broadcast root replaces the prior
+                // `drain_frame_bound_or_abort` gate.
                 self.push_chassis_root(
-                    self.input_mailbox,
-                    self.kind_tick,
-                    encode_empty::<Tick>(),
+                    self.lifecycle_mailbox,
+                    self.kind_lifecycle_advance,
+                    encode_empty::<aether_kinds::LifecycleAdvance>(),
                     1,
                 );
                 if let Some(window) = &self.window {
@@ -713,10 +724,19 @@ impl DriverCapability for DesktopDriverCapability {
         // `App` and `about_to_wait` drains it inline between frames.
         let window_claim = ctx.claim_mailbox("aether.window")?;
 
+        let lifecycle_mailbox = mailbox_id_from_name(
+            <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE,
+        );
+        let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
+        let _ = kind_tick; // PR 3b retired direct Tick push; the
+        // chassis still resolves the kind id via `boot.registry` for
+        // compatibility but the redraw handler no longer reads it.
+
         let app = App {
             queue: Arc::clone(&boot.queue),
             input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
-            kind_tick,
+            lifecycle_mailbox,
+            kind_lifecycle_advance,
             kind_key,
             kind_key_release,
             kind_mouse_button,

@@ -31,7 +31,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
-use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
+#[cfg(test)]
+use aether_kinds::Tick;
+use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_actor::Actor;
@@ -141,11 +143,15 @@ pub struct TestBench {
 
     gpu: Gpu,
 
-    /// `aether.input` mailbox id, cached at boot. `advance()` ticks
-    /// fan through this single push and the input cap re-fans per
-    /// subscriber (issue 640).
-    input_mailbox: MailboxId,
-    kind_tick: KindId,
+    /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
+    /// fires one `LifecycleAdvance` here per requested tick; the
+    /// lifecycle driver broadcasts `Tick` to `aether.input` (relayed
+    /// via the chassis's `initial_subscribers`) and the rest of the
+    /// subscriber set per ADR-0082.
+    lifecycle_mailbox: MailboxId,
+    /// Kind id of [`LifecycleAdvance`], pre-resolved so the advance
+    /// loop body stays alloc-free per tick.
+    kind_lifecycle_advance: KindId,
     /// Snapshot of every frame-bound capability's pending counter
     /// (ADR-0074 §Decision 5). Today: render. Cloned out of
     /// `PassiveChassis::frame_bound_pending` at boot; `advance` /
@@ -317,9 +323,12 @@ impl TestBench {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
-        let input_mailbox = aether_data::mailbox_id_from_name(
-            <aether_capabilities::InputCapability as Actor>::NAMESPACE,
+        let lifecycle_mailbox = aether_data::mailbox_id_from_name(
+            <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE,
         );
+        let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
+        let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
+        // build result for wire-compat with binaries that haven't migrated yet.
         let frame_bound_pending = passive.frame_bound_pending();
 
         Ok(Self {
@@ -330,8 +339,8 @@ impl TestBench {
             capture_queue,
             events_rx,
             gpu,
-            input_mailbox,
-            kind_tick,
+            lifecycle_mailbox,
+            kind_lifecycle_advance,
             frame_bound_pending,
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
@@ -774,18 +783,26 @@ impl TestBench {
             // test name the actual cause instead of timing out
             // generically on the reply pump.
             let registry = self.passive.settlement_registry();
-            let tick_root = self.queue.push_chassis_root_mail(
+            // ADR-0082 PR 3b: TestBench pushes `LifecycleAdvance` to the
+            // lifecycle driver, which broadcasts Tick to `aether.input`
+            // (relayed via the chassis's `initial_subscribers`) plus any
+            // other subscribers. Settlement on the broadcast root waits
+            // for the whole subtree — same property the prior direct-
+            // push path had.
+            let advance_root = self.queue.push_chassis_root_mail(
                 self.fresh_correlation_id(),
-                self.input_mailbox,
-                self.kind_tick,
-                encode_empty::<Tick>(),
+                self.lifecycle_mailbox,
+                self.kind_lifecycle_advance,
+                encode_empty::<aether_kinds::LifecycleAdvance>(),
                 1,
             );
-            let rx = registry.subscribe_settlement(tick_root);
+            let rx = registry.subscribe_settlement(advance_root);
             if rx.recv_timeout(SETTLEMENT_TIMEOUT).is_err() {
                 return Err(TestBenchError::SettlementTimeout {
-                    recipient: "aether.input".to_owned(),
-                    kind_name: Tick::NAME,
+                    recipient:
+                        <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE
+                            .to_owned(),
+                    kind_name: aether_kinds::LifecycleAdvance::NAME,
                 });
             }
         }

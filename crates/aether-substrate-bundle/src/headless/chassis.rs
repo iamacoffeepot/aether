@@ -25,10 +25,12 @@ use aether_data::Kind;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
-use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
+use crate::chassis_common::{
+    CommonBoot, maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
+};
 use crate::hub;
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
@@ -219,10 +221,15 @@ impl HeadlessChassis {
             namespace_roots,
             http,
         };
+        // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
+        // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
+        // the timer pushes `LifecycleAdvance` and the driver broadcasts
+        // Tick to `aether.input` via the relay subscriber.
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<UnsupportedTestBenchCapability>(());
+            .with_actor::<UnsupportedTestBenchCapability>(())
+            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         builder.driver(driver).build()
     }

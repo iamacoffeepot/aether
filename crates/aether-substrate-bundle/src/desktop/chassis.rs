@@ -22,12 +22,14 @@ use aether_capabilities::{
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
-use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
+use crate::chassis_common::{
+    CommonBoot, maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
+};
 use crate::hub;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -270,10 +272,14 @@ impl DesktopChassis {
             namespace_roots,
             http,
         };
+        // ADR-0082 §1 / PR 3b: desktop's lifecycle is the shared Tick-
+        // only graph today. A future PR adds `Render` / `Present`
+        // states so the render cap subscribes per ADR-0082 §11.
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
-            .with_actor::<UnsupportedTestBenchCapability>(());
+            .with_actor::<UnsupportedTestBenchCapability>(())
+            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         builder.driver(driver).build()
     }

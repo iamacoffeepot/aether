@@ -14,15 +14,50 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aether_actor::Actor;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     ComponentHostCapability, ComponentHostConfig, FsCapability, HandleCapability, HttpCapability,
     InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
     trace::TraceObserverCapability,
 };
+use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
+use aether_kinds::{Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_substrate::{LifecycleDriverConfig, LifecycleGraph};
+
+/// Build the standard single-stage lifecycle config every Tick-driven
+/// chassis shares today (ADR-0082 PR 3b): a `Tick` self-loop with a
+/// `Quit` escape to a `Shutdown` terminal, relaying `Tick` to
+/// `aether.input` so the existing `InputCapability::on_tick` fan-out
+/// keeps routing to component subscribers. Headless / `test_bench` /
+/// desktop all use this identical shape; a chassis that adds
+/// `Render` / `Present` stages (ADR-0082 §11) builds its own graph
+/// instead.
+///
+/// # Panics
+/// Panics if the (compile-time-fixed) graph fails to build — it can't,
+/// the shape is structurally valid; the `expect` documents the
+/// invariant.
+#[must_use]
+pub fn tick_only_lifecycle_config() -> LifecycleDriverConfig<()> {
+    let graph = LifecycleGraph::<()>::builder()
+        .state::<Tick, _>(|()| Tick {})
+        .next::<Tick>()
+        .quit::<Shutdown>()
+        .terminal::<Shutdown, _>(|()| Shutdown {})
+        .start::<Tick>()
+        .build()
+        .expect("tick-only lifecycle graph is structurally valid");
+    let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
+    LifecycleDriverConfig {
+        graph,
+        context: (),
+        initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
+    }
+}
 
 /// Args every full-stack chassis hands to [`with_common_caps`]. Kept
 /// as a flat struct (no defaults) so an added cap forces the chassis

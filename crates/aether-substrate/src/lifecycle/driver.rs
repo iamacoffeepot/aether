@@ -77,6 +77,15 @@ pub struct LifecycleDriverConfig<C> {
     /// timer, window handle, render queue) — see the `'static` bound
     /// requirement on `C`.
     pub context: C,
+    /// Initial `(stage_kind, mailbox)` pairs to populate the
+    /// subscriber table at boot. Chassis builders use this to wire
+    /// the relay (e.g. `(Tick::ID, aether.input)`) without round-
+    /// tripping a `LifecycleSubscribe` mail through the dispatcher.
+    /// Each pair must reference a stage kind declared by `graph` —
+    /// the boot path verifies this and returns `BootError` otherwise,
+    /// so misconfiguration fails fast at chassis-build rather than
+    /// silently dropping mail at runtime.
+    pub initial_subscribers: Vec<(KindId, DataMailboxId)>,
 }
 
 /// The `aether.lifecycle` capability — ADR-0082's first-class actor
@@ -156,13 +165,34 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
         config: LifecycleDriverConfig<C>,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        let LifecycleDriverConfig { graph, context } = config;
+        let LifecycleDriverConfig {
+            graph,
+            context,
+            initial_subscribers,
+        } = config;
         let current_state = graph.start();
         let mailer = ctx.mailer();
+        let mut subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>> = BTreeMap::new();
+        for (stage, mailbox) in initial_subscribers {
+            // Reject unknown-stage subscriptions at boot rather than
+            // silently dropping mail at runtime — ADR-0082 §7's
+            // fail-fast contract applies to compile-site config too,
+            // not just LifecycleSubscribe mail.
+            if graph.state(stage).is_none() && graph.terminal(stage).is_none() {
+                return Err(BootError::Other(
+                    format!(
+                        "aether.lifecycle: initial subscriber references stage {stage:?} not \
+                         declared by graph"
+                    )
+                    .into(),
+                ));
+            }
+            subscribers.entry(stage).or_default().insert(mailbox);
+        }
         Ok(Self {
             graph,
             context,
-            subscribers: BTreeMap::new(),
+            subscribers,
             current_state,
             terminal_reached: false,
             quit_pending: false,
@@ -333,7 +363,7 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
         if let Some(registry) = self.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 root,
-                mailbox_id_from_name("aether.lifecycle"),
+                mailbox_id_from_name(<Self as aether_actor::Actor>::NAMESPACE),
                 <Settled as Kind>::ID,
                 Arc::clone(&self.mailer),
             );

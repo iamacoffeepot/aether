@@ -73,6 +73,7 @@ pub use chassis::ctx::{
     MailboxSender,
 };
 pub use chassis::error::{BootError, WedgedFrameBound};
+pub use lifecycle::{LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend,
