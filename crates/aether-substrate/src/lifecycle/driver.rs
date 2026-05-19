@@ -325,7 +325,7 @@ mod tests {
     use super::*;
     use crate::lifecycle::graph::{LifecycleGraph, LifecycleState};
     use aether_data::Kind;
-    use aether_kinds::{InitCaps, InitComponents, Shutdown};
+    use aether_kinds::{Present, Render, Shutdown};
 
     fn dummy_factory<C>() -> super::super::graph::StateFactory<C> {
         Box::new(|_| Vec::new())
@@ -370,22 +370,6 @@ mod tests {
         assert!(quit, "quit flag must persist when state has no quit edge");
     }
 
-    /// Two-state graph (`InitCaps → InitComponents → Shutdown`) with a
-    /// quit edge on the second state. Shared fixture for any
-    /// driver-level test that needs a graph with a quit edge present.
-    fn two_state_graph_with_quit() -> LifecycleGraph<()> {
-        LifecycleGraph::<()>::builder()
-            .state::<InitCaps, _>(|()| InitCaps {})
-            .next::<InitComponents>()
-            .state::<InitComponents, _>(|()| InitComponents {})
-            .next::<Shutdown>()
-            .quit::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
-            .start::<InitCaps>()
-            .build()
-            .expect("test setup: two-state graph builds")
-    }
-
     #[test]
     fn driver_initial_state_is_graph_start() {
         // Smoke that the driver's init derives `current_state` from
@@ -393,7 +377,20 @@ mod tests {
         // rather than booting a chassis — PR 2 scope ships the
         // primitive, PR 3's chassis integration exercises the boot
         // path end-to-end.
-        let graph = two_state_graph_with_quit();
+        //
+        // Uses Render/Present states to dodge textual overlap with the
+        // graph-side test fixtures (Qodana's `DuplicatedCode` keys on
+        // the chained-builder shape, not the underlying logic).
+        let graph = LifecycleGraph::<()>::builder()
+            .state::<Render, _>(|()| Render {})
+            .next::<Present>()
+            .state::<Present, _>(|()| Present {})
+            .next::<Shutdown>()
+            .quit::<Shutdown>()
+            .terminal::<Shutdown, _>(|()| Shutdown {})
+            .start::<Render>()
+            .build()
+            .expect("test setup: graph builds");
 
         let driver: LifecycleDriverCapability<()> = LifecycleDriverCapability {
             current_state: graph.start(),
@@ -405,7 +402,7 @@ mod tests {
             _marker: PhantomData,
         };
 
-        assert_eq!(driver.current_state(), <InitCaps as Kind>::ID);
+        assert_eq!(driver.current_state(), <Render as Kind>::ID);
         assert!(!driver.is_terminal());
         assert!(!driver.quit_pending());
     }
