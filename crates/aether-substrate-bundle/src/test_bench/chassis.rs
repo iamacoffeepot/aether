@@ -10,7 +10,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use aether_actor::Actor;
 use aether_capabilities::{
     CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
     InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, fs::NamespaceRoots,
@@ -19,17 +18,17 @@ use aether_capabilities::{
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
-use aether_data::{MailboxId as DataMailboxId, mailbox_id_from_name};
-use aether_kinds::{Shutdown, Tick};
+use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Chassis, LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph, SubstrateBoot,
-    capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
+    Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue,
+    render::VERTEX_BUFFER_BYTES,
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
 use super::events::{ChassisEvent, EventSender};
+use crate::chassis_common::tick_only_lifecycle_config;
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
 
@@ -289,26 +288,10 @@ impl TestBenchChassis {
             );
         }
 
-        // ADR-0082 §1 / PR 3b: test-bench lifecycle graph — Tick self-
-        // loops, Quit escapes to Shutdown. Same shape as headless;
-        // the embedder pushes `LifecycleAdvance` via TestBench's
-        // own pumping logic, the driver broadcasts Tick to
-        // `aether.input` per the relay registered below.
-        let lifecycle_graph = LifecycleGraph::<()>::builder()
-            .state::<Tick, _>(|()| Tick {})
-            .next::<Tick>()
-            .quit::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
-            .start::<Tick>()
-            .build()
-            .expect("test-bench lifecycle graph is structurally valid");
-        let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
-        let lifecycle_config = LifecycleDriverConfig {
-            graph: lifecycle_graph,
-            context: (),
-            initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
-        };
-
+        // ADR-0082 §1 / PR 3b: test-bench uses the shared Tick-only
+        // lifecycle graph. The embedder pushes `LifecycleAdvance` via
+        // TestBench's own pumping logic; the driver broadcasts Tick to
+        // `aether.input` via the relay subscriber.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_actor::<HandleCapability>(())
             .with_actor::<TraceObserverCapability>(())
@@ -318,7 +301,7 @@ impl TestBenchChassis {
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<TestBenchCapability>(test_bench_cap_config)
-            .with_actor::<LifecycleDriverCapability<()>>(lifecycle_config);
+            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

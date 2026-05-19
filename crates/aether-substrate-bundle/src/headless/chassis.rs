@@ -17,22 +17,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::Actor;
 use aether_capabilities::{
-    ComponentHostConfig, HeadlessRenderCapability, HeadlessWindowCapability, InputCapability,
-    InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    ComponentHostConfig, HeadlessRenderCapability, HeadlessWindowCapability, InputConfig,
+    UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
-use aether_data::{MailboxId as DataMailboxId, mailbox_id_from_name};
-use aether_kinds::{SetMasterGain, SetMasterGainResult, Shutdown, Tick};
+use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{
-    Chassis, LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph, SubstrateBoot,
-};
+use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
-use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
+use crate::chassis_common::{
+    CommonBoot, maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
+};
 use crate::hub;
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
@@ -223,37 +221,15 @@ impl HeadlessChassis {
             namespace_roots,
             http,
         };
-        // ADR-0082 §1 / PR 3b: headless lifecycle graph — Tick self-loops
-        // until Quit fires, at which point the next advance takes the
-        // quit edge to Shutdown. Today the chassis emits the timer ticks
-        // and the lifecycle driver broadcasts Tick to subscribers
-        // (including `aether.input` so the existing component fan-out
-        // path stays intact).
-        let lifecycle_graph = LifecycleGraph::<()>::builder()
-            .state::<Tick, _>(|()| Tick {})
-            .next::<Tick>()
-            .quit::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
-            .start::<Tick>()
-            .build()
-            .expect("headless lifecycle graph is structurally valid");
-        let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
-        let lifecycle_config = LifecycleDriverConfig {
-            graph: lifecycle_graph,
-            context: (),
-            // Relay Tick from the lifecycle driver to `aether.input` so
-            // the existing `InputCapability::on_tick` fan-out path keeps
-            // routing Tick to component subscribers (issue 640 phase 2)
-            // until PR 4's component migration moves them onto the
-            // lifecycle subscriber table directly.
-            initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
-        };
-
+        // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
+        // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
+        // the timer pushes `LifecycleAdvance` and the driver broadcasts
+        // Tick to `aether.input` via the relay subscriber.
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleDriverCapability<()>>(lifecycle_config);
+            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         builder.driver(driver).build()
     }
