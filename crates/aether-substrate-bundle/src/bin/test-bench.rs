@@ -16,21 +16,28 @@ use std::sync::Arc;
 
 use aether_actor::Actor;
 use aether_capabilities::InputCapability;
+use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{encode_empty, mailbox_id_from_name};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
+use aether_substrate::runtime::trace;
 use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId};
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
 };
+use std::env;
+use std::sync::atomic::AtomicU64;
+
+use aether_substrate_bundle::chassis_root::next_chassis_correlation;
+use std::time::Duration;
 
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
 /// missing/unparseable input with a warn log so scenario scripts can
 /// see what dimensions they actually got.
 fn parse_size_env() -> (u32, u32) {
     use aether_substrate_bundle::test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-    let Ok(raw) = std::env::var("AETHER_TEST_BENCH_SIZE") else {
+    let Ok(raw) = env::var("AETHER_TEST_BENCH_SIZE") else {
         return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
     };
     if let Some((w, h)) = raw.split_once('x') {
@@ -60,7 +67,7 @@ fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = events::channel();
 
     // Per issue 464, this `main()` is the env-reading edge.
-    let namespace_roots = aether_capabilities::fs::NamespaceRoots::from_env();
+    let namespace_roots = NamespaceRoots::from_env();
 
     let env = TestBenchEnv {
         name: "test-bench".to_owned(),
@@ -121,7 +128,7 @@ fn drive_events_loop(
     // iamacoffeepot/aether#723). Threaded through `run_frame` so each
     // tick push carries observable lineage like the desktop and
     // headless drivers do.
-    let chassis_correlation = std::sync::atomic::AtomicU64::new(1);
+    let chassis_correlation = AtomicU64::new(1);
 
     while let Ok(event) = events_rx.recv() {
         match event {
@@ -177,21 +184,14 @@ fn run_frame(
     input_mailbox: MailboxId,
     kind_tick: aether_data::KindId,
     capture_queue: &CaptureQueue,
-    frame_bound_pending: &[(MailboxId, Arc<std::sync::atomic::AtomicU64>)],
+    frame_bound_pending: &[(MailboxId, Arc<AtomicU64>)],
     gpu: &mut Gpu,
-    chassis_correlation: &std::sync::atomic::AtomicU64,
+    chassis_correlation: &AtomicU64,
 ) {
-    let next_correlation = || -> u64 {
-        let id = chassis_correlation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if id == 0 {
-            chassis_correlation.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        } else {
-            id
-        }
-    };
+    let next_correlation = || -> u64 { next_chassis_correlation(chassis_correlation) };
 
     if dispatch_tick {
-        aether_substrate::runtime::trace::push_chassis_root_mail(
+        trace::push_chassis_root_mail(
             queue,
             next_correlation(),
             input_mailbox,
@@ -215,7 +215,7 @@ fn run_frame(
             // bailing out of the frame loop.
             let mut pre_failed: Option<String> = None;
             for rx in req.pre_settlements {
-                if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                if rx.recv_timeout(Duration::from_secs(5)).is_err() {
                     pre_failed = Some(
                         "capture pre-mail chain failed to settle within 5s — \
                          a downstream cap is wedged"

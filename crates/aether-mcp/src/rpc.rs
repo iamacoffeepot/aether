@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use aether_capabilities::rpc::{
     MailEnvelope, PeerKind, RpcClient, RpcConnection, RpcReaderHandle, WireFrame,
 };
+use std::thread;
+use std::thread::JoinHandle;
 use tokio::sync::mpsc;
 
 /// One outbound RPC connection to the hub, shared across every MCP
@@ -36,7 +38,7 @@ pub struct RpcSession {
     _reader: RpcReaderHandle,
     /// The demux thread. Detached on drop — it exits on its own once
     /// `_reader`'s teardown closes `inbound`.
-    _router: std::thread::JoinHandle<()>,
+    _router: JoinHandle<()>,
 }
 
 impl RpcSession {
@@ -63,7 +65,7 @@ impl RpcSession {
         let pending: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<WireFrame>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let router_pending = Arc::clone(&pending);
-        let router = std::thread::Builder::new()
+        let router = thread::Builder::new()
             .name("aether-mcp-rpc-router".into())
             .spawn(move || {
                 // `inbound.recv()` ends with `Err` once the reader

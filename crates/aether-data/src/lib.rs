@@ -38,8 +38,11 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use serde::de::DeserializeOwned;
 
 pub mod canonical;
 pub mod hash;
@@ -176,7 +179,7 @@ impl<T: CastEligible, const N: usize> CastEligible for [T; N] {
 // Listing them here is the price of not having stable Rust
 // specialization; new "definitely not eligible" types can be added
 // as the kind vocabulary reaches for them.
-impl CastEligible for alloc::string::String {
+impl CastEligible for String {
     const ELIGIBLE: bool = false;
 }
 impl<T> CastEligible for Vec<T> {
@@ -190,7 +193,7 @@ impl<K> CastEligible for Ref<K> {
 }
 // Issue #232: `BTreeMap<K, V>` is variable-length and disqualifies a
 // parent struct from `repr_c`, same as `Vec`/`String`/`Option`.
-impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
+impl<K, V> CastEligible for BTreeMap<K, V> {
     const ELIGIBLE: bool = false;
 }
 
@@ -306,6 +309,7 @@ mod schema_impls {
 
     use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
     use crate::{HandleId, KindId, MailboxId, Schema};
+    use alloc::collections::BTreeMap;
 
     macro_rules! scalar {
         ($t:ty, $p:ident) => {
@@ -416,7 +420,7 @@ mod schema_impls {
     // type level. `HashMap<K, V>` is rejected at the derive layer
     // (mail-derive) because its iteration order is platform-
     // dependent and would diverge canonical bytes across builds.
-    impl<K: Schema + Ord + 'static, V: Schema + 'static> Schema for alloc::collections::BTreeMap<K, V> {
+    impl<K: Schema + Ord + 'static, V: Schema + 'static> Schema for BTreeMap<K, V> {
         const SCHEMA: SchemaType = SchemaType::Map {
             key: SchemaCell::Static(&K::SCHEMA),
             value: SchemaCell::Static(&V::SCHEMA),
@@ -478,6 +482,7 @@ pub mod __derive_runtime {
     };
     pub use alloc::borrow::Cow;
     pub use alloc::vec::Vec;
+    use serde::de::DeserializeOwned;
 
     /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
     /// after a length check so the Kind derive can emit a uniform call
@@ -513,7 +518,7 @@ pub mod __derive_runtime {
     /// this helper rather than on `Kind` so cast kinds stay
     /// independent of `serde`.
     #[must_use]
-    pub fn decode_postcard<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    pub fn decode_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         postcard::from_bytes(bytes).ok()
     }
 
@@ -628,9 +633,7 @@ pub fn encode_struct<T: Kind + serde::Serialize>(value: &T) -> Vec<u8> {
 }
 
 /// Decode a structural value via postcard. Returns owned `T`.
-pub fn decode_struct<T: Kind + serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, DecodeError> {
+pub fn decode_struct<T: Kind + DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     postcard::from_bytes(bytes).map_err(DecodeError::from)
 }
 
@@ -645,6 +648,7 @@ pub fn encode_empty<T: Kind>() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
     use bytemuck::{Pod, Zeroable};
     use serde::{Deserialize, Serialize};
 
@@ -677,7 +681,7 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct TestStruct {
         tag: u32,
-        label: alloc::string::String,
+        label: String,
     }
     impl Kind for TestStruct {
         const NAME: &'static str = "test.struct";
@@ -727,7 +731,7 @@ mod tests {
     fn struct_roundtrip() {
         let v = TestStruct {
             tag: 7,
-            label: alloc::string::String::from("hello"),
+            label: String::from("hello"),
         };
         let bytes = encode_struct(&v);
         let back: TestStruct =
@@ -782,7 +786,7 @@ mod tests {
     fn ref_inline_wraps_value() {
         let v = TestStruct {
             tag: 7,
-            label: alloc::string::String::from("hi"),
+            label: String::from("hi"),
         };
         let r = Ref::inline(v.clone());
         match r {
@@ -795,7 +799,7 @@ mod tests {
     fn ref_predicates_and_handle_id() {
         let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
             tag: 1,
-            label: alloc::string::String::from("a"),
+            label: String::from("a"),
         });
         let handle: Ref<TestStruct> = Ref::handle(99);
         assert!(inline.is_inline());
@@ -810,7 +814,7 @@ mod tests {
     fn ref_inline_postcard_roundtrip() {
         let v = TestStruct {
             tag: 42,
-            label: alloc::string::String::from("hello"),
+            label: String::from("hello"),
         };
         let r = Ref::Inline(v);
         let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes Inline Ref");
@@ -835,7 +839,7 @@ mod tests {
     fn ref_inline_and_handle_have_distinct_wire_discriminants() {
         let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
             tag: 1,
-            label: alloc::string::String::from("x"),
+            label: String::from("x"),
         });
         let handle: Ref<TestStruct> = Ref::Handle { id: 1, kind_id: 1 };
         let inline_bytes =

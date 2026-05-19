@@ -20,6 +20,9 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 pub use render::VERTEX_BUFFER_BYTES;
+use std::env;
+use std::iter;
+use std::slice;
 
 /// Wireframe-overlay shader: same vertex layout as the main shader so
 /// the pipeline shares the existing vertex buffer. The fragment stage
@@ -80,7 +83,7 @@ enum WireframeMode {
 
 impl WireframeMode {
     fn from_env() -> Self {
-        match std::env::var("AETHER_WIREFRAME").ok().as_deref() {
+        match env::var("AETHER_WIREFRAME").ok().as_deref() {
             None | Some("" | "0" | "off") => Self::Off,
             Some("line") => Self::Line,
             Some(_) => Self::Overlay, // "1", "overlay", etc.
@@ -225,7 +228,7 @@ impl Gpu {
                         module: &wire_shader,
                         entry_point: Some("vs_main"),
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        buffers: std::slice::from_ref(&vertex_layout),
+                        buffers: slice::from_ref(&vertex_layout),
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &wire_shader,
@@ -375,7 +378,7 @@ impl Gpu {
             });
         }
 
-        queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(iter::once(encoder.finish()));
         if let Some(tex) = surface_tex {
             tex.present();
         }

@@ -69,6 +69,7 @@ mod tests {
         primitives::write_varint_u64,
         schema::{KIND_DOMAIN, fnv1a_64_prefixed},
     };
+    use crate::ids::KindId;
     use crate::schema::{
         EnumVariant, KindLabels, KindShape, LabelCell, LabelNode, NamedField, Primitive,
         SchemaCell, SchemaShape, SchemaType, VariantLabel, VariantShape,
@@ -328,7 +329,7 @@ mod tests {
     };
 
     static TRIANGLE_LABELS: KindLabels = KindLabels {
-        kind_id: crate::ids::KindId(0),
+        kind_id: KindId(0),
         kind_label: Cow::Borrowed("my_crate::Triangle"),
         root: LabelNode::Struct {
             type_label: Some(Cow::Borrowed("my_crate::Triangle")),
@@ -346,7 +347,7 @@ mod tests {
     }
 
     static RESULT_LABELS: KindLabels = KindLabels {
-        kind_id: crate::ids::KindId(0),
+        kind_id: KindId(0),
         kind_label: Cow::Borrowed("my_crate::Result"),
         root: LabelNode::Enum {
             type_label: Some(Cow::Borrowed("my_crate::Result")),
@@ -382,7 +383,7 @@ mod tests {
     // on either side breaks `describe_kinds`.
 
     static REF_VERTEX_LABELS: KindLabels = KindLabels {
-        kind_id: crate::ids::KindId(0),
+        kind_id: KindId(0),
         kind_label: Cow::Borrowed("my_crate::HeldVertex"),
         root: LabelNode::Ref(LabelCell::Static(&VERTEX_LABELS)),
     };
@@ -410,7 +411,7 @@ mod tests {
         let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
         match decoded {
             InputsRecord::Handler { id, name, doc } => {
-                assert_eq!(id, crate::ids::KindId(ID));
+                assert_eq!(id, KindId(ID));
                 assert_eq!(name, NAME);
                 assert_eq!(doc.as_deref(), DOC);
             }
@@ -429,7 +430,7 @@ mod tests {
         assert_eq!(
             decoded,
             InputsRecord::Handler {
-                id: crate::ids::KindId(ID),
+                id: KindId(ID),
                 name: NAME.into(),
                 doc: None,
             }

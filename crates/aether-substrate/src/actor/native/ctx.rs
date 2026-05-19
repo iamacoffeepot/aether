@@ -35,6 +35,13 @@ use crate::mail::ReplyTo;
 use crate::mail::mailer::Mailer;
 
 use super::{NativeActor, NativeDispatch};
+use crate::actor::native::InheritCtx;
+use crate::actor::native::RootCtx;
+use crate::actor::native::spawn_thread;
+use crate::mail::ReplyTarget;
+use aether_actor::actor::ctx::sync_waiter;
+use serde::de::DeserializeOwned;
+use std::thread::JoinHandle;
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
 /// actor's [`NativeBinding`] for outbound mail and carries the
@@ -86,7 +93,7 @@ impl<'a> NativeCtx<'a> {
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`
-    /// receives a [`crate::actor::native::InheritCtx<A>`] — sends
+    /// receives a [`InheritCtx<A>`] — sends
     /// from inside `f` carry `parent_mail = self.in_flight_mail_id()`
     /// and `root = self.in_flight_root()` automatically.
     ///
@@ -101,12 +108,12 @@ impl<'a> NativeCtx<'a> {
     /// arrives; callers gate-sensitive to settlement should not
     /// rely on the parent chain staying open for the worker's
     /// lifetime today.
-    pub fn spawn_inherit<A, F>(&self, f: F) -> std::thread::JoinHandle<()>
+    pub fn spawn_inherit<A, F>(&self, f: F) -> JoinHandle<()>
     where
         A: Actor + Singleton + 'static,
-        F: FnOnce(crate::actor::native::InheritCtx<A>) + Send + 'static,
+        F: FnOnce(InheritCtx<A>) + Send + 'static,
     {
-        crate::actor::native::spawn_thread::spawn_inherit::<A, F>(
+        spawn_thread::spawn_inherit::<A, F>(
             Arc::clone(self.binding),
             self.in_flight_mail_id,
             self.in_flight_root,
@@ -116,19 +123,19 @@ impl<'a> NativeCtx<'a> {
 
     /// ADR-0080 §12 spawn primitive: launch a worker thread with no
     /// in-flight inheritance. The closure `f` receives a
-    /// [`crate::actor::native::RootCtx<A>`] — each send mints a
+    /// [`RootCtx<A>`] — each send mints a
     /// fresh root chain with `A`'s mailbox as the producer.
     ///
     /// Use for long-lived workers that respond to external events
     /// (TCP per-connection workers, pollers). For short-burst CPU
     /// offload that is part of the current handler's causal closure,
     /// use [`Self::spawn_inherit`].
-    pub fn spawn_detached<A, F>(&self, f: F) -> std::thread::JoinHandle<()>
+    pub fn spawn_detached<A, F>(&self, f: F) -> JoinHandle<()>
     where
         A: Actor + Singleton + 'static,
-        F: FnOnce(crate::actor::native::RootCtx<A>) + Send + 'static,
+        F: FnOnce(RootCtx<A>) + Send + 'static,
     {
-        crate::actor::native::spawn_thread::spawn_detached::<A, F>(Arc::clone(self.binding), f)
+        spawn_thread::spawn_detached::<A, F>(Arc::clone(self.binding), f)
     }
 
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
@@ -169,7 +176,7 @@ impl<'a> NativeCtx<'a> {
     #[must_use]
     pub fn origin(&self) -> Option<MailboxId> {
         match self.sender.target {
-            crate::mail::ReplyTarget::Component(id) => Some(id),
+            ReplyTarget::Component(id) => Some(id),
             _ => None,
         }
     }
@@ -282,7 +289,7 @@ impl<'a> NativeCtx<'a> {
             .spawner()
             .expect("NativeCtx::spawn_child requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
         let sender = ReplyTo {
-            target: crate::mail::ReplyTarget::Component(self.binding.self_mailbox()),
+            target: ReplyTarget::Component(self.binding.self_mailbox()),
             correlation_id: ReplyTo::NO_CORRELATION,
         };
         super::spawn::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
@@ -674,7 +681,7 @@ impl OutboundReply for NativeCtx<'_> {
 
     fn origin(&self) -> Option<MailboxId> {
         match self.sender.target {
-            crate::mail::ReplyTarget::Component(id) => Some(id),
+            ReplyTarget::Component(id) => Some(id),
             _ => None,
         }
     }
@@ -696,10 +703,10 @@ impl SyncWaiter for NativeCtx<'_> {
         expected_correlation: u64,
     ) -> Result<K, E>
     where
-        K: Kind + serde::de::DeserializeOwned,
+        K: Kind + DeserializeOwned,
         E: WaitError,
     {
-        aether_actor::actor::ctx::sync_waiter::wait_reply_via::<K, E>(
+        sync_waiter::wait_reply_via::<K, E>(
             |kind, out, timeout, corr| self.binding.wait_reply(kind, out, timeout, corr),
             timeout_ms,
             capacity,

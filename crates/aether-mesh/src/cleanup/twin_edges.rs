@@ -12,6 +12,7 @@
 //! the correct cancellation.
 
 use super::mesh::VertexId;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 /// Collect surviving directed edges after twin-pair cancellation.
@@ -32,17 +33,17 @@ pub(super) fn surviving_directed_edges(
         let forward = directed.get(&(a, b)).copied().unwrap_or(0);
         let reverse = directed.get(&(b, a)).copied().unwrap_or(0);
         match forward.cmp(&reverse) {
-            std::cmp::Ordering::Greater => {
+            Ordering::Greater => {
                 for _ in 0..(forward - reverse) {
                     out.push((a, b));
                 }
             }
-            std::cmp::Ordering::Less => {
+            Ordering::Less => {
                 for _ in 0..(reverse - forward) {
                     out.push((b, a));
                 }
             }
-            std::cmp::Ordering::Equal => {}
+            Ordering::Equal => {}
         }
     }
     out

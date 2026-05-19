@@ -41,12 +41,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::mail::Mail;
+use crate::mail::mailer::Mailer;
 use aether_data::{KindId, MailId, MailboxId};
 use crossbeam_channel::{Receiver, Sender, bounded};
 
 /// Chassis-owned settlement notification registry. Owned by the
 /// chassis (one per substrate); cloned via `Arc` into the
-/// [`crate::mail::Mailer`]'s chassis-router closure so the
+/// [`Mailer`]'s chassis-router closure so the
 /// dispatcher's `Settled` switch can fire.
 #[derive(Default)]
 pub struct SettlementRegistry {
@@ -82,14 +84,14 @@ enum SettlementSubscriber {
     Mail {
         target: MailboxId,
         kind: KindId,
-        mailer: Arc<crate::mail::mailer::Mailer>,
+        mailer: Arc<Mailer>,
     },
 }
 
 impl SettlementSubscriber {
     /// Fire this subscriber for the settled `root`. Channel sends are
     /// non-blocking (`try_send`, so a closed receiver doesn't panic);
-    /// mail sends go through the chassis [`crate::mail::mailer::Mailer`]
+    /// mail sends go through the chassis [`Mailer`]
     /// which resolves the recipient inline on the firing thread.
     fn fire(self, root: MailId) {
         match self {
@@ -153,7 +155,7 @@ impl SettlementRegistry {
     }
 
     /// Subscribe a mailbox to receive a notification mail when `root`
-    /// settles. The notification is a [`crate::mail::Mail`] with the
+    /// settles. The notification is a [`Mail`] with the
     /// given `kind`, the [`MailId`] of the settled root postcard-encoded
     /// as payload, and `count = 1`. Pre-fires immediately (synchronously
     /// pushes the mail) if `root` has already settled at least once.
@@ -169,7 +171,7 @@ impl SettlementRegistry {
         root: MailId,
         target: MailboxId,
         kind: KindId,
-        mailer: Arc<crate::mail::mailer::Mailer>,
+        mailer: Arc<Mailer>,
     ) {
         let mut inner = self
             .inner
@@ -269,12 +271,7 @@ impl SettlementRegistry {
 /// the notification is dropped (logged at error) — `MailId` is a small
 /// `repr(C)` postcard-shaped struct, so encode failure here is a "this
 /// should never happen" path rather than a recoverable condition.
-fn push_settlement_notice(
-    mailer: &crate::mail::mailer::Mailer,
-    target: MailboxId,
-    kind: KindId,
-    root: MailId,
-) {
+fn push_settlement_notice(mailer: &Mailer, target: MailboxId, kind: KindId, root: MailId) {
     let payload = match postcard::to_allocvec(&root) {
         Ok(p) => p,
         Err(e) => {
@@ -286,7 +283,7 @@ fn push_settlement_notice(
             return;
         }
     };
-    mailer.push(crate::mail::Mail::new(target, kind, payload, 1));
+    mailer.push(Mail::new(target, kind, payload, 1));
 }
 
 #[cfg(test)]
@@ -302,6 +299,7 @@ mod tests {
     use super::*;
     use crate::handle_store::HandleStore;
     use crate::mail::mailer::Mailer;
+    use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
     use std::sync::Mutex as StdMutex;
 
@@ -339,7 +337,7 @@ mod tests {
             // directly and move payload into the captured row
             // (was: `payload.to_vec()` clone via the legacy
             // borrowed-dispatch shape).
-            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 captured_clone.lock().unwrap().push(CapturedDispatch {
                     kind: dispatch.kind,
                     payload: dispatch.payload,

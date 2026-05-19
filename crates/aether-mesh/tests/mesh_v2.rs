@@ -2,6 +2,7 @@
 
 use aether_math::Vec3;
 use aether_mesh::{ParseError, mesh, parse};
+use std::f32::consts::SQRT_2;
 
 #[test]
 fn torus_triangle_count_is_two_per_quad() {
@@ -107,7 +108,7 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
                 }
             }
             assert!(
-                min_dist <= radius.mul_add(std::f32::consts::SQRT_2, 1e-4),
+                min_dist <= radius.mul_add(SQRT_2, 1e-4),
                 "swept vertex too far from any waypoint: {v:?} (dist {min_dist})"
             );
         }

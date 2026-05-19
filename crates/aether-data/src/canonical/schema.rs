@@ -15,6 +15,12 @@ use super::primitives::{
     cow_enum_variants, cow_named_fields, cow_schema_types, str_len, varint_u32_len, varint_u64_len,
     varint_usize_len, write_str, write_varint_u32, write_varint_u64, write_varint_usize,
 };
+use crate::schema::KindShape;
+use crate::schema::SchemaShape;
+use crate::schema::VariantShape;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 const SCHEMA_UNIT: u8 = 0;
 const SCHEMA_BOOL: u8 = 1;
@@ -191,15 +197,15 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// per ADR-0063: `postcard::to_allocvec` into a growable `Vec` cannot
 /// fail for `KindShape`, so a failure indicates a serializer bug.
 #[must_use]
-pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> alloc::vec::Vec<u8> {
-    let shape = crate::schema::KindShape {
-        name: alloc::borrow::Cow::Owned(name.into()),
+pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> Vec<u8> {
+    let shape = KindShape {
+        name: Cow::Owned(name.into()),
         schema: schema_to_shape(schema),
     };
     postcard::to_allocvec(&shape).expect("canonical KindShape serialization is infallible")
 }
 
-fn schema_to_shape(s: &SchemaType) -> crate::schema::SchemaShape {
+fn schema_to_shape(s: &SchemaType) -> SchemaShape {
     use crate::schema::SchemaShape;
     match s {
         SchemaType::Unit => SchemaShape::Unit,
@@ -207,12 +213,10 @@ fn schema_to_shape(s: &SchemaType) -> crate::schema::SchemaShape {
         SchemaType::Scalar(p) => SchemaShape::Scalar(*p),
         SchemaType::String => SchemaShape::String,
         SchemaType::Bytes => SchemaShape::Bytes,
-        SchemaType::Option(cell) => {
-            SchemaShape::Option(alloc::boxed::Box::new(schema_to_shape(cell)))
-        }
-        SchemaType::Vec(cell) => SchemaShape::Vec(alloc::boxed::Box::new(schema_to_shape(cell))),
+        SchemaType::Option(cell) => SchemaShape::Option(Box::new(schema_to_shape(cell))),
+        SchemaType::Vec(cell) => SchemaShape::Vec(Box::new(schema_to_shape(cell))),
         SchemaType::Array { element, len } => SchemaShape::Array {
-            element: alloc::boxed::Box::new(schema_to_shape(element)),
+            element: Box::new(schema_to_shape(element)),
             len: *len,
         },
         SchemaType::Struct { fields, repr_c } => SchemaShape::Struct {
@@ -222,16 +226,16 @@ fn schema_to_shape(s: &SchemaType) -> crate::schema::SchemaShape {
         SchemaType::Enum { variants } => SchemaShape::Enum {
             variants: variants.iter().map(variant_to_shape).collect(),
         },
-        SchemaType::Ref(cell) => SchemaShape::Ref(alloc::boxed::Box::new(schema_to_shape(cell))),
+        SchemaType::Ref(cell) => SchemaShape::Ref(Box::new(schema_to_shape(cell))),
         SchemaType::Map { key, value } => SchemaShape::Map {
-            key: alloc::boxed::Box::new(schema_to_shape(key)),
-            value: alloc::boxed::Box::new(schema_to_shape(value)),
+            key: Box::new(schema_to_shape(key)),
+            value: Box::new(schema_to_shape(value)),
         },
         SchemaType::TypeId(id) => SchemaShape::TypeId(*id),
     }
 }
 
-fn variant_to_shape(v: &EnumVariant) -> crate::schema::VariantShape {
+fn variant_to_shape(v: &EnumVariant) -> VariantShape {
     use crate::schema::VariantShape;
     match v {
         EnumVariant::Unit { discriminant, .. } => VariantShape::Unit {
@@ -291,7 +295,7 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 /// ADR-0063: `postcard::to_allocvec` into a growable `Vec` cannot fail
 /// for `KindShape`, so a failure indicates a serializer bug.
 #[must_use]
-pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
+pub fn kind_id_from_shape(shape: &KindShape) -> u64 {
     let bytes =
         postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
     (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)

@@ -23,11 +23,12 @@ use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{TestBench, test_helpers::require_runtime};
 use aether_test_fixture_probe::TickObserved;
+use std::fs;
 
 const PROBE_NAME: &str = "probe";
 
 fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
-    let wasm = std::fs::read(wasm_path).expect("read fixture wasm");
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let result: LoadResult = bench
         .send_and_await_reply(
             ComponentHostCapability::NAMESPACE,

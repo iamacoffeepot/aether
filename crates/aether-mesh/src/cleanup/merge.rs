@@ -77,7 +77,9 @@
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
 use crate::plane::{Plane3, project_2d};
 use crate::point::Point3;
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 type PlaneKey = (i64, i64, i64, i128);
 type BucketKey = (PlaneKey, u32);
@@ -414,8 +416,7 @@ fn extract_loops(
     let mut starts: Vec<(VertexId, VertexId)> = boundary.to_vec();
     starts.sort_unstable();
 
-    let mut visited: std::collections::HashSet<(VertexId, VertexId)> =
-        std::collections::HashSet::new();
+    let mut visited: HashSet<(VertexId, VertexId)> = HashSet::new();
     let mut loops = Vec::new();
 
     for &(start_a, start_b) in &starts {
@@ -459,7 +460,7 @@ fn pick_continuation(
     vertices: &[Point3],
     axes: (usize, usize),
     outgoing: &HashMap<VertexId, Vec<VertexId>>,
-    visited: &std::collections::HashSet<(VertexId, VertexId)>,
+    visited: &HashSet<(VertexId, VertexId)>,
     prev: VertexId,
     cur: VertexId,
 ) -> Option<VertexId> {
@@ -483,13 +484,13 @@ fn pick_continuation(
     let mut best = unvisited[0];
     for &cand in &unvisited[1..] {
         match cmp_turn(in_dx, in_dy, cur_2d, vertices, axes, cand, best) {
-            std::cmp::Ordering::Less => best = cand,
-            std::cmp::Ordering::Equal => {
+            Ordering::Less => best = cand,
+            Ordering::Equal => {
                 if cand < best {
                     best = cand;
                 }
             }
-            std::cmp::Ordering::Greater => {}
+            Ordering::Greater => {}
         }
     }
     Some(best)
@@ -524,7 +525,7 @@ fn cmp_turn(
     axes: (usize, usize),
     a: VertexId,
     b: VertexId,
-) -> std::cmp::Ordering {
+) -> Ordering {
     let a_2d = project_2d(vertices[a], axes);
     let b_2d = project_2d(vertices[b], axes);
     let a_dx = a_2d.0 - cur.0;
@@ -558,7 +559,7 @@ fn cmp_turn(
                 rhs.cmp(&lhs)
             }
         }
-        _ => std::cmp::Ordering::Equal,
+        _ => Ordering::Equal,
     }
 }
 
@@ -585,6 +586,7 @@ mod tests {
     use super::*;
     use crate::loop_polygon::Polygon;
     use crate::test_helpers::{indexed_mesh_on, pt, triangle_fan};
+    use std::collections::BTreeSet;
 
     fn weld_then_merge(polys: Vec<Polygon>) -> Vec<Polygon> {
         IndexedMesh::weld(polys).merge_coplanar().into_polygons()
@@ -613,8 +615,8 @@ mod tests {
         let out = weld_then_merge(vec![t1, t2]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].vertices.len(), 4);
-        let covered: std::collections::BTreeSet<Point3> = out[0].vertices.iter().copied().collect();
-        let expect: std::collections::BTreeSet<Point3> = [
+        let covered: BTreeSet<Point3> = out[0].vertices.iter().copied().collect();
+        let expect: BTreeSet<Point3> = [
             pt(0.0, 0.0, 0.0),
             pt(1.0, 0.0, 0.0),
             pt(1.0, 1.0, 0.0),
@@ -688,8 +690,7 @@ mod tests {
         );
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 3);
-        let lens: std::collections::BTreeSet<usize> =
-            out.iter().map(|p| p.vertices.len()).collect();
+        let lens: BTreeSet<usize> = out.iter().map(|p| p.vertices.len()).collect();
         assert_eq!(lens, [3, 4].into_iter().collect());
     }
 
@@ -887,8 +888,7 @@ mod tests {
             2,
             "different colors must stay in separate buckets and not merge"
         );
-        let colors: std::collections::BTreeSet<u32> =
-            merged.polygons.iter().map(|p| p.color).collect();
+        let colors: BTreeSet<u32> = merged.polygons.iter().map(|p| p.color).collect();
         assert_eq!(colors, [11, 22].into_iter().collect());
     }
 
@@ -1149,8 +1149,7 @@ mod tests {
             "X-junction at J must extract 2 loops, got {}",
             merged.polygons.len()
         );
-        let lens: std::collections::BTreeSet<usize> =
-            merged.polygons.iter().map(|p| p.vertices.len()).collect();
+        let lens: BTreeSet<usize> = merged.polygons.iter().map(|p| p.vertices.len()).collect();
         assert_eq!(
             lens,
             [3, 5].into_iter().collect(),
@@ -1287,7 +1286,7 @@ mod tests {
         // After collapsing 14 and 10, only 11, 12, 13 survive (in some
         // rotation; rotate_left makes 11 the head).
         assert_eq!(out.len(), 3);
-        let as_set: std::collections::BTreeSet<VertexId> = out.iter().copied().collect();
+        let as_set: BTreeSet<VertexId> = out.iter().copied().collect();
         assert_eq!(as_set, [11, 12, 13].into_iter().collect());
     }
 

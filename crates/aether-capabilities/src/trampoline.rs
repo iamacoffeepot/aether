@@ -92,6 +92,7 @@ mod native {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{Mail, MailboxId};
+    use std::io;
 
     /// Configuration handed to [`WasmTrampoline::init`] by the spawn
     /// path. Carries the wasmtime engine / linker plus the parsed
@@ -175,9 +176,7 @@ mod native {
                 substrate_ctx,
             )
             .map_err(|e| {
-                BootError::Other(
-                    std::io::Error::other(format!("wasm instantiation failed: {e}")).into(),
-                )
+                BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
             })?;
             Ok(Self {
                 component: Some(component),

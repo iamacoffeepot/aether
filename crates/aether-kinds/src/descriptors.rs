@@ -28,6 +28,7 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+use aether_data::__inventory::DescriptorEntry;
 use aether_data::KindDescriptor;
 
 /// Every kind the substrate exposes. Order is unspecified — names are
@@ -35,7 +36,7 @@ use aether_data::KindDescriptor;
 /// hub `Hello` handshake) are order-independent.
 #[must_use]
 pub fn all() -> Vec<KindDescriptor> {
-    inventory::iter::<aether_data::__inventory::DescriptorEntry>()
+    inventory::iter::<DescriptorEntry>()
         .map(|e| KindDescriptor {
             name: e.name.to_string(),
             schema: e.schema.clone(),

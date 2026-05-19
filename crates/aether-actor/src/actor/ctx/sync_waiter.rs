@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use aether_data::Kind;
 
 use crate::mail::sync::{WaitError, decode_wait_reply};
+use serde::de::DeserializeOwned;
 
 /// Synchronous reply-receive surface every per-handler ctx that
 /// participates in ADR-0042 sync round trips exposes. Today FFI ctxs
@@ -49,7 +50,7 @@ pub trait SyncWaiter {
         expected_correlation: u64,
     ) -> Result<K, E>
     where
-        K: Kind + serde::de::DeserializeOwned,
+        K: Kind + DeserializeOwned,
         E: WaitError;
 }
 
@@ -64,7 +65,7 @@ pub fn wait_reply_via<K, E>(
     expected_correlation: u64,
 ) -> Result<K, E>
 where
-    K: Kind + serde::de::DeserializeOwned,
+    K: Kind + DeserializeOwned,
     E: WaitError,
 {
     let mut buf: Vec<u8> = vec![0u8; capacity];

@@ -23,6 +23,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::hub::DEFAULT_RPC_PORT;
+use std::thread;
 
 /// ADR-0071 marker for the hub chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HubChassis>`] returned by
@@ -143,7 +144,7 @@ fn shutdown_signal() -> &'static str {
                 "aether-substrate-hub: signal handler install failed: {e}; \
                  parking thread — SIGKILL is the only exit"
             );
-            std::thread::park();
+            thread::park();
             return "park";
         }
     };

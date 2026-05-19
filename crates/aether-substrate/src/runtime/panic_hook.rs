@@ -18,9 +18,12 @@
 // `RUST_BACKTRACE` if set — so existing toolchain conventions still
 // work.
 
+use std::any::Any;
 use std::backtrace::{Backtrace, BacktraceStatus};
+use std::env;
 use std::panic::{self, PanicHookInfo};
 use std::sync::OnceLock;
+use std::thread;
 
 /// Env var that forces backtrace capture without flipping
 /// `RUST_BACKTRACE` for the whole process (which would change every
@@ -58,7 +61,7 @@ fn make_hook(
 }
 
 fn emit_event(info: &PanicHookInfo<'_>) {
-    let thread = std::thread::current();
+    let thread = thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
     let location = info.location().map_or_else(
         || "<unknown>".to_string(),
@@ -99,7 +102,7 @@ fn emit_event(info: &PanicHookInfo<'_>) {
 // Chained if-let on disjoint downcasts reads cleaner than a deep
 // `map_or_else` ladder over two Options.
 #[allow(clippy::option_if_let_else)]
-fn payload_string(payload: &(dyn std::any::Any + Send)) -> String {
+fn payload_string(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -110,7 +113,7 @@ fn payload_string(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 fn capture_backtrace() -> Option<Backtrace> {
-    capture_backtrace_with(std::env::var_os(ENV_BACKTRACE).is_some())
+    capture_backtrace_with(env::var_os(ENV_BACKTRACE).is_some())
 }
 
 /// Pure-fn factor of `capture_backtrace` so tests can exercise both
@@ -140,18 +143,25 @@ mod tests {
     use tracing::field::{Field, Visit};
 
     use super::*;
+    use std::any::Any;
+    use std::fmt;
+    use std::thread;
+    use tracing::span::Attributes;
+    use tracing::span::Id;
+    use tracing::span::Record;
+    use tracing::subscriber;
 
     /// `&'static str` payload (the common `panic!("literal")` case).
     #[test]
     fn payload_string_handles_static_str() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new("static reason");
+        let payload: Box<dyn Any + Send> = Box::new("static reason");
         assert_eq!(payload_string(payload.as_ref()), "static reason");
     }
 
     /// `String` payload (the common `panic!("{}", x)` case).
     #[test]
     fn payload_string_handles_owned_string() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("owned reason"));
+        let payload: Box<dyn Any + Send> = Box::new(String::from("owned reason"));
         assert_eq!(payload_string(payload.as_ref()), "owned reason");
     }
 
@@ -159,7 +169,7 @@ mod tests {
     /// at least identifies the payload shape.
     #[test]
     fn payload_string_handles_unknown_type() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        let payload: Box<dyn Any + Send> = Box::new(42i32);
         let out = payload_string(payload.as_ref());
         assert!(
             out.starts_with("<non-string panic payload"),
@@ -205,12 +215,12 @@ mod tests {
     /// assertion stable under parallel test execution.
     #[test]
     fn make_hook_chains_to_previous() {
-        let test_thread = std::thread::current().id();
+        let test_thread = thread::current().id();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_prev = Arc::clone(&counter);
         let prev: Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static> =
             Box::new(move |_info| {
-                if std::thread::current().id() == test_thread {
+                if thread::current().id() == test_thread {
                     counter_for_prev.fetch_add(1, Ordering::SeqCst);
                 }
             });
@@ -248,7 +258,7 @@ mod tests {
             events: Arc::clone(&captured),
         };
 
-        tracing::subscriber::with_default(subscriber, || {
+        subscriber::with_default(subscriber, || {
             let _ = panic::catch_unwind(|| {
                 panic!("e2e probe 8e3a");
             });
@@ -299,11 +309,11 @@ mod tests {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
         }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
             let mut buf = String::new();
             let mut visitor = StringVisit(&mut buf);
@@ -313,8 +323,8 @@ mod tests {
                 fields: buf,
             });
         }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
     }
 
     struct StringVisit<'a>(&'a mut String);
@@ -323,7 +333,7 @@ mod tests {
         fn record_str(&mut self, field: &Field, value: &str) {
             let _ = write!(self.0, "{}={};", field.name(), value);
         }
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
             let _ = write!(self.0, "{}={:?};", field.name(), value);
         }
     }

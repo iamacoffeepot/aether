@@ -15,7 +15,9 @@
 //! Builder→BuiltChassis→run path applies all the same).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+
+use crate::chassis_root::next_chassis_correlation;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
     Mailer, SubstrateBoot, mail::MailboxId, runtime::trace::push_chassis_root_mail,
 };
+use std::env;
 
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
@@ -39,7 +42,7 @@ pub fn parse_tick_hz_env() -> u32 {
     // Match arms read cleaner than `map_or` here because the Ok arm
     // is a chained iterator/closure that warn-logs on parse failure.
     #[allow(clippy::option_if_let_else)]
-    match std::env::var("AETHER_TICK_HZ") {
+    match env::var("AETHER_TICK_HZ") {
         Ok(s) => s
             .trim()
             .parse::<u32>()
@@ -114,14 +117,7 @@ impl DriverRunning for HeadlessTimerRunning {
         // per-actor counter on `NativeBinding`. Skipping 0 keeps the
         // sentinel slot reserved.
         let chassis_correlation = AtomicU64::new(1);
-        let next_correlation = || -> u64 {
-            let id = chassis_correlation.fetch_add(1, Ordering::Relaxed);
-            if id == 0 {
-                chassis_correlation.fetch_add(1, Ordering::Relaxed)
-            } else {
-                id
-            }
-        };
+        let next_correlation = || -> u64 { next_chassis_correlation(&chassis_correlation) };
 
         let mut next_deadline = Instant::now() + tick_period;
         loop {

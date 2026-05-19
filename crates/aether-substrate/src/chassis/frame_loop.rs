@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use crate::mail::MailboxId;
 use crate::mail::outbound::HubOutbound;
 use crate::runtime::lifecycle;
+use std::thread;
 
 /// ADR-0063 fail-fast budget for the per-frame drain barrier. A
 /// dispatcher that doesn't quiesce within this window is treated as
@@ -77,7 +78,7 @@ pub fn drain_frame_bound_or_abort(pending: &[(MailboxId, Arc<AtomicU64>)], outbo
                     );
                     lifecycle::fatal_abort(outbound, reason);
                 }
-                std::thread::sleep(Duration::from_micros(50));
+                thread::sleep(Duration::from_micros(50));
             }
         }
     }

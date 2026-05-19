@@ -49,6 +49,8 @@ use aether_data::{
     canonical::kind_id_from_shape,
 };
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
+use serde::de::DeserializeOwned;
+use std::str;
 use wasmparser::{Parser, Payload};
 
 /// Section name the derive writes to for canonical schema bytes.
@@ -178,7 +180,7 @@ pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> 
             continue;
         };
         if reader.name() == NAMESPACE_SECTION {
-            return std::str::from_utf8(reader.data())
+            return str::from_utf8(reader.data())
                 .map(|s| Some(s.to_owned()))
                 .map_err(|e| format!("{NAMESPACE_SECTION}: invalid UTF-8: {e}"));
         }
@@ -277,7 +279,7 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
 /// the section is exhausted. Abort on unknown version or postcard
 /// decode error. Per-section version allowlists are passed in so the
 /// shape and labels sections can evolve independently.
-fn decode_records<T: serde::de::DeserializeOwned>(
+fn decode_records<T: DeserializeOwned>(
     section_name: &str,
     supported_versions: &[u8],
     data: &[u8],
@@ -495,6 +497,7 @@ fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>
 mod tests {
     use super::*;
     use aether_data::{LabelCell, LabelNode, Primitive, SchemaShape, VariantShape};
+    use std::fs;
     fn wasm_with_section(section_name: &str, section: &[u8]) -> Vec<u8> {
         use core::fmt::Write as _;
         let mut escaped = String::with_capacity(section.len() * 3);
@@ -761,7 +764,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../target/wasm32-unknown-unknown/release/aether_demo_sokoban.wasm"
         );
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = fs::read(path) else {
             eprintln!("skipping: sokoban wasm not built at {path}");
             return;
         };
@@ -1006,7 +1009,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../target/wasm32-unknown-unknown/release/examples/hello.wasm"
         );
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = fs::read(path) else {
             eprintln!("skipping: hello example wasm not built at {path}");
             return;
         };

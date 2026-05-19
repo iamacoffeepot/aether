@@ -41,6 +41,7 @@ use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
 use crate::LoadMesh;
+use core::str;
 
 const OUTLINE_WIDTH: f32 = 0.012;
 const OUTLINE_LIFT: f32 = 0.002;
@@ -158,7 +159,7 @@ impl FfiActor for MeshViewer {
                 return;
             }
         };
-        let Ok(text) = core::str::from_utf8(&bytes) else {
+        let Ok(text) = str::from_utf8(&bytes) else {
             tracing::warn!(
                 target: "aether_mesh_viewer",
                 path = %path,

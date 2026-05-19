@@ -19,6 +19,8 @@
 //! the inherent methods on `aether_substrate::actor::native::binding::NativeBinding`
 //! (native).
 
+use core::slice;
+use serde::de::DeserializeOwned;
 pub mod mailbox;
 pub mod sync;
 
@@ -191,7 +193,7 @@ impl<'a> Mail<'a> {
         // which guarantees the substrate wrote `self.byte_len >=
         // size_of::<K>()` bytes valid at `self.ptr` for the lifetime
         // of this `Mail`. `'a` ties the borrow to that lifetime.
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
+        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         Some(bytemuck::pod_read_unaligned(bytes))
     }
 
@@ -214,7 +216,7 @@ impl<'a> Mail<'a> {
         // the lifetime of this `Mail`. `'a` ties the returned slice
         // to that lifetime; `try_cast_slice` returns `None` on
         // alignment mismatch.
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
+        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         bytemuck::try_cast_slice(bytes).ok()
     }
 
@@ -249,7 +251,7 @@ impl<'a> Mail<'a> {
         // substrate's receive ABI; the `byte_len` check above proves
         // the host promised exactly `size_of::<K>()` bytes valid at
         // `self.ptr` for this `Mail`'s lifetime.
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
+        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         Some(bytemuck::pod_read_unaligned(bytes))
     }
 
@@ -269,7 +271,7 @@ impl<'a> Mail<'a> {
         // the host promised `size_of::<K>() * count` bytes valid at
         // `self.ptr` for this `Mail`'s lifetime. `try_cast_slice`
         // returns `None` on alignment mismatch.
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
+        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, byte_len) };
         bytemuck::try_cast_slice(bytes).ok()
     }
 
@@ -302,8 +304,7 @@ impl<'a> Mail<'a> {
         // lifetime. Bounding the slice by `byte_len` keeps
         // `K::decode_from_bytes` (cast or postcard) from running past
         // the substrate-written region into adjacent linear memory.
-        let bytes =
-            unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
+        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
         K::decode_from_bytes(bytes)
     }
 }
@@ -370,7 +371,7 @@ impl<'a> PriorState<'a> {
             // bytes valid at `self.ptr` for this `PriorState`'s
             // lifetime. The `len == 0` branch above avoids forming a
             // slice over a possibly-null pointer.
-            unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+            unsafe { slice::from_raw_parts(self.ptr as *const u8, self.len) }
         }
     }
 
@@ -390,7 +391,7 @@ impl<'a> PriorState<'a> {
     #[must_use]
     pub fn as_kind<K>(&self) -> Option<K>
     where
-        K: Kind + Schema + serde::de::DeserializeOwned,
+        K: Kind + Schema + DeserializeOwned,
     {
         let bytes = self.bytes();
         if bytes.len() < 8 {
@@ -414,6 +415,7 @@ impl<'a> PriorState<'a> {
 mod tests {
     use super::*;
     use aether_data::KindId as DataKindId;
+    use alloc::string::String;
     use alloc::vec::Vec;
     use serde::{Deserialize, Serialize};
 
@@ -448,7 +450,7 @@ mod tests {
     )]
     #[kind(name = "test.fake_postcard")]
     struct FakePostcard {
-        tag: alloc::string::String,
+        tag: String,
         ids: Vec<u32>,
     }
 
@@ -616,7 +618,7 @@ mod tests {
     #[test]
     fn mail_decode_kind_postcard_roundtrip() {
         let value = FakePostcard {
-            tag: alloc::string::String::from("greet"),
+            tag: String::from("greet"),
             ids: alloc::vec![1, 2, 3, 4],
         };
         let bytes =
@@ -671,7 +673,7 @@ mod tests {
     #[test]
     fn mail_decode_kind_wrong_kind_returns_none() {
         let value = FakePostcard {
-            tag: alloc::string::String::from("x"),
+            tag: String::from("x"),
             ids: alloc::vec![],
         };
         let bytes =
@@ -693,7 +695,7 @@ mod tests {
     #[test]
     fn mail_decode_kind_wrong_count_returns_none() {
         let value = FakePostcard {
-            tag: alloc::string::String::from("x"),
+            tag: String::from("x"),
             ids: alloc::vec![],
         };
         let bytes =
@@ -715,7 +717,7 @@ mod tests {
     #[test]
     fn mail_decode_kind_truncated_bytes_returns_none() {
         let value = FakePostcard {
-            tag: alloc::string::String::from("longer"),
+            tag: String::from("longer"),
             ids: alloc::vec![1, 2, 3],
         };
         let bytes =
@@ -788,7 +790,7 @@ mod tests {
     #[kind(name = "test.state.struct")]
     struct StateStruct {
         tag: u32,
-        label: alloc::string::String,
+        label: String,
         items: Vec<u32>,
     }
 
@@ -820,7 +822,7 @@ mod tests {
     fn as_kind_roundtrip() {
         let value = StateStruct {
             tag: 11,
-            label: alloc::string::String::from("phase-2"),
+            label: String::from("phase-2"),
             items: alloc::vec![1, 2, 3],
         };
         let buf = frame_bundle(&value);

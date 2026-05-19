@@ -36,6 +36,8 @@ use aether_substrate_bundle::test_bench::{
 // keep the anchor for parity with the other component scenario files.
 #[allow(unused_imports)]
 use aether_camera as _;
+use std::fs;
+use std::path::Path;
 
 /// Component name passed to `LoadComponent`. The full mailbox address
 /// the substrate registers is `aether.component.trampoline:cam`
@@ -58,8 +60,8 @@ fn component_address() -> String {
 /// Load this crate's pre-built wasm into the bench and await
 /// `LoadResult`. Panics on load failure so the calling test surfaces
 /// the error message rather than wedging on a missing subscription.
-fn load_camera(bench: &mut TestBench, wasm_path: &std::path::Path) {
-    let wasm = std::fs::read(wasm_path).expect("read camera wasm");
+fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
+    let wasm = fs::read(wasm_path).expect("read camera wasm");
     let result: LoadResult = bench
         .send_and_await_reply(
             "aether.component",

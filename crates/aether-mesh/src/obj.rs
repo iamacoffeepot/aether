@@ -11,6 +11,7 @@ use std::fmt::Write;
 
 use crate::mesh::Triangle;
 use aether_math::Vec3;
+use std::collections::BTreeMap;
 
 #[must_use]
 pub fn to_obj(triangles: &[Triangle]) -> String {
@@ -40,7 +41,7 @@ pub fn to_obj(triangles: &[Triangle]) -> String {
         writeln!(out, "v {} {} {}", v.x, v.y, v.z).expect("writeln! into String never fails");
     }
 
-    let mut faces_by_color = std::collections::BTreeMap::<u32, Vec<[usize; 3]>>::new();
+    let mut faces_by_color = BTreeMap::<u32, Vec<[usize; 3]>>::new();
     for (_, indices, color) in faces {
         faces_by_color.entry(color).or_default().push(indices);
     }

@@ -158,9 +158,14 @@ mod native {
             Arc, BootError, HandleCapability, HandlePublish, HandlePublishResult, HandleStore,
         };
         use crate::test_chassis::{TestChassis, boot_test_chassis_with};
+        use aether_kinds::descriptors;
         use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::mail::MailId;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::EgressEvent;
+        use aether_substrate::mail::outbound::HubOutbound;
+        use aether_substrate::mail::registry;
+        use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
 
@@ -172,10 +177,10 @@ mod native {
         ) {
             let store = Arc::new(HandleStore::new(64 * 1024));
             let registry = Arc::new(Registry::new());
-            for d in aether_kinds::descriptors::all() {
+            for d in descriptors::all() {
                 let _ = registry.register_kind_with_descriptor(d);
             }
-            let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
+            let (outbound, rx) = HubOutbound::attached_loopback();
             let mailer = Arc::new(
                 Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
             );
@@ -211,15 +216,15 @@ mod native {
             };
             let bytes = postcard::to_allocvec(&req)
                 .expect("test setup: HandlePublish serializes via postcard");
-            handler.enqueue(aether_substrate::mail::registry::OwnedDispatch {
+            handler.enqueue(OwnedDispatch {
                 kind: <HandlePublish as Kind>::ID,
                 kind_name: "aether.handle.publish".to_owned(),
                 origin: None,
                 sender: session_reply_to(),
                 payload: bytes,
                 count: 1,
-                mail_id: aether_substrate::mail::MailId::NONE,
-                root: aether_substrate::mail::MailId::NONE,
+                mail_id: MailId::NONE,
+                root: MailId::NONE,
                 parent_mail: None,
             });
 
@@ -284,10 +289,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (_store, mailer, registry, _rx) = fresh_substrate();
-            registry.register_inbox(
-                HandleCapability::NAMESPACE,
-                aether_substrate::mail::registry::noop_handler(),
-            );
+            registry.register_inbox(HandleCapability::NAMESPACE, registry::noop_handler());
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())

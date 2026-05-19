@@ -12,6 +12,7 @@
 use aether_actor::Actor;
 use aether_capabilities::EngineServer;
 use aether_data::{Kind, mailbox_id_from_name};
+use aether_kinds::descriptors;
 use aether_kinds::{
     ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
     TerminateEngineResult,
@@ -25,6 +26,7 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 struct TestChassis;
@@ -101,7 +103,7 @@ mod sink {
 
 fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let registry = Arc::new(Registry::new());
-    for d in aether_kinds::descriptors::all() {
+    for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
@@ -136,7 +138,7 @@ fn drive<K: Kind + serde::Serialize, T>(
             return value;
         }
         assert!(Instant::now() < until, "no reply within {deadline:?}");
-        std::thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(25));
     }
 }
 

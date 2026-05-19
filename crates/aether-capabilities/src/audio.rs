@@ -80,6 +80,8 @@ mod native {
     use aether_substrate::chassis::error::BootError;
 
     use super::{NoteOff, NoteOn, SetMasterGain};
+    use core::fmt;
+    use std::env;
 
     /// Capacity of the event queue between the cap's handlers and the
     /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
@@ -113,9 +115,9 @@ mod native {
     impl AudioConfig {
         #[must_use]
         pub fn from_env() -> Self {
-            let disabled = std::env::var("AETHER_AUDIO_DISABLE")
+            let disabled = env::var("AETHER_AUDIO_DISABLE")
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-            let requested_sample_rate = std::env::var("AETHER_AUDIO_SAMPLE_RATE")
+            let requested_sample_rate = env::var("AETHER_AUDIO_SAMPLE_RATE")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok());
             Self {
@@ -564,8 +566,8 @@ mod native {
         StreamPlay(String),
     }
 
-    impl core::fmt::Display for AudioBuildError {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    impl fmt::Display for AudioBuildError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::NoDevice => write!(f, "no default audio output device"),
                 Self::RateUnsupported(r) => write!(f, "requested sample rate {r} Hz unsupported"),
@@ -887,6 +889,7 @@ mod native {
         use aether_actor::Actor;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
+        use aether_substrate::mail::registry;
 
         #[test]
         fn builtin_registry_covers_five_patches() {
@@ -1044,10 +1047,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_inbox(
-                AudioCapability::NAMESPACE,
-                aether_substrate::mail::registry::noop_handler(),
-            );
+            registry.register_inbox(AudioCapability::NAMESPACE, registry::noop_handler());
 
             //noinspection DuplicatedCode
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))

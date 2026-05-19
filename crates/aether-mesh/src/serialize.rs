@@ -7,6 +7,9 @@ use lexpr::{Cons, Number, Value};
 
 use crate::ast::Node;
 use aether_math::Vec3;
+use lexpr::parse::KeywordSyntax;
+use lexpr::print;
+use lexpr::print::Options;
 
 /// Serialize a typed mesh AST to its canonical Lisp s-expression form.
 ///
@@ -18,10 +21,9 @@ use aether_math::Vec3;
 #[must_use]
 pub fn serialize(node: &Node) -> String {
     let value = node_to_value(node);
-    let opts = lexpr::print::Options::default()
-        .with_keyword_syntax(lexpr::parse::KeywordSyntax::ColonPrefix);
+    let opts = Options::default().with_keyword_syntax(KeywordSyntax::ColonPrefix);
     let mut buf = Vec::new();
-    lexpr::print::to_writer_custom(&mut buf, &value, opts).expect("writing to Vec never fails");
+    print::to_writer_custom(&mut buf, &value, opts).expect("writing to Vec never fails");
     String::from_utf8(buf).expect("lexpr emits utf-8")
 }
 

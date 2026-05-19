@@ -42,7 +42,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::actor::native::Envelope;
+use crate::runtime::log_install;
+use crate::runtime::log_install::MailDispatch;
+use crate::runtime::trace;
+use aether_actor::local;
 use aether_actor::local::ActorSlots;
+use aether_actor::log;
+use std::ops::Deref;
+use std::sync::PoisonError;
+use std::thread;
 
 /// `ActorSlots` uses `RefCell` internally because the dedicated-thread
 /// dispatcher path only ever reaches it from one OS thread. Worker-pool
@@ -60,7 +69,7 @@ struct PooledSlots(Box<ActorSlots>);
 // single-threaded across the Pooled dispatch path.
 unsafe impl Sync for PooledSlots {}
 
-impl std::ops::Deref for PooledSlots {
+impl Deref for PooledSlots {
     type Target = ActorSlots;
     fn deref(&self) -> &ActorSlots {
         &self.0
@@ -177,7 +186,7 @@ where
         let tx = self
             .close_done_tx
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .take();
         if let Some(tx) = tx {
             // Receiver may have hung up if the wait already timed out.
@@ -195,7 +204,7 @@ where
     // (reply_to, payload) into the actor; the helper here doesn't
     // happen to, but the surface mirrors the owning dispatch loop.
     #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_one(&self, actor: &mut Box<A>, env: crate::actor::native::Envelope) {
+    fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
         let inbound_mail_id = env.mail_id;
         // Issue 734: capture the OS thread name at the dispatcher's
         // receive hook so the trace renderer can stamp each event
@@ -203,19 +212,16 @@ where
         // `Pooled` default scheduler (issue 635) this is the worker's
         // `aether-worker-N` name (shared across actors); `Thread`-
         // scheduled actors land on a per-actor name.
-        let thread_name = std::thread::current().name().map(str::to_owned);
-        crate::runtime::trace::record_received(inbound_mail_id, thread_name);
-        aether_actor::local::with_stamped(&self.slots, || {
-            crate::runtime::log_install::with_actor_dispatch(
-                &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
-                || {
-                    let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
-                    super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
-                    aether_actor::log::drain_buffer();
-                },
-            );
+        let thread_name = thread::current().name().map(str::to_owned);
+        trace::record_received(inbound_mail_id, thread_name);
+        local::with_stamped(&self.slots, || {
+            log_install::with_actor_dispatch(&*self.binding as &dyn MailDispatch, || {
+                let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
+                super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
+                log::drain_buffer();
+            });
         });
-        crate::runtime::trace::record_finished(inbound_mail_id);
+        trace::record_finished(inbound_mail_id);
         if let Some(p) = &self.pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -226,20 +232,17 @@ where
     /// final tracing event from the close hook still routes to
     /// `LogCapability`.
     fn run_close_hook(&self, actor: &mut Box<A>) {
-        aether_actor::local::with_stamped(&self.slots, || {
-            crate::runtime::log_install::with_actor_dispatch(
-                &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
-                || {
-                    let mut close_ctx = NativeCtx::new(
-                        &self.binding,
-                        ReplyTo::NONE,
-                        aether_data::MailId::NONE,
-                        aether_data::MailId::NONE,
-                    );
-                    actor.unwire(&mut close_ctx);
-                    aether_actor::log::drain_buffer();
-                },
-            );
+        local::with_stamped(&self.slots, || {
+            log_install::with_actor_dispatch(&*self.binding as &dyn MailDispatch, || {
+                let mut close_ctx = NativeCtx::new(
+                    &self.binding,
+                    ReplyTo::NONE,
+                    aether_data::MailId::NONE,
+                    aether_data::MailId::NONE,
+                );
+                actor.unwire(&mut close_ctx);
+                log::drain_buffer();
+            });
         });
     }
 
@@ -280,10 +283,7 @@ where
             return CycleResult::Idle;
         }
 
-        let mut actor_guard = self
-            .actor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(actor) = actor_guard.as_mut() else {
             // Slot already finalized. Nothing to do.
             drop(actor_guard);
@@ -396,10 +396,7 @@ where
     /// predicate stays available for diagnostics + the fast-path
     /// already-closed check inside `set_close_done_tx`.
     fn is_closed(&self) -> bool {
-        let guard = self
-            .actor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         guard.is_none()
     }
 
@@ -418,7 +415,7 @@ where
         let prior = self
             .close_done_tx
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .replace(tx);
         // Defensive: if a prior sender was installed (shouldn't happen
         // — `shutdown_instanced` runs once per chassis), drop it. The

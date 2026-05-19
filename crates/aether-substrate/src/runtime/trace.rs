@@ -42,6 +42,7 @@ use crossbeam_queue::SegQueue;
 
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::MailboxEntry;
 
 /// Monotonic-since-boot reference. Set once at chassis boot via
 /// [`init_substrate_start`]; producer-side hooks subtract from it to
@@ -376,7 +377,7 @@ fn ship_batch(
     if !mailer
         .registry()
         .entry(recipient)
-        .is_some_and(|e| matches!(e, crate::mail::registry::MailboxEntry::Inbox(_)))
+        .is_some_and(|e| matches!(e, MailboxEntry::Inbox(_)))
     {
         // Observer not registered (or dropped); silently discard the
         // batch. Test isolation: a chassis without

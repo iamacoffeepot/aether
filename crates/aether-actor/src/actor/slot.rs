@@ -7,15 +7,16 @@
 //! `init` / `receive` shims that the substrate serializes.
 
 /// Macro-use backing store for the one component instance per guest.
+use core::cell::UnsafeCell;
 pub struct Slot<C> {
-    inner: core::cell::UnsafeCell<Option<C>>,
+    inner: UnsafeCell<Option<C>>,
 }
 
 impl<C> Slot<C> {
     /// Build an empty slot. `const` so it can live in a `static`.
     pub const fn new() -> Self {
         Self {
-            inner: core::cell::UnsafeCell::new(None),
+            inner: UnsafeCell::new(None),
         }
     }
 

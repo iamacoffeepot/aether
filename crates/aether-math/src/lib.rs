@@ -43,5 +43,18 @@ pub use mat::Mat4;
 pub use quat::Quat;
 pub use vec::{Vec2, Vec3, Vec4};
 
+// Re-export the standard math constants under our own crate root so
+// downstream code can write `aether_math::PI` without rooting at
+// `core::f32::consts`. The absolute path is intentional: importing
+// `PI` / `TAU` at the crate root would shadow these re-exports and
+// create a name cycle.
+#[expect(
+    clippy::absolute_paths,
+    reason = "re-export would shadow itself if imported"
+)]
 pub const PI: f32 = core::f32::consts::PI;
+#[expect(
+    clippy::absolute_paths,
+    reason = "re-export would shadow itself if imported"
+)]
 pub const TAU: f32 = core::f32::consts::TAU;

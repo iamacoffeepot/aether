@@ -49,6 +49,8 @@ pub mod mail;
 pub mod render;
 pub mod runtime;
 pub mod scheduler;
+#[cfg(test)]
+mod test_util;
 
 pub use actor::monitor::MonitorHandle;
 pub use actor::native::binding::NativeBinding;

@@ -28,6 +28,11 @@ use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::chassis_common::{CommonBoot, maybe_with_rpc_server, with_common_caps};
+use crate::hub;
+use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
+use std::env;
+use winit::event_loop::ControlFlow;
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Just one variant today: a wake-up so the loop picks up a queued
@@ -96,7 +101,7 @@ impl DesktopEnv {
     /// than the historic catch-all `wasmtime::Result` (issue #571).
     pub fn from_env() -> Result<Self, EventLoopError> {
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+        event_loop.set_control_flow(ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
 
         let http = HttpConf::from_env();
@@ -106,7 +111,7 @@ impl DesktopEnv {
         // nested matches read clearer than `map_or_else` here because both
         // arms have multi-line bodies (warn-log path on parse failure).
         #[allow(clippy::option_if_let_else)]
-        let (boot_mode, boot_size) = match std::env::var("AETHER_WINDOW_MODE") {
+        let (boot_mode, boot_size) = match env::var("AETHER_WINDOW_MODE") {
             Ok(s) => match parse_window_mode_env(&s) {
                 Ok(parsed) => parsed,
                 Err(e) => {
@@ -121,15 +126,13 @@ impl DesktopEnv {
             },
             Err(_) => (WindowMode::Windowed, None),
         };
-        let boot_title =
-            std::env::var("AETHER_WINDOW_TITLE").unwrap_or_else(|_| "aether".to_owned());
+        let boot_title = env::var("AETHER_WINDOW_TITLE").unwrap_or_else(|_| "aether".to_owned());
 
         // `AETHER_RPC_PORT` has no default — absent means RpcServer
         // doesn't boot. Binds `127.0.0.1`, matching the hub chassis.
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
-            crate::hub::rpc_port_from_env()
-                .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
+            hub::rpc_port_from_env().map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
         let workers = parse_workers_env();
@@ -155,7 +158,7 @@ impl DesktopEnv {
 /// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
 /// one worker); unparseable → `None` with a warn. Issue 745.
 fn parse_workers_env() -> Option<usize> {
-    let raw = std::env::var("AETHER_WORKERS").ok()?;
+    let raw = env::var("AETHER_WORKERS").ok()?;
     match raw.trim().parse::<usize>() {
         Ok(0) => {
             tracing::warn!(
@@ -238,11 +241,8 @@ impl DesktopChassis {
         // cross-class `wait_reply` aborter so the substrate exits via
         // `lifecycle::fatal_abort` instead of unwinding. Built before
         // `boot` moves into the driver.
-        let aborter: Arc<dyn aether_substrate::runtime::lifecycle::FatalAborter> = Arc::new(
-            aether_substrate::runtime::lifecycle::OutboundFatalAborter::new(Arc::clone(
-                &boot.outbound,
-            )),
-        );
+        let aborter: Arc<dyn FatalAborter> =
+            Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
 
         // Issue 552 stage 2d: render is a NativeActor. The chassis
         // builder constructs the cap inside `init` (called from

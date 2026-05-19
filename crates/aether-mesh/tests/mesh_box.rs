@@ -6,6 +6,7 @@
 //! Verify the box mesher produces 12 triangles at the expected corners.
 
 use aether_mesh::{mesh, parse};
+use std::collections::BTreeSet;
 
 #[test]
 fn unit_box_has_twelve_triangles() {
@@ -18,7 +19,7 @@ fn unit_box_has_twelve_triangles() {
 fn unit_box_corners_are_at_half_extents() {
     let ast = parse("(box 2 2 2 :color 5)").expect("test setup: box DSL parses");
     let tris = mesh(&ast).expect("test setup: box meshes");
-    let mut seen_corners = std::collections::BTreeSet::<[i32; 3]>::new();
+    let mut seen_corners = BTreeSet::<[i32; 3]>::new();
     for tri in &tris {
         for v in tri.vertices {
             // box 2 2 2 → corners at ±1 on each axis

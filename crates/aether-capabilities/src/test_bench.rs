@@ -28,6 +28,7 @@ mod native {
     use aether_substrate::mail::outbound::HubOutbound;
 
     use super::Advance;
+    use std::io;
 
     /// Stub cap for `aether.test_bench` on chassis without test-bench
     /// drive (desktop, headless). Replies `AdvanceResult::Err` so MCP
@@ -45,7 +46,7 @@ mod native {
 
         fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-                BootError::Other(Box::new(std::io::Error::other(
+                BootError::Other(Box::new(io::Error::other(
                     "HubOutbound must be wired on Mailer before \
                      UnsupportedTestBenchCapability::init (chassis main connects the hub before \
                      the Builder chain)",

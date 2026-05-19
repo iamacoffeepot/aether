@@ -78,6 +78,11 @@ unreadable_literal                  = "deny"
 unwrap_used                         = "warn"
 print_stdout                        = "warn"
 print_stderr                        = "warn"
+# absolute_paths — catches `crate::a::b::c::Thing` written inline at call sites
+# when a `use` would shorten it. See iamacoffeepot/aether#951. Starts at `warn`;
+# promotion to `deny` is a follow-up phase once any reintroduced hits stay green.
+# Default `absolute-paths-max-segments = 2` is sufficient — no override in clippy.toml.
+absolute_paths                      = "warn"
 
 # Disable — idiom fight / dispatcher contract / doc-burden. Rationale in iamacoffeepot/aether#854.
 float_cmp                    = "allow"

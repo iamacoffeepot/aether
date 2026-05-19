@@ -44,6 +44,9 @@ mod native {
     use aether_substrate::mail::helpers::resolve_bundle;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::Registry;
+    use aether_substrate::runtime::trace;
+    use std::cmp::Reverse;
+    use std::env;
 
     /// ADR-0080 §11 retention defaults. Override via env vars.
     /// `AETHER_TRACE_RETENTION_MS` — drop roots older than this many
@@ -309,7 +312,7 @@ mod native {
                     })
                 })
                 .collect();
-            summaries.sort_by_key(|s| std::cmp::Reverse(s.t_sent));
+            summaries.sort_by_key(|s| Reverse(s.t_sent));
             summaries.truncate(max);
             ListActiveRootsResult { roots: summaries }
         }
@@ -446,14 +449,14 @@ mod native {
     }
 
     fn parse_env_u64(name: &str, default: u64) -> u64 {
-        std::env::var(name)
+        env::var(name)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(default)
     }
 
     fn parse_env_usize(name: &str, default: usize) -> usize {
-        std::env::var(name)
+        env::var(name)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(default)
@@ -542,7 +545,7 @@ mod native {
         /// Issue 718 / ADR-0080 Phase 2.
         #[handler]
         fn on_list_active_roots(&mut self, ctx: &mut NativeCtx<'_>, request: ListActiveRoots) {
-            let now = aether_substrate::runtime::trace::now_nanos();
+            let now = trace::now_nanos();
             let result = self.build_list_active_roots(request, now);
             ctx.reply(&result);
         }
@@ -559,7 +562,7 @@ mod native {
         /// root via `describe_tree` for full chain context. Issue 735.
         #[handler]
         fn on_describe_window(&mut self, ctx: &mut NativeCtx<'_>, request: DescribeWindow) {
-            let now = aether_substrate::runtime::trace::now_nanos();
+            let now = trace::now_nanos();
             let result = self.build_describe_window(request, now);
             ctx.reply(&result);
         }
@@ -609,8 +612,11 @@ mod native {
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::{MailDispatch, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use std::collections::HashSet;
+        use std::env;
         use std::sync::Mutex;
         use std::sync::mpsc::Receiver;
+        use std::thread;
 
         /// Construct an observer for state-fold tests. Stash a fresh
         /// `Mailer` so `fire_settled` has somewhere to push (the
@@ -625,8 +631,8 @@ mod native {
             // write. `std::env::set_var` only requires "no other thread
             // is reading or writing the environment simultaneously."
             unsafe {
-                std::env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
-                std::env::set_var("AETHER_TRACE_MAX_ROOTS", "1000");
+                env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
+                env::set_var("AETHER_TRACE_MAX_ROOTS", "1000");
             }
             observer_with(Duration::from_mins(1), 1000)
         }
@@ -816,7 +822,7 @@ mod native {
                 );
                 // Tiny delay so `Instant::now()` advances across
                 // each insert — cheap-enough for a 5-root test.
-                std::thread::sleep(Duration::from_millis(2));
+                thread::sleep(Duration::from_millis(2));
             }
             obs.evict();
             assert_eq!(obs.roots.len(), 3);
@@ -1132,8 +1138,7 @@ mod native {
                     assert_eq!(r, root);
                     assert_eq!(in_flight, 3);
                     assert_eq!(mails.len(), 3);
-                    let ids: std::collections::HashSet<MailId> =
-                        mails.iter().map(|m| m.mail_id).collect();
+                    let ids: HashSet<MailId> = mails.iter().map(|m| m.mail_id).collect();
                     assert!(ids.contains(&root));
                     assert!(ids.contains(&a));
                     assert!(ids.contains(&b));
@@ -1250,7 +1255,7 @@ mod native {
                 Nanos(100),
             );
             assert_eq!(obs.t_sent_index.len(), 1);
-            std::thread::sleep(Duration::from_millis(80));
+            thread::sleep(Duration::from_millis(80));
             obs.evict();
             assert!(obs.t_sent_index.is_empty(), "secondary index out of sync");
         }
@@ -1273,7 +1278,7 @@ mod native {
                     KindId(0xABCD),
                     Nanos(cid * 100),
                 );
-                std::thread::sleep(Duration::from_millis(2));
+                thread::sleep(Duration::from_millis(2));
             }
             obs.evict();
             assert_eq!(obs.roots.len(), 3);
@@ -1455,8 +1460,7 @@ mod native {
             match result {
                 DescribeWindowResult::Ok { mails } => {
                     assert_eq!(mails.len(), 2);
-                    let ids: std::collections::HashSet<MailId> =
-                        mails.iter().map(|m| m.mail_id).collect();
+                    let ids: HashSet<MailId> = mails.iter().map(|m| m.mail_id).collect();
                     assert!(ids.contains(&mail(1, 2)));
                     assert!(ids.contains(&mail(1, 3)));
                 }
@@ -1509,7 +1513,7 @@ mod native {
                 Nanos(100),
             );
             assert_eq!(obs.roots.len(), 1);
-            std::thread::sleep(Duration::from_millis(80));
+            thread::sleep(Duration::from_millis(80));
             obs.evict();
             assert!(obs.roots.is_empty());
             assert!(obs.mails.is_empty());

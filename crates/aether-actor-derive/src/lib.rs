@@ -43,6 +43,10 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use std::mem;
+use syn::meta;
+use syn::parse::Parser;
+use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
     GenericArgument, ImplItem, Item, ItemImpl, ItemMod, Lit, Meta, PathArguments, Signature, Type,
@@ -604,7 +608,7 @@ fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
     Err(syn::Error::new(
         attrs
             .first()
-            .map_or_else(proc_macro2::Span::call_site, syn::spanned::Spanned::span),
+            .map_or_else(proc_macro2::Span::call_site, Spanned::span),
         "missing `#[kind(name = \"...\")]` attribute",
     ))
 }
@@ -759,7 +763,7 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
     if attr.is_empty() {
         return Ok(opts);
     }
-    let parser = syn::meta::parser(|meta| {
+    let parser = meta::parser(|meta| {
         if meta.path.is_ident("skip_markers") {
             opts.skip_markers = true;
             Ok(())
@@ -767,7 +771,7 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             Err(meta.error("unrecognised #[actor] argument; only `skip_markers` is supported"))
         }
     });
-    syn::parse::Parser::parse2(parser, attr)?;
+    Parser::parse2(parser, attr)?;
     Ok(opts)
 }
 
@@ -851,7 +855,7 @@ fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
     if attr.is_empty() {
         return Ok(opts);
     }
-    let parser = syn::meta::parser(|meta| {
+    let parser = meta::parser(|meta| {
         if meta.path.is_ident("singleton") {
             if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
                 return Err(meta.error(
@@ -880,7 +884,7 @@ fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
                 .error("#[bridge] only accepts `singleton`, `instanced`, or `feature = \"name\"`"))
         }
     });
-    syn::parse::Parser::parse(parser, attr)?;
+    Parser::parse(parser, attr)?;
     Ok(opts)
 }
 
@@ -1178,7 +1182,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     // one it adds `feature = "X"` so the inner `mod native` only
     // compiles when both the target and the feature say to.
     item_mod.content = Some((brace, items));
-    let mod_attrs = std::mem::take(&mut item_mod.attrs);
+    let mod_attrs = mem::take(&mut item_mod.attrs);
     Ok(quote! {
         #stub_and_reexport
         #actor_marker

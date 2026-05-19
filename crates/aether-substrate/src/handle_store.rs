@@ -45,6 +45,7 @@ use std::sync::RwLock;
 use crate::mail::Mail;
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
+use std::env;
 
 /// Default byte cap for the handle store.
 pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -158,7 +159,7 @@ impl HandleStore {
     pub fn from_env() -> Self {
         // Nested match keeps the warn-log path readable.
         #[allow(clippy::option_if_let_else)]
-        let max_bytes = match std::env::var(ENV_MAX_BYTES) {
+        let max_bytes = match env::var(ENV_MAX_BYTES) {
             Ok(raw) => match raw.parse::<usize>() {
                 Ok(n) => n,
                 Err(e) => {
@@ -835,6 +836,7 @@ mod tests {
     use aether_data::{NamedField, SchemaCell};
 
     use super::*;
+    use aether_data::tagged_id;
 
     // ------------------------------------------------------------
     // HandleStore unit tests
@@ -907,12 +909,9 @@ mod tests {
         // ADR-0064: counter occupies the low 60 bits; the high 4
         // bits carry `Tag::Handle`. Strip the tag to assert on the
         // raw counter value.
-        assert_eq!(aether_data::tagged_id::body_of(a.0), 1);
-        assert_eq!(aether_data::tagged_id::body_of(b.0), 2);
-        assert_eq!(
-            aether_data::tagged_id::tag_of(a.0),
-            Some(aether_data::Tag::Handle)
-        );
+        assert_eq!(tagged_id::body_of(a.0), 1);
+        assert_eq!(tagged_id::body_of(b.0), 2);
+        assert_eq!(tagged_id::tag_of(a.0), Some(aether_data::Tag::Handle));
         assert_ne!(a, HandleId(0));
     }
 

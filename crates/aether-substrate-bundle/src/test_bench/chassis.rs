@@ -27,6 +27,8 @@ use aether_substrate::{
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
 use super::events::{ChassisEvent, EventSender};
+use aether_substrate::mail::registry::MailDispatch;
+use std::io;
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
 /// component, the scheduler doesn't read this — it's retained on the
@@ -81,7 +83,7 @@ impl Chassis for TestBenchChassis {
     /// `Builder<TestBenchChassis, _>` can still parameterise over
     /// `Chassis` per ADR-0071.
     fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        Err(BootError::Other(Box::new(std::io::Error::other(
+        Err(BootError::Other(Box::new(io::Error::other(
             "TestBenchChassis has no driver; use TestBenchChassis::build_passive(env) instead \
              (the binary main() loops on events_rx; the in-process TestBench dispatches per-call)",
         ))))
@@ -271,17 +273,15 @@ impl TestBenchChassis {
             let observed_for_handler = sink;
             boot.registry.register_inline(
                 TEST_BENCH_OBSERVER_MAILBOX_NAME,
-                Arc::new(
-                    move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {
-                        if dispatch.kind_name.is_empty() {
-                            return;
-                        }
-                        observed_for_handler
-                            .lock()
-                            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
-                            .push(dispatch.kind_name.to_owned());
-                    },
-                ),
+                Arc::new(move |dispatch: MailDispatch<'_>| {
+                    if dispatch.kind_name.is_empty() {
+                        return;
+                    }
+                    observed_for_handler
+                        .lock()
+                        .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
+                        .push(dispatch.kind_name.to_owned());
+                }),
             );
         }
 

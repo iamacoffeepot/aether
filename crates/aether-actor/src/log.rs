@@ -60,6 +60,8 @@ use tracing::{
 use tracing::{Subscriber, span};
 
 use crate::{Local, local};
+use core::fmt;
+use core::mem;
 
 /// Per-actor log buffer, drained by the chassis dispatcher at
 /// handler exit and on `WARN`/`ERROR` priority flush. Backed by
@@ -125,9 +127,11 @@ pub type NativeLogShipper = fn(mailbox: MailboxId, kind: KindId, payload: &[u8])
 mod shipper {
     extern crate std;
     use super::NativeLogShipper;
+    use core::mem;
+    use core::ptr;
     use core::sync::atomic::{AtomicPtr, Ordering};
 
-    pub(super) static HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+    pub(super) static HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
     pub(super) fn store(hook: NativeLogShipper) {
         HOOK.store(hook as *mut (), Ordering::Release);
@@ -142,7 +146,7 @@ mod shipper {
             // through `store(hook: NativeLogShipper)`, which casts a
             // valid `fn` pointer of that exact signature. Round-trips
             // through `*mut ()` for `AtomicPtr` storage.
-            Some(unsafe { core::mem::transmute::<*mut (), NativeLogShipper>(raw) })
+            Some(unsafe { mem::transmute::<*mut (), NativeLogShipper>(raw) })
         }
     }
 }
@@ -164,7 +168,7 @@ pub fn set_native_log_shipper(hook: NativeLogShipper) {
 /// `aether_substrate::runtime::log_install::with_actor_dispatch`
 /// envelope is active.
 pub fn drain_buffer() {
-    let Some(entries) = LogBuffer::try_with_mut(|b| core::mem::take(&mut b.0)) else {
+    let Some(entries) = LogBuffer::try_with_mut(|b| mem::take(&mut b.0)) else {
         return;
     };
     if entries.is_empty() {
@@ -336,7 +340,7 @@ impl MessageBuilder {
         truncate(self.fields)
     }
 
-    fn append_field(&mut self, name: &str, separator: &str, value: core::fmt::Arguments<'_>) {
+    fn append_field(&mut self, name: &str, separator: &str, value: fmt::Arguments<'_>) {
         if !self.fields.is_empty() {
             self.fields.push(' ');
         }
@@ -365,7 +369,7 @@ impl Visit for MessageBuilder {
         }
     }
 
-    fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         if field.name() == "message" {
             let _ = write!(&mut self.message, "{value:?}");
         } else {

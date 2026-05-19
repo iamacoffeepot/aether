@@ -64,6 +64,7 @@ mod proxy_native {
     use std::io::ErrorKind;
     use std::process::Child;
     use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     /// Total time [`connect_proxy`] keeps retrying a refused dial when
@@ -290,7 +291,7 @@ mod proxy_native {
                 Ok(conn) => Ok(conn),
                 Err(e) => {
                     if retry && is_transient_connect_error(&e) && Instant::now() < deadline {
-                        std::thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
+                        thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
                         continue;
                     }
                     Err(e)
@@ -454,7 +455,9 @@ mod tests {
     use aether_substrate::Subname;
     use aether_substrate::chassis::builder::Builder;
     use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn substrate_peer_kind() -> PeerKind {
@@ -555,7 +558,7 @@ mod tests {
                 Instant::now() < deadline,
                 "reply did not route back through the proxy within 5s",
             );
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -570,7 +573,7 @@ mod tests {
             .expect("empty chassis boots");
 
         // Bind then drop a listener to get a definitely-closed port.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local_addr").port();
         drop(listener);
 

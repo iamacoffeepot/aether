@@ -48,6 +48,10 @@ use aether_substrate::{
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
+use serde::de::DeserializeOwned;
+use std::any;
+use std::error;
+use std::thread;
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness
@@ -116,7 +120,7 @@ impl fmt::Display for TestBenchError {
 /// dispatcher wake under nextest CPU contention.
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl std::error::Error for TestBenchError {}
+impl error::Error for TestBenchError {}
 
 /// In-process test-bench driver. Owns the substrate, runs the
 /// chassis events loop synchronously inside its API methods, routes
@@ -492,7 +496,7 @@ impl TestBench {
     ) -> Result<R, TestBenchError>
     where
         K: Kind + serde::Serialize,
-        R: serde::de::DeserializeOwned,
+        R: DeserializeOwned,
     {
         let mailbox = self
             .registry
@@ -503,7 +507,7 @@ impl TestBench {
         let payload = encode_struct(mail);
         self.queue
             .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
-        self.pump_until_reply::<R>(cid, std::any::type_name::<R>())
+        self.pump_until_reply::<R>(cid, any::type_name::<R>())
     }
 
     /// Run `ticks` complete frames synchronously. Each frame
@@ -614,7 +618,7 @@ impl TestBench {
     /// `WriteResult`) can't beat the bail-out check.
     fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, TestBenchError>
     where
-        R: serde::de::DeserializeOwned,
+        R: DeserializeOwned,
     {
         const MAX_ITERATIONS: u32 = 8_192;
         // Sleep per quiet iteration. 10 ms × QUIET_BUDGET caps total
@@ -682,7 +686,7 @@ impl TestBench {
                     });
                 }
                 // Yield to capability dispatcher threads (ADR-0070).
-                std::thread::sleep(QUIET_SLEEP);
+                thread::sleep(QUIET_SLEEP);
             }
         }
         Err(TestBenchError::Timeout {
@@ -693,7 +697,7 @@ impl TestBench {
 
     fn decode_reply<R>(event: EgressEvent, expected: &'static str) -> Result<R, TestBenchError>
     where
-        R: serde::de::DeserializeOwned,
+        R: DeserializeOwned,
     {
         match event {
             EgressEvent::ToSession {
@@ -857,6 +861,8 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Instant;
 
     /// Boot, advance one tick, capture, sanity-check the PNG.
     /// The default scene is empty so the captured frame is the
@@ -1099,9 +1105,9 @@ mod tests {
 
         // Wait briefly for the two pre-loaded `Bump` mails to land in
         // the first instance's dispatcher.
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
-        while received.load(AtomicOrdering::SeqCst) < 2 && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
             received.load(AtomicOrdering::SeqCst),

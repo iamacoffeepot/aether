@@ -25,6 +25,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use serde::{Serialize, de::DeserializeOwned};
+use std::error;
 
 /// Maximum accepted frame body size. Bounded so a malformed length
 /// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
@@ -53,7 +54,7 @@ impl fmt::Display for FrameError {
     }
 }
 
-impl std::error::Error for FrameError {}
+impl error::Error for FrameError {}
 
 impl From<io::Error> for FrameError {
     fn from(e: io::Error) -> Self {

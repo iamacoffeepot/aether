@@ -25,6 +25,7 @@
 
 use aether_kinds::{LogBatch, LogEvent, LogRead, LogReadResult};
 use aether_substrate_bundle::test_bench::{TestBench, test_helpers::has_wgpu_adapter};
+use std::env;
 
 const LOG_MAILBOX: &str = "aether.log";
 
@@ -32,7 +33,7 @@ fn require_wgpu_only() -> bool {
     if has_wgpu_adapter() {
         return true;
     }
-    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     assert!(
         !strict,
         "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",

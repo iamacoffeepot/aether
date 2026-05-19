@@ -13,6 +13,7 @@ use super::{
     CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, VERTEX_BUFFER_BYTES,
     VERTEX_STRIDE, vertex_buffer_layout,
 };
+use std::slice;
 
 /// Surfaceable failures from `record_main_pass`. Today there's only
 /// the buffer-overflow case (frame dropped); reified as a `Result`
@@ -112,7 +113,7 @@ pub fn build_main_pipeline(
             module: &shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: std::slice::from_ref(&vertex_layout),
+            buffers: slice::from_ref(&vertex_layout),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,

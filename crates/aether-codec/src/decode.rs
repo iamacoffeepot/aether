@@ -31,6 +31,9 @@ use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::{Map, Value};
 
 use crate::cast::{align_of_primitive, non_cast_variant_error};
+use aether_data::tagged_id;
+use std::error;
+use std::str;
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -91,7 +94,7 @@ impl fmt::Display for DecodeError {
     }
 }
 
-impl std::error::Error for DecodeError {}
+impl error::Error for DecodeError {}
 
 /// ADR-0020: decode `bytes` against a `SchemaType` descriptor into a
 /// JSON value symmetric to what `encode_schema` would accept.
@@ -217,7 +220,7 @@ fn decode_cast_field(
 fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, DecodeError> {
     let _expected = aether_data::tag_for_type_id(type_id)
         .ok_or(DecodeError::UnsupportedSchema("unknown TypeId in schema"))?;
-    Ok(aether_data::tagged_id::encode(id).map_or_else(|| Value::from(id), Value::String))
+    Ok(tagged_id::encode(id).map_or_else(|| Value::from(id), Value::String))
 }
 
 fn read_primitive_cast(
@@ -292,7 +295,7 @@ fn decode_postcard(
         SchemaType::String => {
             let len = read_varint_u64(cur, path)? as usize;
             let bytes = cur.take_slice(len, path)?;
-            let s = std::str::from_utf8(bytes)
+            let s = str::from_utf8(bytes)
                 .map_err(|_| DecodeError::InvalidUtf8 { path: path.into() })?;
             Ok(Value::String(s.into()))
         }
@@ -622,6 +625,7 @@ mod tests {
     use crate::encode_schema;
     use crate::test_fixtures::{cast_struct, pending_ok_err_variants, postcard_struct, scalar};
     use aether_data::SchemaCell;
+    use aether_data::tagged_id;
     use serde_json::json;
 
     /// Local alias preserving the decode-side spelling that the test
@@ -1036,8 +1040,7 @@ mod tests {
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0)
-            .expect("test setup: encode tagged mailbox id");
+        let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         roundtrip(json!({ "mailbox": s }), &schema);
     }
 
@@ -1056,8 +1059,7 @@ mod tests {
             },
         ]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let s = aether_data::tagged_id::encode(mailbox.0)
-            .expect("test setup: encode tagged mailbox id");
+        let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         roundtrip(json!({ "stream": 1, "mailbox": s }), &schema);
     }
 
@@ -1073,11 +1075,10 @@ mod tests {
         // match what the substrate expects.
         use aether_data::Kind;
         let mailbox = aether_data::MailboxId::from_name("aether.component");
-        let mailbox_str = aether_data::tagged_id::encode(mailbox.0)
-            .expect("test setup: encode tagged mailbox id");
+        let mailbox_str =
+            tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
         let kind_id = aether_kinds::Tick::ID;
-        let kind_str =
-            aether_data::tagged_id::encode(kind_id.0).expect("test setup: encode tagged kind id");
+        let kind_str = tagged_id::encode(kind_id.0).expect("test setup: encode tagged kind id");
         let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
 
         let bytes = encode_schema(
@@ -1099,7 +1100,7 @@ mod tests {
         // `with_tag` discipline holds through the schema-bytes
         // change).
         assert_eq!(
-            aether_data::tagged_id::tag_of(aether_kinds::SubscribeInput::ID.0),
+            tagged_id::tag_of(aether_kinds::SubscribeInput::ID.0),
             Some(aether_data::Tag::Kind),
         );
     }

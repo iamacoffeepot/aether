@@ -17,8 +17,12 @@ use crate::actor::native::envelope::Envelope;
 use crate::chassis::error::BootError;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::FatalAborter;
+use crate::scheduler::Drainable;
+use std::fmt;
+use std::sync::OnceLock;
 
 // iamacoffeepot/aether#848 PR 3: the `build_envelope(&MailDispatch)`
 // helper retired. Production cap registration closures now take
@@ -59,7 +63,7 @@ pub struct DropOnShutdownClaim {
     /// Issue 635 PR C: optional wake hook for `Pooled` actors. The
     /// mailbox closure invokes this after a successful inbox push so
     /// the chassis worker pool re-queues the actor's
-    /// [`Drainable`](crate::scheduler::Drainable) slot. `Dedicated` actors
+    /// [`Drainable`] slot. `Dedicated` actors
     /// (today: every cap) leave this empty — the closure's `get()`
     /// is a single atomic load, ~free.
     ///
@@ -72,14 +76,14 @@ pub struct DropOnShutdownClaim {
 /// Cell holding the optional wake hook a `Pooled` mailbox fires after
 /// each accepted send. The mailbox closure captures `Arc<MailboxWakeSlot>`
 /// at registration time; the spawn path populates it once the
-/// [`Drainable`](crate::scheduler::Drainable) slot exists.
+/// [`Drainable`] slot exists.
 #[derive(Default)]
 pub struct MailboxWakeSlot {
-    inner: std::sync::OnceLock<MailboxWakeFn>,
+    inner: OnceLock<MailboxWakeFn>,
 }
 
-impl std::fmt::Debug for MailboxWakeSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for MailboxWakeSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MailboxWakeSlot")
             .field("installed", &self.inner.get().is_some())
             .finish()
@@ -295,7 +299,7 @@ impl<'a> ChassisCtx<'a> {
             // path. `SendError` returns the envelope on failure so
             // the warn-log reads `env.kind_name` (the owned String)
             // without needing to clone ahead of the send.
-            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 let env: Envelope = dispatch;
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
                     tracing::warn!(
@@ -354,7 +358,7 @@ impl<'a> ChassisCtx<'a> {
             // logs `dispatch.kind_name` (still owned by the closure
             // at that point); the post-send fail branch reads
             // `env.kind_name` out of the `SendError` payload.
-            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 let Some(tx) = weak.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -435,7 +439,7 @@ impl<'a> ChassisCtx<'a> {
             // the only change is that `dispatch` is `OwnedDispatch`
             // (moved into `env` via `From`) and the failure branch
             // reads `env.kind_name` out of the `SendError`.
-            Arc::new(move |dispatch: crate::mail::registry::OwnedDispatch| {
+            Arc::new(move |dispatch: OwnedDispatch| {
                 let Some(tx) = weak.upgrade() else {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -590,9 +594,7 @@ impl<'a> ChassisCtx<'a> {
     /// sender. The `Pooled` branch of `make_native_actor_boot` clones
     /// this into the [`crate::scheduler::WakeHandle`] that fires when
     /// the actor's mailbox accepts a send.
-    pub(crate) fn pool_ready_tx(
-        &self,
-    ) -> &crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>> {
+    pub(crate) fn pool_ready_tx(&self) -> &crossbeam_channel::Sender<Arc<dyn Drainable>> {
         self.spawner.pool_ready_tx()
     }
 

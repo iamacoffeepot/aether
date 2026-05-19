@@ -21,12 +21,14 @@
 
 use crate::rpc::wire::{Hello, HelloAck, MailEnvelope, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
+use std::error;
 use std::fmt;
 use std::io::{self, BufReader};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::thread;
 use std::thread::JoinHandle;
 
 /// The outbound half of a live RPC connection: the write socket plus a
@@ -105,8 +107,8 @@ impl fmt::Display for RpcClientError {
     }
 }
 
-impl std::error::Error for RpcClientError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for RpcClientError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Connect(e) => Some(e),
             Self::Frame(e) => Some(e),
@@ -178,7 +180,7 @@ impl RpcClient {
         let shutdown_for_thread = Arc::clone(&shutdown);
         let (inbound_tx, inbound_rx) = mpsc::channel::<WireFrame>();
 
-        let thread = std::thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("aether-rpc-client-reader".into())
             .spawn(move || {
                 loop {
@@ -280,6 +282,7 @@ mod tests {
     use std::io::BufReader;
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
+    use std::thread;
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -307,7 +310,7 @@ mod tests {
     fn fake_server(handle: impl FnOnce(TcpStream) + Send + 'static) -> (u16, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         let port = listener.local_addr().expect("local_addr").port();
-        let thread = std::thread::spawn(move || {
+        let thread = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("fake server accept");
             handle(stream);
         });

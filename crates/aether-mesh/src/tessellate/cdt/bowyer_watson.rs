@@ -60,6 +60,8 @@
 //! relies on; it is also where degenerate-input handling lands.
 
 use super::predicates::{Point2, in_circle, orient2d};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 pub(super) type VertId = usize;
 pub(super) type TriId = usize;
@@ -264,10 +266,7 @@ impl Mesh {
     /// the constraint may not be locally Delaunay — leaving slivers in
     /// the output even though the topology is correct. This pass cleans
     /// them up.
-    pub(super) fn lawson_redelaunize(
-        &mut self,
-        constraints: &std::collections::HashSet<(VertId, VertId)>,
-    ) {
+    pub(super) fn lawson_redelaunize(&mut self, constraints: &HashSet<(VertId, VertId)>) {
         const MAX_LAWSON_ITERATIONS: usize = 4096;
         for _ in 0..MAX_LAWSON_ITERATIONS {
             let mut flipped = false;
@@ -655,10 +654,8 @@ impl Mesh {
         // whose b is this triangle's a, and "across edge opposite b" =
         // the new triangle whose a is this triangle's b.
         // Build a vertex → (new_tid, "is this vert the `a` slot"?) map.
-        let mut by_a: std::collections::HashMap<VertId, TriId> =
-            std::collections::HashMap::with_capacity(n_new);
-        let mut by_b: std::collections::HashMap<VertId, TriId> =
-            std::collections::HashMap::with_capacity(n_new);
+        let mut by_a: HashMap<VertId, TriId> = HashMap::with_capacity(n_new);
+        let mut by_b: HashMap<VertId, TriId> = HashMap::with_capacity(n_new);
         for (k, &(a, b, _)) in boundary.iter().enumerate() {
             let tid = first_new_tid + k;
             by_a.insert(a, tid);
@@ -686,6 +683,8 @@ impl Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
+    use std::f64::consts::TAU;
 
     fn count_alive(mesh: &Mesh) -> usize {
         mesh.alive_triangles().count()
@@ -791,7 +790,7 @@ mod tests {
         // checker exercises both `assert_all_ccw` and `assert_delaunay`.
         let pts: Vec<(i64, i64)> = (0..6)
             .map(|i| {
-                let theta = i as f64 * std::f64::consts::PI / 3.0;
+                let theta = i as f64 * PI / 3.0;
                 ((1000.0 * theta.cos()) as i64, (1000.0 * theta.sin()) as i64)
             })
             .collect();
@@ -867,7 +866,7 @@ mod tests {
     fn flip_edge_preserves_neighbor_symmetry_and_winding() {
         let pts: Vec<(i64, i64)> = (0..12)
             .map(|i| {
-                let theta = i as f64 * std::f64::consts::TAU / 12.0;
+                let theta = i as f64 * TAU / 12.0;
                 ((1000.0 * theta.cos()) as i64, (1000.0 * theta.sin()) as i64)
             })
             .collect();

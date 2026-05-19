@@ -12,14 +12,16 @@
 //! `(Arc<Registry>, Arc<Mailer>)` seed for `Builder::new`.
 
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
+use aether_kinds::descriptors;
 use aether_substrate::actor::native::{NativeActor, NativeDispatch};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
-use aether_substrate::mail::outbound::HubOutbound;
+use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::Registry;
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
@@ -47,7 +49,7 @@ impl Chassis for TestChassis {
 /// (rpc, engine proxy) get the connected backend they need.
 pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let registry = Arc::new(Registry::new());
-    for d in aether_kinds::descriptors::all() {
+    for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
@@ -79,4 +81,19 @@ where
         .with_actor::<A>(config)
         .build_passive()
         .expect("test chassis boots")
+}
+
+/// Build a `(Arc<Mailer>, Receiver<EgressEvent>)` pair where the
+/// mailer's outbound is wired to a loopback channel whose receiver
+/// the caller can drain. Mirrors [`fresh_substrate`] but exposes the
+/// egress side for tests that need to observe `ReplyTarget::Session`
+/// sends (the cap-level reply path used by `aether.fs` / `aether.http`
+/// / `aether.audio`). The registry is bare — no kind descriptors —
+/// so tests can register only what they exercise.
+pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
+    let (outbound, rx) = HubOutbound::attached_loopback();
+    let registry = Arc::new(Registry::new());
+    let store = Arc::new(HandleStore::new(1024 * 1024));
+    let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+    (mailer, rx)
 }

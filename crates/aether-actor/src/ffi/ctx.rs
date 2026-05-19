@@ -24,6 +24,7 @@ use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::resolver::Resolver;
+use crate::actor::ctx::sync_waiter;
 use crate::actor::ctx::sync_waiter::SyncWaiter;
 use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{Actor, HandlesKind, Singleton};
@@ -32,6 +33,8 @@ use crate::ffi::mailbox::FfiActorMailbox;
 use crate::mail::ReplyTo;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use crate::mail::sync::WaitError;
+use alloc::string::String;
+use serde::de::DeserializeOwned;
 
 /// Init-only capability handle for FFI guests. Resolved during
 /// `FfiActor::init`; not available at runtime (the type split fences
@@ -180,7 +183,7 @@ impl FfiCtx<'_> {
     // — `reason` is owned because callers `format!(...)` inline and the
     // diverging body means no further use.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn fatal_abort(&self, reason: alloc::string::String) -> ! {
+    pub fn fatal_abort(&self, reason: String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
     }
 }
@@ -269,10 +272,10 @@ impl SyncWaiter for FfiCtx<'_> {
         expected_correlation: u64,
     ) -> Result<K, E>
     where
-        K: Kind + serde::de::DeserializeOwned,
+        K: Kind + DeserializeOwned,
         E: WaitError,
     {
-        crate::actor::ctx::sync_waiter::wait_reply_via::<K, E>(
+        sync_waiter::wait_reply_via::<K, E>(
             |kind, out, timeout, corr| SYNC_WAIT_BRIDGE.wait_reply(kind, out, timeout, corr),
             timeout_ms,
             capacity,

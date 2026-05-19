@@ -47,11 +47,14 @@
 //! selection and face-normal lighting; small noise there doesn't
 //! affect topology.
 
+use crate::ast::Node;
 use crate::loop_polygon;
+use crate::mesh;
 use crate::mesh::MeshError;
 use crate::plane;
 use crate::plane::project_2d;
 use crate::point::Point3;
+use crate::tessellate;
 use aether_math::Vec3;
 use std::collections::HashMap;
 
@@ -71,7 +74,7 @@ pub struct Polygon {
 
 /// Mesh `node` and return the result as n-gon polygons.
 ///
-/// Goes directly through [`crate::mesh::mesh_polygons_internal`] —
+/// Goes directly through [`mesh::mesh_polygons_internal`] —
 /// the polygon-domain mesh evaluator that operates polygon-in /
 /// polygon-out throughout (no triangle round-trip). This is the fix
 /// for the `protruding_sphere` `SingularEdges`: the previous path went
@@ -80,8 +83,8 @@ pub struct Polygon {
 /// CDT-output sliver triangles. Skipping the triangle hop avoids the
 /// re-derivation entirely — n-gon loops travel from CSG cleanup
 /// straight into the crate-internal `group_loops` step.
-pub fn mesh_polygons(node: &crate::ast::Node) -> Result<Vec<Polygon>, MeshError> {
-    let loops = crate::mesh::mesh_polygons_internal(node)?;
+pub fn mesh_polygons(node: &Node) -> Result<Vec<Polygon>, MeshError> {
+    let loops = mesh::mesh_polygons_internal(node)?;
     Ok(group_loops(loops))
 }
 
@@ -440,17 +443,15 @@ fn fan_triangulate(vertices: &[Point3]) -> Vec<[Point3; 3]> {
 }
 
 fn cdt_tessellate(polygon: &Polygon) -> Option<Vec<[Point3; 3]>> {
-    crate::tessellate::tessellate_polygon_integer(
-        &polygon.vertices,
-        &polygon.holes,
-        polygon.plane_normal,
-    )
+    tessellate::tessellate_polygon_integer(&polygon.vertices, &polygon.holes, polygon.plane_normal)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ast::Node;
+    use core::f32::consts::FRAC_1_SQRT_2;
+    use std::f32::consts::PI;
 
     fn p(x: f32, y: f32, z: f32) -> Point3 {
         Point3::from_f32(Vec3::new(x, y, z)).expect("in range")
@@ -525,7 +526,7 @@ mod tests {
         for n in 3..=8 {
             let vertices: Vec<Point3> = (0..n)
                 .map(|i| {
-                    let theta = 2.0 * std::f32::consts::PI * (i as f32) / (n as f32);
+                    let theta = 2.0 * PI * (i as f32) / (n as f32);
                     p(theta.cos(), theta.sin(), 0.0)
                 })
                 .collect();
@@ -609,11 +610,7 @@ mod tests {
             p(0.199_996_95, 0.453_582_76, 0.346_405_03),
             p(0.199_996_95, 1.0, 0.346_405_03),
         ];
-        let normal = Vec3::new(
-            -core::f32::consts::FRAC_1_SQRT_2,
-            0.0,
-            -core::f32::consts::FRAC_1_SQRT_2,
-        );
+        let normal = Vec3::new(-FRAC_1_SQRT_2, 0.0, -FRAC_1_SQRT_2);
         assert!(
             is_convex(&verts, &normal),
             "snap-rounded near-collinear vertex should not flip convex classification"

@@ -24,6 +24,9 @@ use aether_actor::FfiActorMailbox;
 use aether_kinds::{Delete, FsError, List, Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
+use std::fs;
+use std::io;
+use std::process;
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `FsError` map directly onto ADR-0041 §1's reply enums, so the
@@ -120,8 +123,8 @@ impl LocalFileAdapter {
     // of `dirs::data_dir()` / a `PathBuf::from(env)` straight in and
     // we shadow-rebind to the canonicalised form.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn new(root: PathBuf, writable: bool) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&root)?;
+    pub fn new(root: PathBuf, writable: bool) -> io::Result<Self> {
+        fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
         Ok(Self { root, writable })
     }
@@ -149,7 +152,7 @@ impl LocalFileAdapter {
 impl FileAdapter for LocalFileAdapter {
     fn read(&self, path: &str) -> FsResult<Vec<u8>> {
         let resolved = self.resolve(path)?;
-        match std::fs::read(&resolved) {
+        match fs::read(&resolved) {
             Ok(bytes) => Ok(bytes),
             Err(e) => Err(fs_error_from_std(e)),
         }
@@ -161,7 +164,7 @@ impl FileAdapter for LocalFileAdapter {
         }
         let resolved = self.resolve(path)?;
         if let Some(parent) = resolved.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| FsError::AdapterError(e.to_string()))?;
+            fs::create_dir_all(parent).map_err(|e| FsError::AdapterError(e.to_string()))?;
         }
         let mut tmp = resolved.clone();
         let existing = tmp
@@ -169,12 +172,12 @@ impl FileAdapter for LocalFileAdapter {
             .and_then(|s| s.to_str())
             .ok_or_else(|| FsError::AdapterError("non-utf8 filename".into()))?
             .to_string();
-        tmp.set_file_name(format!("{existing}.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, bytes).map_err(|e| FsError::AdapterError(e.to_string()))?;
-        match std::fs::rename(&tmp, &resolved) {
+        tmp.set_file_name(format!("{existing}.tmp-{}", process::id()));
+        fs::write(&tmp, bytes).map_err(|e| FsError::AdapterError(e.to_string()))?;
+        match fs::rename(&tmp, &resolved) {
             Ok(()) => Ok(()),
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
+                let _ = fs::remove_file(&tmp);
                 Err(FsError::AdapterError(e.to_string()))
             }
         }
@@ -185,7 +188,7 @@ impl FileAdapter for LocalFileAdapter {
             return Err(FsError::Forbidden);
         }
         let resolved = self.resolve(path)?;
-        match std::fs::remove_file(&resolved) {
+        match fs::remove_file(&resolved) {
             Ok(()) => Ok(()),
             Err(e) => Err(fs_error_from_std(e)),
         }
@@ -193,7 +196,7 @@ impl FileAdapter for LocalFileAdapter {
 
     fn list(&self, prefix: &str) -> FsResult<Vec<String>> {
         let resolved = self.resolve(prefix)?;
-        let entries = std::fs::read_dir(&resolved).map_err(fs_error_from_std)?;
+        let entries = fs::read_dir(&resolved).map_err(fs_error_from_std)?;
         let mut names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| FsError::AdapterError(e.to_string()))?;
@@ -212,7 +215,7 @@ impl FileAdapter for LocalFileAdapter {
 // `to_string()` both borrow, so technically `&Error` would work, but
 // it'd force ad-hoc closures at every call site.
 #[allow(clippy::needless_pass_by_value)]
-fn fs_error_from_std(err: std::io::Error) -> FsError {
+fn fs_error_from_std(err: io::Error) -> FsError {
     match err.kind() {
         ErrorKind::NotFound => FsError::NotFound,
         ErrorKind::PermissionDenied => FsError::Forbidden,
@@ -237,9 +240,7 @@ pub struct NamespaceRoots {
 /// read-only. Returns the populated registry along with the roots
 /// echoed back (cloned) so the chassis can log what it actually
 /// wired.
-pub fn build_registry(
-    roots: NamespaceRoots,
-) -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
+pub fn build_registry(roots: NamespaceRoots) -> io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
     let mut registry = AdapterRegistry::new();
     let save = Arc::new(LocalFileAdapter::new(roots.save.clone(), true)?);
     let assets = Arc::new(LocalFileAdapter::new(roots.assets.clone(), false)?);
@@ -258,10 +259,10 @@ impl NamespaceRoots {
     /// builders that want to surface root-validity as a "skip the
     /// `aether.fs` cap and continue" decision rather than letting
     /// init failure abort the whole boot.
-    pub fn ensure_dirs(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.save)?;
-        std::fs::create_dir_all(&self.assets)?;
-        std::fs::create_dir_all(&self.config)?;
+    pub fn ensure_dirs(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.save)?;
+        fs::create_dir_all(&self.assets)?;
+        fs::create_dir_all(&self.config)?;
         self.save.canonicalize()?;
         self.assets.canonicalize()?;
         self.config.canonicalize()?;
@@ -388,6 +389,7 @@ mod native {
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use std::env;
 
     impl NamespaceRoots {
         /// Resolve each root from its env-var override, falling back to
@@ -415,22 +417,22 @@ mod native {
         pub fn from_env() -> Self {
             let save = env_or_default("AETHER_SAVE_DIR", || {
                 dirs::data_dir()
-                    .unwrap_or_else(std::env::temp_dir)
+                    .unwrap_or_else(env::temp_dir)
                     .join("aether")
                     .join("save")
             });
             let assets = env_or_default("AETHER_ASSETS_DIR", || {
-                std::env::current_exe()
+                env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(Path::to_path_buf))
                     .map_or_else(
-                        || std::env::temp_dir().join("aether").join("assets"),
+                        || env::temp_dir().join("aether").join("assets"),
                         |p| p.join("assets"),
                     )
             });
             let config = env_or_default("AETHER_CONFIG_DIR", || {
                 dirs::config_dir()
-                    .unwrap_or_else(std::env::temp_dir)
+                    .unwrap_or_else(env::temp_dir)
                     .join("aether")
             });
             Self {
@@ -442,7 +444,7 @@ mod native {
     }
 
     fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
-        match std::env::var(var) {
+        match env::var(var) {
             Ok(s) if !s.is_empty() => PathBuf::from(s),
             _ => default(),
         }
@@ -629,16 +631,23 @@ mod native {
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
-        use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::mail::registry::Registry;
 
         use crate::test_chassis::{TestChassis, fresh_substrate};
+        use aether_substrate::mail::ReplyTarget;
+        use aether_substrate::mail::registry;
+        use serde::de::DeserializeOwned;
+        use std::fs;
+        use std::process;
+        use std::sync::mpsc::Receiver;
+        use std::time::Duration;
+        use std::time::SystemTime;
+        use std::time::UNIX_EPOCH;
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.
         struct TestFixture {
             cap: FsCapability,
-            rx: std::sync::mpsc::Receiver<EgressEvent>,
+            rx: Receiver<EgressEvent>,
             transport: Arc<NativeBinding>,
         }
 
@@ -666,9 +675,9 @@ mod native {
         /// Manual tempdir helper to avoid pulling in the `tempfile`
         /// crate. Caller cleans up via [`cleanup`] after the test asserts.
         fn scratch_root(tag: &str) -> PathBuf {
-            let pid = std::process::id();
-            let nonce: u64 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let pid = process::id();
+            let nonce: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 // Nanosecond clock fits comfortably in u64 for the next ~584 years.
                 .map_or(0, |d| {
                     #[allow(clippy::cast_possible_truncation)]
@@ -676,12 +685,12 @@ mod native {
                     nanos
                 });
             let path = temp_dir().join(format!("aether-io-cap-{tag}-{pid}-{nonce}"));
-            std::fs::create_dir_all(&path).expect("test setup: scratch dir creates");
+            fs::create_dir_all(&path).expect("test setup: scratch dir creates");
             path
         }
 
         fn cleanup(path: &Path) {
-            let _ = std::fs::remove_dir_all(path);
+            let _ = fs::remove_dir_all(path);
         }
 
         fn roots_under(root: &Path) -> NamespaceRoots {
@@ -690,9 +699,9 @@ mod native {
                 assets: root.join("assets"),
                 config: root.join("config"),
             };
-            std::fs::create_dir_all(&r.save).expect("test setup: save root creates");
-            std::fs::create_dir_all(&r.assets).expect("test setup: assets root creates");
-            std::fs::create_dir_all(&r.config).expect("test setup: config root creates");
+            fs::create_dir_all(&r.save).expect("test setup: save root creates");
+            fs::create_dir_all(&r.assets).expect("test setup: assets root creates");
+            fs::create_dir_all(&r.config).expect("test setup: config root creates");
             r
         }
 
@@ -773,7 +782,7 @@ mod native {
                 .expect("test setup: LocalFileAdapter constructs on scratch root");
             a.write("slot.bin", &[0u8; 16])
                 .expect("test setup: adapter accepts atomic write");
-            let siblings: Vec<String> = std::fs::read_dir(a.root())
+            let siblings: Vec<String> = fs::read_dir(a.root())
                 .expect("test setup: adapter root is readable")
                 .filter_map(Result::ok)
                 .filter_map(|e| e.file_name().to_str().map(ToString::to_string))
@@ -917,28 +926,14 @@ mod native {
         }
 
         fn session_sender() -> ReplyTo {
-            ReplyTo::to(aether_substrate::mail::ReplyTarget::Session(SessionToken(
-                Uuid::nil(),
-            )))
+            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
 
-        /// Build a fully-wired `Mailer` connected to a fresh test
-        /// outbound channel.
-        fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-            let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
-            let registry = Arc::new(Registry::new());
-            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
-                1024 * 1024,
-            ));
-            let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
-            (mailer, rx)
-        }
+        use crate::test_chassis::test_mailer_and_rx;
 
-        fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
-            rx: &std::sync::mpsc::Receiver<EgressEvent>,
-        ) -> K {
+        fn decode_reply<K: aether_data::Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
             let event = rx
-                .recv_timeout(std::time::Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(1))
                 .expect("test: egress event arrives within 1s deadline");
             let EgressEvent::ToSession {
                 kind_name, payload, ..
@@ -976,15 +971,15 @@ mod native {
         fn cap_init_fails_when_adapter_init_fails() {
             let root = scratch_root("init-fails");
             let save_path = root.join("save_is_actually_a_file");
-            std::fs::write(&save_path, b"not a dir")
+            fs::write(&save_path, b"not a dir")
                 .expect("test setup: write save_path as a regular file");
             let roots = NamespaceRoots {
                 save: save_path,
                 assets: root.join("assets"),
                 config: root.join("config"),
             };
-            std::fs::create_dir_all(&roots.assets).expect("test setup: assets root creates");
-            std::fs::create_dir_all(&roots.config).expect("test setup: config root creates");
+            fs::create_dir_all(&roots.assets).expect("test setup: assets root creates");
+            fs::create_dir_all(&roots.config).expect("test setup: config root creates");
 
             let (registry, mailer) = fresh_substrate();
             let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -1000,10 +995,7 @@ mod native {
         fn duplicate_claim_rejects_with_typed_error() {
             let root = scratch_root("collide");
             let (registry, mailer) = fresh_substrate();
-            registry.register_inbox(
-                FsCapability::NAMESPACE,
-                aether_substrate::mail::registry::noop_handler(),
-            );
+            registry.register_inbox(FsCapability::NAMESPACE, registry::noop_handler());
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<FsCapability>(roots_under(&root))

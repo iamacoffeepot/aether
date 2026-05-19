@@ -42,6 +42,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::capabilities::fs::NamespaceRoots;
+use std::env;
+use std::fs;
+use std::process;
 
 /// Process-wide test sandbox. Single `OnceLock` so repeat calls
 /// across a binary's tests resolve to the same dir — handy for
@@ -125,7 +128,7 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 // and surfaces it on failure (issue 891).
 #[allow(clippy::print_stderr)]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
-    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {
         assert!(
             !strict,
@@ -170,11 +173,8 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
 /// a test that can't reserve its sandbox can't proceed.
 pub fn init_save_sandbox(label: &str) -> &'static Path {
     TEST_SAVE_DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "aether-{label}-tests-{pid}",
-            pid = std::process::id(),
-        ));
-        std::fs::create_dir_all(&dir).expect("create test save dir");
+        let dir = env::temp_dir().join(format!("aether-{label}-tests-{pid}", pid = process::id()));
+        fs::create_dir_all(&dir).expect("create test save dir");
         dir
     })
 }
@@ -212,6 +212,6 @@ pub fn write_fixture(name: &str, bytes: &[u8]) -> String {
     let dir = TEST_SAVE_DIR
         .get()
         .expect("init_save_sandbox must run before write_fixture");
-    std::fs::write(dir.join(name), bytes).expect("write fixture");
+    fs::write(dir.join(name), bytes).expect("write fixture");
     name.to_owned()
 }
