@@ -74,7 +74,10 @@ done < <(git diff --name-only "$base..HEAD" 2>/dev/null || true)
     echo
     if [[ ${#rust_files[@]} -gt 0 ]]; then
         echo "Then run \`mcp__rustrover__get_file_problems\` over each changed .rs"
-        echo "file (the qodana-equivalent that preflight.sh can't run locally):"
+        echo "file (the qodana-equivalent that preflight.sh can't run locally)."
+        echo "IMPORTANT: pass \`errorsOnly: false\` — the default is errors-only"
+        echo "and Qodana CI flags NOTICE-level findings (Duplicated code"
+        echo "fragment, Unnecessary path prefix) that get missed otherwise:"
         echo
         for f in "${rust_files[@]}"; do
             echo "    - $f"
