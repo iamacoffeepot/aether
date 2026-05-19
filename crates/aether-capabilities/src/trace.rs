@@ -828,40 +828,7 @@ mod native {
 
         #[test]
         fn finished_to_zero_fires_settled() {
-            use std::sync::Mutex;
-
-            // Build a Mailer with a chassis-router that records every
-            // chassis-addressed mail. The observer's `fire_settled`
-            // pushes through the Mailer; the router intercepts.
-            let registry = Arc::new(Registry::new());
-            let store = Arc::new(HandleStore::new(1024 * 1024));
-            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-            let captured: Arc<Mutex<Vec<Settled>>> = Arc::new(Mutex::new(Vec::new()));
-            let captured_for_router = Arc::clone(&captured);
-            let settled_kind = <Settled as aether_data::Kind>::ID;
-            mailer.install_chassis_router(Box::new(move |mail| {
-                if mail.kind == settled_kind
-                    && let Ok(notice) = postcard::from_bytes::<Settled>(&mail.payload)
-                {
-                    captured_for_router
-                        .lock()
-                        .expect("test stub: captured mutex poisoned")
-                        .push(notice);
-                }
-            }));
-
-            let mut obs = TraceObserverCapability {
-                roots: HashMap::new(),
-                mails: HashMap::new(),
-                t_sent_index: BTreeSet::new(),
-                retention: Duration::from_mins(1),
-                max_roots: 1000,
-                mailer: Arc::clone(&mailer),
-                settled_kind,
-                registry: Arc::clone(&registry),
-            };
-
-            let root = mail(1, 1);
+            let (mut obs, captured, root) = observer_with_settled_capture();
             apply_sent_event(
                 &mut obs,
                 root,
@@ -873,18 +840,13 @@ mod native {
                 Nanos(100),
             );
             // No Settled yet — in_flight is 1.
-            assert!(
-                captured
-                    .lock()
-                    .expect("test stub: captured mutex poisoned")
-                    .is_empty()
-            );
+            assert!(captured.lock().expect("captured mutex").is_empty());
             obs.apply_event(TraceEvent::Finished {
                 mail_id: root,
                 t: Nanos(200),
             });
             // Settled fired; chassis-router decoded the mail.
-            let captured = captured.lock().expect("test stub: captured mutex poisoned");
+            let captured = captured.lock().expect("captured mutex");
             assert_eq!(captured.len(), 1);
             assert_eq!(captured[0].root, root);
         }

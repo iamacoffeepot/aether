@@ -25,12 +25,12 @@
 //!
 //! ADR-0080 §12 says "the spawning handler's tree does not settle
 //! until every spawned-thread send completes." Enforced here via the
-//! `SettlementHold` RAII guard from
-//! [`crate::runtime::trace::acquire_settlement_hold`]: `spawn_inherit`
-//! acquires a hold against the parent's `in_flight_root` BEFORE the
-//! worker thread is spawned (so the `HoldOpen` trace event lands ahead
-//! of the parent handler's `Finished`), then moves the hold into the
-//! `InheritCtx<A>` so the worker thread owns it. Drop fires `Release`.
+//! [`SettlementHold`] RAII guard from [`acquire_settlement_hold`]:
+//! `spawn_inherit` acquires a hold against the parent's
+//! `in_flight_root` BEFORE the worker thread is spawned (so the
+//! `HoldOpen` trace event lands ahead of the parent handler's
+//! `Finished`), then moves the hold into the `InheritCtx<A>` so the
+//! worker thread owns it. Drop fires `Release`.
 //! The observer gates `Settled` emission on
 //! `(in_flight == 0 && held_open == 0)`, so a worker thread that
 //! outlives its handler keeps the chain open until it exits.
