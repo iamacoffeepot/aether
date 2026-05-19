@@ -167,6 +167,15 @@ struct PendingState<C> {
 }
 
 impl<C> Inner<C> {
+    /// Set the pending state's optional `quit` edge. Called from both
+    /// `quit` methods (`OpenNoNext` and `OpenWithNext`) so the
+    /// per-typestate handlers stay one-line wrappers.
+    fn set_pending_quit(&mut self, quit: KindId) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.quit = Some(quit);
+        }
+    }
+
     /// Commit the pending state into `states`. Caller must have
     /// established `pending.is_some()` and `pending.next.is_some()`
     /// via the type-state machinery — this is the runtime
@@ -271,9 +280,7 @@ impl<C: 'static> LifecycleGraphBuilder<C, OpenNoNext> {
     /// can be added.
     #[must_use]
     pub fn quit<K: Kind>(mut self) -> Self {
-        if let Some(pending) = self.inner.pending.as_mut() {
-            pending.quit = Some(<K as Kind>::ID);
-        }
+        self.inner.set_pending_quit(<K as Kind>::ID);
         self
     }
 }
@@ -283,9 +290,7 @@ impl<C: 'static> LifecycleGraphBuilder<C, OpenWithNext> {
     /// edge. Stays in [`OpenWithNext`].
     #[must_use]
     pub fn quit<K: Kind>(mut self) -> Self {
-        if let Some(pending) = self.inner.pending.as_mut() {
-            pending.quit = Some(<K as Kind>::ID);
-        }
+        self.inner.set_pending_quit(<K as Kind>::ID);
         self
     }
 
@@ -414,17 +419,15 @@ fn finalize<C>(inner: Inner<C>) -> Result<LifecycleGraph<C>, BuildError> {
 
     // Duplicate-kind check across the union of states + terminals.
     let mut seen: Vec<KindId> = Vec::with_capacity(states.len() + terminals.len());
-    for s in &states {
-        if seen.contains(&s.kind) {
-            return Err(BuildError::DuplicateKind { kind: s.kind });
+    let all_kinds = states
+        .iter()
+        .map(|s| s.kind)
+        .chain(terminals.iter().map(|t| t.kind));
+    for kind in all_kinds {
+        if seen.contains(&kind) {
+            return Err(BuildError::DuplicateKind { kind });
         }
-        seen.push(s.kind);
-    }
-    for t in &terminals {
-        if seen.contains(&t.kind) {
-            return Err(BuildError::DuplicateKind { kind: t.kind });
-        }
-        seen.push(t.kind);
+        seen.push(kind);
     }
 
     // Resolution check for start.
@@ -468,12 +471,20 @@ mod tests {
     use super::*;
     use aether_kinds::{InitCaps, InitComponents, Quit, Shutdown, Tick};
 
-    #[test]
-    fn minimal_graph_init_to_terminal_builds() {
-        let graph = LifecycleGraph::<()>::builder()
+    /// Shared fixture: a single-state graph (`InitCaps → Shutdown`)
+    /// that several build-error tests start from. Returns the builder
+    /// post-state-and-terminal but pre-start so tests can either commit
+    /// or substitute the start before `.build()`.
+    fn init_to_shutdown_builder() -> LifecycleGraphBuilder<(), NoOpen> {
+        LifecycleGraph::<()>::builder()
             .state::<InitCaps, _>(|()| InitCaps {})
             .next::<Shutdown>()
             .terminal::<Shutdown, _>(|()| Shutdown {})
+    }
+
+    #[test]
+    fn minimal_graph_init_to_terminal_builds() {
+        let graph = init_to_shutdown_builder()
             .start::<InitCaps>()
             .build()
             .expect("test setup: minimal graph builds");
@@ -487,10 +498,7 @@ mod tests {
 
     #[test]
     fn build_rejects_missing_start() {
-        let err = LifecycleGraph::<()>::builder()
-            .state::<InitCaps, _>(|()| InitCaps {})
-            .next::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
+        let err = init_to_shutdown_builder()
             .build()
             .expect_err("missing start should fail");
         assert!(matches!(err, BuildError::MissingStart));
@@ -498,10 +506,7 @@ mod tests {
 
     #[test]
     fn build_rejects_start_unregistered() {
-        let err = LifecycleGraph::<()>::builder()
-            .state::<InitCaps, _>(|()| InitCaps {})
-            .next::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
+        let err = init_to_shutdown_builder()
             .start::<Tick>() // Tick is not registered in the graph
             .build()
             .expect_err("start::<Tick> with no Tick state should fail");

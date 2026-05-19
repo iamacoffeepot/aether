@@ -2,10 +2,9 @@
 //! (ADR-0082 §2).
 //!
 //! The driver is a `NativeActor` registered at `aether.lifecycle`. It
-//! holds the compiled [`LifecycleGraph<C>`](super::LifecycleGraph) plus
-//! a shared chassis context `C` and a subscriber table. On each
-//! [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) mail received from the chassis,
-//! the driver:
+//! holds the compiled [`LifecycleGraph`] plus a shared chassis context
+//! `C` and a subscriber table. On each [`LifecycleAdvance`] mail
+//! received from the chassis, the driver:
 //!
 //! 1. Mints the current state's payload by calling the state's factory
 //!    with `&C`.
@@ -15,9 +14,9 @@
 //!    `quit` if `quit_pending` is set and the state declares a quit
 //!    edge (consuming the flag), otherwise `next`.
 //!
-//! `quit_pending` is set by inbound [`Quit`](aether_kinds::Quit) mail
-//! and persists across states with no declared quit edge — only states
-//! that declare `.quit::<K>()` consume the flag.
+//! `quit_pending` is set by inbound [`Quit`] mail and persists across
+//! states with no declared quit edge — only states that declare
+//! `.quit::<K>()` consume the flag.
 //!
 //! **PR 2 scope.** This implementation is fire-and-advance — the driver
 //! broadcasts then advances without awaiting settlement. ADR-0082 §6
@@ -62,8 +61,7 @@ enum Step {
 /// at chassis-builder time and consumed by the actor's `init`.
 pub struct LifecycleDriverConfig<C> {
     /// The compiled lifecycle graph. Built via
-    /// [`LifecycleGraph::builder()`](super::LifecycleGraph::builder) on
-    /// the chassis side.
+    /// [`LifecycleGraph::builder()`] on the chassis side.
     pub graph: LifecycleGraph<C>,
     /// The initial chassis context. Owned by the driver actor for the
     /// lifetime of the chassis; factories read it via `&C` each
@@ -372,14 +370,11 @@ mod tests {
         assert!(quit, "quit flag must persist when state has no quit edge");
     }
 
-    #[test]
-    fn driver_initial_state_is_graph_start() {
-        // Smoke that the driver's init derives `current_state` from
-        // `graph.start()`. We construct the driver fields directly
-        // rather than booting a chassis — PR 2 scope ships the
-        // primitive, PR 3's chassis integration exercises the boot
-        // path end-to-end.
-        let graph = LifecycleGraph::<()>::builder()
+    /// Two-state graph (`InitCaps → InitComponents → Shutdown`) with a
+    /// quit edge on the second state. Shared fixture for any
+    /// driver-level test that needs a graph with a quit edge present.
+    fn two_state_graph_with_quit() -> LifecycleGraph<()> {
+        LifecycleGraph::<()>::builder()
             .state::<InitCaps, _>(|()| InitCaps {})
             .next::<InitComponents>()
             .state::<InitComponents, _>(|()| InitComponents {})
@@ -388,7 +383,17 @@ mod tests {
             .terminal::<Shutdown, _>(|()| Shutdown {})
             .start::<InitCaps>()
             .build()
-            .expect("test setup: graph builds");
+            .expect("test setup: two-state graph builds")
+    }
+
+    #[test]
+    fn driver_initial_state_is_graph_start() {
+        // Smoke that the driver's init derives `current_state` from
+        // `graph.start()`. We construct the driver fields directly
+        // rather than booting a chassis — PR 2 scope ships the
+        // primitive, PR 3's chassis integration exercises the boot
+        // path end-to-end.
+        let graph = two_state_graph_with_quit();
 
         let driver: LifecycleDriverCapability<()> = LifecycleDriverCapability {
             current_state: graph.start(),
