@@ -17,8 +17,8 @@
 
 use aether_actor::Local;
 use aether_actor::log::{ActorLogRing, render_event};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::now_unix_ms;
 use std::io;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
@@ -71,14 +71,6 @@ pub fn emit_host_event(level: u32, target: &str, message: &str) {
     let _ = ActorLogRing::try_with_mut(|ring| {
         ring.push(level_u8, target, message, timestamp);
     });
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        #[allow(clippy::cast_possible_truncation)]
-        let ms = d.as_millis() as u64;
-        ms
-    })
 }
 
 const FILTER_ENV: &str = "AETHER_LOG_FILTER";

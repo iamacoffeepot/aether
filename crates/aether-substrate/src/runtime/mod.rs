@@ -10,3 +10,13 @@ pub mod panic_hook;
 pub mod trace;
 
 pub use panic_hook::init_panic_hook;
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
+        #[allow(clippy::cast_possible_truncation)]
+        let ms = d.as_millis() as u64;
+        ms
+    })
+}
