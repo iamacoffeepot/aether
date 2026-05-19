@@ -17,6 +17,7 @@ pub mod descriptors;
 pub mod keycode;
 pub mod trace;
 
+use alloc::string::String;
 use bytemuck::{Pod, Zeroable};
 
 // Every kind below derives both `Kind` and `Schema`. Pre-ADR-0032
@@ -49,6 +50,226 @@ use bytemuck::{Pod, Zeroable};
 )]
 #[kind(name = "aether.tick")]
 pub struct Tick;
+
+// ADR-0082 lifecycle stage kinds. Empty payload — the broadcast is the
+// signal. Future revisions may add per-stage fields (frame_no on Tick,
+// vp matrix on Render) once stage payload semantics settle; v1 keeps
+// the wire shape minimal so the application-declared graph can drive
+// stage timing without committing to a fixed payload schema. The
+// existing `aether.tick` kind above stays in place for PR-4-deferred
+// renaming; the new kinds below add the rest of the lifecycle family.
+
+/// Lifecycle stage broadcast — capability init pass (ADR-0082 §5).
+/// Fires once at chassis boot, after every capability's actor-framework
+/// `claim → init → wire → spawn` completes and before
+/// [`InitComponents`] fires. Capabilities that need to send mail to
+/// peers during boot subscribe to this stage.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.init_caps")]
+pub struct InitCaps;
+
+/// Lifecycle stage broadcast — component init pass (ADR-0082 §5).
+/// Fires once after [`InitCaps`] settles, before the per-frame loop
+/// begins. Component-category actors subscribe here when they need to
+/// reach already-wired capabilities during their boot logic.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.init_components")]
+pub struct InitComponents;
+
+/// Lifecycle stage broadcast — render stage (ADR-0082 §1). Fires every
+/// frame between [`Tick`] and [`Present`] on chassis that declare a
+/// render state in their lifecycle graph (today: desktop). Render
+/// capabilities subscribe to integrate frame state submitted during
+/// the preceding Tick stage. Headless / hub chassis omit this state
+/// from their graph; subscribing on a chassis that doesn't declare it
+/// rejects fail-fast at wire time per ADR-0082 §7.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.render")]
+pub struct Render;
+
+/// Lifecycle stage broadcast — frame-present stage (ADR-0082 §1).
+/// Fires every frame after [`Render`] on chassis that drive a display.
+/// The default desktop graph routes the quit edge through this stage so
+/// the current frame finishes drawing before shutdown.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.present")]
+pub struct Present;
+
+/// Lifecycle stage broadcast — shutdown stage (ADR-0082 §1). Fires
+/// once when the graph reaches a terminal state. Subscribers perform
+/// graceful cleanup with the full mail surface still operational
+/// (save game state, flush a write, post a metric) before the chassis
+/// runs each actor's `unwire` finaliser. Distinct from the actor
+/// framework's per-actor `unwire` hook — ADR-0082 §12.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.shutdown")]
+pub struct Shutdown;
+
+/// Lifecycle escape signal (ADR-0082 §3). The one hardcoded signal the
+/// driver recognises. Setting `quit_pending = true` on receipt; the
+/// flag is consumed at the next state whose graph declares a `quit`
+/// edge. Chassis bridges OS-level termination signals (ctrlc, winit
+/// `WindowEvent::CloseRequested`, future hub-shutdown mail) to this
+/// kind so three trigger sources converge on one consumption point.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.quit")]
+pub struct Quit;
+
+/// Driver-internal trigger that advances the lifecycle state machine
+/// by one step (ADR-0082 §2). The chassis main loop sends this each
+/// frame; the driver responds by minting the current state's payload
+/// via its factory, broadcasting to subscribers, awaiting settlement,
+/// and advancing the internal state pointer along the resolved edge
+/// (`next` or `quit`). Not exposed via the `aether.lifecycle.*` stage
+/// vocabulary because it carries no semantic meaning to subscribers;
+/// it's the cadence input, not a stage broadcast.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.advance")]
+pub struct LifecycleAdvance;
+
+/// Subscribe a mailbox to a lifecycle stage broadcast (ADR-0082 §7).
+/// `stage` is the [`KindId`](aether_data::KindId) of the stage kind
+/// (e.g. `<Tick as Kind>::ID.0`); `mailbox` is the subscriber's mailbox
+/// id. Substrate replies with [`LifecycleSubscribeResult`] —
+/// `Err { reason: UnsupportedStage }` when the chassis's lifecycle
+/// graph doesn't declare a state at that kind, fail-fast at wire time
+/// per ADR-0082 §7.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.subscribe")]
+pub struct LifecycleSubscribe {
+    pub stage: u64,
+    pub mailbox: u64,
+}
+
+/// Unsubscribe counterpart of [`LifecycleSubscribe`]. Idempotent on
+/// "not currently subscribed."
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.unsubscribe")]
+pub struct LifecycleUnsubscribe {
+    pub stage: u64,
+    pub mailbox: u64,
+}
+
+/// Reply to [`LifecycleSubscribe`] / [`LifecycleUnsubscribe`].
+/// `Err` carries the stage kind id and a human-readable reason —
+/// fail-fast subscribe per ADR-0082 §7. Same shape and rationale as
+/// [`SubscribeInputResult`] for input subscriptions.
+#[derive(
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+)]
+#[kind(name = "aether.lifecycle.subscribe_result")]
+pub enum LifecycleSubscribeResult {
+    Ok,
+    Err { stage: u64, error: String },
+}
 
 /// A single keyboard keypress, identified by the stable codes in
 /// `keycode`. Dispatched on press only (no repeat). Released keys
@@ -1784,6 +2005,19 @@ mod tests {
     #[test]
     fn kind_names_are_stable() {
         assert_eq!(Tick::NAME, "aether.tick");
+        assert_eq!(InitCaps::NAME, "aether.lifecycle.init_caps");
+        assert_eq!(InitComponents::NAME, "aether.lifecycle.init_components");
+        assert_eq!(Render::NAME, "aether.lifecycle.render");
+        assert_eq!(Present::NAME, "aether.lifecycle.present");
+        assert_eq!(Shutdown::NAME, "aether.lifecycle.shutdown");
+        assert_eq!(Quit::NAME, "aether.lifecycle.quit");
+        assert_eq!(LifecycleAdvance::NAME, "aether.lifecycle.advance");
+        assert_eq!(LifecycleSubscribe::NAME, "aether.lifecycle.subscribe");
+        assert_eq!(LifecycleUnsubscribe::NAME, "aether.lifecycle.unsubscribe");
+        assert_eq!(
+            LifecycleSubscribeResult::NAME,
+            "aether.lifecycle.subscribe_result"
+        );
         assert_eq!(Key::NAME, "aether.key");
         assert_eq!(KeyRelease::NAME, "aether.key_release");
         assert_eq!(MouseButton::NAME, "aether.mouse_button");

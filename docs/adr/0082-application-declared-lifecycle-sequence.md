@@ -51,16 +51,19 @@ Builder `.build()` (finalize) checks at compile-error-equivalent panic time (wit
 
 ### 2. `LifecycleDriverCapability` is a first-class actor
 
-The driver is a `NativeActor` registered at the `aether.lifecycle` mailbox. It owns the compiled `LifecycleGraph` and a `quit_pending: bool` flag. Its `next(ctx)` method:
+The driver is a `NativeActor` (passive cap shape — generics propagate through the existing `#[actor]` macro) registered at the `aether.lifecycle` mailbox. Generic over chassis context `C` so each chassis declares its own context type and the driver is concrete-per-chassis (`LifecycleDriverCapability<DesktopCtx>`, `LifecycleDriverCapability<HeadlessCtx>`, etc.). `C: 'static` matches the bound on `NativeActor` and the `DriverCapability` family; existing chassis state is already owned/`Arc`-shared, so the bound is a labelling constraint rather than a future-tax.
 
-1. Calls the current state's factory with the chassis-supplied `&FrameContext` to produce the stage payload bytes.
-2. Broadcasts the bytes to every subscriber of that kind (sender = `aether.lifecycle`, so ADR-0080 sees the driver as the labelled root).
-3. Subscribes settlement on the resulting root via `ctx.subscribe_settlement(root)`.
-4. On `Settled { root }`: if the current state has a `quit` edge and `quit_pending`, take it and clear the flag; otherwise take `next`.
+The driver owns the compiled `LifecycleGraph<C>`, the chassis context `C`, a subscriber table keyed by stage kind, the current state pointer, a `quit_pending: bool` flag, and a `terminal_reached: bool` flag. The chassis main loop drives cadence by mailing `Advance` to the driver per frame; the driver's `on_advance` handler:
 
-The driver receives `Quit` mail through its own mailbox; the `Quit` handler sets `quit_pending = true`. The flag persists across states with no declared `quit` edge — it's only consumed at a state where `quit` is reachable. This is the primitive for "drain frame before exit" (place `quit` on `Present`) or "save game before exit" (route `quit` to a `SaveGame` state with unconditional progression).
+1. Calls the current state's factory with `&C` to produce the stage payload bytes.
+2. Broadcasts the bytes to every subscriber of that kind via the runtime-id envelope path (`send_envelope_traced`), so sender = `aether.lifecycle` and ADR-0080 sees the driver as the labelled root.
+3. Advances the state pointer along the resolved edge — `quit` if `quit_pending && state.quit.is_some()` (consuming the flag), otherwise `next`.
 
-Lifecycle is clock-agnostic. The driver does not own a timer. Chassis cadence (vsync, fixed-dt, replay-clock, test-harness step) is provided by the chassis main loop calling `driver.next(ctx)` at the right rate. The driver blocks on settlement inside each `next(ctx)`, so back-pressure naturally couples cadence to actual work completion.
+`Advance` is fire-and-forget; no reply. The chassis main loop calls `advance` at its desired cadence (vsync, fixed-dt, replay-clock, test-harness step) without waiting on a synchronous reply.
+
+The driver also handles `Quit` (sets `quit_pending = true`), `LifecycleSubscribe` (registers a mailbox for a stage; replies `LifecycleSubscribeResult::Err{stage, error}` if the stage isn't declared by the graph per §7), and `LifecycleUnsubscribe`. The quit flag persists across states with no declared `quit` edge — it's only consumed at a state where `quit` is reachable. This is the primitive for "drain frame before exit" (place `quit` on `Present`) or "save game before exit" (route `quit` to a `SaveGame` state with unconditional progression).
+
+**Settlement gating arrives in PR 3.** PR 2 ships fire-and-advance (broadcast then advance immediately) so the core types land and the synthetic-chassis tests can exercise the state machine without the full settlement plumbing. PR 3's chassis migration adds settlement subscription — the driver waits on `Settled { root }` for the broadcast root before mutating its state pointer — so cadence couples to actual work completion. Subsequent revisions can then expose a per-state budget via the chassis's main loop without changing the driver's wire surface.
 
 ### 3. `Quit` kind, single hardcoded signal
 
