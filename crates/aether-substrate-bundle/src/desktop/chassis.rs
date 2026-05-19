@@ -15,9 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig, LogCapability,
-    RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
-    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig, RenderCapability,
+    RenderConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
+    fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -275,9 +275,6 @@ impl DesktopChassis {
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
-        builder
-            .with_log_drain::<LogCapability>()
-            .driver(driver)
-            .build()
+        builder.driver(driver).build()
     }
 }

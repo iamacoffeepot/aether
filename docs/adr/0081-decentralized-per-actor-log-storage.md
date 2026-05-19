@@ -38,11 +38,15 @@ The `aether.log` mailbox and the `LogCapability` actor both retire. Their substr
 
 The `aether.log.read` / `aether.log.read_result` mail surface that the issue 776 amendment introduced retires alongside the cap.
 
-### 3. `engine_logs` walks the actor registry
+### 3. Per-actor queries; client-side merge in the MCP
 
-The MCP/RPC `engine_logs(engine_id, max?, level?, since?)` tool dispatches a fan-out query over the actor registry. Each actor handles `aether.log.tail { max, level, since }` and replies with the slice of its ring matching the filter. The coordinator side (in `aether-substrate-bundle`'s hub library, where the RPC `EngineServer` lives) merge-sorts the per-actor replies by sequence, applies the `max` clamp, and returns the same response shape ADR-0023 §4 already specified (`entries: [...], next_since, truncated_before`).
+Each actor exposes its ring via the framework-built-in `aether.log.tail { max, level, since }` dispatch arm in `aether-substrate::actor::native::dispatch` — every actor responds, the author writes no handler. The reply (`aether.log.tail_result`) carries the slice matching the filter plus a `next_since` cursor and a `truncated_before` signal when the ring evicted entries the caller hadn't seen yet.
 
-The per-actor roundtrip cost is bounded by actor count × one mpsc round-trip; `engine_logs` is human-paced (MCP polling at most a few Hz), so this is not a hot path. A future ADR may introduce a query-coordinator capability if aggregation grows policy (per-namespace dedup, level normalization, format coercion); for v1 the merge logic lives directly in the RPC handler.
+The MCP exposes this as the `actor_logs(engine_id, mailbox_name, max?, level?, since?)` tool: one query per actor, one round-trip per call. Agents that want a cross-actor view call the tool once per mailbox and merge in their own context. There is no substrate-side aggregator and no `aether.log` mailbox — the centralized cap retired with `LogCapability`.
+
+*This is a revision of the original ADR text.* The first draft had a substrate-side `LogAggregator` actor at `aether.log` doing the fan-out via mail + `wait_reply`. That implementation hit several friction points in the existing cap API (no shared `WaitError` impl, no `wait_reply_any_of` for parallel reply collection, the actor model's stated norm against caps walking the actor registry, manual `Envelope` construction footguns). The cleanest path was to leave aggregation out of the substrate entirely. Filed as iamacoffeepot/aether#960 for the missing fan-out primitives that would let a substrate-side aggregator land cleanly if one ever becomes worthwhile.
+
+The per-actor roundtrip cost is one mpsc round-trip per query; `actor_logs` is human-paced (MCP polling at most a few Hz), so this is not a hot path even if a caller iterates over 20 actors. A future ADR may introduce a query-coordinator capability if aggregation grows policy (per-namespace dedup, level normalization, format coercion); for v1 callers compose at the client.
 
 ### 4. Crash dump = panicking actor only
 
@@ -82,13 +86,13 @@ The fan-out query side picks up trampolines naturally: `engine_logs` walks the a
 ### Negative
 
 - **Memory grows linearly with actor count.** Today's centralized 2000-entry ring is replaced by N × 1024 per-actor rings. At N=20 that's ~4MB (similar order, distributed); at N=200 it's ~40MB. The default ring size or the per-actor cap may want revisiting if substrate-wide actor counts grow large.
-- **`engine_logs` is now a fan-out query.** Each call dispatches an `aether.log.tail` mail per actor and waits for replies. Bounded by actor count and MCP-paced, but the latency is no longer single-roundtrip — it's "slowest actor's reply + merge time." Acceptable for human-paced polling; pathological for any future high-frequency log consumer (none today).
+- **`actor_logs` queries one actor at a time.** Replaces the pre-ADR `engine_logs` aggregated tool. Each call is single-roundtrip and queries a named mailbox; cross-actor views require N calls from the client. Acceptable for human-paced polling; high-frequency log consumers (none today) would want either client-side parallelism (`futures::join_all`) or a substrate-side aggregator (deferred — see iamacoffeepot/aether#960 for the missing primitives).
 - **Multi-actor crash splice is not solved in v1.** When actor X panics, only X's ring is dumped. The cross-actor "what were other actors doing right before X died" property requires either pre-flushed-to-disk per-actor logs (continuous IO cost) or cross-thread coordination (locking cost). Deferred until forensic value is established.
 - **Wire kind retirement.** `LogBatch` was an exported `Kind` in `aether-kinds`. Removing it is a wire-shape break. Hub-side and MCP-side consumers must drop any leftover references; the `engine_logs` MCP tool's response shape stays the same (no consumer-visible change there), but the *internal* `aether.log.read` mail surface that issue 776's amendment introduced retires.
 
 ### Neutral
 
-- **`engine_logs` MCP response shape unchanged.** Same `entries`, `next_since`, `truncated_before` fields. The `origin: Option<MailboxId>` field ADR-0077 §6 added is now always `Some(id)` (every entry comes from an actor's ring), so consumers stop seeing host-event entries — which already wasn't surfacing them since issue 776's amendment didn't route host events into the cap's ring either.
+- **MCP tool renamed: `engine_logs` → `actor_logs`.** Per-call shape is now `(engine_id, mailbox_name, max?, level?, since?)` → `{entries, next_since, truncated_before}`. Each call returns one actor's logs; the previously-aggregated wire response retires. Consumers polling for cross-actor merges call the tool N times.
 - **`AETHER_LOG_FILTER`, `tsfmt::Layer` to stderr, panic-hook chain retain their existing semantics.**
 - **Per-buffer length cap (ADR-0077 follow-up).** Replaced by the per-actor ring's bounded capacity and FIFO eviction. The unbounded-growth concern from ADR-0077's negatives section retires.
 

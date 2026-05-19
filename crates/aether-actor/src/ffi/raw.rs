@@ -63,6 +63,21 @@ unsafe extern "C" {
     /// guest memory before the call returns.
     #[link_name = "init_failed_p32"]
     pub fn init_failed(ptr: u32, len: u32);
+    /// ADR-0081 §7: re-emit one `tracing::*` event on the host side
+    /// so the trampoline's `ActorAwareLayer` lands it in this guest's
+    /// per-actor `ActorLogRing`. Called by `WasmSubscriber::event`
+    /// per event. `level` follows the `0 = trace .. 4 = error`
+    /// mapping the rest of `aether.log.*` uses. `target_ptr/len` and
+    /// `message_ptr/len` are byte slices in guest memory; the host
+    /// copies before returning.
+    #[link_name = "log_event_p32"]
+    pub fn log_event(
+        level: u32,
+        target_ptr: u32,
+        target_len: u32,
+        message_ptr: u32,
+        message_len: u32,
+    );
 }
 
 /// Host-side stub for the FFI `aether::send_mail` import. Always
@@ -158,4 +173,24 @@ pub unsafe fn prev_correlation() -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn init_failed(_ptr: u32, _len: u32) {
     panic!("aether-actor: init_failed called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::log_event` import.
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn log_event(
+    _level: u32,
+    _target_ptr: u32,
+    _target_len: u32,
+    _message_ptr: u32,
+    _message_len: u32,
+) {
+    panic!("aether-actor: log_event called outside the FFI guest");
 }

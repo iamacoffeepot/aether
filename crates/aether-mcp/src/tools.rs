@@ -36,9 +36,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 
-use crate::args::EngineLogEntry;
-use crate::args::EngineLogsArgs;
-use crate::args::EngineLogsResponse;
+use crate::args::ActorLogEntry;
+use crate::args::ActorLogsArgs;
+use crate::args::ActorLogsResponse;
 use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, EngineInfo, LoadComponentArgs,
     MailIdJson, MailNodeJson, MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs,
@@ -59,8 +59,6 @@ const ENGINE_CAP: &str = "aether.engine";
 const COMPONENT_CAP: &str = "aether.component";
 /// Mailbox name of a substrate's render cap.
 const RENDER_CAP: &str = "aether.render";
-/// Mailbox name of a substrate's log cap (issue 776 / ADR-0023 §4).
-const LOG_CAP: &str = "aether.log";
 
 /// Component receive-side capabilities, keyed by `(engine, mailbox)`.
 /// Populated from `load_component` / `replace_component` replies and
@@ -443,52 +441,55 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Pull recent log entries from a substrate's ring (issue 776, restoring ADR-0023 §4). \
-                       Forwards aether.log.read to the engine's aether.log mailbox and decodes \
-                       aether.log.read_result. `max` defaults to 100 and clamps to 1000; pass \
-                       `level` (`trace|debug|info|warn|error`) for server-side filtering; pass `since` \
-                       (the prior call's `next_since`) to walk past already-seen entries without \
+        description = "Pull recent log entries from one actor's per-actor log ring (ADR-0081). \
+                       Sends aether.log.tail to the named mailbox and decodes aether.log.tail_result. \
+                       Every actor — native or wasm trampoline — serves this kind via the substrate's \
+                       framework dispatch arm, so any mailbox is queryable (e.g. \"aether.audio\", \
+                       \"aether.component.trampoline:camera\"). `max` defaults to 100 and clamps to 1000; \
+                       pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
+                       `since` (the prior call's `next_since`) to walk past already-seen entries without \
                        double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
-                       evicted entries the caller hadn't seen yet (the lowest sequence still held), \
-                       a signal to poll more often or accept the gap."
+                       evicted entries the caller hadn't seen yet (the lowest sequence still held). \
+                       Aggregate across actors by calling this tool once per mailbox client-side."
     )]
-    pub async fn engine_logs(
+    pub async fn actor_logs(
         &self,
-        Parameters(args): Parameters<EngineLogsArgs>,
+        Parameters(args): Parameters<ActorLogsArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
         let engine_id_str = args.engine_id.clone();
+        let mailbox_name = args.mailbox_name.clone();
         let min_level = match args.level.as_deref() {
             Some(s) => Some(parse_level(s)?),
             None => None,
         };
-        let request = aether_kinds::LogRead {
+        let request = aether_kinds::LogTail {
             max: args.max.unwrap_or(0),
             min_level,
             since: args.since,
         };
         let reply = self
             .session
-            .call_one(engine_envelope(engine, LOG_CAP, &request))
+            .call_one(engine_envelope(engine, &args.mailbox_name, &request))
             .await
             .map_err(internal)?;
-        match aether_kinds::LogReadResult::decode_from_bytes(&reply.payload) {
-            Some(aether_kinds::LogReadResult::Ok {
+        match aether_kinds::LogTailResult::decode_from_bytes(&reply.payload) {
+            Some(aether_kinds::LogTailResult::Ok {
                 entries,
                 next_since,
                 truncated_before,
             }) => {
-                let response = EngineLogsResponse {
+                let response = ActorLogsResponse {
                     engine_id: engine_id_str,
+                    mailbox_name,
                     entries: entries
                         .into_iter()
-                        .map(|e| EngineLogEntry {
+                        .map(|e| ActorLogEntry {
                             timestamp_unix_ms: e.timestamp_unix_ms,
                             level: level_to_str(e.level).to_owned(),
                             target: e.target,
                             message: e.message,
                             sequence: e.sequence,
-                            origin: e.origin.map(|id| id.to_string()),
                         })
                         .collect(),
                     next_since,
@@ -496,8 +497,8 @@ impl Mcp {
                 };
                 json(&response)
             }
-            Some(aether_kinds::LogReadResult::Err { error }) => Err(internal_msg(&error)),
-            None => Err(internal_msg("undecodable LogReadResult")),
+            Some(aether_kinds::LogTailResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable LogTailResult")),
         }
     }
 }
@@ -758,7 +759,7 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
 
-    use crate::args::EngineLogsArgs;
+    use crate::args::ActorLogsArgs;
     use crate::test_chassis::TestChassis;
     use aether_kinds::descriptors;
 
@@ -1070,15 +1071,16 @@ mod tests {
         assert_eq!(level_to_str(99), "info");
     }
 
-    /// `engine_logs` with a malformed `engine_id` rejects up front
+    /// `actor_logs` with a malformed `engine_id` rejects up front
     /// without touching the wire.
     #[tokio::test]
-    async fn engine_logs_bad_engine_id_is_tool_error() {
+    async fn actor_logs_bad_engine_id_is_tool_error() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let result = mcp
-            .engine_logs(Parameters(EngineLogsArgs {
+            .actor_logs(Parameters(ActorLogsArgs {
                 engine_id: "not-a-uuid".to_owned(),
+                mailbox_name: "aether.audio".to_owned(),
                 max: None,
                 level: None,
                 since: None,
@@ -1090,15 +1092,16 @@ mod tests {
         );
     }
 
-    /// `engine_logs` with an unknown `level` string is rejected at
+    /// `actor_logs` with an unknown `level` string is rejected at
     /// the tool boundary before any RPC.
     #[tokio::test]
-    async fn engine_logs_bad_level_is_tool_error() {
+    async fn actor_logs_bad_level_is_tool_error() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let result = mcp
-            .engine_logs(Parameters(EngineLogsArgs {
+            .actor_logs(Parameters(ActorLogsArgs {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                mailbox_name: "aether.audio".to_owned(),
                 max: None,
                 level: Some("verbose".to_owned()),
                 since: None,

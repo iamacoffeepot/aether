@@ -121,7 +121,6 @@ mod native {
 
     use crate::input::InputCapability;
     use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
-    use aether_actor::log;
 
     /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load instantiates
@@ -304,17 +303,10 @@ mod native {
                 }
             };
 
-            // 6. Push the chassis-current log drain to the freshly-
-            // spawned trampoline. The trampoline's `#[handlers]`-
-            // emitted `ConfigureLogDrain` handler stamps its per-
-            // actor slot. Issue #601.
-            if let Some(drain) = log::current_drain() {
-                let cfg = aether_kinds::ConfigureLogDrain { mailbox: drain };
-                let cfg_payload = bytemuck::bytes_of(&cfg).to_vec();
-                let kind = <aether_kinds::ConfigureLogDrain as Kind>::ID;
-                self.mailer
-                    .push(Mail::new(mailbox_id, kind, cfg_payload, 1));
-            }
+            // 6. ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
+            // mail. The freshly-spawned trampoline owns its own
+            // `ActorLogRing` like every other actor; no drain
+            // configuration is needed.
 
             // 7. Announce the new kind vocabulary AND mailbox inventory
             // upstream so the hub (and attached MCP sessions) see the

@@ -19,8 +19,7 @@ use std::time::Duration;
 
 use aether_capabilities::{
     ComponentHostConfig, HeadlessRenderCapability, HeadlessWindowCapability, InputConfig,
-    LogCapability, UnsupportedTestBenchCapability, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf,
+    UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
@@ -225,10 +224,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
-        builder
-            .with_log_drain::<LogCapability>()
-            .driver(driver)
-            .build()
+        builder.driver(driver).build()
     }
 }
 

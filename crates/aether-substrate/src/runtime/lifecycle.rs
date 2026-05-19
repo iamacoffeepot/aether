@@ -28,7 +28,6 @@
 use std::sync::Arc;
 
 use crate::mail::outbound::HubOutbound;
-use aether_actor::log;
 use std::process;
 
 /// Process exit code on fatal abort. Distinct from `0` (clean exit)
@@ -58,14 +57,10 @@ pub fn fatal_abort(_outbound: &HubOutbound, reason: String) -> ! {
         "substrate fatal abort",
     );
 
-    // Issue #581: drain the dying actor's per-actor `LogBuffer`
-    // into LogCapability's mailbox so trap-time tracing events
-    // reach the cap before exit. (The pre-#581 `log_capture::flush_now`
-    // drained the substrate-global ring synchronously; with the
-    // ring retired, `aether-actor::log::drain_buffer` is the
-    // closest equivalent — it hands buffered events to the cap
-    // via the actor's transport.)
-    log::drain_buffer();
+    // ADR-0081 retired the chassis-pushed flush hop. Each actor's
+    // `ActorLogRing` lives in its own `ActorSlots`; the panic-hook
+    // path (ADR-0081 §4 / P2) is the post-mortem dump surface — no
+    // synchronous drain is needed here.
 
     process::exit(FATAL_EXIT_CODE);
 }

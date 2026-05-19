@@ -956,30 +956,6 @@ mod control_plane {
         pub mailbox: aether_data::MailboxId,
     }
 
-    /// `aether.log.configure_drain` — chassis-pushed mail every actor
-    /// handles to pick up the configured log drain mailbox (issue
-    /// #601). The chassis dispatches one of these to every
-    /// freshly-instantiated actor before any other inbound mail; the
-    /// SDK's `#[actor]` / `#[handlers]` derive auto-emits a handler
-    /// that installs `mailbox` into the per-actor `LogDrainSlot` so
-    /// `aether-actor::log::drain_buffer` knows where to ship the
-    /// `LogBatch`. Cast-shape — one `MailboxId`, fixed size.
-    ///
-    /// Fire-and-forget; no reply. If the chassis didn't declare a
-    /// drain via `Builder::with_log_drain<T>()` no `ConfigureLogDrain`
-    /// is dispatched and the slot stays at its default (`MailboxId(0)`,
-    /// drain disabled).
-    use bytemuck::{Pod, Zeroable};
-
-    #[repr(C)]
-    #[derive(
-        Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-    )]
-    #[kind(name = "aether.log.configure_drain")]
-    pub struct ConfigureLogDrain {
-        pub mailbox: aether_data::MailboxId,
-    }
-
     /// `aether.render.capture_frame` — request the substrate grab the
     /// current frame contents and reply-to-sender with an encoded
     /// PNG. Carries two optional bundles: `mails` dispatched *before*
@@ -1532,65 +1508,38 @@ mod control_plane {
         },
     }
 
-    // Issue #581 unified actor-aware logging. `LogEvent` is the shape
-    // the actor-aware tracing subscriber buffers per-actor; the wire
-    // kind is `LogBatch` (one mail per drain rather than one mail per
-    // event). `LogEvent` itself is intentionally *not* a `Kind` — it
-    // can't be addressed as top-level mail, so the only authors are
-    // the in-crate subscriber and the `aether::log_*!` macros. The
-    // mailbox `"aether.log"` (kind id namespace `aether.log.*`) is
-    // owned by `LogCapability` (`aether-capabilities::log`) which
-    // forwards entries to the hub.
-
-    /// One captured tracing event, ready to be batched into a
-    /// `LogBatch`. `level` maps `0 = trace .. 4 = error`. `target` is
-    /// a module-style string the chassis's `EnvFilter` matches against.
-    /// `message` is pre-formatted with structured fields collapsed
-    /// into the message body (e.g. `"error=<Display> count=3 parse
-    /// failed"`), capped by the subscriber with a `" [truncated]"`
-    /// suffix on overflow.
-    ///
-    /// Pre-#581 this carried `#[derive(aether_data::Kind,
-    /// aether_data::Schema)]` + `#[kind(name = "aether.log")]` and was
-    /// mailed one event at a time. The `Kind` derive was dropped to
-    /// make `LogEvent` unmailable on its own — every emission flows
-    /// through `LogBatch`. `Schema` stays so the derive on `LogBatch`
-    /// can describe its `Vec<LogEvent>` field's wire shape.
-    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct LogEvent {
-        pub level: u8,
-        pub target: String,
-        pub message: String,
-    }
-
-    /// `aether.log.batch` — a drained per-actor log buffer or a single
-    /// host-emitted event. Mailed to the `"aether.log"` mailbox by the
-    /// actor-aware subscriber (issue #581); fire-and-forget. The
-    /// originating `MailboxId` rides on the mail envelope (cap reads
-    /// `ctx.sender()`); empty `entries` is legal but produced by no
-    /// path the SDK exposes.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.log.batch")]
-    pub struct LogBatch {
-        pub entries: Vec<LogEvent>,
-    }
+    // ADR-0081 per-actor log storage. Each actor owns an
+    // `ActorLogRing` (in `aether-actor::log`); one wire kind pair
+    // drives the query path:
+    //
+    // - `LogTail` / `LogTailResult` — per-actor query, every actor
+    //   responds via the framework-built-in dispatch arm. The MCP
+    //   `actor_logs` tool wraps this for a named mailbox; cross-
+    //   actor aggregation (when callers want it) is client-side
+    //   composition over the same per-actor surface (filed as
+    //   iamacoffeepot/aether#960 for the missing fan-out primitive
+    //   if substrate-side aggregation ever becomes worthwhile).
+    //
+    // `LogBatch` / `LogEvent` (the pre-ADR-0081 flush-hop kinds) and
+    // `LogRead` / `LogReadResult` (the issue 776 pull surface that
+    // `LogCapability` served) retired alongside `LogCapability`.
 
     /// One log entry as it appears on the wire when an MCP caller
-    /// pulls from a substrate's log ring via
-    /// [`LogRead`]/[`LogReadResult`] (issue 776, restoring ADR-0023 §4
-    /// under the forward model). Mirrors the substrate-local
-    /// `aether_substrate::LogEntry` field-for-field; the cap converts
-    /// at the wire boundary.
+    /// queries an actor's ring via [`LogTail`] / [`LogTailResult`].
     ///
     /// `level` follows the same `0 = trace .. 4 = error` mapping the
-    /// rest of `aether.log.*` uses. `origin` is the `MailboxId` of the
-    /// actor whose dispatch buffered the entry, or `None` for host-
-    /// emitted events (substrate boot, scheduler, panic hook).
-    /// `sequence` is monotonic per substrate boot starting at 1;
-    /// callers use it as the cursor for `LogRead::since`.
+    /// rest of `aether.log.*` uses. `origin` is the `MailboxId` of
+    /// the actor whose ring buffered the entry: `None` from the
+    /// per-actor framework reply (the responder IS the origin —
+    /// stamped at client side if the caller is merging across
+    /// actors).
+    ///
+    /// `sequence` is monotonic *per actor's ring*, starting at 1.
+    /// Callers walk a single actor's ring via `LogTail::since`; the
+    /// cursor is per-actor.
     ///
     /// Not a `Kind` — only addressable as an element of
-    /// `LogReadResult::Ok::entries`.
+    /// `LogTailResult::Ok::entries`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct LogEntry {
         pub timestamp_unix_ms: u64,
@@ -1601,47 +1550,42 @@ mod control_plane {
         pub origin: Option<aether_data::MailboxId>,
     }
 
-    /// `aether.log.read` — pull entries out of the substrate's log
-    /// ring (issue 776). Mailed by the `aether-mcp` `engine_logs` tool
-    /// (or any RPC caller) to the chassis's `"aether.log"` mailbox;
-    /// reply rides back as [`LogReadResult`].
+    /// `aether.log.tail` — query one actor's `ActorLogRing`.
+    /// Routed to a specific actor by `MailboxId`; the framework's
+    /// dispatch loop services this directly (every native actor and
+    /// every wasm trampoline answers without the author writing a
+    /// handler). Reply: [`LogTailResult`].
     ///
-    /// Per ADR-0023 §4 (restored under the forward model):
-    /// - `max` is the cap on returned entries; `0` is treated as the
-    ///   default (100) and any value over `1000` is clamped to `1000`.
-    /// - `min_level` filters server-side: `None` returns every entry,
-    ///   `Some(2)` returns `info` and above, etc. Same `0..=4` mapping
-    ///   as the rest of `aether.log.*`.
-    /// - `since` is a cursor: `None` returns from the oldest entry in
-    ///   the ring, `Some(n)` returns only entries with `sequence > n`.
-    ///
-    /// Fire-and-await — the reply correlates by kind (`LogReadResult`),
-    /// not by an explicit correlation id (the chassis's
-    /// `send_and_await_reply` plumbing carries that).
+    /// - `max == 0` resolves to the substrate-default cap (currently
+    ///   100) — the reply slice never exceeds `MAX_TAIL_MAX` (1000;
+    ///   defined in `aether_actor::log`) even on a full ring.
+    /// - `min_level: None` returns every level; `Some(2)` returns
+    ///   info and above; same `0..=4` mapping the rest of
+    ///   `aether.log.*` uses.
+    /// - `since: None` returns from the oldest entry in the ring;
+    ///   `Some(n)` returns only entries with `sequence > n`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.log.read")]
-    pub struct LogRead {
+    #[kind(name = "aether.log.tail")]
+    pub struct LogTail {
         pub max: u32,
         pub min_level: Option<u8>,
         pub since: Option<u64>,
     }
 
-    /// Reply to [`LogRead`]. `Ok::entries` carries the slice of the
-    /// ring matching the filter, ordered oldest-to-newest. `next_since`
-    /// is the highest `sequence` in `entries` (or the caller's `since`
-    /// echoed back when the slice is empty) — callers thread it into
-    /// the next `LogRead::since` for a stable cursor. `truncated_before`
-    /// is set when the ring evicted entries the caller hadn't seen
-    /// yet: it's the lowest sequence still in the ring, signalling
-    /// the caller missed everything strictly below that.
-    ///
-    /// `Err` only surfaces for chassis-side failures (e.g. the
-    /// `aether.log` mailbox isn't bound, which shouldn't happen on a
-    /// healthy substrate); filter / cursor mismatches return an empty
-    /// `Ok` rather than `Err`.
+    /// Reply to [`LogTail`]. `Ok::entries` slices the responder's
+    /// ring matching `(min_level, since)`, ordered oldest-to-newest
+    /// (ascending `sequence`). `next_since` is the highest `sequence`
+    /// in `entries` (or the caller's `since` echoed back on an empty
+    /// reply) — thread it into the next `LogTail::since` for a
+    /// stable per-actor cursor. `truncated_before` is set when the
+    /// ring evicted entries the caller hadn't seen yet (the lowest
+    /// `sequence` still in the ring): callers either accept the gap
+    /// or poll more often. `entries[i].origin` is `None` — the
+    /// responder IS the origin; client-side merge code stamps it if
+    /// aggregating across actors.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.log.read_result")]
-    pub enum LogReadResult {
+    #[kind(name = "aether.log.tail_result")]
+    pub enum LogTailResult {
         Ok {
             entries: Vec<LogEntry>,
             next_since: u64,
@@ -1879,9 +1823,8 @@ mod tests {
             "aether.audio.set_master_gain_result"
         );
         assert_eq!(MonitorNotice::NAME, "aether.actor.monitor_notice");
-        assert_eq!(LogBatch::NAME, "aether.log.batch");
-        assert_eq!(LogRead::NAME, "aether.log.read");
-        assert_eq!(LogReadResult::NAME, "aether.log.read_result");
+        assert_eq!(LogTail::NAME, "aether.log.tail");
+        assert_eq!(LogTailResult::NAME, "aether.log.tail_result");
         assert_eq!(Read::NAME, "aether.fs.read");
         assert_eq!(ReadResult::NAME, "aether.fs.read_result");
         assert_eq!(Write::NAME, "aether.fs.write");

@@ -124,12 +124,20 @@ pub struct CaptureMailSpec {
     pub params: Option<serde_json::Value>,
 }
 
-/// `engine_logs` arguments — pull entries out of a substrate's log
-/// ring (issue 776, restoring ADR-0023 §4 under the forward model).
+/// `actor_logs` arguments — pull entries out of one actor's
+/// per-actor log ring (ADR-0081). The substrate-side aggregator
+/// retired; each call queries a single actor by name. Aggregate
+/// client-side if you want a cross-actor view.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct EngineLogsArgs {
+pub struct ActorLogsArgs {
     /// Engine UUID to pull from (from `list_engines`).
     pub engine_id: String,
+    /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
+    /// `"aether.component.trampoline:camera"`). The substrate's
+    /// dispatch loop services `aether.log.tail` for every actor
+    /// automatically; agents don't need to know which actor
+    /// implements the handler.
+    pub mailbox_name: String,
     /// Cap on returned entries. Defaults to 100; clamped to 1000.
     /// Use the response's `next_since` to walk past the cap on the
     /// next call.
@@ -148,11 +156,10 @@ pub struct EngineLogsArgs {
     pub since: Option<u64>,
 }
 
-/// One log entry as `engine_logs` returns it. Mirrors
-/// `aether_kinds::LogEntry` but renders `level` as a string per the
-/// ADR-0023 §4 contract.
+/// One log entry as `actor_logs` returns it. Mirrors
+/// `aether_kinds::LogEntry` but renders `level` as a string.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct EngineLogEntry {
+pub struct ActorLogEntry {
     /// Unix epoch milliseconds the entry was stamped at on the
     /// substrate's wall clock.
     pub timestamp_unix_ms: u64,
@@ -164,21 +171,19 @@ pub struct EngineLogEntry {
     /// Pre-formatted event body; structured fields are flattened
     /// into the message string.
     pub message: String,
-    /// Monotonic per-substrate sequence; cursor for the next call.
+    /// Monotonic per-actor sequence; cursor for the next call.
     pub sequence: u64,
-    /// Tagged mailbox id (`mbx-…`) of the actor whose dispatch
-    /// buffered this entry, or `null` for host-emitted events.
-    pub origin: Option<String>,
 }
 
-/// `engine_logs` response. `next_since` echoes the cursor to thread
+/// `actor_logs` response. `next_since` echoes the cursor to thread
 /// into the next call; `truncated_before` is `Some(seq)` when the
 /// ring evicted entries the caller hadn't seen yet (the lowest
 /// sequence still in the ring), `null` otherwise.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct EngineLogsResponse {
+pub struct ActorLogsResponse {
     pub engine_id: String,
-    pub entries: Vec<EngineLogEntry>,
+    pub mailbox_name: String,
+    pub entries: Vec<ActorLogEntry>,
     pub next_since: u64,
     pub truncated_before: Option<u64>,
 }

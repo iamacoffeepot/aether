@@ -38,13 +38,10 @@ use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
 use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
 use crate::runtime::lifecycle::FatalAborter;
-use crate::runtime::log_install;
-use crate::runtime::log_install::MailDispatch;
 use crate::scheduler::Drainable;
 use crate::scheduler::WakeHandle;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
-use aether_actor::log;
 use std::sync::Weak;
 use std::thread;
 use std::time::Duration;
@@ -365,19 +362,12 @@ impl Spawner {
             let mut throwaway_handles = crate::ExportedHandles::new();
             let mut init_ctx =
                 NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
-            // Issue 581: wrap `init` in `with_stamped` +
-            // `with_actor_dispatch` so any `tracing::*` event the
-            // actor fires during boot drains to LogCapability with
-            // sender attribution when init returns. Singletons get
-            // this through `make_native_actor_boot`; instanced
-            // actors join the pattern in issue 672.
-            let init_result = local::with_stamped(&slots, || {
-                log_install::with_actor_dispatch(&*transport as &dyn MailDispatch, || {
-                    let r = A::init(config, &mut init_ctx);
-                    log::drain_buffer();
-                    r
-                })
-            });
+            // ADR-0081: wrap `init` in `with_stamped` so any
+            // `tracing::*` event the actor fires lands in its
+            // per-actor `ActorLogRing`. The pre-ADR
+            // `with_actor_dispatch` + `drain_buffer` flush hop
+            // retired alongside `LogBatch`.
+            let init_result = local::with_stamped(&slots, || A::init(config, &mut init_ctx));
             match init_result {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
@@ -508,16 +498,13 @@ impl Spawner {
         // child wire→dispatcher transition is sequential within this
         // ctx, peers are running, all mailboxes claimed.
         local::with_stamped(&slots, || {
-            log_install::with_actor_dispatch(&*transport as &dyn MailDispatch, || {
-                let mut wire_ctx = crate::actor::native::NativeCtx::new(
-                    &transport,
-                    ReplyTo::NONE,
-                    MailId::NONE,
-                    MailId::NONE,
-                );
-                actor.wire(&mut wire_ctx);
-                log::drain_buffer();
-            });
+            let mut wire_ctx = crate::actor::native::NativeCtx::new(
+                &transport,
+                ReplyTo::NONE,
+                MailId::NONE,
+                MailId::NONE,
+            );
+            actor.wire(&mut wire_ctx);
         });
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
