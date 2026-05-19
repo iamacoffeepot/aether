@@ -124,7 +124,7 @@ impl Mailer {
     }
 
     /// Borrow the wired
-    /// [`SettlementRegistry`](crate::chassis::settlement::SettlementRegistry),
+    /// [`SettlementRegistry`],
     /// or `None` if no registry was installed (test fixtures, chassis
     /// that don't bring up the trace pipeline). Capabilities subscribe
     /// via
