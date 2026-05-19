@@ -39,11 +39,12 @@ use std::panic::{self, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_actor::Local;
 use aether_actor::log::ActorLogRing;
 use aether_kinds::LogEntry;
+
+use super::now_unix_ms;
 
 /// Env var that forces backtrace capture without flipping
 /// `RUST_BACKTRACE` for the whole process (which would change every
@@ -140,14 +141,6 @@ fn emit_event(thread_name: &str, location: &str, payload: &str, backtrace: Optio
             "panic on substrate thread",
         );
     }
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        #[allow(clippy::cast_possible_truncation)]
-        let ms = d.as_millis() as u64;
-        ms
-    })
 }
 
 /// ADR-0081 §4 crash dump. Reads the panicking actor's
