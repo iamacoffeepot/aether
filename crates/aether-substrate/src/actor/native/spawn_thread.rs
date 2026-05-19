@@ -25,7 +25,8 @@
 //!
 //! ADR-0080 §12 says "the spawning handler's tree does not settle
 //! until every spawned-thread send completes." Enforced here via the
-//! [`SettlementHold`] RAII guard from [`acquire_settlement_hold`]:
+//! [`SettlementHold`] RAII guard from
+//! [`crate::Mailer::acquire_settlement_hold`]:
 //! `spawn_inherit` acquires a hold against the parent's
 //! `in_flight_root` BEFORE the worker thread is spawned (so the
 //! `HoldOpen` trace event lands ahead of the parent handler's
@@ -44,7 +45,7 @@ use aether_actor::{MailSender, Sender, Singleton};
 use aether_data::{Kind, MailId, mailbox_id_from_name};
 
 use super::binding::NativeBinding;
-use crate::runtime::trace::{SettlementHold, acquire_settlement_hold};
+use crate::runtime::trace::SettlementHold;
 
 /// ADR-0080 §12 spawn-context that captures the spawning handler's
 /// in-flight `(mail_id, root)`. Outbound sends from the worker
@@ -333,7 +334,7 @@ where
     let hold = if in_flight_root == MailId::NONE {
         None
     } else {
-        Some(acquire_settlement_hold(in_flight_root))
+        Some(binding.mailer().acquire_settlement_hold(in_flight_root))
     };
     thread::Builder::new()
         .name(format!("aether-inherit-{}", A::NAMESPACE))
@@ -378,11 +379,9 @@ mod tests {
     use aether_actor::Singleton;
     use aether_data::{KindId, MailboxId};
 
-    use crate::mail::Mail;
-    use crate::mail::registry::OwnedDispatch;
-    use crate::mail::registry::Registry;
-    use crate::runtime::trace;
-    use crate::test_util::fresh_substrate;
+    use crate::handle_store::HandleStore;
+    use crate::mail::registry::{OwnedDispatch, Registry};
+    use crate::mail::{Mail, Mailer};
 
     /// Stub actor used as the `A` phantom marker on [`InheritCtx`] /
     /// [`RootCtx`]. Must impl `Singleton` because the spawn helpers
@@ -402,6 +401,13 @@ mod tests {
         root: MailId,
         parent_mail: Option<MailId>,
         sender: aether_data::ReplyTo,
+    }
+
+    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        (registry, mailer)
     }
 
     fn register_capture(registry: &Registry, name: &str) -> Arc<Mutex<Vec<CapturedDispatch>>> {
@@ -615,27 +621,17 @@ mod tests {
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: `spawn_inherit`
     /// acquires a `SettlementHold` on the parent root before spawning
-    /// and drops it on thread exit. Both events ride the global trace
-    /// queue (installed by `install_trace_queue`).
-    ///
-    /// Test filters the queue by the unique sender mailbox id we
-    /// allocate locally so the assertion is robust against other
-    /// parallel tests sharing the queue (the same drain-and-restore
-    /// pattern `mailer::drain_events_for` uses).
+    /// and drops it on thread exit. Both events ride the per-mailer
+    /// trace queue (iamacoffeepot/aether#953 retired the
+    /// process-global queue).
     #[test]
     fn spawn_inherit_acquires_and_releases_settlement_hold() {
         use aether_kinds::trace::TraceEvent;
-        use crossbeam_queue::SegQueue;
-
-        trace::init_substrate_start();
-        let queue = Arc::new(SegQueue::<TraceEvent>::new());
-        trace::install_trace_queue(Arc::clone(&queue));
-        // After install_trace_queue, the global may already point at a
-        // queue from a prior test. Read the live one and drain from
-        // there so we observe the same queue spawn_inherit pushes to.
-        let live = trace::trace_queue().expect("trace queue installed").clone();
 
         let (_registry, mailer) = fresh_substrate();
+        // Per-mailer queue (post #953): tests are isolated naturally
+        // — no shared global, no sender-prefix filter needed.
+        let live = Arc::clone(mailer.trace_handle().queue());
         let producer_mailbox = MailboxId(0xC0FE_C0FE_C0FE_C0FE);
         let binding = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
@@ -697,16 +693,9 @@ mod tests {
     #[test]
     fn spawn_inherit_with_none_root_skips_hold() {
         use aether_kinds::trace::TraceEvent;
-        use crossbeam_queue::SegQueue;
-
-        trace::init_substrate_start();
-        let queue = Arc::new(SegQueue::<TraceEvent>::new());
-        trace::install_trace_queue(Arc::clone(&queue));
-        let live = trace::trace_queue().expect("trace queue installed").clone();
 
         let (_registry, mailer) = fresh_substrate();
-        // Different unique sender so this test's filter doesn't catch
-        // the other hold-lifecycle test's events.
+        let live = Arc::clone(mailer.trace_handle().queue());
         let producer_mailbox = MailboxId(0xC0FE_DEAD_C0FE_DEAD);
         let binding = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),

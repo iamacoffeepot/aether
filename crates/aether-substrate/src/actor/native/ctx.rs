@@ -90,6 +90,17 @@ impl<'a> NativeCtx<'a> {
         }
     }
 
+    /// Borrow the wired `Mailer`. Issue 953: surfaced so cap handlers
+    /// (`TraceObserverCapability` is the motivating consumer) can
+    /// reach the per-chassis trace handle for `now_nanos` without
+    /// going through `binding()`. Mirrors the `NativeInitCtx::mailer`
+    /// accessor but returns a borrow rather than a clone — handler
+    /// paths usually just need a `&Mailer` for one call.
+    #[must_use]
+    pub fn mailer(&self) -> &Arc<Mailer> {
+        self.binding.mailer()
+    }
+
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`

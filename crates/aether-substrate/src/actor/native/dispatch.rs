@@ -45,7 +45,6 @@ use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
 use crate::runtime::log_install;
 use crate::runtime::log_install::MailDispatch;
-use crate::runtime::trace;
 use aether_actor::local;
 use aether_actor::log;
 use std::thread;
@@ -114,7 +113,9 @@ pub fn dispatch_loop_run<A>(
         // `aether-worker-N` shared across actors; `Thread`-scheduled
         // actors get per-actor names.
         let thread_name = thread::current().name().map(str::to_owned);
-        trace::record_received(inbound_mail_id, thread_name);
+        binding
+            .mailer()
+            .record_received(inbound_mail_id, thread_name);
         local::with_stamped(slots, || {
             log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
                 let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
@@ -128,7 +129,7 @@ pub fn dispatch_loop_run<A>(
         // the substrate down anyway, so a missing `Finished` is
         // moot. A future PR may add `catch_unwind` here for graceful
         // settlement-on-panic.
-        trace::record_finished(inbound_mail_id);
+        binding.mailer().record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -142,7 +143,9 @@ pub fn dispatch_loop_run<A>(
     while let Some(env) = binding.try_recv() {
         let inbound_mail_id = env.mail_id;
         let thread_name = thread::current().name().map(str::to_owned);
-        trace::record_received(inbound_mail_id, thread_name);
+        binding
+            .mailer()
+            .record_received(inbound_mail_id, thread_name);
         local::with_stamped(slots, || {
             log_install::with_actor_dispatch(&**binding as &dyn MailDispatch, || {
                 let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
@@ -150,7 +153,7 @@ pub fn dispatch_loop_run<A>(
                 log::drain_buffer();
             });
         });
-        trace::record_finished(inbound_mail_id);
+        binding.mailer().record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }

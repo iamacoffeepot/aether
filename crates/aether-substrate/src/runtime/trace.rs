@@ -2,15 +2,15 @@
 //!
 //! Two pieces:
 //!
-//! - **Producer-side helpers** (`record_sent` / `record_received` /
-//!   `record_finished`) push [`TraceEvent`]s onto a process-global
-//!   [`SegQueue`]. The hooks live in
-//!   [`NativeBinding::send_mail_with_lineage`](crate::NativeBinding::send_mail_with_lineage)
-//!   (Sent), the native dispatcher trampoline (Received / Finished),
-//!   and the wasm trampoline forwarder (Received / Finished). Calls
-//!   are no-ops until the chassis [`install_trace_queue`]s the
-//!   queue at boot — silent drop is the right shape for tests that
-//!   don't bring up the chassis.
+//! - **Producer-side helpers** ([`TraceHandle::record_sent`] /
+//!   [`TraceHandle::record_received`] / [`TraceHandle::record_finished`])
+//!   push [`TraceEvent`]s onto the per-chassis [`SegQueue`] held in
+//!   the [`TraceHandle`]. The handle is owned by the chassis
+//!   [`Mailer`] and reached via [`Mailer::trace_handle`]; producer-side
+//!   call sites usually reach for the `mailer.record_sent(...)`
+//!   shortcuts. Calls are no-ops when the chassis hasn't installed a
+//!   handle — silent drop is the right shape for tests that don't
+//!   bring up the chassis.
 //!
 //! - **[`start_drainer`]** spawns the chassis-owned drainer thread.
 //!   The thread loop-drains up to `BATCH_MAX` events and ships a
@@ -20,19 +20,21 @@
 //!   [`TraceDrainerHandle`] — its `Drop` signals the thread and
 //!   joins.
 //!
-//! Why global rather than chassis-owned: producer-side hooks are
-//! reached from every actor's send path; threading an
-//! `Arc<SegQueue<TraceEvent>>` through every binding constructor is
-//! invasive churn for a feature that runs at most once per process.
-//! The global is initialised exactly once at chassis boot and never
-//! reset — multi-chassis test fixtures (`TestBench`) share the queue
-//! across their substrates, which is fine because each `TraceEvent`
-//! carries the producer's [`MailboxId`] so the observer can attribute
-//! events even if the queue is shared.
+//! Why per-chassis rather than process-global: the trace pipeline is
+//! per-chassis everywhere else (drainer is per-`build_passive`,
+//! observer is a regular cap actor, queue is allocated fresh each
+//! boot). A process-global `OnceLock` for the queue pinned the *first*
+//! chassis's queue forever — subsequent chassis boots in the same
+//! process silently wired their drainer to a fresh empty Arc while
+//! producers kept pushing into the orphaned first Arc, so trace events
+//! never reached the second chassis's observer. The handle now rides
+//! on the Mailer (one per chassis), which makes the lifecycle
+//! structurally correct and unlocks future in-process multi-substrate
+//! workflows. Filed as iamacoffeepot/aether#953.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -44,167 +46,173 @@ use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::MailboxEntry;
 
-/// Monotonic-since-boot reference. Set once at chassis boot via
-/// [`init_substrate_start`]; producer-side hooks subtract from it to
-/// produce a [`Nanos`] for each event.
-static SUBSTRATE_START: OnceLock<Instant> = OnceLock::new();
-
-/// Process-global trace queue. Set by [`install_trace_queue`] at
-/// chassis boot; producer-side hooks push when present, no-op when
-/// absent. Wrapped in `OnceLock<Arc<SegQueue>>` so the drainer thread
-/// can hold a clone for `pop` without contending on the `OnceLock`
-/// itself on every read.
-static TRACE_QUEUE: OnceLock<Arc<SegQueue<TraceEvent>>> = OnceLock::new();
-
-/// Initialise the crate-internal `SUBSTRATE_START` reference. Called
-/// once during chassis boot before any actor is wired so every
-/// subsequent timestamp has a stable origin. Safe to call multiple
-/// times — the `OnceLock` ignores subsequent calls.
-pub fn init_substrate_start() {
-    let _ = SUBSTRATE_START.set(Instant::now());
-}
-
-/// Install the process-global trace queue. The chassis builder
-/// constructs the queue + drainer pair at boot via
-/// [`start_drainer`]; this function exposes the queue handle so
-/// producer-side hooks can find it. Safe to call multiple times —
-/// subsequent calls return the existing queue.
-pub fn install_trace_queue(queue: Arc<SegQueue<TraceEvent>>) {
-    let _ = TRACE_QUEUE.set(queue);
-}
-
-/// Read the process-global trace queue, if installed. Returns `None`
-/// before chassis boot or in tests that bypass the chassis.
-pub fn trace_queue() -> Option<&'static Arc<SegQueue<TraceEvent>>> {
-    TRACE_QUEUE.get()
-}
-
-/// Compute the current [`Nanos`] timestamp relative to the
-/// crate-internal `SUBSTRATE_START` reference. `0` if `SUBSTRATE_START`
-/// was not initialised (the producer hooks early-out before this in
-/// that case, but the guard makes the function safe to call standalone).
-pub fn now_nanos() -> Nanos {
-    let start = match SUBSTRATE_START.get() {
-        Some(s) => *s,
-        None => return Nanos(0),
-    };
-    let elapsed = Instant::now().saturating_duration_since(start);
-    // u128 → u64: trace timestamps overflow after ~584 years; the
-    // substrate's `SUBSTRATE_START` is set at boot, so realistic
-    // runtimes are well within u64 range.
-    #[allow(clippy::cast_possible_truncation)]
-    Nanos(elapsed.as_nanos() as u64)
-}
-
-/// ADR-0080 §2 producer hook for the `Sent` event. No-op if the
-/// global queue isn't installed yet (early-test paths, tests that
-/// bypass chassis boot). Allocates and pushes only when the queue
-/// is live.
-pub fn record_sent(
-    mail_id: MailId,
-    root: MailId,
-    parent_mail: Option<MailId>,
-    sender: MailboxId,
-    recipient: MailboxId,
-    kind: KindId,
-) {
-    let Some(queue) = TRACE_QUEUE.get() else {
-        return;
-    };
-    queue.push(TraceEvent::Sent {
-        mail_id,
-        root,
-        parent_mail,
-        sender,
-        recipient,
-        kind,
-        t: now_nanos(),
-    });
-}
-
-/// ADR-0080 §2 producer hook for the `Received` event. Pushed by the
-/// native dispatcher trampoline at handler entry. No-op when
-/// `mail_id == MailId::NONE` — that's the structural recursion break
-/// per ADR-0080 §7: the drainer's own outbound `BatchedTraceEvents`
-/// mail is pushed bare through the `Mailer` (skipping
-/// `NativeBinding::send_mail_with_lineage`), so it carries the
-/// default `MailId::NONE`. Suppressing `Received`/`Finished` for
-/// `NONE`-stamped mail prevents the observer's own dispatch from
-/// generating events that would re-feed the drainer.
+/// Per-chassis trace-pipeline handle. Owned by the chassis [`Mailer`];
+/// producer-side hooks reach it via `mailer.trace_handle()` or the
+/// `mailer.record_*` shortcuts that wrap the methods on this type.
 ///
-/// Issue 734: dispatchers pass `std::thread::current().name()
-/// .map(str::to_owned)` as `thread_name` so the trace renderer
-/// (`hub::mcp::trace`) can stamp each event with a per-thread row. The
-/// default `Pooled` scheduler (post-issue-635) names worker threads
-/// `aether-worker-N`, so one tid commonly serves multiple actors;
-/// actors on the `Thread` scheduler get the per-actor names from
-/// `actor::native::spawn` (`aether-instanced-<full_name>`,
-/// `aether-root-<NAMESPACE>`). Anonymous test threads pass `None`.
-pub fn record_received(mail_id: MailId, thread_name: Option<String>) {
-    if mail_id == MailId::NONE {
-        return;
+/// Cloning shares the underlying [`SegQueue`] (Arc) and copies the
+/// boot-time anchor (Copy), so the chassis drainer and every producer
+/// site can hold an independent `TraceHandle` cheaply.
+#[derive(Clone, Debug)]
+pub struct TraceHandle {
+    queue: Arc<SegQueue<TraceEvent>>,
+    boot_time: Instant,
+}
+
+impl TraceHandle {
+    /// Build a fresh handle: empty queue, `Instant::now()` boot
+    /// anchor. The chassis builder calls this once per `build_passive`;
+    /// the returned handle is installed on the chassis [`Mailer`] and
+    /// its queue is handed to [`start_drainer`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_queue(Arc::new(SegQueue::new()))
     }
-    let Some(queue) = TRACE_QUEUE.get() else {
-        return;
-    };
-    queue.push(TraceEvent::Received {
-        mail_id,
-        t: now_nanos(),
-        thread_name,
-    });
-}
 
-/// ADR-0080 §2 producer hook for the `Finished` event. Pushed by the
-/// native dispatcher trampoline at handler exit (normal return).
-/// Symmetric `MailId::NONE` short-circuit (see [`record_received`]).
-pub fn record_finished(mail_id: MailId) {
-    if mail_id == MailId::NONE {
-        return;
+    /// Build a handle that wraps an existing queue Arc. Used by tests
+    /// that boot multiple `Mailer`s pointing at the same queue so the
+    /// test body can drain a single shared event stream and filter by
+    /// `mail_id.sender`. Production chassis use [`Self::new`] instead;
+    /// the queue is allocated fresh per chassis.
+    #[must_use]
+    pub fn with_queue(queue: Arc<SegQueue<TraceEvent>>) -> Self {
+        Self {
+            queue,
+            boot_time: Instant::now(),
+        }
     }
-    let Some(queue) = TRACE_QUEUE.get() else {
-        return;
-    };
-    queue.push(TraceEvent::Finished {
-        mail_id,
-        t: now_nanos(),
-    });
-}
 
-/// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a `SettlementHold`
-/// against `root`. The returned guard increments the root's `held_open`
-/// counter (via a [`TraceEvent::HoldOpen`] pushed inline) and decrements
-/// it again on `Drop` (via [`TraceEvent::Release`]). Settlement for
-/// `root` gates on `(in_flight == 0 && held_open == 0)`, so any thread
-/// that outlives its spawning handler (`InheritCtx<A>` from
-/// [`crate::actor::native::NativeCtx::spawn_inherit`]) keeps the chain
-/// open until it drops.
-///
-/// Acquired on the parent thread before the worker is spawned so the
-/// `HoldOpen` event is visible in the trace queue before the parent
-/// handler's `Finished` lands. Moving the guard into the worker thread
-/// (via the `InheritCtx<A>` ctor) ties release to the worker's lifetime.
-///
-/// No-op when the trace queue isn't installed (early-test paths,
-/// fixtures that bypass chassis boot). The returned guard still pushes
-/// `Release` on drop, but the observer simply ignores both events.
-#[must_use = "SettlementHold gates root settlement; storing _ silently fires Release"]
-pub fn acquire_settlement_hold(root: MailId) -> SettlementHold {
-    if let Some(queue) = TRACE_QUEUE.get() {
-        queue.push(TraceEvent::HoldOpen {
+    /// Borrow the queue Arc so the chassis builder can pass it to
+    /// [`start_drainer`]. Internal: producer-side call sites go
+    /// through the `record_*` methods on this type.
+    #[must_use]
+    pub fn queue(&self) -> &Arc<SegQueue<TraceEvent>> {
+        &self.queue
+    }
+
+    /// Boot-time anchor for [`Self::now_nanos`]. Exposed for fixtures
+    /// that want to reconstruct timestamps for asserting.
+    #[must_use]
+    pub fn boot_time(&self) -> Instant {
+        self.boot_time
+    }
+
+    /// Compute the current [`Nanos`] timestamp relative to this
+    /// handle's boot anchor. Sub-microsecond resolution; saturates to
+    /// `u64::MAX` after ~584 years of substrate uptime.
+    #[must_use]
+    pub fn now_nanos(&self) -> Nanos {
+        let elapsed = Instant::now().saturating_duration_since(self.boot_time);
+        // u128 → u64: trace timestamps overflow after ~584 years; the
+        // handle's boot anchor is set at chassis boot, so realistic
+        // runtimes are well within u64 range.
+        #[allow(clippy::cast_possible_truncation)]
+        Nanos(elapsed.as_nanos() as u64)
+    }
+
+    /// ADR-0080 §2 producer hook for the `Sent` event.
+    pub fn record_sent(
+        &self,
+        mail_id: MailId,
+        root: MailId,
+        parent_mail: Option<MailId>,
+        sender: MailboxId,
+        recipient: MailboxId,
+        kind: KindId,
+    ) {
+        self.queue.push(TraceEvent::Sent {
+            mail_id,
             root,
-            t: now_nanos(),
+            parent_mail,
+            sender,
+            recipient,
+            kind,
+            t: self.now_nanos(),
         });
     }
-    SettlementHold { root }
+
+    /// ADR-0080 §2 producer hook for the `Received` event. Pushed by
+    /// the native dispatcher trampoline at handler entry. No-op when
+    /// `mail_id == MailId::NONE` — that's the structural recursion
+    /// break per ADR-0080 §7: the drainer's own outbound
+    /// `BatchedTraceEvents` mail is pushed bare through the `Mailer`
+    /// (skipping `NativeBinding::send_mail_with_lineage`), so it
+    /// carries the default `MailId::NONE`. Suppressing
+    /// `Received`/`Finished` for `NONE`-stamped mail prevents the
+    /// observer's own dispatch from generating events that would
+    /// re-feed the drainer.
+    ///
+    /// Issue 734: dispatchers pass `std::thread::current().name()
+    /// .map(str::to_owned)` as `thread_name` so the trace renderer
+    /// (`hub::mcp::trace`) can stamp each event with a per-thread row.
+    pub fn record_received(&self, mail_id: MailId, thread_name: Option<String>) {
+        if mail_id == MailId::NONE {
+            return;
+        }
+        self.queue.push(TraceEvent::Received {
+            mail_id,
+            t: self.now_nanos(),
+            thread_name,
+        });
+    }
+
+    /// ADR-0080 §2 producer hook for the `Finished` event. Pushed by
+    /// the native dispatcher trampoline at handler exit (normal
+    /// return). Symmetric `MailId::NONE` short-circuit (see
+    /// [`Self::record_received`]).
+    pub fn record_finished(&self, mail_id: MailId) {
+        if mail_id == MailId::NONE {
+            return;
+        }
+        self.queue.push(TraceEvent::Finished {
+            mail_id,
+            t: self.now_nanos(),
+        });
+    }
+
+    /// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a
+    /// [`SettlementHold`] against `root`. The returned guard increments
+    /// the root's `held_open` counter (via a [`TraceEvent::HoldOpen`]
+    /// pushed inline) and decrements it again on `Drop` (via
+    /// [`TraceEvent::Release`]). Settlement for `root` gates on
+    /// `(in_flight == 0 && held_open == 0)`, so any thread that
+    /// outlives its spawning handler (`InheritCtx<A>` from
+    /// [`crate::actor::native::NativeCtx::spawn_inherit`]) keeps the
+    /// chain open until it drops.
+    ///
+    /// Acquired on the parent thread before the worker is spawned so
+    /// the `HoldOpen` event is visible in the trace queue before the
+    /// parent handler's `Finished` lands. Moving the guard into the
+    /// worker thread (via the `InheritCtx<A>` ctor) ties release to
+    /// the worker's lifetime.
+    #[must_use = "SettlementHold gates root settlement; storing _ silently fires Release"]
+    pub fn acquire_settlement_hold(&self, root: MailId) -> SettlementHold {
+        self.queue.push(TraceEvent::HoldOpen {
+            root,
+            t: self.now_nanos(),
+        });
+        SettlementHold {
+            handle: self.clone(),
+            root,
+        }
+    }
+}
+
+impl Default for TraceHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// RAII guard for an ADR-0080 §12 settlement hold. Construct via
-/// [`acquire_settlement_hold`]; drop fires [`TraceEvent::Release`] for
-/// the same root. The only public surface is the guard — `Release` is
-/// never a free function, so a paired `hold`/`release` mismatch is
-/// structurally impossible.
+/// [`TraceHandle::acquire_settlement_hold`] (or
+/// [`Mailer::acquire_settlement_hold`]); drop fires
+/// [`TraceEvent::Release`] for the same root. The only public surface
+/// is the guard — `Release` is never a free function, so a paired
+/// `hold`/`release` mismatch is structurally impossible.
 #[derive(Debug)]
 pub struct SettlementHold {
+    handle: TraceHandle,
     root: MailId,
 }
 
@@ -219,50 +227,11 @@ impl SettlementHold {
 
 impl Drop for SettlementHold {
     fn drop(&mut self) {
-        let Some(queue) = TRACE_QUEUE.get() else {
-            return;
-        };
-        queue.push(TraceEvent::Release {
+        self.handle.queue.push(TraceEvent::Release {
             root: self.root,
-            t: now_nanos(),
+            t: self.handle.now_nanos(),
         });
     }
-}
-
-/// ADR-0080 chassis-root push helper. Combines `MailId` minting,
-/// the `Sent` trace event emission, and the `Mailer::push` into one
-/// call so chassis-side mail (Tick fanout from the frame loop, hub-
-/// bridged inbound, MCP-bridged) gets observable lineage without
-/// duplicating the producer-side hook in `NativeBinding::send_mail_with_lineage`.
-///
-/// Returns the freshly minted `MailId` so the caller can subscribe
-/// to its settlement via the chassis [`crate::chassis::settlement::SettlementRegistry`]
-/// before waiting on the chain.
-///
-/// `correlation_id` is allocated by the caller (the chassis owns its
-/// own `AtomicU64` counter, symmetric with each per-actor `NativeBinding`'s
-/// counter). Pre-PR 4 the test bench / hub minters were the only
-/// chassis-side counters; this helper shapes them as ADR-0080 §1
-/// chassis-root `MailId`s.
-pub fn push_chassis_root_mail(
-    mailer: &Mailer,
-    correlation_id: u64,
-    recipient: MailboxId,
-    kind: KindId,
-    payload: Vec<u8>,
-    count: u32,
-) -> MailId {
-    let mail_id = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
-    record_sent(
-        mail_id,
-        mail_id,
-        None,
-        MailboxId::CHASSIS_MAILBOX_ID,
-        recipient,
-        kind,
-    );
-    mailer.push(Mail::new(recipient, kind, payload, count).with_lineage(mail_id, mail_id, None));
-    mail_id
 }
 
 /// ADR-0080 §3 batch parameters: drain at most this many events per
@@ -305,10 +274,6 @@ impl Drop for TraceDrainerHandle {
 /// every `BATCH_INTERVAL` (also crate-internal) and ships a
 /// [`BatchedTraceEvents`] mail to the [`TRACE_OBSERVER_MAILBOX_NAME`]
 /// sink. Returns a handle whose `Drop` joins the thread.
-///
-/// Idempotent in the sense that calling [`install_trace_queue`]
-/// twice with the same `queue` Arc is a no-op; the chassis builder
-/// installs the queue exactly once and pairs it with one drainer.
 ///
 /// # Panics
 /// Panics if the OS refuses to spawn the drainer thread — fail-fast

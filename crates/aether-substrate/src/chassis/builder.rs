@@ -54,7 +54,6 @@ use aether_actor::local::ActorSlots;
 use aether_actor::log;
 use aether_data::mailbox_id_from_name;
 use aether_kinds::trace::Settled;
-use aether_kinds::trace::TraceEvent;
 use aether_kinds::{ConfigureLogDrain, LogBatch};
 use std::any::Any;
 use std::any::TypeId;
@@ -1248,17 +1247,17 @@ fn boot_passives(
     });
     let pool = Pool::start(pool_config, Arc::clone(aborter));
 
-    // ADR-0080 §3 trace pipeline. `init_substrate_start` pins the
-    // monotonic-since-boot reference; `install_trace_queue` makes the
-    // global queue visible to producer-side hooks; `start_drainer`
-    // owns the thread that batches events into mail addressed to the
-    // `aether.trace` sink. The handle in `BootedPassives` joins the
-    // thread on chassis tear down.
-    trace::init_substrate_start();
-    let trace_queue: Arc<crossbeam_queue::SegQueue<TraceEvent>> =
-        Arc::new(crossbeam_queue::SegQueue::new());
-    trace::install_trace_queue(Arc::clone(&trace_queue));
-    let trace_drainer = trace::start_drainer(Arc::clone(&trace_queue), Arc::clone(mailer));
+    // ADR-0080 §3 trace pipeline. The `Mailer` already carries a
+    // per-chassis `TraceHandle` allocated by `Mailer::new` (issue 953
+    // retired the process-global queue); pull its queue and hand a
+    // clone to `start_drainer`, which owns the thread that batches
+    // events into mail addressed to the `aether.trace` sink. The
+    // handle in `BootedPassives` joins the thread on chassis tear
+    // down.
+    let trace_drainer = trace::start_drainer(
+        Arc::clone(mailer.trace_handle().queue()),
+        Arc::clone(mailer),
+    );
 
     // ADR-0080 §6 settlement registry + chassis-mail router. The
     // registry owns the gate-site notification map; the router

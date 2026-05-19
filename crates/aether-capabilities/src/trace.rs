@@ -29,11 +29,16 @@ mod native {
         DispatchTraced, DispatchTracedAck, ListActiveRoots, ListActiveRootsResult, MailNodeWire,
         RootSummaryWire, TraceWindow,
     };
+    use std::cmp::Reverse;
+    #[cfg(test)]
+    use std::collections::HashSet;
     use std::collections::{BTreeSet, HashMap};
+    use std::env;
     use std::ops::Bound;
-    use std::time::{Duration, Instant};
-
     use std::sync::Arc;
+    #[cfg(test)]
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use aether_actor::{MailCtx, actor};
     use aether_data::{KindId, MailId, MailboxId};
@@ -44,9 +49,6 @@ mod native {
     use aether_substrate::mail::helpers::resolve_bundle;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::runtime::trace;
-    use std::cmp::Reverse;
-    use std::env;
 
     /// ADR-0080 §11 retention defaults. Override via env vars.
     /// `AETHER_TRACE_RETENTION_MS` — drop roots older than this many
@@ -545,7 +547,7 @@ mod native {
         /// Issue 718 / ADR-0080 Phase 2.
         #[handler]
         fn on_list_active_roots(&mut self, ctx: &mut NativeCtx<'_>, request: ListActiveRoots) {
-            let now = trace::now_nanos();
+            let now = ctx.mailer().now_nanos();
             let result = self.build_list_active_roots(request, now);
             ctx.reply(&result);
         }
@@ -562,7 +564,7 @@ mod native {
         /// root via `describe_tree` for full chain context. Issue 735.
         #[handler]
         fn on_describe_window(&mut self, ctx: &mut NativeCtx<'_>, request: DescribeWindow) {
-            let now = trace::now_nanos();
+            let now = ctx.mailer().now_nanos();
             let result = self.build_describe_window(request, now);
             ctx.reply(&result);
         }
@@ -612,11 +614,8 @@ mod native {
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::{MailDispatch, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
-        use std::collections::HashSet;
-        use std::env;
         use std::sync::Mutex;
         use std::sync::mpsc::Receiver;
-        use std::thread;
 
         /// Construct an observer for state-fold tests. Stash a fresh
         /// `Mailer` so `fire_settled` has somewhere to push (the
