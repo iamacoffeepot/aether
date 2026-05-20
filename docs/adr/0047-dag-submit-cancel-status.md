@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-04-25
+- **Revised:** 2026-05-19 (iamacoffeepot/aether#972) — mailbox renamed `aether.control` → `aether.dag`; raw `u64` wire ids replaced with typed newtypes (tagged-string serialization per ADR-0064/0065); "sink" terminology swept to "mailbox"/"cap" per ADR-0074 Phase 5; retired broadcast-sink reference removed (issue #775). Submit/validation semantics unchanged.
 
 ## Context
 
@@ -17,26 +18,28 @@ ADR-0045's §5 sketched the wire shape and the executor's high-level role. This 
 
 ### 1. Mail surface
 
-Three request kinds, three reply kinds, all on the existing `"aether.control"` mailbox alongside `load_component` / `replace_component` / `subscribe_input`:
+Three request kinds, three reply kinds, all on the `"aether.dag"` mailbox alongside the other `aether.<name>` chassis mailboxes (`aether.component`, `aether.input`, etc.). ADR-0074 Phase 5 retired the `aether.control` name this ADR originally used.
 
 ```rust
 aether.dag.submit { descriptor: DagDescriptor }
-aether.dag.cancel { dag_id: u64 }
-aether.dag.status { dag_id: u64 }
+aether.dag.cancel { dag_id: DagId }
+aether.dag.status { dag_id: DagId }
 
-aether.dag.submit_result : Ok  { dag_id: u64, output_handles: Vec<(NodeId, u64)> }
+aether.dag.submit_result : Ok  { dag_id: DagId, output_handles: Vec<(NodeId, HandleId)> }
                         | Err { error: DagError }
 aether.dag.cancel_result : Ok  { cancelled: bool }
                          | Err { error: String }
 aether.dag.status_result : Pending  { node_count: u32, ready: u32, in_flight: u32, parked: u32 }
                          | Running  { progress: Vec<NodeStatus> }
-                         | Complete { outputs: Vec<(NodeId, u64)> }
+                         | Complete { outputs: Vec<(NodeId, HandleId)> }
                          | Failed   { node_id: NodeId, error: String }
 ```
 
+`DagId`, `MailboxId`, `KindId`, and `HandleId` are `u64`-backed newtypes that serialize as tagged strings (`dag-`/`mbx-`/`knd-`/`hdl-XXXX-XXXX-XXXX`) on the MCP JSON wire per ADR-0064/0065; the Rust definitions here use the newtype forms.
+
 Submit returns synchronously with `dag_id` as soon as validation completes — *before* any source dispatches. The reply also carries the full `output_handles` list (handle ids assigned to terminal nodes) so a caller can hand them to downstream consumers immediately, even though the values aren't resolved yet. This is consistent with ADR-0045 §4: `Ref::Handle` slots can travel before their values resolve; the substrate parks dispatch until they do.
 
-Cancel returns `cancelled: true` if the DAG was found and torn down, `false` if it had already completed or never existed (idempotent). In-flight sink calls aren't aborted — the substrate stops awaiting their replies and discards them when they arrive. Parked mail tied to the cancelled DAG drops with a `CapabilityDenied`-shaped diagnostic.
+Cancel returns `cancelled: true` if the DAG was found and torn down, `false` if it had already completed or never existed (idempotent). In-flight mailbox calls aren't aborted — the substrate stops awaiting their replies and discards them when they arrive. Parked mail tied to the cancelled DAG drops with a `CapabilityDenied`-shaped diagnostic.
 
 Status is poll-shaped, not push-shaped. The session asks; the substrate replies with the current state. `Pending` covers the brief window between submit-ack and first source dispatch; `Running` covers everything until terminal handles land; `Complete` is terminal and persists until the dag_id is reaped (see §7); `Failed` is terminal and also persists. There is no streamed status — push-style observation goes through normal observer nodes the caller wires into the DAG.
 
@@ -49,14 +52,14 @@ struct DagDescriptor {
 }
 
 enum Node {
-    Source    { id: NodeId, sink: String, kind_id: u64, payload: Vec<u8> },
-    Transform { id: NodeId, transform: TransformRef, output_kind_id: u64 },
-    Observer  { id: NodeId, recipient: u64, kind_id: u64 },
+    Source    { id: NodeId, mailbox: MailboxId, kind_id: KindId, payload: Vec<u8> },
+    Transform { id: NodeId, transform: TransformRef, output_kind_id: KindId },
+    Observer  { id: NodeId, recipient: MailboxId, kind_id: KindId },
 }
 
 struct Edge { from: NodeId, to: NodeId, slot: u32 }
 
-struct TransformRef { component: u64, index: u32 }
+struct TransformRef { component: MailboxId, index: u32 }
 
 type NodeId = u32;
 ```
@@ -65,7 +68,7 @@ The shape locks in for Phase 2 even though `Transform` doesn't dispatch yet. Pha
 
 `NodeId` is descriptor-local — a `u32` index assigned by the submitter, not a globally unique handle id. Edges reference NodeIds; the substrate maps NodeIds to handle ids during execution. Two DAGs submitted in parallel can both have a `NodeId(0)` without collision because the namespaces don't cross.
 
-`Source` carries `payload: Vec<u8>` rather than a structured kind value because the substrate doesn't decode source payloads on the submit path — it forwards them to the named sink as opaque bytes, identical to how `send_mail` works today. Validation only checks that `kind_id` is in the sink's accept set (see §3); deep payload validation happens inside the sink adapter at dispatch time.
+`Source` carries `payload: Vec<u8>` rather than a structured kind value because the substrate doesn't decode source payloads on the submit path — it forwards them to the named mailbox as opaque bytes, identical to how `send_mail` works today. Validation only checks that `kind_id` is in the mailbox's accept set (see §3); deep payload validation happens inside the mailbox's handler at dispatch time.
 
 `Observer` names a recipient by `MailboxId` and a `kind_id` it'll receive. This is how a DAG terminates: when the observer's input handles all resolve, the substrate dispatches the assembled mail to the recipient using normal mailbox dispatch — `aether.kinds.inputs` (ADR-0033) gates whether the kind is acceptable.
 
@@ -78,8 +81,8 @@ The shape locks in for Phase 2 even though `Transform` doesn't dispatch yet. Pha
 Validation runs synchronously on the submit path and returns `Err` before any work dispatches. Ordering matters because some checks are cheap (and would mask the source of a real bug if a later check ran first) and some need a populated graph. The phases:
 
 1. **Structural integrity.** Every `Edge.from` and `Edge.to` references a NodeId that exists in `nodes`. NodeIds are unique within `nodes`. Source nodes have no incoming edges; observer nodes have no outgoing edges. The graph is acyclic (Kahn's-algorithm topological sort succeeds).
-2. **Dispatchability.** Every `Source.sink` resolves to a registered sink on this substrate (chassis-specific; see §8). Every `Source.kind_id` is in the sink's accept set. Every `Observer.recipient` is a live mailbox. Every `Observer.kind_id` is in the recipient's `aether.kinds.inputs` manifest *or* the recipient declares a `#[fallback]` (ADR-0033). Every `Transform.transform.component` is a live mailbox; the loaded component's `aether.dag.transforms` section contains an entry at `Transform.transform.index` whose declared `output_kind_id` matches the descriptor.
-3. **Type compatibility on edges.** For each edge `Edge { from, to, slot }`: the `from` node's output kind matches the input kind expected at `to`'s `slot`. For sources, output kind = `Source.kind_id`'s reply kind (e.g., a source that dispatches `aether.io.read` produces a `ReadResult`). For transforms, output kind = `Transform.output_kind_id`. For observers, the slot maps to a `Ref<K>` field in the observer's `kind_id` schema; that field's `K` must match the upstream output.
+2. **Dispatchability.** Every `Source.mailbox` resolves to a registered mailbox on this substrate (chassis-specific; see §8). Every `Source.kind_id` is in the mailbox's accept set. Every `Observer.recipient` is a live mailbox. Every `Observer.kind_id` is in the recipient's `aether.kinds.inputs` manifest *or* the recipient declares a `#[fallback]` (ADR-0033). Every `Transform.transform.component` is a live mailbox; the loaded component's `aether.dag.transforms` section contains an entry at `Transform.transform.index` whose declared `output_kind_id` matches the descriptor.
+3. **Type compatibility on edges.** For each edge `Edge { from, to, slot }`: the `from` node's output kind matches the input kind expected at `to`'s `slot`. For sources, output kind = `Source.kind_id`'s reply kind (e.g., a source that dispatches `aether.fs.read` produces a `ReadResult`). For transforms, output kind = `Transform.output_kind_id`. For observers, the slot maps to a `Ref<K>` field in the observer's `kind_id` schema; that field's `K` must match the upstream output.
 
 Validation phases short-circuit on first failure. The reply's `DagError` carries a structured variant indicating which phase failed and which node/edge tripped it:
 
@@ -91,11 +94,11 @@ enum DagError {
     SourceWithIncomingEdge(NodeId),
     ObserverWithOutgoingEdge(NodeId),
     UnknownSink(String),
-    UnknownRecipient(u64),
-    KindNotAccepted { node: NodeId, kind_id: u64, sink_or_recipient: String },
-    UnknownTransform { node: NodeId, component: u64, index: u32 },
-    TransformOutputMismatch { node: NodeId, declared: u64, manifest: u64 },
-    EdgeTypeMismatch { edge_index: u32, expected_kind: u64, got_kind: u64 },
+    UnknownRecipient(MailboxId),
+    KindNotAccepted { node: NodeId, kind_id: KindId, mailbox_or_recipient: String },
+    UnknownTransform { node: NodeId, component: MailboxId, index: u32 },
+    TransformOutputMismatch { node: NodeId, declared: KindId, manifest: KindId },
+    EdgeTypeMismatch { edge_index: u32, expected_kind: KindId, got_kind: KindId },
     TooLarge { reason: String },
 }
 ```
@@ -108,7 +111,7 @@ On `Ok`, the substrate allocates a `dag_id` (monotonic per-substrate, with a ses
 
 ```rust
 struct DagState {
-    dag_id: u64,
+    dag_id: DagId,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     handles: HashMap<NodeId, HandleId>,    // assigned at submit; resolved at dispatch
@@ -123,7 +126,7 @@ Handle ids for *every* node — including transforms (Phase 3) and observers —
 
 Execution proceeds:
 
-1. **Sources fire.** Every source node's payload is submitted to its named sink as if `send_mail` had been called. The substrate retains the sink's reply correlation so the response routes back to the DAG executor, not to the submitting session. When the reply arrives, the corresponding `HandleId` resolves in the handle store; ADR-0045 §4's parked-mail flush runs identically to today.
+1. **Sources fire.** Every source node's payload is submitted to its named mailbox as if `send_mail` had been called. The substrate retains the mailbox's reply correlation so the response routes back to the DAG executor, not to the submitting session. When the reply arrives, the corresponding `HandleId` resolves in the handle store; ADR-0045 §4's parked-mail flush runs identically to today.
 2. **Transforms fire when their inputs all resolve.** Phase 2 has no transforms; this clause activates in Phase 3. The executor decrements `pending_inputs[node]` on each input resolution; at zero, it dispatches the transform via wasmtime `Func::call` (per ADR-0048).
 3. **Observer mail dispatches when its inputs all resolve.** Same `pending_inputs` mechanism. The substrate assembles the observer's kind from the input handles (each handle's value substituted into the matching `Ref<K>` slot), and dispatches the resulting mail to the observer's recipient mailbox. The observer is just a regular mail recipient; `aether.kinds.inputs` and `#[handlers]` (ADR-0033) handle dispatch normally.
 
@@ -140,7 +143,7 @@ When all observer nodes have dispatched (or the DAG has no observers — in whic
 - Releases all DAG-held refs on its own handles. Source replies that arrive after cancel are discarded silently (the executor no longer has a routing entry for them).
 - Marks the DAG state as reapable. Reaping happens on a slow tick; the entry persists for a short window so a `status` poll racing with a cancel still sees a coherent reply.
 
-In-flight sink work isn't aborted. A `Fetch` already in flight to the network completes server-side; its bytes arrive at the substrate, get routed to the cancelled DAG, and get dropped. This is the same shape as cancellation semantics for `wait_reply` (ADR-0042): the substrate doesn't pretend it can unsend.
+In-flight mailbox work isn't aborted. A `Fetch` already in flight to the network completes server-side; its bytes arrive at the substrate, get routed to the cancelled DAG, and get dropped. This is the same shape as cancellation semantics for `wait_reply` (ADR-0042): the substrate doesn't pretend it can unsend.
 
 ### 6. Status semantics
 
@@ -148,9 +151,9 @@ In-flight sink work isn't aborted. A `Fetch` already in flight to the network co
 
 - **`Pending`** — submit succeeded but no source has dispatched yet (purely transient — the substrate dispatches sources synchronously after submit, so this state is only observable in tests).
 - **`Running { progress: Vec<NodeStatus> }`** — at least one node has resolved; some haven't. `NodeStatus { node_id, state }` where state is `Pending | Resolved | Failed`.
-- **`Complete { outputs: Vec<(NodeId, u64)> }`** — all observer dispatches fired (or all terminal handles resolved if no observers). Outputs are the same `(NodeId, HandleId)` pairs `submit_result` returned, restated for callers that didn't keep the submit reply around.
+- **`Complete { outputs: Vec<(NodeId, HandleId)> }`** — all observer dispatches fired (or all terminal handles resolved if no observers). Outputs are the same `(NodeId, HandleId)` pairs `submit_result` returned, restated for callers that didn't keep the submit reply around.
 - **`Failed { node_id, error }`** — at least one node produced an error and downstream couldn't proceed. Specific failure modes:
-  - A source's sink replied `Err` for a kind whose reply variant is `Result`-shaped (e.g., `ReadResult::Err`). This isn't a *DAG* failure by default — the `Err` value resolves the handle and downstream nodes consume it via match on the variant. But: an observer whose input is `Ref<ReadResult>` and whose handler doesn't accept `Err` will reject at dispatch — that surfaces as `Failed` here.
+  - A source's mailbox replied `Err` for a kind whose reply variant is `Result`-shaped (e.g., `ReadResult::Err`). This isn't a *DAG* failure by default — the `Err` value resolves the handle and downstream nodes consume it via match on the variant. But: an observer whose input is `Ref<ReadResult>` and whose handler doesn't accept `Err` will reject at dispatch — that surfaces as `Failed` here.
   - A transform panic (Phase 3) is a hard `Failed`; the DAG aborts, all unresolved handles drop, parked mail clears.
   - Validation can't fail post-submit (it ran on submit), so `Failed` is always a runtime issue.
 
@@ -171,7 +174,7 @@ Across substrate restart: DAG state is in-memory only and doesn't survive. Persi
 
 ### 8. Chassis coverage
 
-- **Desktop** — full executor. All sinks dispatchable as DAG sources. `aether.dag.*` accepted.
+- **Desktop** — full executor. All mailboxes dispatchable as DAG sources. `aether.dag.*` accepted.
 - **Headless** — same as desktop except chassis-restricted kinds (capture_frame, set_window_mode, etc. — see ADR-0035) reject in DAG validation phase 2 with `UnknownSink` or `KindNotAccepted`.
 - **Hub** — no executor. `aether.dag.submit` replies `Err { error: DagError::TooLarge { reason: "unsupported on hub chassis" } }` (reusing the existing variant rather than inventing a new one keeps wire churn low; alternatively a future revision adds `ChassisUnsupported`). The hub bubbles mail to its substrate children per ADR-0037; DAG submission is a substrate concern, not a hub one.
 
@@ -179,7 +182,7 @@ Across substrate restart: DAG state is in-memory only and doesn't survive. Persi
 
 The hub exposes `mcp__aether-hub__submit_dag(engine_id, descriptor, timeout_ms?)` as a thin wrapper around `aether.dag.submit`. Same await-reply mechanism `capture_frame` and `load_component` use; the hub forwards the descriptor, awaits `submit_result` via the pending-replies queue, returns the response inline. `descriptor` is a structured JSON object the hub encodes against the `DagDescriptor` schema before forwarding (symmetric to `send_mail`'s param decoding; ADR-0007).
 
-Default `timeout_ms = 5000`. The tool returns immediately on submit-ack — it does not wait for DAG completion. A separate `mcp__aether-hub__dag_status(engine_id, dag_id)` polls; `mcp__aether-hub__dag_cancel(engine_id, dag_id)` cancels. Three tools, mirroring the three mail kinds.
+Default `timeout_ms = 5000`. The tool returns once validation completes (the submit-ack); it does not wait for DAG execution. A separate `mcp__aether-hub__dag_status(engine_id, dag_id)` polls; `mcp__aether-hub__dag_cancel(engine_id, dag_id)` cancels. Three tools, mirroring the three mail kinds.
 
 This is the surface ADR-0046 names when it says "Claude-in-harness can declare pipelines without writing a component." A content-gen recipe loaded by a harness session becomes a `DagDescriptor` the harness submits via this tool; the substrate validates, dispatches, and the harness polls for completion.
 
@@ -194,21 +197,21 @@ ADR-0045 Phase 4+ work (incremental recompute, distributed handle stores) lives 
 ### Positive
 
 - **Pipeline declaration becomes a first-class operation.** A caller stops writing chained `#[handler]`s for graph-shaped work and instead hands a descriptor to the substrate. ADR-0046's content-gen pipeline lands here as the headline customer; render DAGs and asset-pipeline workflows pick this up next.
-- **Validation up front.** A pipeline that's structurally bad fails on submit, not halfway through. Type errors, unknown sinks, missing recipients all surface synchronously with structured error variants.
+- **Validation up front.** A pipeline that's structurally bad fails on submit, not halfway through. Type errors, unknown mailboxes, missing recipients all surface synchronously with structured error variants.
 - **Claude-in-harness composition.** The MCP `submit_dag` tool gives the harness a way to compose multi-step jobs without authoring a component. ADR-0008's observation path + this tool cover declarative-side and observation-side parity.
 - **Wire foundation for Phase 3+.** The `Transform` variant is already in the descriptor; ADR-0048 lights up dispatch without changing wire format. Same property for ADR-0045's parked Phase 4+ work — node options, persistence hints, recomputation directives all add as optional fields.
-- **Cancellation is real.** Long-running DAGs (image generation, long fetches) can be aborted from the harness side; in-flight sinks complete server-side but the substrate stops paying attention.
+- **Cancellation is real.** Long-running DAGs (image generation, long fetches) can be aborted from the harness side; in-flight calls complete server-side but the substrate stops paying attention.
 
 ### Negative
 
 - **DAG state is one more substrate registry.** Adds `HashMap<DagId, DagState>` plus a reaping tick. Test scaffolding and lifecycle tracing grow commensurately.
-- **In-flight cancellation isn't real.** Sinks that have already dispatched complete on the remote side; cancel only stops the substrate from caring. A user who cancels because they noticed their fetch URL was wrong is still on the hook for the bandwidth. This is the same semantics as `wait_reply` and not novel — but it bears mention because DAG cancellation reads as "stop the work" and isn't.
+- **In-flight cancellation isn't real.** Mailbox calls that have already dispatched complete on the remote side; cancel only stops the substrate from caring. A user who cancels because they noticed their fetch URL was wrong is still on the hook for the bandwidth. This is the same semantics as `wait_reply` and not novel — but it bears mention because DAG cancellation reads as "stop the work" and isn't.
 - **Error variants are narrow at first.** Phase 2 `DagError` covers structural and dispatchability errors; runtime errors surface as `Failed` with a `String` message. Phase 3+ work likely wants a `Failed` reply with structured per-node error info, which means another wire revision (additive).
-- **Validator complexity is moderate.** Cycle detection, type-compatibility cross-checks, sink/recipient lookup, and component-manifest cross-validation are all simple individually; ordering them so error messages are useful (rather than "first failure wins, regardless of which is the real problem") takes care.
+- **Validator complexity is moderate.** Cycle detection, type-compatibility cross-checks, mailbox/recipient lookup, and component-manifest cross-validation are all simple individually; ordering them so error messages are useful (rather than "first failure wins, regardless of which is the real problem") takes care.
 
 ### Neutral
 
-- **Existing kinds dispatch unchanged.** A DAG source for `aether.io.read` builds a normal `Read` request and forwards it to the io sink; the sink doesn't know it came from a DAG. ADR-0041 / ADR-0043 / ADR-0039 / ADR-0025 sink contracts hold.
+- **Existing kinds dispatch unchanged.** A DAG source for `aether.fs.read` builds a normal `Read` request and forwards it to the `aether.fs` mailbox; the cap doesn't know it came from a DAG. The `aether.fs` (ADR-0041), `aether.http` / `aether.tcp` (ADR-0043), and `aether.audio` (ADR-0039) cap contracts hold.
 - **Actor-per-component scheduling unchanged.** ADR-0038 keeps its semantics — the DAG executor is a substrate-level orchestrator, not a scheduling layer; transform / observer dispatches funnel through the same per-component mpsc queues as any other mail.
 - **Hub mail bubbling unchanged.** ADR-0037 keeps its semantics — the hub doesn't host DAGs, it forwards mail to substrates.
 
@@ -216,11 +219,11 @@ ADR-0045 Phase 4+ work (incremental recompute, distributed handle stores) lives 
 
 - **Push-based status (server-streamed).** Rejected for v1: the harness already polls `engine_logs` and receive_mail on its own cadence; adding a push channel is design surface that doesn't pay off until DAGs are long-lived enough that polling becomes wasteful. Forward-compatible: a future ADR can add a `subscribe_dag_status` kind without changing the descriptor or other reply kinds.
 - **Compile transforms into the descriptor as wasm bytecode.** Rejected for the obvious reason: descriptors would explode in size and the substrate would need to instantiate ad-hoc components. Phase 3's `transform_id = (component_mailbox, transform_index)` keeps transforms tied to loaded components; the descriptor only references them.
-- **Inline observer kinds (carry the observer's kind value verbatim, no recipient).** Rejected: a DAG that "observes" by attaching a kind value to the executor and sending it nowhere is weird. The observer-as-mail-dispatch shape composes with the existing mailbox / handler infrastructure (ADR-0033). A DAG that needs to "fan out to all sessions" is doing observation, which ADR-0008 already handles via the broadcast sink.
+- **Inline observer kinds (carry the observer's kind value verbatim, no recipient).** Rejected: a DAG that "observes" by attaching a kind value to the executor and sending it nowhere is weird. The observer-as-mail-dispatch shape composes with the existing mailbox / handler infrastructure (ADR-0033). A DAG that needs to fan out to multiple recipients wires multiple observer nodes — one per recipient.
 - **Synchronous submit (block until DAG completes).** Rejected: long-running DAGs (image gen at 60s/image, fetch chains) would block the submitting actor. Async submit with `dag_id` + poll/wait separation matches the rest of the substrate's mail-shaped surface. A caller that *wants* synchronous semantics composes them on top: submit, then `wait_reply` for an observer-emitted "DAG complete" mail.
-- **DAG submit as a host-fn instead of a mail kind.** Rejected: ADR-0002 keeps the privileged FFI surface small. Mail-shaped submit gives Claude observability for free, plays nicely with capability gating (ADR-0044), and follows the same pattern as ADR-0041's io sink and ADR-0043's net sink.
+- **DAG submit as a host-fn instead of a mail kind.** Rejected: ADR-0002 keeps the privileged FFI surface small. Mail-shaped submit gives Claude observability for free, plays nicely with capability gating (ADR-0044), and follows the same pattern as ADR-0041's `aether.fs` cap and ADR-0043's `aether.http` / `aether.tcp` caps.
 - **Allow nested DAGs (a node's payload is itself a `DagDescriptor`).** Rejected for v1: composability via observers (DAG A's observer is a component method that submits DAG B) is sufficient and keeps the executor's invariants simple. Nesting can come back as a future ADR if recipe ergonomics demand it.
-- **Ship Phase 2 + Phase 3 as one ADR.** Tempting because both reference the same descriptor format. Rejected: transforms add a guest-side macro, custom section, and wasmtime integration — separate engineering surface deserving separate review. Phase 2 alone is shippable and useful (sources + observers cover the "declare a pipeline made of sink calls + dispatch the result somewhere" workflow).
+- **Ship Phase 2 + Phase 3 as one ADR.** Tempting because both reference the same descriptor format. Rejected: transforms add a guest-side macro, custom section, and wasmtime integration — separate engineering surface deserving separate review. Phase 2 alone is shippable and useful (sources + observers cover the "declare a pipeline made of mailbox calls + dispatch the result somewhere" workflow).
 
 ## Follow-up work
 
