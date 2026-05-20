@@ -16,20 +16,23 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{HandlePin, HandlePublish, HandleRelease, HandleUnpin};
+use aether_kinds::{HandleDescribe, HandlePin, HandlePublish, HandleRelease, HandleUnpin};
 
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
 
-    use super::{HandlePin, HandlePublish, HandleRelease, HandleUnpin};
+    use super::{HandleDescribe, HandlePin, HandlePublish, HandleRelease, HandleUnpin};
     use aether_actor::{MailCtx, actor};
     use aether_kinds::{
-        HandleError, HandlePinResult, HandlePublishResult, HandleReleaseResult, HandleUnpinResult,
+        HandleDescribeResult, HandleError, HandlePinResult, HandlePublishResult,
+        HandleReleaseResult, HandleSummary, HandleUnpinResult,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::handle_store::{HandleStore, PutError};
+    use aether_substrate::handle_store::{
+        HandleStore, HandleStoreSnapshot, HandleSummary as StoreSummary, PutError,
+    };
 
     /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`.
     pub struct HandleCapability {
@@ -129,6 +132,59 @@ mod native {
                     error: HandleError::UnknownHandle,
                 });
             }
+        }
+
+        /// Summarize the persistent handle store (ADR-0049 §10). `max`
+        /// caps the top-N lists; the handler clamps it to `[1, 256]`
+        /// (a 0 / absent request lands on the v1 default of 16).
+        ///
+        /// # Agent
+        /// Reply: `HandleDescribeResult`.
+        #[handler]
+        fn on_describe(&self, ctx: &mut NativeCtx<'_>, mail: HandleDescribe) {
+            let max = clamp_describe_max(mail.max);
+            let snap = self.store.inspect(max);
+            ctx.reply(&snapshot_to_result(&snap));
+        }
+    }
+
+    /// Default top-N when the request asks for 0 (ADR-0049 §10 follow-up
+    /// text); clamp ceiling.
+    const DESCRIBE_DEFAULT_MAX: u32 = 16;
+    const DESCRIBE_MAX_CAP: u32 = 256;
+
+    fn clamp_describe_max(requested: u32) -> usize {
+        let n = if requested == 0 {
+            DESCRIBE_DEFAULT_MAX
+        } else {
+            requested.min(DESCRIBE_MAX_CAP)
+        };
+        n as usize
+    }
+
+    fn summary_to_wire(s: &StoreSummary) -> HandleSummary {
+        HandleSummary {
+            handle_id: s.handle_id,
+            kind_id: s.kind_id,
+            bytes_len: s.bytes_len,
+            pinned: s.pinned,
+            refcount: s.refcount,
+            created_at_ms: s.created_at_ms,
+        }
+    }
+
+    fn snapshot_to_result(snap: &HandleStoreSnapshot) -> HandleDescribeResult {
+        let cast = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        HandleDescribeResult {
+            total_entries: cast(snap.total_entries),
+            in_memory_entries: cast(snap.in_memory_entries),
+            on_disk_entries: cast(snap.on_disk_entries),
+            pinned_entries: cast(snap.pinned_entries),
+            in_memory_bytes: snap.in_memory_bytes,
+            on_disk_bytes: snap.on_disk_bytes,
+            on_disk_budget_bytes: snap.on_disk_budget_bytes,
+            top_by_size: snap.top_by_size.iter().map(summary_to_wire).collect(),
+            top_by_recency: snap.top_by_recency.iter().map(summary_to_wire).collect(),
         }
     }
 
@@ -259,6 +315,73 @@ mod native {
                 .expect("test setup: stored handle should be retrievable");
             assert_eq!(stored_kind, KindId(0xCAFE));
             assert_eq!(stored_bytes, vec![1, 2, 3, 4, 5]);
+
+            drop(chassis);
+        }
+
+        /// `aether.handle.describe` flows through the cap and returns a
+        /// `HandleDescribeResult` whose counts match the store contents
+        /// (ADR-0049 §10).
+        #[test]
+        fn capability_describe_summarizes_store() {
+            use aether_kinds::{HandleDescribe, HandleDescribeResult};
+
+            let (store, mailer, registry, rx) = fresh_substrate();
+            // Pre-populate the store: 3 entries, 1 pinned.
+            store
+                .put(HandleId(1), KindId(0xA), vec![0u8; 100])
+                .expect("put 1");
+            store
+                .put(HandleId(2), KindId(0xB), vec![0u8; 200])
+                .expect("put 2");
+            store
+                .put(HandleId(3), KindId(0xC), vec![0u8; 50])
+                .expect("put 3");
+            store.pin(HandleId(2));
+
+            let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());
+
+            let id = registry
+                .lookup(HandleCapability::NAMESPACE)
+                .expect("mailbox registered");
+            let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry") else {
+                panic!("expected mailbox entry");
+            };
+
+            let req = HandleDescribe { max: 16 };
+            let bytes = postcard::to_allocvec(&req).expect("HandleDescribe serializes");
+            handler.enqueue(OwnedDispatch {
+                kind: <HandleDescribe as Kind>::ID,
+                kind_name: "aether.handle.describe".to_owned(),
+                origin: None,
+                sender: session_reply_to(),
+                payload: bytes,
+                count: 1,
+                mail_id: MailId::NONE,
+                root: MailId::NONE,
+                parent_mail: None,
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let frame = loop {
+                if let Ok(f) = rx.try_recv() {
+                    break f;
+                }
+                assert!(Instant::now() < deadline, "describe reply did not arrive");
+                thread::sleep(Duration::from_millis(5));
+            };
+            let payload = match frame {
+                EgressEvent::ToSession { payload, .. } => payload,
+                other => panic!("expected ToSession egress, got {other:?}"),
+            };
+            let result: HandleDescribeResult =
+                postcard::from_bytes(&payload).expect("HandleDescribeResult decodes");
+            assert_eq!(result.total_entries, 3);
+            assert_eq!(result.in_memory_entries, 3);
+            assert_eq!(result.pinned_entries, 1);
+            assert_eq!(result.in_memory_bytes, 350);
+            // top_by_size descending: the 200-byte entry leads.
+            assert_eq!(result.top_by_size.first().map(|s| s.bytes_len), Some(200));
 
             drop(chassis);
         }

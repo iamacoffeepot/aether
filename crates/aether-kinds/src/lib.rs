@@ -1823,6 +1823,46 @@ mod control_plane {
         },
     }
 
+    /// `aether.handle.describe` — ask the substrate's `HandleCapability`
+    /// for a summary of the persistent store (ADR-0049 §10). Reply:
+    /// `HandleDescribeResult`. `max` caps the top-N lists; the cap
+    /// clamps it to a sane ceiling.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.describe")]
+    pub struct HandleDescribe {
+        pub max: u32,
+    }
+
+    /// One handle's summary line in a `HandleDescribeResult`. Carries
+    /// the identity + size + durability fields the operator triages on.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct HandleSummary {
+        pub handle_id: aether_data::HandleId,
+        pub kind_id: aether_data::KindId,
+        pub bytes_len: u32,
+        pub pinned: bool,
+        pub refcount: u32,
+        pub created_at_ms: u64,
+    }
+
+    /// Reply to `HandleDescribe` — the store summary (ADR-0049 §10).
+    /// `top_by_size` is descending by `bytes_len`; `top_by_recency` is
+    /// descending by `created_at_ms`. Both are capped at the request's
+    /// (clamped) `max`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.describe_result")]
+    pub struct HandleDescribeResult {
+        pub total_entries: u32,
+        pub in_memory_entries: u32,
+        pub on_disk_entries: u32,
+        pub pinned_entries: u32,
+        pub in_memory_bytes: u64,
+        pub on_disk_bytes: u64,
+        pub on_disk_budget_bytes: u64,
+        pub top_by_size: Vec<HandleSummary>,
+        pub top_by_recency: Vec<HandleSummary>,
+    }
+
     // ADR-0081 per-actor log storage. Each actor owns an
     // `ActorLogRing` (in `aether-actor::log`); one wire kind pair
     // drives the query path:

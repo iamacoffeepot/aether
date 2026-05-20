@@ -188,6 +188,46 @@ pub struct ActorLogsResponse {
     pub truncated_before: Option<u64>,
 }
 
+/// `describe_handles` arguments (ADR-0049 §10). Summarizes a
+/// substrate's persistent handle store.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeHandlesArgs {
+    /// Engine UUID to summarize (from `list_engines`).
+    pub engine_id: String,
+    /// Cap on the `top_by_size` / `top_by_recency` lists. Defaults to
+    /// 16; clamped to 256.
+    #[serde(default)]
+    pub max: Option<u32>,
+}
+
+/// One handle's summary line as `describe_handles` renders it. `handle_id`
+/// and `kind_id` are tagged-id strings (ADR-0064).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HandleSummaryJson {
+    pub handle_id: String,
+    pub kind_id: String,
+    pub bytes_len: u32,
+    pub pinned: bool,
+    pub refcount: u32,
+    pub created_at_ms: u64,
+}
+
+/// `describe_handles` response — the persistent store summary
+/// (ADR-0049 §10).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DescribeHandlesResponse {
+    pub engine_id: String,
+    pub total_entries: u32,
+    pub in_memory_entries: u32,
+    pub on_disk_entries: u32,
+    pub pinned_entries: u32,
+    pub in_memory_bytes: u64,
+    pub on_disk_bytes: u64,
+    pub on_disk_budget_bytes: u64,
+    pub top_by_size: Vec<HandleSummaryJson>,
+    pub top_by_recency: Vec<HandleSummaryJson>,
+}
+
 /// `send_mail_traced` arguments — atomic batched dispatch with a shared
 /// trace root (issue iamacoffeepot/aether#749). Every spec lands on the
 /// same engine and inherits the same chassis root, so the response carries one

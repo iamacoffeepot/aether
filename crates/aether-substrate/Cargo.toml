@@ -32,6 +32,9 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
+# ADR-0049 on-disk handle store: resolve the default persistence root
+# (`dirs::data_dir()/aether/handles`). Same crate the fs cap uses.
+dirs = "6"
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 # ADR-0081 §4 crash dump: serialize the panicking actor's ring as
@@ -59,6 +62,13 @@ crossbeam-channel = "0.5"
 # `aether.kinds` section. Pin to the version wasmtime re-exports
 # transitively so we stay on a single compiled copy.
 wasmparser = "0.249"
+
+# ADR-0049 §7 lockfile liveness check: `kill(pid, 0)` to detect whether
+# a lock-holding PID is still alive. Unix-only; the lockfile path is
+# gated to `#[cfg(unix)]` (substrate on Windows is deferred per
+# ADR-0049 §7).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 wat = "1"

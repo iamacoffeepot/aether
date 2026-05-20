@@ -206,7 +206,10 @@ impl DesktopChassis {
             workers,
         } = env;
 
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        // ADR-0049 §9: desktop enables on-disk handle persistence.
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
+            .persist_enabled(true)
+            .build()?;
 
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
