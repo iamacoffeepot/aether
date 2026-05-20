@@ -28,6 +28,7 @@ use aether_data::canonical::canonical_kind_bytes;
 use aether_data::{Kind, Schema, SchemaType};
 use aether_kinds::{Bundle, DagDescriptor, DagError, Edge, Node, NodeId};
 
+use crate::dag::transform_registry::TransformRegistry;
 use crate::mail::{CapabilityRegistry, KindId, MailboxEntry, MailboxId, Registry};
 
 const TARGET: &str = "aether::dag::validator";
@@ -89,11 +90,12 @@ pub fn validate(
     descriptor: &DagDescriptor,
     mailboxes: &Registry,
     caps: &CapabilityRegistry,
+    transforms: Option<&TransformRegistry>,
 ) -> Result<ValidatedDag, DagError> {
     check_version(descriptor)?;
     let structure = check_structure(descriptor)?;
-    check_dispatchability(descriptor, mailboxes, caps)?;
-    check_edge_types(descriptor, mailboxes)?;
+    check_dispatchability(descriptor, mailboxes, caps, transforms)?;
+    check_edge_types(descriptor, mailboxes, transforms)?;
     Ok(ValidatedDag {
         descriptor: descriptor.clone(),
         topo_order: structure.topo_order,
@@ -265,16 +267,20 @@ fn toposort(node_ids: &BTreeSet<NodeId>, edges: &[Edge]) -> Result<Vec<NodeId>, 
     Ok(order)
 }
 
-/// Phase 2 — dispatchability (ADR-0047 §3). Each effectful node's target
-/// mailbox must exist (routing `Registry`) and accept the node's kind
-/// (`CapabilityRegistry`). `Transform` nodes always fail here in this
-/// issue's scope — no native transform is registered yet, so a
-/// `Transform` is wire-reserved but dispatch-disabled
-/// (iamacoffeepot/aether#976 lights it up).
+/// Phase 2 — dispatchability (ADR-0047 §3, ADR-0048 §2). Each effectful
+/// node's target mailbox must exist (routing `Registry`) and accept the
+/// node's kind (`CapabilityRegistry`). A `Transform` node's
+/// `transform_id` must resolve in the native-transform registry
+/// (`UnknownTransform` otherwise), and its declared `output_kind_id`
+/// must equal the registered transform's manifest output kind
+/// (`TransformOutputMismatch` otherwise). A `None` transform registry
+/// (a chassis that doesn't host the executor, or a validator test)
+/// treats every `Transform` as `UnknownTransform`.
 fn check_dispatchability(
     descriptor: &DagDescriptor,
     mailboxes: &Registry,
     caps: &CapabilityRegistry,
+    transforms: Option<&TransformRegistry>,
 ) -> Result<(), DagError> {
     for node in &descriptor.nodes {
         match node {
@@ -337,32 +343,56 @@ fn check_dispatchability(
                 }
             }
             Node::Transform {
-                id, transform_id, ..
+                id,
+                transform_id,
+                output_kind_id,
+                ..
             } => {
-                // No native-transform catalog exists yet
-                // (iamacoffeepot/aether#976) — a Transform node is
-                // wire-reserved but dispatch-disabled, so every one
-                // fails Phase 2 here. This is the intended surface.
-                return Err(DagError::UnknownTransform {
-                    node: *id,
-                    transform_id: *transform_id,
-                });
+                // Resolve the transform against the native-transform
+                // registry. Unknown id (or no registry on this chassis)
+                // -> UnknownTransform; output-kind disagreement ->
+                // TransformOutputMismatch (ADR-0048 §2).
+                let Some(entry) = transforms.and_then(|r| r.lookup(*transform_id)) else {
+                    return Err(DagError::UnknownTransform {
+                        node: *id,
+                        transform_id: *transform_id,
+                    });
+                };
+                if entry.output_kind_id != *output_kind_id {
+                    return Err(DagError::TransformOutputMismatch {
+                        node: *id,
+                        declared: *output_kind_id,
+                        manifest: entry.output_kind_id,
+                    });
+                }
             }
         }
     }
     Ok(())
 }
 
-/// Phase 3 — type compatibility on edges (ADR-0047 §3, re-scoped). Only
-/// statically-declared output kinds are checkable. The single such kind
-/// in this issue's scope is a `Call`'s output, which is always the
-/// `Bundle` meta-type: an edge out of a `Call` requires the consumer at
-/// `to` to declare a `Bundle` input at the matching `slot`. Edges out of
-/// a `Source` are skipped — a source's output kind depends on what the
-/// cap replies, which a handler never declares. (When transforms land,
-/// a `Transform`-output arm joins here, checking the consumer's slot
-/// against `Transform.output_kind_id`.)
-fn check_edge_types(descriptor: &DagDescriptor, mailboxes: &Registry) -> Result<(), DagError> {
+/// Phase 3 — type compatibility on edges (ADR-0047 §3, ADR-0048 §2,
+/// re-scoped). Only statically-declared output kinds are checkable.
+/// Two producers carry one:
+///
+/// - a `Call`'s output is always the `Bundle` meta-type — an edge out of
+///   a `Call` requires the consumer at `to` to declare a `Bundle` input
+///   at the matching `slot`;
+/// - a `Transform`'s output is its registered manifest `output_kind_id`
+///   — an edge out of a `Transform` requires the consumer's slot to
+///   declare that exact kind.
+///
+/// Edges out of a `Source` are skipped — a source's output kind depends
+/// on what the cap replies, which a handler never declares. A
+/// `Transform` consumer has no registered input schema (its inputs are
+/// raw byte slices keyed by slot), so nothing checks an edge *into* a
+/// `Transform` here; the transform's declared input arity is the
+/// registry's business at dispatch, not the edge type-check's.
+fn check_edge_types(
+    descriptor: &DagDescriptor,
+    mailboxes: &Registry,
+    transforms: Option<&TransformRegistry>,
+) -> Result<(), DagError> {
     // Node lookup by id for resolving each edge's producer / consumer.
     let by_id: HashMap<NodeId, &Node> = descriptor.nodes.iter().map(|n| (n.id(), n)).collect();
 
@@ -374,39 +404,59 @@ fn check_edge_types(descriptor: &DagDescriptor, mailboxes: &Registry) -> Result<
             continue;
         };
 
-        // Only a `Call` has a statically-knowable output kind in this
-        // issue's scope (the `Bundle` meta-type). Everything else —
-        // sources especially — is not type-checked.
-        if !matches!(producer, Node::Call { .. }) {
+        // The statically-knowable output of this producer as
+        // `(expected_kind_id, expected_schema)`, or `None` for an
+        // un-checkable producer (a `Source`, whose output is whatever
+        // the cap replies). A `Call` produces a `Bundle`; a `Transform`
+        // produces its registered manifest output kind.
+        let expected = match producer {
+            Node::Call { .. } => Some((Bundle::ID, Bundle::SCHEMA)),
+            Node::Transform {
+                transform_id,
+                output_kind_id,
+                ..
+            } => {
+                let kind = transforms
+                    .and_then(|r| r.lookup(*transform_id))
+                    .map_or(*output_kind_id, |entry| entry.output_kind_id);
+                // The transform's output schema, for the canonical
+                // comparison. `None` when the output kind isn't
+                // registered — fall back to an id-only check below.
+                mailboxes.kind_descriptor(kind).map(|d| (kind, d.schema))
+            }
+            Node::Source { .. } | Node::Observer { .. } => None,
+        };
+        let Some((expected_kind, expected_schema)) = expected else {
             continue;
-        }
+        };
 
         let Some(consumer) = by_id.get(&edge.to) else {
             continue;
         };
         let consumer_kind = match consumer {
             Node::Observer { kind_id, .. } | Node::Call { kind_id, .. } => *kind_id,
-            // A `Call` cannot feed a `Source` (sources have no incoming
+            // A producer cannot feed a `Source` (sources have no incoming
             // edges, enforced in Phase 1) and `Transform` consumers have
-            // no registered input schema yet, so nothing else is
-            // checkable here.
+            // no registered input schema, so nothing else is checkable
+            // here.
             Node::Source { .. } | Node::Transform { .. } => continue,
         };
 
         // The consumer's slot maps to a `Ref<K>` field of its
         // assembled-request schema. Resolve `K`'s schema; the edge is
-        // type-valid iff that `K` is a `Bundle`.
+        // type-valid iff that `K` canonically matches the producer's
+        // output schema.
         let slot_schema = consumer_slot_kind(mailboxes, consumer_kind, edge.slot);
-        let accepts_bundle = slot_schema.as_ref().is_some_and(|s| {
-            canonical_kind_bytes("", s) == canonical_kind_bytes("", &Bundle::SCHEMA)
+        let matches = slot_schema.as_ref().is_some_and(|s| {
+            canonical_kind_bytes("", s) == canonical_kind_bytes("", &expected_schema)
         });
-        if !accepts_bundle {
+        if !matches {
             let got_kind = slot_schema
                 .as_ref()
                 .map_or(KindId(0), |s| declared_kind_id(mailboxes, s));
             return Err(DagError::EdgeTypeMismatch {
                 edge_index: u32::try_from(edge_index).unwrap_or(u32::MAX),
-                expected_kind: Bundle::ID,
+                expected_kind,
                 got_kind,
             });
         }

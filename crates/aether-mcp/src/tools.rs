@@ -46,7 +46,7 @@ use crate::args::{
     DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo, HandleSummaryJson, LoadComponentArgs,
     MailIdJson, MailNodeJson, MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs,
     SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
-    TerminateSubstrateArgs, TracedMailSpec,
+    TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::rpc::RpcSession;
 use aether_kinds::descriptors;
@@ -417,6 +417,21 @@ impl Mcp {
     )]
     pub async fn describe_kinds(&self) -> Result<String, McpError> {
         json(&descriptors::all())
+    }
+
+    #[tool(
+        description = "List the native transforms collected at link time (ADR-0048): every #[transform] fn with its global transform_id, fully-qualified name, declared input kind ids (slot order), and output kind id. These are pure Kind -> Kind functions a DAG Transform node dispatches; this is the static inventory aether-mcp ships with (a transform set is a build-time property). Empty when no first-party transforms are linked."
+    )]
+    pub async fn describe_transforms(&self) -> Result<String, McpError> {
+        let listing: Vec<TransformListing> = aether_data::transforms()
+            .map(|t| TransformListing {
+                transform_id: t.transform_id.to_string(),
+                name: t.name,
+                input_kind_ids: t.input_kind_ids.iter().map(ToString::to_string).collect(),
+                output_kind_id: t.output_kind_id.to_string(),
+            })
+            .collect();
+        json(&listing)
     }
 
     #[tool(

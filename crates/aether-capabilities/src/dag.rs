@@ -32,7 +32,7 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{Cancel, DagReapTick, Status, Submit, trace::Settled};
+use aether_kinds::{Cancel, DagReapTick, DagTransformDone, Status, Submit, trace::Settled};
 
 #[aether_actor::bridge(singleton)]
 mod native {
@@ -41,7 +41,7 @@ mod native {
     use std::thread;
     use std::time::Duration;
 
-    use super::{Cancel, DagReapTick, Settled, Status, Submit};
+    use super::{Cancel, DagReapTick, DagTransformDone, Settled, Status, Submit};
     use aether_actor::{MailCtx, actor};
     use aether_data::{Kind, KindId, MailId, MailboxId};
     use aether_kinds::{StatusResult, SubmitResult};
@@ -115,6 +115,8 @@ mod native {
 
         fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
             self.reap_shutdown.store(true, Ordering::Release);
+            // Join the transform compute-pool workers (ADR-0048 §3).
+            self.executor.shutdown();
         }
 
         /// Submit a computation DAG for validation + execution. Validation
@@ -188,6 +190,19 @@ mod native {
         #[handler]
         fn on_reap_tick(&mut self, _ctx: &mut NativeCtx<'_>, _mail: DagReapTick) {
             let _ = self.executor.reap();
+        }
+
+        /// Off-thread native-transform completion wake (ADR-0048 §3).
+        /// The compute pool fires this after a transform `fn` returns (or
+        /// panics); forward it to the executor, which pulls the stashed
+        /// outcome and resolves / fails the node on this actor's own
+        /// thread. Fires from the pool, not from external mail.
+        ///
+        /// # Agent
+        /// Internal — not part of the cap's external surface.
+        #[handler]
+        fn on_transform_done(&mut self, ctx: &mut NativeCtx<'_>, mail: DagTransformDone) {
+            self.executor.on_transform_complete(ctx, mail.job_id);
         }
 
         /// Catch-all reply interception. A source / `Call` reply lands

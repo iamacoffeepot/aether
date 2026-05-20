@@ -18,6 +18,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -41,9 +42,11 @@ use aether_substrate::mail::{ReplyTarget, ReplyTo};
 
 use super::DagCapability;
 use super::test_support::{
-    Recorder, TestBundleObserverActor, TestCallActor, TestCallConfig, TestCallReply,
-    TestDeferredCallActor, TestObserved, TestObserved2, TestObserverActor,
-    TestParallelObserverActor, TestReadResult, TestSourceActor,
+    Recorder, SLOW_TRANSFORM_GATE, TestBundleObserverActor, TestCallActor, TestCallConfig,
+    TestCallReply, TestDeferredCallActor, TestNumber, TestNumberObserved, TestNumberObserverActor,
+    TestNumberRequest, TestNumberSourceActor, TestObserved, TestObserved2, TestObserverActor,
+    TestParallelObserverActor, TestReadResult, TestSourceActor, big_output_transform_id,
+    boom_transform_id, double_transform_id, seed_transform_id, slow_transform_id,
 };
 use crate::test_chassis::TestChassis;
 use crate::trace::TraceObserverCapability;
@@ -841,4 +844,376 @@ fn run_call_dag_to(
         aether_data::Ref::Inline(bundle) => bundle,
         aether_data::Ref::Handle { .. } => panic!("bundle slot should be resolved inline"),
     }
+}
+
+/// Base builder plus the number source + number observer the transform
+/// fixtures wire (ADR-0048 §3, iamacoffeepot/aether#1012). The
+/// `DagCapability` builds its `TransformRegistry` from the link-time
+/// inventory at boot, so the `double` / `boom` / `slow` / `big_output` /
+/// `seed` transforms from `test_support` are dispatchable.
+fn transform_builder(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    recorder: &Recorder<TestNumberObserved>,
+) -> PassiveChassis<TestChassis> {
+    base_builder(registry, mailer)
+        .with_actor::<TestNumberSourceActor>(())
+        .with_actor::<TestNumberObserverActor>(Arc::clone(recorder))
+        .build_passive()
+        .expect("caps boot")
+}
+
+/// A `TestNumberRequest` payload (cast-shape bytes).
+fn number_req(value: u64) -> Vec<u8> {
+    <TestNumberRequest as Kind>::encode_into_bytes(&TestNumberRequest { value })
+}
+
+/// number-source → transform(`tx`, output `TestNumber`) → number-observer.
+fn number_transform_dag(tx: aether_data::TransformId, value: u64) -> DagDescriptor {
+    DagDescriptor {
+        version: 1,
+        nodes: vec![
+            Node::Source {
+                id: NodeId(0),
+                mailbox: mbx::<TestNumberSourceActor>(),
+                kind_id: <TestNumberRequest as Kind>::ID,
+                payload: number_req(value),
+            },
+            Node::Transform {
+                id: NodeId(1),
+                transform_id: tx,
+                output_kind_id: <TestNumber as Kind>::ID,
+                timeout_ms: None,
+            },
+            Node::Observer {
+                id: NodeId(2),
+                recipient: mbx::<TestNumberObserverActor>(),
+                kind_id: <TestNumberObserved as Kind>::ID,
+            },
+        ],
+        edges: vec![
+            Edge {
+                from: NodeId(0),
+                to: NodeId(1),
+                slot: 0,
+            },
+            Edge {
+                from: NodeId(1),
+                to: NodeId(2),
+                slot: 0,
+            },
+        ],
+    }
+}
+
+/// source → `double` transform → observer. The observer receives the
+/// doubled value resolved inline; the DAG reaches `Complete` (ADR-0048
+/// §3 invocation path).
+#[test]
+fn transform_invoke_resolves_handle() {
+    let (registry, mailer, rx) = fresh_substrate_with_rx();
+    let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
+    let chassis = transform_builder(&registry, &mailer, &recorder);
+
+    let dag_id = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(double_transform_id(), 21),
+        1,
+    );
+
+    assert!(
+        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
+            == 1),
+        "observer never received the transform output",
+    );
+    let observed = recorder.lock().unwrap()[0].clone();
+    assert_eq!(
+        observed.input,
+        aether_data::Ref::Inline(TestNumber { value: 42, tag: 0 }),
+        "double(21) should resolve to 42",
+    );
+    assert!(poll_until(Duration::from_secs(5), || matches!(
+        query_status(&registry, &rx, dag_id, 100),
+        StatusResult::Complete { .. }
+    )));
+
+    drop(chassis);
+}
+
+/// A panicking transform maps to `Failed` with the panic message in the
+/// diagnostic; the executor + sibling branches survive (ADR-0048 §6).
+#[test]
+fn transform_panic_fails_node() {
+    let (registry, mailer, rx) = fresh_substrate_with_rx();
+    let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
+    let chassis = transform_builder(&registry, &mailer, &recorder);
+
+    let dag_id = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(boom_transform_id(), 1),
+        1,
+    );
+
+    let failed = poll_until(Duration::from_secs(5), || {
+        matches!(
+            query_status(&registry, &rx, dag_id, 100),
+            StatusResult::Failed { ref error, .. } if error.contains("panicked")
+        )
+    });
+    assert!(failed, "panicking transform should fail the node");
+    assert_eq!(
+        recorder.lock().unwrap().len(),
+        0,
+        "downstream observer must not run on a failed transform",
+    );
+
+    // The executor survives: a fresh DAG still resolves.
+    let recorder2: Recorder<TestNumberObserved> = recorder;
+    let dag2 = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(double_transform_id(), 5),
+        2,
+    );
+    assert!(poll_until(Duration::from_secs(5), || matches!(
+        query_status(&registry, &rx, dag2, 101),
+        StatusResult::Complete { .. }
+    )));
+    assert_eq!(recorder2.lock().unwrap().len(), 1);
+
+    drop(chassis);
+}
+
+/// A transform exceeding its `timeout_ms` marks the node `Failed
+/// { error: "timeout: ..." }`; the thread orphans (the executor
+/// continues). The fixture releases the gate afterward so the pool
+/// joins cleanly (ADR-0048 §6).
+#[test]
+fn transform_timeout_fails_node() {
+    SLOW_TRANSFORM_GATE.store(false, Ordering::Release);
+    // SAFETY: nextest runs each test in its own process.
+    unsafe {
+        env::set_var("AETHER_TRANSFORM_TIMEOUT_MS", "50");
+    }
+    let (registry, mailer, rx) = fresh_substrate_with_rx();
+    let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
+    let chassis = transform_builder(&registry, &mailer, &recorder);
+
+    let dag_id = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(slow_transform_id(), 1),
+        1,
+    );
+
+    thread::sleep(Duration::from_millis(80));
+    let failed = poll_until(Duration::from_secs(5), || {
+        enqueue(&registry, dag_mailbox(), &DagReapTick {}, session(300));
+        thread::sleep(Duration::from_millis(20));
+        matches!(
+            query_status(&registry, &rx, dag_id, 301),
+            StatusResult::Failed { ref error, .. } if error.contains("timeout")
+        )
+    });
+    assert!(failed, "slow transform should fail on timeout");
+
+    // Release the spinning worker so the pool can join on drop.
+    SLOW_TRANSFORM_GATE.store(true, Ordering::Release);
+    // SAFETY: nextest process isolation.
+    unsafe {
+        env::remove_var("AETHER_TRANSFORM_TIMEOUT_MS");
+    }
+    drop(chassis);
+}
+
+/// A transform whose encoded output exceeds
+/// `AETHER_TRANSFORM_MAX_OUTPUT_BYTES` hard-fails the node (ADR-0048
+/// §6).
+#[test]
+fn transform_output_overflow_fails_node() {
+    // SAFETY: nextest process isolation.
+    unsafe {
+        env::set_var("AETHER_TRANSFORM_MAX_OUTPUT_BYTES", "8");
+    }
+    let (registry, mailer, rx) = fresh_substrate_with_rx();
+    let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
+    let chassis = transform_builder(&registry, &mailer, &recorder);
+
+    // `big_output` produces `value` zero bytes; 64 > the 8-byte cap.
+    let descriptor = DagDescriptor {
+        version: 1,
+        nodes: vec![
+            Node::Source {
+                id: NodeId(0),
+                mailbox: mbx::<TestNumberSourceActor>(),
+                kind_id: <TestNumberRequest as Kind>::ID,
+                payload: number_req(64),
+            },
+            Node::Transform {
+                id: NodeId(1),
+                transform_id: big_output_transform_id(),
+                output_kind_id: <super::test_support::TestBytes as Kind>::ID,
+                timeout_ms: None,
+            },
+        ],
+        edges: vec![Edge {
+            from: NodeId(0),
+            to: NodeId(1),
+            slot: 0,
+        }],
+    };
+    let dag_id = submit_ok(&registry, &rx, descriptor, 1);
+
+    let failed = poll_until(Duration::from_secs(5), || {
+        matches!(
+            query_status(&registry, &rx, dag_id, 100),
+            StatusResult::Failed { ref error, .. } if error.contains("exceeded")
+        )
+    });
+    assert!(failed, "oversized transform output should fail the node");
+
+    // SAFETY: nextest process isolation.
+    unsafe {
+        env::remove_var("AETHER_TRANSFORM_MAX_OUTPUT_BYTES");
+    }
+    drop(chassis);
+}
+
+/// A second DAG with the same `transform_id` + input handle ids (here a
+/// zero-input `seed`, whose content-address `f(transform_id, [])` is
+/// identical across DAGs) skips the invoke entirely — the cache hit
+/// resolves the node. The pool's invoke count reports 1, not 2
+/// (ADR-0048 §4, iamacoffeepot/aether#982).
+#[test]
+fn transform_skips_invoke_on_cache_hit() {
+    super::test_support::SEED_INVOKE_COUNT.store(0, Ordering::Release);
+    let (registry, mailer, rx) = fresh_substrate_with_rx();
+    let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
+
+    // A zero-input transform feeding a number observer.
+    let seed_dag = || DagDescriptor {
+        version: 1,
+        nodes: vec![
+            Node::Transform {
+                id: NodeId(0),
+                transform_id: seed_transform_id(),
+                output_kind_id: <TestNumber as Kind>::ID,
+                timeout_ms: None,
+            },
+            Node::Observer {
+                id: NodeId(1),
+                recipient: mbx::<TestNumberObserverActor>(),
+                kind_id: <TestNumberObserved as Kind>::ID,
+            },
+        ],
+        edges: vec![Edge {
+            from: NodeId(0),
+            to: NodeId(1),
+            slot: 0,
+        }],
+    };
+
+    let chassis = transform_builder(&registry, &mailer, &recorder);
+
+    let dag1 = submit_ok(&registry, &rx, seed_dag(), 1);
+    assert!(poll_until(Duration::from_secs(5), || matches!(
+        query_status(&registry, &rx, dag1, 100),
+        StatusResult::Complete { .. }
+    )));
+    assert_eq!(
+        recorder.lock().unwrap().len(),
+        1,
+        "first seed DAG observer should run",
+    );
+
+    // Second DAG: same transform, same (empty) inputs -> same
+    // content-address -> cache hit -> no second invoke.
+    recorder.lock().unwrap().clear();
+    let dag2 = submit_ok(&registry, &rx, seed_dag(), 2);
+    assert!(poll_until(Duration::from_secs(5), || matches!(
+        query_status(&registry, &rx, dag2, 101),
+        StatusResult::Complete { .. }
+    )));
+    assert_eq!(
+        recorder.lock().unwrap().len(),
+        1,
+        "second seed DAG observer should still resolve from cache",
+    );
+    assert_eq!(
+        recorder.lock().unwrap()[0].input,
+        aether_data::Ref::Inline(TestNumber { value: 7, tag: 0 }),
+    );
+
+    let invoke_count = super::test_support::SEED_INVOKE_COUNT.load(Ordering::Acquire);
+    assert_eq!(
+        invoke_count, 1,
+        "second identical transform must hit the cache, not re-invoke",
+    );
+
+    drop(chassis);
+}
+
+/// A transform that blocks briefly does not stall the executor's
+/// parking / reaping of other DAG branches: a sibling DAG's pure
+/// `double` resolves while the `slow` transform spins (ADR-0048 §3 off
+/// the executor thread).
+#[test]
+fn transform_runs_off_executor_thread() {
+    SLOW_TRANSFORM_GATE.store(false, Ordering::Release);
+    let (registry, mailer, rx) = fresh_substrate_with_rx();
+    let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
+    let chassis = transform_builder(&registry, &mailer, &recorder);
+
+    // DAG 1: a long-blocking `slow` transform (terminal, no observer).
+    let slow_descriptor = DagDescriptor {
+        version: 1,
+        nodes: vec![
+            Node::Source {
+                id: NodeId(0),
+                mailbox: mbx::<TestNumberSourceActor>(),
+                kind_id: <TestNumberRequest as Kind>::ID,
+                payload: number_req(99),
+            },
+            Node::Transform {
+                id: NodeId(1),
+                transform_id: slow_transform_id(),
+                output_kind_id: <TestNumber as Kind>::ID,
+                timeout_ms: Some(60_000),
+            },
+        ],
+        edges: vec![Edge {
+            from: NodeId(0),
+            to: NodeId(1),
+            slot: 0,
+        }],
+    };
+    let _slow_dag = submit_ok(&registry, &rx, slow_descriptor, 1);
+
+    // DAG 2: a pure `double` that must resolve while DAG 1 is blocked.
+    let dag2 = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(double_transform_id(), 4),
+        2,
+    );
+    let completed = poll_until(Duration::from_secs(5), || {
+        matches!(
+            query_status(&registry, &rx, dag2, 101),
+            StatusResult::Complete { .. }
+        )
+    });
+    assert!(
+        completed,
+        "the executor must advance a sibling DAG while a transform blocks off-thread",
+    );
+    assert_eq!(
+        recorder.lock().unwrap()[0].input,
+        aether_data::Ref::Inline(TestNumber { value: 8, tag: 0 }),
+    );
+
+    // Release the spinning worker so the pool joins cleanly.
+    SLOW_TRANSFORM_GATE.store(true, Ordering::Release);
+    drop(chassis);
 }

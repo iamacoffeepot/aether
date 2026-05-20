@@ -114,21 +114,24 @@ impl DagState {
             topo_order,
         } = validated;
 
-        // Per-`Call` input-edge counts gate dispatch (ADR-0047 §4). Seed
-        // every `Call` at 0 so a no-input call dispatches immediately,
-        // then bump one per incoming edge.
+        // Per-`Call` + per-`Transform` input-edge counts gate dispatch
+        // (ADR-0047 §4, ADR-0048 §3). Both are mid-graph nodes that fire
+        // once every input handle resolves; observers gate through the
+        // parking table instead. Seed every counter-gated node at 0 so a
+        // no-input one dispatches immediately, then bump one per incoming
+        // edge.
         let mut pending_inputs: HashMap<NodeId, u32> = HashMap::new();
-        let call_ids: HashSet<NodeId> = descriptor
+        let counter_gated: HashSet<NodeId> = descriptor
             .nodes
             .iter()
-            .filter(|n| matches!(n, Node::Call { .. }))
+            .filter(|n| matches!(n, Node::Call { .. } | Node::Transform { .. }))
             .map(Node::id)
             .collect();
-        for id in &call_ids {
+        for id in &counter_gated {
             pending_inputs.insert(*id, 0);
         }
         for edge in &descriptor.edges {
-            if call_ids.contains(&edge.to) {
+            if counter_gated.contains(&edge.to) {
                 *pending_inputs.entry(edge.to).or_insert(0) += 1;
             }
         }

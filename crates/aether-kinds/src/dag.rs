@@ -64,12 +64,22 @@ pub enum Node {
     },
     /// Mid-graph pure transform (ADR-0048 native-transform shape).
     /// Identity is the global `transform_id`; `output_kind_id`
-    /// declares what the node produces. Dispatch lights up in Phase 3
-    /// (iamacoffeepot/aether#976) — Phase 2 reserves the wire shape.
+    /// declares what the node produces. Dispatch is the native
+    /// invocation path (iamacoffeepot/aether#1012): the executor runs
+    /// the registered `fn` off-thread on a compute pool, caches the
+    /// content-addressed output, and resolves the node's handle.
     Transform {
         id: NodeId,
         transform_id: TransformId,
         output_kind_id: KindId,
+        /// Per-call wall-clock deadline, in milliseconds (ADR-0048 §3,
+        /// §6). `None` uses the executor's default
+        /// (`AETHER_TRANSFORM_TIMEOUT_MS`). A native thread can't be
+        /// safely preempted, so on deadline the executor fails the node
+        /// and orphans the runaway thread — best-effort, acceptable only
+        /// because transforms are first-party reviewed code. Wire-additive
+        /// (appended field, `Option` so existing descriptors decode).
+        timeout_ms: Option<u64>,
     },
     /// Mid-graph effectful cap dispatch (ADR-0047 rev 2026-05-20). Its
     /// request is assembled from incoming edges (the observer-side
@@ -366,3 +376,33 @@ pub enum DagError {
 )]
 #[kind(name = "aether.dag.reap_tick")]
 pub struct DagReapTick {}
+
+/// `aether.dag.transform_done` — internal wake mail signalling that an
+/// off-thread native-transform invocation finished (ADR-0048 §3). The
+/// executor's transform compute pool fires this (carrying the `job_id`
+/// of the completed invocation) at the `aether.dag` mailbox so the
+/// executor pulls the stashed result and resolves / fails the node on
+/// its own single-threaded actor thread (the `DagState` map is
+/// lock-free actor state — the pool thread can't touch it directly).
+/// Mirrors the `DagReapTick` / `aether.tcp` sidecar-wake pattern: the
+/// mail is only the signal; the result lives in a shared completion
+/// map keyed by `job_id`.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.dag.transform_done")]
+pub struct DagTransformDone {
+    /// Identifies the completed invocation in the executor's in-flight
+    /// transform table + the pool's completion map.
+    pub job_id: u64,
+}

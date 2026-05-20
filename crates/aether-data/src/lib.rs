@@ -51,10 +51,11 @@ pub mod mail;
 pub mod schema;
 pub mod tag_bits;
 pub mod tagged_id;
+pub mod transform;
 pub mod wire_id;
 pub use hash::{
-    KIND_DOMAIN, MAILBOX_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed,
-    mailbox_id_from_name,
+    HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN,
+    content_addressed_handle_id, fnv1a_64_bytes, fnv1a_64_prefixed, mailbox_id_from_name,
 };
 pub use ids::{
     DagId, HandleId, KindId, MailboxId, TransformId, tag_for_type_id, type_name_for_type_id,
@@ -62,6 +63,9 @@ pub use ids::{
 pub use mail::{MailId, ReplyTarget, ReplyTo};
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
+pub use transform::{InvokeFn, TransformError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use transform::{TransformEntry, transforms};
 pub use wire_id::{EngineId, SessionToken, Uuid};
 
 /// Re-exported derive macros from `aether-actor-derive`. Behind the
@@ -79,6 +83,16 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 pub use aether_actor_derive::{
     Instanced, Kind, Schema, Singleton, actor, bridge, capability, fallback, handler, local,
 };
+
+/// Re-exported `#[transform]` attribute macro from `aether-data-derive`
+/// (ADR-0048 §1). A transform is a pure `Kind -> Kind` data-layer
+/// primitive — no actor dependence — so its macro re-exports from the
+/// data layer as `aether_data::transform`, not from the actor SDK. Lives
+/// in the sibling `aether-data-derive` crate because `aether-data` is
+/// `no_std` + `alloc` and cannot itself be `proc-macro = true`. Behind
+/// the `derive` feature like the other macros.
+#[cfg(feature = "derive")]
+pub use aether_data_derive::transform;
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from

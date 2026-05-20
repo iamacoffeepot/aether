@@ -6,7 +6,7 @@
 //! `MailboxId`-into-`KindId` slot (or vice versa) hashes to a
 //! different value rather than colliding silently.
 
-use crate::ids::MailboxId;
+use crate::ids::{HandleId, MailboxId, TransformId};
 use crate::tagged_id::{Tag, with_tag};
 
 /// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
@@ -28,6 +28,70 @@ pub const KIND_DOMAIN: &[u8] = b"kind:";
 /// `"type:aether.mailbox_id"`). Disjoint from mailbox / kind domains
 /// so a typed-id `TYPE_ID` cannot alias either space.
 pub const TYPE_DOMAIN: &[u8] = b"type:";
+
+/// ADR-0048 §1: 16-byte domain prefix for native-transform id hashes.
+/// Hashed input is `TRANSFORM_DOMAIN ++ "{crate}::{module}::{fn}"`. A
+/// transform's identity is name-based (not position-based), so
+/// inserting / reordering transforms in a file leaves every id stable;
+/// renaming or moving a transform fn changes its id. Disjoint from the
+/// mailbox / kind / handle domains so a `TransformId` can't alias any
+/// of those spaces. The `#[transform]` macro prepends this before the
+/// canonical name bytes.
+pub const TRANSFORM_DOMAIN: [u8; 16] = *b"aether/xform/v1\0";
+
+/// ADR-0048 §4: 16-byte domain prefix for content-addressed handle-id
+/// derivation. Disjoint from `KIND_DOMAIN`, `MAILBOX_DOMAIN`,
+/// `TRANSFORM_DOMAIN`, and `TYPE_DOMAIN` so a 64-bit collision within
+/// the handle space can't cross-pollinate the other registries.
+pub const HANDLE_DOMAIN: [u8; 16] = *b"aether/handle/v1";
+
+/// ADR-0048 §4: derive the content-addressed [`HandleId`] for a native
+/// transform applied to a set of input handles.
+///
+/// `inputs` are the input handle ids in **slot-index order** (the
+/// caller resolves `Edge.slot` ascending to build the list). The id
+/// keys on the global `transform_id` — a native transform is global to
+/// the substrate build, not owned by a component instance — so
+/// identical compute dedups engine-wide and across restarts.
+///
+/// Derivation (ADR-0048 §4):
+///
+/// ```text
+/// HANDLE_DOMAIN
+///   ++ transform_id.0.to_le_bytes()
+///   ++ [inputs.len() as u8]
+///   ++ for (slot, handle) in inputs: [slot as u8] ++ handle.0.to_le_bytes()
+/// ```
+///
+/// The explicit `slot` byte before each input handle id protects the
+/// `compose(a, b)` vs `compose(b, a)` case — swapping the two slots
+/// changes the hash, so semantically different transforms get different
+/// cache entries. The `inputs.len()` byte distinguishes `foo(a)` from
+/// `foo(a, a)`. The result carries `Tag::Handle` bits so it lives in the
+/// same id space as ephemeral handles (the executor's cache check keys
+/// on the full tagged id).
+///
+/// `inputs.len()` is truncated to a `u8`; the ADR-0048 §1 input cap is
+/// 8, so a transform never reaches the 256-input wraparound.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn content_addressed_handle_id(transform_id: TransformId, inputs: &[HandleId]) -> HandleId {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    feed(&HANDLE_DOMAIN);
+    feed(&transform_id.0.to_le_bytes());
+    feed(&[inputs.len() as u8]);
+    for (slot, handle) in inputs.iter().enumerate() {
+        feed(&[slot as u8]);
+        feed(&handle.0.to_le_bytes());
+    }
+    HandleId(with_tag(Tag::Handle, hash))
+}
 
 /// FNV-1a 64 over a byte slice. Retained for the few call sites that
 /// hash neither a mailbox name nor a kind schema. New callers should

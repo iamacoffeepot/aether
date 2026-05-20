@@ -200,6 +200,17 @@ pub struct DescribeHandlesArgs {
     pub max: Option<u32>,
 }
 
+/// One native transform's metadata as `describe_transforms` renders it
+/// (ADR-0048 §2). `transform_id` / `*_kind_id` are tagged-id strings
+/// (ADR-0064).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TransformListing {
+    pub transform_id: String,
+    pub name: &'static str,
+    pub input_kind_ids: Vec<String>,
+    pub output_kind_id: String,
+}
+
 /// One handle's summary line as `describe_handles` renders it. `handle_id`
 /// and `kind_id` are tagged-id strings (ADR-0064).
 #[derive(Debug, Serialize, JsonSchema)]
