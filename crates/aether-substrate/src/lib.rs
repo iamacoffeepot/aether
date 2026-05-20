@@ -43,6 +43,7 @@ pub mod actor;
 pub mod boot;
 pub mod capture;
 pub mod chassis;
+pub mod dag;
 pub mod handle_store;
 pub mod lifecycle;
 pub mod mail;
