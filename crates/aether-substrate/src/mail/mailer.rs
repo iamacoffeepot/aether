@@ -814,11 +814,9 @@ mod tests {
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         // Arbitrary non-`LogTail` kind id — the reply branch must not fire.
-        mailer.push(
-            Mail::new(unknown, KindId(0xABCD), vec![], 1).with_reply_to(
-                ReplyTo::with_correlation(ReplyTarget::Component(recorder_id), 0xCAFE),
-            ),
-        );
+        mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 1).with_reply_to(
+            ReplyTo::with_correlation(ReplyTarget::Component(recorder_id), 0xCAFE),
+        ));
 
         assert!(
             recorded.read().unwrap().is_empty(),
