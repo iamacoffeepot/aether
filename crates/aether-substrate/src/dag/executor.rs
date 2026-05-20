@@ -175,8 +175,8 @@ impl Executor {
     /// success mints the [`DagId`], allocates one handle per node,
     /// kicks off source dispatch + eager observer dispatch + zero-input
     /// `Call` dispatch, and returns the `(dag_id, output_handles)`. On a
-    /// validation failure returns the structured [`DagError`] and
-    /// dispatches nothing.
+    /// validation failure returns the structured
+    /// [`DagError`](aether_kinds::DagError) and dispatches nothing.
     ///
     /// The returned [`SubmitOutcome`] is the wire `SubmitResult` shape;
     /// the cap replies it verbatim.

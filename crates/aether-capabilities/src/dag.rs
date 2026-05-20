@@ -6,7 +6,8 @@
 //! timer) — into it.
 //!
 //! Same construction shape as `HandleCapability` and
-//! `RpcServerCapability`: a singleton [`NativeActor`] registered at
+//! `RpcServerCapability`: a singleton
+//! [`NativeActor`](aether_substrate::actor::native::NativeActor) registered at
 //! chassis boot under the `aether.dag` namespace (ADR-0078
 //! chassis-internal actor). `init` caches the `Arc<Mailer>` + own
 //! mailbox id off the init ctx and builds the executor against them,
@@ -16,7 +17,9 @@
 //!
 //! Source / `Call` replies arrive as arbitrary kinds correlated by the
 //! dispatch's correlation id; the `#[fallback]` forwards them to the
-//! executor's [`Executor::on_reply`]. The hub chassis doesn't register
+//! executor's
+//! [`Executor::on_reply`](aether_substrate::dag::executor::Executor::on_reply).
+//! The hub chassis doesn't register
 //! this cap (ADR-0035 / ADR-0047 §8) — a `aether.dag.submit` to a hub
 //! substrate warn-drops as an unknown mailbox, the right shape for
 //! "DAG submission is not supported here".
