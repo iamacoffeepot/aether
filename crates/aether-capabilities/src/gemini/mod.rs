@@ -23,6 +23,8 @@ mod nanobanana;
 
 use std::time::Duration;
 
+use serde_json::Value;
+
 use crate::contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiArtifact, GeminiImageRequest, GeminiMusicRequest,
     GeminiResponse,
@@ -140,10 +142,36 @@ impl UreqGeminiAdapter {
 /// Generative Language API host.
 const GENLANG_HOST: &str = "https://generativelanguage.googleapis.com";
 
+impl UreqGeminiAdapter {
+    /// POST a JSON body to a Generative Language API endpoint and return
+    /// the response text on a 2xx. Both media backends share this shape
+    /// (build request → run → status-check), so it lives in one place.
+    /// `endpoint` is the `:method` suffix (`generateContent` / `predict`).
+    fn post_json(&self, model: &str, endpoint: &str, body: &Value) -> Result<String, String> {
+        use ureq::http::Request;
+        let body_bytes = serde_json::to_vec(body).map_err(|e| format!("encode request: {e}"))?;
+        let url = format!("{GENLANG_HOST}/v1beta/models/{model}:{endpoint}");
+        let http_req = Request::builder()
+            .method("POST")
+            .uri(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .header("content-type", "application/json")
+            .body(body_bytes)
+            .map_err(|e| format!("build request: {e}"))?;
+        let (status, retry_after_ms, text) =
+            shared::run_request(&self.agent, http_req, self.timeout)?;
+        if !(200..300).contains(&status) {
+            return Err(format!(
+                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+            ));
+        }
+        Ok(text)
+    }
+}
+
 impl GeminiAdapter for UreqGeminiAdapter {
     fn nanobanana_generate(&self, req: GeminiImageRequest) -> Result<GeminiResponse, String> {
         use serde_json::json;
-        use ureq::http::Request;
 
         // Build the generateContent body: the prompt plus any reference
         // images as inline-data parts, and the aspect ratio in the
@@ -161,24 +189,7 @@ impl GeminiAdapter for UreqGeminiAdapter {
             "contents": [{ "role": "user", "parts": parts }],
             "generationConfig": { "imageConfig": { "aspectRatio": req.aspect_ratio } },
         });
-        let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode request: {e}"))?;
-
-        let url = format!("{GENLANG_HOST}/v1beta/models/{}:generateContent", req.model);
-        let http_req = Request::builder()
-            .method("POST")
-            .uri(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .header("content-type", "application/json")
-            .body(body_bytes)
-            .map_err(|e| format!("build request: {e}"))?;
-
-        let (status, retry_after_ms, text) =
-            shared::run_request(&self.agent, http_req, self.timeout)?;
-        if !(200..300).contains(&status) {
-            return Err(format!(
-                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
-            ));
-        }
+        let text = self.post_json(&req.model, "generateContent", &body)?;
 
         let parsed = nanobanana::parse_image_response(&text)?;
         Ok(GeminiResponse {
@@ -194,30 +205,12 @@ impl GeminiAdapter for UreqGeminiAdapter {
 
     fn lyria_generate(&self, req: GeminiMusicRequest) -> Result<GeminiResponse, String> {
         use serde_json::json;
-        use ureq::http::Request;
 
         let body = json!({
             "instances": [{ "prompt": req.prompt }],
             "parameters": { "sampleCount": req.sample_count.max(1) },
         });
-        let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode request: {e}"))?;
-
-        let url = format!("{GENLANG_HOST}/v1beta/models/{}:predict", req.model);
-        let http_req = Request::builder()
-            .method("POST")
-            .uri(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .header("content-type", "application/json")
-            .body(body_bytes)
-            .map_err(|e| format!("build request: {e}"))?;
-
-        let (status, retry_after_ms, text) =
-            shared::run_request(&self.agent, http_req, self.timeout)?;
-        if !(200..300).contains(&status) {
-            return Err(format!(
-                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
-            ));
-        }
+        let text = self.post_json(&req.model, "predict", &body)?;
 
         let clips = lyria::parse_clip_response(&text)?;
         let artifacts = clips
