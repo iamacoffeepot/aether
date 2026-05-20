@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-04-25
 - **Revised:** 2026-05-19 (iamacoffeepot/aether#972) — mailbox renamed `aether.control` → `aether.dag`; raw `u64` wire ids replaced with typed newtypes (tagged-string serialization per ADR-0064/0065); "sink" terminology swept to "mailbox"/"cap" per ADR-0074 Phase 5; retired broadcast-sink reference removed (issue #775). Submit/validation semantics unchanged.
+- **Revised:** 2026-05-20 (iamacoffeepot/aether#1017) — adds the `Call` mid-graph effectful node (input handles → cap dispatch → output handle), filling the previously-empty mid+effectful cell of the position×effect grid and completing the node taxonomy before the wire freezes. Also adds a `version` field to `DagDescriptor` so a future node-set change fails cleanly rather than mis-decodes. No new runtime mechanism — `Call` reuses the source-reply correlation path and ADR-0045 §4 parking. See §2 (the variant + grid), §3 (validation), §4 (executor + timeout parity), and §10 (versioning + deferred axes).
 
 ## Context
 
@@ -47,6 +48,7 @@ Status is poll-shaped, not push-shaped. The session asks; the substrate replies 
 
 ```rust
 struct DagDescriptor {
+    version: u16,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
 }
@@ -54,6 +56,7 @@ struct DagDescriptor {
 enum Node {
     Source    { id: NodeId, mailbox: MailboxId, kind_id: KindId, payload: Vec<u8> },
     Transform { id: NodeId, transform: TransformRef, output_kind_id: KindId },
+    Call      { id: NodeId, recipient: MailboxId, kind_id: KindId, output_kind_id: KindId },
     Observer  { id: NodeId, recipient: MailboxId, kind_id: KindId },
 }
 
@@ -66,23 +69,48 @@ type NodeId = u32;
 
 The shape locks in for Phase 2 even though `Transform` doesn't dispatch yet. Phase 3 lights it up by adding the `aether.dag.transforms` custom section read at component load and the dispatch path that calls into wasmtime when input handles all resolve.
 
+#### The `Call` node — mid-graph effectful (iamacoffeepot/aether#1017)
+
+The original three variants were enumerated by use case — "fire a mailbox call at the root" (`Source`), "compute purely in the middle" (`Transform`, ADR-0048), "dispatch the assembled result somewhere terminal" (`Observer`). That left a hole: every cap call between the first and last in a pipeline. A content-gen recipe that frames a prompt, distills it, then translates it (ADR-0046) is three *effectful* cap calls in series, each consuming the prior's output and feeding the next — but `Source` takes no inputs (it's a root) and `Observer` produces no output (it's terminal). The middle calls have nowhere to live. ADR-0047 as merged forced such a recipe to wrap each mid-graph cap call in a component `#[handler]` segment, giving up DAG-shaped composition for exactly the part a content pipeline is mostly made of.
+
+The nodes are really a cross-product of two axes — **position** (where in the graph: root / mid / terminal) × **effect** (whether the node touches a cap: pure / effectful):
+
+| | **root** | **mid** | **terminal** |
+|---|---|---|---|
+| **effectful** | `Source` | `Call` | `Observer` |
+| **pure** | (degenerate) | `Transform` | (degenerate) |
+
+`Call` is the mid+effectful cell — the one the original by-use-case enumeration missed. The two remaining cells are degenerate, not missing:
+
+- **root+pure** — a pure node with no inputs is a constant. A `Source` payload already carries that constant, so a dedicated node buys nothing.
+- **terminal+pure** — a terminal node with no output and no effect does nothing. There's no observable result and no side effect, so there's nothing to wire it to.
+
+So the three originals were enumerated by use case; `Call` completes the *derived* grid. After it, the useful taxonomy is complete — every (position, effect) cell that does something has a node.
+
+`Call` is, equivalently:
+
+- **"an `Observer` that captures its reply as an output handle"** — like `Observer`, its inputs arrive via **incoming edges** and the substrate assembles them into a request of `kind_id` (the same slot-fill mechanism §4 describes for observers); unlike `Observer`, it dispatches to a *capability* `recipient` and the **correlated reply (of `output_kind_id`) resolves the node's output handle**.
+- **"a `Source` that also takes inputs"** — like `Source`, it dispatches a cap call and lets the correlated reply resolve a handle; unlike `Source`, the request is assembled from upstream handles rather than carried as an opaque `payload`.
+
+`Call` introduces **no new runtime mechanism**. The request-assembly-from-inputs is `Observer`'s path; the reply-resolves-a-handle is `Source`'s path; downstream nodes park on the unresolved output handle exactly as they park on a source's per ADR-0045 §4. It's first-class typed vocabulary over two paths the executor already runs, not a new one.
+
 `NodeId` is descriptor-local — a `u32` index assigned by the submitter, not a globally unique handle id. Edges reference NodeIds; the substrate maps NodeIds to handle ids during execution. Two DAGs submitted in parallel can both have a `NodeId(0)` without collision because the namespaces don't cross.
 
 `Source` carries `payload: Vec<u8>` rather than a structured kind value because the substrate doesn't decode source payloads on the submit path — it forwards them to the named mailbox as opaque bytes, identical to how `send_mail` works today. Validation only checks that `kind_id` is in the mailbox's accept set (see §3); deep payload validation happens inside the mailbox's handler at dispatch time.
 
 `Observer` names a recipient by `MailboxId` and a `kind_id` it'll receive. This is how a DAG terminates: when the observer's input handles all resolve, the substrate dispatches the assembled mail to the recipient using normal mailbox dispatch — `aether.kinds.inputs` (ADR-0033) gates whether the kind is acceptable.
 
-`Edge.slot` is the consumer-side input slot index. For sources (which take no inputs) this field is unused. For transforms (Phase 3) it disambiguates multi-input transforms — a `compose(prompt, embedding)` transform is reachable via `Edge { from: prompt_node, to: compose, slot: 0 }` and `Edge { from: embedding_node, to: compose, slot: 1 }`. Observers also use slots: an observer that receives a kind with multiple `Ref<K>` fields gets each field filled by the edge whose `slot` matches the field's declaration order in the kind schema.
+`Edge.slot` is the consumer-side input slot index. For sources (which take no inputs) this field is unused. For transforms (Phase 3) it disambiguates multi-input transforms — a `compose(prompt, embedding)` transform is reachable via `Edge { from: prompt_node, to: compose, slot: 0 }` and `Edge { from: embedding_node, to: compose, slot: 1 }`. Observers and calls also use slots: each fills a `Ref<K>` field in its assembled-kind schema (`Observer.kind_id` / `Call.kind_id`) from the edge whose `slot` matches the field's declaration order.
 
-`output_kind_id` on `Transform` declares what the transform produces. Stored on the descriptor (rather than read out of the component's custom section at validate time) so a reviewer reading the descriptor knows the wire shape without cross-referencing component state. Phase 3 still cross-checks against the loaded component's `aether.dag.transforms` section to catch mismatches.
+`output_kind_id` on `Transform` and `Call` declares what the node produces. On `Transform` it's stored on the descriptor (rather than read out of the component's custom section at validate time) so a reviewer reading the descriptor knows the wire shape without cross-referencing component state; Phase 3 still cross-checks against the loaded component's `aether.dag.transforms` section to catch mismatches. On `Call` it's the kind of the cap's correlated reply (e.g., a `Call` that dispatches `aether.fs.read` declares `output_kind_id` = the `ReadResult` kind id) — the type the resolved output handle carries and the type downstream edges are checked against.
 
 ### 3. Validation rules and ordering
 
 Validation runs synchronously on the submit path and returns `Err` before any work dispatches. Ordering matters because some checks are cheap (and would mask the source of a real bug if a later check ran first) and some need a populated graph. The phases:
 
 1. **Structural integrity.** Every `Edge.from` and `Edge.to` references a NodeId that exists in `nodes`. NodeIds are unique within `nodes`. Source nodes have no incoming edges; observer nodes have no outgoing edges. The graph is acyclic (Kahn's-algorithm topological sort succeeds).
-2. **Dispatchability.** Every `Source.mailbox` resolves to a registered mailbox on this substrate (chassis-specific; see §8). Every `Source.kind_id` is in the mailbox's accept set. Every `Observer.recipient` is a live mailbox. Every `Observer.kind_id` is in the recipient's `aether.kinds.inputs` manifest *or* the recipient declares a `#[fallback]` (ADR-0033). Every `Transform.transform.component` is a live mailbox; the loaded component's `aether.dag.transforms` section contains an entry at `Transform.transform.index` whose declared `output_kind_id` matches the descriptor.
-3. **Type compatibility on edges.** For each edge `Edge { from, to, slot }`: the `from` node's output kind matches the input kind expected at `to`'s `slot`. For sources, output kind = `Source.kind_id`'s reply kind (e.g., a source that dispatches `aether.fs.read` produces a `ReadResult`). For transforms, output kind = `Transform.output_kind_id`. For observers, the slot maps to a `Ref<K>` field in the observer's `kind_id` schema; that field's `K` must match the upstream output.
+2. **Dispatchability.** Every `Source.mailbox` resolves to a registered mailbox on this substrate (chassis-specific; see §8). Every `Source.kind_id` is in the mailbox's accept set. Every `Observer.recipient` is a live mailbox. Every `Observer.kind_id` is in the recipient's `aether.kinds.inputs` manifest *or* the recipient declares a `#[fallback]` (ADR-0033). Every `Transform.transform.component` is a live mailbox; the loaded component's `aether.dag.transforms` section contains an entry at `Transform.transform.index` whose declared `output_kind_id` matches the descriptor. Every `Call.recipient` is a live mailbox; every `Call.kind_id` is in its accept set (same check `Source` runs, since a `Call` is a cap dispatch).
+3. **Type compatibility on edges.** For each edge `Edge { from, to, slot }`: the `from` node's output kind matches the input kind expected at `to`'s `slot`. For sources, output kind = `Source.kind_id`'s reply kind (e.g., a source that dispatches `aether.fs.read` produces a `ReadResult`). For transforms, output kind = `Transform.output_kind_id`. For observers, the slot maps to a `Ref<K>` field in the observer's `kind_id` schema; that field's `K` must match the upstream output. For calls, both directions are type-checked: each incoming edge's `slot` maps to a `Ref<K>` field in the call's assembled-request `kind_id` schema (the observer-side check, since a `Call` assembles its request from inputs the same way), and the call's output handle is typed against `Call.output_kind_id` (the source-side check, since a `Call`'s reply resolves a handle the same way) — so a downstream edge consuming the call's output is checked against `output_kind_id`.
 
 Validation phases short-circuit on first failure. The reply's `DagError` carries a structured variant indicating which phase failed and which node/edge tripped it:
 
@@ -122,17 +150,20 @@ struct DagState {
 }
 ```
 
-Handle ids for *every* node — including transforms (Phase 3) and observers — are allocated at submit time so they're available in the `submit_result.output_handles` reply and so observer `Ref<K>` slots can be substituted with `Ref::Handle { id, kind_id }` immediately. Source handle ids are ephemeral monotonic per ADR-0045 §3; transform handle ids in Phase 2 are placeholder (Phase 3 swaps in content-addressed ids per ADR-0048); observer handle ids are unused (observers don't produce a handle, they consume).
+Handle ids for *every* node — including transforms (Phase 3), calls, and observers — are allocated at submit time so they're available in the `submit_result.output_handles` reply and so downstream `Ref<K>` slots can be substituted with `Ref::Handle { id, kind_id }` immediately. Source handle ids are ephemeral monotonic per ADR-0045 §3; call handle ids are likewise ephemeral monotonic (the reply resolves them, same as a source's); transform handle ids in Phase 2 are placeholder (Phase 3 swaps in content-addressed ids per ADR-0048); observer handle ids are unused (observers don't produce a handle, they consume).
 
 Execution proceeds:
 
 1. **Sources fire.** Every source node's payload is submitted to its named mailbox as if `send_mail` had been called. The substrate retains the mailbox's reply correlation so the response routes back to the DAG executor, not to the submitting session. When the reply arrives, the corresponding `HandleId` resolves in the handle store; ADR-0045 §4's parked-mail flush runs identically to today.
 2. **Transforms fire when their inputs all resolve.** Phase 2 has no transforms; this clause activates in Phase 3. The executor decrements `pending_inputs[node]` on each input resolution; at zero, it dispatches the transform via wasmtime `Func::call` (per ADR-0048).
-3. **Observer mail dispatches when its inputs all resolve.** Same `pending_inputs` mechanism. The substrate assembles the observer's kind from the input handles (each handle's value substituted into the matching `Ref<K>` slot), and dispatches the resulting mail to the observer's recipient mailbox. The observer is just a regular mail recipient; `aether.kinds.inputs` and `#[handlers]` (ADR-0033) handle dispatch normally.
+3. **Calls dispatch when their inputs all resolve.** Same `pending_inputs` mechanism as observers. The executor assembles the call's request kind (`Call.kind_id`) from the resolved input handles — each handle's value substituted into the matching `Ref<K>` slot, exactly as for an observer — then dispatches it to `Call.recipient` and retains the reply correlation, exactly as for a source. When the correlated reply (of `Call.output_kind_id`) arrives, the call's `HandleId` resolves and the parked-mail flush runs. So a `Call` is "observer-assemble, then source-dispatch-and-resolve": input resolution gates the dispatch, the reply gates the output.
+4. **Observer mail dispatches when its inputs all resolve.** Same `pending_inputs` mechanism. The substrate assembles the observer's kind from the input handles (each handle's value substituted into the matching `Ref<K>` slot), and dispatches the resulting mail to the observer's recipient mailbox. The observer is just a regular mail recipient; `aether.kinds.inputs` and `#[handlers]` (ADR-0033) handle dispatch normally.
 
 Source dispatch is parallel (sources have no edges between them, so they can fire concurrently). Transform / observer dispatch is constrained by the actor-per-component scheduler (ADR-0038): a transform pinned to component X runs on X's actor thread, serialised with X's other mail. An observer dispatched to recipient Y is just normal mail on Y's mpsc queue.
 
-When all observer nodes have dispatched (or the DAG has no observers — in which case "all transforms have resolved"), the DAG is complete. `status` flips to `Complete`. Handles assigned to terminal nodes remain in the handle store until their refcounts drop per normal lifecycle (ADR-0045 §9).
+When all observer nodes have dispatched (or the DAG has no observers — in which case "all transforms and calls have resolved"), the DAG is complete. `status` flips to `Complete`. Handles assigned to terminal nodes remain in the handle store until their refcounts drop per normal lifecycle (ADR-0045 §9).
+
+A `Call`'s cap reply gets the **same timeout and cancellation handling as a `Source`'s reply** — because it *is* the source-reply correlation path. A cap that never replies times out per the same source-reply timeout, fails the `Call` node (surfacing as `Failed { node_id, error }` in §6), and parks/drops its downstream consumers per the cancellation rules in §5. A non-replying `Call` recipient must **not** be able to hang the DAG: the timeout fires, the node fails, and the DAG tears down its parked mail rather than waiting forever on a reply that never comes. This is the existing source-reply behaviour applied to a mid-graph node, not a new timeout mechanism.
 
 ### 5. Cancellation
 
@@ -140,7 +171,7 @@ When all observer nodes have dispatched (or the DAG has no observers — in whic
 
 - Marks `status` as `Cancelled` (an internal terminal state; reads back as `Failed { node_id: 0, error: "cancelled" }` from `status_result` — there's no separate `Cancelled` reply variant because callers either know they cancelled or they don't, and `Failed` carries the right semantics for "downstream consumers should release their refs").
 - Drops all parked mail tied to the DAG's handle ids (ADR-0045 §4's parking table). Each parked mail's sender — the DAG executor itself — releases its refs on the parked envelope's `Ref::Handle` slots.
-- Releases all DAG-held refs on its own handles. Source replies that arrive after cancel are discarded silently (the executor no longer has a routing entry for them).
+- Releases all DAG-held refs on its own handles. Source and call replies that arrive after cancel are discarded silently (the executor no longer has a routing entry for them).
 - Marks the DAG state as reapable. Reaping happens on a slow tick; the entry persists for a short window so a `status` poll racing with a cancel still sees a coherent reply.
 
 In-flight mailbox work isn't aborted. A `Fetch` already in flight to the network completes server-side; its bytes arrive at the substrate, get routed to the cancelled DAG, and get dropped. This is the same shape as cancellation semantics for `wait_reply` (ADR-0042): the substrate doesn't pretend it can unsend.
@@ -192,6 +223,26 @@ Phase 3 (transforms, ADR-0048) doesn't change the wire. The `Transform` Node var
 
 ADR-0045 Phase 4+ work (incremental recompute, distributed handle stores) lives behind the descriptor — executor sophistication, not wire surface. Future ADRs may add a `node_options` field to nodes for things like "pin this transform's output" or "memoize aggressively across restarts," but those are additive optional fields; the canonical-bytes machinery (ADR-0032) handles the encoding.
 
+#### The `DagDescriptor.version` field
+
+`DagDescriptor` carries a `version: u16`. Be precise about what it does and doesn't do.
+
+It makes a *future* node-set or wire change **fail cleanly**: a substrate that doesn't recognise the descriptor version rejects the submit with a clear `DagError` rather than mis-decoding a `Node` enum it doesn't understand into garbage and dispatching it. A v1 substrate handed a v2 descriptor says "I don't speak version 2" instead of silently corrupting execution. That's the whole job — a guard rail on the decode boundary.
+
+It does **not** make node-set changes non-breaking. Kind ids are schema-hashed (ADR-0030): `Kind::ID = fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))`. Adding, removing, or reshaping a `Node` variant changes the `DagDescriptor` schema, which changes the `aether.dag.submit` kind id — so any node-set change is a *new kind version* regardless of what the `version` field says. The field doesn't dodge that; it just turns the failure mode from "mis-decode" into "explicit reject" for any decoder that hasn't been taught the new shape.
+
+The engine's established path for a post-1.0 breaking node-set change is a **sibling kind**: `aether.dag.submit.v2` coexists with `aether.dag.submit` (v1), each with its own schema-hashed id, and a substrate accepts whichever it implements. This is consistent with the kind-versioning philosophy elsewhere in the engine — kinds are immutable once their schema hashes, and a breaking change is a new sibling, not a mutation of the old. Adding `Call` *now* (pre-1.0, wire not yet frozen) is the cheap path: it reshapes v1 in place before anyone depends on the frozen bytes. The `version` field exists so the *next* such change — if it lands after the freeze — fails clean while the sibling kind carries the new shape.
+
+#### Deferred future axes
+
+Adding `Call` completes the position×effect grid (§2). It does **not** complete the design space of what a node *could* be. Three further axes are explicitly out of scope here and are each a **larger** change than adding an enum variant — they touch the `Edge` model, the acyclic assumption, or the one-handle-per-node output model, not just the `Node` enum:
+
+- **Multiplicity** — multi-output nodes, or dynamic-arity gather/reduce (a node that fans into N outputs, or consumes a runtime-determined number of inputs). This breaks the one-handle-per-node output model and the static edge count; `Edge` and the handle-allocation scheme would both need rework.
+- **Control flow** — branch / conditional / loop nodes. This breaks the acyclic, static-shape assumption the validator's topological sort relies on (§3 phase 1) and the executor's "fire when inputs resolve" monotonic progress model (§4). A graph with a loop isn't a DAG.
+- **Streaming** — a node that emits a *stream* of outputs over time rather than a single resolved handle. This breaks the "one resolution per handle" assumption ADR-0045 §3 builds on; downstream parking (§4) would need a streaming flush semantics.
+
+These are recorded deliberately so the next hole is a *decision*, not a surprise. They're to be done before the wire freezes (pre-1.0, reshaping the kind in place as `Call` does here) or, post-freeze, as sibling-kind versions (`aether.dag.submit.v2`, per above), consistent with the engine's kind-versioning philosophy.
+
 ## Consequences
 
 ### Positive
@@ -230,6 +281,7 @@ ADR-0045 Phase 4+ work (incremental recompute, distributed handle stores) lives 
 - **PR**: kinds + schema-derive — `DagDescriptor` and the three reply types in `aether-kinds`, with `#[derive(Schema)]` covering the enum variants. New `NodeId` / `TransformRef` types as wire-stable aliases.
 - **PR**: substrate executor — `DagState`, validation phases, source dispatch + parked-mail integration, observer dispatch, reaping tick, cancellation. Integration tests covering each failure path of `DagError` and the happy-path source → observer flow.
 - **PR**: hub MCP surface — `submit_dag`, `dag_status`, `dag_cancel` tools wrapping the three mail kinds.
+- **`Call` node + `version` field (iamacoffeepot/aether#1017).** The implementing work lands in the existing DAG issues: the `Node` / `DagDescriptor` wire change (the `Call` variant + `version: u16`) in iamacoffeepot/aether#974, the validator arm (dispatchability + bidirectional edge type-checking for `Call`) in iamacoffeepot/aether#975, and the executor arm (resolve inputs → dispatch to the cap mailbox → park on the correlated reply → resolve the output handle, with source-reply timeout parity) in iamacoffeepot/aether#976.
 - **Parked, ADR-0048**: transforms (Phase 3) — `#[transform]` macro, `aether.dag.transforms` custom section, wasmtime `Func::call` integration, content-addressed transform handle ids, persistent handle store.
 - **Parked, future ADR**: structured per-node error info on `Failed` (replacing `error: String`).
 - **Parked, future ADR**: server-streamed status / observer-pushed completion notification, if polling becomes the bottleneck.
