@@ -213,6 +213,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "crossbeam-queue",
+ "dirs",
  "png",
  "postcard",
  "serde",

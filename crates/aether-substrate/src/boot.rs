@@ -91,6 +91,13 @@ pub struct SubstrateBoot {
 pub struct SubstrateBootBuilder<'a> {
     name: &'a str,
     version: &'a str,
+    /// Whether this chassis enables on-disk handle persistence
+    /// (ADR-0049 §9). Desktop + headless set `true`; the hub leaves it
+    /// `false` (it hosts no handles, so there's nothing to persist).
+    /// Defaults to `false` so a chassis that forgets to opt in stays
+    /// in-memory-only rather than silently writing to the user's data
+    /// dir.
+    persist_enabled: bool,
 }
 
 impl SubstrateBoot {
@@ -100,7 +107,24 @@ impl SubstrateBoot {
     /// `env!("CARGO_PKG_VERSION")`.
     #[must_use]
     pub fn builder<'a>(name: &'a str, version: &'a str) -> SubstrateBootBuilder<'a> {
-        SubstrateBootBuilder { name, version }
+        SubstrateBootBuilder {
+            name,
+            version,
+            persist_enabled: false,
+        }
+    }
+}
+
+impl<'a> SubstrateBootBuilder<'a> {
+    /// Opt this chassis into ADR-0049 on-disk handle persistence. The
+    /// desktop + headless chassis call this; the hub does not. Whether
+    /// persistence actually activates still depends on the env
+    /// (`AETHER_HANDLE_STORE_PERSIST_DISABLE`, data-dir resolution) —
+    /// this is just the chassis vote.
+    #[must_use]
+    pub fn persist_enabled(mut self, enabled: bool) -> Self {
+        self.persist_enabled = enabled;
+        self
     }
 }
 
@@ -184,7 +208,7 @@ impl SubstrateBootBuilder<'_> {
             }),
         );
 
-        let handle_store = Arc::new(HandleStore::from_env());
+        let handle_store = Arc::new(HandleStore::from_env_persistent(self.persist_enabled));
         let queue = Arc::new(
             Mailer::new(Arc::clone(&registry), Arc::clone(&handle_store))
                 .with_outbound(Arc::clone(&outbound)),

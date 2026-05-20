@@ -32,6 +32,9 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
+# ADR-0049 on-disk handle store: resolve the default persistence root
+# (`dirs::data_dir()/aether/handles`). Same crate the fs cap uses.
+dirs = "6"
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 # ADR-0081 §4 crash dump: serialize the panicking actor's ring as

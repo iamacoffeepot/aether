@@ -40,12 +40,18 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mail::Mail;
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
 use std::env;
+
+pub mod meta;
+
+use meta::{HandleMeta, SCHEMA_VERSION, TransformOrigin};
 
 /// Default byte cap for the handle store.
 pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -54,6 +60,146 @@ pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// (`SubstrateBoot::build`) and parsed as a `usize` of bytes; absent
 /// or unparseable values fall back to the default.
 pub const ENV_MAX_BYTES: &str = "AETHER_HANDLE_STORE_MAX_BYTES";
+
+/// Env var pointing at the on-disk persistence root (ADR-0049 §2).
+/// Absent or empty falls through to `dirs::data_dir()/aether/handles`.
+pub const ENV_PERSIST_DIR: &str = "AETHER_HANDLE_STORE_DIR";
+
+/// Env var that disables on-disk persistence outright. Set to `1` by
+/// the TestBench harness + CI so unit tests don't leak entries into the
+/// user's data dir.
+pub const ENV_PERSIST_DISABLE: &str = "AETHER_HANDLE_STORE_PERSIST_DISABLE";
+
+/// On-disk layout version directory under [`ENV_PERSIST_DIR`]. The
+/// `v1/` namespacing is ADR-0049 §8's forward-compatibility hook.
+pub const LAYOUT_VERSION_DIR: &str = "v1";
+
+/// Tracing target shared by every persistence diagnostic.
+const TARGET: &str = "aether_substrate::handle_store";
+
+/// Resolved on-disk persistence configuration. Carried on the
+/// [`HandleStore`] when persistence is enabled (desktop + headless
+/// chassis); `None` on the hub chassis and on test fixtures with
+/// [`ENV_PERSIST_DISABLE`] set.
+#[derive(Debug, Clone)]
+pub struct PersistConfig {
+    /// `${AETHER_HANDLE_STORE_DIR}/v1/` — the layout-versioned root that
+    /// holds `entries/`, `pinned.set`, and `lock.pid`.
+    pub root: PathBuf,
+}
+
+impl PersistConfig {
+    /// Resolve the persistence config from the environment, or `None`
+    /// when persistence is disabled (`AETHER_HANDLE_STORE_PERSIST_DISABLE=1`)
+    /// or when the data dir can't be resolved and no override is set.
+    ///
+    /// `enabled` is the chassis's verdict: desktop + headless pass
+    /// `true`; the hub passes `false` (ADR-0049 §9). A `false` chassis
+    /// vote short-circuits to `None` regardless of env.
+    #[must_use]
+    pub fn from_env(enabled: bool) -> Option<Self> {
+        if !enabled {
+            return None;
+        }
+        if env::var(ENV_PERSIST_DISABLE).is_ok_and(|v| v == "1") {
+            return None;
+        }
+        let base = match env::var(ENV_PERSIST_DIR) {
+            Ok(raw) if !raw.is_empty() => PathBuf::from(raw),
+            _ => {
+                let Some(data) = dirs::data_dir() else {
+                    tracing::warn!(
+                        target: TARGET,
+                        "no data dir and no AETHER_HANDLE_STORE_DIR; persistence disabled",
+                    );
+                    return None;
+                };
+                data.join("aether").join("handles")
+            }
+        };
+        Some(Self {
+            root: base.join(LAYOUT_VERSION_DIR),
+        })
+    }
+
+    /// The `entries/` subdirectory under the layout root.
+    #[must_use]
+    pub fn entries_dir(&self) -> PathBuf {
+        self.root.join("entries")
+    }
+
+    /// The `pinned.set` file under the layout root.
+    #[must_use]
+    pub fn pinned_set_path(&self) -> PathBuf {
+        self.root.join("pinned.set")
+    }
+}
+
+/// A handle known to be on disk but not (necessarily) materialized in
+/// memory. Populated by the boot scan (issue #985) from the `.meta`
+/// sidecars; lets a cache-miss lookup find the `.bin` without re-reading
+/// the meta.
+#[derive(Debug, Clone)]
+pub struct DiskEntry {
+    pub kind_id: KindId,
+    pub bytes_len: u32,
+    pub pinned: bool,
+    pub created_at: u64,
+}
+
+/// Compute the `(<bin>, <meta>)` paths for a handle id under `root`.
+/// 256 prefix-shard directories keyed on the first hex byte of the id
+/// (ADR-0049 §2).
+#[must_use]
+pub fn entry_paths(root: &Path, id: HandleId) -> (PathBuf, PathBuf) {
+    let hex = format!("{:016x}", id.0);
+    let dir = root.join("entries").join(&hex[0..2]);
+    (
+        dir.join(format!("{}.bin", &hex[2..])),
+        dir.join(format!("{}.meta", &hex[2..])),
+    )
+}
+
+/// Millis since the unix epoch, saturating to 0 if the clock is before
+/// the epoch (unreachable in practice).
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Atomic write via tmp+rename (ADR-0041's `LocalFileAdapter` pattern):
+/// stage to a sibling `.tmp-<pid>-<nonce>`, fsync it, rename over the
+/// target. Creates the parent dir lazily. Returns the io error on
+/// failure so the caller can log + continue (persistence is best-effort
+/// per ADR-0049 §3).
+fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let nonce = now_millis();
+    let pid = std::process::id();
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("entry");
+    let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        // fsync the tmp file so its bytes hit disk before the rename
+        // publishes it (preserves ordering across a crash).
+        f.sync_all()?;
+    }
+    match std::fs::rename(&tmp, target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
 
 /// Per-entry store record. Bytes are the postcard-encoded `K` body
 /// (the same shape `Ref::Inline` would carry), kept owned because the
@@ -88,6 +234,11 @@ struct Inner {
 pub struct HandleStore {
     inner: RwLock<Inner>,
     max_bytes: usize,
+    /// On-disk persistence config (ADR-0049). `Some` on desktop +
+    /// headless chassis; `None` on hub + test fixtures. When present,
+    /// [`Self::put_persistent`] mirrors the in-memory write to disk and
+    /// pin/unpin rewrite `pinned.set`.
+    persist: Option<PersistConfig>,
 }
 
 /// Reasons a `put` can fail.
@@ -149,7 +300,30 @@ impl HandleStore {
                 ..Default::default()
             }),
             max_bytes,
+            persist: None,
         }
+    }
+
+    /// Build an in-memory store with on-disk persistence wired in. The
+    /// caller resolves the [`PersistConfig`] (typically via
+    /// [`PersistConfig::from_env`]); the boot scan (issue #985)
+    /// populates the disk index from the existing tree.
+    #[must_use]
+    pub fn with_persist(max_bytes: usize, persist: Option<PersistConfig>) -> Self {
+        Self {
+            inner: RwLock::new(Inner {
+                next_ephemeral: 1,
+                ..Default::default()
+            }),
+            max_bytes,
+            persist,
+        }
+    }
+
+    /// Borrow the wired persistence config, if any.
+    #[must_use]
+    pub fn persist_config(&self) -> Option<&PersistConfig> {
+        self.persist.as_ref()
     }
 
     /// Build a store sized from `AETHER_HANDLE_STORE_MAX_BYTES` if
@@ -177,6 +351,19 @@ impl HandleStore {
             Err(_) => DEFAULT_MAX_BYTES,
         };
         Self::new(max_bytes)
+    }
+
+    /// Build a store sized from the environment with on-disk
+    /// persistence resolved from [`PersistConfig::from_env`]. `enabled`
+    /// is the chassis verdict (desktop + headless `true`, hub `false`
+    /// per ADR-0049 §9). When persistence resolves to `Some`, the boot
+    /// scan (issue #985) populates the disk index from the existing
+    /// tree.
+    #[must_use]
+    pub fn from_env_persistent(enabled: bool) -> Self {
+        let mut store = Self::from_env();
+        store.persist = PersistConfig::from_env(enabled);
+        store
     }
 
     /// Mint a fresh ephemeral handle id. Pure counter today; content-
@@ -257,6 +444,134 @@ impl HandleStore {
         Ok(())
     }
 
+    /// Insert (or update) a handle and mirror it to disk when
+    /// persistence is wired (ADR-0049 §3). The in-memory `put` runs
+    /// first and is authoritative for this run; the disk write is
+    /// best-effort — a failure logs a warning but leaves the in-memory
+    /// entry valid (the caller doesn't see a different return value).
+    ///
+    /// `origin` records the transform provenance, or `None` for a
+    /// pinned source handle.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    pub fn put_persistent(
+        &self,
+        id: HandleId,
+        kind: KindId,
+        bytes: Vec<u8>,
+        origin: Option<TransformOrigin>,
+    ) -> Result<(), PutError> {
+        // In-memory write is authoritative; clone the bytes only when
+        // there's a disk target to mirror to.
+        let pinned = self
+            .inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.pinned);
+        if let Some(cfg) = self.persist.clone() {
+            let disk_bytes = bytes.clone();
+            self.put(id, kind, bytes)?;
+            self.write_to_disk(&cfg, id, kind, &disk_bytes, origin.as_ref(), pinned);
+            Ok(())
+        } else {
+            self.put(id, kind, bytes)
+        }
+    }
+
+    /// Write the `.bin` + `.meta` sidecar pair for `id` atomically. Best
+    /// effort: a failure on either file logs and returns without
+    /// touching the in-memory state.
+    fn write_to_disk(
+        &self,
+        cfg: &PersistConfig,
+        id: HandleId,
+        kind: KindId,
+        bytes: &[u8],
+        origin: Option<&TransformOrigin>,
+        pinned: bool,
+    ) {
+        let (bin_path, meta_path) = entry_paths(&cfg.root, id);
+        let meta = HandleMeta {
+            schema_version: SCHEMA_VERSION,
+            handle_id: id.0,
+            kind_id: kind.0,
+            transform_origin: origin.cloned(),
+            bytes_len: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+            created_at: now_millis(),
+            pinned,
+        };
+        let meta_bytes = match postcard::to_allocvec(&meta) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: TARGET,
+                    handle = %id,
+                    error = %e,
+                    "failed to encode HandleMeta; skipping disk persist",
+                );
+                return;
+            }
+        };
+        if let Err(e) = atomic_write(&bin_path, bytes) {
+            tracing::warn!(
+                target: TARGET,
+                handle = %id,
+                path = %bin_path.display(),
+                error = %e,
+                "handle store .bin write failed; in-memory entry retained (best-effort persist)",
+            );
+            return;
+        }
+        if let Err(e) = atomic_write(&meta_path, &meta_bytes) {
+            tracing::warn!(
+                target: TARGET,
+                handle = %id,
+                path = %meta_path.display(),
+                error = %e,
+                "handle store .meta write failed; orphan .bin will be scrubbed on next boot",
+            );
+        }
+    }
+
+    /// Rewrite `pinned.set` from the current in-memory pinned set. Cheap
+    /// (one `u64` per pinned id); atomic via tmp+rename. Called from
+    /// pin/unpin so the durable pinned set tracks the live set. No-op
+    /// when persistence is disabled.
+    fn persist_pinned_set(&self) {
+        let Some(cfg) = self.persist.as_ref() else {
+            return;
+        };
+        let mut ids: Vec<u64> = {
+            let inner = self
+                .inner
+                .read()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            inner
+                .entries
+                .iter()
+                .filter(|(_, e)| e.pinned)
+                .map(|(id, _)| id.0)
+                .collect()
+        };
+        ids.sort_unstable();
+        let mut bytes = Vec::with_capacity(ids.len() * 8);
+        for id in ids {
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        if let Err(e) = atomic_write(&cfg.pinned_set_path(), &bytes) {
+            tracing::warn!(
+                target: TARGET,
+                path = %cfg.pinned_set_path().display(),
+                error = %e,
+                "pinned.set write failed (best-effort persist)",
+            );
+        }
+    }
+
     /// Mark `id` as pinned: it won't be evicted under memory pressure
     /// regardless of `refcount`. Returns `false` if the id isn't in
     /// the store.
@@ -266,16 +581,22 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn pin(&self, id: HandleId) -> bool {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("handle store lock poisoned; fail-fast per ADR-0063");
-        if let Some(entry) = inner.entries.get_mut(&id) {
-            entry.pinned = true;
-            true
-        } else {
-            false
+        let pinned = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.pinned = true;
+                true
+            } else {
+                false
+            }
+        };
+        if pinned {
+            self.persist_pinned_set();
         }
+        pinned
     }
 
     /// Clear the pinned flag on `id`. Doesn't drop the entry; only
@@ -286,16 +607,22 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn unpin(&self, id: HandleId) -> bool {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("handle store lock poisoned; fail-fast per ADR-0063");
-        if let Some(entry) = inner.entries.get_mut(&id) {
-            entry.pinned = false;
-            true
-        } else {
-            false
+        let unpinned = {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.pinned = false;
+                true
+            } else {
+                false
+            }
+        };
+        if unpinned {
+            self.persist_pinned_set();
         }
+        unpinned
     }
 
     /// Increment the refcount on `id`. Returns `false` if the id isn't
