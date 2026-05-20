@@ -21,7 +21,7 @@
 use aether_camera::CameraDestroy;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{
-    TestBench,
+    BenchOp, TestBench,
     test_helpers::require_runtime,
     visual::{decode_png, not_all_black},
 };
@@ -62,16 +62,22 @@ fn component_address() -> String {
 /// the error message rather than wedging on a missing subscription.
 fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read camera wasm");
-    let result: LoadResult = bench
-        .send_and_await_reply(
-            "aether.component",
-            &LoadComponent {
-                wasm,
-                name: Some(COMPONENT_NAME.to_owned()),
-            },
-        )
-        .expect("await load_component reply");
-    match result {
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(COMPONENT_NAME.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -88,10 +94,14 @@ fn camera_component_lifecycle() {
 
     // A few ticks lets the component finish init, run on_tick, and
     // let the renderer cycle.
-    bench.advance(5).expect("advance");
-
-    let png = bench.capture().expect("capture");
-    let img = decode_png(&png).expect("decode capture png");
+    let result = bench
+        .execute(vec![
+            ("advance", BenchOp::advance(5)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("advance + capture");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     not_all_black(&img).expect("camera scene should not be all black");
 }
 
@@ -113,7 +123,9 @@ fn camera_default_orbit_publishes_view_proj() {
     // Five ticks: enough for init + a handful of publishes to surface
     // on the camera sink. The component publishes on every tick after
     // init, so any non-zero count proves the path is alive.
-    bench.advance(5).expect("advance");
+    bench
+        .execute(vec![("advance", BenchOp::advance(5))])
+        .expect("advance");
 
     let observed = bench.count_observed("aether.camera");
     assert!(
@@ -140,7 +152,9 @@ fn camera_destroy_main_keeps_substrate_alive() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_camera(&mut bench, &wasm_path);
 
-    bench.advance(2).expect("pre-destroy advance");
+    bench
+        .execute(vec![("pre", BenchOp::advance(2))])
+        .expect("pre-destroy advance");
     // Baseline: default orbit was publishing before destroy.
     let pre_destroy = bench.count_observed("aether.camera");
     assert!(
@@ -149,24 +163,31 @@ fn camera_destroy_main_keeps_substrate_alive() {
         bench.observed_kinds(),
     );
 
-    // Drop the only camera the component was bootstrapped with. Per
-    // issue 634 Phase 4, agents address loaded components at the
-    // trampoline's full name (`aether.component.trampoline:NAME`).
-    bench
-        .send_mail(
-            &component_address(),
-            &CameraDestroy {
-                name: "main".to_owned(),
-            },
-        )
-        .expect("send camera.destroy");
-    bench.advance(5).expect("post-destroy advance");
-
+    // Drop the only camera the component was bootstrapped with (agents
+    // address loaded components at the trampoline's full name,
+    // `aether.component.trampoline:NAME`, per issue 634 Phase 4), then
+    // advance and capture.
+    //
     // Survivability: the chassis still renders its clear pass after
     // the active camera was removed. If the component panicked or the
     // substrate wedged, capture would fail or the frame would be
     // all-black.
-    let png = bench.capture().expect("capture after destroy");
-    let img = decode_png(&png).expect("decode capture png");
+    let result = bench
+        .execute(vec![
+            (
+                "destroy",
+                BenchOp::send_mail(
+                    component_address(),
+                    &CameraDestroy {
+                        name: "main".to_owned(),
+                    },
+                ),
+            ),
+            ("post", BenchOp::advance(5)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("destroy + advance + capture");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     not_all_black(&img).expect("frame should not be all black after camera destroy");
 }
