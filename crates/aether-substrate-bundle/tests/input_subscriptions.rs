@@ -16,48 +16,66 @@ use aether_kinds::{
     DropComponent, DropResult, LoadComponent, LoadResult, SubscribeInputResult, Tick,
     UnsubscribeInput,
 };
-use aether_substrate_bundle::test_bench::{TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_test_fixture_probe::TickObserved;
 use std::fs;
 
 fn load_probe_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let result: LoadResult = bench
-        .send_and_await_reply(
-            ComponentHostCapability::NAMESPACE,
-            &LoadComponent {
-                wasm,
-                name: Some(name.to_owned()),
-            },
-        )
-        .expect("await load_component reply");
-    match result {
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                ComponentHostCapability::NAMESPACE,
+                &LoadComponent {
+                    wasm,
+                    name: Some(name.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component({name}): {error}"),
     }
 }
 
 fn unsubscribe(bench: &mut TestBench, kind: KindId, mailbox: MailboxId) {
-    let r: SubscribeInputResult = bench
-        .send_and_await_reply(
-            InputCapability::NAMESPACE,
-            &UnsubscribeInput { kind, mailbox },
-        )
-        .expect("await unsubscribe reply");
-    match r {
+    let result = bench
+        .execute(vec![(
+            "unsub",
+            BenchOp::send_and_await(
+                InputCapability::NAMESPACE,
+                &UnsubscribeInput { kind, mailbox },
+            ),
+        )])
+        .expect("unsubscribe sequence");
+    match result
+        .reply::<SubscribeInputResult>("unsub")
+        .expect("decode SubscribeInputResult")
+    {
         SubscribeInputResult::Ok => {}
         SubscribeInputResult::Err { error } => panic!("unsubscribe failed: {error}"),
     }
 }
 
 fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
-    let r: DropResult = bench
-        .send_and_await_reply(
-            ComponentHostCapability::NAMESPACE,
-            &DropComponent { mailbox_id },
-        )
-        .expect("await drop reply");
-    match r {
+    let result = bench
+        .execute(vec![(
+            "drop",
+            BenchOp::send_and_await(
+                ComponentHostCapability::NAMESPACE,
+                &DropComponent { mailbox_id },
+            ),
+        )])
+        .expect("drop sequence");
+    match result
+        .reply::<DropResult>("drop")
+        .expect("decode DropResult")
+    {
         DropResult::Ok => {}
         DropResult::Err { error } => panic!("drop failed: {error}"),
     }
@@ -72,7 +90,9 @@ fn empty_subscribers_means_no_delivery() {
         return;
     }
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    bench.advance(2).expect("advance 2");
+    bench
+        .execute(vec![("advance", BenchOp::advance(2))])
+        .expect("advance 2");
     assert_eq!(
         bench.count_observed(TickObserved::NAME),
         0,
@@ -91,7 +111,9 @@ fn subscribed_component_receives_published_ticks() {
     let _mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench.advance(3).expect("advance 3");
+    bench
+        .execute(vec![("advance", BenchOp::advance(3))])
+        .expect("advance 3");
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -114,7 +136,9 @@ fn two_subscribers_each_receive_every_tick() {
     let _mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench.advance(2).expect("advance 2");
+    bench
+        .execute(vec![("advance", BenchOp::advance(2))])
+        .expect("advance 2");
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -136,7 +160,9 @@ fn unsubscribe_stops_delivery() {
     let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench.advance(1).expect("pre-unsubscribe advance");
+    bench
+        .execute(vec![("advance", BenchOp::advance(1))])
+        .expect("pre-unsubscribe advance");
     assert_eq!(
         bench.count_observed(TickObserved::NAME) - baseline,
         1,
@@ -146,7 +172,9 @@ fn unsubscribe_stops_delivery() {
     let pre_unsub = bench.count_observed(TickObserved::NAME);
 
     unsubscribe(&mut bench, Tick::ID, mbox);
-    bench.advance(2).expect("post-unsubscribe advance");
+    bench
+        .execute(vec![("advance", BenchOp::advance(2))])
+        .expect("post-unsubscribe advance");
     assert_eq!(
         bench.count_observed(TickObserved::NAME),
         pre_unsub,
@@ -168,7 +196,9 @@ fn drop_clears_subscriptions() {
     let mbox = load_probe_named(&mut bench, &wasm_path, "victim");
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench.advance(1).expect("pre-drop advance");
+    bench
+        .execute(vec![("advance", BenchOp::advance(1))])
+        .expect("pre-drop advance");
     assert_eq!(
         bench.count_observed(TickObserved::NAME) - baseline,
         1,
@@ -178,7 +208,9 @@ fn drop_clears_subscriptions() {
     let pre_drop = bench.count_observed(TickObserved::NAME);
 
     drop_component(&mut bench, mbox);
-    bench.advance(2).expect("post-drop advance");
+    bench
+        .execute(vec![("advance", BenchOp::advance(2))])
+        .expect("post-drop advance");
     assert_eq!(
         bench.count_observed(TickObserved::NAME),
         pre_drop,

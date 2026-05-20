@@ -49,7 +49,6 @@ use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
 use serde::de::DeserializeOwned;
-use std::any;
 use std::error;
 use std::thread;
 
@@ -379,42 +378,20 @@ impl TestBench {
             .clone()
     }
 
-    /// Push a typed mail and block until the dispatched chain
-    /// settles (ADR-0080 §6). Recipient is resolved by name against
-    /// the registry; kind ids are pulled from `K::ID` so the caller
-    /// doesn't need to look anything up.
+    /// Bytes-level fire-and-settle send: resolve `recipient_name` in
+    /// the registry, push `(kind, bytes)` as a chassis-root mail, and
+    /// block until the dispatched chain settles (ADR-0080 §6). Backs
+    /// the `SendMail` op of [`Self::execute`].
     ///
-    /// Issue 834: this is synchronous-on-settle. The mail is minted
-    /// as a chassis-root via [`Mailer::push_chassis_root_mail`] so the trace
-    /// pipeline tracks the chain; the bench then subscribes to
-    /// `Settled { root }` and waits up to `SETTLEMENT_TIMEOUT` for
-    /// the chain (the recipient's handler + every descendant mail
-    /// it spawned) to drain. By the time this returns, any
-    /// subsequent observation (`capture()`, the next send, an
-    /// assertion) is causally after the producer's full chain —
-    /// no more nudge_tick-style band-aids needed for render-flush
-    /// races.
-    pub fn send_mail<K>(&self, recipient_name: &str, mail: &K) -> Result<(), TestBenchError>
-    where
-        K: Kind + serde::Serialize,
-    {
-        let mailbox = self
-            .registry
-            .lookup(recipient_name)
-            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
-        let payload = encode_struct(mail);
-        self.push_and_settle(recipient_name, K::NAME, mailbox, K::ID, payload)
-    }
-
-    /// Bytes-level send for callers that resolve kind+payload at
-    /// runtime (the scenario library's descriptor-driven path). Same
-    /// recipient lookup as `send_mail` but takes a pre-encoded
-    /// `(kind, bytes)` tuple — the typed `send_mail<K>` is the
-    /// preferred path when `K` is known statically.
-    ///
-    /// Issue 834: synchronous-on-settle, same semantics as
-    /// [`Self::send_mail`].
-    pub fn send_bytes(
+    /// Issue 834: synchronous-on-settle. The mail is minted as a
+    /// chassis-root via [`Mailer::push_chassis_root_mail`] so the trace
+    /// pipeline tracks the chain; the bench subscribes to
+    /// `Settled { root }` and waits up to `SETTLEMENT_TIMEOUT` for the
+    /// chain (the recipient's handler + every descendant mail it
+    /// spawned) to drain. By the time this returns, any subsequent
+    /// observation is causally after the producer's full chain — no
+    /// nudge_tick-style band-aids needed for render-flush races.
+    pub(crate) fn send_bytes(
         &self,
         recipient_name: &str,
         kind: KindId,
@@ -427,11 +404,10 @@ impl TestBench {
         self.push_and_settle(recipient_name, "<bytes>", mailbox, kind, bytes)
     }
 
-    /// Shared body of [`Self::send_mail`] / [`Self::send_bytes`]:
-    /// push as a chassis-root mail (so the trace pipeline tracks
-    /// the chain) and block on `Settled { root }`. Returns
-    /// `SettlementTimeout` if the chain doesn't drain within
-    /// [`SETTLEMENT_TIMEOUT`].
+    /// Body of [`Self::send_bytes`]: push as a chassis-root mail (so
+    /// the trace pipeline tracks the chain) and block on
+    /// `Settled { root }`. Returns `SettlementTimeout` if the chain
+    /// doesn't drain within [`SETTLEMENT_TIMEOUT`].
     fn push_and_settle(
         &self,
         recipient_name: &str,
@@ -460,8 +436,11 @@ impl TestBench {
     /// the caller chains `after_init` / `finish` against — the same
     /// shape callers reach for from the chassis-builder scope. Used by
     /// integration tests that exercise the spawn lifecycle without
-    /// going through a parent-actor handler.
-    pub fn spawn_actor<'a, A>(
+    /// going through a parent-actor handler. Test-only: the spawn
+    /// lifecycle is exercised by the in-crate unit test, and `execute`
+    /// (the public driver) doesn't model spawning.
+    #[cfg(test)]
+    pub(crate) fn spawn_actor<'a, A>(
         &'a self,
         subname: aether_substrate::Subname<'a>,
         config: A::Config,
@@ -475,52 +454,25 @@ impl TestBench {
     }
 
     /// Borrow the bench's [`aether_substrate::ActorRegistry`]. Used
-    /// alongside `spawn_actor` so tests can inspect the live entry's
-    /// `MailboxId` directly.
-    pub fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
+    /// alongside `spawn_actor` so the in-crate spawn test can inspect
+    /// the live entry's `MailboxId` directly. Test-only, same
+    /// rationale as [`Self::spawn_actor`].
+    #[cfg(test)]
+    pub(crate) fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
         self.passive.actor_registry()
-    }
-
-    /// Send `mail` to `recipient_name` with this bench's session as
-    /// the reply target, then pump until a matching reply arrives and
-    /// decode it as `R`. The reply must be postcard-encoded — true
-    /// for every standard reply kind (`*Result` variants in
-    /// `aether-kinds`). Use this for any sink/component whose reply
-    /// pattern is "send → await → decode" — e.g. the `aether.fs`
-    /// `Read`/`Write`/`Delete`/`List` round trips. `advance` and
-    /// `capture` are specialisations of this same shape against the
-    /// `aether.component` mailbox.
-    pub fn send_and_await_reply<K, R>(
-        &mut self,
-        recipient_name: &str,
-        mail: &K,
-    ) -> Result<R, TestBenchError>
-    where
-        K: Kind + serde::Serialize,
-        R: DeserializeOwned,
-    {
-        let mailbox = self
-            .registry
-            .lookup(recipient_name)
-            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
-        let cid = self.fresh_correlation_id();
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
-        let payload = encode_struct(mail);
-        self.queue
-            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
-        self.pump_until_reply::<R>(cid, any::type_name::<R>())
     }
 
     /// Bytes-level request/reply: push `(kind, payload)` to
     /// `recipient_name` with this bench's session as the reply
     /// target, pump until the matching reply arrives, and return its
-    /// raw payload bytes. The bytes-level sibling of
-    /// [`Self::send_and_await_reply`] — used by the `SendAndAwait` op
-    /// of [`Self::execute`], where the reply type isn't known
-    /// statically and the caller decodes on demand. Decode the
-    /// returned bytes with `postcard::from_bytes` (every standard
-    /// `*Result` kind is postcard-encoded).
-    pub fn send_bytes_and_await(
+    /// raw payload bytes. Backs the `SendAndAwait` op of
+    /// [`Self::execute`], where the reply type isn't known statically
+    /// and the caller decodes on demand via
+    /// [`super::ExecutionResult::reply`]. Used for the
+    /// component load/replace/drop round trips and the `aether.fs`
+    /// `Read`/`Write`/`Delete`/`List` replies — every standard
+    /// `*Result` kind is postcard-encoded.
+    pub(crate) fn send_bytes_and_await(
         &mut self,
         recipient_name: &str,
         kind: KindId,
@@ -541,7 +493,7 @@ impl TestBench {
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with
     /// `AdvanceResult::Ok`.
-    pub fn advance(&mut self, ticks: u32) -> Result<u32, TestBenchError> {
+    pub(crate) fn advance(&mut self, ticks: u32) -> Result<u32, TestBenchError> {
         let cid = self.fresh_correlation_id();
         // Issue 603 Phase 4: advance migrated from `aether.control`
         // (chassis_handler closure) onto `aether.test_bench`
@@ -574,7 +526,7 @@ impl TestBench {
     /// rendered, which matches "what the user would see right now"
     /// in the same way wgpu / D3D / Vulkan swapchain front buffers
     /// behave.
-    pub fn capture(&mut self) -> Result<Vec<u8>, TestBenchError> {
+    pub(crate) fn capture(&mut self) -> Result<Vec<u8>, TestBenchError> {
         self.capture_with_mails(Vec::new(), Vec::new())
     }
 
@@ -584,7 +536,7 @@ impl TestBench {
     /// is dispatched *after* the readback — typically cleanup that
     /// restores state the caller flipped for the capture. Matches
     /// the wire shape of the MCP `capture_frame` tool.
-    pub fn capture_with_mails(
+    pub(crate) fn capture_with_mails(
         &mut self,
         pre: Vec<aether_kinds::MailEnvelope>,
         after: Vec<aether_kinds::MailEnvelope>,

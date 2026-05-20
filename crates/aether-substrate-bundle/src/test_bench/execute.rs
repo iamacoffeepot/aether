@@ -43,17 +43,17 @@ use super::bench::{TestBench, TestBenchError};
 /// a loaded component's trampoline address) — mailbox ids are
 /// one-way name hashes, so every send resolves by name.
 pub enum BenchOp {
-    /// Run `ticks` complete frames. Maps to [`TestBench::advance`].
+    /// Run `ticks` complete frames. Build with [`BenchOp::advance`].
     Advance { ticks: u32 },
-    /// Fire-and-settle a mail; no reply is awaited. Maps to
-    /// [`TestBench::send_bytes`].
+    /// Fire-and-settle a mail; no reply is awaited. Build with the
+    /// typed [`BenchOp::send_mail`].
     SendMail {
         recipient: String,
         kind: KindId,
         payload: Vec<u8>,
     },
     /// Send a mail and block until a reply arrives, stashing the raw
-    /// reply bytes. Maps to [`TestBench::send_bytes_and_await`].
+    /// reply bytes. Build with the typed [`BenchOp::send_and_await`].
     /// Covers component load / replace / drop and the `aether.fs`
     /// read / write / delete / list round trips uniformly — decode
     /// the stored bytes downstream with [`ExecutionResult::reply`].
@@ -62,15 +62,15 @@ pub enum BenchOp {
         kind: KindId,
         payload: Vec<u8>,
     },
-    /// Capture the current frame as PNG bytes. Maps to
-    /// [`TestBench::capture`]. Does not dispatch a tick — sequence a
+    /// Capture the current frame as PNG bytes. Build with
+    /// [`BenchOp::capture`]. Does not dispatch a tick — sequence a
     /// [`BenchOp::Advance`] before it if the world must move first.
     Capture,
     /// Capture with pre/after mail bundles dispatched atomically
     /// around the readback (the `CaptureFrame` shape, ADR-0020): `pre`
     /// lands *before* the readback so its effects appear in the PNG,
-    /// `after` runs *after* (cleanup). Maps to
-    /// [`TestBench::capture_with_mails`]. Use this rather than
+    /// `after` runs *after* (cleanup). Build with
+    /// [`BenchOp::capture_with_mails`]. Use this rather than
     /// decomposing into separate `SendMail` + `Capture` ops when the
     /// pre-mail's geometry must land in the same frame as the
     /// readback.
