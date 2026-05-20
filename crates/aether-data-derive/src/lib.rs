@@ -393,11 +393,6 @@ impl PurityScanner {
 }
 
 impl<'ast> Visit<'ast> for PurityScanner {
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        self.check_path(&node.path);
-        visit::visit_expr_path(self, node);
-    }
-
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         // A call's callee is an `Expr::Path` for free-fn / path calls;
         // `visit_expr_path` handles it. Method calls (`x.foo()`) carry
@@ -407,5 +402,10 @@ impl<'ast> Visit<'ast> for PurityScanner {
             self.check_path(&p.path);
         }
         visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.check_path(&node.path);
+        visit::visit_expr_path(self, node);
     }
 }

@@ -18,6 +18,13 @@ exclude:
       - .cargo
       - archive
       - spikes
+      # trybuild compile-fixtures (e.g. the #[transform] macro's
+      # accept/reject cases) are standalone .rs files compiled
+      # individually by trybuild — they are intentionally not `mod`-
+      # attached to any cargo target, so Qodana's "Detached file"
+      # inspection fires on every one. The detachment is the trybuild
+      # contract, not a defect; exclude the fixture trees.
+      - crates/aether-data-derive/tests/ui
 
 # Native deps + toolchain bump.
 #
