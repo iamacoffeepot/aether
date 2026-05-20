@@ -499,7 +499,15 @@ impl Mcp {
                 };
                 json(&response)
             }
-            Some(aether_kinds::LogTailResult::Err { error }) => Err(internal_msg(&error)),
+            // Issue 963: name the agent-supplied mailbox in the error
+            // so an `actor_logs` against an unregistered mailbox (which
+            // the substrate now answers with a synthesized
+            // `LogTailResult::Err`, mailer.rs `None` arm) reads as
+            // "that mailbox doesn't exist" rather than a bare relayed
+            // substrate string.
+            Some(aether_kinds::LogTailResult::Err { error }) => {
+                Err(internal_msg(&actor_logs_err_message(&mailbox_name, &error)))
+            }
             None => Err(internal_msg("undecodable LogTailResult")),
         }
     }
@@ -762,6 +770,15 @@ fn internal(e: anyhow::Error) -> McpError {
 
 fn internal_msg(msg: &str) -> McpError {
     McpError::internal_error(msg.to_owned(), None)
+}
+
+/// Issue 963: render an `actor_logs` `LogTailResult::Err` into a
+/// tool-error message that names the agent-supplied mailbox, so an
+/// unregistered-mailbox query reads as "that mailbox doesn't exist"
+/// rather than a bare relayed substrate string. Factored out so the
+/// formatting is unit-testable without standing up a live engine.
+fn actor_logs_err_message(mailbox_name: &str, error: &str) -> String {
+    format!("actor_logs: mailbox \"{mailbox_name}\" — {error}")
 }
 
 /// Map ADR-0023 §4's level string to the `0..=4` byte the
@@ -1148,6 +1165,19 @@ mod tests {
             result.is_err(),
             "a malformed engine_id should be a tool error"
         );
+    }
+
+    /// Issue 963: the `LogTailResult::Err` arm names the agent-
+    /// supplied mailbox in the tool error. A live engine isn't needed
+    /// to inject a decoded `Err` — pin the formatting at the call
+    /// site's helper instead (the substrate-side synthesized-Err
+    /// routing is covered in `aether-substrate`'s mailer tests).
+    #[test]
+    fn actor_logs_err_message_names_mailbox() {
+        let msg =
+            actor_logs_err_message("aether.nope", "mailbox mbx-0000-0000-0000 not registered");
+        assert!(msg.contains("aether.nope"), "names the mailbox: {msg}");
+        assert!(msg.contains("not registered"), "carries the cause: {msg}");
     }
 
     /// `actor_logs` with an unknown `level` string is rejected at

@@ -606,6 +606,48 @@ fn route_mail(
                 trace_handle.record_finished(inbound_mail_id);
                 return;
             }
+            // Issue 963: `aether.log.tail` (`actor_logs`) to an
+            // unresolved mailbox synthesizes a `LogTailResult::Err`
+            // reply instead of silently warn-dropping, so the MCP
+            // caller's `call_one` sees one `ReplyEvent` (a clean "that
+            // mailbox doesn't exist" signal) rather than `got 0
+            // replies`. Narrow per-kind treatment (Option B) — the
+            // general `aether.mail.unresolved` reply for every
+            // reply-expecting kind is parked (Option C, lib.rs:86).
+            // Only the `Component` reply target (the path the MCP Call
+            // takes via `RpcServerCapability::handle_call`) is routed;
+            // `Session`/`EngineMailbox` targets fall through to the
+            // warn-drop, keeping the blast radius minimal.
+            if mail.kind.0 == <aether_kinds::LogTail as aether_data::Kind>::ID.0 {
+                let err = aether_kinds::LogTailResult::Err {
+                    error: format!("mailbox {recipient} not registered on engine"),
+                };
+                if let Ok(payload) = postcard::to_allocvec(&err)
+                    && let ReplyTarget::Component(target) = mail.reply_to.target
+                {
+                    let reply_to =
+                        ReplyTo::with_correlation(ReplyTarget::None, mail.reply_to.correlation_id);
+                    route_mail(
+                        Mail::new(
+                            target,
+                            <aether_kinds::LogTailResult as aether_data::Kind>::ID,
+                            payload,
+                            1,
+                        )
+                        .with_reply_to(reply_to),
+                        registry,
+                        outbound,
+                        store,
+                        chassis_router,
+                        trace_handle,
+                    );
+                }
+                // The synthesized reply is a fresh un-lineaged mail
+                // (`MailId::NONE`); the inbound still records `Finished`
+                // so its settlement chain balances (issue 838).
+                trace_handle.record_finished(inbound_mail_id);
+                return;
+            }
             tracing::warn!(
                 target: "aether_substrate::queue",
                 mailbox = %recipient,
@@ -693,6 +735,97 @@ mod tests {
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 0));
         // No panic is the test; the warn path logs and returns.
+    }
+
+    /// Issue 963: recorder capture row — `(kind, correlation, payload)`
+    /// for each reply a stand-in RPC-server mailbox receives. Aliased
+    /// to keep the `Arc<RwLock<Vec<...>>>` off the `type_complexity`
+    /// lint at the two recorder sites below.
+    type RecordedReplies = Arc<RwLock<Vec<(KindId, u64, Vec<u8>)>>>;
+
+    /// Register an inline mailbox that records each reply's kind,
+    /// correlation, and payload — a stand-in for the RPC-server reply
+    /// target the MCP Call's `Component` reply hop lands at. Returns
+    /// the recorder's `MailboxId` plus the shared capture buffer.
+    fn record_inline(registry: &Registry) -> (MailboxId, RecordedReplies) {
+        let recorded: RecordedReplies = Arc::new(RwLock::new(Vec::new()));
+        let recorded_for_handler = Arc::clone(&recorded);
+        let recorder_id = registry.register_inline(
+            "test.rpc_server_reply",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                recorded_for_handler.write().unwrap().push((
+                    dispatch.kind,
+                    dispatch.sender.correlation_id,
+                    dispatch.payload.to_vec(),
+                ));
+            }),
+        );
+        (recorder_id, recorded)
+    }
+
+    /// Issue 963: `aether.log.tail` to an unregistered mailbox (no
+    /// outbound) synthesizes a `LogTailResult::Err` reply routed back
+    /// to the inbound's `Component` reply target instead of warn-
+    /// dropping. Stands in the RPC-server reply mailbox with a
+    /// recording inline handler; asserts exactly one reply of kind
+    /// `LogTailResult::ID`, decoding to `Err { error }` naming the
+    /// recipient id, with the correlation echoed.
+    #[test]
+    fn unknown_mailbox_log_tail_synthesizes_err_reply() {
+        use aether_kinds::{LogTail, LogTailResult};
+
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+
+        let (recorder_id, recorded) = record_inline(&registry);
+
+        let unknown = MailboxId(0xDEAD_BEEF_u64);
+        mailer.push(
+            Mail::new(unknown, <LogTail as Kind>::ID, vec![], 1).with_reply_to(
+                ReplyTo::with_correlation(ReplyTarget::Component(recorder_id), 0xCAFE),
+            ),
+        );
+
+        let recorded = recorded.read().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one synthesized reply");
+        let (kind, correlation, payload) = &recorded[0];
+        assert_eq!(*kind, <LogTailResult as Kind>::ID);
+        assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
+        match postcard::from_bytes::<LogTailResult>(payload).unwrap() {
+            LogTailResult::Err { error } => assert!(
+                error.contains(&unknown.to_string()),
+                "error names the recipient id: {error}",
+            ),
+            other @ LogTailResult::Ok { .. } => {
+                panic!("expected LogTailResult::Err, got {other:?}")
+            }
+        }
+    }
+
+    /// Issue 963: the synthesized-Err branch is narrow — a non-
+    /// `LogTail` kind to an unregistered mailbox still warn-drops with
+    /// no reply, even with a live `Component` reply target. Pins the
+    /// scope so the change doesn't start replying for every kind
+    /// (Option B, not Option C).
+    #[test]
+    fn unknown_mailbox_non_log_tail_still_warn_drops() {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+
+        let (recorder_id, recorded) = record_inline(&registry);
+
+        let unknown = MailboxId(0xDEAD_BEEF_u64);
+        // Arbitrary non-`LogTail` kind id — the reply branch must not fire.
+        mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 1).with_reply_to(
+            ReplyTo::with_correlation(ReplyTarget::Component(recorder_id), 0xCAFE),
+        ));
+
+        assert!(
+            recorded.read().unwrap().is_empty(),
+            "non-LogTail unknown-mailbox mail warn-drops with no reply",
+        );
     }
 
     // ------------------------------------------------------------
