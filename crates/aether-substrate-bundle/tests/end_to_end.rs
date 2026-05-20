@@ -21,7 +21,7 @@ use aether_actor::Actor;
 use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::test_bench::{TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_test_fixture_probe::TickObserved;
 use std::fs;
 
@@ -29,16 +29,22 @@ const PROBE_NAME: &str = "probe";
 
 fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let result: LoadResult = bench
-        .send_and_await_reply(
-            ComponentHostCapability::NAMESPACE,
-            &LoadComponent {
-                wasm,
-                name: Some(PROBE_NAME.to_owned()),
-            },
-        )
-        .expect("await load_component reply");
-    match result {
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                ComponentHostCapability::NAMESPACE,
+                &LoadComponent {
+                    wasm,
+                    name: Some(PROBE_NAME.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -59,7 +65,9 @@ fn tick_roundtrip_component_to_sink() {
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench.advance(3).expect("advance 3");
+    bench
+        .execute(vec![("advance", BenchOp::advance(3))])
+        .expect("advance 3");
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -87,7 +95,9 @@ fn batched_ticks_preserve_per_mailbox_count() {
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench.advance(N).expect("advance N");
+    bench
+        .execute(vec![("advance", BenchOp::advance(N))])
+        .expect("advance N");
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
