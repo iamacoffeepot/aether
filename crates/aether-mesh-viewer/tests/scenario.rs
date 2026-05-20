@@ -23,7 +23,7 @@
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_mesh_viewer::LoadMesh;
 use aether_substrate_bundle::test_bench::{
-    TestBench,
+    BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
     visual::{decode_png, differs_from_background},
 };
@@ -72,16 +72,22 @@ const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 /// the error message rather than wedging on a missing subscription.
 fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read mesh-viewer wasm");
-    let result: LoadResult = bench
-        .send_and_await_reply(
-            "aether.component",
-            &LoadComponent {
-                wasm,
-                name: Some(COMPONENT_NAME.to_owned()),
-            },
-        )
-        .expect("await load_component reply");
-    match result {
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(COMPONENT_NAME.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -119,23 +125,29 @@ fn dsl_box_loads_and_renders() {
         .expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
-    // First tick triggers the load; the read reply lands on a later
-    // tick. A handful of ticks ensures the cache is populated and
-    // several render-sink emissions land.
-    bench.advance(1).expect("priming advance");
-    bench
-        .send_mail(
-            &component_address(),
-            &LoadMesh {
-                namespace: "save".to_owned(),
-                path,
-            },
-        )
-        .expect("send mesh.load");
-    bench.advance(5).expect("post-load advance");
+    // Priming tick triggers the load; the read reply lands on a later
+    // tick, so a handful of post-load ticks populate the cache and
+    // emit several render-sink frames before the capture.
+    let result = bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            (
+                "load_mesh",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path,
+                    },
+                ),
+            ),
+            ("post", BenchOp::advance(5)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("prime + load + advance + capture");
 
-    let png = bench.capture().expect("capture");
-    let img = decode_png(&png).expect("decode capture png");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     assert_draw_triangle_observed(&bench);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
@@ -159,20 +171,26 @@ fn obj_quad_loads_and_renders() {
         .expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
-    bench.advance(1).expect("priming advance");
-    bench
-        .send_mail(
-            &component_address(),
-            &LoadMesh {
-                namespace: "save".to_owned(),
-                path,
-            },
-        )
-        .expect("send mesh.load");
-    bench.advance(5).expect("post-load advance");
+    let result = bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            (
+                "load_mesh",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path,
+                    },
+                ),
+            ),
+            ("post", BenchOp::advance(5)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("prime + load + advance + capture");
 
-    let png = bench.capture().expect("capture");
-    let img = decode_png(&png).expect("decode capture png");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     assert_draw_triangle_observed(&bench);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
@@ -199,37 +217,47 @@ fn parse_failure_keeps_prior_mesh() {
         .expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
-    bench.advance(1).expect("priming advance");
     bench
-        .send_mail(
-            &component_address(),
-            &LoadMesh {
-                namespace: "save".to_owned(),
-                path: good,
-            },
-        )
-        .expect("send good mesh.load");
-    bench.advance(5).expect("post-good-load advance");
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            (
+                "load_good",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path: good,
+                    },
+                ),
+            ),
+            ("post_good", BenchOp::advance(5)),
+        ])
+        .expect("prime + good load");
 
     // Baseline: the good mesh is publishing.
     assert_draw_triangle_observed(&bench);
 
-    // Now hand the viewer something it can't parse.
-    bench
-        .send_mail(
-            &component_address(),
-            &LoadMesh {
-                namespace: "save".to_owned(),
-                path: bad,
-            },
-        )
-        .expect("send bad mesh.load");
-    bench.advance(5).expect("post-bad-load advance");
-
-    // The cached triangle list should be intact — the captured frame
-    // still has non-clear-color geometry.
-    let png = bench.capture().expect("capture");
-    let img = decode_png(&png).expect("decode capture png");
+    // Now hand the viewer something it can't parse, then capture. The
+    // cached triangle list should be intact — the frame still has
+    // non-clear-color geometry.
+    let result = bench
+        .execute(vec![
+            (
+                "load_bad",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path: bad,
+                    },
+                ),
+            ),
+            ("post_bad", BenchOp::advance(5)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("bad load + capture");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     differs_from_background(&img, 5)
         .expect("cached mesh should remain visible after parse failure");
 }

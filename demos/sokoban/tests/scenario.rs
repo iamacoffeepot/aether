@@ -15,10 +15,9 @@
 //! gate) live in `aether_substrate_bundle::test_bench::test_helpers`
 //! (issues 460 + 821).
 
-use aether_data::Kind;
 use aether_kinds::{Key, LoadComponent, LoadResult, keycode};
 use aether_substrate_bundle::test_bench::{
-    TestBench,
+    BenchOp, TestBench,
     test_helpers::require_runtime,
     visual::{decode_png, differs_from_background},
 };
@@ -58,16 +57,22 @@ fn component_address() -> String {
 /// the error message rather than wedging on a missing subscription.
 fn load_sokoban(bench: &mut TestBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read sokoban wasm");
-    let result: LoadResult = bench
-        .send_and_await_reply(
-            "aether.component",
-            &LoadComponent {
-                wasm,
-                name: Some(COMPONENT_NAME.to_owned()),
-            },
-        )
-        .expect("await load_component reply");
-    match result {
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(COMPONENT_NAME.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -104,10 +109,14 @@ fn default_level_renders_grid_and_player() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_sokoban(&mut bench, &wasm_path);
 
-    bench.advance(3).expect("advance");
-
-    let png = bench.capture().expect("capture");
-    let img = decode_png(&png).expect("decode capture png");
+    let result = bench
+        .execute(vec![
+            ("advance", BenchOp::advance(3)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("advance + capture");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     assert_draw_triangle_observed(&bench);
     differs_from_background(&img, 5).expect("default level should render visible geometry");
 }
@@ -125,24 +134,23 @@ fn key_press_keeps_render_path_alive() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_sokoban(&mut bench, &wasm_path);
 
-    bench.advance(2).expect("pre-key advance");
-
     // Press D — sokoban steps the player east; the WASD/arrow mapping
-    // lives in `step_delta` inside the demo's lib.rs. `send_bytes`
-    // is synchronous-on-settle (iamacoffeepot/aether#834), so the
-    // post-key advance below picks up the new player position
-    // structurally.
+    // lives in `step_delta` inside the demo's lib.rs. Each `execute`
+    // step is synchronous-on-settle (iamacoffeepot/aether#834), so the
+    // post-key advance picks up the new player position structurally.
     let key = Key {
         code: keycode::KEY_D,
     };
-    bench
-        .send_bytes(&component_address(), Key::ID, key.encode_into_bytes())
-        .expect("send key");
-
-    bench.advance(2).expect("post-key advance");
-
-    let png = bench.capture().expect("capture");
-    let img = decode_png(&png).expect("decode capture png");
+    let result = bench
+        .execute(vec![
+            ("pre", BenchOp::advance(2)),
+            ("key", BenchOp::send_mail(component_address(), &key)),
+            ("post", BenchOp::advance(2)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("pre-key advance + key + post-key advance + capture");
+    let png = result.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     assert_draw_triangle_observed(&bench);
     differs_from_background(&img, 5).expect("frame should still render after key press");
 }
