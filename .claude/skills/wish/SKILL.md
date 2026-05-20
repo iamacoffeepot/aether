@@ -1,6 +1,6 @@
 ---
 name: wish
-description: Adversity-grounded design ideation that drills from a felt absence down through the chain of "I don't know how to produce this yet" until each branch resolves into a producible plan. Each wish carries its alternatives + doors-opened + doors-closed so integration questions are answerable without re-deriving the design space. Output is a directory tree (one wish per file, alternatives as sibling subdirectories), depth unbounded, no header structure imposed. Wishes assume infinite time, finite compute. The accuracy test is the same rails as normal execution — the collapsed plan must compile and pass CI.
+description: Adversity-grounded design ideation that drills from a felt absence down through the chain of "I don't know how to produce this yet" until each branch resolves into a producible plan. Each wish carries its alternatives + doors-opened + doors-closed so integration questions are answerable without re-deriving the design space. Output is a directory tree (one wish per file, alternatives as sibling subdirectories), depth unbounded, no header structure imposed. Wishes assume infinite time, finite compute. Shapes are grounded in current code — every existing surface a wish builds on is grep-confirmed against the crates, not recalled from training, so producibility is real rather than hallucinated. The accuracy test is the same rails as normal execution — the collapsed plan must compile and pass CI.
 ---
 
 # /wish — recursive design through wishing
@@ -30,6 +30,16 @@ Two sources:
 
 Wishes that can't name their adversity source — either a specific data ref or an articulated empathy chain — are imagination, not design. Drop them.
 
+### Wishes ground their shape in real code
+
+A wish's *adversity* says why it exists; its *shape* says what would satisfy it. Adversity is grounded by a data or empathy source (above). The shape must be grounded too — but in the **current code**, not the agent's trained recall of it.
+
+The failure mode: a wish composes its plan from kinds, caps, mailboxes, traits, file paths, or API signatures that don't exist or are misnamed. Producibility *looks* satisfied, but the "known means" were hallucinated, so the collapsed-upward plan can't compile. The operational accuracy-test (compiles + passes CI) catches this only *after* implementation — too late. Ground at ideation time instead.
+
+The rule: **every concrete engine surface a wish claims already exists must be grep-confirmed against current code before it is written into the wish.** Read the file; cite `crate/path` (or `file:line`) for load-bearing references. Prefer code over `CLAUDE.md` and ADRs — docs drift, the crates are authoritative.
+
+The line between checked and invented is sharp: the *existing* pieces a wish builds on are verified facts; the *novel* thing being wished for is the design — invented, that's the point of a wish. "Build a new `X` on top of `aether.fs.read` (verified: `crates/aether-capabilities/src/fs.rs`)" — `aether.fs.read` is grep-confirmed, `X` is the wish. If you can't verify a surface you were about to lean on, that's signal, not a detail: either it doesn't exist (a deeper absence — drill it) or it's named differently (find the real name). Never paper over with a plausible guess. This is the [[verify_names_against_current_code]] discipline applied at design time.
+
 ### Wishes drill toward producibility
 
 At each wish, the agent sketches the shape that would satisfy the wish *at the depth currently occupied* — coarse near the root (system seams, crate-level architecture, ADR revisions), fine deeper down (traits, file formats, mail kinds), finest at leaves (structs, fields, algorithms, pseudocode).
@@ -40,6 +50,8 @@ Then asks: **can I produce this shape with known means within current resources?
 - **No** → articulate the absences. Each absence is a sub-wish, written as its own file in a sub-directory. Recurse on each.
 
 The bottom of the tree is whenever an articulation reaches "I can write this." Don't pad and don't truncate.
+
+**"Known means" are *verified* means** (see *Wishes ground their shape in real code* above): an existing surface the shape composes from counts as a known mean only once it's grep-confirmed in current code. An unverified surface is itself an absence — drill it or find its real name, don't assume it.
 
 ### Plans collapse upward
 
@@ -250,6 +262,8 @@ Read, selective on the theme:
 - `git log --oneline main | head -50`.
 - Empathy material (especially for non-agent roles): general knowledge of how the role works in similar engines/contexts, the user's published vision in memory entries, domain patterns from training.
 
+**For concrete engine surfaces, the code is authoritative.** `CLAUDE.md`, ADRs, and memory orient you to what exists *in spirit*, but they drift. The moment a wish is about to compose on a specific kind / cap / mailbox / trait / path / signature, `grep` the crates (`crates/aether-*/src/`) to confirm the real name and shape before writing it in. Adversity sources tell you *why*; the code tells you *what is actually there* (per *Wishes ground their shape in real code*).
+
 ### 2. Generate roots from adversity
 
 1-3 root wishes from the adversity corpus. Each root names an outcome the role wants to achieve. For non-agent roles, anchor empathy on the user's stated commitments (`project_avatar_commitment`, `project_mmo_vision`, etc.) — empathy from "users in general" produces shapeless wishes.
@@ -352,6 +366,7 @@ The "why rejected as the chosen path" line names which dimension(s) the chosen w
 - Wish for things already producible — those are plans, not wishes; write them directly as the wish's own body.
 - Wish for resource-infeasible shapes — drop or flag.
 - Speculate without grounding — every wish carries data or empathy source.
+- Claim an existing engine surface (kind / cap / mailbox / trait / path / signature) without grep-confirming it against current code. The novel wished thing is invented; the means it builds on are *verified*, never recalled.
 
 ## Failure modes
 
@@ -360,6 +375,7 @@ The "why rejected as the chosen path" line names which dimension(s) the chosen w
 - **`gh` rate-limited**: degrade gracefully, note partial scan.
 - **Producibility check fails for the entire root** (resource-infeasible): mark `producible: false` + `resource_bound: true`; document. Don't drop.
 - **L1 drift** (root reads as workflow not outcome): restate as outcome before drilling.
+- **Unverifiable surface a wish leans on**: don't substitute a plausible name. Either the surface doesn't exist (drill the absence) or it's renamed (grep for the real name). A guessed surface makes producibility a lie.
 - **Children don't compose to satisfy parent**: back up, restate.
 - **`--compare` invoked on a wish with no named alternatives**: write a note in the wish's prose suggesting alternatives, refuse with *"No alternatives named in <wish-path>. Add alternatives in the body and re-invoke."*
 - **`--under` invoked on a path that doesn't exist**: refuse with the valid prior-pass paths.
