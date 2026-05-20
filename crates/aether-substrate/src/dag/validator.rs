@@ -11,7 +11,7 @@
 //!
 //! **Re-scoped 2026-05-20 ("handlers promise nothing about replies").**
 //! Phase 2 dispatchability reads accept-sets from the queryable
-//! [`CapabilityRegistry`](crate::mail::CapabilityRegistry)
+//! [`CapabilityRegistry`]
 //! (iamacoffeepot/aether#1037), *not* the routing registry — the
 //! routing table carries no accept-sets. Phase 3 type-compat checks
 //! only statically-declared output kinds: a `Call`'s output is the
