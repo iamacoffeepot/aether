@@ -18,7 +18,7 @@ use aether_actor::Actor;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
-    FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
+    DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
     InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
     trace::TraceObserverCapability,
 };
@@ -87,6 +87,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_workers(boot.workers)
         .with_actor::<HandleCapability>(())
         .with_actor::<TraceObserverCapability>(())
+        .with_actor::<DagCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
         .with_actor::<FsCapability>(boot.namespace_roots)

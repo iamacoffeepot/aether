@@ -343,3 +343,26 @@ pub enum DagError {
     /// version (ADR-0047 §3/§8 wire-churn-avoiding reuse).
     TooLarge { reason: String },
 }
+
+/// `aether.dag.reap_tick` — internal wake mail for the DAG executor's
+/// reaping sweep (ADR-0047 §7). A sidecar timer thread fires this
+/// (empty-payload) mail at the `aether.dag` mailbox every ~30s so the
+/// executor's reaping runs on its own single-threaded actor thread
+/// (the `DagState` map lives in lock-free actor state — the timer
+/// thread can't touch it directly). Mirrors the `RpcInboundReady` /
+/// `aether.tcp` sidecar-wake pattern: the mail is only the signal.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.dag.reap_tick")]
+pub struct DagReapTick {}
