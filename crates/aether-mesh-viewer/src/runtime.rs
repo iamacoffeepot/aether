@@ -31,12 +31,12 @@
 //! 4. Every `aether.lifecycle.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyTo, Resolver, actor};
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::{FsCapability, InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
+use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -62,6 +62,18 @@ const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
+    /// Reply target of the most recent `aether.mesh.load` request,
+    /// parked across the async `aether.fs.read` round-trip (issue 964).
+    /// `on_load` runs in the requester's reply context; the actual
+    /// parse + cache replace happens later in `on_read_result`, whose
+    /// reply context points at `FsCapability`, not the original
+    /// requester. Stashing the handle here lets the `MeshLoadResult`
+    /// route back to whoever sent the `LoadMesh` (the
+    /// parked-sender pattern; the handle stays valid for the instance
+    /// lifetime per the SDK `ReplyTo` contract). `None` when the load
+    /// was fire-and-forget (no reply target) or when no load is in
+    /// flight.
+    pending_reply: Option<ReplyTo>,
 }
 
 /// Mesh viewer component.
@@ -84,6 +96,7 @@ impl FfiActor for MeshViewer {
     {
         Ok(MeshViewer {
             triangles: Vec::new(),
+            pending_reply: None,
         })
     }
 
@@ -111,18 +124,27 @@ impl FfiActor for MeshViewer {
 
     /// Triggers an asynchronous mesh load. Reply arrives as
     /// `aether.fs.read_result`; the parser is picked from the file
-    /// extension at that point.
+    /// extension at that point. The `aether.mesh.load_result` reply to
+    /// the originator (issue 964) fires once the read settles and the
+    /// parse / mesh outcome is known — see `on_read_result`.
     ///
     /// # Agent
     /// `namespace` is the short prefix with no `://` — `"save"`,
     /// `"assets"`, `"config"`. `path` is relative to the namespace
-    /// root and must end in `.dsl` or `.obj`.
-    // `&mut self` and `msg: LoadMesh` match the dispatch ABI
-    // (ADR-0033 / ADR-0038); the load body delegates straight to
-    // `FsCapability` via `ctx`.
-    #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+    /// root and must end in `.dsl` or `.obj`. Send-and-await the
+    /// `aether.mesh.load_result` reply to learn whether the load
+    /// succeeded (`ok`) and why it didn't (`error`).
+    // `msg: LoadMesh` matches the dispatch ABI (ADR-0033 / ADR-0038);
+    // the load body delegates straight to `FsCapability` via `ctx`.
+    #[allow(clippy::needless_pass_by_value)]
     #[handler]
     fn on_load(&mut self, ctx: &mut FfiCtx<'_>, msg: LoadMesh) {
+        // Park the requester's reply target across the async read.
+        // `on_read_result` answers it with the structured outcome.
+        // Overwriting any prior pending handle is intentional —
+        // loads are serialized through one read round-trip, and a
+        // fresh load supersedes an unanswered prior one.
+        self.pending_reply = ctx.reply_target();
         tracing::info!(
             target: "aether_mesh_viewer",
             namespace = %msg.namespace,
@@ -136,14 +158,27 @@ impl FfiActor for MeshViewer {
     /// `path`'s extension and replaces the cached triangle list on
     /// success. Any failure (read error, non-utf8, parse error,
     /// unknown extension) leaves the previous cache intact, with a
-    /// warn log explaining the failure.
+    /// warn log explaining the failure. Issue 964: after computing the
+    /// outcome, replies `aether.mesh.load_result` to the originator of
+    /// the `aether.mesh.load` request (parked in `on_load`), echoing
+    /// the request's `namespace` + `path` and carrying the structured
+    /// `ok` / `error` verdict so a scenario harness or MCP `send_mail`
+    /// caller has a wire signal instead of having to scrape
+    /// `engine_logs`.
     ///
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler]
-    fn on_read_result(&mut self, _ctx: &mut FfiCtx<'_>, r: ReadResult) {
-        let (path, bytes) = match r {
-            ReadResult::Ok { path, bytes, .. } => (path, bytes),
+    fn on_read_result(&mut self, ctx: &mut FfiCtx<'_>, r: ReadResult) {
+        let (namespace, path, outcome) = match r {
+            ReadResult::Ok {
+                namespace,
+                path,
+                bytes,
+            } => {
+                let outcome = self.load_bytes(&path, &bytes);
+                (namespace, path, outcome)
+            }
             ReadResult::Err {
                 namespace,
                 path,
@@ -156,34 +191,96 @@ impl FfiActor for MeshViewer {
                     error = ?error,
                     "read failed; keeping prior mesh",
                 );
-                return;
+                let outcome = LoadOutcome::failed(format!("read failed: {error:?}"));
+                (namespace, path, outcome)
             }
         };
-        let Ok(text) = str::from_utf8(&bytes) else {
+        self.reply_load_result(ctx, namespace, path, outcome);
+    }
+}
+
+/// The result of a single load attempt, decoupled from where the bytes
+/// came from. `on_read_result` builds one of these, then turns it into
+/// the wire `MeshLoadResult` reply (issue 964). A failed load reports
+/// `error: Some(_)` and leaves the cache untouched; a succeeded load
+/// reports `error: None` and may carry non-fatal `warnings` (none are
+/// produced today — diagnostic content is a sibling issue — but the
+/// shape is plumbed so it rides along once the content lands).
+struct LoadOutcome {
+    error: Option<String>,
+    warnings: Vec<String>,
+}
+
+impl LoadOutcome {
+    fn ok() -> Self {
+        Self {
+            error: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn failed(error: String) -> Self {
+        Self {
+            error: Some(error),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+impl MeshViewer {
+    /// Parse `bytes` for `path`, replacing the cached triangle list on
+    /// success and leaving it intact on any failure. Returns the
+    /// structured outcome for the `MeshLoadResult` reply.
+    fn load_bytes(&mut self, path: &str, bytes: &[u8]) -> LoadOutcome {
+        let Ok(text) = str::from_utf8(bytes) else {
             tracing::warn!(
                 target: "aether_mesh_viewer",
                 path = %path,
                 "mesh file is not valid UTF-8; keeping prior mesh",
             );
-            return;
+            return LoadOutcome::failed("mesh file is not valid UTF-8".to_string());
         };
         let lower = path.rsplit('.').next().map(str::to_ascii_lowercase);
         if lower.as_deref() == Some("dsl") {
-            self.try_replace_dsl(text);
+            self.try_replace_dsl(text)
         } else if lower.as_deref() == Some("obj") {
-            self.try_replace_obj(text);
+            self.try_replace_obj(text)
         } else {
             tracing::warn!(
                 target: "aether_mesh_viewer",
                 path = %path,
                 "unsupported file extension; expected .dsl or .obj",
             );
+            LoadOutcome::failed("unsupported file extension; expected .dsl or .obj".to_string())
         }
     }
-}
 
-impl MeshViewer {
-    fn try_replace_dsl(&mut self, dsl: &str) {
+    /// Build and dispatch the `aether.mesh.load_result` reply to the
+    /// parked requester. No-op when no reply target was parked (the
+    /// load was fire-and-forget). Clears the parked handle either way
+    /// so a stale target can't leak into a later load's reply.
+    fn reply_load_result(
+        &mut self,
+        ctx: &mut FfiCtx<'_>,
+        namespace: String,
+        path: String,
+        outcome: LoadOutcome,
+    ) {
+        if let Some(sender) = self.pending_reply.take() {
+            ctx.reply_to(
+                sender,
+                &MeshLoadResult {
+                    ok: outcome.error.is_none(),
+                    namespace,
+                    path,
+                    error: outcome.error,
+                    warnings: outcome.warnings,
+                },
+            );
+        }
+    }
+
+    fn try_replace_dsl(&mut self, dsl: &str) -> LoadOutcome {
         let ast = match aether_mesh::parse(dsl) {
             Ok(ast) => ast,
             Err(error) => {
@@ -192,7 +289,7 @@ impl MeshViewer {
                     error = %error,
                     "DSL parse failed; keeping prior mesh",
                 );
-                return;
+                return LoadOutcome::failed(format!("DSL parse failed: {error}"));
             }
         };
         let polygons = match aether_mesh::mesh_polygons(&ast) {
@@ -203,7 +300,7 @@ impl MeshViewer {
                     error = %error,
                     "DSL mesh build failed; keeping prior mesh",
                 );
-                return;
+                return LoadOutcome::failed(format!("DSL mesh build failed: {error}"));
             }
         };
         let mut out = Vec::new();
@@ -222,9 +319,10 @@ impl MeshViewer {
             "DSL load complete; cache replaced",
         );
         self.triangles = out;
+        LoadOutcome::ok()
     }
 
-    fn try_replace_obj(&mut self, obj: &str) {
+    fn try_replace_obj(&mut self, obj: &str) -> LoadOutcome {
         match parse_obj(obj) {
             Ok(tris) => {
                 tracing::info!(
@@ -233,12 +331,16 @@ impl MeshViewer {
                     "OBJ load complete; cache replaced",
                 );
                 self.triangles = tris;
+                LoadOutcome::ok()
             }
-            Err(error) => tracing::warn!(
-                target: "aether_mesh_viewer",
-                error = ?error,
-                "OBJ parse failed; keeping prior mesh",
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_mesh_viewer",
+                    error = ?error,
+                    "OBJ parse failed; keeping prior mesh",
+                );
+                LoadOutcome::failed(format!("OBJ parse failed: {error:?}"))
+            }
         }
     }
 }

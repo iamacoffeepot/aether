@@ -20,7 +20,7 @@
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
 use aether_mesh_viewer::LoadMesh;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -260,4 +260,93 @@ fn parse_failure_keeps_prior_mesh() {
     let img = decode_png(png).expect("decode capture png");
     differs_from_background(&img, 5)
         .expect("cached mesh should remain visible after parse failure");
+}
+
+/// Issue 964 acceptance: a good-DSL load replies `aether.mesh.load_result`
+/// with `ok: true`, no `error`, and no `warnings`, echoing the request's
+/// `namespace` + `path`. `send_and_await` blocks through the async
+/// `aether.fs.read` round-trip until the structured reply lands, so the
+/// reply is the wire signal a harness reads instead of inferring success
+/// from rendered geometry.
+#[test]
+fn good_dsl_load_replies_ok() {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+        return;
+    };
+    let sandbox = init_save_sandbox("mesh-viewer");
+    let path = write_fixture("reply_good.dsl", BOX_DSL);
+
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+    load_viewer(&mut bench, &wasm_path);
+
+    let result = bench
+        .execute(vec![(
+            "load_mesh",
+            BenchOp::send_and_await(
+                component_address(),
+                &LoadMesh {
+                    namespace: "save".to_owned(),
+                    path: path.clone(),
+                },
+            ),
+        )])
+        .expect("load + reply");
+
+    let reply = result
+        .reply::<MeshLoadResult>("load_mesh")
+        .expect("decode MeshLoadResult");
+    assert!(reply.ok, "good DSL should load: {:?}", reply.error);
+    assert!(reply.error.is_none(), "good load carries no error");
+    assert!(
+        reply.warnings.is_empty(),
+        "good load carries no warnings; got {:?}",
+        reply.warnings,
+    );
+    assert_eq!(reply.namespace, "save", "reply echoes request namespace");
+    assert_eq!(reply.path, path, "reply echoes request path");
+}
+
+/// Issue 964 acceptance: a bad-DSL load replies `aether.mesh.load_result`
+/// with `ok: false` and `error.is_some()`. The prior cache (none here)
+/// is untouched; the failure surfaces on the wire rather than only in
+/// `engine_logs`.
+#[test]
+fn bad_dsl_load_replies_err() {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+        return;
+    };
+    let sandbox = init_save_sandbox("mesh-viewer");
+    let path = write_fixture("reply_bad.dsl", BAD_DSL);
+
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+    load_viewer(&mut bench, &wasm_path);
+
+    let result = bench
+        .execute(vec![(
+            "load_mesh",
+            BenchOp::send_and_await(
+                component_address(),
+                &LoadMesh {
+                    namespace: "save".to_owned(),
+                    path: path.clone(),
+                },
+            ),
+        )])
+        .expect("load + reply");
+
+    let reply = result
+        .reply::<MeshLoadResult>("load_mesh")
+        .expect("decode MeshLoadResult");
+    assert!(!reply.ok, "bad DSL should not load");
+    assert!(reply.error.is_some(), "bad load carries a failure reason");
+    assert_eq!(reply.namespace, "save", "reply echoes request namespace");
+    assert_eq!(reply.path, path, "reply echoes request path");
 }

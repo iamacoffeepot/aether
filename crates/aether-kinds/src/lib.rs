@@ -1022,6 +1022,7 @@ mod engine {
 }
 
 mod control_plane {
+    use alloc::collections::BTreeMap;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -1513,6 +1514,70 @@ mod control_plane {
             prefix: String,
             error: FsError,
         },
+    }
+
+    // Mesh-viewer structured load replies (issue 964). The mesh-viewer
+    // component's `aether.mesh.load` was fire-and-forget — failures
+    // warn-logged and the prior cache stayed, with no wire signal a
+    // scenario harness or MCP `send_mail` caller could read. These two
+    // reply kinds give the load path the same structured Ok/Err shape
+    // the `aether.fs.*_result` family carries (ADR-0041), echoing the
+    // request's `namespace` + `path` for correlation per the
+    // explicit-nulls convention (every `Option` addressed, never an
+    // absent field).
+    //
+    // Flat-struct shape (`ok: bool` + `error: Option<String>`) rather
+    // than an Ok/Err enum so a caller reads success/failure off one
+    // field without matching a variant, and so `warnings` rides along
+    // on a successful load (e.g. a clamped sphere subdivision) without
+    // forcing a third variant. The diagnostic *content* of `error` /
+    // `warnings` is a sibling issue — this kind ships only the shape.
+
+    /// `aether.mesh.load_result` — reply to `aether.mesh.load`
+    /// (`aether_mesh_viewer::LoadMesh`). Echoes the request's
+    /// `namespace` + `path` so the caller correlates the reply to its
+    /// source without a pending-op queue — operation identity comes
+    /// from the reply kind, target identity from the echoed fields.
+    /// `ok` is the single success/failure read; `error` is `Some` iff
+    /// `ok` is false (read / utf-8 / parse / mesh / unknown-extension
+    /// failure); `warnings` carries non-fatal notes (e.g. an
+    /// auto-clamped sphere subdivision) on an otherwise-successful
+    /// load. Whole-mesh atomic-replace semantics are preserved: a
+    /// failed load leaves the prior cached triangles intact.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.load_result")]
+    pub struct MeshLoadResult {
+        pub ok: bool,
+        pub namespace: String,
+        pub path: String,
+        pub error: Option<String>,
+        pub warnings: Vec<String>,
+    }
+
+    /// `aether.scene.load_result` — reply to a future `aether.scene.load`
+    /// (issue 964 ships the reply shape ahead of the multi-instance
+    /// scene loader; the wire is the bottleneck its sibling issues fill).
+    /// Echoes the request's `namespace` + `path`. Whole-scene
+    /// atomic-replace semantics are preserved — `ok` is the overall
+    /// verdict, `instances_loaded` counts the instances that landed,
+    /// and `instance_errors` maps each failed instance name to its
+    /// failure reason so a partial scene is diagnosable per-instance.
+    /// `error` carries a whole-scene failure (e.g. the scene file
+    /// itself failed to read / parse) distinct from the per-instance
+    /// `instance_errors`. `BTreeMap` rather than `HashMap` because
+    /// `aether-kinds` is `no_std` + `alloc` and the `Schema` derive
+    /// encodes `BTreeMap` as `SchemaType::Map` (it rejects `HashMap`);
+    /// the keyed-by-instance-name semantics are identical.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.scene.load_result")]
+    pub struct SceneLoadResult {
+        pub ok: bool,
+        pub namespace: String,
+        pub path: String,
+        pub error: Option<String>,
+        pub instance_errors: BTreeMap<String, String>,
+        pub instances_loaded: u32,
+        pub warnings: Vec<String>,
     }
 
     // ADR-0043 substrate HTTP egress. One request kind + one reply
@@ -2076,9 +2141,13 @@ mod tests {
         assert_eq!(Camera::NAME, "aether.camera");
         // ADR-0066: aether.camera.{create,destroy,set_active,set_mode,
         // orbit.set,topdown.set} kind-name asserts live in
-        // `aether-camera`'s tests; aether.mesh.load lives in
-        // `aether-mesh-viewer`'s tests. The view-proj sink contract
-        // (`aether.camera`) stays here as a chassis primitive.
+        // `aether-camera`'s tests; the `aether.mesh.load` *request*
+        // lives in `aether-mesh-viewer`'s tests. The view-proj sink
+        // contract (`aether.camera`) stays here as a chassis primitive.
+        // The structured load *reply* kinds (issue 964) live in this
+        // crate, so their names are pinned here.
+        assert_eq!(MeshLoadResult::NAME, "aether.mesh.load_result");
+        assert_eq!(SceneLoadResult::NAME, "aether.scene.load_result");
         assert_eq!(NoteOn::NAME, "aether.audio.note_on");
         assert_eq!(NoteOff::NAME, "aether.audio.note_off");
         assert_eq!(SetMasterGain::NAME, "aether.audio.set_master_gain");
