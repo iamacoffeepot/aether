@@ -197,8 +197,8 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // Capture's `run_frame` runs with `dispatch_tick=false`, so the
     // probe won't auto-tick during the captured frame. The pre-mail
     // bundle wires it up manually: set_render flips state to "visible
-    // red", and a synthesised `aether.tick` immediately drives the
-    // probe's on_tick to emit a `DrawTriangle` into the bench's
+    // red", and a synthesised `aether.lifecycle.tick` immediately drives
+    // the probe's on_tick to emit a `DrawTriangle` into the bench's
     // frame_vertices buffer right before the GPU readback.
     let pre = vec![
         envelope(
@@ -212,7 +212,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
         ),
         MailEnvelope {
             recipient_name: probe_address(),
-            kind_name: "aether.tick".to_owned(),
+            kind_name: "aether.lifecycle.tick".to_owned(),
             payload: Vec::new(),
             count: 1,
         },
