@@ -54,8 +54,8 @@ pub mod tagged_id;
 pub mod transform;
 pub mod wire_id;
 pub use hash::{
-    KIND_DOMAIN, MAILBOX_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed,
-    mailbox_id_from_name,
+    HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN,
+    content_addressed_handle_id, fnv1a_64_bytes, fnv1a_64_prefixed, mailbox_id_from_name,
 };
 pub use transform::{InvokeFn, TransformError};
 #[cfg(not(target_arch = "wasm32"))]
