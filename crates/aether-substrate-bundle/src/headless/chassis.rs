@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    ComponentHostConfig, HeadlessRenderCapability, HeadlessWindowCapability, InputConfig,
-    UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, ComponentHostConfig, GeminiConfig, HeadlessRenderCapability,
+    HeadlessWindowCapability, InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
@@ -59,6 +60,12 @@ impl Chassis for HeadlessChassis {
 pub struct HeadlessEnv {
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConf,
+    /// ADR-0050 `aether.anthropic` cap config (issue 1014). Resolved
+    /// from `ANTHROPIC_API_KEY` + `AETHER_ANTHROPIC_*`.
+    pub anthropic: AnthropicConfig,
+    /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
+    /// `GOOGLE_API_KEY` + `AETHER_GEMINI_*`.
+    pub gemini: GeminiConfig,
     pub tick_period: Duration,
     /// Issue 763 P2: optional `aether.rpc.server` bind address.
     /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
@@ -79,6 +86,8 @@ impl HeadlessEnv {
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
         let http = HttpConf::from_env();
+        let anthropic = AnthropicConfig::from_env();
+        let gemini = GeminiConfig::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let tick_hz = parse_tick_hz_env();
         let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
@@ -90,6 +99,8 @@ impl HeadlessEnv {
         Self {
             namespace_roots,
             http,
+            anthropic,
+            gemini,
             tick_period,
             rpc_addr,
             workers,
@@ -138,6 +149,8 @@ impl HeadlessChassis {
         let HeadlessEnv {
             namespace_roots,
             http,
+            anthropic,
+            gemini,
             tick_period,
             rpc_addr,
             workers,
@@ -223,6 +236,8 @@ impl HeadlessChassis {
             component_host_config,
             namespace_roots,
             http,
+            anthropic,
+            gemini,
         };
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);

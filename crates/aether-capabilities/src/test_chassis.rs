@@ -13,7 +13,9 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
+use aether_data::Kind;
 use aether_kinds::descriptors;
 use aether_substrate::actor::native::{NativeActor, NativeDispatch};
 use aether_substrate::chassis::Chassis;
@@ -23,6 +25,7 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::Registry;
+use serde::de::DeserializeOwned;
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
@@ -96,4 +99,31 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
     let store = Arc::new(HandleStore::new(1024 * 1024));
     let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
     (mailer, rx)
+}
+
+/// Drain egress until a `ToSession` reply of kind `K` arrives, decoding
+/// it via postcard. Skips non-`ToSession` events and replies of other
+/// kinds — the content-gen caps spawn a real ephemeral dispatch thread
+/// whose loopback mail (to an unregistered stand-in mailbox in
+/// `new_for_test`) bubbles up as a non-`ToSession` egress, so a cap
+/// test that drives the actual re-reply via `on_*_result` reads past
+/// the bubble-up to the `ToSession` re-reply. Shared by the
+/// `aether.anthropic` / `aether.gemini` test modules.
+pub fn decode_session_reply<K>(rx: &Receiver<EgressEvent>) -> K
+where
+    K: Kind + DeserializeOwned,
+{
+    loop {
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test: egress event arrives within deadline");
+        if let EgressEvent::ToSession {
+            kind_name, payload, ..
+        } = event
+            && kind_name == K::NAME
+        {
+            return postcard::from_bytes(&payload)
+                .expect("test: reply payload decodes via postcard");
+        }
+    }
 }

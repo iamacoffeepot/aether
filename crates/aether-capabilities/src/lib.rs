@@ -25,11 +25,26 @@
 //! [`NativeActor`]: aether_substrate::actor::native::NativeActor
 //! [`Actor`]: aether_actor::Actor
 
+// `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
+// only — embeds the native-only contentgen dispatch helper and makes
+// blocking ureq / subprocess calls.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anthropic;
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod component;
+// Shared content-gen infrastructure (ADR-0050 §2). Native-only — the
+// dispatch helper, staging, and adapter traits all lean on the
+// substrate runtime (`Mailer`, `LocalFileAdapter`), so the module
+// elides cleanly on the wasm-component build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod contentgen;
 pub mod engine;
 pub mod fs;
+// `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
+// for the same reason as `anthropic`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gemini;
 pub mod handle;
 pub mod http;
 pub mod input;
@@ -48,7 +63,18 @@ pub mod window;
 pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
+// ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
+// part of the same native-only module.
+#[cfg(not(target_arch = "wasm32"))]
+pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::ComponentHostCapability;
+// ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
+// provider caps (issue 1014 / 1015) embed these.
+#[cfg(not(target_arch = "wasm32"))]
+pub use contentgen::{
+    AnthropicAdapter, BlockingCall, GeminiAdapter, InFlightDispatch, StubAnthropicAdapter,
+    StubGeminiAdapter, stage_gen_output,
+};
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). It re-exports only on the native
 // target — wasm-component consumers see the cap stub via
@@ -67,6 +93,9 @@ pub use input::InputCapability;
 pub use input::InputConfig;
 
 pub use fs::FsCapability;
+// ADR-0050 `aether.gemini` cap (issue 1015).
+#[cfg(not(target_arch = "wasm32"))]
+pub use gemini::{GeminiCapability, GeminiConfig};
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;
 #[cfg(feature = "render")]

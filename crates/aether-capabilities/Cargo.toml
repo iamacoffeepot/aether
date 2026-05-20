@@ -38,9 +38,11 @@ native = [
     "dep:bytemuck",
     "dep:dirs",
     "dep:postcard",
+    "dep:serde_json",
     "dep:tracing",
     "dep:ureq",
     "dep:url",
+    "dep:uuid",
     "dep:wasmtime",
 ]
 
@@ -76,9 +78,18 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 bytemuck = { version = "1.19", optional = true }
 dirs = { version = "6", optional = true }
 postcard = { version = "1.1", optional = true, features = ["alloc"] }
+# JSON request/response bodies for the content-gen provider APIs
+# (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
+serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
+# `v4` random-name generation for `save://gen/<uuid>.{png,wav}` output
+# staging (ADR-0050). `aether-data` pulls `uuid` with `serde`-only
+# features for its `Uuid` wire type; the staging helper needs the
+# random `v4` constructor, hence a direct dep here (issue 1013 §Side
+# findings — direct-dep keeps `aether-data`'s no_std/alloc posture clean).
+uuid = { version = "1", optional = true, features = ["v4"] }
 # wasmtime is reached for by ComponentHostCapability (issue 603 +
 # issue 638 phase 3 rename) — the cap holds the Engine/Linker/Module
 # the substrate previously held in its `ControlPlane` struct. Same
