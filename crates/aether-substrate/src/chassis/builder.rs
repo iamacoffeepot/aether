@@ -35,6 +35,7 @@ use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
+use crate::mail::capability::MailboxCaps;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -545,7 +546,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // (empty) covers any cap the macro didn't touch.
         ctx.mail_send_handle().capability_registry().register(
             resources.mailbox_id,
-            crate::mail::MailboxCaps::from_component_capabilities(&A::__aether_capabilities()),
+            MailboxCaps::from_component_capabilities(&A::__aether_capabilities()),
         );
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.

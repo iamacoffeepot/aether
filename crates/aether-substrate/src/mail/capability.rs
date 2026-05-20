@@ -152,7 +152,7 @@ mod tests {
                     doc: None,
                 })
                 .collect(),
-            fallback: fallback.then(|| FallbackCapability { doc: None }),
+            fallback: fallback.then_some(FallbackCapability { doc: None }),
             doc: None,
         }
     }

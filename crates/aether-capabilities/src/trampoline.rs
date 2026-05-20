@@ -88,6 +88,7 @@ mod native {
     use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
     use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::capability::MailboxCaps;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
@@ -390,7 +391,7 @@ mod native {
             // sees the new accept-set immediately.
             self.mailer.capability_registry().register(
                 self.mailbox,
-                aether_substrate::mail::MailboxCaps::from_component_capabilities(&capabilities),
+                MailboxCaps::from_component_capabilities(&capabilities),
             );
 
             ReplaceResult::Ok { capabilities }

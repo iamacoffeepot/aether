@@ -42,7 +42,7 @@ use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
     SubstrateBoot,
     capture::CaptureQueue,
-    mail::{Mail, MailId, MailboxId},
+    mail::{CapabilityRegistry, Mail, MailId, MailboxId},
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -386,7 +386,7 @@ impl TestBench {
     /// integration tests that exercise the registry through a real
     /// component-load lifecycle.
     #[must_use]
-    pub fn capability_registry(&self) -> &Arc<aether_substrate::mail::CapabilityRegistry> {
+    pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         self.queue.capability_registry()
     }
 

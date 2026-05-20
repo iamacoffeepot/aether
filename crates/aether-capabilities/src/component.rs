@@ -113,6 +113,7 @@ mod native {
     use aether_substrate::actor::wasm::component::ComponentCtx;
     use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::capability::MailboxCaps;
     use aether_substrate::mail::helpers::register_or_match_all;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -313,7 +314,7 @@ mod native {
             // clears.
             self.mailer.capability_registry().register(
                 mailbox_id,
-                aether_substrate::mail::MailboxCaps::from_component_capabilities(&capabilities),
+                MailboxCaps::from_component_capabilities(&capabilities),
             );
 
             // ADR-0081 retired the chassis-pushed `ConfigureLogDrain`

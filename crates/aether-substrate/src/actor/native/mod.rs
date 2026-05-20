@@ -196,13 +196,14 @@ pub trait NativeDispatch: Send + 'static {
     /// macro overrides this to enumerate the cap's handlers + fallback,
     /// the always-on native counterpart of a wasm component's
     /// `aether.kinds.inputs` manifest. The native-cap-boot path reads
-    /// it to populate the [`CapabilityRegistry`]
-    /// (`crate::mail::CapabilityRegistry`), so a native cap (e.g.
+    /// it to populate the [`CapabilityRegistry`](crate::mail::CapabilityRegistry),
+    /// so a native cap (e.g.
     /// `aether.fs`) is queryable for dispatchability just like a loaded
     /// wasm component. Default is an empty surface — only the
     /// (`name` / `doc`-dropping) handler ids + fallback flag are
     /// load-bearing here; reply kinds are deliberately absent (handlers
     /// promise nothing about replies).
+    #[must_use]
     fn __aether_capabilities() -> ComponentCapabilities
     where
         Self: Sized,
