@@ -9,9 +9,9 @@
 //! enabling chassis main loops to drive the lifecycle cadence by mail
 //! without per-stage hand-rolled glue.
 //!
-//! See ADR-0082 for the full design. PR 2 of the migration ships the
-//! core types and synthetic-chassis tests; PR 3 wires the driver into
-//! production chassis main loops, PR 4 renames `aether.tick` into the
+//! See ADR-0082 for the full design. PR 2 of the migration shipped the
+//! core types and synthetic-chassis tests; PR 3 wired the driver into
+//! production chassis main loops; PR 4 renamed `aether.tick` into the
 //! `aether.lifecycle.*` family.
 
 mod driver;

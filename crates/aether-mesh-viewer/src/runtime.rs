@@ -28,7 +28,7 @@
 //! 3. On reply, the cached triangle list is replaced atomically. Any
 //!    parse or mesh failure leaves the prior cache intact (silent
 //!    drop; errors surface via `engine_logs`).
-//! 4. Every `aether.tick` re-emits the cached triangles to
+//! 4. Every `aether.lifecycle.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};

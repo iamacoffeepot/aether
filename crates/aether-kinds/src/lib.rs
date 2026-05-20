@@ -27,8 +27,16 @@ use bytemuck::{Pod, Zeroable};
 // `aether.kinds` section carries and the `LABEL_NODE` sidecar — so
 // it's load-bearing on every build, not an optional enrichment.
 
-/// Per-frame signal from the substrate's frame loop. Empty payload —
-/// elapsed-time is parked until a subscriber actually needs it.
+// ADR-0082 lifecycle stage kinds. Empty payload — the broadcast is the
+// signal. Future revisions may add per-stage fields (frame_no on Tick,
+// vp matrix on Render) once stage payload semantics settle; v1 keeps
+// the wire shape minimal so the application-declared graph can drive
+// stage timing without committing to a fixed payload schema.
+
+/// Per-frame lifecycle stage (ADR-0082 §11). Empty payload —
+/// elapsed-time is parked until a subscriber actually needs it. The
+/// kind moved from `aether.tick` into the `aether.lifecycle.*` family
+/// in PR 4 so the lifecycle stage vocabulary reads as one namespace.
 ///
 /// ADR-0033 handler dispatch (`#[actor]` synthesized
 /// `__aether_dispatch`) decodes every typed handler via
@@ -48,16 +56,8 @@ use bytemuck::{Pod, Zeroable};
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.tick")]
+#[kind(name = "aether.lifecycle.tick")]
 pub struct Tick;
-
-// ADR-0082 lifecycle stage kinds. Empty payload — the broadcast is the
-// signal. Future revisions may add per-stage fields (frame_no on Tick,
-// vp matrix on Render) once stage payload semantics settle; v1 keeps
-// the wire shape minimal so the application-declared graph can drive
-// stage timing without committing to a fixed payload schema. The
-// existing `aether.tick` kind above stays in place for PR-4-deferred
-// renaming; the new kinds below add the rest of the lifecycle family.
 
 /// Lifecycle stage broadcast — capability init pass (ADR-0082 §5).
 /// Fires once at chassis boot, after every capability's actor-framework
@@ -2030,7 +2030,7 @@ mod tests {
 
     #[test]
     fn kind_names_are_stable() {
-        assert_eq!(Tick::NAME, "aether.tick");
+        assert_eq!(Tick::NAME, "aether.lifecycle.tick");
         assert_eq!(InitCaps::NAME, "aether.lifecycle.init_caps");
         assert_eq!(InitComponents::NAME, "aether.lifecycle.init_components");
         assert_eq!(Render::NAME, "aether.lifecycle.render");
