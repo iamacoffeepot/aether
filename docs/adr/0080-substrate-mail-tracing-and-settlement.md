@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-05-09
+- **Revised:** 2026-05-20 (iamacoffeepot/aether#1031) — §6 settlement-reliability resolution. The deferred "one-batch quiescence window" follow-on (§6) was explored for the first non-idempotent consumer — the DAG `Call` node's bundle-close (ADR-0047) — and **rejected** in favour of an explicit **hold contract**: a handler that will send chain mail after it returns holds a `SettlementHold` on the root until its last send (synchronous in-handler replies need nothing — their `Sent` precedes their `Finished`; `spawn_inherit` workers hold automatically). Under that contract `(in_flight == 0 && held_open == 0)` is an **exact** settlement signal — the counter does not transiently reach zero with work still coming — so `Settled` fires once and is not merely a hint. The window would not have worked anyway: it is redundant for synchronous replies and cannot bridge a multi-second async reply. See §6's amended resolution.
 
 ## Context
 
@@ -113,6 +114,14 @@ Rather than enforce a producer-side "Sent before enqueue" ordering invariant (wh
 - Gate consumers (chassis Tick gate, lifecycle gates, `replace_component` drain) are written to be idempotent: first `Settled` unblocks the gate; duplicate `Settled` is a no-op. None of them destroy state on first `Settled` — they only unblock waiters. Late events landing under the new chain (which has a different root MailId) cannot mix in.
 
 Optional follow-ons if telemetry shows spurious fires are common enough to matter: a one-batch quiescence window at the observer (fire only after `counter[root]` has been zero for one batch interval), or generation numbers on `Settled` so consumers can reason about replay. Both deferred past v1.
+
+**Resolution (2026-05-20, iamacoffeepot/aether#1031).** The quiescence-window follow-on was not taken. The first consumer that cannot be idempotent — the DAG `Call` node, whose output `Bundle` *closes* on `Settled` (a destructive, un-repeatable act, ADR-0047) — forced the question, and the answer is an explicit **hold contract** rather than a timing window:
+
+- A handler that will send chain mail (a reply or follow-up) **after it returns** holds a `SettlementHold` on the root until its last such send. The guard pushes `HoldOpen` on acquire (before the handler's `Finished`) and `Release` on drop, so `held_open` keeps the chain open across the deferred work.
+- Synchronous in-handler replies need no hold: the reply's `Sent` is pushed before the handler's `Finished` on the same thread (per-producer FIFO), so the counter never transiently reaches zero with a reply still coming.
+- `spawn_inherit` workers acquire the hold automatically (the parent thread pushes `HoldOpen` before the worker starts, per §12); a two-hop deferred path (worker → cap → re-reply) holds an explicit guard in actor state that outlives the worker thread (the content-gen caps' spawn-and-die dispatch, fixed in iamacoffeepot/aether#1031).
+
+Under the contract, `(in_flight == 0 && held_open == 0)` is **exact**: `Settled` fires once, never early. The transient-zero scenario described above arises in practice only from deferred work that fails to hold — which the contract forbids. The idempotent-consumer guidance below still holds for the existing gate consumers (cheap insurance, and a duplicate `Settled` is harmless to an unblock-only gate), but a consumer that *destroys* state on `Settled` — the `Call` bundle-close — relies on the exactness the contract provides, not on idempotency.
 
 ### 7. Trace events are detached — the tracing layer is meta
 
