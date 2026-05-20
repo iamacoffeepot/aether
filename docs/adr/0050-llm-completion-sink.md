@@ -1,254 +1,279 @@
-# ADR-0050: LLM completion sink
+# ADR-0050: Per-provider content-gen caps
 
 - **Status:** Proposed
 - **Date:** 2026-04-25
+- **Revised:** 2026-05-19 (iamacoffeepot/aether#1001) — rewritten from a single `llm` sink to per-provider caps (`aether.anthropic`, `aether.gemini`) with per-API kinds, matching iamacoffeepot/aether#989. CLI is now a sibling kind; media outputs return file paths; retired broadcast-sink cost telemetry removed (issue #775).
 
 ## Context
 
-The substrate today ships five sinks: render, camera, audio, io (ADR-0041), and net (ADR-0043). Each owns a peripheral or boundary the substrate's components shouldn't touch directly. ADR-0046's content-generation pipeline pattern names a sixth required sink: an LLM completion endpoint. Pipelines that frame, distill, scrub, translate, or compose text via Claude / GPT / local model dispatch their LLM calls through the substrate, identical to how they'd dispatch a file write or an HTTPS fetch.
+ADR-0046's content-generation pipeline pattern depends on a missing primitive: caps that call provider APIs. Pipelines that frame, distill, scrub, translate, compose text, or generate images and music dispatch those provider calls through the substrate, identical to how they'd dispatch a file write (ADR-0041) or an HTTPS fetch (ADR-0043). The DAG cluster (ADR-0045/0047/0048/0049) gives that dispatch caching + provenance for free; these caps close the loop by giving the pipeline its main paid-call dispatchers under the same primitives.
 
-`spikes/prompt-pipeline-spike/` validated the call shape against `claude -p` as a subprocess. Each call composes a prompt, dispatches via `Command::new("claude").arg("-p").arg(prompt).args(["--model", model])`, captures stdout, and content-addresses the cache by `(prompt, model, template-hash)`. The shape held across five experimental runs and worked uniformly across Haiku / Sonnet / Opus model variants. The data-flow shape — request with `(prompt, model)`, reply with `text`, optional cost / latency fields — is well-understood. What's open is the *substrate-side* engineering: mail kinds, adapter dispatch, credential management, capability gating, observability.
+The original framing of this ADR (2026-04-25) was a single `"llm"` sink with a model-prefix adapter registry routing both text and image generation through one `aether.llm.complete` kind whose reply was `Ok { text, ... }`. Three things made that shape wrong:
 
-The deployment context for v1 is **Claude via subscription, dispatched through the local `claude` CLI** — *not* direct Anthropic API access. Subscription billing means there is no API key budget for routine development workflows; every Claude call has to flow through the CLI. HTTP-based providers (Gemini for image generation, future API-budgeted Claude / OpenAI usage) coexist as separate adapter shapes, but the subprocess adapter is the load-bearing v1 path, not a peer of HTTP.
+- **Provider APIs are products, not interchangeable backends behind a model string.** Auth is per-provider (`ANTHROPIC_API_KEY` vs `GOOGLE_API_KEY`), rate limits are sometimes per-provider, and each surface has quirks — Anthropic's `system` field is meaningless to a Gemini image request; Nano Banana's `aspect_ratio` is meaningless to an Anthropic messages request. Squeezing them through one kind forces `Option<everything>` schemas, the smell that says you're abstracting at the wrong layer.
+- **Image generation can't be a text-completion reply.** Routing image gen through an `Ok { text }` reply is a real modeling bug — the reply shape can't carry a PNG. Media outputs are file paths, not text.
+- **The original cost-telemetry surface no longer exists.** ADR-0050 published `aether.observation.llm_cost` to the broadcast sink every 30s. The broadcast sink and the entire `aether.observation.*` family retired in issue #775. That telemetry path is gone.
 
-Two design pressures:
+The deployment context for v1 is unchanged and load-bearing: **the user's Claude access is the local `claude` CLI driven by a subscription** — *not* direct Anthropic API access. Subscription billing means there's no API-key budget for routine development workflows; the CLI path has to be a first-class call surface, not a fallback. HTTP-based providers (Gemini for image + music generation, future API-budgeted Claude / OpenAI usage) coexist; the subprocess path is a peer, not a hidden routing detail.
 
-- **Adapter neutrality across mechanism.** Different providers expose different surfaces. The user's Claude access is CLI-only (subscription, no API budget). Gemini is HTTP-only (no CLI). Future providers (OpenAI, Ollama, enterprise gateway) will be HTTP. The sink contract abstracts the mechanism behind a `model` string dispatched through an adapter registry, parallel to ADR-0041's `AdapterRegistry`. v1 ships subprocess as the default, HTTP-Gemini as a loadable adapter for image-gen workflows, and HTTP-Anthropic as an optional adapter for deployments that have configured API access.
-- **Cost observability.** LLM calls are the most expensive routine operation in any content pipeline. The substrate is the right place to log per-call cost — model, input tokens, output tokens, wall-clock — because the substrate sees every dispatch. Application-side cost tracking would have to instrument every component. Subscription-billed CLI calls can't surface per-call cost (the CLI doesn't know subscription pricing); HTTP adapters can, since the API responses include token counts.
-
-This ADR commits to the LLM sink mail surface, the adapter model, the v1 backends, credential and capability handling, and the observability surface. Streaming, vision/multimodal, and structured output are deferred to follow-up ADRs.
+This ADR commits to the per-provider cap mail surface, the per-cap adapter model, the v1 backends, the versioning policy, credential handling, and the observability surface — matching iamacoffeepot/aether#989, which implements it. Streaming, vision/multimodal, embeddings, and structured output are deferred to follow-up ADRs.
 
 ## Decision
 
+The single `"llm"` sink is replaced by **one cap per provider, one kind per API.** v1 ships two caps:
+
+- **`aether.anthropic`** — text completion via the official Messages API (HTTPS) *and* the local `claude` CLI subprocess, as explicit sibling kinds.
+- **`aether.gemini`** — media generation only: image (Nano Banana) + music (Lyria). No text completion, no embeddings (the user defaults to Claude CLI for text; embeddings deferred until a use case appears).
+
+Each cap owns provider-scoped state: auth, rate-limit budget, and its client / subprocess slot. Adding a provider (`aether.openai`, `aether.suno`, `aether.runway`) is a new cap; existing caps don't churn.
+
 ### 1. Mail surface
 
-The substrate exposes one new sink, `"llm"`, with three request kinds and three corresponding reply kinds:
+#### `aether.anthropic`
+
+Two request kinds with identical input/output schemas, different routing — the caller picks the routing by picking the kind:
 
 ```rust
-aether.llm.complete         { model, prompt, max_tokens?, temperature?, system?, stop_sequences? }
-aether.llm.list_models      { /* empty */ }
-aether.llm.cancel           { request_id }
+aether.anthropic.messages.send { request_id, model, messages, max_tokens?, temperature?, system? }
+aether.anthropic.cli.send      { request_id, model, messages, max_tokens?, temperature?, system? }
 
-aether.llm.complete_result  : Ok  { text, model, usage, request_id }
-                            | Err { error: LlmError, request_id }
-aether.llm.list_models_result : Ok  { models: Vec<ModelInfo> }
-                              | Err { error: String }
-aether.llm.cancel_result    : Ok  { cancelled: bool }
-                            | Err { error: String }
+aether.anthropic.messages.send_result : Ok  { request_id, text, model_used, usage }
+                                      | Err { request_id, error: AnthropicError }
+aether.anthropic.cli.send_result      : Ok  { request_id, text, model_used, usage }
+                                      | Err { request_id, error: AnthropicError }
 ```
 
-Concrete shapes:
+- `aether.anthropic.messages.send` — HTTPS to `api.anthropic.com` against the official **Messages API** (`/v1/messages`). Auth: `ANTHROPIC_API_KEY` env var, per-token billing. (This is the Messages API, *not* the deprecated text-completion `/v1/complete` endpoint — hence the reply field is `text: String`, never `completion`.)
+- `aether.anthropic.cli.send` — spawns the local `claude` binary as a subprocess, pipes the request through stdin/stdout. No API key needed; it uses the user's subscription. Skips with `Err { error: AnthropicError::CliNotFound }` if `claude` is not on PATH.
+
+CLI and Messages are **sibling kinds, not a hidden adapter choice.** A caller that wants the subscription rail sends `aether.anthropic.cli.send`; one with API budget sends `aether.anthropic.messages.send`. The "registry silently routes to CLI vs HTTP" model is gone — routing is the kind name, visible in `describe_kinds`.
 
 ```rust
-struct CompleteRequest {
-    model: String,                       // adapter-routed (e.g., "haiku", "sonnet", "opus", "gpt-4")
-    prompt: String,                      // utf-8, single user message
-    max_tokens: Option<u32>,             // adapter-default if None
-    temperature: Option<f32>,            // 0.0..=2.0; adapter-default if None
-    system: Option<String>,              // optional system message
-    stop_sequences: Option<Vec<String>>, // optional stop tokens
-}
-
-struct CompleteResult {
-    text: String,
-    model: String,                       // canonical model name the adapter actually used
-    usage: Usage,
-    request_id: u64,                     // for correlation with cancel and engine_logs
-}
+struct Message { role: Role, content: String }   // role: User | Assistant
+enum Role { User, Assistant }
 
 struct Usage {
     input_tokens: u32,
     output_tokens: u32,
     wall_clock_ms: u32,
-    cost_micros: Option<u64>,           // 1/1_000_000 USD; adapter-reported, None if unknown
+    cost_micros: Option<u64>,   // 1/1_000_000 USD; API reports it, CLI subscription leaves it None
 }
 
-enum LlmError {
-    UnknownModel(String),
-    Unauthorized,                        // missing or invalid credentials
+enum AnthropicError {
+    Overloaded,
     RateLimited { retry_after_ms: Option<u32> },
     ContextLengthExceeded { limit: u32 },
-    AdapterError(String),                // catchall for backend-specific failures
-    Cancelled,
-    Timeout,
-}
-
-struct ModelInfo {
-    name: String,                        // canonical name (e.g., "haiku")
-    aliases: Vec<String>,                // adapter-known aliases ("claude-haiku-4-5", etc.)
-    adapter: String,                     // which backend serves this model
-    context_window: u32,                 // input token cap
-    max_output_tokens: u32,
-    supports_system_message: bool,
+    Unauthorized,
+    ContentPolicyRefused,
+    CliNotFound,                // claude binary absent from PATH (cli.send only)
+    UnknownModel { model: String, supported: Vec<String> },
+    AdapterError(String),
 }
 ```
 
-Single-shot completion only in v1. Conversation/multi-turn is composable on top: a component that wants conversation state holds it locally and re-prompts with the assembled history. Streaming, structured outputs (JSON schema), tool use, and vision are deferred (see §8).
+`request_id` is a caller-supplied `u64` echoed on the reply (correlation by structured field, not FIFO position — the ADR-0041 convention). Single-shot completion only in v1; multi-turn is composable on top — a component that wants conversation state holds it locally and re-prompts with the assembled `messages`.
 
-`request_id` is a substrate-assigned monotonic counter. The reply echoes it; cancel takes it. Same shape ADR-0041 used for the namespace+path echo (correlation by structured field, not by FIFO position).
+#### `aether.gemini`
 
-### 2. Adapter registry
-
-Parallel to ADR-0041's `AdapterRegistry<Namespace>`:
+Media-generation only. Two request kinds, each modeled on the actual Gemini API request/response shape for that endpoint (no `Option<everything>` at the cross-modality level). Auth for both: `GOOGLE_API_KEY` env var. Reference images come in as file paths; the cap reads bytes before dispatching.
 
 ```rust
-struct LlmAdapterRegistry {
-    adapters: HashMap<String, Box<dyn LlmAdapter>>,
-    model_routes: HashMap<String, String>,  // model_name -> adapter_name
+aether.gemini.nanobanana.generate {
+    request_id: u64,
+    model: String,                          // "gemini-2.5-flash-image",
+                                            //   "gemini-3-pro-image-preview",
+                                            //   "gemini-3.1-flash-image-preview" (NB2, default)
+    prompt: String,
+    aspect_ratio: AspectRatio,
+    image_size: Option<ImageSize>,          // adapter enforces per-model
+    thinking_level: Option<ThinkingLevel>,  // NB2 only; rejected on older models
+    include_thoughts: Option<bool>,         // NB2 only
+    object_reference_paths: Vec<String>,    // up to 10 (NB2) / 6 (NB Pro) / 0 (NB1)
+    character_reference_paths: Vec<String>, // up to 4 (NB2) / 5 (NB Pro) / 0 (NB1)
+    use_grounding: Option<bool>,            // NB2 only
 }
 
-trait LlmAdapter: Send + Sync {
-    fn complete(&self, req: &CompleteRequest) -> Result<CompleteResult, LlmError>;
-    fn list_models(&self) -> Vec<ModelInfo>;
-    fn cancel(&self, request_id: u64) -> bool;
+aether.gemini.nanobanana.generate_result : Ok {
+    request_id, output_path, model_used, usage,
+    thought_signature: Option<String>,      // NB2 only; pass back unchanged for multi-turn
+    grounding: Option<GroundingMetadata>,   // when use_grounding=true
+} | Err { request_id, error: GeminiError }
+
+aether.gemini.lyria.generate {
+    request_id, model, prompt, duration_s, /* surveyed at implementation */
+}
+aether.gemini.lyria.generate_result : Ok  { request_id, output_path, model_used, usage }
+                                   | Err { request_id, error: GeminiError }
+```
+
+**Media outputs are file paths, not text.** Each result carries `output_path: String` — the cap stages the generated bytes to `save://gen/<uuid>.png` (image) or `save://gen/<uuid>.wav` (audio) and returns the path; the caller resolves via `aether.fs` or directly. This is the fix for the original ADR's modeling bug: an image cannot ride an `Ok { text }` reply, and Lyria/music was never modeled at all.
+
+`AspectRatio` is a typed enum (union of all model-supported ratios — `AR_1_1`, `AR_16_9`, … plus NB2-only extreme ratios like `AR_1_4`). `ImageSize` covers `S512` / `K1` / `K2` / `K4`. The adapter validates per-model and rejects unsupported combinations before any HTTP dispatch (`GeminiError::AspectRatioNotSupportedByModel`, `ImageSizeNotSupportedByModel`). `seed` and `negative_prompt` are deliberately absent — they don't exist in the Gemini Image API surface as of 2026-05. The Lyria request/response surface is surveyed at implementation time (same approach as the Nano Banana survey: model the kind on what exists, don't invent params); `output` is audio bytes staged to `save://gen/<uuid>.wav`, `duration_s: u32` bounded by the API's max-duration constraint at the cap layer.
+
+```rust
+enum GeminiError {
+    RateLimited { retry_after_ms: Option<u32> },
+    ContentPolicyRefused,
+    Unauthorized,
+    UnknownModel { model: String, supported: Vec<String> },
+    AspectRatioNotSupportedByModel { model: String, aspect_ratio: AspectRatio, supported: Vec<AspectRatio> },
+    ImageSizeNotSupportedByModel { model: String, image_size: ImageSize, supported: Vec<ImageSize> },
+    MissingRequiredField { model: String, field: String },
+    AdapterError(String),
 }
 ```
 
-The substrate boots with adapters loaded from config (§4) and a model-routing table built from each adapter's `list_models()`. A `complete` request looks up `model_routes[req.model]`, dispatches to the named adapter, and returns the result. Lookup miss → `LlmError::UnknownModel(req.model)`.
+Per-provider error types carry provider-specific failure shapes instead of a generic `LlmError` that loses information.
 
-Adapter calls are *not* dispatched on the actor-per-component thread. The substrate owns a small thread pool (default 4 threads, configurable via `AETHER_LLM_CONCURRENCY`) for in-flight LLM calls; the sink dispatch enqueues the request and returns the reply when the adapter completes. This matches ADR-0043 (net) — long-tail outbound calls don't block per-component scheduling.
+### 2. Adapter model
 
-Per-call timeout: default 120s, overridable via `AETHER_LLM_TIMEOUT_MS`. Exceeding it surfaces as `LlmError::Timeout`. The adapter is expected to honor cancel signals — subprocess adapters kill the child; HTTP adapters drop the connection.
+There is no global model-routing registry. Each cap holds its own adapter, and routing to an API is the kind name, not a `model → adapter` lookup. The adapter is the **compat layer between the caller-stable kind and the underlying HTTP / subprocess wire**, holding a `model → ApiShape` dispatch table:
 
-### 3. v1 adapters
+```rust
+trait GeminiAdapter: Send + Sync {
+    fn nanobanana_generate(&self, req: &NanobananaGenerate) -> Result<NanobananaResult, GeminiError>;
+    fn lyria_generate(&self, req: &LyriaGenerate) -> Result<LyriaResult, GeminiError>;
+}
 
-**Subprocess adapter for Claude** (`claude_cli`). Mandatory v1, default. Runs `claude -p <prompt> --model <model> --max-turns 1 --output-format text` as a child process per request. Stdout is captured as the `text` field; stderr goes to engine_logs. The adapter expects `claude` on PATH at substrate startup; if absent, the substrate logs a warn and the adapter is marked unavailable — `complete` requests routed to a Claude model return `LlmError::AdapterError("claude CLI not found on PATH")`. This is the load-bearing path: the user runs Claude via subscription, the subscription is exercised through the CLI, no API key is configured.
+trait AnthropicAdapter: Send + Sync {
+    fn messages_send(&self, req: &MessagesSend) -> Result<MessagesResult, AnthropicError>;
+    fn cli_send(&self, req: &CliSend) -> Result<MessagesResult, AnthropicError>;
+}
+```
 
-Model names recognized: `haiku`, `sonnet`, `opus`, plus passthrough of fully-qualified IDs (`claude-haiku-4-5`, etc.). The adapter passes the user-supplied `model` string to the CLI verbatim; routing happens in the CLI.
+Each adapter dispatches by `model: String` through a `model → ApiShape` table; per-shape request/response constructors translate to/from the underlying wire. Unknown model → `…Error::UnknownModel { model, supported }`. Adding a known model that speaks an existing shape is a one-line table entry — no kind change, no caller change.
 
-This adapter validated empirically in `spikes/prompt-pipeline-spike/` — five experiment runs across multiple model profiles, content-addressed caching, no failures. The spike's `src/claude.rs` is the reference implementation.
+Adapter calls run on the cap's actor thread (per the per-actor mpsc discipline, ADR-0038) but each provider call dispatches through `aether-tokio-runtime` for the HTTP / subprocess I/O; the cap holds a `tokio::task::spawn` per in-flight request and routes the response back via the `Mailer`'s loopback channel — the same shape `aether.tcp` (ADR-0043) and `aether.http` use. Long-tail outbound calls don't block per-component scheduling.
 
-`Usage` reporting from subprocess: `wall_clock_ms` measured by the substrate; `input_tokens` and `output_tokens` are `0` (the CLI's text-output mode doesn't surface them, and the subscription model means tokens aren't billed per-call anyway). `cost_micros` is `None` for the subprocess adapter — subscription billing isn't per-call. Operators wanting per-call cost data must use the HTTP-Anthropic adapter with API access.
+`save://gen/` is the default output namespace for binary outputs. Configurable via `AETHER_GEN_DIR`; the resolved path lands in the reply kind.
 
-**HTTP adapter for Gemini** (`http_gemini`). Loaded when `AETHER_LLM_GEMINI_API_KEY` is set. Dispatches against `generativelanguage.googleapis.com` via the substrate's net sink (ADR-0043). Returns full `Usage` including token counts. The spike's `src/gemini.rs` validated this against `gemini-3.1-flash-image-preview` (image gen) and `gemini-3-pro-preview` (text + vision); both shapes are reusable by the adapter. This is the API path for providers that don't have a CLI option.
+### 3. v1 backends
 
-Model names: `gemini-3.1-flash-image-preview`, `gemini-3-pro-preview`, etc. — passthrough of Gemini model IDs.
+**`aether.anthropic`** — two backend paths under one cap:
 
-**HTTP adapter for Anthropic** (`http_anthropic`). Loaded only when `AETHER_LLM_ANTHROPIC_API_KEY` is set, which the user does not currently set. Documented for completeness — same shape as `http_gemini` against the Anthropic API, returns full `Usage` with `cost_micros` computed from the API pricing table. Useful for future deployments with API budget (CI runners, headless production workloads, multi-tenant deployments). The default path remains `claude_cli`; routing only flips to `http_anthropic` if the operator explicitly sets `AETHER_LLM_ROUTE_<model>=http_anthropic`.
+- **Messages API** (`aether.anthropic.messages.send`). HTTPS to `api.anthropic.com/v1/messages`. Loaded when `ANTHROPIC_API_KEY` is set; per-token billing; reports full `Usage` including `cost_micros` from the API pricing table. Absent in the user's default workflow.
+- **CLI subprocess** (`aether.anthropic.cli.send`). Runs the local `claude` binary as a child process per request, request piped through stdin, `text` captured from stdout, stderr to the actor log ring. The load-bearing v1 path: the user runs Claude via subscription exercised through the CLI, no API key configured. Validated empirically in `spikes/prompt-pipeline-spike/` — five experiment runs across Haiku / Sonnet / Opus profiles, content-addressed caching, no failures; the spike's `src/claude.rs` is the reference. `Usage` from the CLI reports `wall_clock_ms` only; `input_tokens` / `output_tokens` are `0` and `cost_micros` is `None` (the CLI's text-output mode doesn't surface tokens, and subscription billing isn't per-call). If `claude` isn't on PATH, `cli.send` replies `Err { error: CliNotFound }`.
 
-All three adapters honor `max_tokens`, `temperature`, `system`, `stop_sequences`. HTTP adapters encode them into the request body per the provider's API spec; the subprocess adapter passes them as CLI flags where supported and warns to engine_logs on first ignore otherwise.
+Both kinds share the cap's rate-limit budget tracker when the user is on one Anthropic account — at the provider level they aren't separate buckets, though today CLI uses subscription quota and Messages uses per-token billing, so the two paths don't actually interact.
 
-OpenAI / local-model / enterprise-gateway adapters are deferred to follow-up ADRs. The trait is forward-compatible — adding adapters doesn't change the `aether.llm.complete` wire format.
+**`aether.gemini`** — two backend kinds under one cap, both HTTPS to `generativelanguage.googleapis.com`, auth `GOOGLE_API_KEY`:
 
-### 4. Configuration
+- **Nano Banana** (`aether.gemini.nanobanana.generate`) — image generation. The spike's `src/gemini.rs` validated this against `gemini-3.1-flash-image-preview`. Output PNG bytes stage to `save://gen/<uuid>.png`.
+- **Lyria** (`aether.gemini.lyria.generate`) — music generation. Output audio bytes stage to `save://gen/<uuid>.wav`. Request/response surface surveyed at implementation.
 
-The substrate reads adapter and routing config from environment variables (v1 — same precedence-stack-deferred as ADR-0041's TOML/CLI):
+Gemini is media-only here. The original ADR's "Gemini does text + vision under the `llm` sink" framing is dropped: text defaults to the Claude CLI; multimodal grading is a deferred follow-up ADR (the Spike B shape is pre-validated but out of scope for these caps).
 
-- **`AETHER_LLM_ADAPTERS`** — comma-separated adapter names to enable. Default: `claude_cli`. Adapters whose required env keys are unset are skipped (logged as a warn). Example: `claude_cli,http_gemini` enables Claude (subscription) + Gemini (API).
-- **`AETHER_LLM_DEFAULT_MODEL`** — fallback model when a request omits or names an unknown one. Default: `haiku`.
-- **`AETHER_LLM_CONCURRENCY`** — thread pool size for in-flight requests. Default: 4.
-- **`AETHER_LLM_TIMEOUT_MS`** — per-call timeout. Default: 120000.
-- **`AETHER_LLM_GEMINI_API_KEY`** — auth for the `http_gemini` adapter. Read once at startup.
-- **`AETHER_LLM_ANTHROPIC_API_KEY`** — auth for the `http_anthropic` adapter. Optional; absent in the user's default workflow (subscription only).
-- **`AETHER_LLM_ROUTE_<MODEL>=<adapter>`** — explicit routing override (e.g., `AETHER_LLM_ROUTE_haiku=http_anthropic` to force the API path for haiku even with the CLI adapter loaded). Without overrides, the substrate uses the first-loaded adapter that claims a given model — `claude_cli` wins for Claude models in v1.
+OpenAI / local-model / enterprise-gateway / video / additional-music caps are deferred — each is a new cap when a use case arrives, not a wire change to these two.
 
-Models that aren't claimed by any loaded adapter route to `LlmError::UnknownModel`. The startup log emits the resolved routing table at INFO level.
+### 4. Versioning policy
 
-A future ADR can add a TOML config layer (matching ADR-0041's deferral) for richer per-deployment configuration. v1 stays env-only.
+Two cases, both falling out of "one cap per provider, one kind per API." This is semver-by-kind: a compatible change rides a field, a breaking change gets a new kind.
 
-### 5. Capability gating
+- **Compatible-shape model versions** (most transitions — a new model name, maybe new optional fields). The `model: String` field carries the version. New optional fields land as `Option<...>` on the existing kind; old callers don't set them. The `model` field does *not* fork request shape (`Option<everything>` smell) — it selects an underlying model that speaks the same request/response shape.
+- **Shape-breaking changes** (rename, removed field, changed reply-enum semantics, a new reply variant the existing enum can't fit cleanly). A new sibling kind ships alongside the old one — e.g. `aether.gemini.nanobanana_v3.generate` next to `aether.gemini.nanobanana.generate`. The old kind stays callable as long as the underlying API is; the caller migrates when ready. Design for it; don't preemptively split.
 
-When ADR-0044's capability system unparks, `llm` is a top-level capability. Components without `llm` can't dispatch to the sink (the same way components without `net` can't dispatch fetches today). The capability is single-grant — a component either has it or doesn't, no per-model gradations in v1. Per-model capability gating (e.g., grant access to `haiku` but not `opus`) is a future ADR if cost-control workflows demand it.
+**Empirical backing.** Nano Banana shipped three model releases in 18 months — `gemini-2.5-flash-image` → `gemini-3-pro-image-preview` → `gemini-3.1-flash-image-preview` (Aug 2025 → May 2026) — with *zero* shape-breaks. Every change was additive: new optional fields, new aspect-ratio enum values, model-specific value ranges enforced by the adapter. The pattern absorbs vendor evolution cleanly; no release has triggered the new-kind path yet.
 
-In v1 (pre-ADR-0044), all components on a substrate can dispatch LLM calls. The trust model is "the substrate's owner trusted these components when they loaded them." Operators concerned about LLM cost from rogue components can either (a) not load untrusted components, (b) cap concurrency via `AETHER_LLM_CONCURRENCY=0` to disable the sink, or (c) set up ADR-0044 once it lands.
+**The adapter is the compat layer; the kind is the caller-stable contract.** Three classes of vendor change, three handling patterns:
 
-### 6. Observability
+1. **New compatible model** (same fields, same response). One-line addition to the `model → ApiShape` table. No kind change; the caller bumps `model: String` and nothing else.
+2. **New optional field on an existing kind** (a newer model gains `style_strength`; older models ignore it). Add `Option<...>` to the kind. The adapter enforces per-model required-ness at dispatch time — e.g. an unset value required by the selected model errors `GeminiError::MissingRequiredField` before any HTTP call.
+3. **Required field added / renamed / removed for a new model, or a broken reply shape.** The adapter holds two request constructors (one per `ApiShape`) and dispatches by model; the kind absorbs the union as `Option<...>`. If the *reply* shape breaks, force a new kind — reply-enum bloat with stale `_` arms is what burns callers.
 
-Per-request engine_logs entries (ADR-0023):
+Each adapter has fixture-replay unit tests (`tests/fixtures/nanobanana_v2_response.json`, etc.) that lock the vendor wire shape we built against. When the vendor changes the wire silently, the fixture-replay test fails and we update the adapter — caller code stays untouched. Same pattern in `AnthropicAdapter`.
 
-- **DEBUG** — request submitted, with `request_id`, `model`, `prompt.len()`, `max_tokens`, sender mailbox.
-- **INFO** — request completed, with `request_id`, `model`, `usage` (tokens, ms, cost), reply text length.
-- **WARN** — adapter error, retry, fallback to default model, ignored unsupported parameter.
-- **ERROR** — request failed irrecoverably, with `LlmError` variant.
+### 5. Configuration
 
-The hub MCP surface gains:
+Per-provider env vars (v1 — same precedence-stack-deferred posture as ADR-0041's TOML/CLI):
 
-- **`mcp__aether-hub__llm_status(engine_id)`** — current in-flight count, queued count, per-adapter dispatched count since substrate boot, per-model dispatched count + total tokens + total cost. Useful for cost triage in long-running content-gen sessions.
+- **`ANTHROPIC_API_KEY`** — auth for `aether.anthropic.messages.send`. Read once at startup. Absent in the user's default workflow (subscription / CLI only).
+- **`GOOGLE_API_KEY`** — auth for both `aether.gemini` kinds. Read once at startup.
+- **`AETHER_GEN_DIR`** — overrides the `save://gen/` binary-output namespace.
 
-Cost roll-up per substrate session is published as `aether.observation.llm_cost` to the broadcast sink every 30 seconds (cadence matching the `frame_stats` observation pattern from ADR-0008). Format: `{ session_micros: u64, calls: u32, by_model: Vec<(String, u64)> }`. Harness sessions watching the broadcast see cost accumulation in near-real-time without polling.
+The `aether.anthropic.cli.send` path needs no key — it relies on the `claude` binary being on PATH. The startup log emits which caps and backends initialized at INFO level; a cap whose required key is unset still loads but replies `Err { error: Unauthorized }` to API-mode requests (CLI-mode requests are unaffected).
 
-### 7. Cancel semantics
+A future ADR can add a TOML config layer (matching ADR-0041's deferral). v1 stays env-only.
 
-`aether.llm.cancel { request_id }` walks the in-flight pool, finds the matching request if present, signals the adapter to abort. Subprocess adapters SIGTERM the child; HTTP adapters drop the connection. The cancelled request's reply (`Err { error: LlmError::Cancelled, request_id }`) goes to the original sender if it hadn't replied yet. Idempotent: cancelling an already-completed or never-existed request returns `Ok { cancelled: false }`.
+### 6. Capability gating
 
-This matches ADR-0047's cancel semantics for DAGs: the substrate stops paying attention; the underlying work may complete server-side. Cost accounting still records calls that complete after cancel — the user paid for them.
+When ADR-0044's capability system unparks, `anthropic` and `gemini` are top-level capabilities. A component without the cap can't dispatch to it (the same way components without `net` can't fetch today). Single-grant per cap in v1 — no per-model or per-kind gradations (a future ADR if cost-control workflows demand them). Pre-ADR-0044, all components on a substrate can dispatch; the trust model is "the substrate's owner trusted these components when they loaded them."
 
-### 8. Deferred capabilities
+### 7. Observability
 
-The following are intentionally not in v1; each is a future ADR:
+Per-request entries land in the per-actor log ring (ADR-0081):
 
-- **Streaming.** A long completion (1000+ tokens) takes seconds to minutes. v1 buffers the full response before replying. Streaming would let the consumer process partial output. Likely ADR shape: a `aether.llm.stream { ... }` request kind that pushes `aether.llm.stream_chunk` mail to the sender as tokens arrive, terminated by `aether.llm.stream_end`. Defers because content-gen pipelines (the v1 customer) don't need streaming.
-- **Vision / multimodal.** v1 is text-in, text-out. Image inputs (for grading rendered output, vision-LLM-based critique) are central to ADR-0046's Spike B. The follow-up ADR adds `aether.llm.complete_multimodal { ... }` with a `Vec<ImageInput>` field. Image inputs likely use `Ref<Image>` (ADR-0045 handle refs) so a generated image flows directly into a vision call without inlining bytes. **Spike B Phase 3 ran the multimodal grading workflow against Gemini and validated the call shape**: `parts: [text, inlineData, inlineData, ...]` in declared order, multiple images per request handled cleanly, response shape is identical to text-only completion (text candidates with `parts[].text`). The follow-up multimodal ADR can lift the spike's `gemini::generate_text(prompt, references, model)` shape directly. ADR effort is moderate (kind definitions + adapter dispatch path); the design surface is well-understood and ready for focused review.
-- **Structured output / JSON schema.** Many providers support "respond in this JSON shape." v1 returns plain text and the consumer parses. The follow-up ADR adds a `response_schema: Option<JsonSchema>` field that the adapter passes through where supported.
-- **Tool use / function calling.** Provider-side tool dispatch (the LLM emits a tool-call request, the substrate runs the tool, feeds the result back). Out of scope; the substrate's mail-shaped sink dispatch is already the substrate-side equivalent.
-- **Embeddings.** A separate operation (input → vector, not input → text). Likely a separate sink (`aether.embed.compute`) or a separate kind on this sink. Defer until embedding-driven workflows appear.
-- **Conversation history.** Multi-turn state. Components that want conversations build them locally; the sink stays single-shot.
+- **DEBUG** — request submitted: `request_id`, `model`, kind, prompt length / param summary, sender mailbox.
+- **INFO** — request completed: `request_id`, `model_used`, `usage`, and (for media) `output_path`.
+- **WARN** — adapter error, retry, ignored unsupported parameter, per-model validation rejection.
+- **ERROR** — irrecoverable failure, with the provider error variant.
 
-### 9. Chassis coverage
+**Per-call cost rides the reply, not a broadcast.** Each completion's reply carries a `usage` field (`input_tokens`, `output_tokens`, `wall_clock_ms`, `cost_micros`) — the minimum cost surface, available to the caller without polling. There is no `aether.observation.llm_cost` 30-second broadcast: the broadcast sink and the entire `aether.observation.*` family retired in issue #775, so there is no fan-out target. A future user-space observer (TCP / websocket / session-targeted mail) is the path forward for engine-out cost fan-out if a long-running session wants a near-real-time roll-up; until then, callers aggregate the reply-carried `usage` themselves.
 
-The LLM sink is **chassis-owned**, like `io` (ADR-0041), `net` (ADR-0043), and `audio` (ADR-0039). Each chassis instance bootstraps its own adapter registry at startup; components on that chassis dispatch into the local sink. No cross-chassis routing in v1.
+### 8. Chassis coverage
 
-- **Desktop** — full LLM sink. `claude_cli` adapter loaded by default; HTTP adapters loadable when API keys are set.
-- **Headless** — full LLM sink, identical semantics. Headless content-gen workloads (CI runners, batch sculpting) are a primary target.
-- **Hub** — no LLM sink. Mail to `"llm"` warn-drops as unknown mailbox, identical to the io sink behaviour on hub chassis. The hub coordinates substrate children; it does not host workload components in v1, so it has no consumer for the sink.
+Both caps are **chassis-owned**, like `aether.fs` (ADR-0041), net (ADR-0043), and audio (ADR-0039):
 
-Components needing LLM access live on a desktop or headless chassis. A component on one chassis cannot dispatch through another chassis's sink directly — that would require either explicit cross-substrate addressing or routing-by-bubbling (ADR-0037), neither of which are wired through the LLM sink in v1. If a deployment grows multiple substrate children that share a single Claude CLI subscription and concurrent calls hit subscription rate limits, the right answer is a **hub-routed adapter** (described under Alternatives) — wire-additive when needed, not v1 work.
+- **Desktop** — both caps. `aether.anthropic` with the CLI path by default; API paths active when keys are set. `aether.gemini` active when `GOOGLE_API_KEY` is set.
+- **Headless** — both caps, identical semantics. Headless content-gen workloads (CI runners, batch sculpting) are a primary target.
+- **Hub** — neither cap. Mail to `aether.anthropic` / `aether.gemini` warn-drops as unknown mailbox, identical to the `aether.fs` behaviour on hub chassis. The hub coordinates substrate children; it hosts no workload components in v1.
 
-### 10. Handle-store integration
+Components needing provider access live on a desktop or headless chassis. A component on one chassis cannot dispatch through another chassis's cap directly. If a deployment grows multiple substrate children that share a single Claude subscription and concurrent CLI calls hit subscription rate limits, the right answer is a hub-routed cap dispatched through ADR-0037 bubbling — wire-additive when needed, not v1 work.
 
-LLM completions are not auto-persisted as content-addressed handles in v1. The reply lands as regular mail to the sender; if the sender wants to share the result across components or persist it across substrate restart, the sender wraps the call in a transform (ADR-0048) — the transform's content-addressed handle id captures `(prompt, model, params)` and the result rides through ADR-0049's persistent handle store.
+### 9. Handle-store integration
 
-Why not auto-handle the reply? Because the LLM sink doesn't know the inputs are *intended* to be cache keys. The same `(prompt, model)` requested twice intentionally (e.g., to sample variance) shouldn't dedup. A transform-wrapped call expresses the intent: "this is a memoized lookup, treat it as content-addressable." Direct sink calls express the alternative intent: "I want a fresh call each time, even if the inputs are identical."
+Provider calls are not auto-persisted as content-addressed handles. The reply lands as regular mail to the sender; provider-call sources are ephemeral monotonic handles (per ADR-0045 §3), not content-addressed — `temperature > 0` makes every call a fresh observation, and even `temperature = 0` can differ across model versions. A caller wanting "compute once, reuse forever" wraps the call in a transform (ADR-0048): the transform's content-address keys on the source handle id, so two pipelines wiring the same source handle into the same transform skip the second compute. This is the auto-cascade property `project_unify_workflows_under_aether` depends on, and ADR-0046's Frame / Distill stages do exactly this.
 
-ADR-0046's Frame and Distill stages naturally wrap the LLM call in a transform; the spike validated this pattern — content-addressed cache keyed on `(prompt, model, template-hash)` was a per-pipeline implementation, but the same shape moves into a `#[transform]` cleanly when ADR-0048 ships.
+## Testing (cost-bounded CI)
+
+Provider integration tests are the only place in the DAG-handles tree that touches paid external services; the test posture keeps CI cost at zero:
+
+- **Stub adapters by default.** `StubAnthropicAdapter` and `StubGeminiAdapter` return canned responses without hitting the network. CI runs these smokes by default — send a kind, assert the reply (stub Nano Banana returns a fixed PNG path that exists and decodes; stub Lyria a fixed WAV path).
+- **Real-API tests are `#[ignore]`.** `#[ignore = "needs ANTHROPIC_API_KEY"]` / `#[ignore = "needs GOOGLE_API_KEY"]` tests call the live APIs with tiny requests when keys are present; not run in CI. Devs validate locally.
+- **CLI path test.** A test that spawns the `claude` binary if it's on PATH, asserting a graceful `Err { error: CliNotFound }` skip otherwise — the user's "no API budget" rail.
+- **Per-model validation tests.** For each known `model`, send an unsupported field combo and assert the adapter returns the right `GeminiError` variant *before* any HTTP dispatch. Plus an unknown-model test asserting `UnknownModel { model, supported }`.
+- **Fixture-replay tests** lock the vendor wire shape (see §4).
 
 ## Consequences
 
 ### Positive
 
-- **Pipelines have a substrate-level LLM dispatch.** ADR-0046's Frame, Distill, Scrub, Translate, Compose stages all dispatch through one well-defined sink instead of bespoke per-pipeline subprocess management.
-- **Adapter neutrality across mechanism.** v1 ships `claude_cli` (subscription, no API budget) and `http_gemini` (image gen + multimodal) — the two providers the spike actually exercised. `http_anthropic` slots in for deployments that have API access. Future providers (OpenAI, local Ollama, enterprise gateway) drop in under the same trait without wire churn.
-- **Substrate-level observability.** Per-call wall-clock, model, prompt length, request id surface via engine_logs and broadcast observation. HTTP adapters add token-level usage and per-call cost in USD micros; subprocess (subscription) adds wall-clock only. A long-running content-gen session can see usage rolled up across all calls without per-component instrumentation.
-- **Capability-ready.** When ADR-0044 unparks, `llm` is a top-level cap. No retrofit required.
-- **Mail-shaped surface lets Claude harness submit LLM calls directly.** A harness session can mail `aether.llm.complete` via MCP `send_mail` and observe the reply in `receive_mail`. Useful for ad-hoc "what does Haiku say if I ask it X" without authoring a component.
+- **Pipelines have substrate-level provider dispatch under the DAG primitives.** ADR-0046's stages dispatch through well-defined per-provider caps instead of bespoke per-pipeline subprocess / HTTP management.
+- **Per-provider state is owned where it belongs.** Auth, rate-limit budget, and client live on the cap, not smeared across a shared registry. Adding a provider is a new cap; existing caps don't churn.
+- **CLI is a first-class, visible call surface.** The subscription rail is a kind the caller picks (`aether.anthropic.cli.send`), surfaced in `describe_kinds`, not a hidden routing detail.
+- **Media outputs model correctly.** Image / music generation reply with a file path the caller resolves through `aether.fs`, not a text-shaped reply that can't carry bytes.
+- **Versioning is bounded.** Compatible model changes ride the `model` field; shape-breaks get a new kind; the adapter absorbs vendor evolution with fixture-replay coverage. Empirically, three Nano Banana releases needed zero kind changes.
+- **Mail-shaped surface lets the Claude harness submit calls directly.** A harness session can mail `aether.anthropic.cli.send` or `aether.gemini.nanobanana.generate` via MCP `send_mail` and observe the reply.
 
 ### Negative
 
-- **Subprocess adapter has limited usage telemetry.** `claude -p` text mode doesn't report token counts and subscription billing isn't per-call, so the subprocess adapter reports `wall_clock_ms` only and `cost_micros: None`. HTTP adapters (when configured) report tokens + cost. Pipelines that want fine-grained cost accounting need API access; subscription users get latency only.
-- **Per-substrate adapter set, not per-component.** All components on a substrate share the same adapter registry and routing. A workflow that wants component-A on Haiku-via-subprocess and component-B on Opus-via-HTTP needs both adapters loaded and uses model-string routing per call. Acceptable; per-component adapter overrides are a future complication that doesn't pay off without a forcing function.
-- **No streaming in v1.** A 30-second completion holds an in-flight slot for 30 seconds; the consumer waits for the full response. Acceptable for content-gen workloads (Frame outputs are short, Distill outputs even shorter); a chat-shaped consumer would need streaming.
-- **No vision in v1 (but the design is unblocked).** ADR-0046's Spike B (image grading) needs vision inputs; it ran successfully against Gemini using the spike's own multimodal HTTP client. The follow-up ADR adding `complete_multimodal` to this sink can lift the validated shape directly. Spike B has unblocked the multimodal design rather than just forcing it.
-- **Credential management is env-var only.** No rotation, no per-component API keys, no provider-specific auth flows. Acceptable for v1; a future ADR can add a credential vault if multi-tenant deployments emerge.
+- **CLI path has limited usage telemetry.** `claude` text mode doesn't report token counts and subscription billing isn't per-call, so `cli.send` reports `wall_clock_ms` only and `cost_micros: None`. Fine-grained cost accounting needs the API path.
+- **Per-substrate cap set, not per-component.** All components on a substrate share each cap's auth and budget. Per-component overrides are a future complication without a forcing function.
+- **No streaming, vision, or embeddings in v1.** Buffered replies only; deferred to follow-up ADRs.
+- **Credential management is env-var only.** No rotation, no per-component keys. Acceptable for v1.
 
 ### Neutral
 
-- **Mail-shape uniformity.** The LLM sink follows the same shape as io, net, audio, render — request kind, reply kind, structured fields, error variants. No new substrate primitives required; the sink trait, `AdapterRegistry`, and the actor-per-component dispatch (ADR-0038) all compose.
-- **Costs charged to the substrate's auth, not the component's.** Whoever owns the API key (env var) pays for the call. v1 acceptable; per-component billing is a deeper concern (probably tied to capabilities) deferred.
-- **No substrate-side rate limiting.** Adapter-side rate limit replies surface as `LlmError::RateLimited`; the consumer decides whether to retry. A substrate-side concurrency cap (`AETHER_LLM_CONCURRENCY`) provides a coarse rate-control hook but isn't a real limiter. Future ADR can add one if cost-runaway becomes a concern.
+- **Mail-shape uniformity.** Each cap follows the request-kind / reply-kind / structured-field / error-variant shape of `aether.fs`, net, audio, render. No new substrate primitives — the cap actor and the per-actor mpsc dispatch (ADR-0038) compose.
+- **Costs charged to the substrate's auth.** Whoever owns the env-var key (or the subscription) pays. Per-component billing is deferred.
+- **No substrate-side rate limiting.** Provider rate-limit replies surface as `…Error::RateLimited`; the caller decides whether to retry. The cap's internal budget tracker is a coarse hook, not a real limiter.
 
 ## Alternatives considered
 
-- **HTTP-only (no subprocess adapter).** Cleaner — one adapter shape, full token telemetry, no PATH dependency. Rejected: the spike validated subprocess against `claude -p` specifically because it uses the user's existing CLI auth; requiring an API key for development workflows is friction. Both adapters earn their slot.
-- **No adapter abstraction (single hardcoded backend).** Simpler to ship. Rejected: the user explicitly wants to experiment with cross-model behavior across providers (the spike's model variation matrix). Adapter neutrality is a v1 requirement, not a future-proofing exercise.
-- **LLM as a transform-shaped operation rather than a sink.** Transforms are pure (ADR-0048 §3); LLM completion is not pure (different replies for the same inputs, depends on remote state, has cost side effects). Sink is the right abstraction. A transform wrapper around an LLM sink call gives the content-addressing benefit at the wrapper layer; ADR-0046's pipelines do exactly this.
-- **Single sink kind with model-string routing vs separate kinds per provider.** Single kind with routing is simpler for callers (one mail kind to learn); per-provider kinds would let static type checking enforce model availability. Rejected: model availability changes per deployment (which adapters loaded), so static enforcement isn't possible anyway. Single kind it is.
-- **Streaming in v1.** Useful for chat-shaped consumers. Rejected for v1 because content-gen pipelines (the actual customer) don't need it; Frame/Distill/Compose outputs are short enough that buffering is fine. Follow-up ADR adds streaming when a forcing function emerges.
-- **Multimodal in v1.** Necessary for Spike B's grading workflow. Rejected for v1 timing — the multimodal surface is enough additional design to deserve its own ADR (image-input handle integration, vision model routing, response-shape differences). Spike B has now both forced and pre-validated the design; the follow-up ADR is near-term work, not deferred indefinitely.
-- **Caching at the sink level.** The substrate could content-address LLM replies by `(prompt, model, params)` automatically. Rejected: same-prompt-same-model intentionally repeated (variance sampling, A/B comparison) shouldn't dedup; the consumer expresses caching intent by wrapping the call in a transform. Sink-level caching would be opt-out, transform-level caching is opt-in — the latter matches the substrate's "explicit is better than implicit" defaults elsewhere.
-- **Hub-routed LLM dispatch (single coordinator).** Centralize all LLM calls at the hub: substrate-child components mail `aether.llm.complete`, which bubbles up via ADR-0037, the hub serves all completions from a single shared adapter registry. The pull is real — one Claude subscription is rate-limited as a unit, so multiple substrates each invoking `claude` concurrently can blow the limit; centralized dispatch can serialize / queue / throttle. Single CLI install, single credential surface, single observability stream. Rejected for v1 because (a) every LLM call would cost a hub round-trip even when the consumer is on the same machine, (b) headless-only deployments without a hub get nothing, and (c) the forcing function (multiple concurrent agent loops sharing one subscription) doesn't exist yet. The right shape when it does: a `bubble_to_hub` adapter loaded on the substrate-children, dispatched through ADR-0037's bubbling — wire-additive, the chassis-owned sink stays unchanged.
-- **Specialized LLM-only chassis.** A new chassis kind whose only job is to expose the LLM sink, with components needing LLM access living there and others mailing across. Rejected: components frequently want LLM access *and* other capabilities simultaneously (a sculptor wants LLM + mesh-editor mail dispatch + frame capture). Splitting capabilities across chassis costs a hop per call. Chassis-owned sink keeps composition local.
-- **LLM as a substrate-core capability.** Bake the sink directly into `aether-substrate-core` so it's not chassis-optional. Rejected: not all deployments want LLM (a CI test runner that just exercises mesh dispatch shouldn't load the adapter machinery). Same reason `io`, `net`, and `audio` are chassis-owned, not core.
+- **Leave ADR-0050 stale, mark iamacoffeepot/aether#989 authoritative.** Same problem as the ADR-0047 drift case — agents read the ADR and get misled, and the image-as-text modeling gap is a bug a reader would inherit. Rejected; this is why the ADR is rewritten rather than annotated.
+- **One omnibus `aether.content_gen` cap with `Mode` and `Provider` fields.** Forces `Option<everything>` on every input — Nano Banana's `aspect_ratio` is meaningless to an Anthropic messages request; Anthropic's `system` is meaningless to a Gemini request. Schemas balloon and `describe_kinds` becomes useless. Rejected.
+- **Per-modality caps (`aether.llm.completion`, `aether.image.generate`, …) with provider as a field.** Closer to right, but still pushes provider quirks into shared kinds, and versioning across providers tangles (a Nano Banana field bump ripples into every image-gen caller). Rejected after the iamacoffeepot/aether#989 discussion in favour of per-provider grouping.
+- **One cap per API (`aether.gemini.nanobanana` as its own mailbox, separate from `aether.gemini.lyria`).** Splits provider-scoped state — auth keys and rate-limit budgets would have to coordinate across mailboxes. Rejected; one cap per provider, kinds per API is the right grain.
+- **CLI as a hidden adapter behind a single completion kind** (the original ADR's model). Makes the subscription-vs-API choice an opaque routing detail instead of a visible kind the caller picks. Rejected for sibling kinds (`aether.anthropic.cli.send` / `aether.anthropic.messages.send`).
+- **Provider calls as transform-shaped operations rather than caps.** Transforms are pure (ADR-0048 §3); a provider call is not (different replies for the same inputs, remote state, cost side effects). The cap is the right abstraction; a transform *wrapper* gives content-addressing at the wrapper layer (see §9).
+- **Caps as guest components, not substrate caps.** API-key handling in wasm is worse security, and there's per-call wasm round-trip latency. The existing private `image-gen` crate already shows the substrate-cap pattern fits. Rejected on security + perf.
+- **Specialized provider-only chassis / substrate-core caps.** Components frequently want provider access *and* other capabilities at once, so splitting across chassis costs a hop per call; and not every deployment wants provider machinery loaded (a CI mesh-dispatch runner shouldn't). Chassis-owned caps keep composition local — the same reasoning that makes `aether.fs`, net, and audio chassis-owned.
 
 ## Follow-up work
 
-- **PR**: kinds + schema-derive — `CompleteRequest`, `CompleteResult`, `Usage`, `LlmError`, `ModelInfo`, `CancelRequest`/`Result`, `ListModelsRequest`/`Result` in `aether-kinds`.
-- **PR**: substrate sink — `LlmAdapter` trait, `LlmAdapterRegistry`, `claude_cli` subprocess adapter (lifting from `spikes/prompt-pipeline-spike/src/claude.rs`), `http_gemini` adapter (lifting from `spikes/prompt-pipeline-spike/src/gemini.rs`, dispatched through the net sink), thread pool integration, env-var config, capability gate stub for ADR-0044. `http_anthropic` adapter optional in this PR or follow-up; gated on operator API setup either way.
-- **PR**: hub MCP — `llm_status` tool surfacing per-adapter / per-model dispatch counts and cost.
-- **PR**: observation — `aether.observation.llm_cost` broadcast every 30s, on the same publisher as `frame_stats`.
-- **Parked, future ADR**: streaming completion (`aether.llm.stream`).
-- **Near-term follow-up ADR (Spike B has validated the shape)**: multimodal completion (`aether.llm.complete_multimodal` with `Vec<Ref<Image>>`). The wire shape, adapter dispatch path, and response handling are pre-validated by the spike's `gemini::generate_text(prompt, references, model)` worked example. Lift the spike's HTTP body shape (`parts: [text, inlineData...]`) into the adapter trait method.
+- **Implementation**: iamacoffeepot/aether#989 — `aether.anthropic` (messages + cli) and `aether.gemini` (nanobanana + lyria) caps, kind modules, per-cap adapters with `model → ApiShape` tables, stub + fixture + `#[ignore]` real-API tests, desktop + headless chassis registration.
+- **Parked, future ADR**: streaming completion (`aether.anthropic.messages.stream`).
+- **Near-term follow-up ADR (Spike B has validated the shape)**: multimodal / vision completion — image inputs via `Ref<Image>` (ADR-0045 handle refs), lifting the spike's `parts: [text, inlineData…]` body shape.
 - **Parked, future ADR**: structured output (response schema, tool use).
-- **Parked, future ADR**: embeddings sink.
-- **Parked, future ADR**: per-component / per-model capability gradations (cost-control workflows).
-- **Parked, future ADR**: credential vault (multi-tenant deployments, key rotation).
-- **Parked, future ADR**: TOML config layer for richer per-deployment configuration (matches ADR-0041's deferred TOML+CLI work).
+- **Parked, future ADR**: embeddings cap.
+- **Parked, future ADR**: additional provider caps (`aether.openai`, `aether.suno`, `aether.runway`) as use cases arrive.
+- **Parked, future ADR**: per-component / per-model capability gradations; credential vault; TOML config layer (matches ADR-0041's deferral).
