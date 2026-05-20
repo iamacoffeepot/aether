@@ -42,7 +42,7 @@ use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
     SubstrateBoot,
     capture::CaptureQueue,
-    mail::{Mail, MailboxId},
+    mail::{Mail, MailId, MailboxId},
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -735,10 +735,13 @@ impl TestBench {
     /// Run one chassis event. Mirrors what the binary's events loop
     /// does — but inline on the test thread instead of on a worker.
     ///
-    /// Returns `SettlementTimeout` if `run_frame`'s per-tick
-    /// settlement misses [`SETTLEMENT_TIMEOUT`]. In the Advance
-    /// branch we bail mid-loop without sending `AdvanceResult::Ok` so
-    /// the `pump_until_reply` caller surfaces the timeout rather than
+    /// Returns the error `run_frame`'s per-tick advance produces if the
+    /// chain never settles: a `Timeout` waiting on the driver's
+    /// `LifecycleAdvanceComplete` reply (the broadcast subtree leaked an
+    /// `in_flight`, or the driver never replied), or a `SettlementTimeout`
+    /// from a capture pre-mail chain. In the Advance branch we bail
+    /// mid-loop without sending `AdvanceResult::Ok` so the
+    /// `pump_until_reply` caller surfaces the timeout rather than
     /// waiting on a reply that will never arrive — the substrate is
     /// in a stuck state and the test should fail loudly.
     // `event` is owned because the match destructures it; clippy
@@ -769,53 +772,72 @@ impl TestBench {
 
     fn run_frame(&mut self, dispatch_tick: bool) -> Result<(), TestBenchError> {
         if dispatch_tick {
-            // ADR-0080 §6 settlement gating: push the Tick mail with a
-            // chassis-minted `MailId` so the trace pipeline tracks
-            // the chain, subscribe to its settlement before pushing,
-            // and wait on the receiver after. The chain rooted at
-            // this Tick's `MailId` covers everything the Tick
-            // triggers — input fanout, subscriber handlers, the
-            // tick_observed broadcasts that those subscribers emit,
-            // the broadcast cap's egress to outbound. When the
-            // chain settles, all derived work is done.
-            //
-            // Replaces the pre-PR-4 `wait_instanced_quiesce` poll
-            // loop (issue #707): the polling deadline guessed at
-            // when broadcasts had landed; settlement knows
-            // structurally.
-            //
-            // Strict propagation: pre-iamacoffeepot/aether#845 this
-            // was `let _ = rx.recv_timeout(...)` — a workaround for
-            // pre-#840 settlement leaks that swallowed silently when
-            // chains never settled. With #840's terminal-arm
-            // bracketing in place a real timeout here means a
-            // genuine in_flight leak in some downstream cap;
-            // surfacing it as `SettlementTimeout` lets the failing
-            // test name the actual cause instead of timing out
-            // generically on the reply pump.
-            let registry = self.passive.settlement_registry();
             // ADR-0082 PR 3b: TestBench pushes `LifecycleAdvance` to the
             // lifecycle driver, which broadcasts Tick to `aether.input`
             // (relayed via the chassis's `initial_subscribers`) plus any
-            // other subscribers. Settlement on the broadcast root waits
-            // for the whole subtree — same property the prior direct-
-            // push path had.
-            let advance_root = self.queue.push_chassis_root_mail(
-                self.fresh_correlation_id(),
+            // other subscribers. The chain rooted at this advance's
+            // `MailId` covers the whole subtree — input fanout,
+            // subscriber handlers, the tick_observed broadcasts those
+            // subscribers emit, the broadcast cap's egress to outbound.
+            //
+            // iamacoffeepot/aether#999: gate the per-tick wait on the
+            // driver's `LifecycleAdvanceComplete` reply rather than the
+            // raw broadcast-root settlement channel. The driver's
+            // `on_advance` sets `pending = Some(..)` and clears it only
+            // in `on_settled`, which runs on the driver's own actor
+            // thread after it dequeues the synthesised `Settled` mail —
+            // and only then does it reply `LifecycleAdvanceComplete`.
+            // Waiting on the raw settlement channel woke the bench (and
+            // let it push the next tick's advance) *before* the driver
+            // had cleared `pending`, so under parallel-nextest load the
+            // next advance hit `pending.is_some()` and warn-dropped one
+            // tick (199 broadcasts, not 200). Correlating on the
+            // `LifecycleAdvanceComplete` reply — emitted strictly after
+            // `pending` clears — closes that race: by the time the reply
+            // lands, the driver is ready for the next advance and the
+            // whole broadcast subtree has settled (the reply is gated on
+            // settlement). Reuses the same reply-correlated loopback wait
+            // (`pump_until_reply`) the `advance()` / `capture()` API
+            // methods already use, rather than a bespoke channel.
+            let cid = self.fresh_correlation_id();
+            // Mint a chassis-root `LifecycleAdvance` (so the trace
+            // pipeline tracks the broadcast subtree and `on_settled`
+            // fires) that *also* carries this bench's session as the
+            // reply target — the driver routes `LifecycleAdvanceComplete`
+            // there via `on_settled`'s `ctx.reply_to`. `push_chassis_root_mail`
+            // doesn't take a reply target, so the chassis-root push is
+            // open-coded here (mint id → record `Sent` → push with both
+            // lineage and reply-to), mirroring its three steps.
+            let advance_root =
+                MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
+            self.queue.record_sent(
+                advance_root,
+                advance_root,
+                None,
+                MailboxId::CHASSIS_MAILBOX_ID,
                 self.lifecycle_mailbox,
                 self.kind_lifecycle_advance,
-                encode_empty::<aether_kinds::LifecycleAdvance>(),
-                1,
             );
-            let rx = registry.subscribe_settlement(advance_root);
-            if rx.recv_timeout(SETTLEMENT_TIMEOUT).is_err() {
-                return Err(TestBenchError::SettlementTimeout {
-                    recipient:
-                        <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE
-                            .to_owned(),
-                    kind_name: aether_kinds::LifecycleAdvance::NAME,
-                });
-            }
+            let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+            self.queue.push(
+                Mail::new(
+                    self.lifecycle_mailbox,
+                    self.kind_lifecycle_advance,
+                    encode_empty::<aether_kinds::LifecycleAdvance>(),
+                    1,
+                )
+                .with_lineage(advance_root, advance_root, None)
+                .with_reply_to(reply_to),
+            );
+            // Block until the driver replies `LifecycleAdvanceComplete`
+            // for this advance. A `Timeout` here means the chain never
+            // settled (a genuine in_flight leak in some downstream cap)
+            // or the driver never replied — same fail-loud disposition
+            // the prior `SettlementTimeout` had.
+            self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(
+                cid,
+                "LifecycleAdvanceComplete",
+            )?;
         }
         // ADR-0082 §6 / PR 3c: the advance settlement above already
         // waited for the whole frame chain (Tick → component →
