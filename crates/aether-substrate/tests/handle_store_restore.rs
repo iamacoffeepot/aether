@@ -19,8 +19,10 @@
     reason = "test-setup unwraps: fixture construction panic-on-failure is the assertion"
 )]
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,12 +33,12 @@ use aether_substrate::handle_store::{HandleStore, PersistConfig, entry_paths};
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn scratch_root(tag: &str) -> PathBuf {
-    let pid = std::process::id();
+    let pid = process::id();
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
     let n = NONCE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("aether-handle-restore-{tag}-{pid}-{millis}-{n}"));
+    let path = env::temp_dir().join(format!("aether-handle-restore-{tag}-{pid}-{millis}-{n}"));
     fs::create_dir_all(&path).expect("test setup: scratch dir creates");
     path
 }
@@ -78,7 +80,7 @@ fn restore_boot_scan_populates_index() {
         let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
         for i in 0..100u64 {
             store
-                .put_persistent(HandleId(i + 1), KindId(7), vec![i as u8; 16], None)
+                .put_persistent(HandleId(i + 1), KindId(7), vec![0u8; 16], None)
                 .unwrap();
         }
     }
@@ -172,7 +174,9 @@ fn restore_pinned_set_loads() {
         let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
         for i in 0..5u64 {
             let id = HandleId(i + 1);
-            store.put_persistent(id, KindId(7), vec![1u8; 8], None).unwrap();
+            store
+                .put_persistent(id, KindId(7), vec![1u8; 8], None)
+                .unwrap();
             store.pin(id);
         }
     }
@@ -219,7 +223,9 @@ fn restore_corrupt_bin_falls_back_to_miss() {
     let id = HandleId(0x30);
     {
         let store = HandleStore::with_persist(64 * 1024, Some(cfg.clone()));
-        store.put_persistent(id, KindId(1), b"x".to_vec(), None).unwrap();
+        store
+            .put_persistent(id, KindId(1), b"x".to_vec(), None)
+            .unwrap();
     }
     let restored = HandleStore::with_persist(64 * 1024, Some(cfg.clone()));
     assert_eq!(restored.disk_index_len(), 1);

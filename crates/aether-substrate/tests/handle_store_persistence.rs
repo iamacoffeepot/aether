@@ -13,8 +13,10 @@
     reason = "test-setup unwraps: fixture construction panic-on-failure is the assertion"
 )]
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -22,19 +24,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_data::{HandleId, KindId};
 use aether_substrate::handle_store::meta::{HandleMeta, SCHEMA_VERSION};
-use aether_substrate::handle_store::{HandleStore, PersistConfig, entry_paths};
+use aether_substrate::handle_store::{
+    ENV_PERSIST_DISABLE, HandleStore, PersistConfig, entry_paths,
+};
 
 /// Process-global nonce so concurrent scratch dirs never collide even
 /// when two tests start in the same millisecond.
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn scratch_root(tag: &str) -> PathBuf {
-    let pid = std::process::id();
+    let pid = process::id();
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
     let n = NONCE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("aether-handle-persist-{tag}-{pid}-{millis}-{n}"));
+    let path = env::temp_dir().join(format!("aether-handle-persist-{tag}-{pid}-{millis}-{n}"));
     fs::create_dir_all(&path).expect("test setup: scratch dir creates");
     path
 }
@@ -65,9 +69,7 @@ fn persist_writes_bin_and_meta() {
     let id = HandleId(0x1234_5678);
     let kind = KindId(0xAAAA);
     let bytes = b"hello-world".to_vec();
-    store
-        .put_persistent(id, kind, bytes.clone(), None)
-        .unwrap();
+    store.put_persistent(id, kind, bytes.clone(), None).unwrap();
 
     let (bin_path, meta_path) = entry_paths(&cfg.root, id);
     assert!(bin_path.exists(), "bin written");
@@ -135,7 +137,9 @@ fn persist_writes_pinned_set_on_pin() {
     let store = HandleStore::with_persist(1024 * 1024, Some(cfg.clone()));
 
     let id = HandleId(0x42);
-    store.put_persistent(id, KindId(1), b"x".to_vec(), None).unwrap();
+    store
+        .put_persistent(id, KindId(1), b"x".to_vec(), None)
+        .unwrap();
     assert!(store.pin(id));
 
     let raw = fs::read(cfg.pinned_set_path()).expect("pinned.set present");
@@ -155,7 +159,9 @@ fn persist_writes_pinned_set_on_unpin() {
     let store = HandleStore::with_persist(1024 * 1024, Some(cfg.clone()));
 
     let id = HandleId(0x99);
-    store.put_persistent(id, KindId(1), b"x".to_vec(), None).unwrap();
+    store
+        .put_persistent(id, KindId(1), b"x".to_vec(), None)
+        .unwrap();
     store.pin(id);
     store.unpin(id);
 
@@ -175,7 +181,9 @@ fn persist_disabled_when_no_config() {
     let root = scratch_root("disabled");
     let store = HandleStore::with_persist(1024 * 1024, None);
     let id = HandleId(0x7);
-    store.put_persistent(id, KindId(1), b"x".to_vec(), None).unwrap();
+    store
+        .put_persistent(id, KindId(1), b"x".to_vec(), None)
+        .unwrap();
 
     assert!(store.contains(id), "in-memory entry present");
     // Nothing written to the scratch dir (we never handed it the dir).
@@ -191,10 +199,10 @@ fn persist_config_from_env_disable_flag() {
     // The disable flag wins even when the chassis votes enabled. This
     // test mutates a process-global env var; nextest runs each test in
     // its own process so the mutation is isolated.
-    let prev = std::env::var(aether_substrate::handle_store::ENV_PERSIST_DISABLE).ok();
+    let prev = env::var(ENV_PERSIST_DISABLE).ok();
     // SAFETY: single-threaded test body; nextest isolates the process.
     unsafe {
-        std::env::set_var(aether_substrate::handle_store::ENV_PERSIST_DISABLE, "1");
+        env::set_var(ENV_PERSIST_DISABLE, "1");
     }
     assert!(
         PersistConfig::from_env(true).is_none(),
@@ -205,8 +213,8 @@ fn persist_config_from_env_disable_flag() {
     // SAFETY: restore.
     unsafe {
         match prev {
-            Some(v) => std::env::set_var(aether_substrate::handle_store::ENV_PERSIST_DISABLE, v),
-            None => std::env::remove_var(aether_substrate::handle_store::ENV_PERSIST_DISABLE),
+            Some(v) => env::set_var(ENV_PERSIST_DISABLE, v),
+            None => env::remove_var(ENV_PERSIST_DISABLE),
         }
     }
 }

@@ -11,12 +11,14 @@
     reason = "test-setup unwraps: fixture construction panic-on-failure is the assertion"
 )]
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_data::{HandleId, KindId};
 use aether_substrate::handle_store::meta::TransformOrigin;
@@ -25,12 +27,12 @@ use aether_substrate::handle_store::{HandleStore, PersistConfig, entry_paths};
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn scratch_root(tag: &str) -> PathBuf {
-    let pid = std::process::id();
+    let pid = process::id();
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
     let n = NONCE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("aether-handle-evict-{tag}-{pid}-{millis}-{n}"));
+    let path = env::temp_dir().join(format!("aether-handle-evict-{tag}-{pid}-{millis}-{n}"));
     fs::create_dir_all(&path).expect("test setup: scratch dir creates");
     path
 }
@@ -60,7 +62,7 @@ fn actual_bin_bytes(cfg: &PersistConfig) -> u64 {
             for f in files.flatten() {
                 let p = f.path();
                 if p.extension().and_then(|e| e.to_str()) == Some("bin") {
-                    total += f.metadata().map(|m| m.len()).unwrap_or(0);
+                    total += f.metadata().map_or(0, |m| m.len());
                 }
             }
         }
@@ -107,7 +109,7 @@ fn eviction_orders_by_created_at() {
         store
             .put_persistent(HandleId(i + 1), KindId(7), vec![0u8; 1024 * 1024], None)
             .unwrap();
-        thread::sleep(std::time::Duration::from_millis(2));
+        thread::sleep(Duration::from_millis(2));
     }
     // Budget 7MB on a 10MB store → evict the 3 oldest.
     store.run_disk_eviction();
@@ -177,7 +179,7 @@ fn eviction_two_phase_handles_crash_between_phases() {
     fs::remove_file(&bin).unwrap();
     assert!(meta.exists());
     // Restart → boot scrub removes the orphan meta.
-    let restored = HandleStore::with_persist(64 * 1024, Some(cfg.clone()));
+    let restored = HandleStore::with_persist(64 * 1024, Some(cfg));
     assert!(!meta.exists(), "boot scrub removed orphan meta");
     assert_eq!(restored.disk_index_len(), 0);
     cleanup(&root);

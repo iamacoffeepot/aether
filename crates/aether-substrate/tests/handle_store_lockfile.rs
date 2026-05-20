@@ -9,8 +9,10 @@
     reason = "test-setup unwraps: fixture construction panic-on-failure is the assertion"
 )]
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,12 +21,12 @@ use aether_substrate::handle_store::{HandleStore, LockError, PersistConfig};
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn scratch_root(tag: &str) -> PathBuf {
-    let pid = std::process::id();
+    let pid = process::id();
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
     let n = NONCE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("aether-handle-lock-{tag}-{pid}-{millis}-{n}"));
+    let path = env::temp_dir().join(format!("aether-handle-lock-{tag}-{pid}-{millis}-{n}"));
     fs::create_dir_all(&path).expect("test setup: scratch dir creates");
     path
 }
@@ -49,7 +51,7 @@ fn lockfile_acquired_on_boot() {
     store.acquire_lock().expect("lock acquired on fresh store");
 
     let raw = fs::read_to_string(cfg.lock_path()).expect("lock.pid present");
-    assert_eq!(raw.trim(), std::process::id().to_string());
+    assert_eq!(raw.trim(), process::id().to_string());
     cleanup(&root);
 }
 
@@ -76,13 +78,15 @@ fn lockfile_rejects_concurrent_substrate() {
 
     // A second store against the same dir sees our own (live) PID and
     // refuses.
-    let second = HandleStore::with_persist(64 * 1024, Some(cfg.clone()));
+    let second = HandleStore::with_persist(64 * 1024, Some(cfg));
     let err = second.acquire_lock().expect_err("second store rejected");
     match err {
         LockError::Held { pid, .. } => {
-            assert_eq!(pid, std::process::id() as i32);
+            assert_eq!(pid, i32::try_from(process::id()).unwrap());
         }
-        other => panic!("expected Held, got {other:?}"),
+        LockError::Io { path, error } => {
+            panic!("expected Held, got Io({}): {error}", path.display())
+        }
     }
     drop(first);
     cleanup(&root);
@@ -100,7 +104,7 @@ fn lockfile_reclaims_stale_lock() {
     store.acquire_lock().expect("stale lock reclaimed");
     // Now holds our PID.
     let raw = fs::read_to_string(cfg.lock_path()).unwrap();
-    assert_eq!(raw.trim(), std::process::id().to_string());
+    assert_eq!(raw.trim(), process::id().to_string());
     cleanup(&root);
 }
 
@@ -112,9 +116,11 @@ fn lockfile_reclaims_garbage_lock() {
     fs::write(cfg.lock_path(), b"not-a-pid").unwrap();
 
     let store = HandleStore::with_persist(64 * 1024, Some(cfg.clone()));
-    store.acquire_lock().expect("garbage lock reclaimed as stale");
+    store
+        .acquire_lock()
+        .expect("garbage lock reclaimed as stale");
     let raw = fs::read_to_string(cfg.lock_path()).unwrap();
-    assert_eq!(raw.trim(), std::process::id().to_string());
+    assert_eq!(raw.trim(), process::id().to_string());
     cleanup(&root);
 }
 
@@ -124,7 +130,7 @@ fn lockfile_does_not_reclaim_live_lock() {
     let cfg = cfg_under(&root);
     fs::create_dir_all(&cfg.root).unwrap();
     // Our own PID — we're alive, so the lock must not be reclaimed.
-    fs::write(cfg.lock_path(), std::process::id().to_string()).unwrap();
+    fs::write(cfg.lock_path(), process::id().to_string()).unwrap();
 
     let store = HandleStore::with_persist(64 * 1024, Some(cfg));
     let err = store.acquire_lock().expect_err("live lock not reclaimed");

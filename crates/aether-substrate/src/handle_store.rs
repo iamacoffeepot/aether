@@ -39,12 +39,19 @@
 //! shims for component-side publish/release land in PR 3.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::error::Error as StdError;
+use std::fmt;
+use std::fs;
+use std::io::{Error as IoError, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::mail::Mail;
+use crate::mail::registry::Registry;
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_data::{HandleId, KindId};
 use std::env;
@@ -66,8 +73,8 @@ pub const ENV_MAX_BYTES: &str = "AETHER_HANDLE_STORE_MAX_BYTES";
 pub const ENV_PERSIST_DIR: &str = "AETHER_HANDLE_STORE_DIR";
 
 /// Env var that disables on-disk persistence outright. Set to `1` by
-/// the TestBench harness + CI so unit tests don't leak entries into the
-/// user's data dir.
+/// the `TestBench` harness + CI so unit tests don't leak entries into
+/// the user's data dir.
 pub const ENV_PERSIST_DISABLE: &str = "AETHER_HANDLE_STORE_PERSIST_DISABLE";
 
 /// On-disk layout version directory under [`ENV_PERSIST_DIR`]. The
@@ -172,11 +179,11 @@ pub enum LockError {
     /// Another live substrate already holds the lock. Boot must abort.
     Held { path: PathBuf, pid: i32 },
     /// The lockfile couldn't be written (permission, disk full, etc.).
-    Io { path: PathBuf, error: std::io::Error },
+    Io { path: PathBuf, error: IoError },
 }
 
-impl std::fmt::Display for LockError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Held { path, pid } => write!(
                 f,
@@ -185,13 +192,17 @@ impl std::fmt::Display for LockError {
                 path.display(),
             ),
             Self::Io { path, error } => {
-                write!(f, "failed to write handle store lock {}: {error}", path.display())
+                write!(
+                    f,
+                    "failed to write handle store lock {}: {error}",
+                    path.display()
+                )
             }
         }
     }
 }
 
-impl std::error::Error for LockError {}
+impl StdError for LockError {}
 
 /// RAII guard that deletes `lock.pid` on graceful shutdown. SIGKILL
 /// bypasses `Drop`; the stale-lock reclamation path handles that case
@@ -203,7 +214,7 @@ struct LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -221,7 +232,7 @@ fn is_pid_alive(pid: i32) -> bool {
         return true;
     }
     // errno == EPERM means the process exists but we lack permission.
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    IoError::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(not(unix))]
@@ -282,7 +293,7 @@ pub trait KindResolver: Send + Sync {
     fn name_for_id(&self, id: KindId) -> Option<String>;
 }
 
-impl KindResolver for crate::mail::registry::Registry {
+impl KindResolver for Registry {
     fn id_for_name(&self, name: &str) -> Option<KindId> {
         self.kind_id(name)
     }
@@ -341,6 +352,8 @@ pub fn entry_paths(root: &Path, id: HandleId) -> (PathBuf, PathBuf) {
 
 /// Parse a `u64` env var, falling back to `default` on absence or a
 /// parse failure (with a warn for the malformed case).
+// Nested match keeps the warn-log path readable (same shape as `from_env`).
+#[allow(clippy::option_if_let_else)]
 fn parse_env_u64(name: &str, default: u64) -> u64 {
     match env::var(name) {
         Ok(raw) => match raw.parse::<u64>() {
@@ -374,29 +387,28 @@ fn now_millis() -> u64 {
 /// target. Creates the parent dir lazily. Returns the io error on
 /// failure so the caller can log + continue (persistence is best-effort
 /// per ADR-0049 §3).
-fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), IoError> {
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
     let nonce = now_millis();
-    let pid = std::process::id();
+    let pid = process::id();
     let file_name = target
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("entry");
     let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));
     {
-        use std::io::Write as _;
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         // fsync the tmp file so its bytes hit disk before the rename
         // publishes it (preserves ordering across a crash).
         f.sync_all()?;
     }
-    match std::fs::rename(&tmp, target) {
+    match fs::rename(&tmp, target) {
         Ok(()) => Ok(()),
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = fs::remove_file(&tmp);
             Err(e)
         }
     }
@@ -478,7 +490,7 @@ pub struct HandleStore {
     /// (ADR-0049 §6). Supplied at construction (the substrate's
     /// `Registry`); `None` on fixtures that don't model schema drift —
     /// the boot scan then only enforces the `schema_version` check.
-    kind_resolver: Option<std::sync::Arc<dyn KindResolver>>,
+    kind_resolver: Option<Arc<dyn KindResolver>>,
 }
 
 /// Reasons a `put` can fail.
@@ -566,7 +578,7 @@ impl HandleStore {
     pub fn with_persist_validated(
         max_bytes: usize,
         persist: Option<PersistConfig>,
-        kind_resolver: Option<std::sync::Arc<dyn KindResolver>>,
+        kind_resolver: Option<Arc<dyn KindResolver>>,
     ) -> Self {
         let store = Self {
             inner: RwLock::new(Inner {
@@ -625,7 +637,7 @@ impl HandleStore {
     #[must_use]
     pub fn from_env_persistent(
         enabled: bool,
-        kind_resolver: Option<std::sync::Arc<dyn KindResolver>>,
+        kind_resolver: Option<Arc<dyn KindResolver>>,
     ) -> Self {
         let max_bytes = Self::from_env().max_bytes;
         Self::with_persist_validated(max_bytes, PersistConfig::from_env(enabled), kind_resolver)
@@ -721,6 +733,9 @@ impl HandleStore {
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
+    // `origin` is taken by value: it's the caller's provenance record
+    // handed to the store, even though the disk write only borrows it.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn put_persistent(
         &self,
         id: HandleId,
@@ -822,7 +837,9 @@ impl HandleStore {
             .inner
             .write()
             .expect("handle store lock poisoned; fail-fast per ADR-0063");
-        inner.total_disk_bytes = inner.total_disk_bytes.saturating_add(u64::from(meta.bytes_len));
+        inner.total_disk_bytes = inner
+            .total_disk_bytes
+            .saturating_add(u64::from(meta.bytes_len));
         inner.disk_index.insert(
             id,
             DiskEntry {
@@ -852,7 +869,7 @@ impl HandleStore {
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
             // Union the in-memory pinned set with the on-disk pinned
             // index so a pinned disk-only entry stays in `pinned.set`.
-            let mut set: std::collections::HashSet<u64> = inner
+            let mut set: HashSet<u64> = inner
                 .entries
                 .iter()
                 .filter(|(_, e)| e.pinned)
@@ -888,13 +905,16 @@ impl HandleStore {
     /// access. A boot scrub deletes orphan `.bin` (no sibling meta) and
     /// orphan `.meta` (no sibling bin) so a crash mid-write doesn't leave
     /// the tree inconsistent. No-op when persistence is disabled.
+    // One pass over the shard tree with inline scrub + validation arms;
+    // splitting it would scatter the boot-scan invariants across helpers.
+    #[allow(clippy::too_many_lines)]
     fn restore_from_disk(&self) {
         let Some(cfg) = self.persist.clone() else {
             return;
         };
         let pinned = read_pinned_set(&cfg);
         let entries_dir = cfg.entries_dir();
-        let Ok(shards) = std::fs::read_dir(&entries_dir) else {
+        let Ok(shards) = fs::read_dir(&entries_dir) else {
             // Fresh store (no entries/ yet) — nothing to scan.
             return;
         };
@@ -911,7 +931,7 @@ impl HandleStore {
             if !shard_path.is_dir() {
                 continue;
             }
-            let Ok(files) = std::fs::read_dir(&shard_path) else {
+            let Ok(files) = fs::read_dir(&shard_path) else {
                 continue;
             };
             for file in files.flatten() {
@@ -919,76 +939,67 @@ impl HandleStore {
                 let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
                     continue;
                 };
-                match ext {
-                    "meta" => {
-                        let bin = path.with_extension("bin");
-                        match read_meta_file(&path) {
-                            Some(meta) => {
-                                if !bin.exists() {
-                                    // Orphan meta — bytes gone; the meta is
-                                    // unreachable. Scrub it.
-                                    let _ = std::fs::remove_file(&path);
-                                    orphan_metas += 1;
-                                    scrubbed += 1;
-                                    continue;
-                                }
-                                // ADR-0049 §6: schema-evolution check. A
-                                // version skew, retired kind, or changed
-                                // kind id invalidates the entry — the
-                                // bytes are unsafe to decode against the
-                                // current schema, so drop both files. This
-                                // overrides pin (a pinned entry whose kind
-                                // changed is still evicted — pin protects
-                                // against budget pressure, not against
-                                // correctness invalidation).
-                                if let Validation::Drop(reason) = validate_meta(&meta, resolver) {
-                                    let _ = std::fs::remove_file(&bin);
-                                    let _ = std::fs::remove_file(&path);
-                                    invalidated += 1;
-                                    tracing::info!(
-                                        target: TARGET,
-                                        handle = %HandleId(meta.handle_id),
-                                        reason = %reason,
-                                        "handle store entry invalidated by schema evolution; dropped",
-                                    );
-                                    continue;
-                                }
-                                let id = HandleId(meta.handle_id);
-                                index.insert(
-                                    id,
-                                    DiskEntry {
-                                        kind_id: KindId(meta.kind_id),
-                                        bytes_len: meta.bytes_len,
-                                        pinned: meta.pinned || pinned.contains(&id),
-                                        created_at: meta.created_at,
-                                    },
-                                );
-                            }
-                            None => {
-                                // Unreadable meta — drop it + its bin.
-                                let _ = std::fs::remove_file(&path);
-                                let _ = std::fs::remove_file(&bin);
-                                scrubbed += 1;
-                            }
-                        }
-                    }
-                    "bin" => {
-                        // Defer: a bin is valid only with its meta, which
-                        // the `meta` arm indexes. An orphan bin (no meta)
-                        // is caught in the second pass below.
-                    }
-                    "tmp" => {}
-                    _ => {}
+                // Only `.meta` sidecars are index entries. A `.bin`
+                // without a sibling meta is an orphan, caught in the
+                // second pass below; `.tmp` leftovers are swept there
+                // too.
+                if ext != "meta" {
+                    continue;
                 }
+                let bin = path.with_extension("bin");
+                let Some(meta) = read_meta_file(&path) else {
+                    // Unreadable meta — drop it + its bin.
+                    let _ = fs::remove_file(&path);
+                    let _ = fs::remove_file(&bin);
+                    scrubbed += 1;
+                    continue;
+                };
+                if !bin.exists() {
+                    // Orphan meta — bytes gone; the meta is unreachable.
+                    // Scrub it.
+                    let _ = fs::remove_file(&path);
+                    orphan_metas += 1;
+                    scrubbed += 1;
+                    continue;
+                }
+                // ADR-0049 §6: schema-evolution check. A version skew,
+                // retired kind, or changed kind id invalidates the entry
+                // — the bytes are unsafe to decode against the current
+                // schema, so drop both files. This overrides pin (a
+                // pinned entry whose kind changed is still evicted — pin
+                // protects against budget pressure, not against
+                // correctness invalidation).
+                if let Validation::Drop(reason) = validate_meta(&meta, resolver) {
+                    let _ = fs::remove_file(&bin);
+                    let _ = fs::remove_file(&path);
+                    invalidated += 1;
+                    tracing::info!(
+                        target: TARGET,
+                        handle = %HandleId(meta.handle_id),
+                        reason = %reason,
+                        "handle store entry invalidated by schema evolution; dropped",
+                    );
+                    continue;
+                }
+                let id = HandleId(meta.handle_id);
+                index.insert(
+                    id,
+                    DiskEntry {
+                        kind_id: KindId(meta.kind_id),
+                        bytes_len: meta.bytes_len,
+                        pinned: meta.pinned || pinned.contains(&id),
+                        created_at: meta.created_at,
+                    },
+                );
             }
             // Second pass: scrub orphan bins (bin without sibling meta).
-            if let Ok(files) = std::fs::read_dir(&shard_path) {
+            if let Ok(files) = fs::read_dir(&shard_path) {
                 for file in files.flatten() {
                     let path = file.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("bin") {
                         let meta = path.with_extension("meta");
                         if !meta.exists() {
-                            let _ = std::fs::remove_file(&path);
+                            let _ = fs::remove_file(&path);
                             orphan_bins += 1;
                             scrubbed += 1;
                         }
@@ -997,7 +1008,7 @@ impl HandleStore {
                     if let Some(name) = path.file_name().and_then(|n| n.to_str())
                         && name.contains(".tmp-")
                     {
-                        let _ = std::fs::remove_file(&path);
+                        let _ = fs::remove_file(&path);
                     }
                 }
             }
@@ -1051,38 +1062,34 @@ impl HandleStore {
             inner.disk_index.get(&id).cloned()?
         };
         let (bin_path, _) = entry_paths(&cfg.root, id);
-        match std::fs::read(&bin_path) {
-            Ok(bytes) => {
-                let mut inner = self
-                    .inner
-                    .write()
-                    .expect("handle store lock poisoned; fail-fast per ADR-0063");
-                let last_access = bump_clock(&mut inner);
-                inner.total_bytes += bytes.len();
-                inner.entries.insert(
-                    id,
-                    HandleEntry {
-                        kind: disk_entry.kind_id,
-                        bytes: bytes.clone(),
-                        refcount: 0,
-                        pinned: disk_entry.pinned,
-                        last_access,
-                    },
-                );
-                Some((disk_entry.kind_id, bytes))
-            }
-            Err(_) => {
-                // `.bin` missing but the index said it was there —
-                // corruption. Treat as a miss + remember it.
-                let mut inner = self
-                    .inner
-                    .write()
-                    .expect("handle store lock poisoned; fail-fast per ADR-0063");
-                inner.disk_index.remove(&id);
-                inner.note_negative(id);
-                None
-            }
-        }
+        let Ok(bytes) = fs::read(&bin_path) else {
+            // `.bin` missing but the index said it was there —
+            // corruption. Treat as a miss + remember it.
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            inner.disk_index.remove(&id);
+            inner.note_negative(id);
+            return None;
+        };
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
+        let last_access = bump_clock(&mut inner);
+        inner.total_bytes += bytes.len();
+        inner.entries.insert(
+            id,
+            HandleEntry {
+                kind: disk_entry.kind_id,
+                bytes: bytes.clone(),
+                refcount: 0,
+                pinned: disk_entry.pinned,
+                last_access,
+            },
+        );
+        Some((disk_entry.kind_id, bytes))
     }
 
     /// Current approximate on-disk byte ledger (ADR-0049 §5). Test +
@@ -1105,6 +1112,10 @@ impl HandleStore {
     /// oldest-`created_at` first, two-phase (`.bin` then `.meta`), until
     /// the ledger drops below the budget or no candidates remain. No-op
     /// when persistence is disabled.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
     pub fn run_disk_eviction(&self) {
         let Some(cfg) = self.persist.clone() else {
             return;
@@ -1143,8 +1154,8 @@ impl HandleStore {
             }
             let (bin_path, meta_path) = entry_paths(&cfg.root, id);
             // Phase A: drop the bytes.
-            if let Err(e) = std::fs::remove_file(&bin_path)
-                && e.kind() != std::io::ErrorKind::NotFound
+            if let Err(e) = fs::remove_file(&bin_path)
+                && e.kind() != ErrorKind::NotFound
             {
                 tracing::warn!(
                     target: TARGET,
@@ -1156,8 +1167,8 @@ impl HandleStore {
                 continue;
             }
             // Phase B: drop the index entry.
-            if let Err(e) = std::fs::remove_file(&meta_path)
-                && e.kind() != std::io::ErrorKind::NotFound
+            if let Err(e) = fs::remove_file(&meta_path)
+                && e.kind() != ErrorKind::NotFound
             {
                 tracing::warn!(
                     target: TARGET,
@@ -1197,8 +1208,8 @@ impl HandleStore {
     /// caller can abort boot with a clear error. No-op (returns `Ok`)
     /// when persistence is disabled.
     ///
-    /// On success the store holds a [`LockGuard`] whose `Drop` deletes
-    /// the lockfile on graceful shutdown.
+    /// On success the store holds a lock guard whose `Drop` deletes the
+    /// lockfile on graceful shutdown.
     ///
     /// # Panics
     /// Panics if the lock mutex is poisoned — fail-fast per ADR-0063.
@@ -1208,7 +1219,7 @@ impl HandleStore {
         };
         let path = cfg.lock_path();
         // Inspect any existing lock.
-        if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(raw) = fs::read_to_string(&path) {
             match raw.trim().parse::<i32>() {
                 Ok(pid) if pid > 0 && is_pid_alive(pid) => {
                     return Err(LockError::Held { path, pid });
@@ -1231,9 +1242,11 @@ impl HandleStore {
             }
         }
         // Write our PID atomically.
-        let pid = std::process::id();
-        atomic_write(&path, pid.to_string().as_bytes())
-            .map_err(|error| LockError::Io { path: path.clone(), error })?;
+        let pid = process::id();
+        atomic_write(&path, pid.to_string().as_bytes()).map_err(|error| LockError::Io {
+            path: path.clone(),
+            error,
+        })?;
         *self
             .lock
             .lock()
@@ -1261,8 +1274,7 @@ impl HandleStore {
         // (not yet persisted, e.g. ephemeral sources) are counted under
         // in_memory. Total is the union of ids.
         let on_disk_entries = inner.disk_index.len();
-        let mut all_ids: std::collections::HashSet<HandleId> =
-            inner.entries.keys().copied().collect();
+        let mut all_ids: HashSet<HandleId> = inner.entries.keys().copied().collect();
         all_ids.extend(inner.disk_index.keys().copied());
 
         // Build summaries from the union, preferring in-memory data
@@ -1273,15 +1285,15 @@ impl HandleStore {
             .map(|id| {
                 let mem = inner.entries.get(&id);
                 let disk = inner.disk_index.get(&id);
-                let kind_id = mem.map_or_else(
-                    || disk.map_or(KindId(0), |d| d.kind_id),
-                    |m| m.kind,
-                );
+                let kind_id = mem.map_or_else(|| disk.map_or(KindId(0), |d| d.kind_id), |m| m.kind);
                 let bytes_len = mem.map_or_else(
                     || disk.map_or(0u32, |d| d.bytes_len),
                     |m| u32::try_from(m.bytes.len()).unwrap_or(u32::MAX),
                 );
-                let pinned = mem.map(|m| m.pinned).or(disk.map(|d| d.pinned)).unwrap_or(false);
+                let pinned = mem
+                    .map(|m| m.pinned)
+                    .or_else(|| disk.map(|d| d.pinned))
+                    .unwrap_or(false);
                 let refcount = mem.map_or(0, |m| m.refcount);
                 let created_at = disk.map_or(0, |d| d.created_at);
                 HandleSummary {
@@ -1300,7 +1312,11 @@ impl HandleStore {
 
         // top_by_size: descending bytes_len.
         let mut by_size = summaries.clone();
-        by_size.sort_by(|a, b| b.bytes_len.cmp(&a.bytes_len).then(a.handle_id.0.cmp(&b.handle_id.0)));
+        by_size.sort_by(|a, b| {
+            b.bytes_len
+                .cmp(&a.bytes_len)
+                .then(a.handle_id.0.cmp(&b.handle_id.0))
+        });
         by_size.truncate(max);
 
         // top_by_recency: descending created_at.
@@ -1330,21 +1346,21 @@ impl HandleStore {
     }
 
     /// Spawn the background eviction tick (ADR-0049 §5). The thread owns
-    /// a [`Weak`] reference to avoid a reference cycle; on the store's
-    /// last `Arc` dropping, the weak fails to upgrade and the thread
-    /// exits. No-op when persistence is disabled. Call once at boot
-    /// after wrapping the store in an `Arc`.
-    pub fn spawn_eviction_thread(self: &std::sync::Arc<Self>) {
+    /// a [`std::sync::Weak`] reference to avoid a reference cycle; on the
+    /// store's last `Arc` dropping, the weak fails to upgrade and the
+    /// thread exits. No-op when persistence is disabled. Call once at
+    /// boot after wrapping the store in an `Arc`.
+    pub fn spawn_eviction_thread(self: &Arc<Self>) {
         let Some(cfg) = self.persist.clone() else {
             return;
         };
-        let weak = std::sync::Arc::downgrade(self);
-        let tick = std::time::Duration::from_secs(cfg.eviction_tick_secs.max(1));
-        std::thread::Builder::new()
+        let weak = Arc::downgrade(self);
+        let tick = Duration::from_secs(cfg.eviction_tick_secs.max(1));
+        thread::Builder::new()
             .name("handle-store-evict".to_owned())
             .spawn(move || {
                 loop {
-                    std::thread::sleep(tick);
+                    thread::sleep(tick);
                     let Some(store) = weak.upgrade() else {
                         // Store dropped; thread exits.
                         return;
@@ -1364,29 +1380,36 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn pin(&self, id: HandleId) -> bool {
-        let pinned = {
+        self.set_pinned(id, true)
+    }
+
+    /// Set the pinned flag on `id` across the in-memory entry AND the
+    /// on-disk index (so the eviction tick skips a pinned disk-resident
+    /// entry that isn't materialized in memory, ADR-0049 §5). Rewrites
+    /// `pinned.set` when either was touched. Returns `false` if `id`
+    /// isn't known in either place.
+    fn set_pinned(&self, id: HandleId, value: bool) -> bool {
+        let found = {
             let mut inner = self
                 .inner
                 .write()
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
-            let mut found = false;
-            if let Some(entry) = inner.entries.get_mut(&id) {
-                entry.pinned = true;
-                found = true;
-            }
-            // Keep the on-disk index's pinned flag in sync so the
-            // eviction tick (ADR-0049 §5) skips a pinned disk-resident
-            // entry even when it isn't materialized in memory.
-            if let Some(disk) = inner.disk_index.get_mut(&id) {
-                disk.pinned = true;
-                found = true;
-            }
-            found
+            let in_mem = inner
+                .entries
+                .get_mut(&id)
+                .map(|e| e.pinned = value)
+                .is_some();
+            let on_disk = inner
+                .disk_index
+                .get_mut(&id)
+                .map(|d| d.pinned = value)
+                .is_some();
+            in_mem || on_disk
         };
-        if pinned {
+        if found {
             self.persist_pinned_set();
         }
-        pinned
+        found
     }
 
     /// Clear the pinned flag on `id`. Doesn't drop the entry; only
@@ -1397,26 +1420,7 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn unpin(&self, id: HandleId) -> bool {
-        let unpinned = {
-            let mut inner = self
-                .inner
-                .write()
-                .expect("handle store lock poisoned; fail-fast per ADR-0063");
-            let mut found = false;
-            if let Some(entry) = inner.entries.get_mut(&id) {
-                entry.pinned = false;
-                found = true;
-            }
-            if let Some(disk) = inner.disk_index.get_mut(&id) {
-                disk.pinned = false;
-                found = true;
-            }
-            found
-        };
-        if unpinned {
-            self.persist_pinned_set();
-        }
-        unpinned
+        self.set_pinned(id, false)
     }
 
     /// Increment the refcount on `id`. Returns `false` if the id isn't
@@ -1623,10 +1627,10 @@ impl HandleStore {
 /// Read `pinned.set` into a set of handle ids. The file is a flat
 /// little-endian `u64` array. Missing / unreadable / malformed (length
 /// not a multiple of 8) → empty set with a warn for the malformed case.
-fn read_pinned_set(cfg: &PersistConfig) -> std::collections::HashSet<HandleId> {
+fn read_pinned_set(cfg: &PersistConfig) -> HashSet<HandleId> {
     let path = cfg.pinned_set_path();
-    let Ok(raw) = std::fs::read(&path) else {
-        return std::collections::HashSet::new();
+    let Ok(raw) = fs::read(&path) else {
+        return HashSet::new();
     };
     if raw.len() % 8 != 0 {
         tracing::warn!(
@@ -1635,7 +1639,7 @@ fn read_pinned_set(cfg: &PersistConfig) -> std::collections::HashSet<HandleId> {
             len = raw.len(),
             "pinned.set length not a multiple of 8; ignoring",
         );
-        return std::collections::HashSet::new();
+        return HashSet::new();
     }
     raw.chunks_exact(8)
         .map(|c| {
@@ -1649,7 +1653,7 @@ fn read_pinned_set(cfg: &PersistConfig) -> std::collections::HashSet<HandleId> {
 /// Read + decode a `.meta` sidecar. Returns `None` on read or decode
 /// failure (the boot scan treats that as a corrupt entry to scrub).
 fn read_meta_file(path: &Path) -> Option<HandleMeta> {
-    let raw = std::fs::read(path).ok()?;
+    let raw = fs::read(path).ok()?;
     postcard::from_bytes::<HandleMeta>(&raw).ok()
 }
 
@@ -2023,7 +2027,7 @@ fn skip_primitive_postcard(state: &mut State<'_>, p: Primitive) -> Result<(), Wa
     reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
 )]
 mod tests {
-    use std::sync::Arc;
+    use Arc;
 
     use crate::mail::{Mail, MailboxId};
     use aether_data::{Kind, Ref};

@@ -44,8 +44,9 @@ use crate::mail::registry::MailDispatch;
 use crate::runtime::log_install;
 use crate::runtime::panic_hook;
 use crate::{
-    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns,
-    handle_store::HandleStore,
+    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry,
+    actor::wasm::host_fns,
+    handle_store::{HandleStore, KindResolver},
 };
 use aether_kinds::descriptors;
 
@@ -115,7 +116,7 @@ impl SubstrateBoot {
     }
 }
 
-impl<'a> SubstrateBootBuilder<'a> {
+impl SubstrateBootBuilder<'_> {
     /// Opt this chassis into ADR-0049 on-disk handle persistence. The
     /// desktop + headless chassis call this; the hub does not. Whether
     /// persistence actually activates still depends on the env
@@ -211,7 +212,7 @@ impl SubstrateBootBuilder<'_> {
         // ADR-0049 §6: the registry (already populated above) drives the
         // schema-evolution check on the boot scan — a kind whose schema
         // changed or was retired invalidates its stale on-disk entries.
-        let kind_resolver: Arc<dyn crate::handle_store::KindResolver> = registry.clone();
+        let kind_resolver: Arc<dyn KindResolver> = registry.clone();
         let handle_store = Arc::new(HandleStore::from_env_persistent(
             self.persist_enabled,
             Some(kind_resolver),

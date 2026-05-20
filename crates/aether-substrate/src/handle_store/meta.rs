@@ -45,7 +45,7 @@ pub struct HandleMeta {
     /// The kind's name at write time. Lets the schema-evolution check
     /// distinguish "kind retired" (no registry entry for the name) from
     /// "kind schema changed" (registry id differs from `kind_id`) —
-    /// added in schema_version 2 (issue #988).
+    /// added in `schema_version` 2 (issue #988).
     pub kind_name: String,
     /// Provenance: the transform that produced this handle, or `None`
     /// for pinned source handles (ADR-0049 §1).

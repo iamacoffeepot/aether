@@ -30,7 +30,9 @@ mod native {
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::handle_store::{HandleStore, PutError};
+    use aether_substrate::handle_store::{
+        HandleStore, HandleStoreSnapshot, HandleSummary as StoreSummary, PutError,
+    };
 
     /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`.
     pub struct HandleCapability {
@@ -160,7 +162,7 @@ mod native {
         n as usize
     }
 
-    fn summary_to_wire(s: &aether_substrate::handle_store::HandleSummary) -> HandleSummary {
+    fn summary_to_wire(s: &StoreSummary) -> HandleSummary {
         HandleSummary {
             handle_id: s.handle_id,
             kind_id: s.kind_id,
@@ -171,9 +173,7 @@ mod native {
         }
     }
 
-    fn snapshot_to_result(
-        snap: &aether_substrate::handle_store::HandleStoreSnapshot,
-    ) -> HandleDescribeResult {
+    fn snapshot_to_result(snap: &HandleStoreSnapshot) -> HandleDescribeResult {
         let cast = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         HandleDescribeResult {
             total_entries: cast(snap.total_entries),
@@ -328,9 +328,15 @@ mod native {
 
             let (store, mailer, registry, rx) = fresh_substrate();
             // Pre-populate the store: 3 entries, 1 pinned.
-            store.put(HandleId(1), KindId(0xA), vec![0u8; 100]).unwrap();
-            store.put(HandleId(2), KindId(0xB), vec![0u8; 200]).unwrap();
-            store.put(HandleId(3), KindId(0xC), vec![0u8; 50]).unwrap();
+            store
+                .put(HandleId(1), KindId(0xA), vec![0u8; 100])
+                .expect("put 1");
+            store
+                .put(HandleId(2), KindId(0xB), vec![0u8; 200])
+                .expect("put 2");
+            store
+                .put(HandleId(3), KindId(0xC), vec![0u8; 50])
+                .expect("put 3");
             store.pin(HandleId(2));
 
             let chassis = boot_test_chassis_with::<HandleCapability>(&registry, &mailer, ());

@@ -1,4 +1,4 @@
-//! Issue #988: schema-evolution invalidation via kind_id (ADR-0049 §6).
+//! Issue #988: schema-evolution invalidation via `kind_id` (ADR-0049 §6).
 //!
 //! On restore, the boot scan compares each entry's `meta.kind_id`
 //! against the current registry's id for the same `kind_name`. A
@@ -14,8 +14,10 @@
 )]
 
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,12 +29,12 @@ use aether_substrate::handle_store::{HandleStore, KindResolver, PersistConfig, e
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn scratch_root(tag: &str) -> PathBuf {
-    let pid = std::process::id();
+    let pid = process::id();
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
     let n = NONCE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("aether-handle-schema-{tag}-{pid}-{millis}-{n}"));
+    let path = env::temp_dir().join(format!("aether-handle-schema-{tag}-{pid}-{millis}-{n}"));
     fs::create_dir_all(&path).expect("test setup: scratch dir creates");
     path
 }
@@ -191,7 +193,11 @@ fn schema_evolution_pinned_entry_still_invalidates() {
     }
     // Restart with a changed id — the pinned entry is still evicted.
     let restored = store_with(&cfg, &[("demo.kind", 0xBBBB)]);
-    assert_eq!(restored.disk_index_len(), 0, "pinned-but-stale entry dropped");
+    assert_eq!(
+        restored.disk_index_len(),
+        0,
+        "pinned-but-stale entry dropped"
+    );
     let (bin, meta) = entry_paths(&cfg.root, id);
     assert!(!bin.exists() && !meta.exists());
     cleanup(&root);
