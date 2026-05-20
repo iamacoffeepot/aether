@@ -268,6 +268,64 @@ pub struct HandleSummary {
     pub created_at_ms: u64,
 }
 
+/// Kind-name → current-id resolver used by the schema-evolution check
+/// (ADR-0049 §6). The substrate's `Registry` implements this; the boot
+/// scan calls it once per `.meta` to detect schema drift. Decoupled
+/// from `Registry` directly so test fixtures can supply a synthetic
+/// resolver without standing up a full registry.
+pub trait KindResolver: Send + Sync {
+    /// Current id for the named kind, or `None` if the kind isn't
+    /// registered.
+    fn id_for_name(&self, name: &str) -> Option<KindId>;
+    /// Current name for the given kind id, or `None` if the id isn't
+    /// registered. Used at write time to stamp `meta.kind_name`.
+    fn name_for_id(&self, id: KindId) -> Option<String>;
+}
+
+impl KindResolver for crate::mail::registry::Registry {
+    fn id_for_name(&self, name: &str) -> Option<KindId> {
+        self.kind_id(name)
+    }
+
+    fn name_for_id(&self, id: KindId) -> Option<String> {
+        self.kind_name(id)
+    }
+}
+
+/// Outcome of validating an on-disk `.meta` against the current kind
+/// registry (ADR-0049 §6).
+enum Validation {
+    /// The entry's kind matches the current registry; keep it.
+    Valid,
+    /// The entry is stale (schema changed, kind retired, or unsupported
+    /// version); drop it. Carries the reason for `engine_logs`.
+    Drop(String),
+}
+
+/// Validate one `.meta` against the resolver (ADR-0049 §6). An
+/// unsupported `schema_version`, an unknown kind name, or a kind-id
+/// mismatch all invalidate the entry. With no resolver (test fixtures
+/// that don't model schema evolution), only the version check applies.
+fn validate_meta(meta: &HandleMeta, resolver: Option<&dyn KindResolver>) -> Validation {
+    if meta.schema_version != SCHEMA_VERSION {
+        return Validation::Drop(format!(
+            "schema_version {} unsupported (current {SCHEMA_VERSION})",
+            meta.schema_version,
+        ));
+    }
+    let Some(resolver) = resolver else {
+        return Validation::Valid;
+    };
+    match resolver.id_for_name(&meta.kind_name) {
+        Some(current) if current.0 == meta.kind_id => Validation::Valid,
+        Some(current) => Validation::Drop(format!(
+            "kind '{}' id changed: {:016x} -> {:016x}",
+            meta.kind_name, meta.kind_id, current.0,
+        )),
+        None => Validation::Drop(format!("kind '{}' no longer registered", meta.kind_name)),
+    }
+}
+
 /// Compute the `(<bin>, <meta>)` paths for a handle id under `root`.
 /// 256 prefix-shard directories keyed on the first hex byte of the id
 /// (ADR-0049 §2).
@@ -416,6 +474,11 @@ pub struct HandleStore {
     /// succeeds; its `Drop` deletes the lockfile on graceful shutdown.
     /// `None` until acquired (or when persistence is disabled).
     lock: Mutex<Option<LockGuard>>,
+    /// Kind-name → current-id resolver for the schema-evolution check
+    /// (ADR-0049 §6). Supplied at construction (the substrate's
+    /// `Registry`); `None` on fixtures that don't model schema drift —
+    /// the boot scan then only enforces the `schema_version` check.
+    kind_resolver: Option<std::sync::Arc<dyn KindResolver>>,
 }
 
 /// Reasons a `put` can fail.
@@ -479,15 +542,32 @@ impl HandleStore {
             max_bytes,
             persist: None,
             lock: Mutex::new(None),
+            kind_resolver: None,
         }
     }
 
     /// Build an in-memory store with on-disk persistence wired in. The
     /// caller resolves the [`PersistConfig`] (typically via
     /// [`PersistConfig::from_env`]); the boot scan populates the disk
-    /// index from the existing tree (ADR-0049 §3).
+    /// index from the existing tree (ADR-0049 §3). No kind resolver, so
+    /// the schema-evolution check (ADR-0049 §6) only enforces the
+    /// `schema_version` gate — use [`Self::with_persist_validated`] to
+    /// wire one.
     #[must_use]
     pub fn with_persist(max_bytes: usize, persist: Option<PersistConfig>) -> Self {
+        Self::with_persist_validated(max_bytes, persist, None)
+    }
+
+    /// Build a persistent store with a kind resolver for the
+    /// schema-evolution check (ADR-0049 §6). The resolver (the
+    /// substrate's `Registry`) lets the boot scan detect a kind whose
+    /// schema changed or was retired and drop its stale on-disk entries.
+    #[must_use]
+    pub fn with_persist_validated(
+        max_bytes: usize,
+        persist: Option<PersistConfig>,
+        kind_resolver: Option<std::sync::Arc<dyn KindResolver>>,
+    ) -> Self {
         let store = Self {
             inner: RwLock::new(Inner {
                 next_ephemeral: 1,
@@ -496,6 +576,7 @@ impl HandleStore {
             max_bytes,
             persist,
             lock: Mutex::new(None),
+            kind_resolver,
         };
         store.restore_from_disk();
         store
@@ -537,15 +618,17 @@ impl HandleStore {
     /// Build a store sized from the environment with on-disk
     /// persistence resolved from [`PersistConfig::from_env`]. `enabled`
     /// is the chassis verdict (desktop + headless `true`, hub `false`
-    /// per ADR-0049 §9). When persistence resolves to `Some`, the boot
-    /// scan (issue #985) populates the disk index from the existing
-    /// tree.
+    /// per ADR-0049 §9). `kind_resolver` (the substrate's `Registry`)
+    /// drives the schema-evolution check (ADR-0049 §6). When persistence
+    /// resolves to `Some`, the boot scan (issue #985) populates the disk
+    /// index from the existing tree, dropping schema-stale entries.
     #[must_use]
-    pub fn from_env_persistent(enabled: bool) -> Self {
-        let mut store = Self::from_env();
-        store.persist = PersistConfig::from_env(enabled);
-        store.restore_from_disk();
-        store
+    pub fn from_env_persistent(
+        enabled: bool,
+        kind_resolver: Option<std::sync::Arc<dyn KindResolver>>,
+    ) -> Self {
+        let max_bytes = Self::from_env().max_bytes;
+        Self::with_persist_validated(max_bytes, PersistConfig::from_env(enabled), kind_resolver)
     }
 
     /// Mint a fresh ephemeral handle id. Pure counter today; content-
@@ -677,10 +760,22 @@ impl HandleStore {
         pinned: bool,
     ) {
         let (bin_path, meta_path) = entry_paths(&cfg.root, id);
+        // Stamp the kind's current name so the schema-evolution check
+        // (ADR-0049 §6) can look it up by name on restore. Falls back to
+        // the hex id when no resolver is wired (test fixtures) — a
+        // synthetic name that won't match any registry entry, so such an
+        // entry invalidates on the first registry-backed restore. That's
+        // the correct conservative behaviour.
+        let kind_name = self
+            .kind_resolver
+            .as_ref()
+            .and_then(|r| r.name_for_id(kind))
+            .unwrap_or_else(|| format!("{:016x}", kind.0));
         let meta = HandleMeta {
             schema_version: SCHEMA_VERSION,
             handle_id: id.0,
             kind_id: kind.0,
+            kind_name,
             transform_origin: origin.cloned(),
             bytes_len: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
             created_at: now_millis(),
@@ -804,9 +899,11 @@ impl HandleStore {
             return;
         };
 
+        let resolver = self.kind_resolver.as_deref();
         let mut index: HashMap<HandleId, DiskEntry> = HashMap::new();
         let mut orphan_bins = 0usize;
         let mut orphan_metas = 0usize;
+        let mut invalidated = 0usize;
         let mut scrubbed = 0usize;
 
         for shard in shards.flatten() {
@@ -833,6 +930,27 @@ impl HandleStore {
                                     let _ = std::fs::remove_file(&path);
                                     orphan_metas += 1;
                                     scrubbed += 1;
+                                    continue;
+                                }
+                                // ADR-0049 §6: schema-evolution check. A
+                                // version skew, retired kind, or changed
+                                // kind id invalidates the entry — the
+                                // bytes are unsafe to decode against the
+                                // current schema, so drop both files. This
+                                // overrides pin (a pinned entry whose kind
+                                // changed is still evicted — pin protects
+                                // against budget pressure, not against
+                                // correctness invalidation).
+                                if let Validation::Drop(reason) = validate_meta(&meta, resolver) {
+                                    let _ = std::fs::remove_file(&bin);
+                                    let _ = std::fs::remove_file(&path);
+                                    invalidated += 1;
+                                    tracing::info!(
+                                        target: TARGET,
+                                        handle = %HandleId(meta.handle_id),
+                                        reason = %reason,
+                                        "handle store entry invalidated by schema evolution; dropped",
+                                    );
                                     continue;
                                 }
                                 let id = HandleId(meta.handle_id);
@@ -895,13 +1013,14 @@ impl HandleStore {
             inner.disk_index = index;
             inner.total_disk_bytes = disk_bytes;
         }
-        if scrubbed > 0 {
+        if scrubbed > 0 || invalidated > 0 {
             tracing::info!(
                 target: TARGET,
                 indexed = count,
                 orphan_bins,
                 orphan_metas,
-                "handle store boot scan complete; scrubbed inconsistent entries",
+                invalidated,
+                "handle store boot scan complete; scrubbed inconsistent + schema-stale entries",
             );
         } else {
             tracing::debug!(

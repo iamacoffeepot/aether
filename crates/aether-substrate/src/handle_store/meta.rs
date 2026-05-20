@@ -15,7 +15,11 @@ use serde::{Deserialize, Serialize};
 /// prior entries (the boot scan treats a version mismatch as
 /// evict-on-restore) — that's the cross-substrate-version migration
 /// mechanism per ADR-0049 §6.
-pub const SCHEMA_VERSION: u8 = 1;
+///
+/// v2 (issue #988) added `kind_name` so the schema-evolution check can
+/// look the kind up in the current registry by name; v1 entries (which
+/// lack the field) are un-rescuable and evict on mismatch.
+pub const SCHEMA_VERSION: u8 = 2;
 
 /// Postcard-encoded sidecar describing one persistent handle. Written
 /// atomically next to the handle's `<hash>.bin` payload; the boot scan
@@ -38,6 +42,11 @@ pub struct HandleMeta {
     /// schema-evolution check (issue #988) compares this against the
     /// current registry's id for the same kind name.
     pub kind_id: u64,
+    /// The kind's name at write time. Lets the schema-evolution check
+    /// distinguish "kind retired" (no registry entry for the name) from
+    /// "kind schema changed" (registry id differs from `kind_id`) —
+    /// added in schema_version 2 (issue #988).
+    pub kind_name: String,
     /// Provenance: the transform that produced this handle, or `None`
     /// for pinned source handles (ADR-0049 §1).
     pub transform_origin: Option<TransformOrigin>,

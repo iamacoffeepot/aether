@@ -208,7 +208,14 @@ impl SubstrateBootBuilder<'_> {
             }),
         );
 
-        let handle_store = Arc::new(HandleStore::from_env_persistent(self.persist_enabled));
+        // ADR-0049 §6: the registry (already populated above) drives the
+        // schema-evolution check on the boot scan — a kind whose schema
+        // changed or was retired invalidates its stale on-disk entries.
+        let kind_resolver: Arc<dyn crate::handle_store::KindResolver> = registry.clone();
+        let handle_store = Arc::new(HandleStore::from_env_persistent(
+            self.persist_enabled,
+            Some(kind_resolver),
+        ));
         // ADR-0049 §7: acquire the single-substrate-per-store lock
         // before doing any writes. A live conflicting lock aborts boot
         // with a clear error. No-op when persistence is disabled.

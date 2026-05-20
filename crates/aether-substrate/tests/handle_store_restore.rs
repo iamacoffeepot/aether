@@ -61,6 +61,7 @@ fn write_meta(cfg: &PersistConfig, id: HandleId, kind: KindId, bytes_len: u32) {
         schema_version: SCHEMA_VERSION,
         handle_id: id.0,
         kind_id: kind.0,
+        kind_name: "test.kind".to_owned(),
         transform_origin: None,
         bytes_len,
         created_at: 1,
