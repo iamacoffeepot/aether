@@ -252,10 +252,14 @@ impl Executor {
             })
             .collect();
         for (node_id, mailbox, kind_id, payload, handle_id) in sources {
-            // Inherited send (the submit chain) — the reply routes back
-            // to this cap via the ReplyTarget::Component tag the binding
-            // stamps. The minted MailId's correlation keys the table.
-            let mail_id = ctx.send_envelope_traced(mailbox, kind_id, &payload);
+            // Dispatch as the source's own causal root — NOT inheriting
+            // the submit chain (ADR-0047 §1: sources dispatch async
+            // *after* the submit ack, so the submit reply settles
+            // independently of the DAG's execution). The reply still
+            // routes back to this cap via the ReplyTarget::Component tag
+            // the binding stamps; the minted MailId's correlation keys
+            // the table.
+            let mail_id = ctx.send_envelope_as_root(mailbox, kind_id, &payload);
             self.pending.insert(
                 mail_id.correlation_id,
                 Pending {
@@ -300,10 +304,12 @@ impl Executor {
             })
             .collect();
         for (node_id, recipient, kind_id, payload, has_inputs) in observers {
-            // The eager dispatch is the executor's own chain — observer
-            // mail rides on the submit chain via the inherited path. A
-            // gated observer parks on its first unresolved input handle.
-            let _ = ctx.send_envelope_traced(recipient, kind_id, &payload);
+            // Dispatch as the observer's own causal root — NOT inheriting
+            // the submit chain. A gated observer parks on its first
+            // unresolved input handle; parked mail would otherwise hold
+            // the submit chain's `in_flight` non-zero forever and the
+            // submit ack would never settle (ADR-0047 §1 async execution).
+            let _ = ctx.send_envelope_as_root(recipient, kind_id, &payload);
             if !has_inputs {
                 // A zero-input observer dispatches immediately and is
                 // terminal-resolved right away — no source ever resolves
