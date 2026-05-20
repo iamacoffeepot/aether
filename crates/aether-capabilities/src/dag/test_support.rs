@@ -322,9 +322,7 @@ mod test_call {
                 // never fires and only the per-`Call` timeout can close
                 // the node (as a failure). Acquired before the handler
                 // returns so `HoldOpen` precedes `Finished`.
-                let hold = ctx
-                    .mailer()
-                    .acquire_settlement_hold(ctx.in_flight_root());
+                let hold = ctx.mailer().acquire_settlement_hold(ctx.in_flight_root());
                 self.held.push(hold);
                 return;
             }

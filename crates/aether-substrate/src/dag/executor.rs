@@ -335,11 +335,10 @@ impl Executor {
                 .nodes
                 .iter()
                 .filter_map(|n| match n {
-                    Node::Call { id, .. } => {
-                        (state.pending_inputs.get(id).copied().unwrap_or(0) == 0
-                            && !state.resolved.contains(id))
-                        .then_some(*id)
-                    }
+                    Node::Call { id, .. } => (state.pending_inputs.get(id).copied().unwrap_or(0)
+                        == 0
+                        && !state.resolved.contains(id))
+                    .then_some(*id),
                     _ => None,
                 })
                 .collect()
@@ -462,7 +461,14 @@ impl Executor {
             NodeRole::Source => {
                 // Single-reply node: consume the correlation.
                 self.pending.remove(&correlation);
-                self.resolve_node(ctx, pending.dag_id, pending.node_id, pending.handle_id, kind, payload);
+                self.resolve_node(
+                    ctx,
+                    pending.dag_id,
+                    pending.node_id,
+                    pending.handle_id,
+                    kind,
+                    payload,
+                );
                 true
             }
             NodeRole::Call => {
@@ -684,10 +690,7 @@ impl Executor {
             self.pending.remove(&correlation);
             if let Some(state) = self.dags.get_mut(&dag_id) {
                 state.call_buffers.remove(&correlation);
-                state.mark_failed(
-                    node_id,
-                    "call timed out waiting for settlement".to_owned(),
-                );
+                state.mark_failed(node_id, "call timed out waiting for settlement".to_owned());
             }
         }
 

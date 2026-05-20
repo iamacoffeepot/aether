@@ -155,12 +155,13 @@ mod native {
         /// Reply: `StatusResult`.
         #[handler]
         fn on_status(&mut self, ctx: &mut NativeCtx<'_>, mail: Status) {
-            let reply = self.executor.status(mail.dag_id).unwrap_or_else(|| {
-                StatusResult::Failed {
+            let reply = self
+                .executor
+                .status(mail.dag_id)
+                .unwrap_or_else(|| StatusResult::Failed {
                     node_id: aether_kinds::NodeId(0),
                     error: format!("unknown dag {}", mail.dag_id),
-                }
-            });
+                });
             ctx.reply(&reply);
         }
 
@@ -197,9 +198,9 @@ mod native {
         #[fallback]
         fn on_reply(&mut self, ctx: &mut NativeCtx<'_>, env: &Envelope) {
             let correlation = env.sender.correlation_id;
-            let matched = self
-                .executor
-                .on_reply(ctx, correlation, KindId(env.kind.0), &env.payload);
+            let matched =
+                self.executor
+                    .on_reply(ctx, correlation, KindId(env.kind.0), &env.payload);
             if !matched {
                 tracing::debug!(
                     target: "aether_substrate::dag",

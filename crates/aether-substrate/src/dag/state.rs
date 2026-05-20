@@ -17,9 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use aether_data::{DagId, HandleId};
-use aether_kinds::{
-    DagDescriptor, Node, NodeHandle, NodeId, NodeState, NodeStatus, StatusResult,
-};
+use aether_kinds::{DagDescriptor, Node, NodeHandle, NodeId, NodeState, NodeStatus, StatusResult};
 
 use crate::dag::validator::ValidatedDag;
 
@@ -51,10 +49,7 @@ impl DagStatus {
     /// sweeps terminal DAGs whose `completed_at` is past retention.
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Complete | Self::Failed { .. } | Self::Cancelled
-        )
+        matches!(self, Self::Complete | Self::Failed { .. } | Self::Cancelled)
     }
 }
 

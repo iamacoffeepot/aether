@@ -24,13 +24,13 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use aether_actor::Actor;
-use serde::de::DeserializeOwned;
 use aether_data::{DagId, Kind, KindId, MailId, MailboxId, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_kinds::{
     Bundle, Cancel, CancelResult, DagDescriptor, DagReapTick, Edge, Node, NodeId, Status,
     StatusResult, Submit, SubmitResult,
 };
+use serde::de::DeserializeOwned;
 
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::handle_store::HandleStore;
@@ -52,8 +52,7 @@ use crate::trace::TraceObserverCapability;
 /// mailer wired to a drainable loopback egress). Like the crate's
 /// `fresh_substrate` but exposes the egress receiver so a test can read
 /// the `SubmitResult` / `CancelResult` / `StatusResult` reply.
-fn fresh_substrate_with_rx()
--> (Arc<Registry>, Arc<Mailer>, Receiver<EgressEvent>) {
+fn fresh_substrate_with_rx() -> (Arc<Registry>, Arc<Mailer>, Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -150,7 +149,12 @@ fn submit_ok(
     descriptor: DagDescriptor,
     corr: u64,
 ) -> DagId {
-    enqueue(registry, dag_mailbox(), &Submit { descriptor }, session(corr));
+    enqueue(
+        registry,
+        dag_mailbox(),
+        &Submit { descriptor },
+        session(corr),
+    );
     match await_session_reply::<SubmitResult>(rx, Duration::from_secs(5)) {
         SubmitResult::Ok { dag_id, .. } => dag_id,
         SubmitResult::Err { error } => panic!("submit failed: {error:?}"),
@@ -211,7 +215,12 @@ fn dag_executor_runs_two_node_dag() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(42, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(42, false),
+            ),
             Node::Observer {
                 id: NodeId(1),
                 recipient: mbx::<TestObserverActor>(),
@@ -266,7 +275,12 @@ fn dag_executor_parks_observer_until_source_resolves() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(7, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(7, false),
+            ),
             Node::Observer {
                 id: NodeId(1),
                 recipient: mbx::<TestObserverActor>(),
@@ -320,8 +334,18 @@ fn dag_executor_runs_parallel_sources() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(10, false)),
-            source_node(1, mbx::<TestSourceActor>(), source_kind(), source_req(20, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(10, false),
+            ),
+            source_node(
+                1,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(20, false),
+            ),
             Node::Observer {
                 id: NodeId(2),
                 recipient: mbx::<TestParallelObserverActor>(),
@@ -381,7 +405,12 @@ fn dag_executor_propagates_source_err_as_observer_input() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(9, true)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(9, true),
+            ),
             Node::Observer {
                 id: NodeId(1),
                 recipient: mbx::<TestObserverActor>(),
@@ -432,7 +461,12 @@ fn dag_executor_cancels_running_dag() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(1, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(1, false),
+            ),
             Node::Observer {
                 id: NodeId(1),
                 recipient: mbx::<TestObserverActor>(),
@@ -487,7 +521,12 @@ fn dag_executor_status_reports_running() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(5, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(5, false),
+            ),
             Node::Observer {
                 id: NodeId(1),
                 recipient: mbx::<TestObserverActor>(),
@@ -546,7 +585,12 @@ fn dag_executor_status_reports_complete_then_reaps() {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(3, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(3, false),
+            ),
             Node::Observer {
                 id: NodeId(1),
                 recipient: mbx::<TestObserverActor>(),
@@ -751,15 +795,16 @@ fn dag_executor_call_dispatches_as_own_root() {
 
 /// Build + submit a source → Call → bundle-observer DAG with the Call
 /// addressed at `call_mbx`, and return the `DagId`.
-fn submit_call_dag(
-    registry: &Registry,
-    rx: &Receiver<EgressEvent>,
-    call_mbx: MailboxId,
-) -> DagId {
+fn submit_call_dag(registry: &Registry, rx: &Receiver<EgressEvent>, call_mbx: MailboxId) -> DagId {
     let descriptor = DagDescriptor {
         version: 1,
         nodes: vec![
-            source_node(0, mbx::<TestSourceActor>(), source_kind(), source_req(1, false)),
+            source_node(
+                0,
+                mbx::<TestSourceActor>(),
+                source_kind(),
+                source_req(1, false),
+            ),
             Node::Call {
                 id: NodeId(1),
                 recipient: call_mbx,

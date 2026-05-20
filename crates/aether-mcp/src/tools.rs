@@ -637,9 +637,7 @@ impl Mcp {
                     "output_handles": handles,
                 }))
             }
-            Some(SubmitResult::Err { error }) => {
-                json(&serde_json::json!({ "error": error }))
-            }
+            Some(SubmitResult::Err { error }) => json(&serde_json::json!({ "error": error })),
             None => Err(internal_msg("undecodable SubmitResult")),
         }
     }
@@ -804,7 +802,9 @@ fn parse_dag_id(s: &str) -> Result<DagId, McpError> {
 /// array, and removes `payload_path`. A `Source` with an inline
 /// `payload` array and no `payload_path` is left untouched. The
 /// substrate never sees the path — it gets a normal `Vec<u8>` payload.
-async fn resolve_payload_paths(mut descriptor: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+async fn resolve_payload_paths(
+    mut descriptor: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
     let Some(nodes) = descriptor
         .get_mut("nodes")
         .and_then(serde_json::Value::as_array_mut)
@@ -815,10 +815,16 @@ async fn resolve_payload_paths(mut descriptor: serde_json::Value) -> anyhow::Res
     };
     for node in nodes.iter_mut() {
         // Externally-tagged: { "Source": { … } }.
-        let Some(source) = node.get_mut("Source").and_then(serde_json::Value::as_object_mut) else {
+        let Some(source) = node
+            .get_mut("Source")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
             continue;
         };
-        let Some(path) = source.get("payload_path").and_then(serde_json::Value::as_str) else {
+        let Some(path) = source
+            .get("payload_path")
+            .and_then(serde_json::Value::as_str)
+        else {
             continue;
         };
         let path = path.to_owned();
