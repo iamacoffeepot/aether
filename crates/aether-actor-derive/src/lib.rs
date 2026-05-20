@@ -1938,6 +1938,46 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     });
 
+    // iamacoffeepot/aether#1037: override `NativeDispatch::__aether_capabilities`
+    // so native caps surface the same ADR-0033 receive-side capability
+    // shape (handler kinds + `#[fallback]` presence) a wasm component
+    // ships in its `aether.kinds.inputs` manifest. The native-cap-boot
+    // path reads this to populate the queryable `CapabilityRegistry`,
+    // unifying native + wasm dispatchability. Reply kinds are absent by
+    // design — handlers promise nothing about replies. The handler
+    // `doc` is dropped (the registry only needs ids + fallback flag),
+    // so this is independent of rustdoc extraction.
+    let capability_handler_entries = handlers.iter().map(|h| {
+        let kind_ty = &h.kind_ty;
+        quote! {
+            ::aether_substrate::actor::native::HandlerCapability {
+                id: <#kind_ty as ::aether_data::Kind>::ID,
+                name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
+                doc: ::core::option::Option::None,
+            }
+        }
+    });
+    let capability_fallback = if fallback.is_some() {
+        quote! {
+            ::core::option::Option::Some(
+                ::aether_substrate::actor::native::FallbackCapability {
+                    doc: ::core::option::Option::None,
+                },
+            )
+        }
+    } else {
+        quote! { ::core::option::Option::None }
+    };
+    let capabilities_override = quote! {
+        fn __aether_capabilities() -> ::aether_substrate::actor::native::ComponentCapabilities {
+            ::aether_substrate::actor::native::ComponentCapabilities {
+                handlers: ::std::vec![#(#capability_handler_entries),*],
+                fallback: #capability_fallback,
+                doc: ::core::option::Option::None,
+            }
+        }
+    };
+
     // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
     // handler-method impl all reach for `::aether_substrate::*` paths
     // and native-only types in their bodies. They're emitted under
@@ -1977,6 +2017,8 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             }
 
             #fallback_dispatch_override
+
+            #capabilities_override
         }
 
         #[cfg(not(target_arch = "wasm32"))]

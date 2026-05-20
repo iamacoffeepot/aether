@@ -81,6 +81,14 @@ ctrlc = "3"
 # module through `crate::test_bench::{visual, test_helpers}` directly
 # (post-issue-821, formerly via `aether-scenario`).
 aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
+# iamacoffeepot/aether#1037: the cap-registry replace test swaps the
+# probe wasm for the camera wasm (a distinct handler set) and asserts
+# the registry reflects the new accept-set. `default-features = false`
+# pulls in only the camera kind types (`CameraCreate`, etc.) for their
+# `::ID`s — the `runtime` module's `export!()` FFI emission is wasm32-
+# only and inert in a host rlib anyway, but skipping it keeps the host
+# test build lean.
+aether-camera = { path = "../aether-camera", default-features = false }
 
 [lints]
 workspace = true
