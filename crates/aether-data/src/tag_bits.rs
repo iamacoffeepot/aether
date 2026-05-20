@@ -23,3 +23,11 @@ pub const TAG_KIND: u8 = 0x2;
 
 /// Tag value for reply-handle ids (ADR-0045).
 pub const TAG_HANDLE: u8 = 0x3;
+
+/// Tag value for DAG ids (ADR-0047). Substrate-minted, counter-backed
+/// per submitted DAG.
+pub const TAG_DAG: u8 = 0x4;
+
+/// Tag value for native-transform ids (ADR-0048). Name-hashed global
+/// identity for a registered transform.
+pub const TAG_TRANSFORM: u8 = 0x5;

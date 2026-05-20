@@ -107,6 +107,10 @@ pub const fn tag_for_type_id(type_id: u64) -> Option<Tag> {
         Some(Tag::Kind)
     } else if type_id == HandleId::TYPE_ID {
         Some(Tag::Handle)
+    } else if type_id == DagId::TYPE_ID {
+        Some(Tag::Dag)
+    } else if type_id == TransformId::TYPE_ID {
+        Some(Tag::Transform)
     } else {
         None
     }
@@ -123,6 +127,10 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
         Some(KindId::TYPE_NAME)
     } else if type_id == HandleId::TYPE_ID {
         Some(HandleId::TYPE_NAME)
+    } else if type_id == DagId::TYPE_ID {
+        Some(DagId::TYPE_NAME)
+    } else if type_id == TransformId::TYPE_ID {
+        Some(TransformId::TYPE_NAME)
     } else {
         None
     }
@@ -260,6 +268,73 @@ impl<'de> Deserialize<'de> for HandleId {
     }
 }
 
+/// Substrate-minted reference to one submitted computation DAG
+/// (ADR-0047 §4). Carries the `Tag::Dag` discriminator + a 60-bit
+/// counter masked into the low bits — monotonic-per-substrate with a
+/// session salt, analogous to [`HandleId`] rather than a name hash.
+/// `#[repr(transparent)]` over `u64`.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+pub struct DagId(pub u64);
+
+impl DagId {
+    pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.dag_id");
+    pub const TYPE_NAME: &'static str = "aether.dag_id";
+}
+
+impl fmt::Display for DagId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+impl Serialize for DagId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_id(self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for DagId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        deserialize_id(d, Tag::Dag).map(DagId)
+    }
+}
+
+/// Global identity for a registered native transform (ADR-0048
+/// §1/§4). Carries the `Tag::Transform` discriminator + a 60-bit
+/// FNV-1a hash of the transform's canonical name. The value
+/// derivation (`fnv1a_64(TRANSFORM_DOMAIN ++ canonical("{crate}::\
+/// {module}::{fn}"))`) lives with the transform-registry macro work
+/// (iamacoffeepot/aether#979); this newtype defines only the wire
+/// shape so the descriptor's `Transform` node encodes/decodes.
+/// `#[repr(transparent)]` over `u64`.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+pub struct TransformId(pub u64);
+
+impl TransformId {
+    pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.transform_id");
+    pub const TYPE_NAME: &'static str = "aether.transform_id";
+}
+
+impl fmt::Display for TransformId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+impl Serialize for TransformId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_id(self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for TransformId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        deserialize_id(d, Tag::Transform).map(TransformId)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +373,32 @@ mod tests {
         assert_eq!(MailboxId::NONE.0, 0);
         assert_eq!(tagged_id::tag_of(MailboxId::NONE.0), None);
         assert!(tagged_id::encode(MailboxId::NONE.0).is_none());
+    }
+
+    /// ADR-0047: a `DagId` carrying `Tag::Dag` bits encodes to the
+    /// `dag-XXXX-XXXX-XXXX` form and round-trips through `decode_with_tag`.
+    /// `tag_for_type_id(DagId::TYPE_ID)` resolves the codec arm.
+    #[test]
+    fn dag_id_is_tagged_and_resolves_codec_arm() {
+        assert_eq!(tag_for_type_id(DagId::TYPE_ID), Some(Tag::Dag));
+        let id = tagged_id::with_tag(Tag::Dag, 0x42);
+        let encoded = tagged_id::encode(id).expect("DagId tag-encodes");
+        assert!(encoded.starts_with("dag-"), "expected tagged: {encoded}");
+        let decoded =
+            tagged_id::decode_with_tag(&encoded, Tag::Dag).expect("DagId round-trips via decode");
+        assert_eq!(decoded, id);
+    }
+
+    /// ADR-0048: a `TransformId` carrying `Tag::Transform` bits encodes
+    /// to the `trn-XXXX-XXXX-XXXX` form and resolves its codec arm.
+    #[test]
+    fn transform_id_is_tagged_and_resolves_codec_arm() {
+        assert_eq!(tag_for_type_id(TransformId::TYPE_ID), Some(Tag::Transform));
+        let id = tagged_id::with_tag(Tag::Transform, 0x99);
+        let encoded = tagged_id::encode(id).expect("TransformId tag-encodes");
+        assert!(encoded.starts_with("trn-"), "expected tagged: {encoded}");
+        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Transform)
+            .expect("TransformId round-trips via decode");
+        assert_eq!(decoded, id);
     }
 }

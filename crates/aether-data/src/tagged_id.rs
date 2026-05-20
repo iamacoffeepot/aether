@@ -18,7 +18,9 @@
 use alloc::string::String;
 use core::fmt;
 
-pub use crate::tag_bits::{HASH_MASK, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT};
+pub use crate::tag_bits::{
+    HASH_MASK, TAG_DAG, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT, TAG_TRANSFORM,
+};
 
 /// Type tag identifying an id space. Encoded in the high 4 bits of
 /// every tagged id. `0x0` is reserved as an invalid sentinel — a
@@ -34,6 +36,12 @@ pub enum Tag {
     Kind = TAG_KIND,
     /// Handle id (ADR-0045) — entry in the substrate's handle store.
     Handle = TAG_HANDLE,
+    /// DAG id (ADR-0047) — substrate-minted, counter-backed handle for
+    /// one submitted computation DAG.
+    Dag = TAG_DAG,
+    /// Native-transform id (ADR-0048) — name-hashed global identity for
+    /// a registered transform.
+    Transform = TAG_TRANSFORM,
 }
 
 impl Tag {
@@ -46,18 +54,22 @@ impl Tag {
             Self::Mailbox => "mbx",
             Self::Kind => "knd",
             Self::Handle => "hdl",
+            Self::Dag => "dag",
+            Self::Transform => "trn",
         }
     }
 
     /// Decode a 4-bit tag value from the high nibble of a `u64`.
     /// Returns `None` for `0x0` (the reserved invalid sentinel) and
-    /// for any reserved-future value (`0x4..=0xF`).
+    /// for any reserved-future value (`0x6..=0xF`).
     #[must_use]
     pub const fn from_bits(bits: u8) -> Option<Self> {
         match bits {
             TAG_MAILBOX => Some(Self::Mailbox),
             TAG_KIND => Some(Self::Kind),
             TAG_HANDLE => Some(Self::Handle),
+            TAG_DAG => Some(Self::Dag),
+            TAG_TRANSFORM => Some(Self::Transform),
             _ => None,
         }
     }
@@ -158,6 +170,8 @@ pub fn decode(s: &str) -> Result<u64, DecodeError> {
         b"mbx" | b"MBX" => Tag::Mailbox,
         b"knd" | b"KND" => Tag::Kind,
         b"hdl" | b"HDL" => Tag::Handle,
+        b"dag" | b"DAG" => Tag::Dag,
+        b"trn" | b"TRN" => Tag::Transform,
         _ => return Err(DecodeError::Malformed),
     };
     if bytes[3] != b'-' || bytes[8] != b'-' || bytes[13] != b'-' {
@@ -203,7 +217,13 @@ mod tests {
 
     #[test]
     fn round_trip_all_tags() {
-        for &tag in &[Tag::Mailbox, Tag::Kind, Tag::Handle] {
+        for &tag in &[
+            Tag::Mailbox,
+            Tag::Kind,
+            Tag::Handle,
+            Tag::Dag,
+            Tag::Transform,
+        ] {
             for hash in [0u64, 0x1, 0x0FFF_FFFF_FFFF_FFFF, 0xDEAD_BEEF_CAFE_BABE] {
                 let id = with_tag(tag, hash);
                 assert_eq!(tag_of(id), Some(tag));
@@ -224,6 +244,26 @@ mod tests {
         assert_eq!(s.len(), 18);
         assert!(s.starts_with("mbx-"));
         assert_eq!(s, "mbx-aaaa-aaaa-aaaa");
+    }
+
+    #[test]
+    fn dag_tag_encoding_shape() {
+        let id = with_tag(Tag::Dag, 0);
+        let s = encode(id).expect("test setup: Dag id encodes (tag is non-zero)");
+        assert_eq!(s.len(), 18);
+        assert!(s.starts_with("dag-"));
+        assert_eq!(s, "dag-aaaa-aaaa-aaaa");
+        assert_eq!(decode(&s).expect("test setup: dag id decodes"), id);
+    }
+
+    #[test]
+    fn transform_tag_encoding_shape() {
+        let id = with_tag(Tag::Transform, 0);
+        let s = encode(id).expect("test setup: Transform id encodes (tag is non-zero)");
+        assert_eq!(s.len(), 18);
+        assert!(s.starts_with("trn-"));
+        assert_eq!(s, "trn-aaaa-aaaa-aaaa");
+        assert_eq!(decode(&s).expect("test setup: transform id decodes"), id);
     }
 
     #[test]

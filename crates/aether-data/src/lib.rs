@@ -56,7 +56,9 @@ pub use hash::{
     KIND_DOMAIN, MAILBOX_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed,
     mailbox_id_from_name,
 };
-pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
+pub use ids::{
+    DagId, HandleId, KindId, MailboxId, TransformId, tag_for_type_id, type_name_for_type_id,
+};
 pub use mail::{MailId, ReplyTarget, ReplyTo};
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
@@ -164,6 +166,12 @@ impl CastEligible for KindId {
     const ELIGIBLE: bool = true;
 }
 impl CastEligible for HandleId {
+    const ELIGIBLE: bool = true;
+}
+impl CastEligible for DagId {
+    const ELIGIBLE: bool = true;
+}
+impl CastEligible for TransformId {
     const ELIGIBLE: bool = true;
 }
 
@@ -308,7 +316,7 @@ mod schema_impls {
     use alloc::vec::Vec;
 
     use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
-    use crate::{HandleId, KindId, MailboxId, Schema};
+    use crate::{DagId, HandleId, KindId, MailboxId, Schema, TransformId};
     use alloc::collections::BTreeMap;
 
     macro_rules! scalar {
@@ -393,6 +401,18 @@ mod schema_impls {
     }
 
     impl Schema for HandleId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+    }
+
+    impl Schema for DagId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+    }
+
+    impl Schema for TransformId {
         const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
         const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
