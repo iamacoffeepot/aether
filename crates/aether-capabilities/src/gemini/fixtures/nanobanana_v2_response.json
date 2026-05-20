@@ -1,0 +1,27 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "thoughtSignature": "sig-abc"
+          },
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "TWFu"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "candidatesTokenCount": 0,
+    "totalTokenCount": 12
+  },
+  "modelVersion": "gemini-3.1-flash-image-preview"
+}

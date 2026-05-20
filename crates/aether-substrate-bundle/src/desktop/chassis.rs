@@ -15,9 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig,
-    RenderCapability, RenderConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, GeminiConfig,
+    InputConfig, RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
+    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -80,6 +80,9 @@ pub struct DesktopEnv {
     /// ADR-0050 `aether.anthropic` cap config (issue 1014). Resolved
     /// from `ANTHROPIC_API_KEY` + `AETHER_ANTHROPIC_*`.
     pub anthropic: AnthropicConfig,
+    /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
+    /// `GOOGLE_API_KEY` + `AETHER_GEMINI_*`.
+    pub gemini: GeminiConfig,
     pub audio: AudioConf,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
@@ -111,6 +114,7 @@ impl DesktopEnv {
 
         let http = HttpConf::from_env();
         let anthropic = AnthropicConfig::from_env();
+        let gemini = GeminiConfig::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let audio = AudioConf::from_env();
 
@@ -149,6 +153,7 @@ impl DesktopEnv {
             namespace_roots,
             http,
             anthropic,
+            gemini,
             audio,
             boot_mode,
             boot_size,
@@ -204,6 +209,7 @@ impl DesktopChassis {
             namespace_roots,
             http,
             anthropic,
+            gemini,
             audio,
             boot_mode,
             boot_size,
@@ -278,6 +284,7 @@ impl DesktopChassis {
             namespace_roots,
             http,
             anthropic,
+            gemini,
         };
         // ADR-0082 §1 / PR 3b: desktop's lifecycle is the shared Tick-
         // only graph today. A future PR adds `Render` / `Present`

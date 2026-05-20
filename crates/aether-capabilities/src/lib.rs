@@ -41,6 +41,10 @@ pub mod component;
 pub mod contentgen;
 pub mod engine;
 pub mod fs;
+// `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
+// for the same reason as `anthropic`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gemini;
 pub mod handle;
 pub mod http;
 pub mod input;
@@ -89,6 +93,9 @@ pub use input::InputCapability;
 pub use input::InputConfig;
 
 pub use fs::FsCapability;
+// ADR-0050 `aether.gemini` cap (issue 1015).
+#[cfg(not(target_arch = "wasm32"))]
+pub use gemini::{GeminiCapability, GeminiConfig};
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;
 #[cfg(feature = "render")]

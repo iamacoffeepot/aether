@@ -859,6 +859,29 @@ mod native {
         }
     }
 
+    /// Real-API smoke. Hits the live Messages API with a tiny
+    /// 5-`max_tokens` request — ignored by default so CI stays
+    /// zero-cost; run with `ANTHROPIC_API_KEY` set.
+    #[test]
+    #[ignore = "needs ANTHROPIC_API_KEY"]
+    fn anthropic_api_smoke() {
+        use super::super::UreqAnthropicAdapter;
+        use crate::contentgen::adapter::AnthropicRequest;
+        use std::env;
+        let key = env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY set for smoke");
+        let adapter = UreqAnthropicAdapter::new(key, Duration::from_secs(30));
+        let resp = adapter
+            .messages_send(&AnthropicRequest {
+                model: "claude-3-5-haiku-20241022".to_string(),
+                prompt: "say hi".to_string(),
+                system: None,
+                max_tokens: Some(5),
+                temperature: None,
+            })
+            .expect("live messages request succeeds");
+        assert!(!resp.text.is_empty());
+    }
+
     // Helpers reaching into the cap for white-box assertions. Both stay
     // test-local; the cap's `dispatch` field is private, so we expose
     // narrow accessors here via a re-export shim.

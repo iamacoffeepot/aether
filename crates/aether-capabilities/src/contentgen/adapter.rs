@@ -47,7 +47,7 @@ pub struct GeminiArtifact {
 
 /// One generated media response from a Gemini adapter. `artifacts` is
 /// plural because Lyria's `sample_count` yields multiple clips.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct GeminiResponse {
     /// Generated artifacts. Nano Banana returns exactly one; Lyria
     /// returns `sample_count` clips.
@@ -57,6 +57,9 @@ pub struct GeminiResponse {
     /// Wall-clock + (where the provider reports them) token / cost
     /// accounting.
     pub usage: AdapterUsage,
+    /// NB2-only opaque signature the caller passes back unchanged for a
+    /// multi-turn image edit. `None` for Lyria and older image models.
+    pub thought_signature: Option<String>,
 }
 
 /// Adapter-layer usage accounting. Carries the same four fields as the
@@ -131,11 +134,17 @@ pub trait GeminiAdapter: Send + Sync {
 
 /// Adapter-facing Nano Banana image request. The cap reads
 /// reference-image bytes from the supplied paths and runs per-model
-/// validation before constructing this; the adapter just dispatches.
+/// validation before constructing this; the adapter just dispatches the
+/// HTTP call. `aspect_ratio` rides as the provider's `W:H` string;
+/// `reference_images` are the already-read reference bytes.
 #[derive(Clone, Debug)]
 pub struct GeminiImageRequest {
     pub model: String,
     pub prompt: String,
+    /// Provider `W:H` aspect-ratio string (e.g. `"16:9"`).
+    pub aspect_ratio: String,
+    /// Reference-image bytes the cap read from the supplied paths.
+    pub reference_images: Vec<Vec<u8>>,
 }
 
 /// Adapter-facing Lyria music request.
@@ -259,6 +268,7 @@ impl GeminiAdapter for StubGeminiAdapter {
             }],
             model_used: req.model,
             usage: AdapterUsage::default(),
+            thought_signature: None,
         })
     }
 
@@ -274,6 +284,7 @@ impl GeminiAdapter for StubGeminiAdapter {
             artifacts,
             model_used: req.model,
             usage: AdapterUsage::default(),
+            thought_signature: None,
         })
     }
 }
@@ -321,6 +332,8 @@ mod tests {
             .nanobanana_generate(GeminiImageRequest {
                 model: String::from("nb-test"),
                 prompt: String::from("a cat"),
+                aspect_ratio: String::from("1:1"),
+                reference_images: Vec::new(),
             })
             .expect("stub nanobanana is infallible");
         assert_eq!(resp.artifacts.len(), 1);

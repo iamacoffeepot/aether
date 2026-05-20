@@ -2124,6 +2124,189 @@ mod control_plane {
             error: AnthropicError,
         },
     }
+
+    // ADR-0050 `aether.gemini` cap (issue 1015). Media generation only
+    // — image via Nano Banana, music via Lyria; no text completion (the
+    // user defaults to the Claude CLI per ADR-0050 §3). Two request
+    // kinds on the `aether.gemini` mailbox, each replying with a
+    // `*_result` Ok/Err enum carrying the shared `Usage` accounting on
+    // `Ok` and a provider-specific `GeminiError` on `Err`. Generated
+    // binary bytes never ride the wire: the reply carries a
+    // `save://gen/<uuid>.{png,wav}` path. The image schema is fixed by
+    // a 2026-05 API survey; per-model validation absorbs vendor drift.
+
+    /// Aspect ratio for a Nano Banana image. The cross-model set covers
+    /// `AR_1_1` … `AR_21_9`; the `AR_1_4` / `AR_1_8` / `AR_4_1` /
+    /// `AR_8_1` extreme ratios are NB2-only and rejected on older
+    /// models by the adapter's per-model validation.
+    // Variant names mirror the provider's `W:H` aspect-ratio labels
+    // verbatim (`AR_16_9` = 16:9) so the wire vocabulary reads the same
+    // as the API survey; the `WxH`-camel form (`Ar16x9`) would obscure
+    // the mapping for the LLM caller building these.
+    #[allow(non_camel_case_types)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AspectRatio {
+        AR_1_1,
+        AR_2_3,
+        AR_3_2,
+        AR_3_4,
+        AR_4_3,
+        AR_4_5,
+        AR_5_4,
+        AR_9_16,
+        AR_16_9,
+        AR_21_9,
+        AR_1_4,
+        AR_1_8,
+        AR_4_1,
+        AR_8_1,
+    }
+
+    /// Output image size for a Nano Banana image. `S512` is NB2; `K1`
+    /// is NB1 / NB Pro; `K2` / `K4` are NB Pro only. The adapter
+    /// enforces the per-model support matrix.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ImageSize {
+        S512,
+        K1,
+        K2,
+        K4,
+    }
+
+    /// Reasoning-effort knob for Nano Banana 2. `Minimal` / `High`;
+    /// rejected on older models by per-model validation.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ThinkingLevel {
+        Minimal,
+        High,
+    }
+
+    /// Grounding metadata returned when `use_grounding=true` — the
+    /// search queries and source URLs the model consulted. Free-form
+    /// strings; the shape mirrors the provider's grounding payload
+    /// without locking the cap to a specific schema version.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct GroundingMetadata {
+        pub search_queries: Vec<String>,
+        pub source_urls: Vec<String>,
+    }
+
+    /// Structured failure reason for a Gemini media generation
+    /// (ADR-0050 §1). `RateLimited` / `ContentPolicyRefused` /
+    /// `Unauthorized` mirror the Anthropic taxonomy; the
+    /// `*NotSupportedByModel` variants carry the rejected value plus the
+    /// model's supported set so the caller can correct and retry, and
+    /// `MissingRequiredField` names a per-model required field the
+    /// request omitted. `AdapterError` is the free-form catchall.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum GeminiError {
+        RateLimited {
+            retry_after_ms: Option<u32>,
+        },
+        ContentPolicyRefused,
+        Unauthorized,
+        UnknownModel {
+            model: String,
+            supported: Vec<String>,
+        },
+        AspectRatioNotSupportedByModel {
+            model: String,
+            aspect_ratio: AspectRatio,
+            supported: Vec<AspectRatio>,
+        },
+        ImageSizeNotSupportedByModel {
+            model: String,
+            image_size: ImageSize,
+            supported: Vec<ImageSize>,
+        },
+        MissingRequiredField {
+            model: String,
+            field: String,
+        },
+        AdapterError(String),
+    }
+
+    /// `aether.gemini.nanobanana.generate` — request an image from the
+    /// Nano Banana family. `model` selects `gemini-2.5-flash-image` /
+    /// `gemini-3-pro-image-preview` / `gemini-3.1-flash-image-preview`
+    /// (NB2, the default). Reference inputs arrive as file paths the cap
+    /// reads before dispatch. Per-model validation of `aspect_ratio` /
+    /// `image_size` / reference-path counts runs before any network
+    /// dispatch. Reply: `NanobananaGenerateResult` carrying a staged
+    /// `save://gen/<uuid>.png` path.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.gemini.nanobanana.generate")]
+    pub struct NanobananaGenerate {
+        pub request_id: u64,
+        pub model: String,
+        pub prompt: String,
+        pub aspect_ratio: AspectRatio,
+        pub image_size: Option<ImageSize>,
+        pub thinking_level: Option<ThinkingLevel>,
+        pub include_thoughts: Option<bool>,
+        pub object_reference_paths: Vec<String>,
+        pub character_reference_paths: Vec<String>,
+        pub use_grounding: Option<bool>,
+    }
+
+    /// Reply to [`NanobananaGenerate`]. Both arms echo `request_id`.
+    /// `Ok` carries the staged image path (never inline bytes), the
+    /// model served, `Usage`, the NB2 `thought_signature` (passed back
+    /// unchanged for multi-turn), and grounding metadata when
+    /// `use_grounding=true`. `Err` carries a `GeminiError`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.gemini.nanobanana.generate_result")]
+    pub enum NanobananaGenerateResult {
+        Ok {
+            request_id: u64,
+            output_path: String,
+            model_used: String,
+            usage: Usage,
+            thought_signature: Option<String>,
+            grounding: Option<GroundingMetadata>,
+        },
+        Err {
+            request_id: u64,
+            error: GeminiError,
+        },
+    }
+
+    /// `aether.gemini.lyria.generate` — request music from the Lyria
+    /// family (snapshot 2026-05-20 of the Vertex AI Lyria API). `model`
+    /// selects `lyria-2` / `lyria-3` / `lyria-3-pro`. `seed` and
+    /// `sample_count` are mutually exclusive — the adapter rejects
+    /// both-set. Each clip is a fixed ~30s WAV at 48 kHz; there is no
+    /// `duration_s`. Reply: `LyriaGenerateResult` carrying one staged
+    /// `save://gen/<uuid>.wav` path per generated clip.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.gemini.lyria.generate")]
+    pub struct LyriaGenerate {
+        pub request_id: u64,
+        pub model: String,
+        pub prompt: String,
+        pub negative_prompt: Option<String>,
+        pub seed: Option<u32>,
+        pub sample_count: Option<u32>,
+    }
+
+    /// Reply to [`LyriaGenerate`]. Both arms echo `request_id`. `Ok`
+    /// carries one staged WAV path per clip (`sample_count` controls
+    /// the count, hence the plural `output_paths`), the model served,
+    /// and `Usage`. `Err` carries a `GeminiError`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.gemini.lyria.generate_result")]
+    pub enum LyriaGenerateResult {
+        Ok {
+            request_id: u64,
+            output_paths: Vec<String>,
+            model_used: String,
+            usage: Usage,
+        },
+        Err {
+            request_id: u64,
+            error: GeminiError,
+        },
+    }
 }
 
 #[cfg(test)]
