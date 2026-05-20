@@ -46,6 +46,8 @@ fn cleanup(path: &Path) {
 fn persist_config(root: &Path) -> PersistConfig {
     PersistConfig {
         root: root.join("v1"),
+        disk_budget_bytes: u64::MAX,
+        eviction_tick_secs: 60,
     }
 }
 
@@ -219,7 +221,11 @@ fn persist_continues_on_write_failure() {
     // under it.
     let blocker = root.join("v1");
     fs::write(&blocker, b"not-a-dir").unwrap();
-    let cfg = PersistConfig { root: blocker };
+    let cfg = PersistConfig {
+        root: blocker,
+        disk_budget_bytes: u64::MAX,
+        eviction_tick_secs: 60,
+    };
     let store = HandleStore::with_persist(1024 * 1024, Some(cfg));
 
     let id = HandleId(0x55);

@@ -48,6 +48,8 @@ fn cleanup(path: &Path) {
 fn cfg_under(root: &Path) -> PersistConfig {
     PersistConfig {
         root: root.join("v1"),
+        disk_budget_bytes: u64::MAX,
+        eviction_tick_secs: 60,
     }
 }
 

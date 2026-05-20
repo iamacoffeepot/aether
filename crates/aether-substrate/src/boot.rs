@@ -209,6 +209,9 @@ impl SubstrateBootBuilder<'_> {
         );
 
         let handle_store = Arc::new(HandleStore::from_env_persistent(self.persist_enabled));
+        // ADR-0049 §5: start the background disk-eviction tick. No-op
+        // when persistence is disabled (hub chassis / test fixtures).
+        handle_store.spawn_eviction_thread();
         let queue = Arc::new(
             Mailer::new(Arc::clone(&registry), Arc::clone(&handle_store))
                 .with_outbound(Arc::clone(&outbound)),

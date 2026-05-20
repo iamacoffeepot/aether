@@ -74,6 +74,21 @@ pub const ENV_PERSIST_DISABLE: &str = "AETHER_HANDLE_STORE_PERSIST_DISABLE";
 /// `v1/` namespacing is ADR-0049 §8's forward-compatibility hook.
 pub const LAYOUT_VERSION_DIR: &str = "v1";
 
+/// Env var overriding the on-disk byte budget (ADR-0049 §5). When the
+/// ledger exceeds this, the eviction tick drops refcount-0 + unpinned
+/// entries oldest-first. Default [`DEFAULT_DISK_BUDGET_BYTES`].
+pub const ENV_DISK_BUDGET_BYTES: &str = "AETHER_HANDLE_STORE_DISK_BUDGET_BYTES";
+
+/// Env var overriding the eviction tick interval in seconds. Default
+/// [`DEFAULT_DISK_EVICTION_TICK_SECS`].
+pub const ENV_DISK_EVICTION_TICK_SECS: &str = "AETHER_HANDLE_STORE_DISK_EVICTION_TICK_SECS";
+
+/// Default on-disk byte budget (16 GiB per ADR-0049 §3).
+pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Default eviction tick interval (60s per ADR-0049 §5).
+pub const DEFAULT_DISK_EVICTION_TICK_SECS: u64 = 60;
+
 /// Tracing target shared by every persistence diagnostic.
 const TARGET: &str = "aether_substrate::handle_store";
 
@@ -86,6 +101,11 @@ pub struct PersistConfig {
     /// `${AETHER_HANDLE_STORE_DIR}/v1/` — the layout-versioned root that
     /// holds `entries/`, `pinned.set`, and `lock.pid`.
     pub root: PathBuf,
+    /// On-disk byte budget (ADR-0049 §5). The eviction tick drops
+    /// candidates until the ledger falls below this.
+    pub disk_budget_bytes: u64,
+    /// Eviction tick interval in seconds.
+    pub eviction_tick_secs: u64,
 }
 
 impl PersistConfig {
@@ -119,6 +139,11 @@ impl PersistConfig {
         };
         Some(Self {
             root: base.join(LAYOUT_VERSION_DIR),
+            disk_budget_bytes: parse_env_u64(ENV_DISK_BUDGET_BYTES, DEFAULT_DISK_BUDGET_BYTES),
+            eviction_tick_secs: parse_env_u64(
+                ENV_DISK_EVICTION_TICK_SECS,
+                DEFAULT_DISK_EVICTION_TICK_SECS,
+            ),
         })
     }
 
@@ -158,6 +183,28 @@ pub fn entry_paths(root: &Path, id: HandleId) -> (PathBuf, PathBuf) {
         dir.join(format!("{}.bin", &hex[2..])),
         dir.join(format!("{}.meta", &hex[2..])),
     )
+}
+
+/// Parse a `u64` env var, falling back to `default` on absence or a
+/// parse failure (with a warn for the malformed case).
+fn parse_env_u64(name: &str, default: u64) -> u64 {
+    match env::var(name) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    target: TARGET,
+                    env = name,
+                    value = %raw,
+                    error = %e,
+                    default,
+                    "ignoring unparseable env var; using default",
+                );
+                default
+            }
+        },
+        Err(_) => default,
+    }
 }
 
 /// Millis since the unix epoch, saturating to 0 if the clock is before
@@ -239,6 +286,12 @@ struct Inner {
     /// Bounded FIFO of "checked, confirmed not on disk" ids. Capped at
     /// [`NEGATIVE_CACHE_CAP`] with FIFO eviction.
     negative_cache: VecDeque<HandleId>,
+    /// Approximate ledger of on-disk bytes (ADR-0049 §5). Bumped on each
+    /// persistent write, decremented on disk delete; the eviction tick
+    /// uses it to decide when to evict. Approximate (content-addressed
+    /// re-writes of the same id over-count until the next boot scan
+    /// reconciles).
+    total_disk_bytes: u64,
 }
 
 impl Inner {
@@ -561,7 +614,30 @@ impl HandleStore {
                 error = %e,
                 "handle store .meta write failed; orphan .bin will be scrubbed on next boot",
             );
+            return;
         }
+        // Register the on-disk entry in the index + ledger so a later
+        // in-memory eviction still finds it on disk and the eviction
+        // tick accounts for its bytes (ADR-0049 §5). A re-write of the
+        // same id over-counts the ledger until the next boot scan
+        // reconciles — approximate by design.
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
+        inner.total_disk_bytes = inner.total_disk_bytes.saturating_add(u64::from(meta.bytes_len));
+        inner.disk_index.insert(
+            id,
+            DiskEntry {
+                kind_id: kind,
+                bytes_len: meta.bytes_len,
+                pinned,
+                created_at: meta.created_at,
+            },
+        );
+        // The entry is now genuinely on disk — clear any negative-cache
+        // shadow.
+        inner.negative_cache.retain(|cached| *cached != id);
     }
 
     /// Rewrite `pinned.set` from the current in-memory pinned set. Cheap
@@ -577,12 +653,22 @@ impl HandleStore {
                 .inner
                 .read()
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
-            inner
+            // Union the in-memory pinned set with the on-disk pinned
+            // index so a pinned disk-only entry stays in `pinned.set`.
+            let mut set: std::collections::HashSet<u64> = inner
                 .entries
                 .iter()
                 .filter(|(_, e)| e.pinned)
                 .map(|(id, _)| id.0)
-                .collect()
+                .collect();
+            set.extend(
+                inner
+                    .disk_index
+                    .iter()
+                    .filter(|(_, e)| e.pinned)
+                    .map(|(id, _)| id.0),
+            );
+            set.into_iter().collect()
         };
         ids.sort_unstable();
         let mut bytes = Vec::with_capacity(ids.len() * 8);
@@ -698,12 +784,14 @@ impl HandleStore {
         }
 
         let count = index.len();
+        let disk_bytes: u64 = index.values().map(|e| u64::from(e.bytes_len)).sum();
         {
             let mut inner = self
                 .inner
                 .write()
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
             inner.disk_index = index;
+            inner.total_disk_bytes = disk_bytes;
         }
         if scrubbed > 0 {
             tracing::info!(
@@ -776,6 +864,138 @@ impl HandleStore {
         }
     }
 
+    /// Current approximate on-disk byte ledger (ADR-0049 §5). Test +
+    /// observability accessor.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    #[must_use]
+    pub fn disk_bytes(&self) -> u64 {
+        self.inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
+            .total_disk_bytes
+    }
+
+    /// Run one disk-eviction pass synchronously (ADR-0049 §5). Public so
+    /// the eviction thread + tests can trigger it. When over budget,
+    /// evicts disk entries that are refcount-0 in memory AND unpinned,
+    /// oldest-`created_at` first, two-phase (`.bin` then `.meta`), until
+    /// the ledger drops below the budget or no candidates remain. No-op
+    /// when persistence is disabled.
+    pub fn run_disk_eviction(&self) {
+        let Some(cfg) = self.persist.clone() else {
+            return;
+        };
+        // Snapshot candidates under a read lock, then mutate under a
+        // write lock per victim — the fs delete happens between, off the
+        // lock.
+        let (over_budget, mut candidates) = {
+            let inner = self
+                .inner
+                .read()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            if inner.total_disk_bytes <= cfg.disk_budget_bytes {
+                return;
+            }
+            // refcount-0 in memory (or not in memory at all) AND unpinned.
+            let candidates: Vec<(HandleId, u64, u32)> = inner
+                .disk_index
+                .iter()
+                .filter(|(id, e)| {
+                    !e.pinned && inner.entries.get(id).is_none_or(|m| m.refcount == 0)
+                })
+                .map(|(id, e)| (*id, e.created_at, e.bytes_len))
+                .collect();
+            (inner.total_disk_bytes, candidates)
+        };
+        // Oldest first.
+        candidates.sort_by_key(|(_, created_at, _)| *created_at);
+
+        let mut freed = 0u64;
+        let budget = cfg.disk_budget_bytes;
+        let mut evicted = 0usize;
+        for (id, _, bytes_len) in candidates {
+            if over_budget.saturating_sub(freed) <= budget {
+                break;
+            }
+            let (bin_path, meta_path) = entry_paths(&cfg.root, id);
+            // Phase A: drop the bytes.
+            if let Err(e) = std::fs::remove_file(&bin_path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    target: TARGET,
+                    handle = %id,
+                    path = %bin_path.display(),
+                    error = %e,
+                    "eviction phase A (.bin) failed; retrying next tick",
+                );
+                continue;
+            }
+            // Phase B: drop the index entry.
+            if let Err(e) = std::fs::remove_file(&meta_path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    target: TARGET,
+                    handle = %id,
+                    path = %meta_path.display(),
+                    error = %e,
+                    "eviction phase B (.meta) failed; orphan .bin already gone, will retry",
+                );
+            }
+            // Update the ledger + index.
+            {
+                let mut inner = self
+                    .inner
+                    .write()
+                    .expect("handle store lock poisoned; fail-fast per ADR-0063");
+                inner.total_disk_bytes =
+                    inner.total_disk_bytes.saturating_sub(u64::from(bytes_len));
+                inner.disk_index.remove(&id);
+            }
+            freed = freed.saturating_add(u64::from(bytes_len));
+            evicted += 1;
+        }
+        if evicted > 0 {
+            tracing::info!(
+                target: TARGET,
+                evicted,
+                freed_bytes = freed,
+                budget,
+                "handle store disk eviction pass complete",
+            );
+        }
+    }
+
+    /// Spawn the background eviction tick (ADR-0049 §5). The thread owns
+    /// a [`Weak`] reference to avoid a reference cycle; on the store's
+    /// last `Arc` dropping, the weak fails to upgrade and the thread
+    /// exits. No-op when persistence is disabled. Call once at boot
+    /// after wrapping the store in an `Arc`.
+    pub fn spawn_eviction_thread(self: &std::sync::Arc<Self>) {
+        let Some(cfg) = self.persist.clone() else {
+            return;
+        };
+        let weak = std::sync::Arc::downgrade(self);
+        let tick = std::time::Duration::from_secs(cfg.eviction_tick_secs.max(1));
+        std::thread::Builder::new()
+            .name("handle-store-evict".to_owned())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(tick);
+                    let Some(store) = weak.upgrade() else {
+                        // Store dropped; thread exits.
+                        return;
+                    };
+                    store.run_disk_eviction();
+                }
+            })
+            .ok();
+    }
+
     /// Mark `id` as pinned: it won't be evicted under memory pressure
     /// regardless of `refcount`. Returns `false` if the id isn't in
     /// the store.
@@ -790,12 +1010,19 @@ impl HandleStore {
                 .inner
                 .write()
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            let mut found = false;
             if let Some(entry) = inner.entries.get_mut(&id) {
                 entry.pinned = true;
-                true
-            } else {
-                false
+                found = true;
             }
+            // Keep the on-disk index's pinned flag in sync so the
+            // eviction tick (ADR-0049 §5) skips a pinned disk-resident
+            // entry even when it isn't materialized in memory.
+            if let Some(disk) = inner.disk_index.get_mut(&id) {
+                disk.pinned = true;
+                found = true;
+            }
+            found
         };
         if pinned {
             self.persist_pinned_set();
@@ -816,12 +1043,16 @@ impl HandleStore {
                 .inner
                 .write()
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            let mut found = false;
             if let Some(entry) = inner.entries.get_mut(&id) {
                 entry.pinned = false;
-                true
-            } else {
-                false
+                found = true;
             }
+            if let Some(disk) = inner.disk_index.get_mut(&id) {
+                disk.pinned = false;
+                found = true;
+            }
+            found
         };
         if unpinned {
             self.persist_pinned_set();
