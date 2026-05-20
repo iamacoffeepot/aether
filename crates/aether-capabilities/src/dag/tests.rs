@@ -63,6 +63,20 @@ fn fresh_substrate_with_rx() -> (Arc<Registry>, Arc<Mailer>, Receiver<EgressEven
     (registry, mailer, rx)
 }
 
+/// A `Builder` carrying the base every DAG fixture shares —
+/// `TraceObserverCapability` (fires `Settled` so `Call` settlement
+/// subscriptions wake), `HandleCapability` (the store the executor
+/// resolves into), `DagCapability` (the executor under test), and
+/// `TestSourceActor` (the universal source). Each fixture chains its
+/// specific observer / call cap before `build_passive`.
+fn base_builder(registry: &Arc<Registry>, mailer: &Arc<Mailer>) -> Builder<TestChassis> {
+    Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
+        .with_actor::<TraceObserverCapability>(())
+        .with_actor::<crate::HandleCapability>(())
+        .with_actor::<DagCapability>(())
+        .with_actor::<TestSourceActor>(())
+}
+
 /// A distinct session reply target per `corr` so multiple in-flight
 /// requests don't collide.
 fn session(corr: u64) -> ReplyTo {
@@ -203,11 +217,7 @@ fn source_kind() -> KindId {
 fn dag_executor_runs_two_node_dag() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestObserverActor>(Arc::clone(&recorder))
         .build_passive()
         .expect("caps boot");
@@ -263,12 +273,8 @@ fn dag_executor_parks_observer_until_source_resolves() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::clone(mailer.handle_store());
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestObserverActor>(Arc::clone(&recorder))
-        .with_actor::<TestSourceActor>(())
         .build_passive()
         .expect("caps boot");
 
@@ -322,11 +328,7 @@ fn dag_executor_parks_observer_until_source_resolves() {
 fn dag_executor_runs_parallel_sources() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved2> = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestParallelObserverActor>(Arc::clone(&recorder))
         .build_passive()
         .expect("caps boot");
@@ -393,11 +395,7 @@ fn dag_executor_runs_parallel_sources() {
 fn dag_executor_propagates_source_err_as_observer_input() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestObserverActor>(Arc::clone(&recorder))
         .build_passive()
         .expect("caps boot");
@@ -449,12 +447,8 @@ fn dag_executor_propagates_source_err_as_observer_input() {
 fn dag_executor_cancels_running_dag() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestObserverActor>(Arc::clone(&recorder))
-        .with_actor::<TestSourceActor>(())
         .build_passive()
         .expect("caps boot");
 
@@ -509,11 +503,7 @@ fn dag_executor_cancels_running_dag() {
 fn dag_executor_status_reports_running() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestObserverActor>(Arc::clone(&recorder))
         .build_passive()
         .expect("caps boot");
@@ -573,11 +563,7 @@ fn dag_executor_status_reports_complete_then_reaps() {
     }
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestObserverActor>(Arc::clone(&recorder))
         .build_passive()
         .expect("caps boot");
@@ -637,11 +623,7 @@ fn dag_executor_status_reports_complete_then_reaps() {
 fn dag_executor_call_collects_single_reply_bundle() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestCallActor>(TestCallConfig {
             replies: 1,
             never: false,
@@ -663,11 +645,7 @@ fn dag_executor_call_collects_single_reply_bundle() {
 fn dag_executor_call_collects_multi_reply_bundle() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestCallActor>(TestCallConfig {
             replies: 3,
             never: false,
@@ -694,11 +672,7 @@ fn dag_executor_call_collects_multi_reply_bundle() {
 fn dag_executor_call_inherited_worker_counts_toward_settlement() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestDeferredCallActor>(())
         .with_actor::<TestBundleObserverActor>(Arc::clone(&recorder))
         .build_passive()
@@ -727,11 +701,7 @@ fn dag_executor_call_times_out_nonsettling_cap() {
     }
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestCallActor>(TestCallConfig {
             replies: 0,
             never: true,
@@ -770,11 +740,7 @@ fn dag_executor_call_times_out_nonsettling_cap() {
 fn dag_executor_call_dispatches_as_own_root() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
-        .with_actor::<crate::HandleCapability>(())
-        .with_actor::<DagCapability>(())
-        .with_actor::<TestSourceActor>(())
+    let chassis = base_builder(&registry, &mailer)
         .with_actor::<TestCallActor>(TestCallConfig {
             replies: 1,
             never: false,

@@ -18,10 +18,10 @@
 //!   source's handle in the [`HandleStore`].
 //! - **Observers** dispatch *eagerly* at submit with `Ref::Handle`
 //!   slots into their input handle ids. The substrate's parking table
-//!   ([`HandleStore::park`] via [`crate::mail::Mailer::push`]) gates
-//!   them: the mail parks on the first unresolved handle and re-routes
-//!   when [`crate::mail::Mailer::resolve_handle`] flushes it — so a
-//!   multi-input observer naturally waits for every slot.
+//!   ([`HandleStore::park`] via [`Mailer::push`]) gates them: the mail
+//!   parks on the first unresolved handle and re-routes when
+//!   [`Mailer::resolve_handle`] flushes it — so a multi-input observer
+//!   naturally waits for every slot.
 //! - **`Call`s** gate on an explicit `pending_inputs` counter rather
 //!   than the parking table: a `Call` must dispatch as *its own causal
 //!   root* (`send_envelope_as_root`) so the executor can subscribe to

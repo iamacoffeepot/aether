@@ -7,7 +7,7 @@
 //!
 //! Same construction shape as `HandleCapability` and
 //! `RpcServerCapability`: a singleton
-//! [`NativeActor`](aether_substrate::actor::native::NativeActor) registered at
+//! [`NativeActor`](aether_substrate::NativeActor) registered at
 //! chassis boot under the `aether.dag` namespace (ADR-0078
 //! chassis-internal actor). `init` caches the `Arc<Mailer>` + own
 //! mailbox id off the init ctx and builds the executor against them,
