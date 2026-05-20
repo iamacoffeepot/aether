@@ -337,3 +337,51 @@ pub struct CaptureFrameArgs {
     #[serde(default)]
     pub after_mails: Vec<CaptureMailSpec>,
 }
+
+/// `submit_dag` arguments (ADR-0047 §9).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubmitDagArgs {
+    /// Engine UUID the DAG submits to (from `list_engines`).
+    pub engine_id: String,
+    /// The DAG descriptor as JSON, encoded against the
+    /// `aether.dag.descriptor` kind schema (read it via `describe_kinds`).
+    /// `nodes` is an array of externally-tagged `Node` variants
+    /// (`{ "Source": { id, mailbox, kind_id, payload_path } }`,
+    /// `{ "Observer": { id, recipient, kind_id } }`,
+    /// `{ "Call": { id, recipient, kind_id } }`); `edges` is an array of
+    /// `{ from, to, slot }`; `version` is `1`. Tagged-string ids
+    /// (`mbx-…`, `knd-…`) per ADR-0064/0065.
+    ///
+    /// **`payload_path` is a tool-layer virtual field.** Each `Source`
+    /// carries `payload_path: String` instead of the wire `payload:
+    /// Vec<u8>`: `submit_dag` reads the file at that path and substitutes
+    /// the bytes into the wire `payload` before encoding. The path must
+    /// be readable from the MCP process (colocated with the substrate in
+    /// v1). A `Source` may instead carry an inline `payload` byte array;
+    /// `payload_path` takes precedence when both are present.
+    pub descriptor: serde_json::Value,
+    /// Cap on wall-clock wait for the synchronous validation verdict, in
+    /// milliseconds. Defaults to 5000. Guards against a hung validator,
+    /// not normal latency — validation is microseconds, and execution is
+    /// async (poll via `dag_status`).
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+/// `dag_status` arguments (ADR-0047 §9).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DagStatusArgs {
+    /// Engine UUID hosting the DAG (from `list_engines`).
+    pub engine_id: String,
+    /// Tagged DAG id (`dag-…`) returned by `submit_dag`.
+    pub dag_id: String,
+}
+
+/// `dag_cancel` arguments (ADR-0047 §9).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DagCancelArgs {
+    /// Engine UUID hosting the DAG (from `list_engines`).
+    pub engine_id: String,
+    /// Tagged DAG id (`dag-…`) returned by `submit_dag`.
+    pub dag_id: String,
+}
