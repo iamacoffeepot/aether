@@ -35,7 +35,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aether-actor"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-capabilities",
  "aether-data",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "aether-actor-derive"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "aether-camera"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "aether-capabilities"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-codec",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "aether-codec"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
  "aether-kinds",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "aether-data"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor-derive",
  "bytemuck",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "aether-demo-sokoban"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-camera",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "aether-kinds"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
  "bytemuck",
@@ -149,14 +149,14 @@ dependencies = [
 
 [[package]]
 name = "aether-math"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "aether-mcp"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-capabilities",
  "aether-codec",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "aether-mesh"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-math",
  "lexpr",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "aether-mesh-viewer"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "aether-substrate"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "aether-substrate-bundle"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "aether-test-fixture-probe"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities",
