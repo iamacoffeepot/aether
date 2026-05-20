@@ -1,0 +1,5 @@
+error: transforms cannot call host functions or access handler context -- see ADR-0048
+  --> tests/ui/rejects_std_time.rs:16:13
+   |
+16 |     let _ = std::time::Instant::now();
+   |             ^^^

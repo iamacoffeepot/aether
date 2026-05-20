@@ -29,6 +29,16 @@ pub const KIND_DOMAIN: &[u8] = b"kind:";
 /// so a typed-id `TYPE_ID` cannot alias either space.
 pub const TYPE_DOMAIN: &[u8] = b"type:";
 
+/// ADR-0048 §1: 16-byte domain prefix for native-transform id hashes.
+/// Hashed input is `TRANSFORM_DOMAIN ++ "{crate}::{module}::{fn}"`. A
+/// transform's identity is name-based (not position-based), so
+/// inserting / reordering transforms in a file leaves every id stable;
+/// renaming or moving a transform fn changes its id. Disjoint from the
+/// mailbox / kind / handle domains so a `TransformId` can't alias any
+/// of those spaces. The `#[transform]` macro prepends this before the
+/// canonical name bytes.
+pub const TRANSFORM_DOMAIN: [u8; 16] = *b"aether/xform/v1\0";
+
 /// FNV-1a 64 over a byte slice. Retained for the few call sites that
 /// hash neither a mailbox name nor a kind schema. New callers should
 /// prefer `fnv1a_64_prefixed` with an explicit domain so the output

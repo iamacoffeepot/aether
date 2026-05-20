@@ -1,0 +1,5 @@
+error: transforms cannot call host functions or access handler context -- see ADR-0048
+  --> tests/ui/rejects_host_fn.rs:16:5
+   |
+16 |     aether::send_mail_p32(0, 0, 0, 0);
+   |     ^^^^^^

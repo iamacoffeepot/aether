@@ -1,0 +1,5 @@
+error: transforms accept at most 8 inputs (ADR-0048 §1); found 9
+  --> tests/ui/rejects_nine_inputs.rs:15:5
+   |
+15 |     a: Scalar,
+   |     ^
