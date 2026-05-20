@@ -35,6 +35,13 @@ struct Fact {
 }
 ```
 
+**Fact identity is two hashes, mirroring the engine's existing identity scheme.** A fact has a stable **name-hash** and a per-version **content-hash**, exactly as the substrate already splits identity (`MailboxId` is a name hash per ADR-0029; `KindId` is `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` — content-sensitive — per ADR-0030):
+
+- **Name-hash** — `fnv1a_64(FACT_DOMAIN ++ id)` over the authored `id` string. Answers *"which fact?"*; stable across body edits; used for references, fact selection, and reverse-walks.
+- **Content-hash** — over the fact's canonical bytes. Answers *"which version?"*; changes the moment the body changes. This is the value the content-addressed cascade keys on.
+
+Both are derived at load, not authored — the file carries only the human `id` and the prose. This closes a soundness gap in ADR-0046 §2: that derivation hashes the string `fact_id`, but the string doesn't change on a body edit, and the `aether.fs.read` that loads a fact is a `Source` with an *ephemeral* handle id (ADR-0045 §3, "two fetches are two observations") — so neither the string id nor the read handle would bust a downstream cache on a content edit, and identical reads wouldn't dedup. The compiler therefore content-hashes each fact's canonical bytes and threads *that* (not the ephemeral read handle, not the bare string id) into the cascade, so a fact edit misses exactly its dependents and an unchanged fact dedups across reads and restarts. `FACT_DOMAIN` is a 16-byte constant disjoint from the kind / mailbox / handle / transform domains. (FNV-1a 64 matches the engine's first-party choice; an untrusted-corpus future would swap to a crypto hash — the same forcing function ADR-0048 names for content-addressed-by-body.) Content-addressing this way is, structurally, a one-way compositional numbering of the derivation graph — a derived artifact's id is built from its inputs' ids (ADR-0048 §4), so the id of a composed prompt encodes its entire provenance.
+
 ### 2. Three authoring layers: properties, tags, capabilities
 
 The corpus is a graph, not a flat list (ADR-0046 open questions; validated across both spikes). Three distinct frontmatter layers, never conflated:
