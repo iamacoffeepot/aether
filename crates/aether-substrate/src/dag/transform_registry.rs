@@ -9,8 +9,8 @@
 //!
 //! The validator's dispatchability phase cross-checks each
 //! `Transform { transform_id, output_kind_id }` node against this
-//! registry (unknown id → [`DagError::UnknownTransform`], output-kind
-//! mismatch → [`DagError::TransformOutputMismatch`]). Post-validation
+//! registry (unknown id → `DagError::UnknownTransform`, output-kind
+//! mismatch → `DagError::TransformOutputMismatch`). Post-validation
 //! lookup is an infallible hashmap hit.
 
 use std::collections::HashMap;
@@ -18,9 +18,8 @@ use std::collections::HashMap;
 use aether_data::{KindId, TransformEntry, TransformId};
 
 /// A registered native transform's static metadata + invocation thunk
-/// (ADR-0048 §2). A thin borrow over the link-time
-/// [`TransformEntry`](aether_data::TransformEntry) — every field is
-/// `'static`.
+/// (ADR-0048 §2). A thin borrow over the link-time [`TransformEntry`] —
+/// every field is `'static`.
 #[derive(Copy, Clone)]
 pub struct RegisteredTransform {
     /// Declared input kind ids, in slot order (≤ 8).

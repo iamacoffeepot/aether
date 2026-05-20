@@ -9,12 +9,11 @@
 //!
 //! A transform is a **data-layer primitive** — a pure `Kind -> Kind`
 //! function with zero dependence on the actor framework. Its runtime
-//! types ([`TransformEntry`](aether_data::TransformEntry),
-//! [`TransformError`](aether_data::TransformError), the link-time
-//! inventory) live in `aether-data`; this crate is the sibling
-//! proc-macro that `aether-data` cannot itself be (`proc-macro = true`
-//! forbids exporting runtime items). `aether-data` re-exports the macro
-//! as `aether_data::transform` behind the `derive` feature.
+//! types (`TransformEntry`, `TransformError`, the link-time inventory)
+//! live in `aether-data`; this crate is the sibling proc-macro that
+//! `aether-data` cannot itself be (`proc-macro = true` forbids
+//! exporting runtime items). `aether-data` re-exports the macro as
+//! `aether_data::transform` behind the `derive` feature.
 //!
 //! The macro's three ADR-0048 §1 responsibilities:
 //!
