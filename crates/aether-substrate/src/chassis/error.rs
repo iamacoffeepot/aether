@@ -3,15 +3,10 @@
 //! `BootError` is what every `Capability::boot` / `NativeActor::init` /
 //! `Chassis::build` returns on failure (per ADR-0063 a boot error
 //! aborts the chassis before user code runs — no partial boots).
-//! `WedgedFrameBound` is the diagnostic the per-frame drain barrier
-//! returns when a frame-bound capability's inbox didn't drain within
-//! the budget.
 
 use std::error::Error as StdError;
 use std::fmt;
-use std::time::Duration;
 
-use crate::mail::MailboxId;
 use crate::mail::registry::NameConflict;
 use std::io;
 
@@ -69,27 +64,5 @@ impl From<NameConflict> for BootError {
 impl From<wasmtime::Error> for BootError {
     fn from(e: wasmtime::Error) -> Self {
         Self::Other(Box::new(io::Error::other(format!("{e}"))))
-    }
-}
-
-/// Diagnostic returned from
-/// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] when a
-/// frame-bound capability's inbox didn't drain within the budget. The
-/// chassis frame loop routes this through `lifecycle::fatal_abort`
-/// the same way component-side wedges do.
-#[derive(Debug, Clone, Copy)]
-pub struct WedgedFrameBound {
-    pub mailbox: MailboxId,
-    pub pending: u64,
-    pub waited: Duration,
-}
-
-impl fmt::Display for WedgedFrameBound {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "frame-bound dispatcher wedged: mailbox={} pending={} waited={:?}",
-            self.mailbox, self.pending, self.waited,
-        )
     }
 }

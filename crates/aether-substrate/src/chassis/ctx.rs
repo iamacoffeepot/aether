@@ -1,15 +1,12 @@
 //! Boot machinery shared by the chassis builder (`chassis::builder::Builder`,
 //! ADR-0071): mailbox claim helpers, the per-cap [`MailboxClaim`] /
-//! [`FrameBoundClaim`] / [`DropOnShutdownClaim`] result shapes, and
-//! the [`ChassisCtx`] threaded through every cap's boot. Sibling
-//! modules: error types live in `chassis::error`; the cross-flavour
-//! [`Envelope`] shape lives
+//! [`DropOnShutdownClaim`] result shapes, and the [`ChassisCtx`]
+//! threaded through every cap's boot. Sibling modules: error types
+//! live in `chassis::error`; the cross-flavour [`Envelope`] shape lives
 //! in `actor::native::envelope`.
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
 
 use aether_actor::Actor;
 
@@ -124,39 +121,10 @@ pub struct MailboxSender {
 
 impl MailboxSender {
     /// Internal constructor — only
-    /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] /
-    /// [`ChassisCtx::claim_frame_bound_mailbox`] build these.
+    /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] builds these.
     pub(crate) fn new(inner: Arc<mpsc::Sender<Envelope>>) -> Self {
         Self { _inner: inner }
     }
-}
-
-/// Result returned from [`ChassisCtx::claim_frame_bound_mailbox`].
-///
-/// Same as [`DropOnShutdownClaim`] plus a `pending` counter that the
-/// sink registration handler increments on every accepted send and
-/// the capability's dispatcher decrements after each processed
-/// envelope. The chassis collects this counter so
-/// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] can wait
-/// on it as part of the per-frame drain barrier (ADR-0074 §Decision 5).
-///
-/// Capabilities authored with `Capability::FRAME_BARRIER = true`
-/// must claim through this method instead of
-/// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] — otherwise the
-/// chassis has no counter to wait on and the barrier degrades to
-/// "components only", reintroducing the race the `FRAME_BARRIER`
-/// classification exists to close.
-#[derive(Debug)]
-pub struct FrameBoundClaim {
-    pub id: MailboxId,
-    pub receiver: mpsc::Receiver<Envelope>,
-    pub mailbox_sender: MailboxSender,
-    /// Shared with the registry's sink handler. The handler increments
-    /// before pushing into the mpsc; the capability's dispatcher must
-    /// decrement after each `dispatch()` returns.
-    pub pending: Arc<AtomicU64>,
-    /// Issue 635 PR C: see [`DropOnShutdownClaim::wake_slot`].
-    pub wake_slot: Arc<MailboxWakeSlot>,
 }
 
 /// Generic fallback-router handler: invoked by substrate dispatch when a
@@ -185,44 +153,21 @@ pub struct ChassisCtx<'a> {
     registry: &'a Arc<Registry>,
     mailer: &'a Arc<Mailer>,
     fallback: &'a mut Option<FallbackRouter>,
-    /// Per-mailbox pending counters collected from
-    /// [`ChassisCtx::claim_frame_bound_mailbox`] calls. The chassis
-    /// builder hands these to the resulting `PassiveChassis` /
-    /// `BuiltChassis` so the frame loop can wait on them via
-    /// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`].
-    frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
-    /// Membership view of the same set the `frame_bound_pending` Vec
-    /// covers, shared with every [`crate::NativeBinding`] built
-    /// against this chassis. Capabilities clone the [`Arc`] into their
-    /// transport at boot; the transport's cross-class `wait_reply`
-    /// guard reads it (with a brief read-lock) to classify the
-    /// recipient of an outbound request as frame-bound or
-    /// free-running. [`Self::claim_frame_bound_mailbox`] inserts the
-    /// claimed mailbox id here in addition to pushing onto the
-    /// pending-counter list.
-    frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
-    /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] cloned into
-    /// every [`crate::NativeBinding`] this ctx builds, so the
-    /// cross-class `wait_reply` guard (ADR-0074 §Decision 5) can
-    /// abort without each capability needing to plumb
-    /// [`crate::HubOutbound`] itself. Defaults to
-    /// [`crate::runtime::lifecycle::PanicAborter`] when the chassis
-    /// builder doesn't override — production drivers swap in
+    /// Indirection over [`crate::runtime::lifecycle::fatal_abort`]
+    /// cloned into every [`crate::NativeBinding`] this ctx builds, so a
+    /// wasm-guest trap can fatal-abort the substrate cleanly without
+    /// each capability needing to plumb [`crate::HubOutbound`] itself.
+    /// Defaults to [`crate::runtime::lifecycle::PanicAborter`] when the
+    /// chassis builder doesn't override — production drivers swap in
     /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via
     /// [`crate::chassis::builder::Builder::with_aborter`].
     aborter: &'a Arc<dyn FatalAborter>,
-    /// Issue #601: every actor-mailbox claim (`claim_mailbox_*`,
-    /// `claim_frame_bound_mailbox_*`, `claim_mailbox_drop_on_shutdown_*`)
-    /// appends its `MailboxId` here. The chassis builder reads the
-    /// list after `boot_passives` to dispatch
-    /// `aether.log.configure_drain` mail to each booted actor
-    /// so its `LogDrainSlot` resolves to the chassis's declared drain
-    /// (`Builder::with_log_drain<T>()`).
+    /// Issue #601: every actor-mailbox claim appends its `MailboxId`
+    /// here. The chassis builder reads the list after `boot_passives`.
     ///
     /// Synchronous-handler registrations (e.g. `AETHER_DIAGNOSTICS`)
     /// go through `Registry::register_inline` directly and do *not*
-    /// land here — they're not actors and have no `LogDrainSlot` to
-    /// install.
+    /// land here — they're not actors.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
     /// [`crate::Spawner`], cloned into every booted actor's
@@ -235,18 +180,11 @@ pub struct ChassisCtx<'a> {
 
 impl<'a> ChassisCtx<'a> {
     /// Internal constructor used by the ADR-0071
-    /// [`crate::chassis::builder::Builder`]. Eight refs is one
-    /// over clippy's default; the alternative — a builder-of-the-builder
-    /// — pays the same plumbing cost without adding clarity, since
-    /// every chassis path that constructs a `ChassisCtx` already has
-    /// every ref in scope.
-    #[allow(clippy::too_many_arguments)]
+    /// [`crate::chassis::builder::Builder`].
     pub(crate) fn new(
         registry: &'a Arc<Registry>,
         mailer: &'a Arc<Mailer>,
         fallback: &'a mut Option<FallbackRouter>,
-        frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
-        frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
         aborter: &'a Arc<dyn FatalAborter>,
         claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
         spawner: &'a Arc<crate::Spawner>,
@@ -255,8 +193,6 @@ impl<'a> ChassisCtx<'a> {
             registry,
             mailer,
             fallback,
-            frame_bound_pending,
-            frame_bound_set,
             aborter,
             claimed_actor_mailboxes,
             spawner,
@@ -394,132 +330,16 @@ impl<'a> ChassisCtx<'a> {
         })
     }
 
-    /// Variant of [`Self::claim_mailbox_drop_on_shutdown`] for
-    /// frame-bound capabilities. Claims under `C::NAMESPACE`. See
-    /// [`Self::claim_frame_bound_mailbox_with_override`] for the
-    /// arbitrary-name escape hatch.
-    pub fn claim_frame_bound_mailbox<C: Actor>(&mut self) -> Result<FrameBoundClaim, BootError> {
-        self.claim_frame_bound_mailbox_with_override(C::NAMESPACE)
-    }
-
-    /// Variant of [`Self::claim_mailbox_drop_on_shutdown_with_override`]
-    /// for frame-bound capabilities (ADR-0074 §Decision 5). In addition
-    /// to the channel-drop shutdown machinery, the registered sink
-    /// handler increments a `pending` counter on every accepted send;
-    /// the capability's dispatcher must decrement after each
-    /// processed envelope so the counter reflects "envelopes accepted
-    /// by the sink but not yet drained by the dispatcher."
-    ///
-    /// The chassis collects the counter so
-    /// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] can
-    /// wait for it to hit zero before render submit. Pair this with
-    /// `FRAME_BARRIER = true` on the [`Actor`] impl. See
-    /// `aether_capabilities::RenderCapability` for the reference shape.
-    ///
-    /// # Panics
-    /// Panics if the `frame_bound_set` `RwLock` is poisoned — fail-fast
-    /// per ADR-0063: a poisoned lock means a prior writer panicked
-    /// under the guard, a substrate-level invariant violation.
-    pub fn claim_frame_bound_mailbox_with_override(
-        &mut self,
-        name: &str,
-    ) -> Result<FrameBoundClaim, BootError> {
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        let tx = Arc::new(tx);
-        let weak = Arc::downgrade(&tx);
-        let pending = Arc::new(AtomicU64::new(0));
-        let pending_for_handler = Arc::clone(&pending);
-        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
-        let wake_for_handler = Arc::clone(&wake_slot);
-        let id = self.registry.try_register_inbox(
-            name.to_owned(),
-            // iamacoffeepot/aether#848 PR 3: see `claim_mailbox_with_override`
-            // for the rationale. Pre-send increment + post-fail
-            // decrement bracket the `tx.send` exactly as before;
-            // the only change is that `dispatch` is `OwnedDispatch`
-            // (moved into `env` via `From`) and the failure branch
-            // reads `env.kind_name` out of the `SendError`.
-            Arc::new(move |dispatch: OwnedDispatch| {
-                let Some(tx) = weak.upgrade() else {
-                    tracing::warn!(
-                        target: "aether_substrate::capability",
-                        kind = %dispatch.kind_name,
-                        "frame-bound capability sender dropped — mail discarded"
-                    );
-                    return;
-                };
-                let env: Envelope = dispatch;
-                // Increment before send so the dispatcher's
-                // matching decrement-after-dispatch sees a count
-                // > 0 by the time it tries to decrement. If the
-                // send itself fails (receiver dropped between the
-                // upgrade and the send — shutdown race), undo
-                // the increment so the counter doesn't drift up.
-                pending_for_handler.fetch_add(1, Ordering::AcqRel);
-                if let Err(mpsc::SendError(env)) = tx.send(env) {
-                    pending_for_handler.fetch_sub(1, Ordering::AcqRel);
-                    tracing::warn!(
-                        target: "aether_substrate::capability",
-                        kind = %env.kind_name,
-                        "frame-bound capability receiver dropped — mail discarded"
-                    );
-                    return;
-                }
-                // Issue 635 PR C: fire the `Pooled` wake hook (if
-                // installed). Frame-bound + pool-scheduled is a
-                // valid combination per the issue's section 5
-                // ("FRAME_BARRIER and SCHEDULING are orthogonal");
-                // the chassis frame loop reads `pending` regardless
-                // of where the dispatch happens.
-                if let Some(wake) = wake_for_handler.get() {
-                    wake();
-                }
-            }),
-        )?;
-        self.frame_bound_pending.push((id, Arc::clone(&pending)));
-        // Mirror the membership into the shared set so each
-        // capability's [`crate::NativeBinding`] can resolve "is the
-        // recipient of this `wait_reply` frame-bound?" with a single
-        // read-lock — without each transport having to scan the
-        // pending-counter Vec on every check.
-        self.frame_bound_set
-            .write()
-            .expect("frame_bound_set lock poisoned; fail-fast per ADR-0063")
-            .insert(id);
-        self.claimed_actor_mailboxes.push(id);
-        Ok(FrameBoundClaim {
-            id,
-            receiver: rx,
-            mailbox_sender: MailboxSender::new(tx),
-            pending,
-            wake_slot,
-        })
-    }
-
     /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call.
-    /// Removes the sink from the chassis registry, the (id, counter)
-    /// entry from `frame_bound_pending`, the id from
-    /// `frame_bound_set`, and the id from `claimed_actor_mailboxes`.
-    /// Idempotent: calling on an id that wasn't claimed is a no-op.
+    /// Removes the sink from the chassis registry and the id from
+    /// `claimed_actor_mailboxes`. Idempotent: calling on an id that
+    /// wasn't claimed is a no-op.
     ///
-    /// Used in the singleton-boot unwind path (`chassis_builder` /
-    /// capability) when `init` fails after the cap mailbox was
-    /// claimed. Without this, the failed cap leaves a sink registered
-    /// against its namespace and a stuck counter in
-    /// `frame_bound_pending` that the chassis frame loop would wait
-    /// for forever.
-    ///
-    /// # Panics
-    /// Panics if the `frame_bound_set` `RwLock` is poisoned — fail-fast
-    /// per ADR-0063: a poisoned lock means a prior writer panicked
-    /// under the guard, a substrate-level invariant violation.
+    /// Used in the singleton-boot unwind path when `init` fails after
+    /// the cap mailbox was claimed. Without this, the failed cap leaves
+    /// a sink registered against its namespace.
     pub fn unclaim_mailbox(&mut self, id: MailboxId) {
         self.registry.remove_closure(id);
-        self.frame_bound_pending.retain(|(i, _)| *i != id);
-        self.frame_bound_set
-            .write()
-            .expect("frame_bound_set lock poisoned; fail-fast per ADR-0063")
-            .remove(&id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
 
@@ -550,26 +370,6 @@ impl<'a> ChassisCtx<'a> {
     #[must_use]
     pub fn mailer(&self) -> &Arc<Mailer> {
         self.mailer
-    }
-
-    /// Read the list of frame-bound pending counters collected so far
-    /// from earlier `claim_frame_bound_mailbox` calls. Used by
-    /// [`crate::chassis::builder::DriverCtx::frame_bound_pending`] to
-    /// snapshot the list at driver-boot time; capabilities that just
-    /// want their own counter should hold the `Arc<AtomicU64>` from
-    /// their [`FrameBoundClaim`] directly instead.
-    #[must_use]
-    pub fn frame_bound_pending(&self) -> &[(MailboxId, Arc<AtomicU64>)] {
-        self.frame_bound_pending
-    }
-
-    /// Clone the chassis's shared frame-bound membership set. Read by
-    /// [`crate::NativeBinding::from_ctx`] so the cross-class
-    /// `wait_reply` guard can classify each outbound recipient.
-    /// Capabilities that just want to send mail don't need this.
-    #[must_use]
-    pub fn frame_bound_set(&self) -> Arc<RwLock<HashSet<MailboxId>>> {
-        Arc::clone(self.frame_bound_set)
     }
 
     /// Clone the chassis's [`FatalAborter`]. Read by

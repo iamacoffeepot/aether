@@ -929,16 +929,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
 
     // Collect everything we need from the inner actor impl into owned
     // values so the borrow on `items` ends before we mutate it below.
-    let (
-        self_ty,
-        type_ident,
-        generics,
-        namespace_expr,
-        frame_barrier_expr,
-        scheduling_expr,
-        handler_kinds,
-        catch_all,
-    ) = {
+    let (self_ty, type_ident, generics, namespace_expr, scheduling_expr, handler_kinds, catch_all) = {
         let Item::Impl(actor_impl) = &items[actor_idx] else {
             unreachable!("actor_idx points to an Item::Impl by construction");
         };
@@ -991,7 +982,6 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         let mut handler_kinds: Vec<Type> = Vec::new();
         let mut has_fallback = false;
         let mut namespace_expr: Option<Expr> = None;
-        let mut frame_barrier_expr: Option<Expr> = None;
         let mut scheduling_expr: Option<Expr> = None;
         for impl_item in &actor_impl.items {
             match impl_item {
@@ -1005,8 +995,6 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
                 ImplItem::Const(c) => {
                     if c.ident == "NAMESPACE" {
                         namespace_expr = Some(c.expr.clone());
-                    } else if c.ident == "FRAME_BARRIER" {
-                        frame_barrier_expr = Some(c.expr.clone());
                     } else if c.ident == "SCHEDULING" {
                         scheduling_expr = Some(c.expr.clone());
                     }
@@ -1044,7 +1032,6 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
             type_ident,
             actor_impl.generics.clone(),
             namespace_expr,
-            frame_barrier_expr,
             scheduling_expr,
             handler_kinds,
             has_fallback,
@@ -1066,9 +1053,6 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     //   (chassis builders, tests in sibling mods) keep working.
     // - Singleton, Actor, and HandlesKind impls are always-on so wasm
     //   consumers compile typed sends without the substrate runtime.
-    let frame_barrier_const = frame_barrier_expr.map(|expr| {
-        quote! { const FRAME_BARRIER: bool = #expr; }
-    });
     // Self-contained emission: the bridge lifts the user's expression
     // from inside `mod native` (where `Scheduling` is in scope via an
     // inner-mod import) to a sibling `impl Actor` at file root (where
@@ -1116,7 +1100,6 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     let actor_marker = quote! {
         impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
             const NAMESPACE: &'static str = #namespace_expr;
-            #frame_barrier_const
             #scheduling_const
         }
     };

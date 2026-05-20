@@ -103,9 +103,11 @@ where
     /// envelope dispatch. Wrapped in [`PooledSlots`] for the `Sync`
     /// safety story — see that type's doc-comment.
     slots: PooledSlots,
-    /// `FRAME_BARRIER` counter for this actor's mailbox. `None` for
-    /// free-running caps; `Some` for frame-bound. Decremented after
-    /// every successful dispatch.
+    /// Per-actor inbox-pending counter, decremented after every
+    /// successful dispatch. `None` for singleton caps (ADR-0082 retired
+    /// the frame-bound drain that was the singleton consumer); `Some`
+    /// for instanced actors, where `Spawner::shutdown_instanced` reads
+    /// it to coordinate teardown (issue 685).
     pending: Option<Arc<AtomicU64>>,
     /// Chassis-level actor registry. Used by [`Self::finalize_registry`]
     /// to drain `monitors_of[id]` and prune `monitoring[id]` from each

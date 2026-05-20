@@ -69,10 +69,9 @@ pub use chassis::builder::{
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use chassis::ctx::{
-    ActorErased, ChassisCtx, DropOnShutdownClaim, FallbackRouter, FrameBoundClaim, MailboxClaim,
-    MailboxSender,
+    ActorErased, ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender,
 };
-pub use chassis::error::{BootError, WedgedFrameBound};
+pub use chassis::error::BootError;
 pub use lifecycle::{LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{
