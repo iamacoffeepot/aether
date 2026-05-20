@@ -7,11 +7,13 @@
 //! interaction lives in the actor SDK (`aether_actor::Mailbox<K>`) and
 //! per-cap dispatchers.
 
+pub mod capability;
 pub mod helpers;
 pub mod mailer;
 pub mod outbound;
 pub mod registry;
 
+pub use capability::{CapabilityRegistry, MailboxCaps};
 pub use mailer::Mailer;
 pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
 pub use registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Registry};

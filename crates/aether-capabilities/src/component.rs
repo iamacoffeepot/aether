@@ -113,6 +113,7 @@ mod native {
     use aether_substrate::actor::wasm::component::ComponentCtx;
     use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::capability::MailboxCaps;
     use aether_substrate::mail::helpers::register_or_match_all;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -303,7 +304,20 @@ mod native {
                 }
             };
 
-            // 6. ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
+            // 6. iamacoffeepot/aether#1037: register the trampoline's
+            // ADR-0033 receive-side capabilities into the queryable
+            // `CapabilityRegistry` so the DAG validator can ask
+            // "does this mailbox accept kind K?". Same registry the
+            // native-cap-boot path populates — one source of truth for
+            // both transport flavours. `aether.component.replace`
+            // re-registers (same mailbox id); `aether.component.drop`
+            // clears.
+            self.mailer.capability_registry().register(
+                mailbox_id,
+                MailboxCaps::from_component_capabilities(&capabilities),
+            );
+
+            // ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
             // mail. The freshly-spawned trampoline owns its own
             // `ActorLogRing` like every other actor; no drain
             // configuration is needed.

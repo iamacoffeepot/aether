@@ -42,7 +42,7 @@ use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
     SubstrateBoot,
     capture::CaptureQueue,
-    mail::{Mail, MailId, MailboxId},
+    mail::{CapabilityRegistry, Mail, MailId, MailboxId},
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -376,6 +376,18 @@ impl TestBench {
             .lock()
             .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
             .clone()
+    }
+
+    /// Borrow the substrate's queryable [`CapabilityRegistry`]
+    /// (iamacoffeepot/aether#1037). The bench shares the same `Mailer`
+    /// every cap registers against, so `accepts(MailboxId, KindId)` /
+    /// `has_fallback(MailboxId)` here reflect the post-load /
+    /// post-replace / post-drop dispatchability surface. Surfaced for
+    /// integration tests that exercise the registry through a real
+    /// component-load lifecycle.
+    #[must_use]
+    pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
+        self.queue.capability_registry()
     }
 
     /// Bytes-level fire-and-settle send: resolve `recipient_name` in

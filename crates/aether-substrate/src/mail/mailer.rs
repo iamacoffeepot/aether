@@ -28,6 +28,7 @@ use std::thread;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
+use crate::mail::capability::CapabilityRegistry;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
@@ -103,6 +104,15 @@ pub struct Mailer {
     /// `start_drainer` is independent — without it, events accumulate
     /// in the queue but aren't shipped.
     trace_handle: TraceHandle,
+    /// iamacoffeepot/aether#1037 queryable capability registry. A
+    /// sibling of [`Self::registry`] — the routing registry resolves
+    /// recipients on the hot path; this one answers the DAG
+    /// validator's submit-path dispatchability questions
+    /// (`accepts(MailboxId, KindId)` / `has_fallback(MailboxId)`). The
+    /// component-load / native-cap-boot path populates it, replace
+    /// re-registers, drop clears. Allocated empty by [`Self::new`]
+    /// (like `trace_handle`) so no call site changes.
+    capability_registry: Arc<CapabilityRegistry>,
 }
 
 impl Mailer {
@@ -120,6 +130,7 @@ impl Mailer {
             chassis_router: OnceLock::new(),
             settlement_registry: OnceLock::new(),
             trace_handle: TraceHandle::new(),
+            capability_registry: Arc::new(CapabilityRegistry::new()),
         }
     }
 
@@ -289,6 +300,17 @@ impl Mailer {
     /// via the cap's config struct.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// Borrow the wired [`CapabilityRegistry`]
+    /// (iamacoffeepot/aether#1037). The component-load / native-cap-boot
+    /// path registers mailbox caps through this handle; the DAG
+    /// validator (iamacoffeepot/aether#975) reads `accepts` /
+    /// `has_fallback` on the submit path. Shared via the `Mailer` so any
+    /// actor with `ctx.mailer()` reaches the same registry — mirroring
+    /// how [`Self::registry`] surfaces the routing table.
+    pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
+        &self.capability_registry
     }
 
     /// Hand `mail` to the substrate for dispatch. `Inbox`-bound

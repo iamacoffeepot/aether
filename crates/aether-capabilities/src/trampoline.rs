@@ -88,6 +88,7 @@ mod native {
     use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
     use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::capability::MailboxCaps;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
@@ -230,6 +231,12 @@ mod native {
                 // drops at end of scope, tearing down linear memory.
                 component.unwire();
             }
+            // iamacoffeepot/aether#1037: clear the trampoline's
+            // capabilities — the wasm is unloaded, so the mailbox now
+            // accepts nothing until a `replace` refills it. The
+            // trampoline (and its mailbox name) survives as an empty
+            // slot, but it has no accept-set while empty.
+            self.mailer.capability_registry().remove(self.mailbox);
             ctx.reply(&DropResult::Ok);
         }
 
@@ -376,6 +383,16 @@ mod native {
             }
 
             self.component = Some(new_component);
+
+            // iamacoffeepot/aether#1037: re-register the trampoline's
+            // capabilities against the post-replace handler set. The
+            // mailbox id is stable across replace (ADR-0022 §4), so
+            // `register` overwrites the prior entry — the validator
+            // sees the new accept-set immediately.
+            self.mailer.capability_registry().register(
+                self.mailbox,
+                MailboxCaps::from_component_capabilities(&capabilities),
+            );
 
             ReplaceResult::Ok { capabilities }
         }

@@ -35,6 +35,7 @@ use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
+use crate::mail::capability::MailboxCaps;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -535,6 +536,18 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 return Err(e);
             }
         };
+
+        // iamacoffeepot/aether#1037: register this native cap's ADR-0033
+        // receive-side capabilities (handler kinds + `#[fallback]`
+        // presence) into the queryable `CapabilityRegistry`, the same
+        // population path a wasm component's load takes. `A` is a
+        // `NativeDispatch`, whose `__aether_capabilities` the `#[actor]`
+        // macro overrides to enumerate the cap's handlers; the default
+        // (empty) covers any cap the macro didn't touch.
+        ctx.mail_send_handle().capability_registry().register(
+            resources.mailbox_id,
+            MailboxCaps::from_component_capabilities(&A::__aether_capabilities()),
+        );
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
         self.state = BootState::Initialized {

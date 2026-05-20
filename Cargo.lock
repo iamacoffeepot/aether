@@ -232,6 +232,7 @@ name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-camera",
  "aether-capabilities",
  "aether-codec",
  "aether-data",

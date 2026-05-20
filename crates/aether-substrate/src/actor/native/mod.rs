@@ -83,6 +83,15 @@ use aether_actor::Actor;
 use crate::chassis::error::BootError;
 use crate::mail::KindId;
 
+/// Re-export of the ADR-0033 capability vocabulary so the
+/// `#[actor] impl NativeActor` macro can construct the
+/// [`NativeDispatch::__aether_capabilities`] override through
+/// `::aether_substrate::` paths — the same crate the rest of the
+/// native dispatch impl already resolves against, so native `#[actor]`
+/// consumers don't need `aether-kinds` in their own dep list
+/// (iamacoffeepot/aether#1037).
+pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
+
 /// Native chassis-cap actor trait. Per-cap shape: one struct, one
 /// `#[actor] impl NativeActor for X` block. The `Config` associated
 /// type is moved into [`Self::init`] by the chassis builder; pass
@@ -179,5 +188,26 @@ pub trait NativeDispatch: Send + 'static {
         _envelope: &Envelope,
     ) -> bool {
         false
+    }
+
+    /// The native cap's ADR-0033 receive-side capability surface —
+    /// every `#[handler]` kind plus `#[fallback]` presence
+    /// (iamacoffeepot/aether#1037). The `#[actor] impl NativeActor`
+    /// macro overrides this to enumerate the cap's handlers + fallback,
+    /// the always-on native counterpart of a wasm component's
+    /// `aether.kinds.inputs` manifest. The native-cap-boot path reads
+    /// it to populate the [`CapabilityRegistry`](crate::mail::CapabilityRegistry),
+    /// so a native cap (e.g.
+    /// `aether.fs`) is queryable for dispatchability just like a loaded
+    /// wasm component. Default is an empty surface — only the
+    /// (`name` / `doc`-dropping) handler ids + fallback flag are
+    /// load-bearing here; reply kinds are deliberately absent (handlers
+    /// promise nothing about replies).
+    #[must_use]
+    fn __aether_capabilities() -> ComponentCapabilities
+    where
+        Self: Sized,
+    {
+        ComponentCapabilities::default()
     }
 }
