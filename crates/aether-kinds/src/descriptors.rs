@@ -158,10 +158,7 @@ mod tests {
     #[test]
     fn gemini_results_are_enum_schemas() {
         let descs = all();
-        for name in [
-            NanobananaGenerateResult::NAME,
-            LyriaGenerateResult::NAME,
-        ] {
+        for name in [NanobananaGenerateResult::NAME, LyriaGenerateResult::NAME] {
             let d = descs
                 .iter()
                 .find(|d| d.name == name)

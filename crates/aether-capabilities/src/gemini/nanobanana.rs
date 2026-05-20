@@ -307,8 +307,8 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_rejected_on_nb1() {
-        let err = validate(nb1(), &inputs(AspectRatio::AR_8_1, None))
-            .expect_err("AR_8_1 is NB2-only");
+        let err =
+            validate(nb1(), &inputs(AspectRatio::AR_8_1, None)).expect_err("AR_8_1 is NB2-only");
         let GeminiError::AspectRatioNotSupportedByModel { supported, .. } = err else {
             panic!("expected AspectRatioNotSupportedByModel, got {err:?}");
         };

@@ -18,8 +18,8 @@ use aether_actor::Actor;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
-    FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability, InputCapability,
-    InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
+    FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
+    InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
     trace::TraceObserverCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};

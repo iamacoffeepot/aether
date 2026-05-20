@@ -30,7 +30,7 @@ pub fn status_to_error(status: u16, retry_after_ms: Option<u32>, body: &str) -> 
 }
 
 /// Convert a free-form adapter error string into a typed
-/// [`GeminiError`]. Recognises the [`UNAUTHORIZED_SENTINEL`] and the
+/// [`GeminiError`]. Recognises the `UNAUTHORIZED_SENTINEL` and the
 /// `status=<n>` prefix the ureq backends prepend; falls back to
 /// `AdapterError`.
 #[must_use]

@@ -33,8 +33,8 @@ use std::sync::Arc;
 use std::thread;
 
 use aether_data::{KindId, MailboxId, ReplyTo};
-use aether_substrate::mail::Mailer;
 use aether_substrate::Mail;
+use aether_substrate::mail::Mailer;
 
 /// Default per-cap concurrency bound when a cap doesn't override it.
 /// Doubles as rate-limit throttling for the paid provider endpoints
@@ -227,9 +227,27 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel::<u64>();
 
         // Submit max_in_flight + 1 = 3 requests against a bound of 2.
-        d.submit(&mailer, self_id, 1, session_reply_to(1), signal_call(1, done_tx.clone()));
-        d.submit(&mailer, self_id, 2, session_reply_to(2), signal_call(2, done_tx.clone()));
-        d.submit(&mailer, self_id, 3, session_reply_to(3), signal_call(3, done_tx));
+        d.submit(
+            &mailer,
+            self_id,
+            1,
+            session_reply_to(1),
+            signal_call(1, done_tx.clone()),
+        );
+        d.submit(
+            &mailer,
+            self_id,
+            2,
+            session_reply_to(2),
+            signal_call(2, done_tx.clone()),
+        );
+        d.submit(
+            &mailer,
+            self_id,
+            3,
+            session_reply_to(3),
+            signal_call(3, done_tx),
+        );
 
         // Two spawned immediately, the third queued.
         assert_eq!(d.in_flight(), 2);
@@ -240,24 +258,44 @@ mod tests {
         // outbound, dropped) — the test doesn't depend on that; it
         // depends on the bookkeeping the landing handler would run.
         let mut landed = vec![
-            done_rx.recv_timeout(Duration::from_secs(2)).expect("first call runs"),
-            done_rx.recv_timeout(Duration::from_secs(2)).expect("second call runs"),
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first call runs"),
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("second call runs"),
         ];
 
         // Simulate the first reply landing: frees a slot, drains the
         // queued third request, which spawns and signals.
         let drained = d.on_reply_landed(&mailer, self_id);
-        assert_eq!(drained, Some(3), "the queued request drains on the first landing");
-        assert_eq!(d.in_flight(), 2, "one freed, one spawned -> still 2 in flight");
+        assert_eq!(
+            drained,
+            Some(3),
+            "the queued request drains on the first landing"
+        );
+        assert_eq!(
+            d.in_flight(),
+            2,
+            "one freed, one spawned -> still 2 in flight"
+        );
         assert_eq!(d.pending(), 0);
-        landed.push(done_rx.recv_timeout(Duration::from_secs(2)).expect("third call runs"));
+        landed.push(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("third call runs"),
+        );
 
         // The remaining two landings free both slots; nothing left to
         // drain.
         assert_eq!(d.on_reply_landed(&mailer, self_id), None);
         assert_eq!(d.in_flight(), 1);
         assert_eq!(d.on_reply_landed(&mailer, self_id), None);
-        assert_eq!(d.in_flight(), 0, "in_flight returns to 0 after every reply lands");
+        assert_eq!(
+            d.in_flight(),
+            0,
+            "in_flight returns to 0 after every reply lands"
+        );
 
         // All three calls ran exactly once.
         landed.sort_unstable();

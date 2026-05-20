@@ -46,7 +46,7 @@ impl ClaudeCliAdapter {
 
     /// Run a completion through the `claude` subprocess. Returns the
     /// completion text or a free-form error string. A missing binary
-    /// surfaces as [`CLI_NOT_FOUND`]; the cap maps that onto
+    /// surfaces as `CLI_NOT_FOUND`; the cap maps that onto
     /// `AnthropicError::CliNotFound`.
     pub fn cli_send(&self, req: &AnthropicRequest) -> Result<AnthropicResponse, String> {
         let started = Instant::now();
@@ -100,8 +100,7 @@ impl ClaudeCliAdapter {
         }
 
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let wall_clock_ms =
-            u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let wall_clock_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
 
         Ok(AnthropicResponse {
             text,
@@ -135,9 +134,7 @@ mod tests {
     fn missing_binary_returns_cli_not_found() {
         // Point the adapter at a binary that can't exist on PATH so the
         // test never depends on whether the real `claude` is installed.
-        let adapter = ClaudeCliAdapter::new(
-            "aether-nonexistent-claude-binary-xyzzy".to_string(),
-        );
+        let adapter = ClaudeCliAdapter::new("aether-nonexistent-claude-binary-xyzzy".to_string());
         let err = adapter
             .cli_send(&req())
             .expect_err("a missing binary must error");

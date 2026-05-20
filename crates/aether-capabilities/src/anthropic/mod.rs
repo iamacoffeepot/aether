@@ -151,9 +151,7 @@ mod config {
         /// cap itself never reads env.
         #[must_use]
         pub fn from_env() -> Self {
-            let api_key = env::var("ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty());
+            let api_key = env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty());
             let disabled = env::var("AETHER_ANTHROPIC_DISABLE")
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
             let max_in_flight = env::var("AETHER_ANTHROPIC_MAX_IN_FLIGHT")
@@ -353,7 +351,9 @@ mod native {
                     "result landed for an unknown request_id (double-landing?)",
                 );
             }
-            let _ = self.dispatch.on_reply_landed(&self.mailer, self.self_mailbox);
+            let _ = self
+                .dispatch
+                .on_reply_landed(&self.mailer, self.self_mailbox);
         }
 
         /// Reply an `Err` synchronously (model validation failure)
@@ -385,11 +385,17 @@ mod native {
         match path {
             SendPath::Messages => {
                 let reply = messages_reply(request_id, result);
-                (KindId(<MessagesSendResult as Kind>::ID.0), reply.encode_into_bytes())
+                (
+                    KindId(<MessagesSendResult as Kind>::ID.0),
+                    reply.encode_into_bytes(),
+                )
             }
             SendPath::Cli => {
                 let reply = cli_reply(request_id, result);
-                (KindId(<CliSendResult as Kind>::ID.0), reply.encode_into_bytes())
+                (
+                    KindId(<CliSendResult as Kind>::ID.0),
+                    reply.encode_into_bytes(),
+                )
             }
         }
     }
@@ -526,376 +532,389 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use super::AnthropicCapability;
         use super::super::{
             AnthropicAdapter, AnthropicConfig, ClaudeCliAdapter, DisabledAnthropicAdapter,
         };
+        use super::AnthropicCapability;
         use crate::contentgen::adapter::{
             AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
         };
-    use crate::test_chassis::{TestChassis, fresh_substrate, test_mailer_and_rx};
-    use aether_actor::Actor;
-    use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
-    use aether_kinds::{
-        AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
-    };
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::chassis::builder::Builder;
-    use aether_substrate::mail::outbound::EgressEvent;
-    use serde::de::DeserializeOwned;
-    use std::sync::Arc;
-    use std::sync::mpsc::Receiver;
-    use std::time::Duration;
-
-    fn session_sender() -> ReplyTo {
-        ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
-    }
-
-    fn user_msg(text: &str) -> Vec<Message> {
-        vec![Message {
-            role: Role::User,
-            content: text.to_string(),
-        }]
-    }
-
-    /// Drain one `ToSession` egress and decode it as `K`.
-    fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-        let event = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test: egress event arrives within deadline");
-        let EgressEvent::ToSession {
-            kind_name, payload, ..
-        } = event
-        else {
-            panic!("expected ToSession egress, got {event:?}");
+        use crate::test_chassis::{TestChassis, fresh_substrate, test_mailer_and_rx};
+        use aether_actor::Actor;
+        use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
+        use aether_kinds::{
+            AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
         };
-        assert_eq!(kind_name, K::NAME);
-        postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
-    }
+        use aether_substrate::actor::native::binding::NativeBinding;
+        use aether_substrate::actor::native::ctx::NativeCtx;
+        use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::mail::outbound::EgressEvent;
+        use serde::de::DeserializeOwned;
+        use std::sync::Arc;
+        use std::sync::mpsc::Receiver;
+        use std::time::Duration;
 
-    /// Adapter that records the prompt it saw and returns canned text.
-    struct RecordingStub {
-        inner: StubAnthropicAdapter,
-    }
-
-    impl AnthropicAdapter for RecordingStub {
-        fn messages_send(
-            &self,
-            req: AnthropicRequest,
-        ) -> Result<AnthropicResponse, String> {
-            self.inner.messages_send(req)
+        fn session_sender() -> ReplyTo {
+            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
-        fn cli_send(
-            &self,
-            req: AnthropicRequest,
-        ) -> Result<AnthropicResponse, String> {
-            self.inner.cli_send(req)
-        }
-        fn supported_models(&self) -> Vec<String> {
-            vec!["claude-test".to_string()]
-        }
-    }
 
-    /// Boot the cap against a default (key-absent) config and confirm
-    /// the mailbox registers.
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<AnthropicCapability>(AnthropicConfig::default())
-            .build_passive()
-            .expect("anthropic capability boots");
-        assert!(
-            registry.lookup(AnthropicCapability::NAMESPACE).is_some(),
-            "anthropic mailbox registered"
-        );
-        drop(chassis);
-    }
+        fn user_msg(text: &str) -> Vec<Message> {
+            vec![Message {
+                role: Role::User,
+                content: text.to_string(),
+            }]
+        }
 
-    /// Drive a stub Messages request through the dispatch loop and
-    /// assert the `Ok` reply lands. The cap submits to the spawn-and-die
-    /// helper; the ephemeral thread fires a loopback result mail at the
-    /// cap's own mailbox (id 0). We drive that landing directly by
-    /// invoking the result handler with the decoded loopback payload.
-    #[test]
-    fn anthropic_stub_messages() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let cap_mailbox = MailboxId(0);
-        let mut cap = AnthropicCapability::from_parts(
-            Arc::new(RecordingStub {
-                inner: StubAnthropicAdapter::default(),
-            }),
-            Arc::clone(&mailer),
-            cap_mailbox,
-            4,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_messages_send(
-            &mut ctx,
-            MessagesSend {
-                request_id: 7,
-                model: "claude-test".to_string(),
-                messages: user_msg("hi"),
-                max_tokens: Some(8),
-                temperature: None,
-                system: None,
-            },
-        );
-        // The ephemeral thread lands a loopback `MessagesSendResult` at
-        // mailbox 0. With `new_for_test` there's no real inbox, so the
-        // loopback push routes to the loopback outbound — drive the
-        // landing directly with the canned result the stub produces.
-        let mut landing_ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_messages_result(
-            &mut landing_ctx,
-            MessagesSendResult::Ok {
-                request_id: 7,
-                text: "stub completion".to_string(),
-                model_used: "claude-test".to_string(),
-                usage: aether_kinds::Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    wall_clock_ms: 0,
-                    cost_micros: Some(0),
+        /// Drain egress until a `ToSession` reply of kind `K` arrives,
+        /// decoding it. The cap's `on_*_send` handler spawns a real
+        /// ephemeral thread whose loopback mail (recipient = the test's
+        /// stand-in mailbox 0, which is unregistered) bubbles up to the
+        /// loopback outbound as a non-`ToSession` egress; the test
+        /// drives the actual re-reply via `on_*_result`, so we skip
+        /// those bubble-ups and take the `ToSession` re-reply.
+        fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
+            loop {
+                let event = rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("test: egress event arrives within deadline");
+                if let EgressEvent::ToSession {
+                    kind_name, payload, ..
+                } = event
+                    && kind_name == K::NAME
+                {
+                    return postcard::from_bytes(&payload)
+                        .expect("test: reply payload decodes via postcard");
+                }
+            }
+        }
+
+        /// Adapter that records the prompt it saw and returns canned text.
+        struct RecordingStub {
+            inner: StubAnthropicAdapter,
+        }
+
+        impl AnthropicAdapter for RecordingStub {
+            fn messages_send(&self, req: AnthropicRequest) -> Result<AnthropicResponse, String> {
+                self.inner.messages_send(req)
+            }
+            fn cli_send(&self, req: AnthropicRequest) -> Result<AnthropicResponse, String> {
+                self.inner.cli_send(req)
+            }
+            fn supported_models(&self) -> Vec<String> {
+                vec!["claude-test".to_string()]
+            }
+        }
+
+        /// Boot the cap against a default (key-absent) config and confirm
+        /// the mailbox registers.
+        #[test]
+        fn capability_boots_and_registers_mailbox() {
+            let (registry, mailer) = fresh_substrate();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<AnthropicCapability>(AnthropicConfig::default())
+                .build_passive()
+                .expect("anthropic capability boots");
+            assert!(
+                registry.lookup(AnthropicCapability::NAMESPACE).is_some(),
+                "anthropic mailbox registered"
+            );
+            drop(chassis);
+        }
+
+        /// Drive a stub Messages request through the dispatch loop and
+        /// assert the `Ok` reply lands. The cap submits to the spawn-and-die
+        /// helper; the ephemeral thread fires a loopback result mail at the
+        /// cap's own mailbox (id 0). We drive that landing directly by
+        /// invoking the result handler with the decoded loopback payload.
+        #[test]
+        fn anthropic_stub_messages() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap_mailbox = MailboxId(0);
+            let mut cap = AnthropicCapability::from_parts(
+                Arc::new(RecordingStub {
+                    inner: StubAnthropicAdapter::default(),
+                }),
+                Arc::clone(&mailer),
+                cap_mailbox,
+                4,
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_messages_send(
+                &mut ctx,
+                MessagesSend {
+                    request_id: 7,
+                    model: "claude-test".to_string(),
+                    messages: user_msg("hi"),
+                    max_tokens: Some(8),
+                    temperature: None,
+                    system: None,
                 },
-            },
-        );
-        match decode_reply::<MessagesSendResult>(&rx) {
-            MessagesSendResult::Ok { request_id, text, .. } => {
-                assert_eq!(request_id, 7);
-                assert_eq!(text, "stub completion");
-            }
-            other @ MessagesSendResult::Err { .. } => panic!("expected Ok, got {other:?}"),
-        }
-    }
-
-    /// Unknown model errors synchronously, before any dispatch.
-    #[test]
-    fn anthropic_unknown_model_errors() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let cap_mailbox = MailboxId(0);
-        let mut cap = AnthropicCapability::from_parts(
-            Arc::new(RecordingStub {
-                inner: StubAnthropicAdapter::default(),
-            }),
-            Arc::clone(&mailer),
-            cap_mailbox,
-            4,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_messages_send(
-            &mut ctx,
-            MessagesSend {
-                request_id: 3,
-                model: "claude-bogus".to_string(),
-                messages: user_msg("hi"),
-                max_tokens: None,
-                temperature: None,
-                system: None,
-            },
-        );
-        match decode_reply::<MessagesSendResult>(&rx) {
-            MessagesSendResult::Err {
-                request_id,
-                error: AnthropicError::UnknownModel { model, supported },
-            } => {
-                assert_eq!(request_id, 3);
-                assert_eq!(model, "claude-bogus");
-                assert!(supported.contains(&"claude-test".to_string()));
-            }
-            other => panic!("expected UnknownModel, got {other:?}"),
-        }
-        // No in-flight work was spawned — the synchronous error path
-        // never touched the dispatch helper.
-        assert_eq!(cap_in_flight(&cap), 0);
-    }
-
-    /// CLI send with a missing `claude` binary replies
-    /// `Err { CliNotFound }` — a graceful skip, not a hang.
-    #[test]
-    fn anthropic_cli_skips_when_no_claude_on_path() {
-        // A disabled adapter routes CLI through the real subprocess
-        // backend; pointing it at a missing binary exercises the
-        // CliNotFound path without depending on the host's `claude`.
-        struct MissingCliAdapter {
-            cli: ClaudeCliAdapter,
-        }
-        impl AnthropicAdapter for MissingCliAdapter {
-            fn messages_send(
-                &self,
-                _req: AnthropicRequest,
-            ) -> Result<AnthropicResponse, String> {
-                Err(super::super::error::UNAUTHORIZED_SENTINEL.to_string())
-            }
-            fn cli_send(
-                &self,
-                req: AnthropicRequest,
-            ) -> Result<AnthropicResponse, String> {
-                self.cli.cli_send(&req)
+            );
+            // The ephemeral thread lands a loopback `MessagesSendResult` at
+            // mailbox 0. With `new_for_test` there's no real inbox, so the
+            // loopback push routes to the loopback outbound — drive the
+            // landing directly with the canned result the stub produces.
+            let mut landing_ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_messages_result(
+                &mut landing_ctx,
+                MessagesSendResult::Ok {
+                    request_id: 7,
+                    text: "stub completion".to_string(),
+                    model_used: "claude-test".to_string(),
+                    usage: aether_kinds::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        wall_clock_ms: 0,
+                        cost_micros: Some(0),
+                    },
+                },
+            );
+            match decode_reply::<MessagesSendResult>(&rx) {
+                MessagesSendResult::Ok {
+                    request_id, text, ..
+                } => {
+                    assert_eq!(request_id, 7);
+                    assert_eq!(text, "stub completion");
+                }
+                other @ MessagesSendResult::Err { .. } => panic!("expected Ok, got {other:?}"),
             }
         }
 
-        let (mailer, rx) = test_mailer_and_rx();
-        let cap_mailbox = MailboxId(0);
-        let mut cap = AnthropicCapability::from_parts(
-            Arc::new(MissingCliAdapter {
-                cli: ClaudeCliAdapter::new(
-                    "aether-nonexistent-claude-binary-xyzzy".to_string(),
-                ),
-            }),
-            Arc::clone(&mailer),
-            cap_mailbox,
-            4,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_cli_send(
-            &mut ctx,
-            CliSend {
-                request_id: 5,
-                model: "claude-test".to_string(),
-                messages: user_msg("hi"),
-                max_tokens: None,
-                temperature: None,
-                system: None,
-            },
-        );
-        // The CLI runs synchronously on an ephemeral thread; drive its
-        // loopback landing with the result the backend produces.
-        let result = build_cli_result_for_test(&cap, 5);
-        let mut landing_ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_cli_result(&mut landing_ctx, result);
-        match decode_reply::<CliSendResult>(&rx) {
+        /// Unknown model errors synchronously, before any dispatch.
+        #[test]
+        fn anthropic_unknown_model_errors() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap_mailbox = MailboxId(0);
+            let mut cap = AnthropicCapability::from_parts(
+                Arc::new(RecordingStub {
+                    inner: StubAnthropicAdapter::default(),
+                }),
+                Arc::clone(&mailer),
+                cap_mailbox,
+                4,
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_messages_send(
+                &mut ctx,
+                MessagesSend {
+                    request_id: 3,
+                    model: "claude-bogus".to_string(),
+                    messages: user_msg("hi"),
+                    max_tokens: None,
+                    temperature: None,
+                    system: None,
+                },
+            );
+            match decode_reply::<MessagesSendResult>(&rx) {
+                MessagesSendResult::Err {
+                    request_id,
+                    error: AnthropicError::UnknownModel { model, supported },
+                } => {
+                    assert_eq!(request_id, 3);
+                    assert_eq!(model, "claude-bogus");
+                    assert!(supported.contains(&"claude-test".to_string()));
+                }
+                other => panic!("expected UnknownModel, got {other:?}"),
+            }
+            // No in-flight work was spawned — the synchronous error path
+            // never touched the dispatch helper.
+            assert_eq!(cap_in_flight(&cap), 0);
+        }
+
+        /// CLI send with a missing `claude` binary replies
+        /// `Err { CliNotFound }` — a graceful skip, not a hang.
+        #[test]
+        fn anthropic_cli_skips_when_no_claude_on_path() {
+            // A disabled adapter routes CLI through the real subprocess
+            // backend; pointing it at a missing binary exercises the
+            // CliNotFound path without depending on the host's `claude`.
+            struct MissingCliAdapter {
+                cli: ClaudeCliAdapter,
+            }
+            impl AnthropicAdapter for MissingCliAdapter {
+                fn messages_send(
+                    &self,
+                    _req: AnthropicRequest,
+                ) -> Result<AnthropicResponse, String> {
+                    Err(super::super::error::UNAUTHORIZED_SENTINEL.to_string())
+                }
+                fn cli_send(&self, req: AnthropicRequest) -> Result<AnthropicResponse, String> {
+                    self.cli.cli_send(&req)
+                }
+            }
+
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap_mailbox = MailboxId(0);
+            let mut cap = AnthropicCapability::from_parts(
+                Arc::new(MissingCliAdapter {
+                    cli: ClaudeCliAdapter::new(
+                        "aether-nonexistent-claude-binary-xyzzy".to_string(),
+                    ),
+                }),
+                Arc::clone(&mailer),
+                cap_mailbox,
+                4,
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_cli_send(
+                &mut ctx,
+                CliSend {
+                    request_id: 5,
+                    model: "claude-test".to_string(),
+                    messages: user_msg("hi"),
+                    max_tokens: None,
+                    temperature: None,
+                    system: None,
+                },
+            );
+            // The CLI runs synchronously on an ephemeral thread; drive its
+            // loopback landing with the result the backend produces.
+            let result = build_cli_result_for_test(&cap, 5);
+            let mut landing_ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_cli_result(&mut landing_ctx, result);
+            match decode_reply::<CliSendResult>(&rx) {
+                CliSendResult::Err {
+                    request_id,
+                    error: AnthropicError::CliNotFound,
+                } => {
+                    assert_eq!(request_id, 5);
+                }
+                other => panic!("expected CliNotFound, got {other:?}"),
+            }
+        }
+
+        /// Disabled adapter replies `Unauthorized` to a Messages request.
+        #[test]
+        fn anthropic_disabled_messages_replies_unauthorized() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap_mailbox = MailboxId(0);
+            let mut cap = AnthropicCapability::from_parts(
+                Arc::new(DisabledAnthropicAdapter::default()),
+                Arc::clone(&mailer),
+                cap_mailbox,
+                4,
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_messages_send(
+                &mut ctx,
+                MessagesSend {
+                    request_id: 9,
+                    model: "claude-anything".to_string(),
+                    messages: user_msg("hi"),
+                    max_tokens: None,
+                    temperature: None,
+                    system: None,
+                },
+            );
+            // Disabled adapter has an empty supported-models table, so the
+            // model gate is skipped and the request dispatches; the
+            // ephemeral thread produces the Unauthorized result. Drive the
+            // landing with that result.
+            let mut landing_ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_messages_result(
+                &mut landing_ctx,
+                MessagesSendResult::Err {
+                    request_id: 9,
+                    error: AnthropicError::Unauthorized,
+                },
+            );
+            match decode_reply::<MessagesSendResult>(&rx) {
+                MessagesSendResult::Err {
+                    request_id,
+                    error: AnthropicError::Unauthorized,
+                } => assert_eq!(request_id, 9),
+                other => panic!("expected Unauthorized, got {other:?}"),
+            }
+        }
+
+        /// Real-API smoke. Hits the live Messages API with a tiny
+        /// 5-`max_tokens` request — ignored by default so CI stays
+        /// zero-cost; run with `ANTHROPIC_API_KEY` set.
+        #[test]
+        #[ignore = "needs ANTHROPIC_API_KEY"]
+        fn anthropic_api_smoke() {
+            use super::super::UreqAnthropicAdapter;
+            use crate::contentgen::adapter::AnthropicRequest;
+            use std::env;
+            let key = env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY set for smoke");
+            let adapter = UreqAnthropicAdapter::new(key, Duration::from_secs(30));
+            let resp = adapter
+                .messages_send(&AnthropicRequest {
+                    model: "claude-3-5-haiku-20241022".to_string(),
+                    prompt: "say hi".to_string(),
+                    system: None,
+                    max_tokens: Some(5),
+                    temperature: None,
+                })
+                .expect("live messages request succeeds");
+            assert!(!resp.text.is_empty());
+        }
+
+        // Helpers reaching into the cap for white-box assertions. Both stay
+        // test-local; the cap's `dispatch` field is private, so we expose
+        // narrow accessors here via a re-export shim.
+        fn cap_in_flight(cap: &AnthropicCapability) -> usize {
+            cap.test_in_flight()
+        }
+
+        fn build_cli_result_for_test(_cap: &AnthropicCapability, request_id: u64) -> CliSendResult {
+            // The missing-binary CLI backend yields CliNotFound; mirror what
+            // the ephemeral thread would have produced.
             CliSendResult::Err {
                 request_id,
                 error: AnthropicError::CliNotFound,
-            } => {
-                assert_eq!(request_id, 5);
             }
-            other => panic!("expected CliNotFound, got {other:?}"),
         }
-    }
-
-    /// Disabled adapter replies `Unauthorized` to a Messages request.
-    #[test]
-    fn anthropic_disabled_messages_replies_unauthorized() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let cap_mailbox = MailboxId(0);
-        let mut cap = AnthropicCapability::from_parts(
-            Arc::new(DisabledAnthropicAdapter::default()),
-            Arc::clone(&mailer),
-            cap_mailbox,
-            4,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_messages_send(
-            &mut ctx,
-            MessagesSend {
-                request_id: 9,
-                model: "claude-anything".to_string(),
-                messages: user_msg("hi"),
-                max_tokens: None,
-                temperature: None,
-                system: None,
-            },
-        );
-        // Disabled adapter has an empty supported-models table, so the
-        // model gate is skipped and the request dispatches; the
-        // ephemeral thread produces the Unauthorized result. Drive the
-        // landing with that result.
-        let mut landing_ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        cap.on_messages_result(
-            &mut landing_ctx,
-            MessagesSendResult::Err {
-                request_id: 9,
-                error: AnthropicError::Unauthorized,
-            },
-        );
-        match decode_reply::<MessagesSendResult>(&rx) {
-            MessagesSendResult::Err {
-                request_id,
-                error: AnthropicError::Unauthorized,
-            } => assert_eq!(request_id, 9),
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
-    }
-
-    /// Real-API smoke. Hits the live Messages API with a tiny
-    /// 5-`max_tokens` request — ignored by default so CI stays
-    /// zero-cost; run with `ANTHROPIC_API_KEY` set.
-    #[test]
-    #[ignore = "needs ANTHROPIC_API_KEY"]
-    fn anthropic_api_smoke() {
-        use super::super::UreqAnthropicAdapter;
-        use crate::contentgen::adapter::AnthropicRequest;
-        use std::env;
-        let key = env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY set for smoke");
-        let adapter = UreqAnthropicAdapter::new(key, Duration::from_secs(30));
-        let resp = adapter
-            .messages_send(&AnthropicRequest {
-                model: "claude-3-5-haiku-20241022".to_string(),
-                prompt: "say hi".to_string(),
-                system: None,
-                max_tokens: Some(5),
-                temperature: None,
-            })
-            .expect("live messages request succeeds");
-        assert!(!resp.text.is_empty());
-    }
-
-    // Helpers reaching into the cap for white-box assertions. Both stay
-    // test-local; the cap's `dispatch` field is private, so we expose
-    // narrow accessors here via a re-export shim.
-    fn cap_in_flight(cap: &AnthropicCapability) -> usize {
-        cap.test_in_flight()
-    }
-
-    fn build_cli_result_for_test(_cap: &AnthropicCapability, request_id: u64) -> CliSendResult {
-        // The missing-binary CLI backend yields CliNotFound; mirror what
-        // the ephemeral thread would have produced.
-        CliSendResult::Err {
-            request_id,
-            error: AnthropicError::CliNotFound,
-        }
-    }
     }
 }

@@ -64,9 +64,10 @@ pub fn parse_clip_response(json: &str) -> Result<Vec<Vec<u8>>, String> {
             .or_else(|| p.get("audioContent"))
             .and_then(Value::as_str)
             .ok_or_else(|| "prediction has no base64 audio field".to_string())?;
-        clips.push(super::nanobanana::decode_base64_for_media(b64).map_err(|e| {
-            format!("decode clip base64: {e}")
-        })?);
+        clips.push(
+            super::nanobanana::decode_base64_for_media(b64)
+                .map_err(|e| format!("decode clip base64: {e}"))?,
+        );
     }
     if clips.is_empty() {
         return Err("response carried zero clips".to_string());

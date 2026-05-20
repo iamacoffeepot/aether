@@ -69,10 +69,7 @@ impl UreqAnthropicAdapter {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
-            .header(
-                "user-agent",
-                concat!("aether/", env!("CARGO_PKG_VERSION")),
-            )
+            .header("user-agent", concat!("aether/", env!("CARGO_PKG_VERSION")))
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
 
@@ -100,7 +97,9 @@ impl UreqAnthropicAdapter {
             // Encode the status + retry-after into the error string so
             // the cap's `error::status_to_error` mapping reconstructs
             // the typed variant. The cap parses the leading status.
-            return Err(format!("status={status} retry_after_ms={retry_after_ms:?} body={text}"));
+            return Err(format!(
+                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+            ));
         }
 
         let elapsed_ms = elapsed_ms(started);
@@ -217,8 +216,7 @@ mod tests {
             "model": "m",
             "usage": {"input_tokens": 1, "output_tokens": 2}
         }"#;
-        let resp =
-            parse_messages_response(json, "m", 0).expect("multi-block response parses");
+        let resp = parse_messages_response(json, "m", 0).expect("multi-block response parses");
         assert_eq!(resp.text, "part one part two");
     }
 

@@ -178,7 +178,9 @@ impl GeminiAdapter for UreqGeminiAdapter {
 
         let (status, retry_after_ms, text) = run(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
-            return Err(format!("status={status} retry_after_ms={retry_after_ms:?} body={text}"));
+            return Err(format!(
+                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+            ));
         }
 
         let parsed = nanobanana::parse_image_response(&text)?;
@@ -214,7 +216,9 @@ impl GeminiAdapter for UreqGeminiAdapter {
 
         let (status, retry_after_ms, text) = run(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
-            return Err(format!("status={status} retry_after_ms={retry_after_ms:?} body={text}"));
+            return Err(format!(
+                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+            ));
         }
 
         let clips = lyria::parse_clip_response(&text)?;
@@ -266,8 +270,7 @@ fn run(
 /// Minimal standard-alphabet base64 encoder for reference-image bytes
 /// on the request side (no padding omitted). Avoids a base64 crate.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = u32::from(chunk[0]);
@@ -446,7 +449,9 @@ mod native {
                     "result landed for an unknown request_id (double-landing?)",
                 );
             }
-            let _ = self.dispatch.on_reply_landed(&self.mailer, self.self_mailbox);
+            let _ = self
+                .dispatch
+                .on_reply_landed(&self.mailer, self.self_mailbox);
         }
     }
 
@@ -523,10 +528,7 @@ mod native {
         }
     }
 
-    fn lyria_reply(
-        request_id: u64,
-        result: Result<GeminiResponse, String>,
-    ) -> LyriaGenerateResult {
+    fn lyria_reply(request_id: u64, result: Result<GeminiResponse, String>) -> LyriaGenerateResult {
         match result {
             Ok(resp) => {
                 let mut output_paths = Vec::with_capacity(resp.artifacts.len());
@@ -605,10 +607,7 @@ mod native {
                 character_ref_count: mail.character_reference_paths.len(),
             };
             if let Err(error) = nanobanana::validate(shape, &inputs) {
-                OutboundReply::reply(
-                    ctx,
-                    &NanobananaGenerateResult::Err { request_id, error },
-                );
+                OutboundReply::reply(ctx, &NanobananaGenerateResult::Err { request_id, error });
                 return;
             }
 
@@ -619,10 +618,7 @@ mod native {
             let reference_images = match read_reference_images(&ref_paths) {
                 Ok(b) => b,
                 Err(error) => {
-                    OutboundReply::reply(
-                        ctx,
-                        &NanobananaGenerateResult::Err { request_id, error },
-                    );
+                    OutboundReply::reply(ctx, &NanobananaGenerateResult::Err { request_id, error });
                     return;
                 }
             };
@@ -666,9 +662,11 @@ mod native {
                 );
                 return;
             }
-            if let Err(error) =
-                lyria::validate(&mail.model, mail.seed.is_some(), mail.sample_count.is_some())
-            {
+            if let Err(error) = lyria::validate(
+                &mail.model,
+                mail.seed.is_some(),
+                mail.sample_count.is_some(),
+            ) {
                 OutboundReply::reply(ctx, &LyriaGenerateResult::Err { request_id, error });
                 return;
             }
@@ -691,7 +689,11 @@ mod native {
         /// Loopback landing for a completed Nano Banana call.
         #[allow(clippy::needless_pass_by_value)]
         #[handler]
-        fn on_nanobanana_result(&mut self, ctx: &mut NativeCtx<'_>, mail: NanobananaGenerateResult) {
+        fn on_nanobanana_result(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            mail: NanobananaGenerateResult,
+        ) {
             let request_id = match &mail {
                 NanobananaGenerateResult::Ok { request_id, .. }
                 | NanobananaGenerateResult::Err { request_id, .. } => *request_id,
@@ -713,10 +715,10 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use super::GeminiCapability;
         use super::super::{DisabledGeminiAdapter, GeminiConfig};
-        use crate::contentgen::adapter::StubGeminiAdapter;
+        use super::GeminiCapability;
         use crate::contentgen::adapter::STUB_PNG;
+        use crate::contentgen::adapter::StubGeminiAdapter;
         use crate::contentgen::staging::stage_gen_output_under;
         use crate::test_chassis::{TestChassis, fresh_substrate, test_mailer_and_rx};
         use aether_actor::Actor;
@@ -739,18 +741,26 @@ mod native {
             ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
 
+        /// Drain egress until a `ToSession` reply of kind `K` arrives.
+        /// The cap's `on_*_generate` handler spawns a real ephemeral
+        /// thread whose loopback mail bubbles up as a non-`ToSession`
+        /// egress (mailbox 0 is unregistered in `new_for_test`); the
+        /// test drives the re-reply via `on_*_result`, so we skip the
+        /// bubble-ups and take the `ToSession` re-reply.
         fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-            let event = rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("test: egress event arrives within deadline");
-            let EgressEvent::ToSession {
-                kind_name, payload, ..
-            } = event
-            else {
-                panic!("expected ToSession egress, got {event:?}");
-            };
-            assert_eq!(kind_name, K::NAME);
-            postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
+            loop {
+                let event = rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("test: egress event arrives within deadline");
+                if let EgressEvent::ToSession {
+                    kind_name, payload, ..
+                } = event
+                    && kind_name == K::NAME
+                {
+                    return postcard::from_bytes(&payload)
+                        .expect("test: reply payload decodes via postcard");
+                }
+            }
         }
 
         fn nb_request(model: &str, aspect_ratio: AspectRatio) -> NanobananaGenerate {
@@ -798,8 +808,8 @@ mod native {
 
             // Stage the stub PNG under the scratch root (the path the
             // cap's ephemeral thread would have produced).
-            let staged = stage_gen_output_under(&scratch, STUB_PNG, "png")
-                .expect("staging the stub png");
+            let staged =
+                stage_gen_output_under(&scratch, STUB_PNG, "png").expect("staging the stub png");
             assert!(staged.starts_with("gen/"));
             assert_eq!(staged.rsplit('.').next(), Some("png"));
             // The path exists under the scratch root and decodes (PNG
@@ -817,8 +827,10 @@ mod native {
                 cap_mailbox,
                 4,
             );
-            let transport =
-                Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
             let mut ctx = NativeCtx::new(
                 &transport,
                 session_sender(),
@@ -855,7 +867,9 @@ mod native {
                 NanobananaGenerateResult::Ok { output_path, .. } => {
                     assert_eq!(output_path, staged);
                 }
-                other @ NanobananaGenerateResult::Err { .. } => panic!("expected Ok, got {other:?}"),
+                other @ NanobananaGenerateResult::Err { .. } => {
+                    panic!("expected Ok, got {other:?}")
+                }
             }
 
             let _ = fs::remove_dir_all(&scratch);
@@ -873,8 +887,10 @@ mod native {
                 cap_mailbox,
                 4,
             );
-            let transport =
-                Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
             let mut ctx = NativeCtx::new(
                 &transport,
                 session_sender(),
@@ -920,8 +936,10 @@ mod native {
                 cap_mailbox,
                 4,
             );
-            let transport =
-                Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
             let mut ctx = NativeCtx::new(
                 &transport,
                 session_sender(),
@@ -953,8 +971,10 @@ mod native {
                 cap_mailbox,
                 4,
             );
-            let transport =
-                Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
             let mut ctx = NativeCtx::new(
                 &transport,
                 session_sender(),
@@ -1001,7 +1021,11 @@ mod native {
             match decode_reply::<LyriaGenerateResult>(&rx) {
                 LyriaGenerateResult::Ok { output_paths, .. } => {
                     assert_eq!(output_paths.len(), 2);
-                    assert!(output_paths.iter().all(|p| p.rsplit('.').next() == Some("wav")));
+                    assert!(
+                        output_paths
+                            .iter()
+                            .all(|p| p.rsplit('.').next() == Some("wav"))
+                    );
                 }
                 other @ LyriaGenerateResult::Err { .. } => panic!("expected Ok, got {other:?}"),
             }
@@ -1017,8 +1041,10 @@ mod native {
                 cap_mailbox,
                 4,
             );
-            let transport =
-                Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
             let mut ctx = NativeCtx::new(
                 &transport,
                 session_sender(),

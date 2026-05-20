@@ -18,8 +18,8 @@ pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 
 /// Convert a free-form adapter error string into the typed
 /// [`AnthropicError`]. Recognises the structured sentinels the
-/// backends emit (the CLI's [`CLI_NOT_FOUND`], the disabled adapter's
-/// [`UNAUTHORIZED_SENTINEL`], and the `status=<n>` prefix the Messages
+/// backends emit (the CLI's `CLI_NOT_FOUND`, the disabled adapter's
+/// `UNAUTHORIZED_SENTINEL`, and the `status=<n>` prefix the Messages
 /// backend uses) and falls back to `AdapterError` for everything else.
 #[must_use]
 pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {

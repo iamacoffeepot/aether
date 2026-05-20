@@ -134,8 +134,8 @@ mod tests {
     #[test]
     fn wav_extension_is_preserved() {
         let root = scratch_root("ext");
-        let path =
-            stage_gen_output_under(&root, b"RIFF....WAVE", "wav").expect("test setup: stage writes");
+        let path = stage_gen_output_under(&root, b"RIFF....WAVE", "wav")
+            .expect("test setup: stage writes");
         assert_eq!(path.rsplit('.').next(), Some("wav"));
         cleanup(&root);
     }
