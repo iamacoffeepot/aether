@@ -510,6 +510,32 @@ impl TestBench {
         self.pump_until_reply::<R>(cid, any::type_name::<R>())
     }
 
+    /// Bytes-level request/reply: push `(kind, payload)` to
+    /// `recipient_name` with this bench's session as the reply
+    /// target, pump until the matching reply arrives, and return its
+    /// raw payload bytes. The bytes-level sibling of
+    /// [`Self::send_and_await_reply`] — used by the `SendAndAwait` op
+    /// of [`Self::execute`], where the reply type isn't known
+    /// statically and the caller decodes on demand. Decode the
+    /// returned bytes with `postcard::from_bytes` (every standard
+    /// `*Result` kind is postcard-encoded).
+    pub fn send_bytes_and_await(
+        &mut self,
+        recipient_name: &str,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, TestBenchError> {
+        let mailbox = self
+            .registry
+            .lookup(recipient_name)
+            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+        let cid = self.fresh_correlation_id();
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+        self.queue
+            .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
+        self.pump_until_reply_bytes(cid, "<await-reply bytes>")
+    }
+
     /// Run `ticks` complete frames synchronously. Each frame
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with
@@ -620,6 +646,33 @@ impl TestBench {
     where
         R: DeserializeOwned,
     {
+        let event = self.pump_until_event(cid, expected)?;
+        Self::decode_reply::<R>(event, expected)
+    }
+
+    /// Pump until the reply with `cid` arrives, returning the raw
+    /// reply payload bytes instead of decoding. Backs
+    /// [`Self::send_bytes_and_await`] and the `SendAndAwait` op of
+    /// [`Self::execute`], where the reply type is decoded on demand.
+    fn pump_until_reply_bytes(
+        &mut self,
+        cid: u64,
+        expected: &'static str,
+    ) -> Result<Vec<u8>, TestBenchError> {
+        let event = self.pump_until_event(cid, expected)?;
+        Self::reply_payload(event, expected)
+    }
+
+    /// Pump the event channel and the loopback receiver until a
+    /// session-targeted reply with `cid` arrives, returning the raw
+    /// [`EgressEvent`]. Shared loop body of [`Self::pump_until_reply`]
+    /// (typed decode) and [`Self::pump_until_reply_bytes`] (raw
+    /// bytes).
+    fn pump_until_event(
+        &mut self,
+        cid: u64,
+        expected: &'static str,
+    ) -> Result<EgressEvent, TestBenchError> {
         const MAX_ITERATIONS: u32 = 8_192;
         // Sleep per quiet iteration. 10 ms × QUIET_BUDGET caps total
         // wait around 60 s. Long enough to absorb wasm compile under
@@ -636,7 +689,7 @@ impl TestBench {
 
         // Check the stash first.
         if let Some(frame) = self.stashed_replies.remove(&cid) {
-            return Self::decode_reply::<R>(frame, expected);
+            return Ok(frame);
         }
 
         let mut quiet_iterations = 0u32;
@@ -665,7 +718,7 @@ impl TestBench {
                 found_reply = true;
                 if let Some(event_cid) = correlation_of(&event) {
                     if event_cid == cid {
-                        return Self::decode_reply::<R>(event, expected);
+                        return Ok(event);
                     }
                     // Reply for a different cid (rare; out-of-order).
                     self.stashed_replies.insert(event_cid, event);
@@ -705,6 +758,21 @@ impl TestBench {
             } => postcard::from_bytes::<R>(&payload).map_err(|e| {
                 TestBenchError::Decode(format!("{expected} decode: {e} (kind={kind_name})"))
             }),
+            other => Err(TestBenchError::Decode(format!(
+                "expected {expected} reply event, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Extract the raw payload bytes from a session-targeted reply
+    /// event. The bytes-level counterpart to [`Self::decode_reply`] —
+    /// the caller decodes later via [`super::ExecutionResult::reply`].
+    fn reply_payload(
+        event: EgressEvent,
+        expected: &'static str,
+    ) -> Result<Vec<u8>, TestBenchError> {
+        match event {
+            EgressEvent::ToSession { payload, .. } => Ok(payload),
             other => Err(TestBenchError::Decode(format!(
                 "expected {expected} reply event, got {other:?}"
             ))),
