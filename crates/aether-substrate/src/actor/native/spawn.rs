@@ -16,11 +16,11 @@
 //! primitive + tombstone population.
 
 use std::any::TypeId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{Kind, mailbox_id_from_name};
@@ -100,7 +100,6 @@ pub struct Spawner {
     registry: Arc<Registry>,
     actor_registry: Arc<ActorRegistry>,
     mailer: Arc<Mailer>,
-    frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
     aborter: Arc<dyn FatalAborter>,
     /// Monotonic counter for [`Subname::Counter`]. Per-Spawner so each
     /// chassis runs its own sequence; not shared across substrates.
@@ -140,7 +139,6 @@ impl Spawner {
         registry: Arc<Registry>,
         actor_registry: Arc<ActorRegistry>,
         mailer: Arc<Mailer>,
-        frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
         aborter: Arc<dyn FatalAborter>,
         pool_ready_tx: crossbeam_channel::Sender<Arc<dyn Drainable>>,
     ) -> Self {
@@ -148,7 +146,6 @@ impl Spawner {
             registry,
             actor_registry,
             mailer,
-            frame_bound_set,
             aborter,
             counter: AtomicU64::new(0),
             pool_ready_tx,
@@ -332,11 +329,6 @@ impl Spawner {
         let transport = Arc::new(NativeBinding::new(
             Arc::clone(&self.mailer),
             id,
-            // Phase 3 instanced actors are free-running. Frame-barrier
-            // semantics for instanced types arrive when (if) a
-            // forcing function emerges; until then, false.
-            false,
-            Arc::clone(&self.frame_bound_set),
             Arc::clone(&self.aborter),
             // Pass the chassis's `Spawner` through so the spawned
             // actor can in turn `ctx.spawn_child` from its own

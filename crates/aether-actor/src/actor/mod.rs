@@ -38,16 +38,6 @@ pub trait Actor: Sized + Send + 'static {
     /// under when the load payload omits an explicit override.
     const NAMESPACE: &'static str;
 
-    /// ADR-0074 §Decision 5 scheduling class. `true` means this actor
-    /// participates in the per-frame drain barrier — the chassis frame
-    /// loop waits for the dispatcher's inbox to quiesce before
-    /// submitting the next render frame, so any mail a peer sent this
-    /// frame is integrated before submit. Defaults to `false`
-    /// (free-running). Today only `RenderCapability` overrides; future
-    /// drawing-side capabilities and any wasm component that wants
-    /// per-frame coupling will too.
-    const FRAME_BARRIER: bool = false;
-
     /// Issue 635 dispatch placement. `Pooled` (the default) registers
     /// a dispatcher slot with the chassis worker pool so many actors
     /// share a small thread set. `Dedicated` is the opt-in escape
@@ -62,10 +52,6 @@ pub trait Actor: Sized + Send + 'static {
     /// `tokio::Runtime::block_on` to coordinate child-process
     /// lifecycle) opts back into `Dedicated`.
     ///
-    /// `FRAME_BARRIER` and `SCHEDULING` are orthogonal: a frame-bound
-    /// actor can be either `Pooled` or `Dedicated`; the per-actor
-    /// `pending` counter is read by the chassis frame loop regardless
-    /// of where the dispatch happens.
     const SCHEDULING: Scheduling = Scheduling::Pooled;
 }
 

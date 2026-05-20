@@ -1,8 +1,10 @@
 //! `aether.render` cap. Owns the render mailbox surface plus the
 //! driver-facing accumulator state ([`RenderHandles`]) and GPU bundle
-//! ([`RenderGpu`]). `FRAME_BARRIER` = true so the chassis frame loop's
-//! drain-or-abort sees the per-mailbox pending counter before recording
-//! a frame (ADR-0074 §Decision 5).
+//! ([`RenderGpu`]). Post-ADR-0082 the chassis gates frame submit on
+//! settlement of the `LifecycleAdvance` chain root — render's
+//! `DrawTriangle` / `aether.camera` mail are descendants of that root,
+//! so they're integrated before submit without a per-mailbox drain
+//! counter.
 //!
 //! Driver-side state (wgpu device, queue, pipeline, offscreen
 //! targets, accumulator buffers) lives on [`RenderHandles`]. The
@@ -173,16 +175,6 @@ mod native {
         /// convention for chassis-owned mailboxes; ADR-0074 §Decision 7
         /// folded the camera mailbox into render under this name.
         const NAMESPACE: &'static str = "aether.render";
-
-        /// Render is the one chassis-owned actor that participates in the
-        /// per-frame drain barrier (ADR-0074 §Decision 7). Without this,
-        /// a `DrawTriangle` mail in flight when the chassis driver records
-        /// the frame would land in the *next* frame's `frame_vertices`,
-        /// dropping a triangle the component meant for this frame. The
-        /// `Builder::with_actor` boot path checks this const and claims
-        /// through the frame-bound path so the cap's `pending` counter
-        /// registers in the chassis's `frame_bound_pending` Vec.
-        const FRAME_BARRIER: bool = true;
 
         /// Allocate the accumulator state up front. Idempotent on the
         /// driver-facing side: every chassis main passes a fresh
@@ -788,65 +780,11 @@ mod native {
             assert!(registry.lookup("aether.sink.camera").is_none());
         }
 
-        /// Boots render through `Builder::with_actor` and asserts a
-        /// `DrawTriangle` mail accumulates into the `frame_vertices`
-        /// buffer. The `RenderHandles` here is reached via the chassis
-        /// post-build by waiting on the per-mailbox pending counter
-        /// the `FRAME_BARRIER` claim populates. Coverage of the
-        /// `handles` accessor is in the desktop chassis path.
-        #[test]
-        fn render_dispatcher_appends_triangles_to_frame_vertices() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = build_render_chassis(&registry, &mailer);
-
-            let one_triangle = vec![0u8; DRAW_TRIANGLE_BYTES];
-            deliver(
-                &registry,
-                RenderCapability::NAMESPACE,
-                <DrawTriangle as Kind>::ID,
-                &one_triangle,
-            );
-
-            // Wait briefly for the dispatcher thread to drain. The
-            // test waits on the per-mailbox pending counter the
-            // FRAME_BARRIER claim populates and treats a drain-to-zero
-            // as the dispatch happening.
-            for _ in 0..50 {
-                let pending = chassis.frame_bound_pending();
-                if pending.is_empty() || pending[0].1.load(Ordering::Acquire) == 0 {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            // The pending counter must have hit zero — the dispatcher
-            // ran the handler.
-            let pending = chassis.frame_bound_pending();
-            assert_eq!(pending.len(), 1);
-            assert_eq!(
-                pending[0].1.load(Ordering::Acquire),
-                0,
-                "dispatcher should have processed the DrawTriangle"
-            );
-
-            drop(chassis);
-        }
-
-        /// Frame-bound claim populates the chassis's `frame_bound_pending`
-        /// Vec. Direct render-internal-state assertions live on
-        /// integration tests in the bundle, where the chassis-side
-        /// actors map exposes `Arc<RenderCapability>` for `handles()`
-        /// access.
-        #[test]
-        fn render_registers_frame_bound_pending_counter() {
-            let (registry, mailer) = fresh_substrate();
-            let chassis = build_render_chassis(&registry, &mailer);
-            assert_eq!(
-                chassis.frame_bound_pending().len(),
-                1,
-                "render claimed through frame-bound path"
-            );
-            drop(chassis);
-        }
+        // ADR-0082 retired the frame-bound pending counter; the
+        // DrawTriangle → render dispatch path is now covered end-to-end
+        // by the bundle scenario tests (`tick_roundtrip_component_to_sink`
+        // and the `test_bench_scenario` suite), which exercise it through
+        // real settlement rather than a per-mailbox counter poll.
 
         #[test]
         fn camera_kind_drops_wrong_length_payload() {

@@ -116,11 +116,11 @@ pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) ->
 /// lifecycle.
 ///
 /// `pending` is decremented after every dispatched envelope when
-/// `Some` — singletons pass it for `FRAME_BARRIER` caps (the chassis
-/// frame-loop drain barrier reads it); instanced actors pass their
-/// per-actor counter (no live consumer post-PR-4: `wait_instanced_quiesce`
-/// retired in favour of ADR-0080 settlement gating, but the counter
-/// stays plumbed for the trampoline's `tx.send` accounting).
+/// `Some`. Singletons now always pass `None` — ADR-0082 retired the
+/// frame-bound drain barrier that was the singleton consumer.
+/// Instanced actors pass their per-actor counter, which
+/// `Spawner::shutdown_instanced` reads to coordinate teardown (issue
+/// 685).
 pub fn dispatch_loop_run<A>(
     binding: &Arc<NativeBinding>,
     actor: &mut Box<A>,

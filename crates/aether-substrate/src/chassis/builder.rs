@@ -18,12 +18,11 @@
 //!   alongside the first real driver extraction (phase 3) so every
 //!   chassis can nominate a real driver type rather than a stub.
 
-use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, RwLock};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatch;
@@ -196,20 +195,6 @@ impl<'a> DriverCtx<'a> {
 
     pub fn claim_fallback_router(&mut self, handler: FallbackRouter) -> Result<(), BootError> {
         self.inner.claim_fallback_router(handler)
-    }
-
-    /// Snapshot of every frame-bound mailbox's pending counter
-    /// collected during passive boot. Drivers stash this clone and
-    /// hand it to [`crate::chassis::frame_loop::drain_frame_bound_or_abort`]
-    /// each frame so render submit waits for inbound mail to drain
-    /// alongside component drains (ADR-0074 §Decision 5).
-    ///
-    /// Returns an empty vec on chassis with no frame-bound
-    /// capabilities (today: the headless chassis without render); in
-    /// that case the per-frame call is a fast no-op.
-    #[must_use]
-    pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
-        self.inner.frame_bound_pending().to_vec()
     }
 
     /// Issue 629 / Phase A: retrieve a clone of a cap-published handle
@@ -405,14 +390,10 @@ enum BootState<A: NativeActor + NativeDispatch> {
 /// the sum dispatch trait the `#[actor] impl NativeActor for A`
 /// macro emits.
 ///
-/// Stage 2d: `FRAME_BARRIER` caps go through this path too. The
-/// frame-bound claim (`claim_frame_bound_mailbox_with_override`)
-/// registers the per-mailbox `pending` counter into the chassis's
-/// `frame_bound_pending` Vec; the dispatcher thread decrements after
-/// each successful handler dispatch so
-/// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`]
-/// (ADR-0074 §Decision 5) sees the counter drop to zero alongside
-/// component drains.
+/// ADR-0082 retired the frame-bound claim variant: every cap takes the
+/// drop-on-shutdown claim, and settlement gating on the
+/// `LifecycleAdvance` chain root (not a per-mailbox pending counter) is
+/// the frame-integration gate now.
 struct NativeActorBoot<A: NativeActor + NativeDispatch> {
     state: BootState<A>,
 }
@@ -461,33 +442,20 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // shutdown claim. Both share the same dispatcher trampoline
         // shape apart from the post-dispatch decrement.
         //
-        // The const is read through a local binding rather than used
-        // directly in the `if` so Qodana's `RsConstantConditionIf`
-        // inspector doesn't evaluate it against the trait default
-        // (false) and report "always false" — concrete `impl Actor`
-        // for frame-bound caps overrides it to `true`.
-        let frame_bound = A::FRAME_BARRIER;
-        let claim_result = if frame_bound {
-            ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
-                (
-                    claim.id,
-                    claim.receiver,
-                    claim.mailbox_sender,
-                    Some(claim.pending),
-                    claim.wake_slot,
-                )
-            })
-        } else {
-            ctx.claim_mailbox_drop_on_shutdown::<A>().map(|claim| {
-                (
-                    claim.id,
-                    claim.receiver,
-                    claim.mailbox_sender,
-                    None,
-                    claim.wake_slot,
-                )
-            })
-        };
+        // ADR-0082: every cap takes the drop-on-shutdown claim. The
+        // FRAME_BARRIER frame-bound claim variant retired with the
+        // per-frame drain barrier — settlement gating on the
+        // LifecycleAdvance chain root is the frame-integration gate
+        // now, so no cap needs a pending-counter registration.
+        let claim_result = ctx.claim_mailbox_drop_on_shutdown::<A>().map(|claim| {
+            (
+                claim.id,
+                claim.receiver,
+                claim.mailbox_sender,
+                None,
+                claim.wake_slot,
+            )
+        });
         let (mailbox_id, receiver, mailbox_sender, pending, wake_slot) = match claim_result {
             Ok(c) => c,
             Err(e) => {
@@ -504,9 +472,8 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         };
 
         // Per-cap transport. `NativeBinding::from_ctx` pulls the
-        // chassis's frame-bound set + aborter so the cross-class
-        // wait_reply guard wires automatically.
-        let transport = Arc::new(NativeBinding::from_ctx(ctx, mailbox_id, A::FRAME_BARRIER));
+        // chassis's aborter + spawner.
+        let transport = Arc::new(NativeBinding::from_ctx(ctx, mailbox_id));
         transport.install_inbox(receiver);
 
         // Per-actor scratch storage (issue 582 / ADR-0074). Stamped
@@ -989,8 +956,6 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &registry,
                 &mailer,
                 &mut booted.fallback,
-                &mut booted.frame_bound_pending,
-                &booted.frame_bound_set,
                 &booted.aborter,
                 &mut booted.claimed_actor_mailboxes,
                 &booted.spawner,
@@ -1018,22 +983,10 @@ struct BootedPassives {
     /// type-keyed actor map; the actor itself never escapes its
     /// dispatcher thread.
     handles: ExportedHandles,
-    /// Per-mailbox pending counters from
-    /// [`ChassisCtx::claim_frame_bound_mailbox`] calls — collected
-    /// during passive boot, exposed to the driver via
-    /// [`DriverCtx::frame_bound_pending`] (the driver stashes a clone
-    /// for its frame loop).
-    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
-    /// Membership view of the same set; shared with every
-    /// [`NativeBinding`] booted under this chassis so the
-    /// cross-class `wait_reply` guard can classify recipients.
-    /// Populated alongside `frame_bound_pending` by
-    /// [`ChassisCtx::claim_frame_bound_mailbox`].
-    frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
     /// Cloned into every `ChassisCtx` and onto every booted
-    /// [`NativeBinding`] so the cross-class `wait_reply`
-    /// guard has somewhere to abort to. Inherited from the
-    /// [`Builder`]'s configured aborter.
+    /// [`NativeBinding`] so a wasm-guest trap can fatal-abort the
+    /// substrate cleanly. Inherited from the [`Builder`]'s configured
+    /// aborter.
     aborter: Arc<dyn FatalAborter>,
     /// Issue #601: every actor mailbox claimed during passive boot.
     /// `Builder::build` / `build_passive` reads this list to dispatch
@@ -1045,8 +998,8 @@ struct BootedPassives {
     /// lifecycle registry, plus the spawn machinery that writes into
     /// it. Both built once at boot; `Spawner` carries `Arc` clones of
     /// the chassis-level handles (registry, `actor_registry`, mailer,
-    /// `frame_bound_set`, aborter) so future per-handler `spawn_child`
-    /// reaches them without separate plumbing.
+    /// aborter) so future per-handler `spawn_child` reaches them
+    /// without separate plumbing.
     actor_registry: Arc<crate::ActorRegistry>,
     spawner: Arc<crate::Spawner>,
     /// Issue 635 PR C: chassis-owned worker pool. Boots empty in
@@ -1119,8 +1072,6 @@ fn boot_passives(
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut fallback: Option<FallbackRouter> = None;
     let mut handles = ExportedHandles::new();
-    let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
-    let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
     let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
@@ -1186,7 +1137,6 @@ fn boot_passives(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
         Arc::clone(mailer),
-        Arc::clone(&frame_bound_set),
         Arc::clone(aborter),
         pool.ready_tx(),
     ));
@@ -1199,15 +1149,13 @@ fn boot_passives(
 
     // Helper: build a fresh `ChassisCtx` borrowing from the locals.
     // Each phase re-takes the borrow because methods may mutate the
-    // borrowed slots (e.g., claim pushes into `frame_bound_pending`).
+    // borrowed slots (e.g., claim pushes into `claimed_actor_mailboxes`).
     macro_rules! build_ctx {
         () => {
             ChassisCtx::new(
                 registry,
                 mailer,
                 &mut fallback,
-                &mut frame_bound_pending,
-                &frame_bound_set,
                 aborter,
                 &mut claimed_actor_mailboxes,
                 &spawner,
@@ -1226,8 +1174,6 @@ fn boot_passives(
         registry: &Arc<Registry>,
         mailer: &Arc<Mailer>,
         fallback: &mut Option<FallbackRouter>,
-        frame_bound_pending: &mut Vec<(MailboxId, Arc<AtomicU64>)>,
-        frame_bound_set: &Arc<RwLock<HashSet<MailboxId>>>,
         aborter: &Arc<dyn FatalAborter>,
         claimed_actor_mailboxes: &mut Vec<MailboxId>,
         spawner: &Arc<crate::Spawner>,
@@ -1242,8 +1188,6 @@ fn boot_passives(
                 registry,
                 mailer,
                 fallback,
-                frame_bound_pending,
-                frame_bound_set,
                 aborter,
                 claimed_actor_mailboxes,
                 spawner,
@@ -1265,8 +1209,6 @@ fn boot_passives(
                     registry,
                     mailer,
                     &mut fallback,
-                    &mut frame_bound_pending,
-                    &frame_bound_set,
                     aborter,
                     &mut claimed_actor_mailboxes,
                     &spawner,
@@ -1286,8 +1228,6 @@ fn boot_passives(
                 registry,
                 mailer,
                 &mut fallback,
-                &mut frame_bound_pending,
-                &frame_bound_set,
                 aborter,
                 &mut claimed_actor_mailboxes,
                 &spawner,
@@ -1305,8 +1245,6 @@ fn boot_passives(
                 registry,
                 mailer,
                 &mut fallback,
-                &mut frame_bound_pending,
-                &frame_bound_set,
                 aborter,
                 &mut claimed_actor_mailboxes,
                 &spawner,
@@ -1334,8 +1272,6 @@ fn boot_passives(
                     registry,
                     mailer,
                     &mut fallback,
-                    &mut frame_bound_pending,
-                    &frame_bound_set,
                     aborter,
                     &mut claimed_actor_mailboxes,
                     &spawner,
@@ -1350,8 +1286,6 @@ fn boot_passives(
         shutdowns,
         fallback,
         handles,
-        frame_bound_pending,
-        frame_bound_set,
         aborter: Arc::clone(aborter),
         claimed_actor_mailboxes,
         actor_registry,
@@ -1525,16 +1459,6 @@ impl<C: Chassis> PassiveChassis<C> {
     /// trace pipeline and wait on the resulting `Settled` signal.
     pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         self.booted.settlement_registry()
-    }
-
-    /// Snapshot of every frame-bound mailbox's pending counter
-    /// collected during passive boot. Embedders (`TestBench`, bin
-    /// drivers) clone this once and feed it to
-    /// [`super::frame_loop::drain_frame_bound_or_abort`] each frame —
-    /// same role as [`DriverCtx::frame_bound_pending`]
-    /// on the driver-build path.
-    pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
-        self.booted.frame_bound_pending.clone()
     }
 
     /// Issue 607 Phase 5 (ADR-0079): mirror of
@@ -1912,54 +1836,6 @@ mod tests {
             "dispatcher should have routed Ping → on_ping within the wait budget"
         );
 
-        drop(chassis);
-    }
-
-    /// Issue 552 stage 2d: `with_actor` accepts `FRAME_BARRIER` caps.
-    /// The chassis claims through `claim_frame_bound_mailbox`, the
-    /// pending counter feeds the chassis's `frame_bound_pending` Vec,
-    /// and the dispatcher decrements after each handler dispatch so
-    /// the per-frame drain barrier sees the counter drop in lock-step.
-    /// Pre-2d the entry point hard-rejected; the prior reject-test
-    /// retired alongside that branch.
-    #[test]
-    fn with_actor_supports_frame_barrier_caps() {
-        struct FrameBoundProbe;
-        impl Actor for FrameBoundProbe {
-            const NAMESPACE: &'static str = "test.with_actor.frame_bound";
-            const FRAME_BARRIER: bool = true;
-        }
-        impl aether_actor::Singleton for FrameBoundProbe {}
-
-        impl NativeActor for FrameBoundProbe {
-            type Config = ();
-            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self)
-            }
-        }
-
-        impl NativeDispatch for FrameBoundProbe {
-            fn __aether_dispatch_envelope(
-                &mut self,
-                _ctx: &mut NativeCtx<'_>,
-                _kind: KindId,
-                _payload: &[u8],
-            ) -> Option<()> {
-                None
-            }
-        }
-
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(registry, mailer)
-            .with_actor::<FrameBoundProbe>(())
-            .build_passive()
-            .expect("FRAME_BARRIER caps boot through with_actor");
-        // Frame-bound claim populated the chassis's pending Vec.
-        assert_eq!(
-            chassis.frame_bound_pending().len(),
-            1,
-            "FRAME_BARRIER cap registered its pending counter for the drain barrier"
-        );
         drop(chassis);
     }
 
