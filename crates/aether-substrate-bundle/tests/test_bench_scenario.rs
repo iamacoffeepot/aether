@@ -29,13 +29,13 @@
 
 use std::path::Path;
 
-use aether_data::{Kind, mailbox_id_from_name};
+use aether_data::{Kind, encode_struct, mailbox_id_from_name};
 use aether_kinds::{
     Delete, DeleteResult, DropComponent, FsError, List, ListResult, LoadComponent, MailEnvelope,
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
 use aether_substrate_bundle::test_bench::{
-    TestBench,
+    BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
     visual::{decode_png, differs_from_background},
 };
@@ -257,45 +257,84 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
 /// proving the new component instance inherits the input
 /// subscriptions and continues receiving ticks at the original
 /// mailbox.
+///
+/// Issue 868 worked example: the load + warm-up and the post-replace
+/// advance are driven through [`TestBench::execute`] as labelled op
+/// sequences. The load reply is decoded back via `reply::<LoadResult>`
+/// to feed the replace step's target mailbox id. Replace runs as its
+/// own sequence so the post-replace tick baseline is sampled before
+/// the next advance dispatches ticks; the `count_observed` assertions
+/// stay imperative between the `execute` calls.
 #[test]
 fn replace_component_preserves_mailbox_identity() {
     let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_probe(&mut bench, &wasm_path);
 
-    bench.advance(3).expect("pre-replace advance");
-    let pre_replace = bench.count_observed(TICK_OBSERVED);
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![
+            (
+                "load",
+                BenchOp::SendAndAwait {
+                    recipient: "aether.component".to_owned(),
+                    kind: LoadComponent::ID,
+                    payload: encode_struct(&LoadComponent {
+                        wasm: wasm.clone(),
+                        name: Some(PROBE_NAME.to_owned()),
+                    }),
+                },
+            ),
+            ("warm", BenchOp::Advance { ticks: 3 }),
+        ])
+        .expect("load + warm sequence");
+
+    let probe_mbox = match loaded
+        .reply::<aether_kinds::LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        aether_kinds::LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        aether_kinds::LoadResult::Err { error } => panic!("load_component: {error}"),
+    };
     assert_eq!(
-        pre_replace,
+        bench.count_observed(TICK_OBSERVED),
         3,
         "expected 3 tick_observed before replace; observed kinds: {:?}",
         bench.observed_kinds(),
     );
 
-    // Phase 4 of issue 603 split advance off `aether.component`, so
-    // replace mail no longer naturally orders ahead of the next
-    // advance. Await `ReplaceResult` explicitly.
-    let probe_mbox = mailbox_id_from_name(&probe_address());
-    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let replace_result: aether_kinds::ReplaceResult = bench
-        .send_and_await_reply(
-            "aether.component",
-            &ReplaceComponent {
-                mailbox_id: probe_mbox,
-                wasm,
-                drain_timeout_ms: None,
+    // Replace the wasm at the same mailbox id with the same fixture
+    // binary. Phase 4 of issue 603 split advance off
+    // `aether.component`, so replace mail no longer naturally orders
+    // ahead of the next advance — `SendAndAwait` blocks on the
+    // `ReplaceResult` reply before the post-replace advance.
+    let swapped = bench
+        .execute(vec![(
+            "swap",
+            BenchOp::SendAndAwait {
+                recipient: "aether.component".to_owned(),
+                kind: ReplaceComponent::ID,
+                payload: encode_struct(&ReplaceComponent {
+                    mailbox_id: probe_mbox,
+                    wasm,
+                    drain_timeout_ms: None,
+                }),
             },
-        )
-        .expect("await replace_component reply");
-    match replace_result {
+        )])
+        .expect("replace sequence");
+    match swapped
+        .reply::<aether_kinds::ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+    {
         aether_kinds::ReplaceResult::Ok { .. } => {}
         aether_kinds::ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post_replace_baseline = bench.count_observed(TICK_OBSERVED);
-    bench.advance(4).expect("post-replace advance");
+    bench
+        .execute(vec![("post", BenchOp::Advance { ticks: 4 })])
+        .expect("post-replace advance");
     let post_replace = bench.count_observed(TICK_OBSERVED);
 
     assert!(
