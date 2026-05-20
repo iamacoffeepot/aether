@@ -9,8 +9,8 @@
 //! - **In-process ([`TestBench`] struct)** — substrate state is owned
 //!   by the test thread; mail goes through the same sinks + control
 //!   plane but replies route to a `RecordingBackend` loopback instead
-//!   of a socket. Rust integration tests and `aether-scenario` link
-//!   this directly via
+//!   of a socket. Rust integration tests (this crate's and sibling
+//!   component crates') link this directly via
 //!   `aether_substrate_bundle::test_bench::TestBench`.
 
 mod bench;

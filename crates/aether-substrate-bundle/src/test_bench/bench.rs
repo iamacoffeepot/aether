@@ -169,7 +169,8 @@ pub struct TestBench {
     /// (`aether.render` — both `aether.draw_triangle` and
     /// `aether.camera` flow here post-ADR-0074 §Decision 7) plus
     /// broadcast / session-zero frames that arrived on the loopback.
-    /// Used by scenario assertions like `Check::MailObserved`.
+    /// Read back via [`Self::count_observed`] / [`Self::observed_kinds`]
+    /// for scenario assertions.
     /// Limitation (v1): mail addressed to other sinks
     /// (`aether.fs`, `aether.log`) and direct
     /// component-to-component mail does not show up here — those
@@ -925,6 +926,7 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
+    use crate::test_bench::BenchOp;
     use std::thread;
     use std::time::Instant;
 
@@ -934,14 +936,11 @@ mod tests {
     /// is well-formed; deeper visual assertions land in the scenario
     /// library.
     ///
-    /// This crate can't depend on `aether-scenario`'s `test_helpers`
-    /// (the scenario crate already depends on test-bench, so reaching
-    /// for `aether_scenario::test_helpers::has_wgpu_adapter` would
-    /// produce a circular path-dep). Instead, the unit test lets
-    /// `TestBench::start_with_size` fail naturally on driverless
-    /// runners and skips on any boot error — the same skip semantics
-    /// the helper provides, just keyed off the boot result rather
-    /// than a separate adapter probe.
+    /// The unit test lets `TestBench::start_with_size` fail naturally
+    /// on driverless runners and skips on any boot error, rather than
+    /// pulling in the `test_helpers` wgpu probe — keeping the lib
+    /// unit test self-contained (the same skip semantics, keyed off
+    /// the boot result rather than a separate adapter probe).
     #[test]
     fn boot_advance_capture_round_trip() {
         let mut tb = match TestBench::start_with_size(64, 48) {
@@ -951,9 +950,13 @@ mod tests {
                 return;
             }
         };
-        let ticks_completed = tb.advance(1).expect("advance");
-        assert_eq!(ticks_completed, 1);
-        let png = tb.capture().expect("capture");
+        let result = tb
+            .execute(vec![
+                ("tick", BenchOp::advance(1)),
+                ("snap", BenchOp::capture()),
+            ])
+            .expect("advance + capture");
+        let png = result.captured("snap").expect("snap step ran");
         assert!(
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "captured bytes are not a PNG: first 8 bytes={:?}",
@@ -1012,22 +1015,28 @@ mod tests {
             }),
         );
 
-        // Subscribe the closure mailbox to Tick. Goes through the input
-        // cap's on_subscribe handler.
-        tb.send_mail(
-            "aether.input",
-            &SubscribeInput {
-                kind: Tick::ID,
-                mailbox: subscriber_mbox,
-            },
-        )
-        .expect("subscribe");
-
-        // Advance one tick. This calls `push_chassis_root_mail` for the
-        // tick (issue 723), which mints a fresh chassis-root MailId and
+        // Subscribe the closure mailbox to Tick (goes through the
+        // input cap's on_subscribe handler), then advance one tick.
+        // The advance calls `push_chassis_root_mail` for the tick
+        // (issue 723), which mints a fresh chassis-root MailId and
         // fires `Sent`. The input cap's `on_tick` reads `ctx.in_flight_*`
         // and threads them through `ctx.fanout` to every subscriber.
-        let _ = tb.advance(1).expect("advance");
+        // Sequencing both through `execute` settles the subscribe
+        // before the tick fires.
+        tb.execute(vec![
+            (
+                "subscribe",
+                BenchOp::send_mail(
+                    "aether.input",
+                    &SubscribeInput {
+                        kind: Tick::ID,
+                        mailbox: subscriber_mbox,
+                    },
+                ),
+            ),
+            ("advance", BenchOp::advance(1)),
+        ])
+        .expect("subscribe + advance");
 
         let captured = captured
             .lock()
