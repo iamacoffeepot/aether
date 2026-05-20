@@ -4,11 +4,24 @@
       "Bash(cargo test *)",
       "Bash(cargo check *)",
       "Bash(cargo clippy *)",
+      "Bash(cargo build *)",
       "Bash(cargo fmt -- --check*)",
       "mcp__aether-hub__receive_mail",
       "mcp__aether-hub__list_engines",
       "mcp__aether-hub__describe_kinds",
-      "mcp__aether-hub__engine_logs"
+      "mcp__aether-hub__engine_logs",
+      "mcp__aether-hub__capture_frame",
+      "mcp__aether-hub__describe_component",
+      "mcp__aether-hub__list_active_roots",
+      "mcp__aether-hub__actor_logs",
+      "mcp__aether-hub__dump_trace_chrome",
+      "mcp__aether-hub__describe_tree_window",
+      "mcp__aether-hub__dump_trace_window",
+      "mcp__aether-hub__describe_tree",
+      "mcp__rustrover__get_file_problems",
+      "mcp__rustrover__search_symbol",
+      "mcp__rustrover__get_repositories",
+      "mcp__rustrover__list_directory_tree"
     ]
   },
   "hooks": {
