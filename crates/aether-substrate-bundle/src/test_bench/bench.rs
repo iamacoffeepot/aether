@@ -738,7 +738,7 @@ impl TestBench {
     /// Returns the error `run_frame`'s per-tick advance produces if the
     /// chain never settles: a `Timeout` waiting on the driver's
     /// `LifecycleAdvanceComplete` reply (the broadcast subtree leaked an
-    /// in_flight, or the driver never replied), or a `SettlementTimeout`
+    /// `in_flight`, or the driver never replied), or a `SettlementTimeout`
     /// from a capture pre-mail chain. In the Advance branch we bail
     /// mid-loop without sending `AdvanceResult::Ok` so the
     /// `pump_until_reply` caller surfaces the timeout rather than
