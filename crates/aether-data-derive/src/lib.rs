@@ -153,13 +153,16 @@ fn emit_inventory(func: &ItemFn, input_types: &[&Type], output_type: &Type) -> T
     // bounds at expansion time, so emit a `const _: fn() = || { <T as
     // Kind>::ID; };` per input + output. A build error fires if any type
     // doesn't impl `Kind` (ADR-0048 §1).
-    let bound_assertions = input_types.iter().chain(iter::once(&output_type)).map(|ty| {
-        quote! {
-            const _: fn() = || {
-                let _ = <#ty as ::aether_data::transform::__transform_runtime::Kind>::ID;
-            };
-        }
-    });
+    let bound_assertions = input_types
+        .iter()
+        .chain(iter::once(&output_type))
+        .map(|ty| {
+            quote! {
+                const _: fn() = || {
+                    let _ = <#ty as ::aether_data::transform::__transform_runtime::Kind>::ID;
+                };
+            }
+        });
 
     // Fully-qualified name string at the consumer's compile time:
     // `"{crate}::{module_path}::{fn}"`. `module_path!()` already begins
@@ -207,7 +210,8 @@ fn emit_inventory(func: &ItemFn, input_types: &[&Type], output_type: &Type) -> T
     // Static slices the inventory entry borrows. `inventory::submit!`
     // needs const-constructible borrows, so the input-kind-id list is a
     // file-scoped `static` array rather than an inline literal.
-    let input_kinds_static = format_ident!("__AETHER_TRANSFORM_INPUTS_{}", fn_name_str.to_uppercase());
+    let input_kinds_static =
+        format_ident!("__AETHER_TRANSFORM_INPUTS_{}", fn_name_str.to_uppercase());
     let input_kind_exprs = input_types.iter().map(|ty| {
         quote! {
             <#ty as ::aether_data::transform::__transform_runtime::Kind>::ID
@@ -310,21 +314,45 @@ struct DeniedPath {
 const DENY_LIST: &[DeniedPath] = &[
     // Host fns — match the bare fn tail so both qualified and
     // use-shortened call sites are caught.
-    DeniedPath { tail: &["send_mail_p32"] },
-    DeniedPath { tail: &["reply_mail_p32"] },
-    DeniedPath { tail: &["send_mail_traced_p32"] },
-    DeniedPath { tail: &["save_state_p32"] },
-    DeniedPath { tail: &["resolve_mailbox_p32"] },
-    DeniedPath { tail: &["resolve_kind_p32"] },
-    DeniedPath { tail: &["wait_reply"] },
+    DeniedPath {
+        tail: &["send_mail_p32"],
+    },
+    DeniedPath {
+        tail: &["reply_mail_p32"],
+    },
+    DeniedPath {
+        tail: &["send_mail_traced_p32"],
+    },
+    DeniedPath {
+        tail: &["save_state_p32"],
+    },
+    DeniedPath {
+        tail: &["resolve_mailbox_p32"],
+    },
+    DeniedPath {
+        tail: &["resolve_kind_p32"],
+    },
+    DeniedPath {
+        tail: &["wait_reply"],
+    },
     // Handler-context types.
-    DeniedPath { tail: &["aether_actor", "Ctx"] },
-    DeniedPath { tail: &["aether_actor", "MailCtx"] },
+    DeniedPath {
+        tail: &["aether_actor", "Ctx"],
+    },
+    DeniedPath {
+        tail: &["aether_actor", "MailCtx"],
+    },
     // Nondeterminism sources, by two-segment prefix so any item under
     // them (`now`, `Instant`, `var`, etc.) is rejected.
-    DeniedPath { tail: &["std", "env"] },
-    DeniedPath { tail: &["std", "time"] },
-    DeniedPath { tail: &["core", "time"] },
+    DeniedPath {
+        tail: &["std", "env"],
+    },
+    DeniedPath {
+        tail: &["std", "time"],
+    },
+    DeniedPath {
+        tail: &["core", "time"],
+    },
 ];
 
 /// Body-path collector + matcher. Records the span of the first path

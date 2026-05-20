@@ -111,7 +111,10 @@ fn content_addressed_handles_collision_resistance_smoke() {
         let arity = (next() % 5) as usize; // 0..=4 inputs
         let inputs: Vec<HandleId> = (0..arity).map(|_| hid(next())).collect();
         let id = content_addressed_handle_id(transform, &inputs);
-        assert!(ids.insert(id), "content-address collision in 10k smoke test");
+        assert!(
+            ids.insert(id),
+            "content-address collision in 10k smoke test"
+        );
     }
     assert_eq!(ids.len(), 10_000);
 }

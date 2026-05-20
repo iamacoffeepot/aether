@@ -915,7 +915,12 @@ fn transform_invoke_resolves_handle() {
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
     let chassis = transform_builder(&registry, &mailer, &recorder);
 
-    let dag_id = submit_ok(&registry, &rx, number_transform_dag(double_transform_id(), 21), 1);
+    let dag_id = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(double_transform_id(), 21),
+        1,
+    );
 
     assert!(
         poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
@@ -944,7 +949,12 @@ fn transform_panic_fails_node() {
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
     let chassis = transform_builder(&registry, &mailer, &recorder);
 
-    let dag_id = submit_ok(&registry, &rx, number_transform_dag(boom_transform_id(), 1), 1);
+    let dag_id = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(boom_transform_id(), 1),
+        1,
+    );
 
     let failed = poll_until(Duration::from_secs(5), || {
         matches!(
@@ -961,7 +971,12 @@ fn transform_panic_fails_node() {
 
     // The executor survives: a fresh DAG still resolves.
     let recorder2: Recorder<TestNumberObserved> = recorder;
-    let dag2 = submit_ok(&registry, &rx, number_transform_dag(double_transform_id(), 5), 2);
+    let dag2 = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(double_transform_id(), 5),
+        2,
+    );
     assert!(poll_until(Duration::from_secs(5), || matches!(
         query_status(&registry, &rx, dag2, 101),
         StatusResult::Complete { .. }
@@ -986,7 +1001,12 @@ fn transform_timeout_fails_node() {
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
     let chassis = transform_builder(&registry, &mailer, &recorder);
 
-    let dag_id = submit_ok(&registry, &rx, number_transform_dag(slow_transform_id(), 1), 1);
+    let dag_id = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(slow_transform_id(), 1),
+        1,
+    );
 
     thread::sleep(Duration::from_millis(80));
     let failed = poll_until(Duration::from_secs(5), || {
@@ -1126,8 +1146,7 @@ fn transform_skips_invoke_on_cache_hit() {
         aether_data::Ref::Inline(TestNumber { value: 7, tag: 0 }),
     );
 
-    let invoke_count =
-        super::test_support::SEED_INVOKE_COUNT.load(Ordering::Acquire);
+    let invoke_count = super::test_support::SEED_INVOKE_COUNT.load(Ordering::Acquire);
     assert_eq!(
         invoke_count, 1,
         "second identical transform must hit the cache, not re-invoke",
@@ -1173,7 +1192,12 @@ fn transform_runs_off_executor_thread() {
     let _slow_dag = submit_ok(&registry, &rx, slow_descriptor, 1);
 
     // DAG 2: a pure `double` that must resolve while DAG 1 is blocked.
-    let dag2 = submit_ok(&registry, &rx, number_transform_dag(double_transform_id(), 4), 2);
+    let dag2 = submit_ok(
+        &registry,
+        &rx,
+        number_transform_dag(double_transform_id(), 4),
+        2,
+    );
     let completed = poll_until(Duration::from_secs(5), || {
         matches!(
             query_status(&registry, &rx, dag2, 101),

@@ -25,7 +25,14 @@ fn ui() {
 
 #[repr(C)]
 #[derive(
-    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "test.det_scalar")]
 struct DetScalar {

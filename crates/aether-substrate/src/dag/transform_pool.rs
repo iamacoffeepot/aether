@@ -30,8 +30,8 @@ use std::thread::{self, JoinHandle};
 use aether_data::{InvokeFn, KindId, MailboxId, TransformError};
 use aether_kinds::DagTransformDone;
 
-use crate::mail::mailer::Mailer;
 use crate::mail::Mail;
+use crate::mail::mailer::Mailer;
 
 const TARGET: &str = "aether::dag::transform_pool";
 

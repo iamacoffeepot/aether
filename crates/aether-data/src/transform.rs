@@ -110,12 +110,12 @@ pub fn transforms() -> impl Iterator<Item = &'static TransformEntry> {
 /// Not part of the public API; the macro is the only intended caller.
 #[doc(hidden)]
 pub mod __transform_runtime {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use super::TransformEntry;
     pub use super::{InvokeFn, TransformError};
     pub use crate::Kind;
     pub use crate::KindId;
     pub use crate::ids::TransformId;
-    #[cfg(not(target_arch = "wasm32"))]
-    pub use super::TransformEntry;
     #[cfg(not(target_arch = "wasm32"))]
     pub use ::inventory;
     pub use alloc::vec::Vec;

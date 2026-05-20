@@ -57,15 +57,15 @@ pub use hash::{
     HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN,
     content_addressed_handle_id, fnv1a_64_bytes, fnv1a_64_prefixed, mailbox_id_from_name,
 };
-pub use transform::{InvokeFn, TransformError};
-#[cfg(not(target_arch = "wasm32"))]
-pub use transform::{TransformEntry, transforms};
 pub use ids::{
     DagId, HandleId, KindId, MailboxId, TransformId, tag_for_type_id, type_name_for_type_id,
 };
 pub use mail::{MailId, ReplyTarget, ReplyTo};
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
+pub use transform::{InvokeFn, TransformError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use transform::{TransformEntry, transforms};
 pub use wire_id::{EngineId, SessionToken, Uuid};
 
 /// Re-exported derive macros from `aether-actor-derive`. Behind the

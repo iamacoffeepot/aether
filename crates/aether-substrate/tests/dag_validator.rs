@@ -149,7 +149,8 @@ fn validator_accepts_minimal_dag() {
         }],
     };
 
-    let validated = validator::validate(&descriptor, &reg, &caps, None).expect("minimal dag validates");
+    let validated =
+        validator::validate(&descriptor, &reg, &caps, None).expect("minimal dag validates");
     assert_eq!(validated.topo_order.len(), 2);
     // Source must precede the observer in topo order.
     let src_pos = validated.topo_order.iter().position(|n| *n == NodeId(0));

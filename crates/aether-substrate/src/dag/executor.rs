@@ -455,14 +455,11 @@ impl Executor {
                 .nodes
                 .iter()
                 .filter_map(|n| match n {
-                    Node::Transform { id, .. } => (state
-                        .pending_inputs
-                        .get(id)
-                        .copied()
-                        .unwrap_or(0)
-                        == 0
-                        && !state.resolved.contains(id))
-                    .then_some(*id),
+                    Node::Transform { id, .. } => {
+                        (state.pending_inputs.get(id).copied().unwrap_or(0) == 0
+                            && !state.resolved.contains(id))
+                        .then_some(*id)
+                    }
                     _ => None,
                 })
                 .collect()
@@ -488,7 +485,9 @@ impl Executor {
     fn dispatch_transform(&mut self, ctx: &mut NativeCtx<'_>, dag_id: DagId, node_id: NodeId) {
         // Resolve the node's transform_id + output kind + per-node
         // timeout + assigned handle.
-        let Some((transform_id, output_kind_id, node_timeout)) = self.transform_node_meta(dag_id, node_id) else {
+        let Some((transform_id, output_kind_id, node_timeout)) =
+            self.transform_node_meta(dag_id, node_id)
+        else {
             return;
         };
         let Some(state) = self.dags.get(&dag_id) else {
@@ -499,7 +498,10 @@ impl Executor {
         }
         let Some(handle_id) = state.handles.get(&node_id).copied() else {
             if let Some(state) = self.dags.get_mut(&dag_id) {
-                state.mark_failed(node_id, "transform node missing handle assignment".to_owned());
+                state.mark_failed(
+                    node_id,
+                    "transform node missing handle assignment".to_owned(),
+                );
             }
             return;
         };
@@ -590,15 +592,20 @@ impl Executor {
         dag_id: DagId,
         node_id: NodeId,
     ) -> Option<(TransformId, KindId, Option<u64>)> {
-        self.dags.get(&dag_id)?.descriptor.nodes.iter().find_map(|n| match n {
-            Node::Transform {
-                id,
-                transform_id,
-                output_kind_id,
-                timeout_ms,
-            } if *id == node_id => Some((*transform_id, *output_kind_id, *timeout_ms)),
-            _ => None,
-        })
+        self.dags
+            .get(&dag_id)?
+            .descriptor
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                Node::Transform {
+                    id,
+                    transform_id,
+                    output_kind_id,
+                    timeout_ms,
+                } if *id == node_id => Some((*transform_id, *output_kind_id, *timeout_ms)),
+                _ => None,
+            })
     }
 
     /// An off-thread transform invocation finished (ADR-0048 §3). Pull
@@ -639,7 +646,11 @@ impl Executor {
         } = in_flight;
 
         // Drop the result for a cancelled / completed DAG.
-        if self.dags.get(&dag_id).is_none_or(|s| s.status.is_terminal()) {
+        if self
+            .dags
+            .get(&dag_id)
+            .is_none_or(|s| s.status.is_terminal())
+        {
             return;
         }
 
@@ -660,10 +671,7 @@ impl Executor {
                 // Store the output under the content-addressed id so a
                 // future identical compute hits the cache (ADR-0048 §4),
                 // hold a ref for the DAG, then resolve the node's handle.
-                if let Err(e) =
-                    self.store()
-                        .put(content_id, output_kind_id, bytes.clone())
-                {
+                if let Err(e) = self.store().put(content_id, output_kind_id, bytes.clone()) {
                     tracing::warn!(
                         target: TARGET,
                         error = ?e,
