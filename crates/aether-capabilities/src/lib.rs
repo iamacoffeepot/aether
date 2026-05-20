@@ -39,6 +39,8 @@ pub mod component;
 // elides cleanly on the wasm-component build.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod contentgen;
+// `aether.dag` computation-DAG executor cap (ADR-0047, issue 976).
+pub mod dag;
 pub mod engine;
 pub mod fs;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
@@ -68,6 +70,7 @@ pub use audio::AudioConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::ComponentHostCapability;
+pub use dag::DagCapability;
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.
 #[cfg(not(target_arch = "wasm32"))]
