@@ -209,6 +209,12 @@ impl SubstrateBootBuilder<'_> {
         );
 
         let handle_store = Arc::new(HandleStore::from_env_persistent(self.persist_enabled));
+        // ADR-0049 §7: acquire the single-substrate-per-store lock
+        // before doing any writes. A live conflicting lock aborts boot
+        // with a clear error. No-op when persistence is disabled.
+        handle_store
+            .acquire_lock()
+            .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
         // ADR-0049 §5: start the background disk-eviction tick. No-op
         // when persistence is disabled (hub chassis / test fixtures).
         handle_store.spawn_eviction_thread();

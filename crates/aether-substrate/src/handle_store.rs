@@ -41,7 +41,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mail::Mail;
@@ -158,6 +158,75 @@ impl PersistConfig {
     pub fn pinned_set_path(&self) -> PathBuf {
         self.root.join("pinned.set")
     }
+
+    /// The `lock.pid` file under the layout root (ADR-0049 §7).
+    #[must_use]
+    pub fn lock_path(&self) -> PathBuf {
+        self.root.join("lock.pid")
+    }
+}
+
+/// Why acquiring the on-disk store lock failed (ADR-0049 §7).
+#[derive(Debug)]
+pub enum LockError {
+    /// Another live substrate already holds the lock. Boot must abort.
+    Held { path: PathBuf, pid: i32 },
+    /// The lockfile couldn't be written (permission, disk full, etc.).
+    Io { path: PathBuf, error: std::io::Error },
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held { path, pid } => write!(
+                f,
+                "handle store at {} is locked by a live substrate (pid {pid}); \
+                 set AETHER_HANDLE_STORE_DIR to a different path or terminate that process",
+                path.display(),
+            ),
+            Self::Io { path, error } => {
+                write!(f, "failed to write handle store lock {}: {error}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LockError {}
+
+/// RAII guard that deletes `lock.pid` on graceful shutdown. SIGKILL
+/// bypasses `Drop`; the stale-lock reclamation path handles that case
+/// on the next boot.
+#[derive(Debug)]
+struct LockGuard {
+    path: PathBuf,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether `pid` names a live process. Unix: `kill(pid, 0)` returns 0
+/// for a live process, `ESRCH` for a dead one, `EPERM` for a live one
+/// we can't signal (still counts as alive). Non-Unix: conservatively
+/// reports `false` so the lock is always reclaimable (substrate on
+/// Windows is deferred per ADR-0049 §7).
+#[cfg(unix)]
+fn is_pid_alive(pid: i32) -> bool {
+    // SAFETY: `kill` with signal 0 performs the error checks without
+    // sending a signal. No memory is touched.
+    let ret = unsafe { libc::kill(pid, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // errno == EPERM means the process exists but we lack permission.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: i32) -> bool {
+    false
 }
 
 /// A handle known to be on disk but not (necessarily) materialized in
@@ -170,6 +239,33 @@ pub struct DiskEntry {
     pub bytes_len: u32,
     pub pinned: bool,
     pub created_at: u64,
+}
+
+/// Read-only snapshot of the store for `describe_handles` (ADR-0049
+/// §10). Built by [`HandleStore::inspect`] under a single read-lock
+/// hold so the caller can serialize without keeping the store locked.
+#[derive(Debug, Clone)]
+pub struct HandleStoreSnapshot {
+    pub total_entries: usize,
+    pub in_memory_entries: usize,
+    pub on_disk_entries: usize,
+    pub pinned_entries: usize,
+    pub in_memory_bytes: u64,
+    pub on_disk_bytes: u64,
+    pub on_disk_budget_bytes: u64,
+    pub top_by_size: Vec<HandleSummary>,
+    pub top_by_recency: Vec<HandleSummary>,
+}
+
+/// Per-handle summary line in a [`HandleStoreSnapshot`].
+#[derive(Debug, Clone)]
+pub struct HandleSummary {
+    pub handle_id: HandleId,
+    pub kind_id: KindId,
+    pub bytes_len: u32,
+    pub pinned: bool,
+    pub refcount: u32,
+    pub created_at_ms: u64,
 }
 
 /// Compute the `(<bin>, <meta>)` paths for a handle id under `root`.
@@ -316,6 +412,10 @@ pub struct HandleStore {
     /// [`Self::put_persistent`] mirrors the in-memory write to disk and
     /// pin/unpin rewrite `pinned.set`.
     persist: Option<PersistConfig>,
+    /// `lock.pid` guard (ADR-0049 §7). Held once [`Self::acquire_lock`]
+    /// succeeds; its `Drop` deletes the lockfile on graceful shutdown.
+    /// `None` until acquired (or when persistence is disabled).
+    lock: Mutex<Option<LockGuard>>,
 }
 
 /// Reasons a `put` can fail.
@@ -378,6 +478,7 @@ impl HandleStore {
             }),
             max_bytes,
             persist: None,
+            lock: Mutex::new(None),
         }
     }
 
@@ -394,6 +495,7 @@ impl HandleStore {
             }),
             max_bytes,
             persist,
+            lock: Mutex::new(None),
         };
         store.restore_from_disk();
         store
@@ -967,6 +1069,144 @@ impl HandleStore {
                 budget,
                 "handle store disk eviction pass complete",
             );
+        }
+    }
+
+    /// Acquire the on-disk store lock (ADR-0049 §7). Writes `lock.pid`
+    /// with this process's PID after checking that any existing lock is
+    /// stale. A live conflicting lock returns [`LockError::Held`] so the
+    /// caller can abort boot with a clear error. No-op (returns `Ok`)
+    /// when persistence is disabled.
+    ///
+    /// On success the store holds a [`LockGuard`] whose `Drop` deletes
+    /// the lockfile on graceful shutdown.
+    ///
+    /// # Panics
+    /// Panics if the lock mutex is poisoned — fail-fast per ADR-0063.
+    pub fn acquire_lock(&self) -> Result<(), LockError> {
+        let Some(cfg) = self.persist.as_ref() else {
+            return Ok(());
+        };
+        let path = cfg.lock_path();
+        // Inspect any existing lock.
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            match raw.trim().parse::<i32>() {
+                Ok(pid) if pid > 0 && is_pid_alive(pid) => {
+                    return Err(LockError::Held { path, pid });
+                }
+                Ok(pid) => {
+                    tracing::warn!(
+                        target: TARGET,
+                        path = %path.display(),
+                        stale_pid = pid,
+                        "reclaiming stale handle store lock from a dead process",
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: TARGET,
+                        path = %path.display(),
+                        "lock.pid holds garbage; reclaiming as stale",
+                    );
+                }
+            }
+        }
+        // Write our PID atomically.
+        let pid = std::process::id();
+        atomic_write(&path, pid.to_string().as_bytes())
+            .map_err(|error| LockError::Io { path: path.clone(), error })?;
+        *self
+            .lock
+            .lock()
+            .expect("handle store lock mutex poisoned; fail-fast per ADR-0063") =
+            Some(LockGuard { path });
+        Ok(())
+    }
+
+    /// Snapshot the store state for `describe_handles` (ADR-0049 §10).
+    /// Takes the read lock once, copies the summary out, releases it
+    /// before the caller serializes. `max` caps the top-N lists.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    #[must_use]
+    pub fn inspect(&self, max: usize) -> HandleStoreSnapshot {
+        let inner = self
+            .inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
+        let in_memory_entries = inner.entries.len();
+        let in_memory_bytes = inner.total_bytes as u64;
+        // On-disk entry set is the disk index; in-memory-only entries
+        // (not yet persisted, e.g. ephemeral sources) are counted under
+        // in_memory. Total is the union of ids.
+        let on_disk_entries = inner.disk_index.len();
+        let mut all_ids: std::collections::HashSet<HandleId> =
+            inner.entries.keys().copied().collect();
+        all_ids.extend(inner.disk_index.keys().copied());
+
+        // Build summaries from the union, preferring in-memory data
+        // (it has refcount + live pinned state) and falling back to the
+        // disk index.
+        let mut summaries: Vec<HandleSummary> = all_ids
+            .into_iter()
+            .map(|id| {
+                let mem = inner.entries.get(&id);
+                let disk = inner.disk_index.get(&id);
+                let kind_id = mem.map_or_else(
+                    || disk.map_or(KindId(0), |d| d.kind_id),
+                    |m| m.kind,
+                );
+                let bytes_len = mem.map_or_else(
+                    || disk.map_or(0u32, |d| d.bytes_len),
+                    |m| u32::try_from(m.bytes.len()).unwrap_or(u32::MAX),
+                );
+                let pinned = mem.map(|m| m.pinned).or(disk.map(|d| d.pinned)).unwrap_or(false);
+                let refcount = mem.map_or(0, |m| m.refcount);
+                let created_at = disk.map_or(0, |d| d.created_at);
+                HandleSummary {
+                    handle_id: id,
+                    kind_id,
+                    bytes_len,
+                    pinned,
+                    refcount,
+                    created_at_ms: created_at,
+                }
+            })
+            .collect();
+
+        let pinned_entries = summaries.iter().filter(|s| s.pinned).count();
+        let total_entries = summaries.len();
+
+        // top_by_size: descending bytes_len.
+        let mut by_size = summaries.clone();
+        by_size.sort_by(|a, b| b.bytes_len.cmp(&a.bytes_len).then(a.handle_id.0.cmp(&b.handle_id.0)));
+        by_size.truncate(max);
+
+        // top_by_recency: descending created_at.
+        summaries.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then(a.handle_id.0.cmp(&b.handle_id.0))
+        });
+        summaries.truncate(max);
+
+        let (on_disk_bytes, on_disk_budget_bytes) = (
+            inner.total_disk_bytes,
+            self.persist.as_ref().map_or(0, |c| c.disk_budget_bytes),
+        );
+
+        HandleStoreSnapshot {
+            total_entries,
+            in_memory_entries,
+            on_disk_entries,
+            pinned_entries,
+            in_memory_bytes,
+            on_disk_bytes,
+            on_disk_budget_bytes,
+            top_by_size: by_size,
+            top_by_recency: summaries,
         }
     }
 

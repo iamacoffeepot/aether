@@ -63,6 +63,13 @@ crossbeam-channel = "0.5"
 # transitively so we stay on a single compiled copy.
 wasmparser = "0.249"
 
+# ADR-0049 §7 lockfile liveness check: `kill(pid, 0)` to detect whether
+# a lock-holding PID is still alive. Unix-only; the lockfile path is
+# gated to `#[cfg(unix)]` (substrate on Windows is deferred per
+# ADR-0049 §7).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 wat = "1"
 # Issue 552 stage 1: integration tests for the macro-emitted
