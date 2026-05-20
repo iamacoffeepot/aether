@@ -216,6 +216,11 @@ struct HandleEntry {
     last_access: u64,
 }
 
+/// FIFO cap on the negative cache (ADR-0049 §3). Protects high-
+/// cardinality-miss pipelines from re-statting the same non-existent
+/// paths every dispatch.
+const NEGATIVE_CACHE_CAP: usize = 8 * 1024;
+
 #[derive(Default)]
 struct Inner {
     entries: HashMap<HandleId, HandleEntry>,
@@ -226,6 +231,25 @@ struct Inner {
     total_bytes: usize,
     access_clock: u64,
     next_ephemeral: u64,
+    /// Sparse "this handle is on disk but not in memory" index, built
+    /// by the boot scan from the `.meta` sidecars (ADR-0049 §3). Lets a
+    /// cache-miss `get` find the `.bin` without re-reading the meta.
+    /// ~80 bytes/entry; a 25k-entry store costs ~2MB.
+    disk_index: HashMap<HandleId, DiskEntry>,
+    /// Bounded FIFO of "checked, confirmed not on disk" ids. Capped at
+    /// [`NEGATIVE_CACHE_CAP`] with FIFO eviction.
+    negative_cache: VecDeque<HandleId>,
+}
+
+impl Inner {
+    /// Record `id` as confirmed-not-on-disk, evicting the oldest entry
+    /// if the cache is at cap.
+    fn note_negative(&mut self, id: HandleId) {
+        if self.negative_cache.len() >= NEGATIVE_CACHE_CAP {
+            self.negative_cache.pop_front();
+        }
+        self.negative_cache.push_back(id);
+    }
 }
 
 /// Refcounted, byte-budgeted handle cache shared between mailer
@@ -306,18 +330,20 @@ impl HandleStore {
 
     /// Build an in-memory store with on-disk persistence wired in. The
     /// caller resolves the [`PersistConfig`] (typically via
-    /// [`PersistConfig::from_env`]); the boot scan (issue #985)
-    /// populates the disk index from the existing tree.
+    /// [`PersistConfig::from_env`]); the boot scan populates the disk
+    /// index from the existing tree (ADR-0049 §3).
     #[must_use]
     pub fn with_persist(max_bytes: usize, persist: Option<PersistConfig>) -> Self {
-        Self {
+        let store = Self {
             inner: RwLock::new(Inner {
                 next_ephemeral: 1,
                 ..Default::default()
             }),
             max_bytes,
             persist,
-        }
+        };
+        store.restore_from_disk();
+        store
     }
 
     /// Borrow the wired persistence config, if any.
@@ -363,6 +389,7 @@ impl HandleStore {
     pub fn from_env_persistent(enabled: bool) -> Self {
         let mut store = Self::from_env();
         store.persist = PersistConfig::from_env(enabled);
+        store.restore_from_disk();
         store
     }
 
@@ -572,6 +599,183 @@ impl HandleStore {
         }
     }
 
+    /// Boot scan (ADR-0049 §3): read `pinned.set`, walk `entries/` for
+    /// `.meta` sidecars, and populate the sparse `disk_index`. Bytes are
+    /// NOT eagerly loaded — disk-resident entries materialize on first
+    /// access. A boot scrub deletes orphan `.bin` (no sibling meta) and
+    /// orphan `.meta` (no sibling bin) so a crash mid-write doesn't leave
+    /// the tree inconsistent. No-op when persistence is disabled.
+    fn restore_from_disk(&self) {
+        let Some(cfg) = self.persist.clone() else {
+            return;
+        };
+        let pinned = read_pinned_set(&cfg);
+        let entries_dir = cfg.entries_dir();
+        let Ok(shards) = std::fs::read_dir(&entries_dir) else {
+            // Fresh store (no entries/ yet) — nothing to scan.
+            return;
+        };
+
+        let mut index: HashMap<HandleId, DiskEntry> = HashMap::new();
+        let mut orphan_bins = 0usize;
+        let mut orphan_metas = 0usize;
+        let mut scrubbed = 0usize;
+
+        for shard in shards.flatten() {
+            let shard_path = shard.path();
+            if !shard_path.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&shard_path) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                match ext {
+                    "meta" => {
+                        let bin = path.with_extension("bin");
+                        match read_meta_file(&path) {
+                            Some(meta) => {
+                                if !bin.exists() {
+                                    // Orphan meta — bytes gone; the meta is
+                                    // unreachable. Scrub it.
+                                    let _ = std::fs::remove_file(&path);
+                                    orphan_metas += 1;
+                                    scrubbed += 1;
+                                    continue;
+                                }
+                                let id = HandleId(meta.handle_id);
+                                index.insert(
+                                    id,
+                                    DiskEntry {
+                                        kind_id: KindId(meta.kind_id),
+                                        bytes_len: meta.bytes_len,
+                                        pinned: meta.pinned || pinned.contains(&id),
+                                        created_at: meta.created_at,
+                                    },
+                                );
+                            }
+                            None => {
+                                // Unreadable meta — drop it + its bin.
+                                let _ = std::fs::remove_file(&path);
+                                let _ = std::fs::remove_file(&bin);
+                                scrubbed += 1;
+                            }
+                        }
+                    }
+                    "bin" => {
+                        // Defer: a bin is valid only with its meta, which
+                        // the `meta` arm indexes. An orphan bin (no meta)
+                        // is caught in the second pass below.
+                    }
+                    "tmp" => {}
+                    _ => {}
+                }
+            }
+            // Second pass: scrub orphan bins (bin without sibling meta).
+            if let Ok(files) = std::fs::read_dir(&shard_path) {
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("bin") {
+                        let meta = path.with_extension("meta");
+                        if !meta.exists() {
+                            let _ = std::fs::remove_file(&path);
+                            orphan_bins += 1;
+                            scrubbed += 1;
+                        }
+                    }
+                    // Sweep leftover tmp files from interrupted writes.
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                        && name.contains(".tmp-")
+                    {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            inner.disk_index = index;
+        }
+        if scrubbed > 0 {
+            tracing::info!(
+                target: TARGET,
+                indexed = count,
+                orphan_bins,
+                orphan_metas,
+                "handle store boot scan complete; scrubbed inconsistent entries",
+            );
+        } else {
+            tracing::debug!(
+                target: TARGET,
+                indexed = count,
+                "handle store boot scan complete",
+            );
+        }
+    }
+
+    /// Resolve `id` from disk on an in-memory cache miss (ADR-0049 §3).
+    /// Materializes the bytes into the in-memory store with refcount 0
+    /// and returns them. A `.bin` that the index expected but that's
+    /// missing is treated as corruption: the index entry is dropped and
+    /// the id lands in the negative cache. Returns `None` when there's
+    /// no persistence, no index hit, or the id is negatively cached.
+    fn lookup_from_disk(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
+        let cfg = self.persist.as_ref()?;
+        // Read the index entry + negative-cache state under a read lock.
+        let disk_entry = {
+            let inner = self
+                .inner
+                .read()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            if inner.negative_cache.contains(&id) {
+                return None;
+            }
+            inner.disk_index.get(&id).cloned()?
+        };
+        let (bin_path, _) = entry_paths(&cfg.root, id);
+        match std::fs::read(&bin_path) {
+            Ok(bytes) => {
+                let mut inner = self
+                    .inner
+                    .write()
+                    .expect("handle store lock poisoned; fail-fast per ADR-0063");
+                let last_access = bump_clock(&mut inner);
+                inner.total_bytes += bytes.len();
+                inner.entries.insert(
+                    id,
+                    HandleEntry {
+                        kind: disk_entry.kind_id,
+                        bytes: bytes.clone(),
+                        refcount: 0,
+                        pinned: disk_entry.pinned,
+                        last_access,
+                    },
+                );
+                Some((disk_entry.kind_id, bytes))
+            }
+            Err(_) => {
+                // `.bin` missing but the index said it was there —
+                // corruption. Treat as a miss + remember it.
+                let mut inner = self
+                    .inner
+                    .write()
+                    .expect("handle store lock poisoned; fail-fast per ADR-0063");
+                inner.disk_index.remove(&id);
+                inner.note_negative(id);
+                None
+            }
+        }
+    }
+
     /// Mark `id` as pinned: it won't be evicted under memory pressure
     /// regardless of `refcount`. Returns `false` if the id isn't in
     /// the store.
@@ -677,14 +881,20 @@ impl HandleStore {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn get(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("handle store lock poisoned; fail-fast per ADR-0063");
-        let access = bump_clock(&mut inner);
-        let entry = inner.entries.get_mut(&id)?;
-        entry.last_access = access;
-        Some((entry.kind, entry.bytes.clone()))
+        {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            let access = bump_clock(&mut inner);
+            if let Some(entry) = inner.entries.get_mut(&id) {
+                entry.last_access = access;
+                return Some((entry.kind, entry.bytes.clone()));
+            }
+        }
+        // In-memory miss: fall through to the on-disk store (no-op when
+        // persistence is disabled or the id isn't indexed).
+        self.lookup_from_disk(id)
     }
 
     /// Park a `Mail` under `handle_id`. The mailer calls this when
@@ -771,19 +981,86 @@ impl HandleStore {
         self.max_bytes
     }
 
-    /// `true` if `id` is currently stored.
+    /// `true` if `id` is resolvable — in memory or on disk. A
+    /// disk-resident entry counts: the DAG executor's pre-dispatch
+    /// cache check (ADR-0048 §4) treats a disk hit as a hit so the
+    /// transform short-circuits and `get` materializes the bytes
+    /// (ADR-0049 §3).
     ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn contains(&self, id: HandleId) -> bool {
+        let inner = self
+            .inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
+        inner.entries.contains_key(&id) || inner.disk_index.contains_key(&id)
+    }
+
+    /// `true` if `id` is currently materialized in the in-memory store
+    /// (ignores the on-disk index). Test + introspection helper for
+    /// asserting lazy-materialization behaviour.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    pub fn contains_in_memory(&self, id: HandleId) -> bool {
         self.inner
             .read()
             .expect("handle store lock poisoned; fail-fast per ADR-0063")
             .entries
             .contains_key(&id)
     }
+
+    /// Count of entries in the on-disk index (disk-resident handles
+    /// discovered by the boot scan, ADR-0049 §3). Test + observability
+    /// helper.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    pub fn disk_index_len(&self) -> usize {
+        self.inner
+            .read()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063")
+            .disk_index
+            .len()
+    }
+}
+
+/// Read `pinned.set` into a set of handle ids. The file is a flat
+/// little-endian `u64` array. Missing / unreadable / malformed (length
+/// not a multiple of 8) → empty set with a warn for the malformed case.
+fn read_pinned_set(cfg: &PersistConfig) -> std::collections::HashSet<HandleId> {
+    let path = cfg.pinned_set_path();
+    let Ok(raw) = std::fs::read(&path) else {
+        return std::collections::HashSet::new();
+    };
+    if raw.len() % 8 != 0 {
+        tracing::warn!(
+            target: TARGET,
+            path = %path.display(),
+            len = raw.len(),
+            "pinned.set length not a multiple of 8; ignoring",
+        );
+        return std::collections::HashSet::new();
+    }
+    raw.chunks_exact(8)
+        .map(|c| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(c);
+            HandleId(u64::from_le_bytes(bytes))
+        })
+        .collect()
+}
+
+/// Read + decode a `.meta` sidecar. Returns `None` on read or decode
+/// failure (the boot scan treats that as a corrupt entry to scrub).
+fn read_meta_file(path: &Path) -> Option<HandleMeta> {
+    let raw = std::fs::read(path).ok()?;
+    postcard::from_bytes::<HandleMeta>(&raw).ok()
 }
 
 fn bump_clock(inner: &mut Inner) -> u64 {
