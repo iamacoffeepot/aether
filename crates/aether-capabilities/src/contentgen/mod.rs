@@ -28,5 +28,5 @@ pub use adapter::{
     GeminiArtifact, GeminiImageRequest, GeminiMusicRequest, GeminiResponse, StubAnthropicAdapter,
     StubGeminiAdapter,
 };
-pub use dispatch::{BlockingCall, DEFAULT_MAX_IN_FLIGHT, InFlightDispatch};
+pub use dispatch::{BlockingCall, DEFAULT_MAX_IN_FLIGHT, InFlightDispatch, LandedReply};
 pub use staging::{GEN_PREFIX, gen_root, stage_gen_output};

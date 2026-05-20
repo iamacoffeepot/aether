@@ -320,6 +320,7 @@ mod native {
             }
 
             let reply_to = OutboundReply::reply_target(ctx).unwrap_or(ReplyTo::NONE);
+            let root = ctx.in_flight_root();
             let adapter = Arc::clone(&self.adapter);
 
             let call: BlockingCall = Box::new(move || {
@@ -330,20 +331,36 @@ mod native {
                 build_result_mail(path, request_id, result)
             });
 
-            self.dispatch
-                .submit(&self.mailer, self.self_mailbox, request_id, reply_to, call);
+            self.dispatch.submit(
+                &self.mailer,
+                self.self_mailbox,
+                root,
+                request_id,
+                reply_to,
+                call,
+            );
         }
 
         /// Re-reply to the original caller for a landed result mail.
-        /// `take_reply_to` pops the stashed `ReplyTo` (FIFO-independent
-        /// correlation by `request_id`); `on_reply_landed` frees the
-        /// in-flight slot and drains the next pending request.
+        /// `take_landed` pops the stashed `ReplyTo` + settlement hold
+        /// (FIFO-independent correlation by `request_id`);
+        /// `on_reply_landed` frees the in-flight slot and drains the
+        /// next pending request.
+        ///
+        /// ADR-0080 §12 ordering: re-reply through `reply_to` first,
+        /// then let the `LandedReply` (carrying the hold) drop at the
+        /// end of this scope so the re-reply's `Sent` event is queued
+        /// before the guard's `Release` — settlement fires exactly once
+        /// the reply is on the wire (iamacoffeepot/aether#1031).
         fn on_result_landed<K>(&mut self, ctx: &mut NativeCtx<'_>, request_id: u64, result: &K)
         where
             K: Kind + serde::Serialize,
         {
-            if let Some(reply_to) = self.dispatch.take_reply_to(request_id) {
-                OutboundReply::reply_to(ctx, reply_to, result);
+            if let Some(landed) = self.dispatch.take_landed(request_id) {
+                OutboundReply::reply_to(ctx, landed.reply_to, result);
+                // `landed.hold` drops here, after the re-reply — `Sent`
+                // precedes `Release`.
+                drop(landed);
             } else {
                 tracing::warn!(
                     target: "aether_capabilities::anthropic",

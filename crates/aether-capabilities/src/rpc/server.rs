@@ -890,6 +890,84 @@ mod tests {
         }
     }
 
+    /// iamacoffeepot/aether#1031 end-to-end: a `Call` against an actor
+    /// that replies through the content-gen `InFlightDispatch`
+    /// (spawned worker -> loopback result -> re-reply) must still
+    /// produce a `ReplyEvent` followed by a `ReplyEnd`. The settlement
+    /// hold keeps the chain open across the spawn, so the RPC server's
+    /// settlement subscription wakes only *after* the deferred reply
+    /// arrives — not when the handler returns. Pre-fix the chain settled
+    /// the instant `on_deferred_echo` returned and the deferred reply
+    /// landed in an already-closed call (no `ReplyEvent`, only a bare
+    /// `ReplyEnd`, then the late reply dropped).
+    #[test]
+    fn call_deferred_echo_settles_after_reply() {
+        use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::trace::TraceObserverCapability;
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<DeferredEchoActor>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
+        complete_handshake(&mut stream);
+
+        let payload = postcard::to_allocvec(&DeferredEchoRequest { value: 99 })
+            .expect("test setup: DeferredEchoRequest serializes via postcard");
+        let mailbox = mailbox_id_from_name(<DeferredEchoActor as Actor>::NAMESPACE);
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: Some(0xdef),
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(mailbox),
+                    from: None,
+                    kind: <DeferredEchoRequest as Kind>::ID,
+                    correlation_id: None,
+                    payload,
+                },
+            },
+        )
+        .expect("test: write_frame Call to rpc server");
+
+        // The deferred reply arrives as a ReplyEvent — proving the chain
+        // stayed open long enough for the spawned worker's reply to be
+        // intercepted (not dropped into an already-settled call).
+        let event: WireFrame = read_frame(&mut stream).expect("read ReplyEvent");
+        let envelope = match event {
+            WireFrame::ReplyEvent { cid, envelope } => {
+                assert_eq!(cid, 0xdef);
+                envelope
+            }
+            other => panic!("expected ReplyEvent for the deferred reply, got {other:?}"),
+        };
+        assert_eq!(envelope.kind, <DeferredEchoReply as Kind>::ID);
+        let decoded: DeferredEchoReply =
+            postcard::from_bytes(&envelope.payload).expect("decode deferred reply");
+        assert_eq!(decoded.value, 99);
+
+        // ReplyEnd follows — settlement fired after the deferred reply,
+        // not when the handler returned.
+        let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+        match end {
+            WireFrame::ReplyEnd { cid, result } => {
+                assert_eq!(cid, 0xdef);
+                result.expect("ReplyEnd result Ok");
+            }
+            other => panic!("expected ReplyEnd, got {other:?}"),
+        }
+    }
+
     /// Fire-and-forget `Call { cid: None }` skips reply correlation
     /// entirely — no settlement subscription is created, no
     /// `ReplyEnd` is written. Verify by sending a Call with cid None
