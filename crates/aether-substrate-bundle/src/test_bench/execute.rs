@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use std::error;
 use std::fmt;
 
-use aether_data::KindId;
+use aether_data::{Kind, KindId};
+use aether_kinds::MailEnvelope;
 use serde::de::DeserializeOwned;
 
 use super::bench::{TestBench, TestBenchError};
@@ -33,12 +34,14 @@ use super::bench::{TestBench, TestBenchError};
 /// [`TestBench`]; the sequencer waits for the op's causal chain to
 /// drain before proceeding to the next step.
 ///
+/// Build ops with the typed constructors ([`BenchOp::send_mail`],
+/// [`BenchOp::send_and_await`], [`BenchOp::advance`],
+/// [`BenchOp::capture`]) — they encode the payload from a typed kind
+/// via [`Kind::encode_into_bytes`], so callers never hand-encode.
+///
 /// Recipients are mailbox *names* (`"aether.fs"`, `"aether.component"`,
 /// a loaded component's trampoline address) — mailbox ids are
-/// one-way name hashes, so every `TestBench` send primitive resolves
-/// by name. Encode `payload` at the call site with the kind's wire
-/// encoding (`encode_struct` for postcard kinds, `encode` for cast
-/// kinds).
+/// one-way name hashes, so every send resolves by name.
 pub enum BenchOp {
     /// Run `ticks` complete frames. Maps to [`TestBench::advance`].
     Advance { ticks: u32 },
@@ -63,6 +66,63 @@ pub enum BenchOp {
     /// [`TestBench::capture`]. Does not dispatch a tick — sequence a
     /// [`BenchOp::Advance`] before it if the world must move first.
     Capture,
+    /// Capture with pre/after mail bundles dispatched atomically
+    /// around the readback (the `CaptureFrame` shape, ADR-0020): `pre`
+    /// lands *before* the readback so its effects appear in the PNG,
+    /// `after` runs *after* (cleanup). Maps to
+    /// [`TestBench::capture_with_mails`]. Use this rather than
+    /// decomposing into separate `SendMail` + `Capture` ops when the
+    /// pre-mail's geometry must land in the same frame as the
+    /// readback.
+    CaptureWithMails {
+        pre: Vec<MailEnvelope>,
+        after: Vec<MailEnvelope>,
+    },
+}
+
+impl BenchOp {
+    /// Run `ticks` complete frames.
+    #[must_use]
+    pub fn advance(ticks: u32) -> Self {
+        Self::Advance { ticks }
+    }
+
+    /// Capture the current frame.
+    #[must_use]
+    pub fn capture() -> Self {
+        Self::Capture
+    }
+
+    /// Capture with pre/after mail bundles dispatched atomically
+    /// around the readback. See [`BenchOp::CaptureWithMails`].
+    #[must_use]
+    pub fn capture_with_mails(pre: Vec<MailEnvelope>, after: Vec<MailEnvelope>) -> Self {
+        Self::CaptureWithMails { pre, after }
+    }
+
+    /// Fire-and-settle a typed mail (no reply awaited). Encodes `mail`
+    /// via [`Kind::encode_into_bytes`] — works for both cast and
+    /// postcard kinds.
+    #[must_use]
+    pub fn send_mail<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
+        Self::SendMail {
+            recipient: recipient.into(),
+            kind: K::ID,
+            payload: mail.encode_into_bytes(),
+        }
+    }
+
+    /// Send a typed mail and block until a reply arrives. Decode the
+    /// reply downstream with [`ExecutionResult::reply`]. Encodes
+    /// `mail` via [`Kind::encode_into_bytes`].
+    #[must_use]
+    pub fn send_and_await<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
+        Self::SendAndAwait {
+            recipient: recipient.into(),
+            kind: K::ID,
+            payload: mail.encode_into_bytes(),
+        }
+    }
 }
 
 /// One output per executed op, keyed by the op's label in
@@ -212,6 +272,9 @@ impl TestBench {
                     .send_bytes_and_await(&recipient, kind, payload)
                     .map(BenchOutput::Replied),
                 BenchOp::Capture => self.capture().map(BenchOutput::Captured),
+                BenchOp::CaptureWithMails { pre, after } => self
+                    .capture_with_mails(pre, after)
+                    .map(BenchOutput::Captured),
             };
             match result {
                 Ok(output) => {

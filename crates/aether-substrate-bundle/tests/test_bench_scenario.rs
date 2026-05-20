@@ -1,16 +1,16 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
 //! a `TestBench` and exercises one substrate primitive — input
 //! subscription, drop, `capture_frame` round-trip, `replace_component`
-//! (all via `aether-test-fixture-probe`), or the IO sink's
-//! read/write/delete/list round trips (which talk directly to the
-//! chassis `aether.fs` via `TestBench::send_and_await_reply`).
+//! (all via `aether-test-fixture-probe`), or the chassis `aether.fs`
+//! adapter's read/write/delete/list round trips — driving every step
+//! through `TestBench::execute` (issue 868).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The fixture's wasm hasn't been built — fixture-loading tests
 //!   read `target/wasm32-unknown-unknown/{debug,release}/aether_test_fixture_probe.wasm`
-//!   and skip with an `eprintln!` when it's absent. IO scenarios
+//!   and skip with an `eprintln!` when it's absent. fs scenarios
 //!   don't load the fixture, so they only need wgpu. CI builds the
 //!   fixture wasm before invoking `cargo test`; setting
 //!   `AETHER_REQUIRE_RUNTIME=1` (CI does) flips both skip points
@@ -29,10 +29,11 @@
 
 use std::path::Path;
 
-use aether_data::{Kind, encode_struct, mailbox_id_from_name};
+use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    Delete, DeleteResult, DropComponent, FsError, List, ListResult, LoadComponent, MailEnvelope,
-    Read, ReadResult, ReplaceComponent, Write, WriteResult,
+    Delete, DeleteResult, DropComponent, DropResult, FsError, List, ListResult, LoadComponent,
+    LoadResult, MailEnvelope, Read, ReadResult, ReplaceComponent, ReplaceResult, Write,
+    WriteResult,
 };
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -79,28 +80,36 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
     }
 }
 
-/// Loads the probe into the bench, blocking until the substrate
-/// replies with `LoadResult` so subsequent `advance` calls see a
-/// fully-instantiated and tick-subscribed component. Pre-Phase-4 of
-/// issue 603 the bench's `aether.control` mailbox (renamed to
-/// `aether.component` in issue 638 phase 3) served as a single FIFO
-/// point for both load and advance; Phase 4 split advance onto
-/// `aether.test_bench`, so load is no longer naturally ordered ahead
-/// of advance — the test must await `LoadResult` explicitly.
-fn load_probe(bench: &mut TestBench, wasm_path: &Path) {
+/// Load the probe into the bench via `execute`, blocking on the
+/// `LoadResult` reply so subsequent `advance` ops see a
+/// fully-instantiated and tick-subscribed component. Returns the
+/// loaded component's `MailboxId` (the trampoline address), which
+/// the drop / replace scenarios target. Pre-Phase-4 of issue 603 the
+/// bench's `aether.control` mailbox (renamed to `aether.component` in
+/// issue 638 phase 3) served as a single FIFO point for both load and
+/// advance; Phase 4 split advance onto `aether.test_bench`, so load is
+/// no longer naturally ordered ahead of advance — `SendAndAwait`
+/// blocks on `LoadResult` before returning.
+fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let result: aether_kinds::LoadResult = bench
-        .send_and_await_reply(
-            "aether.component",
-            &LoadComponent {
-                wasm,
-                name: Some(PROBE_NAME.to_owned()),
-            },
-        )
-        .expect("await load_component reply");
-    match result {
-        aether_kinds::LoadResult::Ok { .. } => {}
-        aether_kinds::LoadResult::Err { error } => panic!("load_component: {error}"),
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(PROBE_NAME.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("load_component: {error}"),
     }
 }
 
@@ -115,7 +124,9 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_probe(&mut bench, &wasm_path);
 
-    bench.advance(5).expect("advance 5");
+    bench
+        .execute(vec![("advance", BenchOp::advance(5))])
+        .expect("advance 5");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         5,
@@ -135,9 +146,11 @@ fn drop_component_silences_tick_echoes() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_probe(&mut bench, &wasm_path);
+    let probe_mbox = load_probe(&mut bench, &wasm_path);
 
-    bench.advance(3).expect("pre-drop advance");
+    bench
+        .execute(vec![("warm", BenchOp::advance(3))])
+        .expect("pre-drop advance");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         3,
@@ -145,27 +158,34 @@ fn drop_component_silences_tick_echoes() {
         bench.observed_kinds(),
     );
 
-    // Phase 4 split advance off `aether.component` (formerly `aether.control`), so the drop mail no
-    // longer naturally orders ahead of the next advance. Await
-    // `DropResult` explicitly so the probe's mailbox is fully gone
-    // before the next advance dispatches ticks.
-    let probe_mbox = mailbox_id_from_name(&probe_address());
-    let drop_result: aether_kinds::DropResult = bench
-        .send_and_await_reply(
-            "aether.component",
-            &DropComponent {
-                mailbox_id: probe_mbox,
-            },
-        )
-        .expect("await drop_component reply");
-    match drop_result {
-        aether_kinds::DropResult::Ok => {}
-        aether_kinds::DropResult::Err { error } => panic!("drop_component: {error}"),
+    // Phase 4 split advance off `aether.component` (formerly
+    // `aether.control`), so the drop mail no longer naturally orders
+    // ahead of the next advance. `SendAndAwait` blocks on `DropResult`
+    // so the probe's mailbox is fully gone before the next advance.
+    let dropped = bench
+        .execute(vec![(
+            "drop",
+            BenchOp::send_and_await(
+                "aether.component",
+                &DropComponent {
+                    mailbox_id: probe_mbox,
+                },
+            ),
+        )])
+        .expect("drop sequence");
+    match dropped
+        .reply::<DropResult>("drop")
+        .expect("decode DropResult")
+    {
+        DropResult::Ok => {}
+        DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
     let post_drop = bench.count_observed(TICK_OBSERVED);
 
-    bench.advance(10).expect("post-drop advance");
+    bench
+        .execute(vec![("post", BenchOp::advance(10))])
+        .expect("post-drop advance");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         post_drop,
@@ -188,18 +208,14 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_probe(&mut bench, &wasm_path);
-    // Advance once so the probe is loaded + subscribed; the capture
-    // path doesn't dispatch Tick on its own (`run_frame` runs with
-    // dispatch_tick=false during capture), so we need at least one
-    // prior tick to have wired the subscriber set.
-    bench.advance(1).expect("priming advance");
 
-    // Capture's `run_frame` runs with `dispatch_tick=false`, so the
-    // probe won't auto-tick during the captured frame. The pre-mail
-    // bundle wires it up manually: set_render flips state to "visible
-    // red", and a synthesised `aether.lifecycle.tick` immediately drives
-    // the probe's on_tick to emit a `DrawTriangle` into the bench's
-    // frame_vertices buffer right before the GPU readback.
+    // Capture's frame runs without a dispatched tick, so the probe
+    // won't auto-tick during the captured frame. The pre-mail bundle
+    // wires it up: `set_render` flips state to "visible red", and a
+    // synthesised `aether.lifecycle.tick` drives the probe's on_tick
+    // to emit a `DrawTriangle` into the frame buffer right before the
+    // GPU readback. The after-mail bundle flips render back to
+    // invisible after the readback.
     let pre = vec![
         envelope(
             &probe_address(),
@@ -217,9 +233,6 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
             count: 1,
         },
     ];
-    // After-mail bundle dispatches *after* the readback. Flips
-    // render state to invisible so the post-cleanup capture is back
-    // at the chassis clear color.
     let after = vec![envelope(
         &probe_address(),
         &SetRender {
@@ -229,20 +242,31 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
             visible: 0,
         },
     )];
-    let png = bench
-        .capture_with_mails(pre, after)
-        .expect("capture with mails");
-    let img = decode_png(&png).expect("decode capture png");
+
+    // Priming advance subscribes the probe to ticks; the
+    // capture-with-mails op then dispatches the pre bundle, reads
+    // back, and dispatches the after bundle — all in one frame.
+    let captured = bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            ("snap", BenchOp::capture_with_mails(pre, after)),
+        ])
+        .expect("prime + capture-with-mails");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
     differs_from_background(&img, 5).expect("captured frame should contain a non-background pixel");
 
     // Cleanup ran: probe.render is now { visible: 0 }. Advance once
     // and capture again — the next tick won't emit DrawTriangle, so
-    // the frame stays at clear color. (The next advance does fire a
-    // tick against the probe, but with visible=0 the probe broadcasts
-    // tick_observed without emitting any geometry.)
-    bench.advance(1).expect("post-cleanup advance");
-    let png2 = bench.capture().expect("plain capture after cleanup");
-    let img2 = decode_png(&png2).expect("decode cleanup png");
+    // the frame stays at clear color.
+    let cleaned = bench
+        .execute(vec![
+            ("cleanup_advance", BenchOp::advance(1)),
+            ("snap2", BenchOp::capture()),
+        ])
+        .expect("post-cleanup advance + capture");
+    let png2 = cleaned.captured("snap2").expect("snap2 step ran");
+    let img2 = decode_png(png2).expect("decode cleanup png");
     assert!(
         differs_from_background(&img2, 5).is_err(),
         "after after-mail cleanup the captured frame should be uniform clear color, \
@@ -257,46 +281,17 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
 /// proving the new component instance inherits the input
 /// subscriptions and continues receiving ticks at the original
 /// mailbox.
-///
-/// Issue 868 worked example: the load + warm-up and the post-replace
-/// advance are driven through [`TestBench::execute`] as labelled op
-/// sequences. The load reply is decoded back via `reply::<LoadResult>`
-/// to feed the replace step's target mailbox id. Replace runs as its
-/// own sequence so the post-replace tick baseline is sampled before
-/// the next advance dispatches ticks; the `count_observed` assertions
-/// stay imperative between the `execute` calls.
 #[test]
 fn replace_component_preserves_mailbox_identity() {
     let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let probe_mbox = load_probe(&mut bench, &wasm_path);
 
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = bench
-        .execute(vec![
-            (
-                "load",
-                BenchOp::SendAndAwait {
-                    recipient: "aether.component".to_owned(),
-                    kind: LoadComponent::ID,
-                    payload: encode_struct(&LoadComponent {
-                        wasm: wasm.clone(),
-                        name: Some(PROBE_NAME.to_owned()),
-                    }),
-                },
-            ),
-            ("warm", BenchOp::Advance { ticks: 3 }),
-        ])
-        .expect("load + warm sequence");
-
-    let probe_mbox = match loaded
-        .reply::<aether_kinds::LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        aether_kinds::LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        aether_kinds::LoadResult::Err { error } => panic!("load_component: {error}"),
-    };
+    bench
+        .execute(vec![("warm", BenchOp::advance(3))])
+        .expect("pre-replace advance");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         3,
@@ -305,35 +300,33 @@ fn replace_component_preserves_mailbox_identity() {
     );
 
     // Replace the wasm at the same mailbox id with the same fixture
-    // binary. Phase 4 of issue 603 split advance off
-    // `aether.component`, so replace mail no longer naturally orders
-    // ahead of the next advance — `SendAndAwait` blocks on the
-    // `ReplaceResult` reply before the post-replace advance.
+    // binary. `SendAndAwait` blocks on `ReplaceResult` so the splice
+    // completes before the post-replace baseline is sampled.
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
     let swapped = bench
         .execute(vec![(
             "swap",
-            BenchOp::SendAndAwait {
-                recipient: "aether.component".to_owned(),
-                kind: ReplaceComponent::ID,
-                payload: encode_struct(&ReplaceComponent {
+            BenchOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
                     mailbox_id: probe_mbox,
                     wasm,
                     drain_timeout_ms: None,
-                }),
-            },
+                },
+            ),
         )])
         .expect("replace sequence");
     match swapped
-        .reply::<aether_kinds::ReplaceResult>("swap")
+        .reply::<ReplaceResult>("swap")
         .expect("decode ReplaceResult")
     {
-        aether_kinds::ReplaceResult::Ok { .. } => {}
-        aether_kinds::ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post_replace_baseline = bench.count_observed(TICK_OBSERVED);
     bench
-        .execute(vec![("post", BenchOp::Advance { ticks: 4 })])
+        .execute(vec![("post", BenchOp::advance(4))])
         .expect("post-replace advance");
     let post_replace = bench.count_observed(TICK_OBSERVED);
 
@@ -346,7 +339,7 @@ fn replace_component_preserves_mailbox_identity() {
     );
 }
 
-/// IO scenarios need wgpu (the bench unconditionally builds a
+/// fs scenarios need wgpu (the bench unconditionally builds a
 /// `Gpu` at boot) but not the fixture wasm. Skips on wgpu-less
 /// runners and panics under `AETHER_REQUIRE_RUNTIME` so a
 /// CI-side regression is loud.
@@ -364,64 +357,76 @@ fn require_wgpu_only() -> bool {
 }
 
 const FS_MAILBOX: &str = "aether.fs";
-const IO_NAMESPACE_SAVE: &str = "save";
+const FS_NAMESPACE_SAVE: &str = "save";
 
 /// `aether.fs.write` followed by `aether.fs.read` round-trips the
 /// bytes through the local-file adapter (ADR-0041). Both replies
 /// echo the originating namespace + path for correlation; the read
 /// reply also carries the bytes verbatim.
 #[test]
-fn io_write_then_read_round_trips_in_save_namespace() {
+fn fs_write_then_read_round_trips_in_save_namespace() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-io");
+    let sandbox = init_save_sandbox("test-bench-fs");
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
 
-    let path = "io-roundtrip.bin".to_owned();
+    let path = "fs-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
 
-    let write_reply: WriteResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Write {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path.clone(),
-                bytes: payload.clone(),
-            },
-        )
-        .expect("write reply");
-    match write_reply {
+    let result = bench
+        .execute(vec![
+            (
+                "write",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &Write {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        path: path.clone(),
+                        bytes: payload.clone(),
+                    },
+                ),
+            ),
+            (
+                "read",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &Read {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        path: path.clone(),
+                    },
+                ),
+            ),
+        ])
+        .expect("write + read");
+
+    match result
+        .reply::<WriteResult>("write")
+        .expect("decode WriteResult")
+    {
         WriteResult::Ok {
             namespace,
             path: echoed_path,
         } => {
-            assert_eq!(namespace, IO_NAMESPACE_SAVE);
+            assert_eq!(namespace, FS_NAMESPACE_SAVE);
             assert_eq!(echoed_path, path);
         }
         WriteResult::Err { error, .. } => panic!("write failed: {error:?}"),
     }
-
-    let read_reply: ReadResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Read {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path.clone(),
-            },
-        )
-        .expect("read reply");
-    match read_reply {
+    match result
+        .reply::<ReadResult>("read")
+        .expect("decode ReadResult")
+    {
         ReadResult::Ok {
             namespace,
             path: echoed_path,
             bytes,
         } => {
-            assert_eq!(namespace, IO_NAMESPACE_SAVE);
+            assert_eq!(namespace, FS_NAMESPACE_SAVE);
             assert_eq!(echoed_path, path);
             assert_eq!(bytes, payload);
         }
@@ -433,53 +438,67 @@ fn io_write_then_read_round_trips_in_save_namespace() {
 /// follow-up `aether.fs.read` of the same path returns
 /// `Err { NotFound }`.
 #[test]
-fn io_delete_removes_written_file() {
+fn fs_delete_removes_written_file() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-io");
+    let sandbox = init_save_sandbox("test-bench-fs");
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
 
-    let path = "io-delete.bin".to_owned();
-    let _: WriteResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Write {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path.clone(),
-                bytes: vec![1, 2, 3],
-            },
-        )
-        .expect("write reply");
+    let path = "fs-delete.bin".to_owned();
+    // A failed write would abort the sequence with `OpFailed`, so
+    // reaching the asserts below means the write succeeded.
+    let result = bench
+        .execute(vec![
+            (
+                "write",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &Write {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        path: path.clone(),
+                        bytes: vec![1, 2, 3],
+                    },
+                ),
+            ),
+            (
+                "delete",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &Delete {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        path: path.clone(),
+                    },
+                ),
+            ),
+            (
+                "read",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &Read {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        path,
+                    },
+                ),
+            ),
+        ])
+        .expect("write + delete + read");
 
-    let delete_reply: DeleteResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Delete {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path.clone(),
-            },
-        )
-        .expect("delete reply");
-    match delete_reply {
+    match result
+        .reply::<DeleteResult>("delete")
+        .expect("decode DeleteResult")
+    {
         DeleteResult::Ok { .. } => {}
         DeleteResult::Err { error, .. } => panic!("delete failed: {error:?}"),
     }
-
-    let read_after_delete: ReadResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Read {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path,
-            },
-        )
-        .expect("read-after-delete reply");
-    match read_after_delete {
+    match result
+        .reply::<ReadResult>("read")
+        .expect("decode ReadResult")
+    {
         ReadResult::Ok { .. } => panic!("read should not have found a deleted file"),
         ReadResult::Err {
             error: FsError::NotFound,
@@ -493,11 +512,11 @@ fn io_delete_removes_written_file() {
 /// write to `<sandbox>/probe-list.bin`, listing the empty prefix
 /// in `save` returns an entry list containing the bare filename.
 #[test]
-fn io_list_returns_written_path() {
+fn fs_list_returns_written_path() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-io");
+    let sandbox = init_save_sandbox("test-bench-fs");
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
@@ -505,27 +524,36 @@ fn io_list_returns_written_path() {
         .expect("boot");
 
     let path = "probe-list.bin".to_owned();
-    let _: WriteResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Write {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: path.clone(),
-                bytes: vec![0],
-            },
-        )
-        .expect("write reply");
+    let result = bench
+        .execute(vec![
+            (
+                "write",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &Write {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        path: path.clone(),
+                        bytes: vec![0],
+                    },
+                ),
+            ),
+            (
+                "list",
+                BenchOp::send_and_await(
+                    FS_MAILBOX,
+                    &List {
+                        namespace: FS_NAMESPACE_SAVE.to_owned(),
+                        prefix: String::new(),
+                    },
+                ),
+            ),
+        ])
+        .expect("write + list");
 
-    let list_reply: ListResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &List {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                prefix: String::new(),
-            },
-        )
-        .expect("list reply");
-    match list_reply {
+    match result
+        .reply::<ListResult>("list")
+        .expect("decode ListResult")
+    {
         ListResult::Ok { entries, .. } => {
             assert!(
                 entries.iter().any(|e| e == &path),
@@ -539,27 +567,34 @@ fn io_list_returns_written_path() {
 /// Reading a path that was never written returns
 /// `Err { NotFound }`. Negative companion to the round-trip test.
 #[test]
-fn io_read_unknown_path_returns_not_found() {
+fn fs_read_unknown_path_returns_not_found() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-io");
+    let sandbox = init_save_sandbox("test-bench-fs");
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
 
-    let read_reply: ReadResult = bench
-        .send_and_await_reply(
-            FS_MAILBOX,
-            &Read {
-                namespace: IO_NAMESPACE_SAVE.to_owned(),
-                path: "nonexistent-do-not-create.bin".to_owned(),
-            },
-        )
-        .expect("read reply");
-    match read_reply {
+    let result = bench
+        .execute(vec![(
+            "read",
+            BenchOp::send_and_await(
+                FS_MAILBOX,
+                &Read {
+                    namespace: FS_NAMESPACE_SAVE.to_owned(),
+                    path: "nonexistent-do-not-create.bin".to_owned(),
+                },
+            ),
+        )])
+        .expect("read");
+
+    match result
+        .reply::<ReadResult>("read")
+        .expect("decode ReadResult")
+    {
         ReadResult::Ok { .. } => panic!("read should not have found a never-written file"),
         ReadResult::Err {
             error: FsError::NotFound,
