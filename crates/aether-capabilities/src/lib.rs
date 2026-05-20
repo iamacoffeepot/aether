@@ -28,6 +28,12 @@
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod component;
+// Shared content-gen infrastructure (ADR-0050 §2). Native-only — the
+// dispatch helper, staging, and adapter traits all lean on the
+// substrate runtime (`Mailer`, `LocalFileAdapter`), so the module
+// elides cleanly on the wasm-component build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod contentgen;
 pub mod engine;
 pub mod fs;
 pub mod handle;
@@ -49,6 +55,13 @@ pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
 pub use component::ComponentHostCapability;
+// ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
+// provider caps (issue 1014 / 1015) embed these.
+#[cfg(not(target_arch = "wasm32"))]
+pub use contentgen::{
+    AnthropicAdapter, BlockingCall, GeminiAdapter, InFlightDispatch, StubAnthropicAdapter,
+    StubGeminiAdapter, stage_gen_output,
+};
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). It re-exports only on the native
 // target — wasm-component consumers see the cap stub via

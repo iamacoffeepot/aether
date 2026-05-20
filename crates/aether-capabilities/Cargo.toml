@@ -41,6 +41,7 @@ native = [
     "dep:tracing",
     "dep:ureq",
     "dep:url",
+    "dep:uuid",
     "dep:wasmtime",
 ]
 
@@ -79,6 +80,12 @@ postcard = { version = "1.1", optional = true, features = ["alloc"] }
 tracing = { version = "0.1", optional = true }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
+# `v4` random-name generation for `save://gen/<uuid>.{png,wav}` output
+# staging (ADR-0050). `aether-data` pulls `uuid` with `serde`-only
+# features for its `Uuid` wire type; the staging helper needs the
+# random `v4` constructor, hence a direct dep here (issue 1013 §Side
+# findings — direct-dep keeps `aether-data`'s no_std/alloc posture clean).
+uuid = { version = "1", optional = true, features = ["v4"] }
 # wasmtime is reached for by ComponentHostCapability (issue 603 +
 # issue 638 phase 3 rename) — the cap holds the Engine/Linker/Module
 # the substrate previously held in its `ControlPlane` struct. Same
