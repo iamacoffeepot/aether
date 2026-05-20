@@ -143,7 +143,17 @@ trait AnthropicAdapter: Send + Sync {
 
 Each adapter dispatches by `model: String` through a `model → ApiShape` table; per-shape request/response constructors translate to/from the underlying wire. Unknown model → `…Error::UnknownModel { model, supported }`. Adding a known model that speaks an existing shape is a one-line table entry — no kind change, no caller change.
 
-Adapter calls run on the cap's actor thread (per the per-actor mpsc discipline, ADR-0038) but each provider call dispatches through `aether-tokio-runtime` for the HTTP / subprocess I/O; the cap holds a `tokio::task::spawn` per in-flight request and routes the response back via the `Mailer`'s loopback channel — the same shape `aether.tcp` (ADR-0043) and `aether.http` use. Long-tail outbound calls don't block per-component scheduling.
+#### Dispatch: cap-local spawn-and-die with a per-cap concurrency bound
+
+Each cap is a single-threaded actor — one OS thread per actor (ADR-0038) — so request intake is already serialized on the mail queue. Long-tail provider calls (multi-second image generation, a `claude` subprocess) must not block that intake, but the adapter call itself is blocking (`ureq` for HTTPS, a child process for the CLI — the same blocking-client posture as `aether.http`). The cap reconciles the two with **cap-local spawn-and-die**:
+
+- For each request the actor takes off its mail queue, if `in_flight < max_in_flight` it spawns **one ephemeral OS thread** to run the blocking call and increments `in_flight`; otherwise it pushes the request onto a `pending: VecDeque`.
+- The ephemeral thread does the blocking HTTPS / subprocess call, sends the result back as a reply mail through the `Mailer` loopback (correlated to the request by `request_id`), and **dies**. It touches **no actor state** — its only end-of-life action is sending the reply, the "alert" that the call finished.
+- When that reply lands back **on the actor thread**, the actor decrements `in_flight`, applies any stateful bookkeeping (rate-limit accounting), and pops + spawns the next `pending` request if the queue is non-empty.
+
+There is **no `Semaphore` and no `Mutex`.** Because the actor is single-threaded, the concurrency bound is just an `in_flight: usize` counter plus a `pending` queue living in the actor's lock-free state (consistent with the actor-state-no-locks discipline). The "permit release" *is* the reply mail; the single-threaded actor is the mutual exclusion. The ephemeral-thread-per-call shape matches the existing `aether.tcp` cap (ADR-0043), which spawns a sidecar OS thread and routes its result back through the same `Mailer` loopback.
+
+`max_in_flight` is per-cap and configurable. It **doubles as rate-limit throttling**: the paid provider endpoints (Anthropic Messages, Gemini) are rate-limited, so bounding the number of concurrent in-flight calls is correct behaviour, not just resource hygiene — the bound keeps the cap from issuing a burst the provider would reject.
 
 `save://gen/` is the default output namespace for binary outputs. Configurable via `AETHER_GEN_DIR`; the resolved path lands in the reply kind.
 
@@ -277,3 +287,4 @@ Provider integration tests are the only place in the DAG-handles tree that touch
 - **Parked, future ADR**: embeddings cap.
 - **Parked, future ADR**: additional provider caps (`aether.openai`, `aether.suno`, `aether.runway`) as use cases arrive.
 - **Parked, future ADR**: per-component / per-model capability gradations; credential vault; TOML config layer (matches ADR-0041's deferral).
+- **Parked, future generalization — global named thread-pool registry.** The cap-local `in_flight` counter + `pending` queue (§2) is sufficient until backpressure has to be shared *across* caps. When multiple caps want shared, configurable, bounded pools — or when CPU-bound vs I/O-bound work needs centralized sizing — the generalization is a substrate-level registry of named pools selected by a `ThreadPool` type (it qualifies *which* pool a unit of work runs on: an HTTP pool vs a CPU/transform pool — explicitly **not** named `PoolKey`). This relates to ADR-0048's transform compute pool, the CPU-bound sibling; both the I/O-bound provider-call pool here and that transform pool would eventually be named `ThreadPool`s under one registry. Out of 0.4 scope: the per-cap counter is enough until cross-cap backpressure forces the generalization.
