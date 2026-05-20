@@ -23,12 +23,11 @@ mod nanobanana;
 
 use std::time::Duration;
 
-use ureq::http::Request as UreqRequest;
-
 use crate::contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiArtifact, GeminiImageRequest, GeminiMusicRequest,
     GeminiResponse,
 };
+use crate::contentgen::shared;
 
 pub use config::GeminiConfig;
 
@@ -130,11 +129,8 @@ impl UreqGeminiAdapter {
     /// Build the adapter with a resolved key + timeout.
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
-        let config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: ureq::Agent::new_with_config(config),
+            agent: shared::agent(),
             api_key,
             timeout,
         }
@@ -176,7 +172,8 @@ impl GeminiAdapter for UreqGeminiAdapter {
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
 
-        let (status, retry_after_ms, text) = run(&self.agent, http_req, self.timeout)?;
+        let (status, retry_after_ms, text) =
+            shared::run_request(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
             return Err(format!(
                 "status={status} retry_after_ms={retry_after_ms:?} body={text}"
@@ -214,7 +211,8 @@ impl GeminiAdapter for UreqGeminiAdapter {
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
 
-        let (status, retry_after_ms, text) = run(&self.agent, http_req, self.timeout)?;
+        let (status, retry_after_ms, text) =
+            shared::run_request(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
             return Err(format!(
                 "status={status} retry_after_ms={retry_after_ms:?} body={text}"
@@ -236,35 +234,6 @@ impl GeminiAdapter for UreqGeminiAdapter {
             thought_signature: None,
         })
     }
-}
-
-/// Run a built request through the agent and return
-/// `(status, retry_after_ms, body_text)`.
-fn run(
-    agent: &ureq::Agent,
-    http_req: UreqRequest<Vec<u8>>,
-    timeout: Duration,
-) -> Result<(u16, Option<u32>, String), String> {
-    use ureq::RequestExt;
-    let mut response = http_req
-        .with_agent(agent)
-        .configure()
-        .timeout_global(Some(timeout))
-        .build()
-        .run()
-        .map_err(|e| format!("gemini request: {e}"))?;
-    let status = response.status().as_u16();
-    let retry_after_ms = response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .map(|secs| secs.saturating_mul(1000));
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("read body: {e}"))?;
-    Ok((status, retry_after_ms, text))
 }
 
 /// Minimal standard-alphabet base64 encoder for reference-image bytes
@@ -720,7 +689,9 @@ mod native {
         use crate::contentgen::adapter::STUB_PNG;
         use crate::contentgen::adapter::StubGeminiAdapter;
         use crate::contentgen::staging::stage_gen_output_under;
-        use crate::test_chassis::{TestChassis, fresh_substrate, test_mailer_and_rx};
+        use crate::test_chassis::{
+            TestChassis, decode_session_reply, fresh_substrate, test_mailer_and_rx,
+        };
         use aether_actor::Actor;
         use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
         use aether_kinds::{
@@ -741,26 +712,9 @@ mod native {
             ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
 
-        /// Drain egress until a `ToSession` reply of kind `K` arrives.
-        /// The cap's `on_*_generate` handler spawns a real ephemeral
-        /// thread whose loopback mail bubbles up as a non-`ToSession`
-        /// egress (mailbox 0 is unregistered in `new_for_test`); the
-        /// test drives the re-reply via `on_*_result`, so we skip the
-        /// bubble-ups and take the `ToSession` re-reply.
+        /// Thin alias over the shared `decode_session_reply`.
         fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-            loop {
-                let event = rx
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("test: egress event arrives within deadline");
-                if let EgressEvent::ToSession {
-                    kind_name, payload, ..
-                } = event
-                    && kind_name == K::NAME
-                {
-                    return postcard::from_bytes(&payload)
-                        .expect("test: reply payload decodes via postcard");
-                }
-            }
+            decode_session_reply(rx)
         }
 
         fn nb_request(model: &str, aspect_ratio: AspectRatio) -> NanobananaGenerate {

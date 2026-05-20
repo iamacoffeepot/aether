@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use ureq::http::Request;
 
 use crate::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
+use crate::contentgen::shared;
 
 /// Official Messages API endpoint.
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -44,11 +45,8 @@ impl UreqAnthropicAdapter {
     /// resolves the key from `ANTHROPIC_API_KEY`; tests build directly.
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
-        let config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: ureq::Agent::new_with_config(config),
+            agent: shared::agent(),
             api_key,
             timeout,
         }
@@ -57,8 +55,6 @@ impl UreqAnthropicAdapter {
     /// Run a Messages completion. Returns the parsed response or a
     /// free-form error string the cap maps onto `AnthropicError`.
     pub fn messages_send(&self, req: &AnthropicRequest) -> Result<AnthropicResponse, String> {
-        use ureq::RequestExt;
-
         let started = Instant::now();
         let body = build_request_body(req);
         let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode request: {e}"))?;
@@ -73,25 +69,8 @@ impl UreqAnthropicAdapter {
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
 
-        let mut response = http_req
-            .with_agent(&self.agent)
-            .configure()
-            .timeout_global(Some(self.timeout))
-            .build()
-            .run()
-            .map_err(|e| format!("messages request: {e}"))?;
-
-        let status = response.status().as_u16();
-        let retry_after_ms = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .map(|secs| secs.saturating_mul(1000));
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| format!("read body: {e}"))?;
+        let (status, retry_after_ms, text) =
+            shared::run_request(&self.agent, http_req, self.timeout)?;
 
         if !(200..300).contains(&status) {
             // Encode the status + retry-after into the error string so

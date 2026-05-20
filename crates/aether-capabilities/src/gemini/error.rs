@@ -7,6 +7,8 @@
 
 use aether_kinds::GeminiError;
 
+use crate::contentgen::shared::{parse_status_prefix, snippet};
+
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`GeminiError::Unauthorized`]. The `DisabledGeminiAdapter`
 /// returns this for every request.
@@ -44,34 +46,6 @@ pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
         return status_to_error(status, retry_after_ms, rest);
     }
     GeminiError::AdapterError(snippet(raw))
-}
-
-fn parse_status_prefix(rest: &str) -> Option<(u16, Option<u32>)> {
-    let mut parts = rest.split_whitespace();
-    let status = parts.next()?.parse::<u16>().ok()?;
-    let retry_after_ms = parts.next().and_then(|tok| {
-        tok.strip_prefix("retry_after_ms=").and_then(|v| {
-            v.strip_prefix("Some(")
-                .and_then(|s| s.strip_suffix(')'))
-                .and_then(|n| n.parse::<u32>().ok())
-        })
-    });
-    Some((status, retry_after_ms))
-}
-
-/// Trim a response body to a short diagnostic snippet so an
-/// `AdapterError` message stays log-sized.
-fn snippet(body: &str) -> String {
-    const MAX: usize = 256;
-    if body.len() <= MAX {
-        body.to_string()
-    } else {
-        let mut end = MAX;
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &body[..end])
-    }
 }
 
 #[cfg(test)]

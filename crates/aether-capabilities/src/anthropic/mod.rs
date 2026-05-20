@@ -539,7 +539,9 @@ mod native {
         use crate::contentgen::adapter::{
             AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
         };
-        use crate::test_chassis::{TestChassis, fresh_substrate, test_mailer_and_rx};
+        use crate::test_chassis::{
+            TestChassis, decode_session_reply, fresh_substrate, test_mailer_and_rx,
+        };
         use aether_actor::Actor;
         use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
         use aether_kinds::{
@@ -565,27 +567,10 @@ mod native {
             }]
         }
 
-        /// Drain egress until a `ToSession` reply of kind `K` arrives,
-        /// decoding it. The cap's `on_*_send` handler spawns a real
-        /// ephemeral thread whose loopback mail (recipient = the test's
-        /// stand-in mailbox 0, which is unregistered) bubbles up to the
-        /// loopback outbound as a non-`ToSession` egress; the test
-        /// drives the actual re-reply via `on_*_result`, so we skip
-        /// those bubble-ups and take the `ToSession` re-reply.
+        /// Thin alias over the shared `decode_session_reply` so call
+        /// sites stay terse.
         fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-            loop {
-                let event = rx
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("test: egress event arrives within deadline");
-                if let EgressEvent::ToSession {
-                    kind_name, payload, ..
-                } = event
-                    && kind_name == K::NAME
-                {
-                    return postcard::from_bytes(&payload)
-                        .expect("test: reply payload decodes via postcard");
-                }
-            }
+            decode_session_reply(rx)
         }
 
         /// Adapter that records the prompt it saw and returns canned text.

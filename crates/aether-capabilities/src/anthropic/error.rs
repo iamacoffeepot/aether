@@ -9,6 +9,7 @@
 use aether_kinds::AnthropicError;
 
 use crate::anthropic::cli::CLI_NOT_FOUND;
+use crate::contentgen::shared::{parse_status_prefix, snippet};
 
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`AnthropicError::Unauthorized`] without the adapter depending
@@ -37,24 +38,6 @@ pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {
     AnthropicError::AdapterError(snippet(raw))
 }
 
-/// Parse the `status=<n> retry_after_ms=<...>` prefix the Messages
-/// backend prepends to a non-2xx error string. Returns
-/// `(status, retry_after_ms)` on a clean parse.
-fn parse_status_prefix(rest: &str) -> Option<(u16, Option<u32>)> {
-    let mut parts = rest.split_whitespace();
-    let status = parts.next()?.parse::<u16>().ok()?;
-    let retry_after_ms = parts.next().and_then(|tok| {
-        tok.strip_prefix("retry_after_ms=").and_then(|v| {
-            // The backend formats `Option<u32>` via Debug — `Some(1500)`
-            // or `None`. Extract the inner integer when present.
-            v.strip_prefix("Some(")
-                .and_then(|s| s.strip_suffix(')'))
-                .and_then(|n| n.parse::<u32>().ok())
-        })
-    });
-    Some((status, retry_after_ms))
-}
-
 /// Map an HTTP status code from the Messages API onto an
 /// [`AnthropicError`]. `body` is the response text, threaded through so
 /// `AdapterError` can preserve provider diagnostics for the status
@@ -76,25 +59,9 @@ pub fn status_to_error(status: u16, retry_after_ms: Option<u32>, body: &str) -> 
     }
 }
 
-/// Trim a response body to a short diagnostic snippet so an
-/// `AdapterError` message stays log-sized even when the provider
-/// returns a multi-kilobyte error page.
-fn snippet(body: &str) -> String {
-    const MAX: usize = 256;
-    if body.len() <= MAX {
-        body.to_string()
-    } else {
-        let mut end = MAX;
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &body[..end])
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{snippet, status_to_error};
+    use super::status_to_error;
     use aether_kinds::AnthropicError;
 
     #[test]
@@ -126,13 +93,5 @@ mod tests {
         };
         assert!(msg.contains("500"));
         assert!(msg.contains("internal error"));
-    }
-
-    #[test]
-    fn snippet_truncates_long_bodies_on_char_boundary() {
-        let long = "x".repeat(1000);
-        let s = snippet(&long);
-        assert!(s.len() <= 260);
-        assert!(s.ends_with('…'));
     }
 }

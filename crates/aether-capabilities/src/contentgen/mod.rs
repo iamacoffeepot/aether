@@ -7,19 +7,20 @@
 //! loop, the `save://gen/` staging convention, or the stub-adapter
 //! shapes:
 //!
-//! - [`dispatch::InFlightDispatch`] — the actor-state half of the
-//!   spawn-and-die model (in-flight counter + pending queue +
-//!   `request_id` correlation map). The embedding cap calls `submit` /
+//! - [`InFlightDispatch`] — the actor-state half of the spawn-and-die
+//!   model (in-flight counter + pending queue + `request_id`
+//!   correlation map). The embedding cap calls `submit` /
 //!   `on_reply_landed` from its handlers.
-//! - [`staging::stage_gen_output`] — write generated binary bytes to a
-//!   fresh `save://gen/<uuid>.<ext>` and return the path the reply
-//!   carries (binary outputs never ride the mail wire).
+//! - [`stage_gen_output`] — write generated binary bytes to a fresh
+//!   `save://gen/<uuid>.<ext>` and return the path the reply carries
+//!   (binary outputs never ride the mail wire).
 //! - [`adapter`] — the `AnthropicAdapter` / `GeminiAdapter` traits plus
 //!   `StubAnthropicAdapter` / `StubGeminiAdapter` no-op impls so both
 //!   caps land scaffolding + CI smokes before any network code exists.
 
 pub mod adapter;
 pub mod dispatch;
+pub mod shared;
 pub mod staging;
 
 pub use adapter::{
