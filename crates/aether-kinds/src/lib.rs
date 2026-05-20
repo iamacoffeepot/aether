@@ -13,9 +13,12 @@
 
 extern crate alloc;
 
+pub mod dag;
 pub mod descriptors;
 pub mod keycode;
 pub mod trace;
+
+pub use dag::*;
 
 use alloc::string::String;
 use bytemuck::{Pod, Zeroable};
