@@ -737,6 +737,32 @@ mod tests {
         // No panic is the test; the warn path logs and returns.
     }
 
+    /// Issue 963: recorder capture row — `(kind, correlation, payload)`
+    /// for each reply a stand-in RPC-server mailbox receives. Aliased
+    /// to keep the `Arc<RwLock<Vec<...>>>` off the `type_complexity`
+    /// lint at the two recorder sites below.
+    type RecordedReplies = Arc<RwLock<Vec<(KindId, u64, Vec<u8>)>>>;
+
+    /// Register an inline mailbox that records each reply's kind,
+    /// correlation, and payload — a stand-in for the RPC-server reply
+    /// target the MCP Call's `Component` reply hop lands at. Returns
+    /// the recorder's `MailboxId` plus the shared capture buffer.
+    fn record_inline(registry: &Registry) -> (MailboxId, RecordedReplies) {
+        let recorded: RecordedReplies = Arc::new(RwLock::new(Vec::new()));
+        let recorded_for_handler = Arc::clone(&recorded);
+        let recorder_id = registry.register_inline(
+            "test.rpc_server_reply",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                recorded_for_handler.write().unwrap().push((
+                    dispatch.kind,
+                    dispatch.sender.correlation_id,
+                    dispatch.payload.to_vec(),
+                ));
+            }),
+        );
+        (recorder_id, recorded)
+    }
+
     /// Issue 963: `aether.log.tail` to an unregistered mailbox (no
     /// outbound) synthesizes a `LogTailResult::Err` reply routed back
     /// to the inbound's `Component` reply target instead of warn-
@@ -752,20 +778,7 @@ mod tests {
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Mailer::new(Arc::clone(&registry), store);
 
-        // Recording stand-in for the RPC-server reply target: capture
-        // each reply's kind, correlation, and payload.
-        let recorded: Arc<RwLock<Vec<(KindId, u64, Vec<u8>)>>> = Arc::new(RwLock::new(Vec::new()));
-        let recorded_for_handler = Arc::clone(&recorded);
-        let recorder_id = registry.register_inline(
-            "test.rpc_server_reply",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                recorded_for_handler.write().unwrap().push((
-                    dispatch.kind,
-                    dispatch.sender.correlation_id,
-                    dispatch.payload.to_vec(),
-                ));
-            }),
-        );
+        let (recorder_id, recorded) = record_inline(&registry);
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         mailer.push(
@@ -784,7 +797,9 @@ mod tests {
                 error.contains(&unknown.to_string()),
                 "error names the recipient id: {error}",
             ),
-            other => panic!("expected LogTailResult::Err, got {other:?}"),
+            other @ LogTailResult::Ok { .. } => {
+                panic!("expected LogTailResult::Err, got {other:?}")
+            }
         }
     }
 
@@ -799,18 +814,7 @@ mod tests {
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Mailer::new(Arc::clone(&registry), store);
 
-        let recorded: Arc<RwLock<Vec<(KindId, u64, Vec<u8>)>>> = Arc::new(RwLock::new(Vec::new()));
-        let recorded_for_handler = Arc::clone(&recorded);
-        let recorder_id = registry.register_inline(
-            "test.rpc_server_reply",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                recorded_for_handler.write().unwrap().push((
-                    dispatch.kind,
-                    dispatch.sender.correlation_id,
-                    dispatch.payload.to_vec(),
-                ));
-            }),
-        );
+        let (recorder_id, recorded) = record_inline(&registry);
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         // Arbitrary non-`LogTail` kind id — the reply branch must not fire.
