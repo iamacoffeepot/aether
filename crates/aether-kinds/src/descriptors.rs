@@ -51,11 +51,12 @@ mod tests {
     use aether_data::{Primitive, SchemaType};
 
     use crate::{
-        Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, Fetch, FetchResult, Key,
-        List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove, NoteOff, NoteOn, Ping,
-        Pong, ProcessExited, Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain,
-        Spawn, SpawnResult, SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick,
-        UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        CliSend, CliSendResult, Delete, DeleteResult, DrawTriangle, DropComponent, DropResult,
+        Fetch, FetchResult, Key, List, ListResult, LoadComponent, LoadResult, MessagesSend,
+        MessagesSendResult, MouseButton, MouseMove, NoteOff, NoteOn, Ping, Pong, ProcessExited,
+        Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult,
+        SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick, UnsubscribeAll,
+        UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -127,6 +128,44 @@ mod tests {
         assert!(names.contains(&Terminate::NAME));
         assert!(names.contains(&TerminateResult::NAME));
         assert!(names.contains(&ProcessExited::NAME));
+        assert!(names.contains(&MessagesSend::NAME));
+        assert!(names.contains(&MessagesSendResult::NAME));
+        assert!(names.contains(&CliSend::NAME));
+        assert!(names.contains(&CliSendResult::NAME));
+    }
+
+    #[test]
+    fn anthropic_requests_are_postcard_schemas() {
+        // ADR-0050: the two send kinds carry String/Vec/Option fields,
+        // so they must serialize as non-cast (postcard) structs — the
+        // hub builds them from agent params via the postcard encoder.
+        let descs = all();
+        for name in [MessagesSend::NAME, CliSend::NAME] {
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: anthropic request kind is registered in descriptor inventory");
+            let SchemaType::Struct { repr_c, .. } = &d.schema else {
+                panic!("{name} should be Struct, got {:?}", d.schema);
+            };
+            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+        }
+    }
+
+    #[test]
+    fn anthropic_results_are_enum_schemas() {
+        let descs = all();
+        for name in [MessagesSendResult::NAME, CliSendResult::NAME] {
+            let d = descs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("test setup: anthropic result kind is registered in descriptor inventory");
+            assert!(
+                matches!(d.schema, SchemaType::Enum { .. }),
+                "{name} should be Enum, got {:?}",
+                d.schema
+            );
+        }
     }
 
     #[test]

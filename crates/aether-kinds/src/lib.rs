@@ -1982,6 +1982,148 @@ mod control_plane {
         pub exit_code: Option<i32>,
         pub reason: String,
     }
+
+    // ADR-0050 per-provider content-gen caps. The `aether.anthropic`
+    // cap (issue 1014) exposes two sibling text-completion request
+    // kinds — `messages.send` (HTTPS to the official Messages API) and
+    // `cli.send` (the local `claude` subprocess against the user's
+    // subscription) — with identical input schemas; the routing choice
+    // is the visible kind name, not an opaque adapter detail. Both
+    // reply with a `*_result` Ok/Err enum carrying the shared `Usage`
+    // accounting (also consumed by the `aether.gemini` media kinds,
+    // issue 1015) on `Ok` and a provider-specific `AnthropicError` on
+    // `Err`. All postcard-shaped — every request carries `String` /
+    // `Vec` / `Option` fields.
+
+    /// Conversation role on a [`Message`]. The Messages API only
+    /// distinguishes user vs assistant turns; `system` rides as a
+    /// separate top-level field on the request, not a role.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Role {
+        User,
+        Assistant,
+    }
+
+    /// One turn in an Anthropic completion request. `content` is the
+    /// flat text of the turn (v1 doesn't model multi-part content
+    /// blocks); `role` distinguishes user from assistant.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct Message {
+        pub role: Role,
+        pub content: String,
+    }
+
+    /// Token + wall-clock accounting returned on a successful
+    /// content-gen completion. Shared across the Anthropic text kinds
+    /// (issue 1014) and the Gemini media kinds (issue 1015). The CLI
+    /// backend can only report `wall_clock_ms` (the subprocess gives no
+    /// token counts), leaving the token / cost fields zero / `None`;
+    /// the Messages API and the Gemini APIs populate the rest where the
+    /// provider reports them.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Usage {
+        pub input_tokens: u32,
+        pub output_tokens: u32,
+        pub wall_clock_ms: u32,
+        pub cost_micros: Option<u64>,
+    }
+
+    /// Structured failure reason for an Anthropic completion (ADR-0050
+    /// §1). Typed variants cover the branches a caller routinely
+    /// matches on — `Overloaded` / `RateLimited` → back off,
+    /// `ContextLengthExceeded` → trim the prompt, `Unauthorized` →
+    /// config issue, `ContentPolicyRefused` → surface to the user,
+    /// `CliNotFound` → the `claude` binary isn't on PATH,
+    /// `UnknownModel` → typo / unsupported id. `AdapterError` is the
+    /// catchall preserving backend-specific detail as free-form text.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum AnthropicError {
+        Overloaded,
+        RateLimited {
+            retry_after_ms: Option<u32>,
+        },
+        ContextLengthExceeded {
+            limit: u32,
+        },
+        Unauthorized,
+        ContentPolicyRefused,
+        CliNotFound,
+        UnknownModel {
+            model: String,
+            supported: Vec<String>,
+        },
+        AdapterError(String),
+    }
+
+    /// `aether.anthropic.messages.send` — request a text completion via
+    /// the official Anthropic Messages API (HTTPS). Mailed to the
+    /// `"aether.anthropic"` mailbox; reply lands as
+    /// `MessagesSendResult`. `request_id` correlates the reply
+    /// (caller-minted, echoed on both arms). `model` selects the
+    /// Messages model; `max_tokens` / `temperature` / `system` are the
+    /// usual completion knobs.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.anthropic.messages.send")]
+    pub struct MessagesSend {
+        pub request_id: u64,
+        pub model: String,
+        pub messages: Vec<Message>,
+        pub max_tokens: Option<u32>,
+        pub temperature: Option<f32>,
+        pub system: Option<String>,
+    }
+
+    /// `aether.anthropic.cli.send` — request a text completion via the
+    /// local `claude` subprocess (the user's subscription rail).
+    /// Identical input schema to [`MessagesSend`]; the routing choice
+    /// is the kind name. Reply lands as `CliSendResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.anthropic.cli.send")]
+    pub struct CliSend {
+        pub request_id: u64,
+        pub model: String,
+        pub messages: Vec<Message>,
+        pub max_tokens: Option<u32>,
+        pub temperature: Option<f32>,
+        pub system: Option<String>,
+    }
+
+    /// Reply to [`MessagesSend`]. Both arms echo the originating
+    /// `request_id` for correlation. `Ok` carries the completion text,
+    /// the model the provider actually served, and `Usage` accounting;
+    /// `Err` carries an `AnthropicError`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.anthropic.messages.send_result")]
+    pub enum MessagesSendResult {
+        Ok {
+            request_id: u64,
+            text: String,
+            model_used: String,
+            usage: Usage,
+        },
+        Err {
+            request_id: u64,
+            error: AnthropicError,
+        },
+    }
+
+    /// Reply to [`CliSend`]. Same shape as [`MessagesSendResult`]; the
+    /// CLI backend populates only `Usage.wall_clock_ms` (the subprocess
+    /// reports no token counts).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.anthropic.cli.send_result")]
+    pub enum CliSendResult {
+        Ok {
+            request_id: u64,
+            text: String,
+            model_used: String,
+            usage: Usage,
+        },
+        Err {
+            request_id: u64,
+            error: AnthropicError,
+        },
+    }
 }
 
 #[cfg(test)]

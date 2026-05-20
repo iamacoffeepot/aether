@@ -25,6 +25,11 @@
 //! [`NativeActor`]: aether_substrate::actor::native::NativeActor
 //! [`Actor`]: aether_actor::Actor
 
+// `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
+// only — embeds the native-only contentgen dispatch helper and makes
+// blocking ureq / subprocess calls.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anthropic;
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod component;
@@ -54,6 +59,10 @@ pub mod window;
 pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
+// ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
+// part of the same native-only module.
+#[cfg(not(target_arch = "wasm32"))]
+pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::ComponentHostCapability;
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.

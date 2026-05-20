@@ -38,6 +38,7 @@ native = [
     "dep:bytemuck",
     "dep:dirs",
     "dep:postcard",
+    "dep:serde_json",
     "dep:tracing",
     "dep:ureq",
     "dep:url",
@@ -77,6 +78,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 bytemuck = { version = "1.19", optional = true }
 dirs = { version = "6", optional = true }
 postcard = { version = "1.1", optional = true, features = ["alloc"] }
+# JSON request/response bodies for the content-gen provider APIs
+# (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
+serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }

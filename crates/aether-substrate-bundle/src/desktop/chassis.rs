@@ -15,8 +15,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig, RenderCapability,
-    RenderConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
+    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, InputConfig,
+    RenderCapability, RenderConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
     fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_kinds::WindowMode;
@@ -77,6 +77,9 @@ pub struct DesktopEnv {
     pub capture_queue: CaptureQueue,
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConf,
+    /// ADR-0050 `aether.anthropic` cap config (issue 1014). Resolved
+    /// from `ANTHROPIC_API_KEY` + `AETHER_ANTHROPIC_*`.
+    pub anthropic: AnthropicConfig,
     pub audio: AudioConf,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
@@ -107,6 +110,7 @@ impl DesktopEnv {
         let capture_queue = CaptureQueue::new();
 
         let http = HttpConf::from_env();
+        let anthropic = AnthropicConfig::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let audio = AudioConf::from_env();
 
@@ -144,6 +148,7 @@ impl DesktopEnv {
             capture_queue,
             namespace_roots,
             http,
+            anthropic,
             audio,
             boot_mode,
             boot_size,
@@ -198,6 +203,7 @@ impl DesktopChassis {
             capture_queue,
             namespace_roots,
             http,
+            anthropic,
             audio,
             boot_mode,
             boot_size,
@@ -271,6 +277,7 @@ impl DesktopChassis {
             component_host_config,
             namespace_roots,
             http,
+            anthropic,
         };
         // ADR-0082 §1 / PR 3b: desktop's lifecycle is the shared Tick-
         // only graph today. A future PR adds `Render` / `Present`

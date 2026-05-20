@@ -17,9 +17,9 @@ use std::sync::Arc;
 use aether_actor::Actor;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    ComponentHostCapability, ComponentHostConfig, FsCapability, HandleCapability, HttpCapability,
-    InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
-    trace::TraceObserverCapability,
+    AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
+    FsCapability, HandleCapability, HttpCapability, InputCapability, InputConfig, TcpCapability,
+    fs::NamespaceRoots, http::HttpConfig, trace::TraceObserverCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
@@ -69,6 +69,7 @@ pub struct CommonBoot {
     pub component_host_config: ComponentHostConfig,
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConfig,
+    pub anthropic: AnthropicConfig,
 }
 
 /// Wire the aborter, worker count, and the common caps every full-
@@ -89,6 +90,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<FsCapability>(boot.namespace_roots)
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
+        .with_actor::<AnthropicCapability>(boot.anthropic)
 }
 
 /// Issue 763 P2: boot the RPC server only when `rpc_addr` is set,

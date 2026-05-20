@@ -92,6 +92,7 @@ dependencies = [
  "png",
  "postcard",
  "serde",
+ "serde_json",
  "tracing",
  "ureq",
  "url",
