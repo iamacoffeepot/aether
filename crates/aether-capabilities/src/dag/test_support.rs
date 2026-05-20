@@ -18,11 +18,14 @@
 //!   content-gen `InFlightDispatch` (spawn-and-die worker + settlement
 //!   hold), exercising the exact-settlement-through-the-hold path.
 
+use std::hint::spin_loop;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use aether_data::Ref;
+use aether_data::transform;
 use aether_kinds::Bundle;
 
 /// Source request — the DAG `Source` node's opaque payload. `fail`
@@ -407,6 +410,246 @@ mod test_deferred_call {
                 .on_reply_landed(&self.mailer, self.self_mailbox);
         }
     }
+}
+
+/// A postcard-shape number kind — the transform fixtures' input +
+/// output (ADR-0048 §3, iamacoffeepot/aether#1012). Postcard (serde)
+/// rather than cast because `ctx.reply` requires `Serialize`; the
+/// transform's decode / encode picks postcard automatically from the
+/// non-`#[repr(C)]` shape, so source bytes and transform input bytes
+/// agree.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.dag.test.number")]
+pub struct TestNumber {
+    pub value: u64,
+    // A structurally-distinguishing second field. Canonical schema
+    // bytes are positional-only (no field names), so a bare `{ value:
+    // u64 }` would collide with every other single-`u64` kind in the
+    // test vocabulary (`TestNumberRequest`, `TestCallReply`, …) and the
+    // observer's `Ref<TestNumber>` slot would resolve to the wrong kind
+    // id. The extra `u32` makes the `{ u64, u32 }` shape unique.
+    pub tag: u32,
+}
+
+/// Source request for the number source — `value` seeds the reply.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.dag.test.number_request")]
+pub struct TestNumberRequest {
+    pub value: u64,
+}
+
+/// Observer request consuming one `Ref<TestNumber>` slot — the
+/// transform fixtures wire a transform's output into this so the test
+/// asserts the resolved value.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.dag.test.number_observed")]
+pub struct TestNumberObserved {
+    pub input: Ref<TestNumber>,
+}
+
+/// Variable-length output kind for the `big_output` fixture.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.dag.test.bytes")]
+pub struct TestBytes {
+    pub bytes: Vec<u8>,
+}
+
+/// Gate the `slow` transform spins on. The timeout / off-thread fixtures
+/// open it (set `true`) after asserting the executor behaviour, so the
+/// orphaned worker can finish and the pool joins cleanly on shutdown.
+/// A transform fn references this `static` directly (a path expression
+/// to a static is not on the deny-list); the busy-spin keeps the body
+/// free of any `std::time` / `core::time` path the purity scan rejects.
+pub static SLOW_TRANSFORM_GATE: AtomicBool = AtomicBool::new(false);
+
+/// Pure transform: double the wrapped value. The headline happy-path
+/// fixture's compute.
+#[transform]
+fn double(x: TestNumber) -> TestNumber {
+    TestNumber {
+        value: x.value.wrapping_mul(2),
+        tag: x.tag,
+    }
+}
+
+/// Panicking transform — exercises ADR-0048 §6 panic = failure.
+#[transform]
+fn boom(_x: TestNumber) -> TestNumber {
+    panic!("boom");
+}
+
+/// Counts actual `seed` invocations — the cache-hit fixture asserts it
+/// stays at 1 across two identical DAGs (a re-invocation would bump it).
+/// Incrementing a `static` atomic from a transform body is permitted by
+/// the deny-list (no host fn / context / time path); it makes the
+/// invoke count directly observable from the test thread, which the
+/// cap-owned executor's `transform_call_count` is not.
+pub static SEED_INVOKE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Zero-input transform — produces a constant. Two DAGs each containing
+/// just this node share the same content-address (`f(transform_id,
+/// [])`), so the second hits the cache: the
+/// `transform_skips_invoke_on_cache_hit` fixture (ADR-0048 §4,
+/// iamacoffeepot/aether#982) asserts [`SEED_INVOKE_COUNT`] stays at 1.
+#[transform]
+fn seed() -> TestNumber {
+    SEED_INVOKE_COUNT.fetch_add(1, Ordering::AcqRel);
+    TestNumber { value: 7, tag: 0 }
+}
+
+/// Spinning transform — busy-waits on `SLOW_TRANSFORM_GATE` so the
+/// timeout / off-thread fixtures can hold it open. No `std::time` path
+/// (the deny-list forbids it); a bare spin loop over a `static` flag.
+#[transform]
+fn slow(x: TestNumber) -> TestNumber {
+    while !SLOW_TRANSFORM_GATE.load(Ordering::Acquire) {
+        spin_loop();
+    }
+    x
+}
+
+/// Transform that produces a large output — exercises the ADR-0048 §6
+/// output-byte cap when paired with a tiny
+/// `AETHER_TRANSFORM_MAX_OUTPUT_BYTES`.
+#[transform]
+fn big_output(x: TestNumber) -> TestBytes {
+    let len = usize::try_from(x.value).unwrap_or(usize::MAX).min(1 << 20);
+    TestBytes {
+        bytes: vec![0u8; len],
+    }
+}
+
+#[aether_actor::bridge(singleton)]
+mod test_number_source {
+    use super::{TestNumber, TestNumberRequest};
+    use aether_actor::{MailCtx, actor};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+
+    /// Source replying a [`TestNumber`] — feeds a transform's input
+    /// handle with the cast-shape bytes the transform decodes.
+    pub struct TestNumberSourceActor;
+
+    #[actor]
+    impl NativeActor for TestNumberSourceActor {
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.dag.test.number_source";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+        #[handler]
+        fn on_request(&mut self, ctx: &mut NativeCtx<'_>, mail: TestNumberRequest) {
+            ctx.reply(&TestNumber {
+                value: mail.value,
+                tag: 0,
+            });
+        }
+    }
+}
+
+#[aether_actor::bridge(singleton)]
+mod test_number_observer {
+    use super::{Recorder, TestNumberObserved};
+    use aether_actor::actor;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+
+    /// Observer recording the resolved `Ref<TestNumber>` it receives —
+    /// the transform fixtures assert against the recorded value.
+    pub struct TestNumberObserverActor {
+        recorder: Recorder<TestNumberObserved>,
+    }
+
+    #[actor]
+    impl NativeActor for TestNumberObserverActor {
+        type Config = Recorder<TestNumberObserved>;
+        const NAMESPACE: &'static str = "aether.dag.test.number_observer";
+
+        fn init(
+            recorder: Recorder<TestNumberObserved>,
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
+            Ok(Self { recorder })
+        }
+
+        #[allow(clippy::needless_pass_by_value)]
+        #[handler]
+        fn on_number_observed(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestNumberObserved) {
+            self.recorder
+                .lock()
+                .expect("recorder mutex poisoned")
+                .push(mail);
+        }
+    }
+}
+
+/// Resolve the `double` transform's global id from the link-time
+/// inventory, for descriptor construction in the fixtures.
+#[must_use]
+pub fn double_transform_id() -> aether_data::TransformId {
+    transform_id_by_name("double")
+}
+
+/// Resolve the `boom` transform's id.
+#[must_use]
+pub fn boom_transform_id() -> aether_data::TransformId {
+    transform_id_by_name("boom")
+}
+
+/// Resolve the `slow` transform's id.
+#[must_use]
+pub fn slow_transform_id() -> aether_data::TransformId {
+    transform_id_by_name("slow")
+}
+
+/// Resolve the `big_output` transform's id.
+#[must_use]
+pub fn big_output_transform_id() -> aether_data::TransformId {
+    transform_id_by_name("big_output")
+}
+
+/// Resolve the zero-input `seed` transform's id.
+#[must_use]
+pub fn seed_transform_id() -> aether_data::TransformId {
+    transform_id_by_name("seed")
+}
+
+/// Look up a registered transform's id by its fn-name tail.
+fn transform_id_by_name(tail: &str) -> aether_data::TransformId {
+    let Some(entry) = aether_data::transforms().find(|t| t.name.ends_with(&format!("::{tail}")))
+    else {
+        panic!("transform `{tail}` not registered in link-time inventory");
+    };
+    entry.transform_id
 }
 
 // The actor structs are re-exported at this module's root by the

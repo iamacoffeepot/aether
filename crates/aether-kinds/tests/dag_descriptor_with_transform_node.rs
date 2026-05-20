@@ -20,6 +20,7 @@ fn descriptor_with_transform_node_roundtrips() {
                 id: NodeId(1),
                 transform_id: TransformId(0x5000),
                 output_kind_id: KindId(0x6000),
+                timeout_ms: None,
             },
             Node::Observer {
                 id: NodeId(2),

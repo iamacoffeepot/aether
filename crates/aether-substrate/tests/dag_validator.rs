@@ -149,7 +149,7 @@ fn validator_accepts_minimal_dag() {
         }],
     };
 
-    let validated = validator::validate(&descriptor, &reg, &caps).expect("minimal dag validates");
+    let validated = validator::validate(&descriptor, &reg, &caps, None).expect("minimal dag validates");
     assert_eq!(validated.topo_order.len(), 2);
     // Source must precede the observer in topo order.
     let src_pos = validated.topo_order.iter().position(|n| *n == NodeId(0));
@@ -166,7 +166,7 @@ fn validator_rejects_unsupported_version() {
         nodes: vec![],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::TooLarge { reason }) => {
             assert!(
                 reason.contains("version"),
@@ -203,7 +203,7 @@ fn validator_rejects_duplicate_node_id() {
         edges: vec![],
     };
     assert_eq!(
-        validator::validate(&descriptor, &reg, &caps),
+        validator::validate(&descriptor, &reg, &caps, None),
         Err(DagError::DuplicateNodeId(NodeId(0)))
     );
 }
@@ -227,7 +227,7 @@ fn validator_rejects_unknown_endpoint() {
         }],
     };
     assert_eq!(
-        validator::validate(&descriptor, &reg, &caps),
+        validator::validate(&descriptor, &reg, &caps, None),
         Err(DagError::UnknownNodeId(NodeId(99)))
     );
 }
@@ -269,7 +269,7 @@ fn validator_rejects_cycle() {
             },
         ],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::Cycle(residual)) => {
             let set: BTreeSet<NodeId> = residual.into_iter().collect();
             assert_eq!(set, [NodeId(0), NodeId(1), NodeId(2)].into_iter().collect());
@@ -306,7 +306,7 @@ fn validator_rejects_source_with_incoming_edge() {
         }],
     };
     assert_eq!(
-        validator::validate(&descriptor, &reg, &caps),
+        validator::validate(&descriptor, &reg, &caps, None),
         Err(DagError::SourceWithIncomingEdge(NodeId(0)))
     );
 }
@@ -337,7 +337,7 @@ fn validator_rejects_observer_with_outgoing_edge() {
         }],
     };
     assert_eq!(
-        validator::validate(&descriptor, &reg, &caps),
+        validator::validate(&descriptor, &reg, &caps, None),
         Err(DagError::ObserverWithOutgoingEdge(NodeId(0)))
     );
 }
@@ -358,7 +358,7 @@ fn validator_rejects_unknown_sink() {
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::UnknownSink(_)) => {}
         other => panic!("expected UnknownSink, got {other:?}"),
     }
@@ -378,7 +378,7 @@ fn validator_rejects_unknown_recipient() {
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::UnknownRecipient(_)) => {}
         other => panic!("expected UnknownRecipient, got {other:?}"),
     }
@@ -401,7 +401,7 @@ fn validator_rejects_kind_not_accepted() {
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::KindNotAccepted { node, kind_id, .. }) => {
             assert_eq!(node, NodeId(0));
             assert_eq!(kind_id, Signal::ID);
@@ -425,7 +425,7 @@ fn validator_rejects_observer_kind_not_accepted_no_fallback() {
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::KindNotAccepted { node, .. }) => assert_eq!(node, NodeId(0)),
         other => panic!("expected KindNotAccepted, got {other:?}"),
     }
@@ -447,7 +447,7 @@ fn validator_accepts_observer_via_fallback() {
         }],
         edges: vec![],
     };
-    assert!(validator::validate(&descriptor, &reg, &caps).is_ok());
+    assert!(validator::validate(&descriptor, &reg, &caps, None).is_ok());
 }
 
 #[test]
@@ -467,7 +467,7 @@ fn validator_rejects_too_large_nodes() {
         nodes,
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::TooLarge { reason }) => {
             assert!(reason.contains("node count"), "reason: {reason}");
         }
@@ -485,10 +485,11 @@ fn validator_rejects_transform_node() {
             id: NodeId(0),
             transform_id: TransformId(0x1234),
             output_kind_id: Signal::ID,
+            timeout_ms: None,
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::UnknownTransform { node, transform_id }) => {
             assert_eq!(node, NodeId(0));
             assert_eq!(transform_id, TransformId(0x1234));
@@ -549,7 +550,7 @@ fn validator_accepts_call_node() {
         ],
     };
 
-    validator::validate(&descriptor, &reg, &caps).expect("call dag validates");
+    validator::validate(&descriptor, &reg, &caps, None).expect("call dag validates");
 }
 
 #[test]
@@ -566,7 +567,7 @@ fn validator_rejects_call_unknown_recipient() {
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::UnknownRecipient(_)) => {}
         other => panic!("expected UnknownRecipient, got {other:?}"),
     }
@@ -587,7 +588,7 @@ fn validator_rejects_call_kind_not_accepted() {
         }],
         edges: vec![],
     };
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::KindNotAccepted { node, kind_id, .. }) => {
             assert_eq!(node, NodeId(0));
             assert_eq!(kind_id, Signal::ID);
@@ -633,7 +634,7 @@ fn validator_rejects_call_consumer_not_accepting_bundle() {
         }],
     };
 
-    match validator::validate(&descriptor, &reg, &caps) {
+    match validator::validate(&descriptor, &reg, &caps, None) {
         Err(DagError::EdgeTypeMismatch {
             edge_index,
             expected_kind,

@@ -18,4 +18,6 @@
 
 pub mod executor;
 pub mod state;
+pub mod transform_pool;
+pub mod transform_registry;
 pub mod validator;
