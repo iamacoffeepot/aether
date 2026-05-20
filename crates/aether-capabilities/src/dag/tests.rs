@@ -32,7 +32,7 @@ use aether_kinds::{
 };
 use serde::de::DeserializeOwned;
 
-use aether_substrate::chassis::builder::Builder;
+use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
@@ -75,6 +75,23 @@ fn base_builder(registry: &Arc<Registry>, mailer: &Arc<Mailer>) -> Builder<TestC
         .with_actor::<crate::HandleCapability>(())
         .with_actor::<DagCapability>(())
         .with_actor::<TestSourceActor>(())
+}
+
+/// Boot a `Call`-fixture chassis: the base caps plus a `TestCallActor`
+/// (configured by `config`) and a `TestBundleObserverActor` recording
+/// into `recorder`. Shared by the source → `Call` → bundle-observer
+/// fixtures so each only declares the call config it varies.
+fn boot_call_fixture(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    config: TestCallConfig,
+    recorder: &Recorder<super::test_support::TestBundleObserved>,
+) -> PassiveChassis<TestChassis> {
+    base_builder(registry, mailer)
+        .with_actor::<TestCallActor>(config)
+        .with_actor::<TestBundleObserverActor>(Arc::clone(recorder))
+        .build_passive()
+        .expect("caps boot")
 }
 
 /// A distinct session reply target per `corr` so multiple in-flight
@@ -623,14 +640,15 @@ fn dag_executor_status_reports_complete_then_reaps() {
 fn dag_executor_call_collects_single_reply_bundle() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = base_builder(&registry, &mailer)
-        .with_actor::<TestCallActor>(TestCallConfig {
+    let chassis = boot_call_fixture(
+        &registry,
+        &mailer,
+        TestCallConfig {
             replies: 1,
             never: false,
-        })
-        .with_actor::<TestBundleObserverActor>(Arc::clone(&recorder))
-        .build_passive()
-        .expect("caps boot");
+        },
+        &recorder,
+    );
 
     let bundle = run_call_dag_to(&registry, &rx, &recorder, mbx::<TestCallActor>());
     assert_eq!(bundle.elements.len(), 1);
@@ -645,14 +663,15 @@ fn dag_executor_call_collects_single_reply_bundle() {
 fn dag_executor_call_collects_multi_reply_bundle() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = base_builder(&registry, &mailer)
-        .with_actor::<TestCallActor>(TestCallConfig {
+    let chassis = boot_call_fixture(
+        &registry,
+        &mailer,
+        TestCallConfig {
             replies: 3,
             never: false,
-        })
-        .with_actor::<TestBundleObserverActor>(Arc::clone(&recorder))
-        .build_passive()
-        .expect("caps boot");
+        },
+        &recorder,
+    );
 
     let bundle = run_call_dag_to(&registry, &rx, &recorder, mbx::<TestCallActor>());
     assert_eq!(bundle.elements.len(), 3);
@@ -701,14 +720,15 @@ fn dag_executor_call_times_out_nonsettling_cap() {
     }
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = base_builder(&registry, &mailer)
-        .with_actor::<TestCallActor>(TestCallConfig {
+    let chassis = boot_call_fixture(
+        &registry,
+        &mailer,
+        TestCallConfig {
             replies: 0,
             never: true,
-        })
-        .with_actor::<TestBundleObserverActor>(Arc::clone(&recorder))
-        .build_passive()
-        .expect("caps boot");
+        },
+        &recorder,
+    );
 
     let dag_id = submit_call_dag(&registry, &rx, mbx::<TestCallActor>());
 
@@ -740,14 +760,15 @@ fn dag_executor_call_times_out_nonsettling_cap() {
 fn dag_executor_call_dispatches_as_own_root() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder = Arc::new(Mutex::new(Vec::new()));
-    let chassis = base_builder(&registry, &mailer)
-        .with_actor::<TestCallActor>(TestCallConfig {
+    let chassis = boot_call_fixture(
+        &registry,
+        &mailer,
+        TestCallConfig {
             replies: 1,
             never: false,
-        })
-        .with_actor::<TestBundleObserverActor>(Arc::clone(&recorder))
-        .build_passive()
-        .expect("caps boot");
+        },
+        &recorder,
+    );
 
     let bundle = run_call_dag_to(&registry, &rx, &recorder, mbx::<TestCallActor>());
     assert_eq!(
