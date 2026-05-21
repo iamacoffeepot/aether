@@ -22,6 +22,7 @@ use aether_data::{
     DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name,
     tagged_id,
 };
+use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ListEngines,
     ListEnginesResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope,
@@ -32,7 +33,6 @@ use aether_kinds::{
         TRACE_OBSERVER_MAILBOX_NAME,
     },
 };
-use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
