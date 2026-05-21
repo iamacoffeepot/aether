@@ -603,6 +603,41 @@ mod tests {
         }
     }
 
+    /// Construction-level driver fixture: a Render→Present→Shutdown
+    /// graph + a fresh mailer, built directly (no chassis boot — PR 3's
+    /// chassis integration exercises the boot path end-to-end), with the
+    /// supplied advance timeout. Centralised so the construction tests
+    /// don't duplicate the chained-builder + struct literal (Qodana
+    /// `DuplicatedCode` keys on that shape, not the assertions).
+    fn test_driver(advance_timeout: Duration) -> LifecycleDriverCapability<()> {
+        let graph = LifecycleGraph::<()>::builder()
+            .state::<Render, _>(|()| Render {})
+            .next::<Present>()
+            .state::<Present, _>(|()| Present {})
+            .next::<Shutdown>()
+            .quit::<Shutdown>()
+            .terminal::<Shutdown, _>(|()| Shutdown {})
+            .start::<Render>()
+            .build()
+            .expect("test setup: graph builds");
+        let mailer = Arc::new(Mailer::new(
+            Arc::new(Registry::default()),
+            Arc::new(HandleStore::new(1024)),
+        ));
+        LifecycleDriverCapability {
+            current_state: graph.start(),
+            graph,
+            context: (),
+            subscribers: BTreeMap::new(),
+            terminal_reached: false,
+            quit_pending: false,
+            pending: None,
+            advance_timeout,
+            mailer,
+            _marker: PhantomData,
+        }
+    }
+
     #[test]
     fn resolve_edge_takes_next_when_no_quit_pending() {
         let state = state_with_quit::<()>(1, 2, Some(99));
@@ -636,42 +671,8 @@ mod tests {
     #[test]
     fn driver_initial_state_is_graph_start() {
         // Smoke that the driver's init derives `current_state` from
-        // `graph.start()`. We construct the driver fields directly
-        // rather than booting a chassis — PR 2 scope ships the
-        // primitive, PR 3's chassis integration exercises the boot
-        // path end-to-end.
-        //
-        // Uses Render/Present states to dodge textual overlap with the
-        // graph-side test fixtures (Qodana's `DuplicatedCode` keys on
-        // the chained-builder shape, not the underlying logic).
-        let graph = LifecycleGraph::<()>::builder()
-            .state::<Render, _>(|()| Render {})
-            .next::<Present>()
-            .state::<Present, _>(|()| Present {})
-            .next::<Shutdown>()
-            .quit::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
-            .start::<Render>()
-            .build()
-            .expect("test setup: graph builds");
-
-        let mailer = Arc::new(Mailer::new(
-            Arc::new(Registry::default()),
-            Arc::new(HandleStore::new(1024)),
-        ));
-        let driver: LifecycleDriverCapability<()> = LifecycleDriverCapability {
-            current_state: graph.start(),
-            graph,
-            context: (),
-            subscribers: BTreeMap::new(),
-            terminal_reached: false,
-            quit_pending: false,
-            pending: None,
-            advance_timeout: Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT),
-            mailer,
-            _marker: PhantomData,
-        };
-
+        // `graph.start()`.
+        let driver = test_driver(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
         assert_eq!(driver.current_state(), <Render as Kind>::ID);
         assert!(!driver.is_terminal());
         assert!(!driver.quit_pending());
@@ -685,31 +686,7 @@ mod tests {
     /// integration tests); the decision itself is unit-checkable here.
     #[test]
     fn pending_timeout_predicate() {
-        let graph = LifecycleGraph::<()>::builder()
-            .state::<Render, _>(|()| Render {})
-            .next::<Present>()
-            .state::<Present, _>(|()| Present {})
-            .next::<Shutdown>()
-            .terminal::<Shutdown, _>(|()| Shutdown {})
-            .start::<Render>()
-            .build()
-            .expect("test setup: graph builds");
-        let mailer = Arc::new(Mailer::new(
-            Arc::new(Registry::default()),
-            Arc::new(HandleStore::new(1024)),
-        ));
-        let mut driver: LifecycleDriverCapability<()> = LifecycleDriverCapability {
-            current_state: graph.start(),
-            graph,
-            context: (),
-            subscribers: BTreeMap::new(),
-            terminal_reached: false,
-            quit_pending: false,
-            pending: None,
-            advance_timeout: Duration::ZERO,
-            mailer,
-            _marker: PhantomData,
-        };
+        let mut driver = test_driver(Duration::ZERO);
 
         // Nothing pending → never timed out.
         assert!(!driver.pending_timed_out());
