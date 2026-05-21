@@ -31,8 +31,10 @@
 //! callers learn fail-fast about unsupported stages per §7.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use aether_actor::{OutboundReply, actor};
 use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
@@ -63,6 +65,16 @@ enum Step {
     },
     Unknown,
 }
+
+/// Default deadline for a pending advance's `Settled` to arrive
+/// before [`LifecycleDriverCapability::on_advance`] force-completes it
+/// (iamacoffeepot/aether#1048). Override via
+/// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`. Generous relative to the
+/// ~16 ms frame tick: normal settlement is sub-tick, so this only
+/// fires when the settlement pipeline has actually stalled — degrading
+/// a permanent wedge into a visible stutter rather than tripping on
+/// ordinary jitter.
+const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = 1_000;
 
 /// Construction-time configuration for [`LifecycleDriverCapability`].
 /// Carries the compiled graph + initial chassis context. Constructed
@@ -122,6 +134,13 @@ pub struct LifecycleDriverCapability<C: 'static + Send + Sync> {
     /// `wait_reply`s on `LifecycleAdvanceComplete` so duplicates only
     /// happen on broken cadence sources.
     pending: Option<PendingAdvance>,
+    /// Deadline for a pending advance's `Settled` (ADR-0082 §6 couples
+    /// the lifecycle to the trace pipeline). When a pending advance
+    /// exceeds this without settling, the next inbound advance
+    /// force-completes it — defense-in-depth against a saturated
+    /// settlement pipeline wedging the lifecycle permanently
+    /// (iamacoffeepot/aether#1048). Set from `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`.
+    advance_timeout: Duration,
     /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
     /// calls inside handlers (which only have `&mut self` + `&mut
     /// NativeCtx`, not a way to clone the mailer cheaply otherwise).
@@ -154,6 +173,9 @@ struct PendingAdvance {
     /// Original chassis sender of the [`LifecycleAdvance`] mail.
     /// `LifecycleAdvanceComplete` reply target.
     reply_to: ReplyTo,
+    /// When this advance was issued. Drives the `advance_timeout`
+    /// force-complete fallback (iamacoffeepot/aether#1048).
+    started: Instant,
 }
 
 #[actor]
@@ -171,6 +193,10 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
             initial_subscribers,
         } = config;
         let current_state = graph.start();
+        let advance_timeout_ms = env::var("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(ADVANCE_TIMEOUT_MS_DEFAULT);
         let mailer = ctx.mailer();
         let mut subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>> = BTreeMap::new();
         for (stage, mailbox) in initial_subscribers {
@@ -197,6 +223,7 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
             terminal_reached: false,
             quit_pending: false,
             pending: None,
+            advance_timeout: Duration::from_millis(advance_timeout_ms),
             mailer,
             _marker: PhantomData,
         })
@@ -300,17 +327,31 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
         }
 
         if self.pending.is_some() {
-            // Overlap: a prior advance hasn't settled yet. The
-            // contract is that the chassis main loop wait-replies on
-            // every Advance, so this is a programmer error or a
-            // duplicate-cadence-source bug. Warn-and-drop the duplicate
-            // without state mutation.
-            tracing::warn!(
-                target: "aether_substrate::lifecycle",
-                current = ?self.current_state,
-                "LifecycleAdvance received while a prior advance is still in flight; dropping"
-            );
-            return;
+            // Overlap: a prior advance hasn't settled yet. Normally the
+            // chassis main loop wait-replies on every Advance, so this is
+            // a duplicate-cadence-source bug — warn-and-drop without
+            // state mutation. But if the pending advance has blown past
+            // `advance_timeout`, its `Settled` is not coming (a saturated
+            // settlement pipeline, iamacoffeepot/aether#1048): force-
+            // complete it so the lifecycle degrades to a stutter instead
+            // of wedging forever, then fall through to process *this*
+            // advance against the now-advanced state.
+            if !self.pending_timed_out() {
+                tracing::warn!(
+                    target: "aether_substrate::lifecycle",
+                    current = ?self.current_state,
+                    "LifecycleAdvance received while a prior advance is still in flight; dropping"
+                );
+                return;
+            }
+            self.force_complete_pending(ctx);
+            if self.terminal_reached {
+                ctx.reply(&LifecycleAdvanceComplete {
+                    completed: 0,
+                    next: 0,
+                });
+                return;
+            }
         }
 
         // Decide what to broadcast and the post-settlement state.
@@ -373,6 +414,7 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
                 next_kind,
                 is_terminal,
                 reply_to,
+                started: Instant::now(),
             });
         } else {
             // No settlement registry wired (test harness without
@@ -434,6 +476,47 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
 }
 
 impl<C: 'static + Send + Sync> LifecycleDriverCapability<C> {
+    /// True when a pending advance has exceeded [`Self::advance_timeout`]
+    /// without settling (iamacoffeepot/aether#1048). `false` when nothing
+    /// is pending.
+    fn pending_timed_out(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.started.elapsed() >= self.advance_timeout)
+    }
+
+    /// Force-complete a pending advance whose [`Settled`] never arrived
+    /// (iamacoffeepot/aether#1048). Mirrors [`Self::on_settled`]'s state
+    /// mutation + reply but logs at `error`: reaching here means the
+    /// settlement pipeline stalled past `advance_timeout`, so the
+    /// lifecycle is degrading to a stutter rather than wedging. No-op
+    /// when nothing is pending.
+    fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_>) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        tracing::error!(
+            target: "aether_substrate::lifecycle",
+            root = ?pending.root,
+            elapsed_ms = pending.started.elapsed().as_millis(),
+            timeout_ms = self.advance_timeout.as_millis(),
+            "LifecycleAdvance settlement timed out; force-advancing to avoid a permanent wedge \
+             (settlement pipeline may be saturated — see iamacoffeepot/aether#1048)"
+        );
+        if pending.is_terminal {
+            self.terminal_reached = true;
+        } else {
+            self.current_state = pending.next_kind;
+        }
+        ctx.reply_to(
+            pending.reply_to,
+            &LifecycleAdvanceComplete {
+                completed: pending.completed_kind.0,
+                next: pending.next_kind.0,
+            },
+        );
+    }
+
     /// Read-only access to the current state's kind id (test/inspect
     /// surface). Production callers should observe lifecycle progress
     /// via subscribed stage broadcasts rather than peeking at this.
@@ -584,6 +667,7 @@ mod tests {
             terminal_reached: false,
             quit_pending: false,
             pending: None,
+            advance_timeout: Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT),
             mailer,
             _marker: PhantomData,
         };
@@ -591,5 +675,59 @@ mod tests {
         assert_eq!(driver.current_state(), <Render as Kind>::ID);
         assert!(!driver.is_terminal());
         assert!(!driver.quit_pending());
+    }
+
+    /// iamacoffeepot/aether#1048: `pending_timed_out` is the gate that
+    /// turns a permanent settlement wedge into a stutter. A zero timeout
+    /// trips immediately on any pending advance; an hour-long one never
+    /// trips on a freshly-issued one. Force-completion's state mutation
+    /// and reply need a live `NativeCtx` (exercised by the chassis
+    /// integration tests); the decision itself is unit-checkable here.
+    #[test]
+    fn pending_timeout_predicate() {
+        let graph = LifecycleGraph::<()>::builder()
+            .state::<Render, _>(|()| Render {})
+            .next::<Present>()
+            .state::<Present, _>(|()| Present {})
+            .next::<Shutdown>()
+            .terminal::<Shutdown, _>(|()| Shutdown {})
+            .start::<Render>()
+            .build()
+            .expect("test setup: graph builds");
+        let mailer = Arc::new(Mailer::new(
+            Arc::new(Registry::default()),
+            Arc::new(HandleStore::new(1024)),
+        ));
+        let mut driver: LifecycleDriverCapability<()> = LifecycleDriverCapability {
+            current_state: graph.start(),
+            graph,
+            context: (),
+            subscribers: BTreeMap::new(),
+            terminal_reached: false,
+            quit_pending: false,
+            pending: None,
+            advance_timeout: Duration::ZERO,
+            mailer,
+            _marker: PhantomData,
+        };
+
+        // Nothing pending → never timed out.
+        assert!(!driver.pending_timed_out());
+
+        let pending = PendingAdvance {
+            root: MailId::NONE,
+            completed_kind: <Render as Kind>::ID,
+            next_kind: <Present as Kind>::ID,
+            is_terminal: false,
+            reply_to: ReplyTo::NONE,
+            started: Instant::now(),
+        };
+        driver.pending = Some(pending);
+        // Zero timeout: any elapsed >= 0 trips immediately.
+        assert!(driver.pending_timed_out());
+
+        // A long timeout never trips on a freshly-issued advance.
+        driver.advance_timeout = Duration::from_hours(1);
+        assert!(!driver.pending_timed_out());
     }
 }

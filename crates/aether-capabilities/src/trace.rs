@@ -34,6 +34,7 @@ mod native {
     use std::collections::HashSet;
     use std::collections::{BTreeSet, HashMap};
     use std::env;
+    use std::mem;
     use std::ops::Bound;
     use std::sync::Arc;
     #[cfg(test)]
@@ -71,12 +72,48 @@ mod native {
     /// `Settled` emission gates on `(in_flight == 0 && held_open == 0)`
     /// so a worker thread that outlives its spawning handler keeps the
     /// chain open until it drops.
+    ///
+    /// `settled_at` is `Some` once the root settled — the immutable
+    /// timestamp the retention index keys on (iamacoffeepot/aether#1048).
+    /// `None` while in-flight; cleared back to `None` if a settled root
+    /// is resurrected by a later `Sent`/`HoldOpen`. `last_event_at` is
+    /// the *mutable* last-activity stamp, used only by the hard-cap
+    /// memory valve (not retention), so it can't index retention.
     #[derive(Debug, Clone)]
     pub struct RootState {
         pub in_flight: u32,
         pub held_open: u32,
         pub last_event_at: Instant,
+        pub settled_at: Option<Instant>,
     }
+
+    /// Throttled eviction profiling (iamacoffeepot/aether#1048). The
+    /// observer's eviction cost was invisible until it wedged the
+    /// lifecycle; this surfaces a periodic heartbeat over `actor_logs
+    /// aether.trace` and escalates to `warn` when a single batch's
+    /// eviction crosses the frame budget (the direct early-warning for
+    /// the settlement-on-critical-path coupling).
+    struct EvictStats {
+        report_at: Instant,
+        max: Duration,
+        batches: u64,
+        removed: u64,
+    }
+
+    impl EvictStats {
+        fn new() -> Self {
+            Self {
+                report_at: Instant::now(),
+                max: Duration::ZERO,
+                batches: 0,
+                removed: 0,
+            }
+        }
+    }
+
+    /// Heartbeat cadence + per-batch budget for [`EvictStats`].
+    const EVICT_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+    const EVICT_WARN_BUDGET: Duration = Duration::from_millis(5);
 
     /// Per-mail node in the parent → mail graph. `t_received` and
     /// `t_finished` patch as `Received`/`Finished` events arrive
@@ -113,6 +150,19 @@ mod native {
         /// Inserted on `TraceEvent::Sent`, removed in `evict` whenever
         /// a `MailNode` drops.
         t_sent_index: BTreeSet<(Nanos, MailId)>,
+        /// iamacoffeepot/aether#1048: retention eviction index, keyed on
+        /// each root's *settlement* `Instant` (immutable once set). Only
+        /// settled roots appear here, so `evict` range-drops the expired
+        /// prefix in `O(log n + k)` instead of scanning every root every
+        /// batch. In-flight roots are absent → never time-evicted
+        /// (ADR-0080 §11 holds for free). `Instant` collisions tie-break
+        /// by `MailId`, same as `t_sent_index`.
+        evictable: BTreeSet<(Instant, MailId)>,
+        /// iamacoffeepot/aether#1048: root → its tracked mail ids, so a
+        /// root eviction drops exactly its own mails (`O(k)`) instead of
+        /// the prior full `mails` scan. Populated on `TraceEvent::Sent`,
+        /// drained in [`Self::remove_root`].
+        mails_by_root: HashMap<MailId, Vec<MailId>>,
         retention: Duration,
         max_roots: usize,
         /// Mailer handle stashed at init so `Settled` mail can be
@@ -132,6 +182,8 @@ mod native {
         /// init; matches the `RenderCapability` pattern that resolves
         /// `CaptureFrame` mail bundles through the same registry.
         registry: Arc<Registry>,
+        /// iamacoffeepot/aether#1048: throttled eviction profiling.
+        evict_stats: EvictStats,
     }
 
     impl TraceObserverCapability {
@@ -166,9 +218,22 @@ mod native {
                         in_flight: 0,
                         held_open: 0,
                         last_event_at: now,
+                        settled_at: None,
                     });
+                    // Resurrection: a `Sent` for a root that had already
+                    // settled re-opens the chain. Clear the settlement
+                    // stamp and drop the now-stale retention index entry
+                    // (deferred past the last `root_state` use so the
+                    // `self.evictable` borrow doesn't overlap the
+                    // `self.roots` borrow). Shouldn't happen under the
+                    // exact-settlement hold contract, but the observer is
+                    // eventually-consistent over an unordered event stream.
+                    let resurrected = root_state.settled_at.take();
                     root_state.in_flight = root_state.in_flight.saturating_add(1);
                     root_state.last_event_at = now;
+                    if let Some(at) = resurrected {
+                        self.evictable.remove(&(at, root));
+                    }
                     self.mails.insert(
                         mail_id,
                         MailNode {
@@ -184,6 +249,7 @@ mod native {
                         },
                     );
                     self.t_sent_index.insert((t, mail_id));
+                    self.mails_by_root.entry(root).or_default().push(mail_id);
                 }
                 TraceEvent::Received {
                     mail_id,
@@ -205,21 +271,25 @@ mod native {
                     if let Some(node) = self.mails.get_mut(&mail_id) {
                         node.t_finished = Some(t);
                         let root = node.root;
-                        if let Some(state) = self.roots.get_mut(&root) {
+                        // ADR-0080 §6 / §12: settlement fires when BOTH
+                        // `in_flight` and `held_open` reach zero (the
+                        // latter gates thread-spawn primitives — see
+                        // iamacoffeepot/aether#716). Compute the verdict,
+                        // dropping the `state` borrow before the `&mut
+                        // self` `fire_settled` call below.
+                        let settled = if let Some(state) = self.roots.get_mut(&root) {
                             state.in_flight = state.in_flight.saturating_sub(1);
                             state.last_event_at = Instant::now();
-                            // ADR-0080 §6 / §12: settlement fires when
-                            // BOTH `in_flight` and `held_open` reach zero
-                            // (the latter gates thread-spawn primitives
-                            // — see iamacoffeepot/aether#716). We push
-                            // `Settled { root }` to `CHASSIS_MAILBOX_ID`
-                            // via the bare mailer so the outbound
-                            // doesn't generate trace events; the chassis-
-                            // router decodes the payload and signals every
-                            // gate-site subscriber waiting on this root.
-                            if state.in_flight == 0 && state.held_open == 0 {
-                                self.fire_settled(root);
-                            }
+                            state.in_flight == 0 && state.held_open == 0
+                        } else {
+                            false
+                        };
+                        // `fire_settled` pushes `Settled { root }` to
+                        // `CHASSIS_MAILBOX_ID` via the bare mailer (so the
+                        // outbound generates no trace events) and stamps
+                        // the retention index.
+                        if settled {
+                            self.fire_settled(root);
                         }
                     }
                 }
@@ -236,21 +306,32 @@ mod native {
                         in_flight: 0,
                         held_open: 0,
                         last_event_at: now,
+                        settled_at: None,
                     });
+                    // Resurrection: a hold acquired against an
+                    // already-settled root re-opens the chain (see the
+                    // `Sent` branch). Drop the stale retention entry.
+                    let resurrected = root_state.settled_at.take();
                     root_state.held_open = root_state.held_open.saturating_add(1);
                     root_state.last_event_at = now;
+                    if let Some(at) = resurrected {
+                        self.evictable.remove(&(at, root));
+                    }
                 }
                 TraceEvent::Release { root, t: _ } => {
-                    if let Some(state) = self.roots.get_mut(&root) {
+                    // Symmetric with Finished: re-check the joint gate. A
+                    // Release that brings held_open to 0 while in_flight
+                    // is also 0 fires settlement (the spawned thread
+                    // outlived its handler).
+                    let settled = if let Some(state) = self.roots.get_mut(&root) {
                         state.held_open = state.held_open.saturating_sub(1);
                         state.last_event_at = Instant::now();
-                        // Symmetric with Finished: re-check the joint
-                        // gate. A Release that brings held_open to 0
-                        // while in_flight is also 0 fires settlement
-                        // (the spawned thread outlived its handler).
-                        if state.in_flight == 0 && state.held_open == 0 {
-                            self.fire_settled(root);
-                        }
+                        state.in_flight == 0 && state.held_open == 0
+                    } else {
+                        false
+                    };
+                    if settled {
+                        self.fire_settled(root);
                     }
                     // Orphan Release (no matching HoldOpen ever observed
                     // — trace queue not installed when the hold was
@@ -383,7 +464,18 @@ mod native {
             DescribeWindowResult::Ok { mails }
         }
 
-        fn fire_settled(&self, root: MailId) {
+        fn fire_settled(&mut self, root: MailId) {
+            // Stamp the immutable settlement time and enrol the root in
+            // the retention index (iamacoffeepot/aether#1048). A root can
+            // only fire once per settle; a resurrecting `Sent`/`HoldOpen`
+            // clears `settled_at` and the index entry before it could
+            // fire again.
+            let now = Instant::now();
+            if let Some(state) = self.roots.get_mut(&root) {
+                state.settled_at = Some(now);
+            }
+            self.evictable.insert((now, root));
+
             let payload = match postcard::to_allocvec(&Settled { root }) {
                 Ok(p) => p,
                 Err(e) => {
@@ -404,49 +496,135 @@ mod native {
             ));
         }
 
-        fn evict(&mut self) {
-            let cutoff = Instant::now().checked_sub(self.retention);
-            if let Some(cutoff) = cutoff {
-                self.roots.retain(|_, state| state.last_event_at >= cutoff);
-                self.drop_orphaned_mails();
+        /// Removes a root and all of its tracked mails from every index
+        /// in one pass (iamacoffeepot/aether#1048). `settled_at` is the
+        /// root's recorded settlement stamp when the caller still needs
+        /// the retention entry cleaned (`None` when the caller already
+        /// drained it, e.g. the retention range-drop). `O(k)` in the
+        /// root's mail count — no full `mails` scan.
+        fn remove_root(&mut self, root: MailId, settled_at: Option<Instant>) {
+            self.roots.remove(&root);
+            if let Some(at) = settled_at {
+                self.evictable.remove(&(at, root));
             }
-            // Hard cap: if we still exceed `max_roots`, drop oldest
-            // by `last_event_at`. This is O(n) but only triggers on
-            // overflow, so it amortises across the steady state.
-            if self.roots.len() > self.max_roots {
-                let mut entries: Vec<(MailId, Instant)> = self
-                    .roots
-                    .iter()
-                    .map(|(id, state)| (*id, state.last_event_at))
-                    .collect();
-                entries.sort_by_key(|(_, t)| *t);
-                let drop_n = self.roots.len() - self.max_roots;
-                for (id, _) in entries.into_iter().take(drop_n) {
-                    self.roots.remove(&id);
+            if let Some(mids) = self.mails_by_root.remove(&root) {
+                for mid in mids {
+                    if let Some(node) = self.mails.remove(&mid) {
+                        self.t_sent_index.remove(&(node.t_sent, mid));
+                    }
                 }
-                self.drop_orphaned_mails();
             }
         }
 
-        /// Drops every `MailNode` whose root is no longer in
-        /// `self.roots`, and removes the matching entry from
-        /// `self.t_sent_index`. Issue 735: keeping the secondary
-        /// index in sync is the load-bearing part — a stale entry
-        /// would cause `describe_window` to surface a `MailId` that
-        /// `self.mails.get` can't resolve (handled by `filter_map`,
-        /// but it's a silent miscount of the matched set).
-        fn drop_orphaned_mails(&mut self) {
-            let dropped: Vec<MailId> = self
-                .mails
-                .iter()
-                .filter(|(_, node)| !self.roots.contains_key(&node.root))
-                .map(|(mid, _)| *mid)
-                .collect();
-            for mid in &dropped {
-                if let Some(node) = self.mails.remove(mid) {
-                    self.t_sent_index.remove(&(node.t_sent, *mid));
+        /// Returns the number of roots evicted this call.
+        fn evict(&mut self) -> usize {
+            let mut removed = 0usize;
+
+            // Retention (ADR-0080 §11): drop settled roots whose
+            // settlement is older than `retention`, via the
+            // settlement-time index. `split_off` partitions at the
+            // cutoff key — `O(log n)` — leaving only the expired prefix
+            // to drain (`O(k)`). No per-batch full scan; in-flight roots
+            // aren't in the index, so they're never time-evicted.
+            if let Some(cutoff) = Instant::now().checked_sub(self.retention) {
+                let fresh = self.evictable.split_off(&(cutoff, MailId::NONE));
+                let expired = mem::replace(&mut self.evictable, fresh);
+                for (settled_at, root) in expired {
+                    let current = self.roots.get(&root).and_then(|s| s.settled_at);
+                    // A resurrected-and-resettled root carries a newer
+                    // `settled_at`, making this drained entry stale — skip
+                    // it (the live root keeps its newer index slot). The
+                    // entry is already gone from `evictable` (split_off),
+                    // so `remove_root` gets `None` for the index probe.
+                    if current == Some(settled_at) {
+                        self.remove_root(root, None);
+                        removed += 1;
+                    }
                 }
             }
+
+            // Hard cap (memory valve, distinct from §11 retention): if
+            // we still exceed `max_roots`, drop oldest by `last_event_at`
+            // regardless of settled state. `O(n log n)` but only on
+            // overflow, so it amortises. Evicting an *in-flight* root
+            // here means a chain is leaking (missing Finished/Release) or
+            // retention can't keep up — surface it loudly rather than
+            // silently corrupting the trace graph.
+            if self.roots.len() > self.max_roots {
+                let mut entries: Vec<(MailId, Instant, Option<Instant>)> = self
+                    .roots
+                    .iter()
+                    .map(|(id, state)| (*id, state.last_event_at, state.settled_at))
+                    .collect();
+                entries.sort_by_key(|(_, t, _)| *t);
+                let drop_n = self.roots.len() - self.max_roots;
+                let mut in_flight_evicted = 0u64;
+                for (id, _, settled_at) in entries.into_iter().take(drop_n) {
+                    if settled_at.is_none() {
+                        in_flight_evicted += 1;
+                    }
+                    self.remove_root(id, settled_at);
+                    removed += 1;
+                }
+                if in_flight_evicted > 0 {
+                    tracing::warn!(
+                        target: "aether_capabilities::trace",
+                        in_flight_evicted,
+                        max_roots = self.max_roots,
+                        "trace observer hard cap evicted in-flight roots — a chain may be leaking \
+                         (missing Finished/Release) or retention isn't keeping up",
+                    );
+                }
+            }
+
+            removed
+        }
+
+        /// Folds one batch's eviction outcome into [`EvictStats`] and
+        /// emits a throttled heartbeat (iamacoffeepot/aether#1048). The
+        /// line escalates to `warn` when a single batch's eviction
+        /// crossed [`EVICT_WARN_BUDGET`] — the early-warning the original
+        /// wedge lacked. Visible via `actor_logs aether.trace`.
+        fn record_evict_sample(&mut self, removed: usize, dur: Duration) {
+            self.evict_stats.batches += 1;
+            self.evict_stats.removed += removed as u64;
+            if dur > self.evict_stats.max {
+                self.evict_stats.max = dur;
+            }
+            if self.evict_stats.report_at.elapsed() < EVICT_REPORT_INTERVAL {
+                return;
+            }
+            let roots = self.roots.len();
+            let mails = self.mails.len();
+            let evictable = self.evictable.len();
+            let max_evict_us = self.evict_stats.max.as_micros();
+            let batches = self.evict_stats.batches;
+            let removed_total = self.evict_stats.removed;
+            if self.evict_stats.max >= EVICT_WARN_BUDGET {
+                tracing::warn!(
+                    target: "aether_capabilities::trace",
+                    roots,
+                    mails,
+                    evictable,
+                    batches,
+                    removed = removed_total,
+                    max_evict_us,
+                    "trace observer eviction exceeded frame budget — settlement latency at risk \
+                     (see iamacoffeepot/aether#1048)",
+                );
+            } else {
+                tracing::debug!(
+                    target: "aether_capabilities::trace",
+                    roots,
+                    mails,
+                    evictable,
+                    batches,
+                    removed = removed_total,
+                    max_evict_us,
+                    "trace observer eviction stats",
+                );
+            }
+            self.evict_stats = EvictStats::new();
         }
     }
 
@@ -499,11 +677,14 @@ mod native {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
+                evictable: BTreeSet::new(),
+                mails_by_root: HashMap::new(),
                 retention: Duration::from_millis(retention_ms),
                 max_roots,
                 mailer,
                 settled_kind: <Settled as aether_data::Kind>::ID,
                 registry,
+                evict_stats: EvictStats::new(),
             })
         }
 
@@ -524,7 +705,9 @@ mod native {
             for event in batch.events {
                 self.apply_event(event);
             }
-            self.evict();
+            let evict_start = Instant::now();
+            let removed = self.evict();
+            self.record_evict_sample(removed, evict_start.elapsed());
         }
 
         /// # Agent
@@ -644,11 +827,14 @@ mod native {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
+                evictable: BTreeSet::new(),
+                mails_by_root: HashMap::new(),
                 retention,
                 max_roots,
                 mailer,
                 settled_kind: <Settled as aether_data::Kind>::ID,
                 registry,
+                evict_stats: EvictStats::new(),
             }
         }
 
@@ -884,11 +1070,14 @@ mod native {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
+                evictable: BTreeSet::new(),
+                mails_by_root: HashMap::new(),
                 retention: Duration::from_mins(1),
                 max_roots: 1000,
                 mailer: Arc::clone(&mailer),
                 settled_kind,
                 registry: Arc::clone(&registry),
+                evict_stats: EvictStats::new(),
             };
             (obs, captured, mail(1, 1))
         }
@@ -1253,6 +1442,11 @@ mod native {
                 KindId(0xABCD),
                 Nanos(100),
             );
+            // Post-#1048: retention drops settled roots only — settle it.
+            obs.apply_event(TraceEvent::Finished {
+                mail_id: m,
+                t: Nanos(200),
+            });
             assert_eq!(obs.t_sent_index.len(), 1);
             thread::sleep(Duration::from_millis(80));
             obs.evict();
@@ -1499,6 +1693,40 @@ mod native {
 
         #[test]
         fn retention_evicts_stale() {
+            // Post-#1048: retention evicts SETTLED roots only (ADR-0080
+            // §11 — in-flight roots are never time-evicted). Settle the
+            // root so it enters the settlement-time index before the
+            // retention window elapses.
+            let mut obs = observer_with(Duration::from_millis(50), 1000);
+            let m = mail(1, 1);
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
+            obs.apply_event(TraceEvent::Finished {
+                mail_id: m,
+                t: Nanos(200),
+            });
+            assert_eq!(obs.roots.len(), 1);
+            thread::sleep(Duration::from_millis(80));
+            obs.evict();
+            assert!(obs.roots.is_empty());
+            assert!(obs.mails.is_empty());
+        }
+
+        /// ADR-0080 §11 / iamacoffeepot/aether#1048: an in-flight root
+        /// (never `Finished`) is **never** time-evicted, no matter how
+        /// long it sits past the retention window — it isn't in the
+        /// settlement-time index. The prior `retain(last_event_at >=
+        /// cutoff)` violated this; the wedge fix makes §11 structural.
+        #[test]
+        fn retention_never_evicts_in_flight_root() {
             let mut obs = observer_with(Duration::from_millis(50), 1000);
             let m = mail(1, 1);
             apply_sent_event(
@@ -1513,9 +1741,93 @@ mod native {
             );
             assert_eq!(obs.roots.len(), 1);
             thread::sleep(Duration::from_millis(80));
+            let removed = obs.evict();
+            assert_eq!(removed, 0, "in-flight root must survive retention");
+            assert_eq!(obs.roots.len(), 1, "in-flight root must not be evicted");
+            assert_eq!(obs.mails.len(), 1);
+        }
+
+        /// iamacoffeepot/aether#1048 regression: under the wedge-causing
+        /// load shape (a steady stream of settle-then-evict batches), the
+        /// working set stays bounded and per-batch eviction work stays
+        /// flat — it does **not** grow with cumulative root count. The
+        /// prior `evict` scanned every root every batch and (with the
+        /// 10-minute default retention) evicted nothing for minutes, so
+        /// state — and scan cost — grew without bound until settlement
+        /// latency exceeded the frame tick. Here a 1 ms retention plus a
+        /// 2 ms inter-batch sleep guarantees the prior batch is always
+        /// expired by the next `evict`, so the working set never exceeds
+        /// ~one batch. `thread::sleep` only ever over-sleeps, so the
+        /// bound is robust to CI jitter in both directions (a longer
+        /// sleep just expires more, and we drain every batch).
+        #[test]
+        fn soak_settled_roots_stay_bounded_with_flat_evict_work() {
+            const BATCHES: usize = 60;
+            const PER_BATCH: usize = 50;
+
+            let mut obs = observer_with(Duration::from_millis(1), 1_000_000);
+            let mut max_roots_seen = 0usize;
+            let mut max_removed_in_one_evict = 0usize;
+            let mut total_settled = 0usize;
+
+            for b in 0..BATCHES {
+                // Each "batch" sends + finishes PER_BATCH distinct roots
+                // (the advance-shaped Sent→Finished pair), then evicts —
+                // exactly the observer's per-batch hot path.
+                for i in 0..PER_BATCH {
+                    let cid = (b * PER_BATCH + i + 1) as u64;
+                    let m = mail(1, cid);
+                    apply_sent_event(
+                        &mut obs,
+                        m,
+                        m,
+                        None,
+                        MailboxId(1),
+                        MailboxId(2),
+                        KindId(0xABCD),
+                        Nanos(cid),
+                    );
+                    obs.apply_event(TraceEvent::Finished {
+                        mail_id: m,
+                        t: Nanos(cid),
+                    });
+                    total_settled += 1;
+                }
+                max_roots_seen = max_roots_seen.max(obs.roots.len());
+                let removed = obs.evict();
+                max_removed_in_one_evict = max_removed_in_one_evict.max(removed);
+                // Sleep > retention so the *previous* batch is expired by
+                // the next evict; the working set stays at ~one batch.
+                thread::sleep(Duration::from_millis(2));
+            }
+
+            // Working set never approaches the cumulative total — old
+            // behaviour would have grown `roots` to all BATCHES*PER_BATCH.
+            let cumulative = BATCHES * PER_BATCH;
+            assert!(
+                max_roots_seen <= PER_BATCH * 5 && max_roots_seen < cumulative / 4,
+                "working set {max_roots_seen} not bounded vs cumulative {cumulative}"
+            );
+            // Per-batch eviction work is proportional to what expired (k),
+            // not total state (n) — a small multiple of one batch.
+            assert!(
+                max_removed_in_one_evict <= PER_BATCH * 5,
+                "single-batch eviction {max_removed_in_one_evict} not bounded by recent inflow"
+            );
+
+            // Final flush: let the last batch expire and drain. After a
+            // full eviction every index is mutually consistent — no leak.
+            thread::sleep(Duration::from_millis(5));
             obs.evict();
-            assert!(obs.roots.is_empty());
-            assert!(obs.mails.is_empty());
+            assert!(obs.roots.is_empty(), "all settled roots eventually evict");
+            assert!(obs.mails.is_empty(), "mails drained with their roots");
+            assert!(obs.t_sent_index.is_empty(), "t_sent_index stays in sync");
+            assert!(obs.evictable.is_empty(), "evictable index stays in sync");
+            assert!(
+                obs.mails_by_root.is_empty(),
+                "root->mails index stays in sync"
+            );
+            assert!(total_settled > 0);
         }
 
         /// Shared scaffolding for the `on_dispatch_traced` tests:
@@ -1546,11 +1858,14 @@ mod native {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
                 t_sent_index: BTreeSet::new(),
+                evictable: BTreeSet::new(),
+                mails_by_root: HashMap::new(),
                 retention: Duration::from_mins(1),
                 max_roots: 1000,
                 mailer,
                 settled_kind: <Settled as aether_data::Kind>::ID,
                 registry: Arc::clone(&registry),
+                evict_stats: EvictStats::new(),
             };
             DispatchTracedFixture {
                 registry,
