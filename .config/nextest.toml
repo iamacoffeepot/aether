@@ -5,3 +5,13 @@ final-status-level = "slow"
 # Don't fail fast in CI to run the full test suite.
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
+
+# Repeat-run ("soak") flake detection for concurrent tests, driven by
+# `scripts/flake-soak.sh` with nextest `--stress-count`. Each repeat is a
+# fresh process. `fail-fast = false` so one flaky test doesn't hide the
+# rest of the marked set. Profiles don't inherit, so the timeout is
+# repeated here to bound a hung run at high counts.
+[profile.flake-soak]
+fail-fast = false
+final-status-level = "fail"
+slow-timeout = { period = "60s", terminate-after = 1 }

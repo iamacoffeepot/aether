@@ -1158,6 +1158,18 @@ fn transform_skips_invoke_on_cache_hit() {
     drop(chassis);
 }
 
+/// Flake-soak wrapper (iamacoffeepot/aether#1060). Re-runs
+/// [`transform_skips_invoke_on_cache_hit`] under a `flaky_` name so the
+/// `scripts/flake-soak.sh` filterset (`test(/flaky/)`) repeat-runs it
+/// before a release — it asserts on async observer recording, the race
+/// the trace ring-buffer change (iamacoffeepot/aether#1056) exposed
+/// here. The original still runs once in normal CI; this duplicate is
+/// the soak target.
+#[test]
+fn flaky_transform_skips_invoke_on_cache_hit() {
+    transform_skips_invoke_on_cache_hit();
+}
+
 /// A transform that blocks briefly does not stall the executor's
 /// parking / reaping of other DAG branches: a sibling DAG's pure
 /// `double` resolves while the `slow` transform spins (ADR-0048 §3 off
