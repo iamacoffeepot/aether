@@ -109,6 +109,14 @@ pub struct TestBenchEnv {
     /// Number of workers for the wire-stable `EngineInfo.workers`
     /// field. Defaults to [`WORKERS`].
     pub workers: usize,
+    /// Override for the scheduler worker-pool size (`PoolConfig::workers`).
+    /// `None` keeps `PoolConfig::default` (`available_parallelism() - 1`,
+    /// min 1) — the behaviour every `TestBench` had before
+    /// iamacoffeepot/aether#1057.
+    /// The mail-latency harness sets this to sweep pool size, since the
+    /// pool-default dispatch model makes worker count the dominant
+    /// latency variable for fan-out and under-load topologies.
+    pub pool_workers: Option<usize>,
     /// Optional observation log: when `Some`, both render and
     /// camera dispatchers push every inbound mail's kind name to it.
     /// In-process API uses this to assert what the sinks have seen;
@@ -182,6 +190,7 @@ impl TestBenchChassis {
             name,
             version,
             workers,
+            pool_workers,
             observed_kinds,
             events_tx,
             capture_queue,
@@ -293,6 +302,7 @@ impl TestBenchChassis {
         // TestBench's own pumping logic; the driver broadcasts Tick to
         // `aether.input` via the relay subscriber.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+            .with_workers(pool_workers)
             .with_actor::<HandleCapability>(())
             .with_actor::<TraceObserverCapability>(())
             .with_actor::<InputCapability>(input_config)

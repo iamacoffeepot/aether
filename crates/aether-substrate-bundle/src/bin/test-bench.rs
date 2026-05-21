@@ -73,6 +73,7 @@ fn main() -> anyhow::Result<()> {
         name: "test-bench".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         workers: WORKERS,
+        pool_workers: None,
         observed_kinds: None,
         events_tx,
         capture_queue: capture_queue.clone(),
