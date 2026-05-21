@@ -30,19 +30,16 @@ mod native {
         RootSummaryWire, TraceWindow,
     };
     use std::cmp::Reverse;
+    use std::collections::HashMap;
     #[cfg(test)]
     use std::collections::HashSet;
-    use std::collections::{BTreeSet, HashMap};
     use std::env;
-    use std::mem;
-    use std::ops::Bound;
     use std::sync::Arc;
     #[cfg(test)]
-    use std::thread;
     use std::time::{Duration, Instant};
 
     use aether_actor::{MailCtx, actor};
-    use aether_data::{KindId, MailId, MailboxId};
+    use aether_data::{KindId, MailId, MailboxId, fnv1a_64_bytes};
     use aether_kinds::trace::{Nanos, Settled, TraceEvent};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -51,80 +48,109 @@ mod native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::Registry;
 
-    /// ADR-0080 §11 retention defaults. Override via env vars.
-    /// `AETHER_TRACE_RETENTION_MS` — drop roots older than this many
-    /// milliseconds at end-of-handler. `AETHER_TRACE_MAX_ROOTS` —
-    /// hard cap on root count; oldest evicted first when exceeded.
-    /// Memory ceiling: ~50 MB at 100k roots × ~512 bytes/root
-    /// (`RootState` + the typical handful of `MailNodes` per root).
-    const RETENTION_MS_DEFAULT: u64 = 600_000;
-    const MAX_ROOTS_DEFAULT: usize = 100_000;
+    /// ADR-0080 §11 (amended, iamacoffeepot/aether#1054). The observer
+    /// stores mail nodes in a fixed-size ring keyed on ingest sequence;
+    /// retention is size-bounded, not time-bounded. `AETHER_TRACE_RING_CAPACITY`
+    /// overrides the slot count (rounded up to a power of two so the
+    /// `seq % N` slot index is a mask). Memory is a hard ceiling of
+    /// `capacity * size_of::<Slot>()` (≈ 28 MB at the default 2^18 ≈ 262k
+    /// slots × 112 B), versus the prior soft estimate. The window is "the
+    /// last N events"; the ring wraps and overwrites, so there is no
+    /// eviction pass.
+    const RING_CAPACITY_DEFAULT: usize = 1 << 18;
+
+    /// Slot-`seq` sentinel for a never-written ring slot; real ingest
+    /// sequences count up from 0 and never reach this in any realistic
+    /// run, so `recycle_slot` skips a slot carrying it.
+    const EMPTY_SEQ: u64 = u64::MAX;
+
+    /// `Nanos` sentinel for an unset `t_received` / `t_finished` — a
+    /// mail node is written at `Sent` and patched when `Received` /
+    /// `Finished` land later. Keeps the slot POD (no `Option<Nanos>`
+    /// padding); projected back to `None` at the wire boundary.
+    const NANOS_UNSET: Nanos = Nanos(u64::MAX);
 
     /// Per-root accumulator. `in_flight` tracks how many mails in
-    /// this chain are currently between `Sent` and `Finished` —
-    /// settlement is the moment this hits zero (PR 3 wires the
-    /// `Settled` mail emission). PR 2 keeps the count for tests and
-    /// future consumers.
+    /// this chain are currently between `Sent` and `Finished`;
+    /// `held_open` tracks ADR-0080 §12 settlement holds (e.g.
+    /// `InheritCtx<A>` from `NativeCtx::spawn_inherit`). `Settled`
+    /// emission gates on `(in_flight == 0 && held_open == 0)`, so a
+    /// worker thread that outlives its spawning handler keeps the chain
+    /// open until it drops.
     ///
-    /// `held_open` tracks ADR-0080 §12 settlement holds — currently
-    /// only `InheritCtx<A>` from `NativeCtx::spawn_inherit` produces
-    /// these via [`aether_substrate::runtime::trace::acquire_settlement_hold`].
-    /// `Settled` emission gates on `(in_flight == 0 && held_open == 0)`
-    /// so a worker thread that outlives its spawning handler keeps the
-    /// chain open until it drops.
-    ///
-    /// `settled_at` is `Some` once the root settled — the immutable
-    /// timestamp the retention index keys on (iamacoffeepot/aether#1048).
-    /// `None` while in-flight; cleared back to `None` if a settled root
-    /// is resurrected by a later `Sent`/`HoldOpen`. `last_event_at` is
-    /// the *mutable* last-activity stamp, used only by the hard-cap
-    /// memory valve (not retention), so it can't index retention.
+    /// A root lives in `roots` iff it has at least one mail slot still
+    /// live in the ring (or a pending hold). Overwriting any of its
+    /// mails invalidates the whole tree — the root is dropped and its
+    /// remaining mails become tombstones (iamacoffeepot/aether#1054).
     #[derive(Debug, Clone)]
     pub struct RootState {
         pub in_flight: u32,
         pub held_open: u32,
-        pub last_event_at: Instant,
-        pub settled_at: Option<Instant>,
     }
 
-    /// Throttled eviction profiling (iamacoffeepot/aether#1048). The
-    /// observer's eviction cost was invisible until it wedged the
-    /// lifecycle; this surfaces a periodic heartbeat over `actor_logs
-    /// aether.trace` and escalates to `warn` when a single batch's
-    /// eviction crosses the frame budget (the direct early-warning for
-    /// the settlement-on-critical-path coupling).
-    struct EvictStats {
-        report_at: Instant,
-        max: Duration,
-        batches: u64,
-        removed: u64,
+    /// One mail node in the ring (iamacoffeepot/aether#1054). Fixed-size
+    /// POD (`Copy`, no heap field) so the ring is one contiguous,
+    /// alloc-free allocation. `seq` is the observer-assigned ingest
+    /// sequence: the slot index is `seq & mask`, and the slot is the
+    /// authoritative record for its `seq` only while `head - seq <
+    /// capacity`. `t_received` / `t_finished` are [`NANOS_UNSET`] until
+    /// the `Received` / `Finished` events patch them. `thread_name_hash`
+    /// is `fnv1a_64` of the actor thread name (`0` = none); the name
+    /// itself lives in the observer's `thread_names` side table so the
+    /// slot stays POD.
+    ///
+    /// Layout is exactly 112 bytes (all fields 8- or 16-byte, no
+    /// padding); the `size_of` assertion below guards against bloat —
+    /// confirm codegen with `cargo asm` before adding a field.
+    #[derive(Debug, Clone, Copy)]
+    struct Slot {
+        seq: u64,
+        mail_id: MailId,
+        root: MailId,
+        /// `MailId::NONE` = no parent (root mail).
+        parent: MailId,
+        sender: MailboxId,
+        recipient: MailboxId,
+        kind: KindId,
+        t_sent: Nanos,
+        t_received: Nanos,
+        t_finished: Nanos,
+        thread_name_hash: u64,
     }
 
-    impl EvictStats {
-        fn new() -> Self {
-            Self {
-                report_at: Instant::now(),
-                max: Duration::ZERO,
-                batches: 0,
-                removed: 0,
-            }
-        }
+    impl Slot {
+        /// A never-written slot; [`EMPTY_SEQ`] makes `recycle_slot` skip
+        /// it on the ring's first lap.
+        const EMPTY: Self = Self {
+            seq: EMPTY_SEQ,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent: MailId::NONE,
+            sender: MailboxId::NONE,
+            recipient: MailboxId::NONE,
+            kind: KindId(0),
+            t_sent: Nanos(0),
+            t_received: NANOS_UNSET,
+            t_finished: NANOS_UNSET,
+            thread_name_hash: 0,
+        };
     }
 
-    /// Heartbeat cadence + per-batch budget for [`EvictStats`].
-    const EVICT_REPORT_INTERVAL: Duration = Duration::from_secs(10);
-    const EVICT_WARN_BUDGET: Duration = Duration::from_millis(5);
+    const _: () = assert!(
+        size_of::<Slot>() == 112,
+        "Slot bloated past 112 B — see cargo asm"
+    );
 
-    /// Per-mail node in the parent → mail graph. `t_received` and
-    /// `t_finished` patch as `Received`/`Finished` events arrive
-    /// after the originating `Sent`. Issue 734: `thread_name` patches
-    /// from the `Received` event the same way `t_received` does — the
-    /// dispatcher captures `std::thread::current().name()` so the
-    /// trace renderer (`hub::mcp::trace`) can give each actor its
-    /// own per-thread row.
+    /// `t` projected to the wire `Option<Nanos>` — [`NANOS_UNSET`] → `None`.
+    fn nanos_opt(t: Nanos) -> Option<Nanos> {
+        (t != NANOS_UNSET).then_some(t)
+    }
+
+    /// Per-mail view reconstructed from a [`Slot`] for query replies and
+    /// tests. Not stored — the ring is the storage. The owning `root` is
+    /// carried by the slot, not this view (it isn't in the wire shape).
     #[derive(Debug, Clone)]
     pub struct MailNode {
-        pub root: MailId,
         pub parent: Option<MailId>,
         pub sender: MailboxId,
         pub recipient: MailboxId,
@@ -140,31 +166,34 @@ mod native {
     /// to [`MailboxId::CHASSIS_MAILBOX_ID`] when a root's `in_flight`
     /// count transitions to zero (ADR-0080 §6).
     pub struct TraceObserverCapability {
+        /// Fixed-size ring of mail nodes (iamacoffeepot/aether#1054).
+        /// Indexed by `seq & mask`; wraps and overwrites. Pre-allocated,
+        /// so steady-state aggregation does no heap work and memory is a
+        /// hard ceiling (`capacity * size_of::<Slot>()`).
+        ring: Box<[Slot]>,
+        /// `capacity - 1`; capacity is a power of two so `seq % capacity`
+        /// is the mask `seq & mask`.
+        mask: u64,
+        /// Next ingest sequence to write; the slot it lands in is
+        /// `head & mask`. Strictly monotonic — assigned single-threaded
+        /// here — so it orders the ring without depending on the
+        /// cross-thread `t_sent` skew.
+        head: u64,
+        /// `mail_id → seq`, so a later `Received` / `Finished` finds the
+        /// originating slot. Verified against `slot.seq`; a stale entry
+        /// (slot since recycled) is detected and ignored. Cleaned when
+        /// the slot is overwritten.
+        by_mail: HashMap<MailId, u64>,
+        /// Settlement counters per live root. A root is present iff it
+        /// still has a live mail in the ring (or a pending hold); see
+        /// [`RootState`].
         roots: HashMap<MailId, RootState>,
-        mails: HashMap<MailId, MailNode>,
-        /// Issue 735: secondary index by `t_sent` for the time-window
-        /// query path (`describe_window`). `BTreeSet<(Nanos, MailId)>`
-        /// because two mails *could* share a `Nanos` (synthetic test
-        /// timestamps; in production `Nanos` is monotonic ~10ns
-        /// granularity, but tight back-to-back sends could collide).
-        /// Inserted on `TraceEvent::Sent`, removed in `evict` whenever
-        /// a `MailNode` drops.
-        t_sent_index: BTreeSet<(Nanos, MailId)>,
-        /// iamacoffeepot/aether#1048: retention eviction index, keyed on
-        /// each root's *settlement* `Instant` (immutable once set). Only
-        /// settled roots appear here, so `evict` range-drops the expired
-        /// prefix in `O(log n + k)` instead of scanning every root every
-        /// batch. In-flight roots are absent → never time-evicted
-        /// (ADR-0080 §11 holds for free). `Instant` collisions tie-break
-        /// by `MailId`, same as `t_sent_index`.
-        evictable: BTreeSet<(Instant, MailId)>,
-        /// iamacoffeepot/aether#1048: root → its tracked mail ids, so a
-        /// root eviction drops exactly its own mails (`O(k)`) instead of
-        /// the prior full `mails` scan. Populated on `TraceEvent::Sent`,
-        /// drained in [`Self::remove_root`].
+        /// `root → its mail ids`, for `describe_tree`. Dropped wholesale
+        /// when an overwrite invalidates the tree.
         mails_by_root: HashMap<MailId, Vec<MailId>>,
-        retention: Duration,
-        max_roots: usize,
+        /// `fnv1a_64(thread name) → name`. The slot stores only the
+        /// hash, so names dedup and the slot stays POD.
+        thread_names: HashMap<u64, String>,
         /// Mailer handle stashed at init so `Settled` mail can be
         /// pushed bare via [`Mailer::push`] — bypassing
         /// `NativeBinding::send_mail_with_lineage` so the outbound
@@ -182,24 +211,105 @@ mod native {
         /// init; matches the `RenderCapability` pattern that resolves
         /// `CaptureFrame` mail bundles through the same registry.
         registry: Arc<Registry>,
-        /// iamacoffeepot/aether#1048: throttled eviction profiling.
-        evict_stats: EvictStats,
     }
 
     impl TraceObserverCapability {
+        /// The single struct-construction site. Pre-allocates a ring of
+        /// `capacity` slots, rounded up to a power of two so the slot
+        /// index is `seq & mask`.
+        fn with_capacity(mailer: Arc<Mailer>, registry: Arc<Registry>, capacity: usize) -> Self {
+            let capacity = capacity.max(2).next_power_of_two();
+            Self {
+                ring: vec![Slot::EMPTY; capacity].into_boxed_slice(),
+                mask: (capacity - 1) as u64,
+                head: 0,
+                by_mail: HashMap::new(),
+                roots: HashMap::new(),
+                mails_by_root: HashMap::new(),
+                thread_names: HashMap::new(),
+                settled_kind: <Settled as aether_data::Kind>::ID,
+                mailer,
+                registry,
+            }
+        }
+
         /// Read-only access to the per-root state map. Used by tests
-        /// and (in PR 3) by `Settled` consumers; runtime callers
-        /// should query via mail rather than reaching across threads.
+        /// and by `Settled` consumers; runtime callers should query via
+        /// mail rather than reaching across threads.
         #[must_use]
         pub fn roots(&self) -> &HashMap<MailId, RootState> {
             &self.roots
         }
 
-        /// Read-only access to the per-mail graph. Same access shape
-        /// as [`Self::roots`].
-        #[must_use]
-        pub fn mails(&self) -> &HashMap<MailId, MailNode> {
-            &self.mails
+        /// Slot index for a sequence. `seq & mask < capacity ≤ usize::MAX`
+        /// (capacity is allocated as a `usize`), so the narrowing cast
+        /// never truncates.
+        #[allow(clippy::cast_possible_truncation)]
+        fn slot_index(&self, seq: u64) -> usize {
+            (seq & self.mask) as usize
+        }
+
+        /// The live slot carrying `seq`, if `seq` is still within the
+        /// ring window. A slot is the authoritative record for `seq`
+        /// only while it still carries it; once overwritten,
+        /// `slot.seq != seq` and the lookup is `None`. Ingest sequences
+        /// are globally monotonic and never reused, so there is no ABA.
+        fn slot_at(&self, seq: u64) -> Option<&Slot> {
+            let slot = &self.ring[self.slot_index(seq)];
+            (slot.seq == seq).then_some(slot)
+        }
+
+        /// The live slot for a mail id via `by_mail`, `None` if recycled.
+        fn slot_for(&self, mail_id: MailId) -> Option<&Slot> {
+            self.slot_at(*self.by_mail.get(&mail_id)?)
+        }
+
+        /// The live slot at `seq` if its `t_sent` is within `[start, end]`
+        /// and its tree is still valid (root present). Drives the
+        /// `describe_window` scan; tombstones (root gone) are skipped.
+        fn window_slot(&self, seq: u64, start: u64, end: u64) -> Option<&Slot> {
+            let slot = self.slot_at(seq)?;
+            (slot.t_sent.0 >= start && slot.t_sent.0 <= end && self.roots.contains_key(&slot.root))
+                .then_some(slot)
+        }
+
+        /// Reconstruct the wire/test view of a slot, resolving the
+        /// thread-name hash back to its string and the `Nanos` sentinels
+        /// back to `Option`.
+        fn node_from_slot(&self, slot: &Slot) -> MailNode {
+            MailNode {
+                parent: (slot.parent != MailId::NONE).then_some(slot.parent),
+                sender: slot.sender,
+                recipient: slot.recipient,
+                kind: slot.kind,
+                t_sent: slot.t_sent,
+                t_received: nanos_opt(slot.t_received),
+                t_finished: nanos_opt(slot.t_finished),
+                thread_name: (slot.thread_name_hash != 0)
+                    .then(|| self.thread_names.get(&slot.thread_name_hash).cloned())
+                    .flatten(),
+            }
+        }
+
+        /// Test view of one live, non-tombstone mail node.
+        #[cfg(test)]
+        fn mail_node(&self, mail_id: MailId) -> Option<MailNode> {
+            let slot = self.slot_for(mail_id)?;
+            self.roots
+                .contains_key(&slot.root)
+                .then(|| self.node_from_slot(slot))
+        }
+
+        /// Count of live (non-tombstone) mails currently in the ring —
+        /// `by_mail` entries whose slot is live and whose tree is still
+        /// valid. For test assertions; runtime callers query via mail.
+        #[cfg(test)]
+        fn live_mail_count(&self) -> usize {
+            self.by_mail
+                .values()
+                .filter_map(|&seq| self.slot_at(seq))
+                .filter(|slot| self.roots.contains_key(&slot.root))
+                .count()
         }
 
         fn apply_event(&mut self, event: TraceEvent) {
@@ -213,81 +323,84 @@ mod native {
                     kind,
                     t,
                 } => {
-                    let now = Instant::now();
-                    let root_state = self.roots.entry(root).or_insert(RootState {
+                    let seq = self.head;
+                    let idx = self.slot_index(seq);
+                    // Reclaim whatever this slot held (and invalidate its
+                    // tree) before overwriting.
+                    self.recycle_slot(idx);
+                    self.ring[idx] = Slot {
+                        seq,
+                        mail_id,
+                        root,
+                        parent: parent_mail.unwrap_or(MailId::NONE),
+                        sender,
+                        recipient,
+                        kind,
+                        t_sent: t,
+                        t_received: NANOS_UNSET,
+                        t_finished: NANOS_UNSET,
+                        thread_name_hash: 0,
+                    };
+                    self.head += 1;
+                    self.by_mail.insert(mail_id, seq);
+                    self.mails_by_root.entry(root).or_default().push(mail_id);
+                    // A `Sent` for an already-settled root re-opens the
+                    // chain naturally (in_flight goes 0 → 1); a later
+                    // transition back to 0 re-fires `Settled` per the
+                    // §6 hint contract. No resurrection bookkeeping —
+                    // there is no settlement timestamp to clear.
+                    let rs = self.roots.entry(root).or_insert(RootState {
                         in_flight: 0,
                         held_open: 0,
-                        last_event_at: now,
-                        settled_at: None,
                     });
-                    // Resurrection: a `Sent` for a root that had already
-                    // settled re-opens the chain. Clear the settlement
-                    // stamp and drop the now-stale retention index entry
-                    // (deferred past the last `root_state` use so the
-                    // `self.evictable` borrow doesn't overlap the
-                    // `self.roots` borrow). Shouldn't happen under the
-                    // exact-settlement hold contract, but the observer is
-                    // eventually-consistent over an unordered event stream.
-                    let resurrected = root_state.settled_at.take();
-                    root_state.in_flight = root_state.in_flight.saturating_add(1);
-                    root_state.last_event_at = now;
-                    if let Some(at) = resurrected {
-                        self.evictable.remove(&(at, root));
-                    }
-                    self.mails.insert(
-                        mail_id,
-                        MailNode {
-                            root,
-                            parent: parent_mail,
-                            sender,
-                            recipient,
-                            kind,
-                            t_sent: t,
-                            t_received: None,
-                            t_finished: None,
-                            thread_name: None,
-                        },
-                    );
-                    self.t_sent_index.insert((t, mail_id));
-                    self.mails_by_root.entry(root).or_default().push(mail_id);
+                    rs.in_flight = rs.in_flight.saturating_add(1);
                 }
                 TraceEvent::Received {
                     mail_id,
                     t,
                     thread_name,
                 } => {
-                    if let Some(node) = self.mails.get_mut(&mail_id) {
-                        node.t_received = Some(t);
-                        node.thread_name = thread_name;
-                        if let Some(state) = self.roots.get_mut(&node.root) {
-                            state.last_event_at = Instant::now();
+                    // Intern the name before borrowing the slot mutably.
+                    let name_hash = thread_name
+                        .as_deref()
+                        .map_or(0, |n| fnv1a_64_bytes(n.as_bytes()));
+                    if name_hash != 0
+                        && let Some(name) = thread_name
+                    {
+                        self.thread_names.entry(name_hash).or_insert(name);
+                    }
+                    if let Some(&seq) = self.by_mail.get(&mail_id) {
+                        let idx = self.slot_index(seq);
+                        let slot = &mut self.ring[idx];
+                        if slot.seq == seq {
+                            slot.t_received = t;
+                            if name_hash != 0 {
+                                slot.thread_name_hash = name_hash;
+                            }
                         }
                     }
-                    // Orphan `Received` (no matching `Sent` ever
-                    // observed) gets dropped. Eventual-consistency
-                    // per ADR-0080 §6.
+                    // Orphan `Received` (no matching live `Sent`) drops.
+                    // Eventual-consistency per ADR-0080 §6.
                 }
                 TraceEvent::Finished { mail_id, t } => {
-                    if let Some(node) = self.mails.get_mut(&mail_id) {
-                        node.t_finished = Some(t);
-                        let root = node.root;
+                    // Patch the slot and recover its root (the event
+                    // carries no root). A recycled slot → orphan, dropped.
+                    let root = self.by_mail.get(&mail_id).copied().and_then(|seq| {
+                        let idx = self.slot_index(seq);
+                        let slot = &mut self.ring[idx];
+                        (slot.seq == seq).then(|| {
+                            slot.t_finished = t;
+                            slot.root
+                        })
+                    });
+                    if let Some(root) = root {
                         // ADR-0080 §6 / §12: settlement fires when BOTH
-                        // `in_flight` and `held_open` reach zero (the
-                        // latter gates thread-spawn primitives — see
-                        // iamacoffeepot/aether#716). Compute the verdict,
-                        // dropping the `state` borrow before the `&mut
-                        // self` `fire_settled` call below.
-                        let settled = if let Some(state) = self.roots.get_mut(&root) {
-                            state.in_flight = state.in_flight.saturating_sub(1);
-                            state.last_event_at = Instant::now();
-                            state.in_flight == 0 && state.held_open == 0
-                        } else {
-                            false
-                        };
-                        // `fire_settled` pushes `Settled { root }` to
-                        // `CHASSIS_MAILBOX_ID` via the bare mailer (so the
-                        // outbound generates no trace events) and stamps
-                        // the retention index.
+                        // in_flight and held_open reach zero. A tombstoned
+                        // tree's root is absent → no decrement, no fire.
+                        let settled = self.roots.get_mut(&root).is_some_and(|rs| {
+                            rs.in_flight = rs.in_flight.saturating_sub(1);
+                            rs.in_flight == 0 && rs.held_open == 0
+                        });
                         if settled {
                             self.fire_settled(root);
                         }
@@ -295,49 +408,66 @@ mod native {
                 }
                 // ADR-0080 §12 / iamacoffeepot/aether#716: spawn-thread
                 // primitives push HoldOpen on acquire and Release on the
-                // hold's Drop. Both ride the same trace queue as Sent /
-                // Received / Finished so ordering is preserved: a
-                // HoldOpen pushed by the parent thread before the worker
-                // starts is folded into the observer's state before the
-                // parent handler's Finished arrives.
+                // hold's Drop. HoldOpen may precede the root's Sent under
+                // cross-producer reorder, so it `or_insert`s the root to
+                // count the hold; such an orphan-hold root carries no live
+                // mail and is reaped in `fire_settled`.
                 TraceEvent::HoldOpen { root, t: _ } => {
-                    let now = Instant::now();
-                    let root_state = self.roots.entry(root).or_insert(RootState {
+                    let rs = self.roots.entry(root).or_insert(RootState {
                         in_flight: 0,
                         held_open: 0,
-                        last_event_at: now,
-                        settled_at: None,
                     });
-                    // Resurrection: a hold acquired against an
-                    // already-settled root re-opens the chain (see the
-                    // `Sent` branch). Drop the stale retention entry.
-                    let resurrected = root_state.settled_at.take();
-                    root_state.held_open = root_state.held_open.saturating_add(1);
-                    root_state.last_event_at = now;
-                    if let Some(at) = resurrected {
-                        self.evictable.remove(&(at, root));
-                    }
+                    rs.held_open = rs.held_open.saturating_add(1);
                 }
                 TraceEvent::Release { root, t: _ } => {
-                    // Symmetric with Finished: re-check the joint gate. A
-                    // Release that brings held_open to 0 while in_flight
-                    // is also 0 fires settlement (the spawned thread
-                    // outlived its handler).
-                    let settled = if let Some(state) = self.roots.get_mut(&root) {
-                        state.held_open = state.held_open.saturating_sub(1);
-                        state.last_event_at = Instant::now();
-                        state.in_flight == 0 && state.held_open == 0
-                    } else {
-                        false
-                    };
+                    // Symmetric with Finished; only mutates an existing
+                    // root. An orphan Release (no HoldOpen, or the tree
+                    // was tombstoned) drops. Eventual-consistency §6.
+                    let settled = self.roots.get_mut(&root).is_some_and(|rs| {
+                        rs.held_open = rs.held_open.saturating_sub(1);
+                        rs.in_flight == 0 && rs.held_open == 0
+                    });
                     if settled {
                         self.fire_settled(root);
                     }
-                    // Orphan Release (no matching HoldOpen ever observed
-                    // — trace queue not installed when the hold was
-                    // acquired, or the root was evicted) is dropped.
-                    // Eventual-consistency per ADR-0080 §6.
                 }
+            }
+        }
+
+        /// Reclaim the slot at `idx` before it is overwritten. Drops the
+        /// old occupant's `by_mail` entry, then — because losing any mail
+        /// leaves a hole in its causal tree — invalidates the whole root:
+        /// drops it from `roots` + `mails_by_root` in one step so its
+        /// remaining mails become tombstones (skipped by every query
+        /// because their root is gone, reclaimed when their own slots
+        /// recycle). `O(1)`; the per-write cost that replaces eviction.
+        fn recycle_slot(&mut self, idx: usize) {
+            let old = self.ring[idx];
+            if old.seq == EMPTY_SEQ {
+                return;
+            }
+            if self.by_mail.get(&old.mail_id) == Some(&old.seq) {
+                self.by_mail.remove(&old.mail_id);
+            }
+            // `remove` returns None if a sibling already invalidated this
+            // tree (this slot is a tombstone) — nothing more to do.
+            // Future (parked, iamacoffeepot/aether#1054): a lapped-but-live
+            // tree could be *promoted* to an overflow store keyed by root,
+            // retained until it settles and then freed, rather than dropped
+            // — preserving completeness for legitimately-slow chains. For
+            // now the warn + lifecycle advance-timeout make the drop safe.
+            if self.mails_by_root.remove(&old.root).is_some()
+                && let Some(rs) = self.roots.remove(&old.root)
+                && (rs.in_flight > 0 || rs.held_open > 0)
+            {
+                tracing::warn!(
+                    target: "aether_capabilities::trace",
+                    root = ?old.root,
+                    in_flight = rs.in_flight,
+                    held_open = rs.held_open,
+                    "trace ring lapped a live tree — a chain outran the ring window \
+                     (a leak, or AETHER_TRACE_RING_CAPACITY too small); dropping it",
+                );
             }
         }
 
@@ -348,11 +478,18 @@ mod native {
             let Some(root_state) = self.roots.get(&root) else {
                 return DescribeTreeResult::Err { not_found: root };
             };
+            // A live root's mails are all live (any overwrite would have
+            // invalidated the whole tree), so this `O(k)` index walk
+            // replaces the prior `O(n)` full-`mails` scan.
             let mails: Vec<MailNodeWire> = self
-                .mails
-                .iter()
-                .filter(|(_, node)| node.root == root)
-                .map(|(mail_id, node)| mail_node_wire_from(*mail_id, node))
+                .mails_by_root
+                .get(&root)
+                .into_iter()
+                .flatten()
+                .filter_map(|mid| {
+                    let slot = self.slot_for(*mid)?;
+                    Some(mail_node_wire_from(*mid, &self.node_from_slot(slot)))
+                })
                 .collect();
             DescribeTreeResult::Ok {
                 root,
@@ -381,16 +518,18 @@ mod native {
                 .roots
                 .iter()
                 .filter_map(|(root_id, root_state)| {
-                    let node = self.mails.get(root_id)?;
-                    if now.0.saturating_sub(node.t_sent.0) > cutoff_ns {
+                    // The root mail (mail_id == root) is live whenever the
+                    // root is; an orphan-hold root with no mail is skipped.
+                    let slot = self.slot_for(*root_id)?;
+                    if now.0.saturating_sub(slot.t_sent.0) > cutoff_ns {
                         return None;
                     }
                     Some(RootSummaryWire {
                         root: *root_id,
-                        kind: node.kind,
-                        sender: node.sender,
-                        recipient: node.recipient,
-                        t_sent: node.t_sent,
+                        kind: slot.kind,
+                        sender: slot.sender,
+                        recipient: slot.recipient,
+                        t_sent: slot.t_sent,
                         in_flight: root_state.in_flight,
                     })
                 })
@@ -421,61 +560,54 @@ mod native {
 
             let (start, end) = match request.window {
                 TraceWindow::Absolute { start_ns, end_ns } => {
-                    (Nanos(start_ns), Nanos(end_ns.unwrap_or(u64::MAX)))
+                    (start_ns, end_ns.unwrap_or(u64::MAX))
                 }
                 TraceWindow::Relative { last_ms } => {
                     let last_ns = last_ms.saturating_mul(1_000_000);
-                    (Nanos(now.0.saturating_sub(last_ns)), now)
+                    (now.0.saturating_sub(last_ns), now.0)
                 }
             };
 
-            // BTreeSet range: lower bound is `(start, MailId::NONE)`;
-            // upper bound is `(end + 1ns, MailId::NONE)` excluded so
-            // the inclusive end timestamp is captured for every
-            // `MailId` tied to it. `saturating_add` covers the (vanishing)
-            // edge where `end == u64::MAX`.
-            let upper = Nanos(end.0.saturating_add(1));
-            let range = self.t_sent_index.range((
-                Bound::Included((start, MailId::NONE)),
-                Bound::Excluded((upper, MailId::NONE)),
-            ));
+            // Scan the live ring region (`seq` in `[head - len, head)`).
+            // `t_sent` is sorted only to within the cross-thread skew
+            // (one-actor-per-thread emit + drainer merge), so a binary
+            // search would be heuristic; the region is capacity-bounded
+            // and this is a cold query, so an exact linear scan is correct
+            // and cheap. Tombstones (root no longer in `roots`) are
+            // skipped — a partial tree is never served. Inclusive bounds.
+            let len = self.head.min(self.ring.len() as u64);
+            let lo = self.head - len;
 
-            // Two-pass: count first to honour the cap-or-error contract,
-            // then collect. `BTreeSet::range` is cheap to iterate twice
-            // (O(log N + matches) per pass).
-            let count = range.clone().count();
+            // Count first to honour the cap-or-error contract.
+            let count = (lo..self.head)
+                .filter_map(|seq| self.window_slot(seq, start, end))
+                .count();
             if count > max {
-                // `max` is u32 on the wire; `count` is bounded by the
-                // BTreeSet which can't exceed `u32::MAX` in any realistic
-                // tracing window.
                 #[allow(clippy::cast_possible_truncation)]
                 return DescribeWindowResult::Err {
                     too_many: Some(count as u32),
                 };
             }
 
-            let mails: Vec<MailNodeWire> = range
-                .filter_map(|(_, mid)| {
-                    let node = self.mails.get(mid)?;
-                    Some(mail_node_wire_from(*mid, node))
-                })
+            let mails: Vec<MailNodeWire> = (lo..self.head)
+                .filter_map(|seq| self.window_slot(seq, start, end))
+                .map(|slot| mail_node_wire_from(slot.mail_id, &self.node_from_slot(slot)))
                 .collect();
 
             DescribeWindowResult::Ok { mails }
         }
 
+        /// Push `Settled { root }` to `CHASSIS_MAILBOX_ID` via the bare
+        /// mailer (so the outbound generates no trace events). An
+        /// orphan-hold root — a `HoldOpen` that arrived before, or
+        /// without, the root's `Sent` — has no live mail in the ring and
+        /// so would never be reclaimed by an overwrite; drop it here once
+        /// it settles. A normal root keeps its `roots` entry until its
+        /// mails lap, so settled trees stay queryable until they age out.
         fn fire_settled(&mut self, root: MailId) {
-            // Stamp the immutable settlement time and enrol the root in
-            // the retention index (iamacoffeepot/aether#1048). A root can
-            // only fire once per settle; a resurrecting `Sent`/`HoldOpen`
-            // clears `settled_at` and the index entry before it could
-            // fire again.
-            let now = Instant::now();
-            if let Some(state) = self.roots.get_mut(&root) {
-                state.settled_at = Some(now);
+            if !self.mails_by_root.contains_key(&root) {
+                self.roots.remove(&root);
             }
-            self.evictable.insert((now, root));
-
             let payload = match postcard::to_allocvec(&Settled { root }) {
                 Ok(p) => p,
                 Err(e) => {
@@ -495,144 +627,6 @@ mod native {
                 1,
             ));
         }
-
-        /// Removes a root and all of its tracked mails from every index
-        /// in one pass (iamacoffeepot/aether#1048). `settled_at` is the
-        /// root's recorded settlement stamp when the caller still needs
-        /// the retention entry cleaned (`None` when the caller already
-        /// drained it, e.g. the retention range-drop). `O(k)` in the
-        /// root's mail count — no full `mails` scan.
-        fn remove_root(&mut self, root: MailId, settled_at: Option<Instant>) {
-            self.roots.remove(&root);
-            if let Some(at) = settled_at {
-                self.evictable.remove(&(at, root));
-            }
-            if let Some(mids) = self.mails_by_root.remove(&root) {
-                for mid in mids {
-                    if let Some(node) = self.mails.remove(&mid) {
-                        self.t_sent_index.remove(&(node.t_sent, mid));
-                    }
-                }
-            }
-        }
-
-        /// Returns the number of roots evicted this call.
-        fn evict(&mut self) -> usize {
-            let mut removed = 0usize;
-
-            // Retention (ADR-0080 §11): drop settled roots whose
-            // settlement is older than `retention`, via the
-            // settlement-time index. `split_off` partitions at the
-            // cutoff key — `O(log n)` — leaving only the expired prefix
-            // to drain (`O(k)`). No per-batch full scan; in-flight roots
-            // aren't in the index, so they're never time-evicted.
-            if let Some(cutoff) = Instant::now().checked_sub(self.retention) {
-                let fresh = self.evictable.split_off(&(cutoff, MailId::NONE));
-                let expired = mem::replace(&mut self.evictable, fresh);
-                for (settled_at, root) in expired {
-                    let current = self.roots.get(&root).and_then(|s| s.settled_at);
-                    // A resurrected-and-resettled root carries a newer
-                    // `settled_at`, making this drained entry stale — skip
-                    // it (the live root keeps its newer index slot). The
-                    // entry is already gone from `evictable` (split_off),
-                    // so `remove_root` gets `None` for the index probe.
-                    if current == Some(settled_at) {
-                        self.remove_root(root, None);
-                        removed += 1;
-                    }
-                }
-            }
-
-            // Hard cap (memory valve, distinct from §11 retention): if
-            // we still exceed `max_roots`, drop oldest by `last_event_at`
-            // regardless of settled state. `O(n log n)` but only on
-            // overflow, so it amortises. Evicting an *in-flight* root
-            // here means a chain is leaking (missing Finished/Release) or
-            // retention can't keep up — surface it loudly rather than
-            // silently corrupting the trace graph.
-            if self.roots.len() > self.max_roots {
-                let mut entries: Vec<(MailId, Instant, Option<Instant>)> = self
-                    .roots
-                    .iter()
-                    .map(|(id, state)| (*id, state.last_event_at, state.settled_at))
-                    .collect();
-                entries.sort_by_key(|(_, t, _)| *t);
-                let drop_n = self.roots.len() - self.max_roots;
-                let mut in_flight_evicted = 0u64;
-                for (id, _, settled_at) in entries.into_iter().take(drop_n) {
-                    if settled_at.is_none() {
-                        in_flight_evicted += 1;
-                    }
-                    self.remove_root(id, settled_at);
-                    removed += 1;
-                }
-                if in_flight_evicted > 0 {
-                    tracing::warn!(
-                        target: "aether_capabilities::trace",
-                        in_flight_evicted,
-                        max_roots = self.max_roots,
-                        "trace observer hard cap evicted in-flight roots — a chain may be leaking \
-                         (missing Finished/Release) or retention isn't keeping up",
-                    );
-                }
-            }
-
-            removed
-        }
-
-        /// Folds one batch's eviction outcome into [`EvictStats`] and
-        /// emits a throttled heartbeat (iamacoffeepot/aether#1048). The
-        /// line escalates to `warn` when a single batch's eviction
-        /// crossed [`EVICT_WARN_BUDGET`] — the early-warning the original
-        /// wedge lacked. Visible via `actor_logs aether.trace`.
-        fn record_evict_sample(&mut self, removed: usize, dur: Duration) {
-            self.evict_stats.batches += 1;
-            self.evict_stats.removed += removed as u64;
-            if dur > self.evict_stats.max {
-                self.evict_stats.max = dur;
-            }
-            if self.evict_stats.report_at.elapsed() < EVICT_REPORT_INTERVAL {
-                return;
-            }
-            let roots = self.roots.len();
-            let mails = self.mails.len();
-            let evictable = self.evictable.len();
-            let max_evict_us = self.evict_stats.max.as_micros();
-            let batches = self.evict_stats.batches;
-            let removed_total = self.evict_stats.removed;
-            if self.evict_stats.max >= EVICT_WARN_BUDGET {
-                tracing::warn!(
-                    target: "aether_capabilities::trace",
-                    roots,
-                    mails,
-                    evictable,
-                    batches,
-                    removed = removed_total,
-                    max_evict_us,
-                    "trace observer eviction exceeded frame budget — settlement latency at risk \
-                     (see iamacoffeepot/aether#1048)",
-                );
-            } else {
-                tracing::debug!(
-                    target: "aether_capabilities::trace",
-                    roots,
-                    mails,
-                    evictable,
-                    batches,
-                    removed = removed_total,
-                    max_evict_us,
-                    "trace observer eviction stats",
-                );
-            }
-            self.evict_stats = EvictStats::new();
-        }
-    }
-
-    fn parse_env_u64(name: &str, default: u64) -> u64 {
-        env::var(name)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default)
     }
 
     fn parse_env_usize(name: &str, default: usize) -> usize {
@@ -669,29 +663,17 @@ mod native {
         const NAMESPACE: &'static str = "aether.trace";
 
         fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let retention_ms = parse_env_u64("AETHER_TRACE_RETENTION_MS", RETENTION_MS_DEFAULT);
-            let max_roots = parse_env_usize("AETHER_TRACE_MAX_ROOTS", MAX_ROOTS_DEFAULT);
+            let capacity = parse_env_usize("AETHER_TRACE_RING_CAPACITY", RING_CAPACITY_DEFAULT);
             let mailer = ctx.mailer();
             let registry = Arc::clone(mailer.registry());
-            Ok(Self {
-                roots: HashMap::new(),
-                mails: HashMap::new(),
-                t_sent_index: BTreeSet::new(),
-                evictable: BTreeSet::new(),
-                mails_by_root: HashMap::new(),
-                retention: Duration::from_millis(retention_ms),
-                max_roots,
-                mailer,
-                settled_kind: <Settled as aether_data::Kind>::ID,
-                registry,
-                evict_stats: EvictStats::new(),
-            })
+            Ok(Self::with_capacity(mailer, registry, capacity))
         }
 
-        /// ADR-0080 §4: fold every event in the batch into the
-        /// per-root counter map and the parent → mail graph. Eviction
-        /// runs once at end-of-handler so the per-event hot path is
-        /// just a `HashMap` insert/update.
+        /// ADR-0080 §4 (§11 amended, iamacoffeepot/aether#1054): fold
+        /// every event in the batch into the ring + per-root counters.
+        /// There is no eviction pass — the ring overwrites in place, so
+        /// the per-event hot path is one slot write plus small-map
+        /// updates, and memory is a fixed ceiling.
         ///
         /// # Agent
         /// Receives batched trace events from the chassis drainer
@@ -705,9 +687,6 @@ mod native {
             for event in batch.events {
                 self.apply_event(event);
             }
-            let evict_start = Instant::now();
-            let removed = self.evict();
-            self.record_evict_sample(removed, evict_start.elapsed());
         }
 
         /// # Agent
@@ -805,37 +784,14 @@ mod native {
         /// chassis-router isn't installed, so the bare push warn-drops
         /// at the `route_mail` switch — that's fine for state assertions).
         fn boot_observer() -> TraceObserverCapability {
-            // SAFETY: called only from this test thread before any
-            // reader. `AETHER_TRACE_RETENTION_MS` and
-            // `AETHER_TRACE_MAX_ROOTS` are read inside `observer_with`
-            // (the next call on this same thread) and nowhere else in
-            // this test module, so no concurrent reader can race the
-            // write. `std::env::set_var` only requires "no other thread
-            // is reading or writing the environment simultaneously."
-            unsafe {
-                env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
-                env::set_var("AETHER_TRACE_MAX_ROOTS", "1000");
-            }
-            observer_with(Duration::from_mins(1), 1000)
+            observer_with(1024)
         }
 
-        fn observer_with(retention: Duration, max_roots: usize) -> TraceObserverCapability {
+        fn observer_with(capacity: usize) -> TraceObserverCapability {
             let registry = Arc::new(Registry::new());
             let store = Arc::new(HandleStore::new(1024 * 1024));
             let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-            TraceObserverCapability {
-                roots: HashMap::new(),
-                mails: HashMap::new(),
-                t_sent_index: BTreeSet::new(),
-                evictable: BTreeSet::new(),
-                mails_by_root: HashMap::new(),
-                retention,
-                max_roots,
-                mailer,
-                settled_kind: <Settled as aether_data::Kind>::ID,
-                registry,
-                evict_stats: EvictStats::new(),
-            }
+            TraceObserverCapability::with_capacity(mailer, registry, capacity)
         }
 
         fn mail(sender: u64, cid: u64) -> MailId {
@@ -892,9 +848,9 @@ mod native {
                     .in_flight,
                 1
             );
-            assert_eq!(obs.mails.len(), 1);
+            assert_eq!(obs.live_mail_count(), 1);
             assert_eq!(
-                obs.mails.get(&m).expect("mail node exists for mail").t_sent,
+                obs.mail_node(m).expect("mail node exists for mail").t_sent,
                 Nanos(100)
             );
         }
@@ -933,10 +889,7 @@ mod native {
                 2
             );
             assert_eq!(
-                obs.mails
-                    .get(&child)
-                    .expect("child mail node exists")
-                    .parent,
+                obs.mail_node(child).expect("child mail node exists").parent,
                 Some(root)
             );
         }
@@ -971,10 +924,102 @@ mod native {
                     .in_flight,
                 0
             );
-            let node = obs.mails.get(&m).expect("mail node exists for mail");
+            let node = obs.mail_node(m).expect("mail node exists for mail");
             assert_eq!(node.t_received, Some(Nanos(200)));
             assert_eq!(node.t_finished, Some(Nanos(300)));
             assert_eq!(node.thread_name.as_deref(), Some("aether-root-test"));
+        }
+
+        /// Timing/soak measurement (iamacoffeepot/aether#1054). Not a CI
+        /// gate — run explicitly:
+        /// `cargo test -p aether-capabilities trace_observer_throughput
+        ///  -- --ignored --nocapture`. Prints fold throughput at a
+        /// steady-state population and the cost of draining the whole
+        /// settled set in one eviction pass (the iamacoffeepot/aether#1048
+        /// spike shape).
+        #[test]
+        #[ignore = "timing/soak measurement; run with --ignored --nocapture"]
+        #[allow(clippy::print_stdout, clippy::cast_precision_loss)]
+        fn trace_observer_throughput_and_cleanup() {
+            fn pump_tick(obs: &mut TraceObserverCapability, n: u64, t0: u64) {
+                let root = mail(0xC0DE, n);
+                let child = mail(0xBEEF, n);
+                apply_sent_event(
+                    obs,
+                    root,
+                    root,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xA),
+                    Nanos(t0),
+                );
+                apply_sent_event(
+                    obs,
+                    child,
+                    root,
+                    Some(root),
+                    MailboxId(2),
+                    MailboxId(3),
+                    KindId(0xB),
+                    Nanos(t0 + 1),
+                );
+                obs.apply_event(TraceEvent::Received {
+                    mail_id: child,
+                    t: Nanos(t0 + 2),
+                    thread_name: Some("aether-actor-0".to_owned()),
+                });
+                obs.apply_event(TraceEvent::Finished {
+                    mail_id: child,
+                    t: Nanos(t0 + 3),
+                });
+                obs.apply_event(TraceEvent::Finished {
+                    mail_id: root,
+                    t: Nanos(t0 + 4),
+                });
+            }
+
+            const CAP: usize = 1 << 17;
+            const POP: u64 = 60_000;
+            const MEASURE: u64 = 40_000;
+
+            let mut obs = observer_with(CAP);
+            for i in 0..POP {
+                pump_tick(&mut obs, i, i * 8);
+            }
+            println!(
+                "FILLED: {} live roots / {} live mails (ring cap {CAP})",
+                obs.roots.len(),
+                obs.live_mail_count()
+            );
+
+            // Steady state: every tick now wraps the ring, overwriting old
+            // slots and invalidating their trees in `recycle_slot` — the
+            // realistic hot path, with cleanup folded into the fold.
+            let start = Instant::now();
+            for i in POP..(POP + MEASURE) {
+                pump_tick(&mut obs, i, i * 8);
+            }
+            let fold = start.elapsed();
+            let events = MEASURE * 5;
+            println!(
+                "FOLD (steady-state, wrapping): {events} events in {fold:?} = {:.1} ns/event",
+                fold.as_nanos() as f64 / events as f64
+            );
+
+            // Hard memory ceiling: live roots + forward index never exceed
+            // the ring capacity, no matter how many trees flowed through.
+            assert!(
+                obs.roots.len() <= CAP && obs.by_mail.len() <= CAP,
+                "ring memory not bounded: {} roots / {} by_mail vs cap {CAP}",
+                obs.roots.len(),
+                obs.by_mail.len(),
+            );
+            println!(
+                "BOUNDED: {} live roots / {} by_mail entries (≤ cap {CAP})",
+                obs.roots.len(),
+                obs.by_mail.len()
+            );
         }
 
         #[test]
@@ -986,14 +1031,18 @@ mod native {
                 t: Nanos(100),
                 thread_name: None,
             });
-            assert!(obs.mails.is_empty());
+            assert_eq!(obs.live_mail_count(), 0);
             assert!(obs.roots.is_empty());
         }
 
+        /// iamacoffeepot/aether#1054: the ring overwrites the oldest slot
+        /// when full, invalidating that tree. Capacity 4 + six single-mail
+        /// roots → the two oldest (cid 1, 2) are overwritten and gone; the
+        /// four newest survive. No eviction pass — wrapping is the GC.
         #[test]
-        fn max_roots_evicts_oldest() {
-            let mut obs = observer_with(Duration::from_hours(1), 3);
-            for cid in 1..=5 {
+        fn ring_overwrites_oldest_when_full() {
+            let mut obs = observer_with(4);
+            for cid in 1..=6 {
                 let m = mail(1, cid);
                 apply_sent_event(
                     &mut obs,
@@ -1005,16 +1054,87 @@ mod native {
                     KindId(0xABCD),
                     Nanos(cid * 100),
                 );
-                // Tiny delay so `Instant::now()` advances across
-                // each insert — cheap-enough for a 5-root test.
-                thread::sleep(Duration::from_millis(2));
             }
-            obs.evict();
-            assert_eq!(obs.roots.len(), 3);
-            // Oldest two (cid 1, 2) evicted; cid 3, 4, 5 retained.
-            assert!(obs.roots.contains_key(&mail(1, 3)));
-            assert!(obs.roots.contains_key(&mail(1, 4)));
-            assert!(obs.roots.contains_key(&mail(1, 5)));
+            assert_eq!(obs.roots.len(), 4, "ring holds at most capacity trees");
+            assert!(!obs.roots.contains_key(&mail(1, 1)), "oldest overwritten");
+            assert!(
+                !obs.roots.contains_key(&mail(1, 2)),
+                "second-oldest overwritten"
+            );
+            for cid in 3..=6 {
+                assert!(obs.roots.contains_key(&mail(1, cid)), "recent survives");
+            }
+            assert_eq!(obs.live_mail_count(), 4);
+        }
+
+        /// iamacoffeepot/aether#1054: overwriting *any* mail of a tree
+        /// invalidates the whole tree — the root drops and its remaining
+        /// mails become tombstones, skipped by queries. Capacity 4, a
+        /// 3-mail tree then enough singles to lap the tree's root slot:
+        /// `describe_tree` then reports the tree gone even though sibling
+        /// slots are still physically present.
+        #[test]
+        fn overwriting_one_mail_invalidates_whole_tree() {
+            let mut obs = observer_with(4);
+            let root = mail(1, 1);
+            let a = mail(2, 1);
+            let b = mail(2, 2);
+            // Tree: root (seq 0), a (seq 1), b (seq 2).
+            apply_sent_event(
+                &mut obs,
+                root,
+                root,
+                None,
+                MailboxId(1),
+                MailboxId(9),
+                KindId(1),
+                Nanos(10),
+            );
+            apply_sent_event(
+                &mut obs,
+                a,
+                root,
+                Some(root),
+                MailboxId(9),
+                MailboxId(8),
+                KindId(2),
+                Nanos(20),
+            );
+            apply_sent_event(
+                &mut obs,
+                b,
+                root,
+                Some(root),
+                MailboxId(9),
+                MailboxId(7),
+                KindId(3),
+                Nanos(30),
+            );
+            assert!(matches!(
+                obs.build_describe_tree(root),
+                DescribeTreeResult::Ok { .. }
+            ));
+            // Two more singles (seq 3, 4): seq 4 wraps to idx 0, overwriting
+            // the tree's root mail (seq 0) → the whole tree is invalidated.
+            for cid in 10..=11 {
+                let m = mail(5, cid);
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(5),
+                    MailboxId(6),
+                    KindId(4),
+                    Nanos(cid * 100),
+                );
+            }
+            assert_eq!(
+                obs.build_describe_tree(root),
+                DescribeTreeResult::Err { not_found: root },
+                "tree with an overwritten mail is reported gone, not partial",
+            );
+            assert!(!obs.roots.contains_key(&root));
         }
 
         #[test]
@@ -1066,19 +1186,11 @@ mod native {
                 }
             }));
 
-            let obs = TraceObserverCapability {
-                roots: HashMap::new(),
-                mails: HashMap::new(),
-                t_sent_index: BTreeSet::new(),
-                evictable: BTreeSet::new(),
-                mails_by_root: HashMap::new(),
-                retention: Duration::from_mins(1),
-                max_roots: 1000,
-                mailer: Arc::clone(&mailer),
-                settled_kind,
-                registry: Arc::clone(&registry),
-                evict_stats: EvictStats::new(),
-            };
+            let obs = TraceObserverCapability::with_capacity(
+                Arc::clone(&mailer),
+                Arc::clone(&registry),
+                1024,
+            );
             (obs, captured, mail(1, 1))
         }
 
@@ -1265,7 +1377,7 @@ mod native {
                 t: Nanos(100),
             });
             assert!(obs.roots.is_empty(), "orphan Release does not create state");
-            assert!(obs.mails.is_empty());
+            assert_eq!(obs.live_mail_count(), 0);
         }
 
         #[test]
@@ -1412,81 +1524,6 @@ mod native {
         }
 
         #[test]
-        fn t_sent_index_inserts_on_sent() {
-            let mut obs = boot_observer();
-            let m = mail(1, 1);
-            apply_sent_event(
-                &mut obs,
-                m,
-                m,
-                None,
-                MailboxId(1),
-                MailboxId(2),
-                KindId(0xABCD),
-                Nanos(500),
-            );
-            assert!(obs.t_sent_index.contains(&(Nanos(500), m)));
-        }
-
-        #[test]
-        fn t_sent_index_drops_on_evict() {
-            let mut obs = observer_with(Duration::from_millis(50), 1000);
-            let m = mail(1, 1);
-            apply_sent_event(
-                &mut obs,
-                m,
-                m,
-                None,
-                MailboxId(1),
-                MailboxId(2),
-                KindId(0xABCD),
-                Nanos(100),
-            );
-            // Post-#1048: retention drops settled roots only — settle it.
-            obs.apply_event(TraceEvent::Finished {
-                mail_id: m,
-                t: Nanos(200),
-            });
-            assert_eq!(obs.t_sent_index.len(), 1);
-            thread::sleep(Duration::from_millis(80));
-            obs.evict();
-            assert!(obs.t_sent_index.is_empty(), "secondary index out of sync");
-        }
-
-        #[test]
-        fn t_sent_index_drops_on_max_roots_overflow() {
-            // Exceeding `max_roots` evicts the oldest by `last_event_at`,
-            // and `drop_orphaned_mails` should prune the secondary
-            // index for the evicted mails too.
-            let mut obs = observer_with(Duration::from_hours(1), 3);
-            for cid in 1..=5u64 {
-                let m = mail(1, cid);
-                apply_sent_event(
-                    &mut obs,
-                    m,
-                    m,
-                    None,
-                    MailboxId(1),
-                    MailboxId(2),
-                    KindId(0xABCD),
-                    Nanos(cid * 100),
-                );
-                thread::sleep(Duration::from_millis(2));
-            }
-            obs.evict();
-            assert_eq!(obs.roots.len(), 3);
-            assert_eq!(
-                obs.t_sent_index.len(),
-                3,
-                "secondary index out of sync with mails"
-            );
-            // Index entries should match the surviving mails (cid 3, 4, 5).
-            assert!(obs.t_sent_index.contains(&(Nanos(300), mail(1, 3))));
-            assert!(obs.t_sent_index.contains(&(Nanos(400), mail(1, 4))));
-            assert!(obs.t_sent_index.contains(&(Nanos(500), mail(1, 5))));
-        }
-
-        #[test]
         fn describe_window_returns_in_window_mails() {
             let mut obs = boot_observer();
             // Three sends at t = 100, 500, 900.
@@ -1559,8 +1596,8 @@ mod native {
 
         #[test]
         fn describe_window_collisions_at_same_t_sent() {
-            // BTreeSet<(Nanos, MailId)>: two mails at the same Nanos
-            // tie-break by MailId and both survive in the index.
+            // Several mails sharing one `Nanos` all fall in an inclusive
+            // [t, t] window — the linear scan needs no tie-break.
             let mut obs = boot_observer();
             for cid in 1..=3u64 {
                 let m = mail(1, cid);
@@ -1575,7 +1612,6 @@ mod native {
                     Nanos(500),
                 );
             }
-            assert_eq!(obs.t_sent_index.len(), 3);
             let result = obs.build_describe_window(
                 DescribeWindow {
                     window: TraceWindow::Absolute {
@@ -1691,92 +1727,31 @@ mod native {
             }
         }
 
+        /// iamacoffeepot/aether#1054 regression: under the wedge-causing
+        /// load shape (a steady stream of settle-then-age-out trees), the
+        /// ring keeps the working set hard-bounded by capacity with no
+        /// eviction pass — overwriting is the GC. The prior design grew
+        /// `roots` / `mails` without bound for minutes (10-min retention)
+        /// until the per-batch drain spiked and settlement latency
+        /// exceeded the frame tick (#1048). Here many batches of
+        /// advance-shaped trees flow through a small ring; the live set
+        /// never exceeds capacity and the indexes stay consistent.
         #[test]
-        fn retention_evicts_stale() {
-            // Post-#1048: retention evicts SETTLED roots only (ADR-0080
-            // §11 — in-flight roots are never time-evicted). Settle the
-            // root so it enters the settlement-time index before the
-            // retention window elapses.
-            let mut obs = observer_with(Duration::from_millis(50), 1000);
-            let m = mail(1, 1);
-            apply_sent_event(
-                &mut obs,
-                m,
-                m,
-                None,
-                MailboxId(1),
-                MailboxId(2),
-                KindId(0xABCD),
-                Nanos(100),
-            );
-            obs.apply_event(TraceEvent::Finished {
-                mail_id: m,
-                t: Nanos(200),
-            });
-            assert_eq!(obs.roots.len(), 1);
-            thread::sleep(Duration::from_millis(80));
-            obs.evict();
-            assert!(obs.roots.is_empty());
-            assert!(obs.mails.is_empty());
-        }
-
-        /// ADR-0080 §11 / iamacoffeepot/aether#1048: an in-flight root
-        /// (never `Finished`) is **never** time-evicted, no matter how
-        /// long it sits past the retention window — it isn't in the
-        /// settlement-time index. The prior `retain(last_event_at >=
-        /// cutoff)` violated this; the wedge fix makes §11 structural.
-        #[test]
-        fn retention_never_evicts_in_flight_root() {
-            let mut obs = observer_with(Duration::from_millis(50), 1000);
-            let m = mail(1, 1);
-            apply_sent_event(
-                &mut obs,
-                m,
-                m,
-                None,
-                MailboxId(1),
-                MailboxId(2),
-                KindId(0xABCD),
-                Nanos(100),
-            );
-            assert_eq!(obs.roots.len(), 1);
-            thread::sleep(Duration::from_millis(80));
-            let removed = obs.evict();
-            assert_eq!(removed, 0, "in-flight root must survive retention");
-            assert_eq!(obs.roots.len(), 1, "in-flight root must not be evicted");
-            assert_eq!(obs.mails.len(), 1);
-        }
-
-        /// iamacoffeepot/aether#1048 regression: under the wedge-causing
-        /// load shape (a steady stream of settle-then-evict batches), the
-        /// working set stays bounded and per-batch eviction work stays
-        /// flat — it does **not** grow with cumulative root count. The
-        /// prior `evict` scanned every root every batch and (with the
-        /// 10-minute default retention) evicted nothing for minutes, so
-        /// state — and scan cost — grew without bound until settlement
-        /// latency exceeded the frame tick. Here a 1 ms retention plus a
-        /// 2 ms inter-batch sleep guarantees the prior batch is always
-        /// expired by the next `evict`, so the working set never exceeds
-        /// ~one batch. `thread::sleep` only ever over-sleeps, so the
-        /// bound is robust to CI jitter in both directions (a longer
-        /// sleep just expires more, and we drain every batch).
-        #[test]
-        fn soak_settled_roots_stay_bounded_with_flat_evict_work() {
-            const BATCHES: usize = 60;
+        fn soak_ring_stays_bounded_no_eviction_pass() {
+            const CAP: usize = 256;
+            const BATCHES: usize = 200;
             const PER_BATCH: usize = 50;
 
-            let mut obs = observer_with(Duration::from_millis(1), 1_000_000);
+            let mut obs = observer_with(CAP);
             let mut max_roots_seen = 0usize;
-            let mut max_removed_in_one_evict = 0usize;
+            let mut max_by_mail_seen = 0usize;
             let mut total_settled = 0usize;
 
             for b in 0..BATCHES {
-                // Each "batch" sends + finishes PER_BATCH distinct roots
-                // (the advance-shaped Sent→Finished pair), then evicts —
-                // exactly the observer's per-batch hot path.
                 for i in 0..PER_BATCH {
                     let cid = (b * PER_BATCH + i + 1) as u64;
                     let m = mail(1, cid);
+                    // Advance-shaped: Sent then Finished — the tree settles.
                     apply_sent_event(
                         &mut obs,
                         m,
@@ -1794,40 +1769,39 @@ mod native {
                     total_settled += 1;
                 }
                 max_roots_seen = max_roots_seen.max(obs.roots.len());
-                let removed = obs.evict();
-                max_removed_in_one_evict = max_removed_in_one_evict.max(removed);
-                // Sleep > retention so the *previous* batch is expired by
-                // the next evict; the working set stays at ~one batch.
-                thread::sleep(Duration::from_millis(2));
+                max_by_mail_seen = max_by_mail_seen.max(obs.by_mail.len());
             }
 
-            // Working set never approaches the cumulative total — old
-            // behaviour would have grown `roots` to all BATCHES*PER_BATCH.
             let cumulative = BATCHES * PER_BATCH;
+            assert_eq!(total_settled, cumulative);
             assert!(
-                max_roots_seen <= PER_BATCH * 5 && max_roots_seen < cumulative / 4,
-                "working set {max_roots_seen} not bounded vs cumulative {cumulative}"
+                cumulative > CAP * 4,
+                "soak must lap the ring many times to be meaningful"
             );
-            // Per-batch eviction work is proportional to what expired (k),
-            // not total state (n) — a small multiple of one batch.
+            // The live set is hard-bounded by the ring — it never grows
+            // with cumulative inflow (which the old design did).
             assert!(
-                max_removed_in_one_evict <= PER_BATCH * 5,
-                "single-batch eviction {max_removed_in_one_evict} not bounded by recent inflow"
+                max_roots_seen <= CAP,
+                "live roots {max_roots_seen} exceeded ring capacity {CAP}"
             );
-
-            // Final flush: let the last batch expire and drain. After a
-            // full eviction every index is mutually consistent — no leak.
-            thread::sleep(Duration::from_millis(5));
-            obs.evict();
-            assert!(obs.roots.is_empty(), "all settled roots eventually evict");
-            assert!(obs.mails.is_empty(), "mails drained with their roots");
-            assert!(obs.t_sent_index.is_empty(), "t_sent_index stays in sync");
-            assert!(obs.evictable.is_empty(), "evictable index stays in sync");
             assert!(
-                obs.mails_by_root.is_empty(),
-                "root->mails index stays in sync"
+                max_by_mail_seen <= CAP,
+                "by_mail {max_by_mail_seen} exceeded ring capacity {CAP}"
             );
-            assert!(total_settled > 0);
+            // Index consistency: every by_mail entry points at its live
+            // slot (recycle cleans stale entries), and every live root
+            // either has a mails_by_root list or an outstanding hold.
+            for (&mid, &seq) in &obs.by_mail {
+                let slot = obs.slot_at(seq).expect("by_mail points at a live slot");
+                assert_eq!(slot.mail_id, mid, "by_mail points at the wrong slot");
+            }
+            for root in obs.roots.keys() {
+                assert!(
+                    obs.mails_by_root.contains_key(root)
+                        || obs.roots.get(root).is_some_and(|r| r.held_open > 0),
+                    "live root {root:?} has neither a mails_by_root entry nor a hold"
+                );
+            }
         }
 
         /// Shared scaffolding for the `on_dispatch_traced` tests:
@@ -1854,19 +1828,7 @@ mod native {
                 Arc::clone(&mailer),
                 MailboxId(0x7ACE),
             ));
-            let cap = TraceObserverCapability {
-                roots: HashMap::new(),
-                mails: HashMap::new(),
-                t_sent_index: BTreeSet::new(),
-                evictable: BTreeSet::new(),
-                mails_by_root: HashMap::new(),
-                retention: Duration::from_mins(1),
-                max_roots: 1000,
-                mailer,
-                settled_kind: <Settled as aether_data::Kind>::ID,
-                registry: Arc::clone(&registry),
-                evict_stats: EvictStats::new(),
-            };
+            let cap = TraceObserverCapability::with_capacity(mailer, Arc::clone(&registry), 1024);
             DispatchTracedFixture {
                 registry,
                 rx,
