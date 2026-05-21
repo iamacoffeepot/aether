@@ -19,8 +19,8 @@ use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
 use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
-    DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Schema, Tag, Uuid,
-    mailbox_id_from_name, tagged_id,
+    DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name,
+    tagged_id,
 };
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ListEngines,
@@ -32,6 +32,7 @@ use aether_kinds::{
         TRACE_OBSERVER_MAILBOX_NAME,
     },
 };
+use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -42,11 +43,11 @@ use crate::args::ActorLogEntry;
 use crate::args::ActorLogsArgs;
 use crate::args::ActorLogsResponse;
 use crate::args::{
-    CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagStatusArgs, DescribeComponentArgs,
-    DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo, HandleSummaryJson, LoadComponentArgs,
-    MailIdJson, MailNodeJson, MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs,
-    SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
-    TerminateSubstrateArgs, TracedMailSpec, TransformListing,
+    CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagDescriptorArg, DagStatusArgs,
+    DescribeComponentArgs, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
+    HandleSummaryJson, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NodeArg,
+    ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
+    SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::rpc::RpcSession;
 use aether_kinds::descriptors;
@@ -595,17 +596,16 @@ impl Mcp {
         Parameters(args): Parameters<SubmitDagArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        // Resolve each Source's `payload_path` virtual field into wire
-        // `payload` bytes before encoding. A read failure surfaces as a
-        // clean invalid-params error and never touches the wire.
-        let descriptor_json = resolve_payload_paths(args.descriptor)
+        // Build the wire descriptor from the typed arg, reading each
+        // Source's `payload_path` into the wire `payload` bytes. A read
+        // failure surfaces as a clean invalid-params error and never
+        // touches the wire.
+        let descriptor = build_descriptor(args.descriptor)
             .await
             .map_err(|e| McpError::invalid_params(format!("submit_dag descriptor: {e}"), None))?;
-        // Encode `Submit { descriptor }` against the Submit kind schema —
-        // the same encode_schema path send_mail uses for its params.
-        let submit_json = serde_json::json!({ "descriptor": descriptor_json });
-        let payload = aether_codec::encode_schema(&submit_json, &Submit::SCHEMA)
-            .map_err(|e| McpError::invalid_params(format!("submit_dag encode: {e}"), None))?;
+        // Encode via the kind's native (postcard) wire encode — ids
+        // serialize in their u64 form, matching the substrate's decode.
+        let payload = Submit { descriptor }.encode_into_bytes();
         let envelope = MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
@@ -806,52 +806,83 @@ fn parse_dag_id(s: &str) -> Result<DagId, McpError> {
         .map_err(|e| McpError::invalid_params(format!("dag_id: {e}"), None))
 }
 
-/// Resolve the tool-layer `payload_path` virtual field on every `Source`
-/// node of a descriptor JSON into the wire `payload: Vec<u8>` byte array.
-///
-/// The descriptor JSON is the externally-tagged `DagDescriptor` shape
-/// `encode_schema` accepts: `nodes` is an array of `{ "Source": { … } }`
-/// / `{ "Observer": { … } }` / `{ "Call": { … } }` objects. For each
-/// `Source` object carrying a `payload_path` string, this reads the file
-/// at that path, replaces `payload` with the file bytes as a JSON byte
-/// array, and removes `payload_path`. A `Source` with an inline
-/// `payload` array and no `payload_path` is left untouched. The
-/// substrate never sees the path — it gets a normal `Vec<u8>` payload.
-async fn resolve_payload_paths(
-    mut descriptor: serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    let Some(nodes) = descriptor
-        .get_mut("nodes")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        // No nodes array — let encode_schema produce the structured
-        // error rather than second-guessing the shape here.
-        return Ok(descriptor);
-    };
-    for node in nodes.iter_mut() {
-        // Externally-tagged: { "Source": { … } }.
-        let Some(source) = node
-            .get_mut("Source")
-            .and_then(serde_json::Value::as_object_mut)
-        else {
-            continue;
+/// Build the wire [`DagDescriptor`] from the typed tool arg, reading each
+/// `Source`'s `payload_path` into the wire `payload` bytes. The wire kind
+/// never learns about filesystem paths — the path is a tool-layer
+/// convenience resolved here; `payload_path` takes precedence over an
+/// inline `payload`. The tagged-string ids were already parsed into their
+/// typed `MailboxId` / `KindId` / `TransformId` form during arg
+/// deserialization, so this is a straight move + a file read.
+async fn build_descriptor(arg: DagDescriptorArg) -> anyhow::Result<DagDescriptor> {
+    let mut nodes = Vec::with_capacity(arg.nodes.len());
+    for node in arg.nodes {
+        let wire = match node {
+            NodeArg::Source {
+                id,
+                mailbox,
+                kind_id,
+                payload_path,
+                payload,
+            } => {
+                let payload = match payload_path {
+                    Some(path) => fs::read(&path)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("reading payload_path {path:?}: {e}"))?,
+                    None => payload.unwrap_or_default(),
+                };
+                Node::Source {
+                    id: NodeId(id),
+                    mailbox,
+                    kind_id,
+                    payload,
+                }
+            }
+            NodeArg::Transform {
+                id,
+                transform_id,
+                output_kind_id,
+                timeout_ms,
+            } => Node::Transform {
+                id: NodeId(id),
+                transform_id,
+                output_kind_id,
+                timeout_ms,
+            },
+            NodeArg::Call {
+                id,
+                recipient,
+                kind_id,
+            } => Node::Call {
+                id: NodeId(id),
+                recipient,
+                kind_id,
+            },
+            NodeArg::Observer {
+                id,
+                recipient,
+                kind_id,
+            } => Node::Observer {
+                id: NodeId(id),
+                recipient,
+                kind_id,
+            },
         };
-        let Some(path) = source
-            .get("payload_path")
-            .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
-        let path = path.to_owned();
-        let bytes = fs::read(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("reading payload_path {path:?}: {e}"))?;
-        let byte_array: Vec<serde_json::Value> =
-            bytes.into_iter().map(serde_json::Value::from).collect();
-        source.insert("payload".to_owned(), serde_json::Value::Array(byte_array));
-        source.remove("payload_path");
+        nodes.push(wire);
     }
-    Ok(descriptor)
+    let edges = arg
+        .edges
+        .into_iter()
+        .map(|e| Edge {
+            from: NodeId(e.from),
+            to: NodeId(e.to),
+            slot: e.slot,
+        })
+        .collect();
+    Ok(DagDescriptor {
+        version: arg.version,
+        nodes,
+        edges,
+    })
 }
 
 /// Encode a `send_mail_traced` batch into the same `MailEnvelope`
@@ -1433,10 +1464,10 @@ mod tests {
         path
     }
 
-    /// The tool's `payload_path` → wire-`payload` substitution + JSON
-    /// encode path produces the exact same canonical bytes as a direct
-    /// `#[derive(Kind)]` encode of the same descriptor with the bytes
-    /// inlined. Locks against encoding skew between the two paths.
+    /// The typed-arg path (`DagDescriptorArg` deserialize + `payload_path`
+    /// file read + native `encode_into_bytes`) produces the exact same
+    /// canonical bytes as a direct `#[derive(Kind)]` encode of the same
+    /// descriptor with the bytes inlined. Locks against encoding skew.
     #[tokio::test]
     async fn submit_dag_encodes_descriptor() {
         let source_mbx = mailbox_id_from_name("aether.fs");
@@ -1475,41 +1506,38 @@ mod tests {
         }
         .encode_into_bytes();
 
-        // Tool path: descriptor JSON with a `payload_path` virtual field
-        // on the source, externally-tagged Node variants, tagged-string
-        // ids.
+        // Tool path: typed descriptor with a `payload_path` virtual field
+        // on the source, externally-tagged variants, tagged-string ids,
+        // and plain-integer node ids (no `{ "0": n }` schema wrapping).
         let path = stage_temp_file("encode", &payload_bytes);
-        // NodeId is a `#[derive(Schema)]` newtype, so encode_schema reads
-        // its single tuple field as `{ "0": <u32> }` (the schema-correct
-        // JSON the agent authors against `describe_kinds`).
         let descriptor_json = serde_json::json!({
             "version": 1,
             "nodes": [
                 { "Source": {
-                    "id": { "0": 0 },
+                    "id": 0,
                     "mailbox": tagged_id::encode(source_mbx.0).unwrap(),
                     "kind_id": tagged_id::encode(source_kind.0).unwrap(),
                     "payload_path": path.to_str().unwrap(),
                 }},
                 { "Observer": {
-                    "id": { "0": 1 },
+                    "id": 1,
                     "recipient": tagged_id::encode(observer_mbx.0).unwrap(),
                     "kind_id": tagged_id::encode(observer_kind.0).unwrap(),
                 }},
             ],
-            "edges": [ { "from": { "0": 0 }, "to": { "0": 1 }, "slot": 0 } ],
+            "edges": [ { "from": 0, "to": 1, "slot": 0 } ],
         });
-        let resolved = resolve_payload_paths(descriptor_json)
-            .await
-            .expect("payload_path resolves");
-        let submit_json = serde_json::json!({ "descriptor": resolved });
-        let actual =
-            aether_codec::encode_schema(&submit_json, &Submit::SCHEMA).expect("encode_schema ok");
+        let arg: DagDescriptorArg =
+            serde_json::from_value(descriptor_json).expect("descriptor deserializes");
+        let actual = Submit {
+            descriptor: build_descriptor(arg).await.expect("payload_path resolves"),
+        }
+        .encode_into_bytes();
 
         std_fs::remove_file(&path).ok();
         assert_eq!(
             actual, expected,
-            "tool path-loading + JSON encode must match the binary inline-bytes encode",
+            "typed tool path + native encode must match the binary inline-bytes encode",
         );
     }
 
@@ -1539,7 +1567,7 @@ mod tests {
             "version": 1,
             "nodes": [
                 { "Source": {
-                    "id": { "0": 0 },
+                    "id": 0,
                     "mailbox": tagged_id::encode(source_mbx.0).unwrap(),
                     "kind_id": tagged_id::encode(source_kind.0).unwrap(),
                     "payload": payload_bytes,
@@ -1547,12 +1575,12 @@ mod tests {
             ],
             "edges": [],
         });
-        let resolved = resolve_payload_paths(descriptor_json)
-            .await
-            .expect("inline payload untouched");
-        let submit_json = serde_json::json!({ "descriptor": resolved });
-        let actual =
-            aether_codec::encode_schema(&submit_json, &Submit::SCHEMA).expect("encode_schema ok");
+        let arg: DagDescriptorArg =
+            serde_json::from_value(descriptor_json).expect("descriptor deserializes");
+        let actual = Submit {
+            descriptor: build_descriptor(arg).await.expect("inline payload builds"),
+        }
+        .encode_into_bytes();
         assert_eq!(actual, expected);
     }
 
@@ -1563,7 +1591,7 @@ mod tests {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let source_mbx = mailbox_id_from_name("aether.fs");
-        let descriptor = serde_json::json!({
+        let descriptor: DagDescriptorArg = serde_json::from_value(serde_json::json!({
             "version": 1,
             "nodes": [
                 { "Source": {
@@ -1574,7 +1602,8 @@ mod tests {
                 }},
             ],
             "edges": [],
-        });
+        }))
+        .expect("descriptor deserializes");
         let result = mcp
             .submit_dag(Parameters(SubmitDagArgs {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),

@@ -2,6 +2,7 @@
 //! (issue 763 P5b). Pure data — `serde` + `schemars::JsonSchema` so
 //! `rmcp` can derive the JSON Schema it advertises to MCP clients.
 
+use aether_data::{KindId, MailboxId, TransformId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -349,34 +350,175 @@ pub struct CaptureFrameArgs {
     pub after_mails: Vec<CaptureMailSpec>,
 }
 
-/// `submit_dag` arguments (ADR-0047 §9).
+// `SubmitDagArgs` lives in its own module so a *scoped*
+// `#![allow(unused_qualifications)]` can cover schemars' `schema_with`
+// codegen without relaxing the workspace lint anywhere else. The
+// `schema_with` expansion emits a `_SchemarsSchemaWithFunction` wrapper
+// containing `impl schemars::JsonSchema` / `<… as schemars::JsonSchema>`
+// — paths that are redundant in this crate's lint context (we
+// `use schemars::JsonSchema`) and so trip `unused_qualifications`. That
+// generated `impl` is a module-level sibling of the struct, so the lint
+// can only be silenced at module scope (an `#[allow]` on the struct or
+// field never reaches it). Isolating the one struct that uses
+// `schema_with` keeps the allow surgical.
+mod submit_dag_args {
+    #![allow(unused_qualifications)]
+
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    use super::DagDescriptorArg;
+
+    /// `schema_with` hook for [`SubmitDagArgs::descriptor`]: returns the
+    /// `DagDescriptorArg` schema *inline* (`json_schema` yields the
+    /// type's own object definition, not a `subschema_for` `$ref`), so
+    /// the advertised property carries `type: object` with the full
+    /// node/edge structure directly — clients then send a nested object
+    /// rather than stringifying this top-level arg.
+    fn descriptor_inline_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        DagDescriptorArg::json_schema(generator)
+    }
+
+    /// `submit_dag` arguments (ADR-0047 §9).
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct SubmitDagArgs {
+        /// Engine UUID the DAG submits to (from `list_engines`).
+        pub engine_id: String,
+        /// The DAG descriptor, encoded against the `aether.dag.descriptor`
+        /// kind schema. `nodes` is an array of externally-tagged `Node`
+        /// variants (`{ "Source": { id, mailbox, kind_id, payload_path }
+        /// }`, `{ "Observer": { id, recipient, kind_id } }`, `{ "Call": {
+        /// id, recipient, kind_id } }`); `edges` is an array of `{ from,
+        /// to, slot }`; `version` is `1`. Tagged-string ids (`mbx-…`,
+        /// `knd-…`) per ADR-0064/0065.
+        ///
+        /// **`payload_path` is a tool-layer virtual field.** Each
+        /// `Source` carries `payload_path: String` instead of the wire
+        /// `payload: Vec<u8>`: `submit_dag` reads the file at that path
+        /// and substitutes the bytes into the wire `payload` before
+        /// encoding. The path must be readable from the MCP process
+        /// (colocated with the substrate in v1). A `Source` may instead
+        /// carry an inline `payload` byte array; `payload_path` takes
+        /// precedence when both are present.
+        ///
+        /// Deserializes into the typed [`DagDescriptorArg`], so the
+        /// node/edge shape and tagged ids are validated with precise
+        /// parse errors. `schema_with` advertises that type's schema
+        /// *inline* (`type: object` with the full structure on this
+        /// property) rather than a bare `serde_json::Value` "any" or a
+        /// `$ref` — clients then send a nested object instead of
+        /// stringifying this top-level arg (an untyped arg got delivered
+        /// as a string, which `Submit` decode rejected as "expected
+        /// object").
+        #[schemars(schema_with = "descriptor_inline_schema")]
+        pub descriptor: DagDescriptorArg,
+        /// Cap on wall-clock wait for the synchronous validation verdict,
+        /// in milliseconds. Defaults to 5000. Guards against a hung
+        /// validator, not normal latency — validation is microseconds,
+        /// and execution is async (poll via `dag_status`).
+        #[serde(default)]
+        pub timeout_ms: Option<u32>,
+    }
+}
+
+pub use submit_dag_args::SubmitDagArgs;
+
+/// Tool-layer mirror of `aether_kinds::dag::DagDescriptor`. Differs from
+/// the wire kind only where the MCP boundary needs it to: `Source`
+/// carries a `payload_path` (a file the tool reads into the wire
+/// `payload` bytes) instead of inline bytes, and ids arrive as tagged
+/// strings. The id fields are the real `MailboxId` / `KindId` /
+/// `TransformId` — their serde already parses the tagged `mbx-` / `knd-`
+/// / `tfm-` form in JSON; `#[schemars(with = "String")]` only patches
+/// the *advertised* schema to `string` (those types intentionally don't
+/// implement `JsonSchema`, which lives in the tool layer, not the
+/// `no_std` data layer).
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SubmitDagArgs {
-    /// Engine UUID the DAG submits to (from `list_engines`).
-    pub engine_id: String,
-    /// The DAG descriptor as JSON, encoded against the
-    /// `aether.dag.descriptor` kind schema (read it via `describe_kinds`).
-    /// `nodes` is an array of externally-tagged `Node` variants
-    /// (`{ "Source": { id, mailbox, kind_id, payload_path } }`,
-    /// `{ "Observer": { id, recipient, kind_id } }`,
-    /// `{ "Call": { id, recipient, kind_id } }`); `edges` is an array of
-    /// `{ from, to, slot }`; `version` is `1`. Tagged-string ids
-    /// (`mbx-…`, `knd-…`) per ADR-0064/0065.
-    ///
-    /// **`payload_path` is a tool-layer virtual field.** Each `Source`
-    /// carries `payload_path: String` instead of the wire `payload:
-    /// Vec<u8>`: `submit_dag` reads the file at that path and substitutes
-    /// the bytes into the wire `payload` before encoding. The path must
-    /// be readable from the MCP process (colocated with the substrate in
-    /// v1). A `Source` may instead carry an inline `payload` byte array;
-    /// `payload_path` takes precedence when both are present.
-    pub descriptor: serde_json::Value,
-    /// Cap on wall-clock wait for the synchronous validation verdict, in
-    /// milliseconds. Defaults to 5000. Guards against a hung validator,
-    /// not normal latency — validation is microseconds, and execution is
-    /// async (poll via `dag_status`).
-    #[serde(default)]
-    pub timeout_ms: Option<u32>,
+pub struct DagDescriptorArg {
+    /// Descriptor version (`1` for the current wire shape).
+    pub version: u16,
+    /// DAG nodes — externally-tagged `Source` / `Transform` / `Call` /
+    /// `Observer` variants.
+    pub nodes: Vec<NodeArg>,
+    /// Directed edges wiring a producer node's output into a consumer
+    /// node's input slot.
+    pub edges: Vec<EdgeArg>,
+}
+
+/// One DAG node — tool-layer mirror of `aether_kinds::dag::Node`,
+/// externally tagged (`{ "Source": { … } }`).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub enum NodeArg {
+    /// Root node: dispatches a payload to `mailbox` as `kind_id` and
+    /// feeds the reply downstream. Sources have no incoming edges.
+    Source {
+        /// Descriptor-local node id, unique within this descriptor.
+        id: u32,
+        /// Sink mailbox (tagged `mbx-…`).
+        #[schemars(with = "String")]
+        mailbox: MailboxId,
+        /// Kind dispatched to `mailbox` (tagged `knd-…`).
+        #[schemars(with = "String")]
+        kind_id: KindId,
+        /// Filesystem path the tool reads into the wire payload bytes
+        /// (readable from the MCP process). Takes precedence over inline
+        /// `payload` when both are present.
+        #[serde(default)]
+        payload_path: Option<String>,
+        /// Inline payload bytes — an alternative to `payload_path` for
+        /// small payloads.
+        #[serde(default)]
+        payload: Option<Vec<u8>>,
+    },
+    /// Mid-graph pure native transform (ADR-0048).
+    Transform {
+        /// Descriptor-local node id.
+        id: u32,
+        /// Registered native transform (tagged `tfm-…`).
+        #[schemars(with = "String")]
+        transform_id: TransformId,
+        /// The kind this transform produces (tagged `knd-…`).
+        #[schemars(with = "String")]
+        output_kind_id: KindId,
+        /// Per-call deadline in ms; `None` uses the executor default.
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// Mid-graph effectful cap dispatch; its output handle is a
+    /// self-describing `Bundle`.
+    Call {
+        /// Descriptor-local node id.
+        id: u32,
+        /// Dispatch recipient (tagged `mbx-…`).
+        #[schemars(with = "String")]
+        recipient: MailboxId,
+        /// Kind dispatched to `recipient` (tagged `knd-…`).
+        #[schemars(with = "String")]
+        kind_id: KindId,
+    },
+    /// Terminal node: assembles `kind_id` from incoming edges and
+    /// dispatches it to `recipient`. Observers have no outgoing edges.
+    Observer {
+        /// Descriptor-local node id.
+        id: u32,
+        /// Dispatch recipient (tagged `mbx-…`).
+        #[schemars(with = "String")]
+        recipient: MailboxId,
+        /// Kind assembled and dispatched to `recipient` (tagged `knd-…`).
+        #[schemars(with = "String")]
+        kind_id: KindId,
+    },
+}
+
+/// One directed DAG edge — mirror of `aether_kinds::dag::Edge`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EdgeArg {
+    /// Producing node id.
+    pub from: u32,
+    /// Consuming node id.
+    pub to: u32,
+    /// Consumer-side input slot index.
+    pub slot: u32,
 }
 
 /// `dag_status` arguments (ADR-0047 §9).
@@ -395,4 +537,32 @@ pub struct DagCancelArgs {
     pub engine_id: String,
     /// Tagged DAG id (`dag-…`) returned by `submit_dag`.
     pub dag_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `submit_dag`'s `descriptor` must advertise as an
+    /// object — either inline `type: object` on the property or via a
+    /// named definition it `$ref`s. As a bare `serde_json::Value` it
+    /// advertised no type at all, and MCP clients stringify an untyped
+    /// top-level object arg — the substrate then sees a string at
+    /// `$.descriptor` and rejects it ("expected object"), blocking every
+    /// DAG submission over MCP.
+    #[test]
+    fn submit_dag_descriptor_advertises_object_type() {
+        let schema = schemars::schema_for!(SubmitDagArgs);
+        let v = serde_json::to_value(&schema).expect("schema serializes");
+        let object = serde_json::Value::String("object".to_owned());
+        let defs = v.get("$defs").or_else(|| v.get("definitions"));
+        let advertises_object = v["properties"]["descriptor"]["type"] == object
+            || defs
+                .and_then(|d| d.get("DagDescriptorArg"))
+                .is_some_and(|d| d["type"] == object);
+        assert!(
+            advertises_object,
+            "descriptor must advertise as an object (inline or via a named def); schema: {v}"
+        );
+    }
 }
