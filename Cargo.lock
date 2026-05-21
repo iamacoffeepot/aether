@@ -259,6 +259,7 @@ dependencies = [
  "aether-test-fixture-probe",
  "anyhow",
  "bytemuck",
+ "crossbeam-channel",
  "ctrlc",
  "png",
  "pollster",

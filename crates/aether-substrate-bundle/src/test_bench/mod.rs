@@ -18,6 +18,8 @@ pub mod cap;
 pub mod chassis;
 pub mod events;
 mod execute;
+#[cfg(test)]
+mod mail_latency;
 pub mod render;
 pub mod test_helpers;
 pub mod visual;

@@ -208,6 +208,7 @@ pub struct TestBenchBuilder {
     width: u32,
     height: u32,
     namespace_roots: Option<NamespaceRoots>,
+    pool_workers: Option<usize>,
 }
 
 impl Default for TestBenchBuilder {
@@ -216,6 +217,7 @@ impl Default for TestBenchBuilder {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             namespace_roots: None,
+            pool_workers: None,
         }
     }
 }
@@ -241,12 +243,28 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Override the scheduler worker-pool size. `None` (the default)
+    /// keeps `PoolConfig::default` (`available_parallelism() - 1`, min
+    /// 1); `Some(n)` pins the pool to `n` workers. The mail-latency
+    /// harness sweeps this to expose how pool size gates fan-out
+    /// parallelism and under-load inbox queueing (iamacoffeepot/aether#1057).
+    #[must_use]
+    pub fn with_workers(mut self, workers: Option<usize>) -> Self {
+        self.pool_workers = workers;
+        self
+    }
+
     /// Boot the bench. Equivalent to `TestBench::start_with_size` for
     /// the default builder; overrides applied via the builder methods
     /// flow through to `SubstrateBoot::builder` and the chassis-side
     /// IO sink wiring.
     pub fn build(self) -> Result<TestBench, TestBenchError> {
-        TestBench::start_inner(self.width, self.height, self.namespace_roots)
+        TestBench::start_inner(
+            self.width,
+            self.height,
+            self.namespace_roots,
+            self.pool_workers,
+        )
     }
 }
 
@@ -267,13 +285,14 @@ impl TestBench {
     /// Boot a `TestBench` with a specific offscreen target size.
     /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
     pub fn start_with_size(width: u32, height: u32) -> Result<Self, TestBenchError> {
-        Self::start_inner(width, height, None)
+        Self::start_inner(width, height, None, None)
     }
 
     fn start_inner(
         width: u32,
         height: u32,
         namespace_roots: Option<NamespaceRoots>,
+        pool_workers: Option<usize>,
     ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
@@ -290,6 +309,7 @@ impl TestBench {
             name: "test-bench".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             workers: WORKERS,
+            pool_workers,
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             capture_queue: capture_queue.clone(),
@@ -472,6 +492,29 @@ impl TestBench {
     #[cfg(test)]
     pub(crate) fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
         self.passive.actor_registry()
+    }
+
+    /// iamacoffeepot/aether#1057: inject a chassis-root mail and return its
+    /// `MailId` plus a settlement [`Receiver`] that fires when the whole
+    /// causal tree drains. Unlike [`Self::send_bytes`] this does NOT
+    /// block — the mail-latency harness injects many roots back-to-back
+    /// (to build inbox queueing) and waits on the collected receivers
+    /// afterward. Subscription is race-safe: `subscribe_settlement`
+    /// pre-fires if the tree settled between the push and the subscribe.
+    #[cfg(test)]
+    pub(crate) fn inject_root(
+        &self,
+        recipient: MailboxId,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> (MailId, crossbeam_channel::Receiver<()>) {
+        let cid = self.fresh_correlation_id();
+        let registry = self.passive.settlement_registry();
+        let root = self
+            .queue
+            .push_chassis_root_mail(cid, recipient, kind, payload, 1);
+        let rx = registry.subscribe_settlement(root);
+        (root, rx)
     }
 
     /// Bytes-level request/reply: push `(kind, payload)` to

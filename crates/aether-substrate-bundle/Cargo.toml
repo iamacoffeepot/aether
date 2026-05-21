@@ -89,6 +89,12 @@ aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
 # only and inert in a host rlib anyway, but skipping it keeps the host
 # test build lean.
 aether-camera = { path = "../aether-camera", default-features = false }
+# iamacoffeepot/aether#1057: the mail-latency harness (`test_bench::mail_latency`)
+# subscribes to per-root `Settled` notifications to wait for injected
+# trace trees to drain; naming the settlement `Receiver<()>` returned by
+# `SettlementRegistry::subscribe_settlement` needs crossbeam-channel in
+# direct scope. Test-only.
+crossbeam-channel = "0.5"
 
 [lints]
 workspace = true
