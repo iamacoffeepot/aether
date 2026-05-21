@@ -38,6 +38,7 @@ native = [
     "dep:bytemuck",
     "dep:dirs",
     "dep:postcard",
+    "dep:rustc-hash",
     "dep:serde_json",
     "dep:tracing",
     "dep:ureq",
@@ -78,6 +79,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 bytemuck = { version = "1.19", optional = true }
 dirs = { version = "6", optional = true }
 postcard = { version = "1.1", optional = true, features = ["alloc"] }
+# Fast non-cryptographic hasher for the trace observer's hot-path maps
+# (keyed by 64-bit ids — no DoS surface). iamacoffeepot/aether#1054.
+rustc-hash = { version = "2", optional = true }
 # JSON request/response bodies for the content-gen provider APIs
 # (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
 serde_json = { version = "1", optional = true }

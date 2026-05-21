@@ -1122,9 +1122,12 @@ fn transform_skips_invoke_on_cache_hit() {
         query_status(&registry, &rx, dag1, 100),
         StatusResult::Complete { .. }
     )));
-    assert_eq!(
-        recorder.lock().unwrap().len(),
-        1,
+    // The observer node dispatches as its own causal root (executor.rs),
+    // so it is NOT part of the submit chain `Complete` gates on — poll for
+    // its async effect rather than asserting it the instant Complete lands.
+    assert!(
+        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
+            == 1),
         "first seed DAG observer should run",
     );
 
@@ -1136,9 +1139,9 @@ fn transform_skips_invoke_on_cache_hit() {
         query_status(&registry, &rx, dag2, 101),
         StatusResult::Complete { .. }
     )));
-    assert_eq!(
-        recorder.lock().unwrap().len(),
-        1,
+    assert!(
+        poll_until(Duration::from_secs(5), || recorder.lock().unwrap().len()
+            == 1),
         "second seed DAG observer should still resolve from cache",
     );
     assert_eq!(
