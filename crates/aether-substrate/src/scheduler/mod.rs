@@ -33,6 +33,7 @@
 //! actually run on the pool. Phase 2 flips one cap to `Pooled`; Phase
 //! 3 sweeps the rest. Until PR C the pool is unused infrastructure.
 
+mod local_slot;
 mod pool;
 mod slot;
 

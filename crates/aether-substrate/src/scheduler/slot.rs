@@ -35,6 +35,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 
+use super::local_slot;
+
 /// Default per-cycle envelope cap. Once a worker has dispatched this
 /// many envelopes from a single slot, it yields to other ready slots
 /// to keep one chatty actor from monopolising the pool. Tunable in
@@ -328,9 +330,14 @@ impl WakeHandle {
             // gone the state never matters.
             return false;
         };
-        // Ready queue closed = pool is shutting down; treat as a no-op
-        // rather than panicking.
-        let _ = self.ready_tx.send(slot);
+        // Affinity (iamacoffeepot/aether#1059): if this wake runs on a
+        // pool worker, stash the slot in that worker's local cell so the
+        // chain stays warm. Otherwise (or if the cell is full — fan-out
+        // spill) fall through to the shared ready queue. A closed ready
+        // queue means the pool is shutting down; treat as a no-op.
+        if let Err(slot) = local_slot::try_stash_next(slot) {
+            let _ = self.ready_tx.send(slot);
+        }
         true
     }
 
@@ -373,6 +380,11 @@ pub mod tests {
         /// Per-envelope work duration. Used by the time-budget test.
         pub work_per_env: Duration,
         pub label: &'static str,
+        /// Optional downstream relay: on each dispatch, forward the env to
+        /// this slot's inbox and wake it. The wake runs on the pool
+        /// worker, so a chain of these exercises the worker-local stash
+        /// path (iamacoffeepot/aether#1059).
+        pub forward: Mutex<Option<(Arc<Self>, WakeHandle)>>,
     }
 
     impl CounterSlot {
@@ -385,6 +397,7 @@ pub mod tests {
                 panic_at: None,
                 work_per_env: Duration::ZERO,
                 label,
+                forward: Mutex::new(None),
             })
         }
 
@@ -424,6 +437,13 @@ pub mod tests {
             hint::black_box(env);
             if !self.work_per_env.is_zero() {
                 thread::sleep(self.work_per_env);
+            }
+            // Relay: forward to the downstream slot and wake it. On a pool
+            // worker this wake stashes the downstream in the worker-local
+            // cell (the path under test).
+            if let Some((down, wake)) = &*self.forward.lock().unwrap() {
+                down.push(env);
+                let _ = wake.wake();
             }
         }
     }

@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! loop {
-//!     slot = ready_rx.recv()?;            // blocks
+//!     slot = acquire_slot()?;             // try_recv → spin → park
 //!     match catch_unwind(|| slot.run_cycle()) {
 //!         Ok(Idle | Closed) => drop(slot),
 //!         Ok(Requeue)       => ready_tx.send(slot)?,
@@ -32,6 +32,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
+
+use crate::scheduler::local_slot;
 
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::slot::{BatchBudget, CycleResult, Drainable};
@@ -228,22 +230,15 @@ fn worker_loop(
     aborter: Arc<dyn FatalAborter>,
     template: BudgetTemplate,
 ) {
+    // Mark this thread as a pool worker so a handler's wake of a
+    // downstream slot can stash it in this worker's local cell (affinity)
+    // rather than the shared queue. iamacoffeepot/aether#1059.
+    local_slot::mark_pool_worker();
     loop {
-        let slot = select! {
-            recv(ready_rx) -> result => match result {
-                Ok(s) => s,
-                // All sender clones are gone (including our own — the
-                // pool's shutdown both drops `ready_tx` and disconnects
-                // `shutdown_rx`, but in either order the channel only
-                // disconnects once every clone drops). Exit either way.
-                Err(_) => return,
-            },
-            recv(shutdown_rx) -> _ => {
-                // Pool dropped `shutdown_tx`. Disconnect on this arm
-                // is the unambiguous "stop now" signal — works even
-                // while we still hold our own `ready_tx` clone.
-                return;
-            }
+        let Some(slot) = acquire_slot(&ready_rx, &shutdown_rx) else {
+            // Shutdown signalled (or, impossibly, the ready queue
+            // disconnected while we hold a `ready_tx` clone). Exit.
+            return;
         };
         let budget = template.build();
         let result = panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
@@ -275,6 +270,39 @@ fn worker_loop(
                 aborter.abort(reason);
             }
         }
+    }
+}
+
+/// Acquire the next ready slot for a worker: worker-local hand-off first,
+/// then a `try_recv` fast path, then a blocking park. Returns `None` only
+/// on shutdown.
+///
+/// The worker-local cell (iamacoffeepot/aether#1059) is the affinity
+/// lever: when a handler running on this worker wakes a downstream slot,
+/// that slot is stashed here instead of the shared queue, so a relay
+/// chain stays on the same warm worker and never pays the ~4.3µs
+/// parked-worker wakeup. The cell holds at most one slot — a fan-out
+/// spills its extras to the shared queue, so independent work still
+/// parallelises across workers. `take_next` is checked first (even
+/// before shutdown) so a stashed slot is never stranded.
+///
+/// `ready_rx` cannot disconnect while the caller holds its own `ready_tx`
+/// clone, so `try_recv` here is only ever `Ok` or `Empty`; shutdown is
+/// signalled solely through `shutdown_rx`, and the park's `select!` arm
+/// on it stays the one clean stop signal (issue 635 deadlock class).
+fn acquire_slot(
+    ready_rx: &Receiver<Arc<dyn Drainable>>,
+    shutdown_rx: &Receiver<()>,
+) -> Option<Arc<dyn Drainable>> {
+    if let Some(slot) = local_slot::take_next() {
+        return Some(slot);
+    }
+    if let Ok(slot) = ready_rx.try_recv() {
+        return Some(slot);
+    }
+    select! {
+        recv(ready_rx) -> result => result.ok(),
+        recv(shutdown_rx) -> _ => None,
     }
 }
 
@@ -521,6 +549,64 @@ mod tests {
         }
 
         drop(wakes);
+        let _ = handle.shutdown_with_results();
+    }
+
+    /// Flake-soak wrapper (iamacoffeepot/aether#1059). Re-runs the
+    /// multi-worker stress under a `flaky_` name so `scripts/flake-soak.sh`
+    /// repeat-runs the rewritten `acquire_slot` dispatch path. The original
+    /// still runs once in normal CI; this duplicate is the soak target.
+    #[test]
+    fn flaky_stress_many_slots_across_workers() {
+        stress_many_slots_across_workers();
+    }
+
+    /// Build a depth-`d` relay chain of `CounterSlot`s: slot[i] forwards
+    /// each dispatched env to slot[i+1] and wakes it. The forwarding wake
+    /// runs on a pool worker, so the chain drives the worker-local stash
+    /// path that `acquire_slot` reads first (iamacoffeepot/aether#1059).
+    fn relay_chain(handle: &PoolHandle, depth: usize) -> Vec<Arc<CounterSlot>> {
+        let slots: Vec<Arc<CounterSlot>> = (0..depth).map(|_| CounterSlot::new("relay")).collect();
+        for i in 0..depth.saturating_sub(1) {
+            let target = slots[i + 1].clone();
+            let target_dyn: Arc<dyn Drainable> = target.clone();
+            let weak: Weak<dyn Drainable> = Arc::downgrade(&target_dyn);
+            drop(target_dyn);
+            let wake = WakeHandle::new(target.state.clone(), weak, handle.ready_tx());
+            *slots[i].forward.lock().unwrap() = Some((target, wake));
+        }
+        slots
+    }
+
+    /// Flake-soak (iamacoffeepot/aether#1059): a relay chain on a
+    /// multi-worker pool. Each hop's wake stashes the downstream in the
+    /// running worker's local cell, so the chain stays on one warm worker
+    /// instead of bouncing across parked siblings. Soaked because the
+    /// stash path is concurrency-sensitive (worker thread-local + the
+    /// `Idle → Ready` CAS) and fires only on real worker threads — which
+    /// the other slot tests, driven from the test thread, never hit.
+    #[test]
+    fn flaky_relay_chain_stays_on_worker() {
+        let handle = standard_handle(4);
+        let slots = relay_chain(&handle, 8);
+
+        let entry = slots[0].clone();
+        let entry_dyn: Arc<dyn Drainable> = entry.clone();
+        let weak: Weak<dyn Drainable> = Arc::downgrade(&entry_dyn);
+        drop(entry_dyn);
+        let entry_wake = WakeHandle::new(entry.state.clone(), weak, handle.ready_tx());
+
+        entry.push(1);
+        assert!(entry_wake.wake());
+
+        assert!(
+            wait_until(Duration::from_secs(5), || slots
+                .iter()
+                .all(|s| s.dispatched() >= 1)),
+            "every slot in the relay chain should dispatch its forwarded env"
+        );
+
+        drop(entry_wake);
         let _ = handle.shutdown_with_results();
     }
 
