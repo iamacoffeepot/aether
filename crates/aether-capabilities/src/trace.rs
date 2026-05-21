@@ -30,13 +30,14 @@ mod native {
         RootSummaryWire, TraceWindow,
     };
     use std::cmp::Reverse;
-    use std::collections::HashMap;
     #[cfg(test)]
     use std::collections::HashSet;
     use std::env;
     use std::sync::Arc;
     #[cfg(test)]
     use std::time::{Duration, Instant};
+
+    use rustc_hash::FxHashMap;
 
     use aether_actor::{MailCtx, actor};
     use aether_data::{KindId, MailId, MailboxId, fnv1a_64_bytes};
@@ -183,17 +184,20 @@ mod native {
         /// originating slot. Verified against `slot.seq`; a stale entry
         /// (slot since recycled) is detected and ignored. Cleaned when
         /// the slot is overwritten.
-        by_mail: HashMap<MailId, u64>,
+        /// Fx-hashed (id keys are 64-bit, no denial-of-service surface)
+        /// so the hot-path map ops cost a couple multiplies, not the
+        /// stdlib default hash.
+        by_mail: FxHashMap<MailId, u64>,
         /// Settlement counters per live root. A root is present iff it
         /// still has a live mail in the ring (or a pending hold); see
         /// [`RootState`].
-        roots: HashMap<MailId, RootState>,
-        /// `root → its mail ids`, for `describe_tree`. Dropped wholesale
-        /// when an overwrite invalidates the tree.
-        mails_by_root: HashMap<MailId, Vec<MailId>>,
+        roots: FxHashMap<MailId, RootState>,
+        /// `root → its mail ids`, for `describe_tree` (`O(k)`, not a ring
+        /// scan). Dropped wholesale when an overwrite invalidates the tree.
+        mails_by_root: FxHashMap<MailId, Vec<MailId>>,
         /// `fnv1a_64(thread name) → name`. The slot stores only the
         /// hash, so names dedup and the slot stays POD.
-        thread_names: HashMap<u64, String>,
+        thread_names: FxHashMap<u64, String>,
         /// Mailer handle stashed at init so `Settled` mail can be
         /// pushed bare via [`Mailer::push`] — bypassing
         /// `NativeBinding::send_mail_with_lineage` so the outbound
@@ -223,10 +227,10 @@ mod native {
                 ring: vec![Slot::EMPTY; capacity].into_boxed_slice(),
                 mask: (capacity - 1) as u64,
                 head: 0,
-                by_mail: HashMap::new(),
-                roots: HashMap::new(),
-                mails_by_root: HashMap::new(),
-                thread_names: HashMap::new(),
+                by_mail: FxHashMap::default(),
+                roots: FxHashMap::default(),
+                mails_by_root: FxHashMap::default(),
+                thread_names: FxHashMap::default(),
                 settled_kind: <Settled as aether_data::Kind>::ID,
                 mailer,
                 registry,
@@ -237,7 +241,7 @@ mod native {
         /// and by `Settled` consumers; runtime callers should query via
         /// mail rather than reaching across threads.
         #[must_use]
-        pub fn roots(&self) -> &HashMap<MailId, RootState> {
+        pub fn roots(&self) -> &FxHashMap<MailId, RootState> {
             &self.roots
         }
 
