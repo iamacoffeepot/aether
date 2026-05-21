@@ -137,3 +137,9 @@ Qodana gates merges via the `ci-pass` aggregator (iamacoffeepot/aether#941), but
 - **Agent-side** (Claude): `mcp__rustrover__get_file_problems` returns the same problem set for one file (`errorsOnly: false` for the full qodana-equivalent surface). Iterate it over `git diff --name-only` before commits on Qodana-touched files (path-prefix sweeps, duplicated-code refactors, etc.) instead of waiting for the CI gate. RustRover MCP has no project-wide inspect runner — for whole-project pre-flight fall back to the IDE menu above.
 
 Caveats: IDE inspections don't run Qodana's Cargo.toml-level checks (`NewCrateVersionAvailable`, `UnusedDependency`) — those still surface only in CI. Re-baselining (`qodana.sarif.json` updates) still happens by downloading the `qodana-report` workflow artifact from a CI run.
+
+## Flake soak (pre-release)
+
+Concurrent / scheduler / mail-dispatch tests are timing-flaky — they pass on a lucky run and fail intermittently, so a single green CI pass does not clear one. Mark such a test by adding a thin **duplicate wrapper** next to it — keep the original, add `#[test] fn flaky_<name>() { <name>(); }`. `nextest` selects tests by name/path (not by a Rust attribute), so a `flaky_`-named duplicate is the simplest marker — no macro, no rename of the original.
+
+Before a release, soak the marked set with `scripts/flake-soak.sh [count]` (default 200). It runs `cargo nextest run --profile flake-soak --stress-count <count> -E 'test(/flaky/)'` — each `flaky_` duplicate runs `count` times, **each in a fresh process** (the isolation that reproduces timing flakes), failing if any iteration fails. The original runs once in normal CI; the per-PR pre-flight (`profile.ci`) doesn't stress, so the duplicate adds one extra run per PR and nothing more. Override the selector with `AETHER_FLAKE_FILTER`.
