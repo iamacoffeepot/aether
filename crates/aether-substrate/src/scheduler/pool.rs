@@ -303,15 +303,18 @@ fn worker_loop(
 /// then a `try_recv` fast path, then the spin-then-park coordinator.
 /// Returns `None` only on shutdown.
 ///
-/// The worker-local cell (iamacoffeepot/aether#1059) is the affinity
+/// The worker-local run-queue (iamacoffeepot/aether#1059) is the affinity
 /// lever: when a handler running on this worker wakes a downstream slot,
 /// that slot is stashed here instead of the shared queue, so a relay
 /// chain stays on the same warm worker and never pays the ~4.3µs
-/// parked-worker wakeup. The cell holds at most one slot — a fan-out
-/// spills its extras to the shared queue, so independent work still
-/// parallelises across workers. `take_next` is checked first so a
-/// stashed slot is never stranded; it can only be populated by *this*
-/// worker during its own `run_cycle`, so one check per acquire suffices.
+/// parked-worker wakeup. The queue holds up to the stickiness cap
+/// (`AETHER_LOCAL_STICKY_MAX`, default 1): at 1 the chain head stays local
+/// and a fan-out spills its extras to the shared queue (independent work
+/// parallelises across workers); higher keeps the fan-out extras local for
+/// the producing worker to drain in sequence, trading parallelism for
+/// locality. `take_next` is checked first so a stashed slot is never
+/// stranded; the queue can only be populated by *this* worker during its
+/// own `run_cycle`, so one pop per acquire suffices.
 ///
 /// When neither the cell nor a fast `try_recv` yields work, the
 /// coordinator (iamacoffeepot/aether#1064) takes over: it keeps the
