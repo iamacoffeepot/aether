@@ -40,6 +40,7 @@ use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
 use crate::scheduler::WakeHandle;
+use crate::scheduler::WakeSink;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use std::sync::Weak;
@@ -104,10 +105,11 @@ pub struct Spawner {
     /// Monotonic counter for [`Subname::Counter`]. Per-Spawner so each
     /// chassis runs its own sequence; not shared across substrates.
     counter: AtomicU64,
-    /// Issue 635 PR C: chassis worker pool's ready-queue sender.
-    /// Cloned into [`WakeHandle`]s when the
-    /// Pooled spawn branch lands a slot.
-    pool_ready_tx: crossbeam_channel::Sender<Arc<dyn Drainable>>,
+    /// Issue 635 PR C: chassis worker pool's wake sink — the ready-queue
+    /// sender bundled with the spin/park coordinator (iamacoffeepot/aether#1064).
+    /// Cloned into [`WakeHandle`]s when the Pooled spawn branch lands a
+    /// slot.
+    wake_sink: WakeSink,
     /// Issue 635 Phase 3: strong-Arc store for instanced
     /// [`Drainable`] slots spawned via the Pooled
     /// branch. Without this the slot dropped at end of `spawn_actor`
@@ -140,7 +142,7 @@ impl Spawner {
         actor_registry: Arc<ActorRegistry>,
         mailer: Arc<Mailer>,
         aborter: Arc<dyn FatalAborter>,
-        pool_ready_tx: crossbeam_channel::Sender<Arc<dyn Drainable>>,
+        wake_sink: WakeSink,
     ) -> Self {
         Self {
             registry,
@@ -148,16 +150,16 @@ impl Spawner {
             mailer,
             aborter,
             counter: AtomicU64::new(0),
-            pool_ready_tx,
+            wake_sink,
             instanced_slots: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Borrow the chassis worker pool's ready-queue sender. PR D
-    /// reaches for this when a Pooled instanced actor spawns.
-    #[allow(dead_code)] // wired in PR D
-    pub(crate) fn pool_ready_tx(&self) -> &crossbeam_channel::Sender<Arc<dyn Drainable>> {
-        &self.pool_ready_tx
+    /// Borrow the chassis worker pool's wake sink (ready-queue sender +
+    /// spin/park coordinator). The Pooled instanced spawn branch clones
+    /// it into each slot's [`WakeHandle`].
+    pub(crate) fn wake_sink(&self) -> &WakeSink {
+        &self.wake_sink
     }
 
     /// Issue 685: walk every spawned instanced slot, signal shutdown
@@ -556,8 +558,7 @@ impl Spawner {
                 );
                 let slot_dyn: Arc<dyn Drainable> = slot.clone();
                 let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
-                let wake =
-                    WakeHandle::new(Arc::clone(slot.state()), weak, self.pool_ready_tx.clone());
+                let wake = WakeHandle::new(Arc::clone(slot.state()), weak, self.wake_sink.clone());
                 // Stash the slot's strong Arc so wakes can upgrade their
                 // `Weak`. PR C dropped it here, which broke every wake
                 // after spawn (the registry only holds the inbox

@@ -17,7 +17,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::FatalAborter;
-use crate::scheduler::Drainable;
+use crate::scheduler::WakeSink;
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -60,7 +60,7 @@ pub struct DropOnShutdownClaim {
     /// Issue 635 PR C: optional wake hook for `Pooled` actors. The
     /// mailbox closure invokes this after a successful inbox push so
     /// the chassis worker pool re-queues the actor's
-    /// [`Drainable`] slot. `Dedicated` actors
+    /// [`crate::scheduler::Drainable`] slot. `Dedicated` actors
     /// (today: every cap) leave this empty — the closure's `get()`
     /// is a single atomic load, ~free.
     ///
@@ -73,7 +73,7 @@ pub struct DropOnShutdownClaim {
 /// Cell holding the optional wake hook a `Pooled` mailbox fires after
 /// each accepted send. The mailbox closure captures `Arc<MailboxWakeSlot>`
 /// at registration time; the spawn path populates it once the
-/// [`Drainable`] slot exists.
+/// [`crate::scheduler::Drainable`] slot exists.
 #[derive(Default)]
 pub struct MailboxWakeSlot {
     inner: OnceLock<MailboxWakeFn>,
@@ -390,12 +390,13 @@ impl<'a> ChassisCtx<'a> {
         self.spawner
     }
 
-    /// Issue 635 PR C: borrow the chassis worker pool's ready-queue
-    /// sender. The `Pooled` branch of `make_native_actor_boot` clones
-    /// this into the [`crate::scheduler::WakeHandle`] that fires when
-    /// the actor's mailbox accepts a send.
-    pub(crate) fn pool_ready_tx(&self) -> &crossbeam_channel::Sender<Arc<dyn Drainable>> {
-        self.spawner.pool_ready_tx()
+    /// Issue 635 PR C: borrow the chassis worker pool's wake sink
+    /// (ready-queue sender + spin/park coordinator). The `Pooled` branch
+    /// of `make_native_actor_boot` clones this into the
+    /// [`crate::scheduler::WakeHandle`] that fires when the actor's
+    /// mailbox accepts a send.
+    pub(crate) fn wake_sink(&self) -> &WakeSink {
+        self.spawner.wake_sink()
     }
 
     /// Install the fallback-router handler. At most one capability
