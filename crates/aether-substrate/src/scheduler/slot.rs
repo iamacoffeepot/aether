@@ -356,18 +356,22 @@ impl WakeHandle {
             return false;
         };
         // Affinity (iamacoffeepot/aether#1059): if this wake runs on a
-        // pool worker, stash the slot in that worker's local cell so the
-        // chain stays warm — no shared-queue round-trip, no wakeup. The
-        // local-cell path is invisible to the spin coordinator; the
-        // same worker drains it on its next loop.
+        // pool worker, stash the slot in that worker's local run-queue so
+        // the chain stays warm — no shared-queue round-trip, no wakeup. The
+        // local path is invisible to the spin coordinator; the same worker
+        // drains it on its next loop. The queue holds up to the stickiness
+        // cap (`AETHER_LOCAL_STICKY_MAX`, default 1): at 1 the chain head
+        // stays local and every fan-out extra spills; higher keeps the
+        // fan-out extras local too, trading cross-worker parallelism for
+        // locality.
         //
-        // Otherwise (not a pool thread, or the cell is full — fan-out
+        // Otherwise (not a pool thread, or the local queue is full — fan-out
         // spill), push to the shared queue and notify the coordinator
         // (iamacoffeepot/aether#1064): it routes to a spinning worker
         // when one exists and only unparks a dormant worker when none
         // is. A closed ready queue means the pool is shutting down —
         // skip the notify.
-        if let Err(slot) = local_slot::try_stash_next(slot)
+        if let Err(slot) = local_slot::try_stash_next(slot, local_slot::sticky_cap())
             && self.sink.ready_tx.send(slot).is_ok()
         {
             self.sink.spin.notify();
