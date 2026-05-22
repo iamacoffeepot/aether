@@ -29,6 +29,7 @@ pub mod chassis_root;
 pub mod desktop;
 pub mod headless;
 pub mod hub;
+pub mod perf;
 pub mod test_bench;
 
 pub use aether_capabilities as capabilities;
