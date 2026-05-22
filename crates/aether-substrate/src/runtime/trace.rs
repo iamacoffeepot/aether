@@ -72,7 +72,7 @@ pub struct ShardedTraceQueue {
 }
 
 impl ShardedTraceQueue {
-    /// Allocate [`TRACE_SHARD_COUNT`] empty shards.
+    /// Allocate `TRACE_SHARD_COUNT` empty shards.
     #[must_use]
     pub fn new() -> Self {
         let shards = (0..TRACE_SHARD_COUNT)

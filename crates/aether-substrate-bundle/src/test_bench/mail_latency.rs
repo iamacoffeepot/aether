@@ -30,8 +30,9 @@
 //! wake, which a debug build inflates several-fold.
 
 use std::collections::BTreeSet;
+use std::env;
 use std::sync::Arc;
-use std::thread::available_parallelism;
+use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
@@ -542,7 +543,7 @@ fn mail_saturation_profile() {
     // Seed M tokens with a high hop budget so they outlast the run; the
     // tokens circulate without further injection. Spread across the ring
     // so multiple actors are ready at once and every worker is fed.
-    let m: usize = std::env::var("TOKENS")
+    let m: usize = env::var("TOKENS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(6000);
@@ -552,12 +553,12 @@ fn mail_saturation_profile() {
         let _ = tb.inject_root(entry, Ping::ID, Ping { seq: ttl }.encode_into_bytes());
     }
 
-    let secs: u64 = std::env::var("PROFILE_SECS")
+    let secs: u64 = env::var("PROFILE_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
     let start = Instant::now();
-    std::thread::sleep(Duration::from_secs(secs));
+    thread::sleep(Duration::from_secs(secs));
     eprintln!(
         "mail_saturation_profile: {workers}w, ring n={n}, m={m} tokens, slept {:?}",
         start.elapsed()
@@ -603,14 +604,10 @@ fn sharded_trace_settles_every_root() {
     // 800 roots × depth 5 = 4000 mails — well under the trace ring
     // capacity (1<<18), so nothing laps and every live root keeps its
     // settlement state.
-    let roots = 800usize;
-    let mut pending = Vec::with_capacity(roots);
+    let roots = 800u32;
+    let mut pending = Vec::with_capacity(roots as usize);
     for seq in 0..roots {
-        pending.push(tb.inject_root(
-            entry,
-            Ping::ID,
-            Ping { seq: seq as u32 }.encode_into_bytes(),
-        ));
+        pending.push(tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes()));
     }
 
     for (idx, (_root, rx)) in pending.iter().enumerate() {
