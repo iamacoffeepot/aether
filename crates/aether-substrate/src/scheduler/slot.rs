@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 
 use super::local_slot;
+use super::spin_park::SpinPark;
 
 /// Default per-cycle envelope cap. Once a worker has dispatched this
 /// many envelopes from a single slot, it yields to other ready slots
@@ -284,6 +285,26 @@ pub trait Drainable: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
+/// The destination a [`WakeHandle`] routes a spilled slot to: the
+/// shared ready queue plus the [`SpinPark`] coordinator it notifies
+/// after pushing. Bundled so the "where woken work goes + how we wake a
+/// worker" pair travels as one value through the chassis wiring rather
+/// than two parallel fields. Cloned per registered slot.
+#[derive(Clone)]
+pub struct WakeSink {
+    ready_tx: Sender<Arc<dyn Drainable>>,
+    spin: Arc<SpinPark>,
+}
+
+impl WakeSink {
+    /// Bundle the pool's ready-queue sender and spin/park coordinator.
+    /// The chassis builds one from [`super::PoolHandle::wake_sink`].
+    #[must_use]
+    pub fn new(ready_tx: Sender<Arc<dyn Drainable>>, spin: Arc<SpinPark>) -> Self {
+        Self { ready_tx, spin }
+    }
+}
+
 /// Sender-side wake hook the chassis hands to the inbox sender path
 /// (PR C wires this into `MailboxSender`). Holds a [`Weak<dyn
 /// Drainable>`] to the slot — the chassis registry owns the strong
@@ -293,22 +314,14 @@ pub trait Drainable: Send + Sync + 'static {
 pub struct WakeHandle {
     state: Arc<SlotState>,
     slot: Weak<dyn Drainable>,
-    ready_tx: Sender<Arc<dyn Drainable>>,
+    sink: WakeSink,
 }
 
 impl WakeHandle {
     /// Construct a wake handle. The chassis registry calls this when
     /// it wires a new dispatcher slot.
-    pub fn new(
-        state: Arc<SlotState>,
-        slot: Weak<dyn Drainable>,
-        ready_tx: Sender<Arc<dyn Drainable>>,
-    ) -> Self {
-        Self {
-            state,
-            slot,
-            ready_tx,
-        }
+    pub fn new(state: Arc<SlotState>, slot: Weak<dyn Drainable>, sink: WakeSink) -> Self {
+        Self { state, slot, sink }
     }
 
     /// Wake the slot if it isn't already in flight. Called from the
@@ -332,11 +345,20 @@ impl WakeHandle {
         };
         // Affinity (iamacoffeepot/aether#1059): if this wake runs on a
         // pool worker, stash the slot in that worker's local cell so the
-        // chain stays warm. Otherwise (or if the cell is full — fan-out
-        // spill) fall through to the shared ready queue. A closed ready
-        // queue means the pool is shutting down; treat as a no-op.
-        if let Err(slot) = local_slot::try_stash_next(slot) {
-            let _ = self.ready_tx.send(slot);
+        // chain stays warm — no shared-queue round-trip, no wakeup. The
+        // local-cell path is invisible to the spin coordinator; the
+        // same worker drains it on its next loop.
+        //
+        // Otherwise (not a pool thread, or the cell is full — fan-out
+        // spill), push to the shared queue and notify the coordinator
+        // (iamacoffeepot/aether#1064): it routes to a spinning worker
+        // when one exists and only unparks a dormant worker when none
+        // is. A closed ready queue means the pool is shutting down —
+        // skip the notify.
+        if let Err(slot) = local_slot::try_stash_next(slot)
+            && self.sink.ready_tx.send(slot).is_ok()
+        {
+            self.sink.spin.notify();
         }
         true
     }
@@ -665,7 +687,8 @@ pub mod tests {
         let (ready_tx, ready_rx) = unbounded::<Arc<dyn Drainable>>();
         let slot = CounterSlot::new("wake");
         let weak: Weak<dyn Drainable> = Arc::downgrade(&(slot.clone() as Arc<dyn Drainable>));
-        let wake = WakeHandle::new(slot.state.clone(), weak, ready_tx);
+        let sink = WakeSink::new(ready_tx, Arc::new(SpinPark::new()));
+        let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         // First wake should push.
         assert!(wake.wake());

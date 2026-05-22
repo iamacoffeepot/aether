@@ -36,9 +36,11 @@
 mod local_slot;
 mod pool;
 mod slot;
+mod spin_park;
 
 pub use pool::{Pool, PoolConfig, PoolHandle, PoolWorkerJoin};
 pub use slot::{
     BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CycleResult, DrainOutcome, Drainable, SlotState,
-    SlotStateLabel, WakeHandle,
+    SlotStateLabel, WakeHandle, WakeSink,
 };
+pub use spin_park::{Acquired, SpinPark};
