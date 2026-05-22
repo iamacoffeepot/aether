@@ -474,10 +474,24 @@ fn route_mail(
         return;
     }
 
-    if let Some(descriptor) = registry.kind_descriptor(mail.kind)
-        && handle_store::schema_contains_ref(&descriptor.schema)
-    {
-        match handle_store::walk_and_resolve(&descriptor.schema, &mail.payload, store) {
+    let recipient = mail.recipient;
+    let inbound_mail_id = mail.mail_id;
+    let inbound_root = mail.root;
+
+    // One read guard resolves the recipient entry, the kind name, and
+    // whether the kind needs ADR-0045 handle resolution. `route_mail`
+    // previously took three separate registry reads (descriptor + entry
+    // + name) and cloned the whole descriptor every mail just to run the
+    // ref check; the cached `has_ref` behind `route_lookup` keeps the
+    // common no-ref path clone-free.
+    let lookup = registry.route_lookup(mail.kind, recipient);
+
+    // ADR-0045: kinds whose schema embeds a `Ref` get their handles
+    // resolved against the store before delivery; everything else flows
+    // through with the original bytes. `ref_schema` is `Some` only on
+    // that ref-carrying path.
+    if let Some(schema) = &lookup.ref_schema {
+        match handle_store::walk_and_resolve(schema, &mail.payload, store) {
             Ok(WalkOutcome::Resolved { payload }) => {
                 if let Cow::Owned(bytes) = payload {
                     mail.payload = bytes;
@@ -514,12 +528,8 @@ fn route_mail(
         }
     }
 
-    let recipient = mail.recipient;
-    let inbound_mail_id = mail.mail_id;
-    let inbound_root = mail.root;
-    match registry.entry(recipient) {
+    match lookup.entry {
         Some(MailboxEntry::Inbox(handler)) => {
-            let kind_name = registry.kind_name(mail.kind).unwrap_or_default();
             // Mail reaching a closure-bound mailbox through `push`
             // came from substrate core or a chassis (e.g. the frame
             // loop's FrameStats push, platform input fan-out). Per
@@ -550,7 +560,7 @@ fn route_mail(
             // copies.
             handler.enqueue(OwnedDispatch {
                 kind: mail.kind,
-                kind_name,
+                kind_name: lookup.kind_name,
                 origin: None,
                 sender: mail.reply_to,
                 payload: mail.payload,
@@ -561,7 +571,6 @@ fn route_mail(
             });
         }
         Some(MailboxEntry::Inline(handler)) => {
-            let kind_name = registry.kind_name(mail.kind).unwrap_or_default();
             // ADR-0080 §2 producer hook: synchronous handler.
             // Bracket the inline call with `Received`/`Finished`
             // so the chain's `in_flight` balances and settlement
@@ -573,7 +582,7 @@ fn route_mail(
             trace_handle.record_received(inbound_mail_id, inbound_root, thread_name);
             handler.dispatch(MailDispatch {
                 kind: mail.kind,
-                kind_name: &kind_name,
+                kind_name: &lookup.kind_name,
                 origin: None,
                 sender: mail.reply_to,
                 payload: &mail.payload,
