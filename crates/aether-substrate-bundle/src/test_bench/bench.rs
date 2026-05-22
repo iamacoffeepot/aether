@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
 #[cfg(test)]
@@ -681,27 +681,41 @@ impl TestBench {
         cid: u64,
         expected: &'static str,
     ) -> Result<EgressEvent, TestBenchError> {
-        const MAX_ITERATIONS: u32 = 8_192;
-        // Sleep per quiet iteration. 10 ms × QUIET_BUDGET caps total
-        // wait around 60 s. Long enough to absorb wasm compile under
-        // parallel test contention on a 2-core CI runner (issue 603
-        // made `aether.control` mail dispatch through
-        // `ComponentHostCapability`'s thread instead of inline on the
-        // caller, so a `LoadComponent` step needs the wait to ride
-        // out the dispatcher hop + wasmtime compile under high CPU
-        // pressure when N test binaries run in parallel).
-        const QUIET_SLEEP: Duration = Duration::from_millis(10);
-        // How many consecutive quiet iterations to tolerate before
-        // giving up.
-        const QUIET_BUDGET: u32 = 6_000;
+        // Adaptive backoff between quiet polls. A frame's settlement
+        // round-trip (driver → pool → settlement registry → reply)
+        // completes in ~1 ms, but a flat coarse sleep makes every tick
+        // pay that sleep's full granularity (a flat 10 ms cost ~12 ms
+        // per `advance(1)` — the harness's entire wall-clock, and it
+        // parked the pool between frames so "warm" was really ~100 Hz
+        // paced; iamacoffeepot/aether#1079). So poll fine initially to
+        // catch the common case promptly, then back off geometrically
+        // to a 10 ms cap for genuine quiet — a wait on a slow cap
+        // (`FsCapability` polls its inbox at 100 ms) reaches the cap
+        // and sleeps coarsely rather than pinning a core. Each sleep
+        // yields the CPU, so capability dispatcher threads still run
+        // (ADR-0070).
+        const BACKOFF_FLOOR: Duration = Duration::from_micros(50);
+        const BACKOFF_CAP: Duration = Duration::from_millis(10);
+        // Wall-clock budget for consecutive quiet (no-progress) time
+        // before giving up. A deadline rather than an iteration count
+        // so the stall timeout is invariant to poll granularity. Long
+        // enough to ride out a wasmtime compile under parallel-test CPU
+        // pressure (issue 603 routed `LoadComponent` through
+        // `ComponentHostCapability`'s thread, so a load step waits on a
+        // dispatcher hop + compile when N test binaries run in
+        // parallel).
+        const STALL_DEADLINE: Duration = Duration::from_mins(1);
 
         // Check the stash first.
         if let Some(frame) = self.stashed_replies.remove(&cid) {
             return Ok(frame);
         }
 
-        let mut quiet_iterations = 0u32;
-        for iteration in 0..MAX_ITERATIONS {
+        let mut backoff = BACKOFF_FLOOR;
+        let mut last_progress = Instant::now();
+        let mut iterations = 0u32;
+        loop {
+            iterations = iterations.saturating_add(1);
             // The control mail we pushed flows through the dispatcher
             // → control plane → chassis handler synchronously on push,
             // which produces an event on `events_rx` for Advance /
@@ -712,18 +726,17 @@ impl TestBench {
             // `SettlementTimeout` from `dispatch_event` short-circuits
             // the pump — the substrate is stuck and no AdvanceResult
             // is coming, so propagating is faster and more actionable
-            // than burning out the quiet-iteration budget waiting on
-            // a reply that will never land.
-            let mut found_event = false;
+            // than burning out the stall deadline waiting on a reply
+            // that will never land.
+            let mut progressed = false;
             while let Ok(event) = self.events_rx.try_recv() {
                 self.dispatch_event(event)?;
-                found_event = true;
+                progressed = true;
             }
 
             // Look for our reply on the loopback.
-            let mut found_reply = false;
             while let Ok(event) = self.loopback_rx.try_recv() {
-                found_reply = true;
+                progressed = true;
                 if let Some(event_cid) = correlation_of(&event) {
                     if event_cid == cid {
                         return Ok(event);
@@ -736,24 +749,20 @@ impl TestBench {
                 // session-targeted replies matter for advance().
             }
 
-            if found_event || found_reply {
-                quiet_iterations = 0;
+            if progressed {
+                backoff = BACKOFF_FLOOR;
+                last_progress = Instant::now();
             } else {
-                quiet_iterations += 1;
-                if quiet_iterations >= QUIET_BUDGET {
+                if last_progress.elapsed() >= STALL_DEADLINE {
                     return Err(TestBenchError::Timeout {
                         expected,
-                        pumped_iterations: iteration + 1,
+                        pumped_iterations: iterations,
                     });
                 }
-                // Yield to capability dispatcher threads (ADR-0070).
-                thread::sleep(QUIET_SLEEP);
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(BACKOFF_CAP);
             }
         }
-        Err(TestBenchError::Timeout {
-            expected,
-            pumped_iterations: MAX_ITERATIONS,
-        })
     }
 
     fn decode_reply<R>(event: EgressEvent, expected: &'static str) -> Result<R, TestBenchError>
