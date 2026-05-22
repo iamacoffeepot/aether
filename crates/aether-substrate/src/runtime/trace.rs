@@ -32,6 +32,7 @@
 //! structurally correct and unlocks future in-process multi-substrate
 //! workflows. Filed as iamacoffeepot/aether#953.
 
+use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -46,6 +47,94 @@ use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::MailboxEntry;
 
+/// Number of per-root trace shards (power of two; mask is `N - 1`).
+/// Sized generously so concurrent roots spread across distinct queues,
+/// removing the single-`SegQueue` tail contention that dominated
+/// saturated multi-worker mail (~50% of worker CPU). Each empty
+/// `SegQueue` is cheap, so over-provisioning shards costs little.
+const TRACE_SHARD_COUNT: usize = 64;
+
+/// Per-chassis trace-event queue, sharded by causal root: every event
+/// for a given root lands in one FIFO `SegQueue`.
+///
+/// ADR-0080 settlement counts on per-root ordering — a root's `Sent`
+/// must be folded before its matching `Finished`, and its `HoldOpen`
+/// before `Release` — or `in_flight`/`held_open` can hit a false zero
+/// and fire `Settled` early. A `SegQueue` is FIFO and the producer
+/// hooks push a root's events in happens-before order, so keeping a
+/// whole root in one shard preserves that ordering exactly. Distinct
+/// roots spread across shards, so concurrent workers emitting for
+/// different roots no longer contend on one queue's tail.
+#[derive(Debug)]
+pub struct ShardedTraceQueue {
+    shards: Box<[SegQueue<TraceEvent>]>,
+    mask: u64,
+}
+
+impl ShardedTraceQueue {
+    /// Allocate [`TRACE_SHARD_COUNT`] empty shards.
+    #[must_use]
+    pub fn new() -> Self {
+        let shards = (0..TRACE_SHARD_COUNT)
+            .map(|_| SegQueue::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            shards,
+            #[allow(clippy::cast_possible_truncation)]
+            mask: TRACE_SHARD_COUNT as u64 - 1,
+        }
+    }
+
+    /// Shard index for a causal root: a cheap mix of the root's two
+    /// 64-bit words. `correlation_id` is a per-root incrementing counter
+    /// (its low bits already round-robin across shards); folding in a
+    /// scrambled `sender` keeps roots minted by the same mailbox spread.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)] // masked to < TRACE_SHARD_COUNT, fits usize
+    fn shard_index(&self, root: MailId) -> usize {
+        let h = root.sender.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ root.correlation_id;
+        (h & self.mask) as usize
+    }
+
+    /// Push an event onto its root's shard.
+    #[inline]
+    pub fn push(&self, root: MailId, event: TraceEvent) {
+        self.shards[self.shard_index(root)].push(event);
+    }
+
+    /// Pop one event from the first non-empty shard. Order *across*
+    /// shards is unspecified — per-root order lives *within* a shard —
+    /// so this is for tests that count or filter, not ones that rely on
+    /// a global event order.
+    #[must_use]
+    pub fn pop(&self) -> Option<TraceEvent> {
+        self.shards.iter().find_map(SegQueue::pop)
+    }
+
+    /// Re-enqueue an event that a test popped and wants to put back.
+    /// Sharded by the event's root where it carries one
+    /// (`Sent`/`HoldOpen`/`Release`); `Received`/`Finished` don't, so
+    /// they land on shard 0 — harmless because [`Self::pop`] scans every
+    /// shard and the restore-pattern tests don't assert cross-shard
+    /// order. Not used on the production drain path.
+    pub fn restore(&self, event: TraceEvent) {
+        let shard = match &event {
+            TraceEvent::Sent { root, .. }
+            | TraceEvent::HoldOpen { root, .. }
+            | TraceEvent::Release { root, .. } => self.shard_index(*root),
+            TraceEvent::Received { .. } | TraceEvent::Finished { .. } => 0,
+        };
+        self.shards[shard].push(event);
+    }
+}
+
+impl Default for ShardedTraceQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Per-chassis trace-pipeline handle. Owned by the chassis [`Mailer`];
 /// producer-side hooks reach it via `mailer.trace_handle()` or the
 /// `mailer.record_*` shortcuts that wrap the methods on this type.
@@ -55,7 +144,7 @@ use crate::mail::registry::MailboxEntry;
 /// site can hold an independent `TraceHandle` cheaply.
 #[derive(Clone, Debug)]
 pub struct TraceHandle {
-    queue: Arc<SegQueue<TraceEvent>>,
+    queue: Arc<ShardedTraceQueue>,
     boot_time: Instant,
 }
 
@@ -66,7 +155,7 @@ impl TraceHandle {
     /// its queue is handed to [`start_drainer`].
     #[must_use]
     pub fn new() -> Self {
-        Self::with_queue(Arc::new(SegQueue::new()))
+        Self::with_queue(Arc::new(ShardedTraceQueue::new()))
     }
 
     /// Build a handle that wraps an existing queue Arc. Used by tests
@@ -75,7 +164,7 @@ impl TraceHandle {
     /// `mail_id.sender`. Production chassis use [`Self::new`] instead;
     /// the queue is allocated fresh per chassis.
     #[must_use]
-    pub fn with_queue(queue: Arc<SegQueue<TraceEvent>>) -> Self {
+    pub fn with_queue(queue: Arc<ShardedTraceQueue>) -> Self {
         Self {
             queue,
             boot_time: Instant::now(),
@@ -86,7 +175,7 @@ impl TraceHandle {
     /// [`start_drainer`]. Internal: producer-side call sites go
     /// through the `record_*` methods on this type.
     #[must_use]
-    pub fn queue(&self) -> &Arc<SegQueue<TraceEvent>> {
+    pub fn queue(&self) -> &Arc<ShardedTraceQueue> {
         &self.queue
     }
 
@@ -120,15 +209,18 @@ impl TraceHandle {
         recipient: MailboxId,
         kind: KindId,
     ) {
-        self.queue.push(TraceEvent::Sent {
-            mail_id,
+        self.queue.push(
             root,
-            parent_mail,
-            sender,
-            recipient,
-            kind,
-            t: self.now_nanos(),
-        });
+            TraceEvent::Sent {
+                mail_id,
+                root,
+                parent_mail,
+                sender,
+                recipient,
+                kind,
+                t: self.now_nanos(),
+            },
+        );
     }
 
     /// ADR-0080 §2 producer hook for the `Received` event. Pushed by
@@ -145,29 +237,35 @@ impl TraceHandle {
     /// Issue 734: dispatchers pass `std::thread::current().name()
     /// .map(str::to_owned)` as `thread_name` so the trace renderer
     /// (`hub::mcp::trace`) can stamp each event with a per-thread row.
-    pub fn record_received(&self, mail_id: MailId, thread_name: Option<String>) {
+    pub fn record_received(&self, mail_id: MailId, root: MailId, thread_name: Option<String>) {
         if mail_id == MailId::NONE {
             return;
         }
-        self.queue.push(TraceEvent::Received {
-            mail_id,
-            t: self.now_nanos(),
-            thread_name,
-        });
+        self.queue.push(
+            root,
+            TraceEvent::Received {
+                mail_id,
+                t: self.now_nanos(),
+                thread_name,
+            },
+        );
     }
 
     /// ADR-0080 §2 producer hook for the `Finished` event. Pushed by
     /// the native dispatcher trampoline at handler exit (normal
     /// return). Symmetric `MailId::NONE` short-circuit (see
     /// [`Self::record_received`]).
-    pub fn record_finished(&self, mail_id: MailId) {
+    pub fn record_finished(&self, mail_id: MailId, root: MailId) {
         if mail_id == MailId::NONE {
             return;
         }
-        self.queue.push(TraceEvent::Finished {
-            mail_id,
-            t: self.now_nanos(),
-        });
+        self.queue.push(
+            root,
+            TraceEvent::Finished {
+                mail_id,
+                t: self.now_nanos(),
+            },
+        );
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a
@@ -187,10 +285,13 @@ impl TraceHandle {
     /// the worker's lifetime.
     #[must_use = "SettlementHold gates root settlement; storing _ silently fires Release"]
     pub fn acquire_settlement_hold(&self, root: MailId) -> SettlementHold {
-        self.queue.push(TraceEvent::HoldOpen {
+        self.queue.push(
             root,
-            t: self.now_nanos(),
-        });
+            TraceEvent::HoldOpen {
+                root,
+                t: self.now_nanos(),
+            },
+        );
         SettlementHold {
             handle: self.clone(),
             root,
@@ -227,10 +328,13 @@ impl SettlementHold {
 
 impl Drop for SettlementHold {
     fn drop(&mut self) {
-        self.handle.queue.push(TraceEvent::Release {
-            root: self.root,
-            t: self.handle.now_nanos(),
-        });
+        self.handle.queue.push(
+            self.root,
+            TraceEvent::Release {
+                root: self.root,
+                t: self.handle.now_nanos(),
+            },
+        );
     }
 }
 
@@ -279,7 +383,7 @@ impl Drop for TraceDrainerHandle {
 /// Panics if the OS refuses to spawn the drainer thread — fail-fast
 /// per ADR-0063: thread spawn is a substrate-boot prerequisite and a
 /// failure means the process is in an unrecoverable state.
-pub fn start_drainer(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>) -> TraceDrainerHandle {
+pub fn start_drainer(queue: Arc<ShardedTraceQueue>, mailer: Arc<Mailer>) -> TraceDrainerHandle {
     let (shutdown_tx, shutdown_rx) = channel::<()>();
     let handle = thread::Builder::new()
         .name("aether-trace-drainer".to_owned())
@@ -294,19 +398,19 @@ pub fn start_drainer(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>) -> T
 // All arguments are taken by value so the spawned drainer thread
 // owns them for its lifetime.
 #[allow(clippy::needless_pass_by_value)]
-fn drainer_loop(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>, shutdown_rx: Receiver<()>) {
+fn drainer_loop(queue: Arc<ShardedTraceQueue>, mailer: Arc<Mailer>, shutdown_rx: Receiver<()>) {
     let recipient = aether_data::mailbox_id_from_name(TRACE_OBSERVER_MAILBOX_NAME);
     let kind = <BatchedTraceEvents as aether_data::Kind>::ID;
 
     loop {
-        ship_batch(&queue, &mailer, recipient, kind);
+        ship_all(&queue, &mailer, recipient, kind);
 
         // Park BATCH_INTERVAL or until shutdown.
         match shutdown_rx.recv_timeout(BATCH_INTERVAL) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => {
                 // One last drain on shutdown so events queued just
                 // before signal don't get lost.
-                ship_batch(&queue, &mailer, recipient, kind);
+                ship_all(&queue, &mailer, recipient, kind);
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -314,43 +418,57 @@ fn drainer_loop(queue: Arc<SegQueue<TraceEvent>>, mailer: Arc<Mailer>, shutdown_
     }
 }
 
-/// Drain up to [`BATCH_MAX`] events and ship one
-/// [`BatchedTraceEvents`] mail. Skipped silently if the
-/// [`TRACE_OBSERVER_MAILBOX_NAME`] sink is not registered on this
-/// substrate's [`crate::mail::registry::Registry`] — that's the
-/// case in unit tests that boot a chassis without
-/// `TraceObserverCapability`, and the bubble-up that would otherwise
-/// fire for the unknown mailbox would interfere with the test's own
-/// outbound assertions. Production chassis register the observer so
-/// the drop branch never fires.
-fn ship_batch(
-    queue: &Arc<SegQueue<TraceEvent>>,
+/// Drain every shard once and ship the events as one or more
+/// [`BatchedTraceEvents`] mails (one per [`BATCH_MAX`] events). Each
+/// shard is drained FIFO, so a root's events stay in their
+/// happens-before order within the shipped stream — the ordering ADR-0080
+/// settlement depends on. Events pushed to a shard after it is scanned
+/// wait for the next cycle (still FIFO for their root).
+///
+/// Shipping is skipped silently when the [`TRACE_OBSERVER_MAILBOX_NAME`]
+/// sink is not registered (unit tests that boot a chassis without
+/// `TraceObserverCapability`), but the shards are still drained so the
+/// queue can't grow without bound. Production chassis register the
+/// observer so the skip branch never fires.
+fn ship_all(
+    queue: &Arc<ShardedTraceQueue>,
     mailer: &Arc<Mailer>,
     recipient: MailboxId,
     kind: KindId,
 ) {
-    let mut batch = Vec::with_capacity(BATCH_MAX);
-    for _ in 0..BATCH_MAX {
-        match queue.pop() {
-            Some(event) => batch.push(event),
-            None => break,
-        }
-    }
-    if batch.is_empty() {
-        return;
-    }
-    if !mailer
+    let registered = mailer
         .registry()
         .entry(recipient)
-        .is_some_and(|e| matches!(e, MailboxEntry::Inbox(_)))
-    {
-        // Observer not registered (or dropped); silently discard the
-        // batch. Test isolation: a chassis without
-        // `TraceObserverCapability` should not surface trace mail as
-        // an `UnresolvedMail` egress event on its outbound.
-        return;
+        .is_some_and(|e| matches!(e, MailboxEntry::Inbox(_)));
+
+    let mut batch: Vec<TraceEvent> = Vec::with_capacity(BATCH_MAX);
+    for shard in &queue.shards {
+        while let Some(event) = shard.pop() {
+            batch.push(event);
+            if batch.len() >= BATCH_MAX {
+                let full = mem::take(&mut batch);
+                if registered {
+                    ship_one(mailer, recipient, kind, full);
+                }
+            }
+        }
     }
-    let envelope = BatchedTraceEvents { events: batch };
+    if registered && !batch.is_empty() {
+        ship_one(mailer, recipient, kind, batch);
+    }
+}
+
+/// Encode one batch and push it to the observer mailbox.
+///
+/// Drainer-originated mail is chassis-root; no inheritance,
+/// no `parent_mail`. We push directly through the `Mailer`
+/// (no `Sender::send_detached` wrapper) — the recursion
+/// break (ADR-0080 §7) is structural here: the producer
+/// hook in `NativeBinding::send_mail_with_lineage` is what
+/// would push a `TraceEvent::Sent` for an outbound, and we
+/// bypass that path by going straight to `Mailer::push`.
+fn ship_one(mailer: &Arc<Mailer>, recipient: MailboxId, kind: KindId, events: Vec<TraceEvent>) {
+    let envelope = BatchedTraceEvents { events };
     let payload = match postcard::to_allocvec(&envelope) {
         Ok(p) => p,
         Err(e) => {
@@ -362,12 +480,5 @@ fn ship_batch(
             return;
         }
     };
-    // Drainer-originated mail is chassis-root; no inheritance,
-    // no `parent_mail`. We push directly through the Mailer
-    // (no `Sender::send_detached` wrapper) — the recursion
-    // break (ADR-0080 §7) is structural here: the producer
-    // hook in `NativeBinding::send_mail_with_lineage` is what
-    // would push a `TraceEvent::Sent` for an outbound, and we
-    // bypass that path by going straight to `Mailer::push`.
     mailer.push(Mail::new(recipient, kind, payload, 1));
 }

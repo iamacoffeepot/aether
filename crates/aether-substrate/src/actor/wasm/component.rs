@@ -260,7 +260,7 @@ impl ComponentCtx {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 let origin = self.registry.mailbox_name(self.sender);
                 let thread_name = thread::current().name().map(str::to_owned);
-                self.queue.record_received(mail_id, thread_name);
+                self.queue.record_received(mail_id, root, thread_name);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,
                     kind_name: &kind_name,
@@ -272,7 +272,7 @@ impl ComponentCtx {
                     root,
                     parent_mail,
                 });
-                self.queue.record_finished(mail_id);
+                self.queue.record_finished(mail_id, root);
                 return;
             }
             Some(MailboxEntry::Dropped) | None => {
