@@ -31,7 +31,9 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use crossbeam_channel::Sender;
 
@@ -49,6 +51,13 @@ pub const BATCH_MAX_MAILS: u32 = 64;
 /// it; the cap is a fairness backstop, not a hard deadline). Tunable
 /// in Phase 2.
 pub const BATCH_MAX_USEC: u64 = 200;
+
+/// Check the wallclock deadline only every Nth dispatch (iamacoffeepot/aether#1067).
+/// A warm single/few-mail cycle drains to empty before reaching the
+/// stride, so it never reads the clock; the time cap still engages once
+/// a slot is genuinely batching. The count cap (`BATCH_MAX_MAILS`) is
+/// the hard backstop and is checked every dispatch (no clock).
+pub const CLOCK_CHECK_STRIDE: u32 = 8;
 
 /// `Idle`: inbox empty, slot is not in the ready queue.
 const STATE_IDLE: u8 = 0;
@@ -162,9 +171,12 @@ pub enum SlotStateLabel {
 pub struct BatchBudget {
     /// Max number of envelopes to dispatch this cycle.
     pub max_mails: u32,
-    /// Wallclock deadline. The slot stops draining once `Instant::now()`
-    /// is past this point (checked between envelopes).
-    pub deadline: Instant,
+    /// Max wallclock duration for the drain cycle. The slot computes a
+    /// deadline lazily from this (only once it is batching past
+    /// [`CLOCK_CHECK_STRIDE`]), so constructing a budget no longer reads
+    /// the clock and a warm single-mail cycle never does either
+    /// (iamacoffeepot/aether#1067).
+    pub max_dur: Duration,
 }
 
 impl BatchBudget {
@@ -179,7 +191,7 @@ impl BatchBudget {
     pub fn custom(max_mails: u32, max_duration: Duration) -> Self {
         Self {
             max_mails,
-            deadline: Instant::now() + max_duration,
+            max_dur: max_duration,
         }
     }
 }
@@ -480,6 +492,7 @@ pub mod tests {
                 self.label
             );
 
+            let deadline = Instant::now() + budget.max_dur;
             let outcome = loop {
                 if self.closed.load(Ordering::Acquire) && self.inbox_is_empty() {
                     break DrainOutcome::Closed;
@@ -490,7 +503,7 @@ pub mod tests {
                 self.drain_one(env);
                 let dispatched_this_cycle =
                     self.dispatched.load(Ordering::Acquire) % budget.max_mails.max(1);
-                if dispatched_this_cycle == 0 || Instant::now() >= budget.deadline {
+                if dispatched_this_cycle == 0 || Instant::now() >= deadline {
                     // Mail count or wallclock budget hit. Yield.
                     break DrainOutcome::Yielded;
                 }

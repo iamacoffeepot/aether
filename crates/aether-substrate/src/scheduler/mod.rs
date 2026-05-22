@@ -40,7 +40,7 @@ mod spin_park;
 
 pub use pool::{Pool, PoolConfig, PoolHandle, PoolWorkerJoin};
 pub use slot::{
-    BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CycleResult, DrainOutcome, Drainable, SlotState,
-    SlotStateLabel, WakeHandle, WakeSink,
+    BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, DrainOutcome,
+    Drainable, SlotState, SlotStateLabel, WakeHandle, WakeSink,
 };
 pub use spin_park::{Acquired, SpinPark};
