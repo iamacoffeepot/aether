@@ -78,7 +78,7 @@ use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
-use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState};
+use crate::scheduler::{BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SlotState};
 
 /// Worker-pool-side wrapper for a native actor. One instance per
 /// `Pooled` actor; held strongly by the chassis (so `unwire` and
@@ -321,7 +321,7 @@ where
             // empty first) never touches the clock. The deadline is
             // measured from the first checked mail — a fairness
             // backstop, not a hard cycle deadline.
-            if dispatched.is_multiple_of(crate::scheduler::CLOCK_CHECK_STRIDE) {
+            if dispatched.is_multiple_of(CLOCK_CHECK_STRIDE) {
                 let start = *cycle_start.get_or_insert_with(Instant::now);
                 if start.elapsed() >= budget.max_dur {
                     budget_hit = true;
