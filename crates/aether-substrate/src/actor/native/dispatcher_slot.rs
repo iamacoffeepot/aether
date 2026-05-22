@@ -295,6 +295,7 @@ where
         };
 
         let mut dispatched = 0u32;
+        let mut cycle_start: Option<Instant> = None;
         let mut shutdown_observed = false;
         let mut budget_hit = false;
         let mut inbox_empty = false;
@@ -309,9 +310,23 @@ where
             };
             self.dispatch_one(actor, env);
             dispatched += 1;
-            if dispatched >= budget.max_mails || Instant::now() >= budget.deadline {
+            // Count cap: hard backstop, checked every dispatch with no
+            // clock read (iamacoffeepot/aether#1067).
+            if dispatched >= budget.max_mails {
                 budget_hit = true;
                 break;
+            }
+            // Time cap: only read the clock once batching past the
+            // stride, so a warm single/few-mail cycle (which drains to
+            // empty first) never touches the clock. The deadline is
+            // measured from the first checked mail — a fairness
+            // backstop, not a hard cycle deadline.
+            if dispatched.is_multiple_of(crate::scheduler::CLOCK_CHECK_STRIDE) {
+                let start = *cycle_start.get_or_insert_with(Instant::now);
+                if start.elapsed() >= budget.max_dur {
+                    budget_hit = true;
+                    break;
+                }
             }
         }
 
