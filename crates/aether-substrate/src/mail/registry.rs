@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use rustc_hash::FxHashMap;
+
 use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
 use std::error;
 
@@ -351,13 +353,13 @@ struct Inner {
     /// Sparse, keyed on the deterministic `MailboxId` (ADR-0029).
     /// Registration inserts; `drop_mailbox` transitions the entry to
     /// `Dropped` so the id stays addressable until re-registered.
-    mailboxes: HashMap<MailboxId, Mailbox>,
+    mailboxes: FxHashMap<MailboxId, Mailbox>,
     /// Sparse, keyed on the `kind_id_from_parts(name, schema)` hash
     /// (ADR-0030 Phase 2). Every descriptor registered with a given
     /// (name, schema) maps to the same id everywhere it's ever
     /// computed — derive-emitted `K::ID`, hub re-derived from
     /// `KindDescriptor`, substrate boot from `descriptors::all()`.
-    kinds: HashMap<KindId, KindSlot>,
+    kinds: FxHashMap<KindId, KindSlot>,
     /// O(1) name → id reverse lookup. Kept as a parallel map rather
     /// than scanning `kinds` because the dispatch path (`reply_mail` kind
     /// validation, `hub_client` inbound-mail name→id) runs on every mail.

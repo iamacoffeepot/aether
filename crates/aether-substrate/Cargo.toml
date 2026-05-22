@@ -62,6 +62,11 @@ crossbeam-channel = "0.5"
 # `aether.kinds` section. Pin to the version wasmtime re-exports
 # transitively so we stay on a single compiled copy.
 wasmparser = "0.249"
+# Registry hot-path maps (#1067): FxHashMap on the id-keyed `mailboxes`
+# and `kinds` tables. Keys are pre-hashed 64-bit ids (ADR-0029/0030), so
+# SipHash's DoS resistance buys nothing here — Fx is faster per lookup and
+# every routed mail hits both maps. `name_index` keeps SipHash (string keys).
+rustc-hash = "2"
 
 # ADR-0049 §7 lockfile liveness check: `kill(pid, 0)` to detect whether
 # a lock-holding PID is still alive. Unix-only; the lockfile path is
