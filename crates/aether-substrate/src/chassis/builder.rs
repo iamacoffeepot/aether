@@ -649,8 +649,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 let slot_dyn: Arc<dyn Drainable> = slot.clone();
                 let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
                 drop(slot_dyn);
-                let wake =
-                    WakeHandle::new(Arc::clone(slot.state()), weak, ctx.pool_ready_tx().clone());
+                let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
                 // Issue 697 multi-pass: mail addressed at this actor
                 // during the wire pass landed in its inbox before the
                 // wake hook was installed, so the closure-side wake
@@ -1088,7 +1087,7 @@ fn boot_passives(
     let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
     let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
-    // The pool's ready_tx is cloned into the Spawner (for instanced
+    // The pool's wake sink is cloned into the Spawner (for instanced
     // Pooled actors) and into the ChassisCtx (for singleton Pooled
     // caps). Today every cap is Dedicated so the pool sits idle, but
     // booting it here means PR D / Phase 2 can flip a cap to Pooled
@@ -1151,7 +1150,7 @@ fn boot_passives(
         Arc::clone(&actor_registry),
         Arc::clone(mailer),
         Arc::clone(aborter),
-        pool.ready_tx(),
+        pool.wake_sink(),
     ));
     // Issue 697: multi-pass boot — claim → init → wire → spawn,
     // synchronized across all passives. Each pass below walks every
