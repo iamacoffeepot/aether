@@ -22,7 +22,7 @@
 //! Run on demand (it is `#[ignore]`d — zero CI cost):
 //!
 //! ```text
-//! cargo test -p aether-substrate-bundle --release mail_latency_sweep \
+//! cargo test -p aether-substrate-bundle --release lifecycle_latency_observe \
 //!     -- --ignored --nocapture
 //! ```
 //!
@@ -37,8 +37,10 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{
-    DescribeTree, DescribeTreeResult, MailNodeWire, TRACE_OBSERVER_MAILBOX_NAME,
+    DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult, MailNodeWire,
+    TRACE_OBSERVER_MAILBOX_NAME, TraceWindow,
 };
+use aether_kinds::{SubscribeInput, SubscribeInputResult, Tick};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
 use super::TestBench;
@@ -268,52 +270,13 @@ fn summarize(mut samples: Vec<u64>) -> Stats {
     }
 }
 
-/// Raw per-condition sample buckets accumulated across every measured
-/// tree, summarized into [`Stats`] at the end.
-#[derive(Default)]
-struct Samples {
-    hop: Vec<u64>,
-    handler: Vec<u64>,
-    e2e: Vec<u64>,
-}
-
-impl Samples {
-    /// Fold one settled trace tree into the buckets: a hop sample per
-    /// node (`t_received - t_sent`), a handler sample per node
-    /// (`t_finished - t_received`), and one end-to-end sample for the
-    /// tree (last finish minus the root's send).
-    fn ingest(&mut self, mails: &[MailNodeWire]) {
-        let mut tree_start: Option<u64> = None;
-        let mut tree_end: Option<u64> = None;
-        for node in mails {
-            let sent = node.t_sent.0;
-            if node.parent.is_none() {
-                tree_start = Some(sent);
-            }
-            if let Some(recv) = node.t_received {
-                self.hop.push(recv.0.saturating_sub(sent));
-                if let Some(fin) = node.t_finished {
-                    self.handler.push(fin.0.saturating_sub(recv.0));
-                }
-            }
-            if let Some(fin) = node.t_finished {
-                tree_end = Some(tree_end.map_or(fin.0, |e: u64| e.max(fin.0)));
-            }
-        }
-        if let (Some(start), Some(end)) = (tree_start, tree_end) {
-            self.e2e.push(end.saturating_sub(start));
-        }
-    }
-}
-
-/// One fully-measured cell of the sweep.
+/// One fully-measured cell (per worker count × topology).
 struct Row {
     workers: usize,
     topo: String,
     cond: &'static str,
     hop: Stats,
     handler: Stats,
-    e2e: Stats,
 }
 
 /// Query the trace observer for one root's whole tree over the mail
@@ -332,173 +295,6 @@ fn describe_tree(tb: &mut TestBench, root: MailId) -> Option<Vec<MailNodeWire>> 
 }
 
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
-const IDLE_SAMPLES: u32 = 120;
-const LOAD_ROOTS: u32 = 200;
-
-/// Sweep worker-pool size × topology × {idle, under-load} and print the
-/// mail-latency percentile tables.
-///
-/// `#[ignore]` — a measurement run, not a correctness gate. Skips
-/// cleanly when no wgpu adapter is available ([`TestBench`] needs an
-/// offscreen render target to boot).
-#[test]
-#[ignore = "measurement harness — run on demand with --ignored --nocapture --release"]
-#[allow(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    clippy::cast_precision_loss
-)]
-fn mail_latency_sweep() {
-    let max_workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let worker_set: BTreeSet<usize> = [1usize, 2, 4, max_workers].into_iter().collect();
-
-    // Probe once so a driverless box prints a skip line instead of a
-    // confusing per-cell failure storm.
-    if let Err(e) = TestBench::builder().size(16, 16).build() {
-        eprintln!(
-            "skipping mail_latency_sweep: TestBench boot failed (likely no wgpu adapter): {e}"
-        );
-        return;
-    }
-
-    let mut rows: Vec<Row> = Vec::new();
-
-    for &workers in &worker_set {
-        for topo in topologies() {
-            let Ok(mut tb) = TestBench::builder()
-                .with_workers(Some(workers))
-                .size(16, 16)
-                .build()
-            else {
-                eprintln!("skipping {} @ {workers}w: boot failed", topo.name);
-                continue;
-            };
-
-            // Spawn every relay with its precomputed downstream ids.
-            // Ids are deterministic, so spawn order is irrelevant.
-            let n = topo.downstreams.len();
-            let mut spawned_ok = true;
-            for i in 0..n {
-                let downs: Arc<[MailboxId]> =
-                    topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-                let sub = i.to_string();
-                if let Err(e) = tb
-                    .spawn_actor::<Relay>(Subname::Named(&sub), downs)
-                    .finish()
-                {
-                    eprintln!("spawn failed for {} relay {i}: {e:?}", topo.name);
-                    spawned_ok = false;
-                    break;
-                }
-            }
-            if !spawned_ok {
-                continue;
-            }
-            let entry = relay_id(0);
-
-            // idle: one root in flight at a time, for clean per-hop cost.
-            let mut idle = Samples::default();
-            for seq in 0..IDLE_SAMPLES {
-                let (root, rx) = tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes());
-                if rx.recv_timeout(SETTLE_TIMEOUT).is_err() {
-                    eprintln!("idle settle timeout: {} @ {workers}w", topo.name);
-                    break;
-                }
-                if let Some(mails) = describe_tree(&mut tb, root) {
-                    idle.ingest(&mails);
-                }
-            }
-            rows.push(Row {
-                workers,
-                topo: topo.name.clone(),
-                cond: "idle",
-                hop: summarize(idle.hop),
-                handler: summarize(idle.handler),
-                e2e: summarize(idle.e2e),
-            });
-
-            // load: many concurrent roots, to surface inbox queueing.
-            let mut pending = Vec::with_capacity(LOAD_ROOTS as usize);
-            for seq in 0..LOAD_ROOTS {
-                pending.push(tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes()));
-            }
-            let mut all_settled = true;
-            for (_, rx) in &pending {
-                if rx.recv_timeout(SETTLE_TIMEOUT).is_err() {
-                    all_settled = false;
-                    break;
-                }
-            }
-            let mut load = Samples::default();
-            if all_settled {
-                for (root, _) in &pending {
-                    if let Some(mails) = describe_tree(&mut tb, *root) {
-                        load.ingest(&mails);
-                    }
-                }
-            } else {
-                eprintln!("load settle timeout: {} @ {workers}w", topo.name);
-            }
-            rows.push(Row {
-                workers,
-                topo: topo.name.clone(),
-                cond: "load",
-                hop: summarize(load.hop),
-                handler: summarize(load.handler),
-                e2e: summarize(load.e2e),
-            });
-        }
-    }
-
-    print_tables(&rows);
-}
-
-#[allow(clippy::print_stdout, clippy::cast_precision_loss)]
-fn print_tables(rows: &[Row]) {
-    let us = |ns: u64| -> String { format!("{:.2}", ns as f64 / 1000.0) };
-
-    println!();
-    println!("=== mail latency sweep (all values µs; n = sample count) ===");
-    println!("idle = one root in flight; load = {LOAD_ROOTS} concurrent roots");
-    println!();
-
-    for (label, pick) in [
-        (
-            "HOP LATENCY  (t_received - t_sent: enqueue + worker pickup)",
-            0usize,
-        ),
-        (
-            "HANDLER DUR  (t_finished - t_received: relay forward work)",
-            1,
-        ),
-        ("END-TO-END   (last finish - root send)", 2),
-    ] {
-        println!("-- {label} --");
-        println!(
-            "{:>3}w  {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
-            "", "topology", "cond", "p50", "p90", "p99", "max", "n"
-        );
-        for r in rows {
-            let s = match pick {
-                0 => r.hop,
-                1 => r.handler,
-                _ => r.e2e,
-            };
-            println!(
-                "{:>3}   {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
-                r.workers,
-                r.topo,
-                r.cond,
-                us(s.p50),
-                us(s.p90),
-                us(s.p99),
-                us(s.max),
-                s.n
-            );
-        }
-        println!();
-    }
-}
 
 /// Multi-worker saturation profile target (samply). Boots the pool at
 /// max workers, wires a ring of N `RingRelay` actors, seeds M circulating
@@ -635,4 +431,303 @@ fn sharded_trace_settles_every_root() {
 #[allow(clippy::print_stderr)]
 fn flaky_sharded_trace_settles_every_root() {
     sharded_trace_settles_every_root();
+}
+
+/// Lifecycle bridge for [`lifecycle_latency_observe`]: subscribed to the
+/// `Tick` input stream, it emits one `Ping` into the entry relay per
+/// frame, inheriting the tick's trace lineage so the whole per-frame
+/// chain is one causal tree. The honest stand-in for a real tick-reactive
+/// component (player, camera): the substrate's own `Tick` fan-out drives
+/// the work — no synthetic injector, no per-root settlement block.
+struct TickSource {
+    entry: MailboxId,
+    seq: u32,
+}
+
+impl aether_actor::Actor for TickSource {
+    const NAMESPACE: &'static str = "mlat.ticksrc";
+}
+impl aether_actor::Instanced for TickSource {}
+impl aether_actor::HandlesKind<Tick> for TickSource {}
+impl NativeActor for TickSource {
+    type Config = MailboxId;
+    fn init(entry: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { entry, seq: 0 })
+    }
+}
+impl NativeDispatch for TickSource {
+    fn __aether_dispatch_envelope(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        kind: KindId,
+        _payload: &[u8],
+    ) -> Option<()> {
+        if kind.0 != Tick::ID.0 {
+            return None;
+        }
+        // One Ping per tick into the entry relay, inheriting the tick's
+        // lineage (`send_envelope_traced`) so the per-frame chain settles
+        // as one tree the trace observer records. `seq` is for legibility
+        // only — relays forward the bytes verbatim.
+        let bytes = Ping { seq: self.seq }.encode_into_bytes();
+        self.seq = self.seq.wrapping_add(1);
+        let _ = ctx.send_envelope_traced(self.entry, Ping::ID, &bytes);
+        Some(())
+    }
+}
+
+const TICKSRC_NS: &str = "mlat.ticksrc";
+
+/// Deterministic id for the single tick source (subname `"src"`).
+fn ticksrc_id() -> MailboxId {
+    MailboxId(mailbox_id_from_name(&format!("{TICKSRC_NS}:src")).0)
+}
+
+const OBSERVE_FRAMES: u32 = 1000;
+
+/// Non-perturbing latency harness: drive the substrate with its **real
+/// lifecycle** (`advance` → `Tick` fan-out → a tick-reactive source →
+/// the relay topology) and **harvest the trace ring after the fact** via
+/// one [`DescribeWindow`] query. The sibling to [`mail_latency_sweep`],
+/// minus its two methodology hazards:
+///
+/// - **No synthetic injector.** The work is produced by the substrate's
+///   own `Tick` delivery to an input-subscribed actor — the real
+///   mechanic a component sees — not by a test thread pushing roots.
+/// - **No per-root blocking.** `mail_latency_sweep`'s idle mode injects
+///   one root and blocks on its settlement before the next, so the pool
+///   goes cold between roots and every hop pays a fresh wakeup. Here the
+///   only block is the single `advance` round-trip for the whole run, and
+///   the measurement is a passive read of the resident ring afterward.
+///
+/// Default is **flat-out** `advance` — frames run back-to-back, workers
+/// stay warm, so the numbers isolate the per-hop dispatch cost.
+/// `AETHER_LAT_PACE_HZ=60` paces one frame per period instead (workers
+/// park in the gaps → realistic frame-loop latency including the
+/// once-per-frame wakeup).
+///
+/// `#[ignore]` — a measurement run, not a correctness gate. Skips cleanly
+/// when no wgpu adapter is available.
+#[test]
+#[ignore = "measurement harness — run on demand with --ignored --nocapture --release"]
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+fn lifecycle_latency_observe() {
+    let max_workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    let worker_set: BTreeSet<usize> = [1usize, 2, 4, max_workers].into_iter().collect();
+
+    if let Err(e) = TestBench::builder().size(16, 16).build() {
+        eprintln!(
+            "skipping lifecycle_latency_observe: TestBench boot failed (likely no wgpu adapter): {e}"
+        );
+        return;
+    }
+
+    // `AETHER_LAT_PACE_HZ=N` → pace one frame per 1/N s (workers park
+    // between frames). Unset → flat-out (warm).
+    let pace_hz: Option<u64> = env::var("AETHER_LAT_PACE_HZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&h| h > 0);
+    let cond = if pace_hz.is_some() { "paced" } else { "warm" };
+
+    let mut rows: Vec<Row> = Vec::new();
+
+    for &workers in &worker_set {
+        for topo in topologies() {
+            let Ok(mut tb) = TestBench::builder()
+                .with_workers(Some(workers))
+                .size(16, 16)
+                .build()
+            else {
+                eprintln!("skipping {} @ {workers}w: boot failed", topo.name);
+                continue;
+            };
+
+            // Relay topology (entry = relay 0), then the tick source
+            // pointed at it. Ids are deterministic, so spawn order is
+            // irrelevant.
+            let n = topo.downstreams.len();
+            let mut spawned_ok = true;
+            for i in 0..n {
+                let downs: Arc<[MailboxId]> =
+                    topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+                let sub = i.to_string();
+                if let Err(e) = tb
+                    .spawn_actor::<Relay>(Subname::Named(&sub), downs)
+                    .finish()
+                {
+                    eprintln!("spawn failed for {} relay {i}: {e:?}", topo.name);
+                    spawned_ok = false;
+                    break;
+                }
+            }
+            if !spawned_ok {
+                continue;
+            }
+            if let Err(e) = tb
+                .spawn_actor::<TickSource>(Subname::Named("src"), relay_id(0))
+                .finish()
+            {
+                eprintln!("tick source spawn failed for {}: {e:?}", topo.name);
+                continue;
+            }
+
+            // Wire the source into the platform `Tick` stream so `advance`
+            // delivers a tick to it each frame (ADR-0021 explicit
+            // subscribe; auto-subscribe retired in #403 / #640).
+            let sub_req = SubscribeInput {
+                kind: Tick::ID,
+                mailbox: ticksrc_id(),
+            }
+            .encode_into_bytes();
+            match tb.send_bytes_and_await("aether.input", SubscribeInput::ID, sub_req) {
+                Ok(reply) => match SubscribeInputResult::decode_from_bytes(&reply) {
+                    Some(SubscribeInputResult::Ok) => {}
+                    other => {
+                        eprintln!("Tick subscribe failed for {}: {other:?}", topo.name);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Tick subscribe send failed for {}: {e:?}", topo.name);
+                    continue;
+                }
+            }
+
+            // Drive via the real lifecycle. The only block is the single
+            // `advance` round-trip for the whole run (flat-out), or one
+            // per paced frame.
+            let t0 = Instant::now();
+            match pace_hz {
+                Some(hz) => {
+                    let period = Duration::from_secs_f64(1.0 / hz as f64);
+                    for _ in 0..OBSERVE_FRAMES {
+                        let f = Instant::now();
+                        let _ = tb.advance(1);
+                        if let Some(rem) = period.checked_sub(f.elapsed()) {
+                            thread::sleep(rem);
+                        }
+                    }
+                }
+                None => {
+                    let _ = tb.advance(OBSERVE_FRAMES);
+                }
+            }
+            let drive_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+            // Harvest the resident ring once, after the run. The window is
+            // generous; the `Ping`-kind filter below isolates the relay
+            // hops regardless, so setup / Tick / query mail never counts.
+            let req = DescribeWindow {
+                window: TraceWindow::Relative {
+                    last_ms: drive_ms.saturating_add(1_000),
+                },
+                max_mails: Some(100_000),
+            }
+            .encode_into_bytes();
+            let mails = match tb.send_bytes_and_await(
+                TRACE_OBSERVER_MAILBOX_NAME,
+                DescribeWindow::ID,
+                req,
+            ) {
+                Ok(reply) => match DescribeWindowResult::decode_from_bytes(&reply) {
+                    Some(DescribeWindowResult::Ok { mails }) => mails,
+                    Some(DescribeWindowResult::Err { too_many }) => {
+                        eprintln!(
+                            "describe_window over cap ({too_many:?}) for {} @ {workers}w — lower OBSERVE_FRAMES or raise AETHER_TRACE_RING_CAPACITY",
+                            topo.name
+                        );
+                        continue;
+                    }
+                    None => {
+                        eprintln!("describe_window decode failed for {}", topo.name);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("describe_window send failed for {}: {e:?}", topo.name);
+                    continue;
+                }
+            };
+
+            // Per-relay-hop samples, filtered to the local `Ping` kind.
+            let mut hop = Vec::new();
+            let mut handler = Vec::new();
+            for node in &mails {
+                if node.kind.0 != Ping::ID.0 {
+                    continue;
+                }
+                if let Some(recv) = node.t_received {
+                    hop.push(recv.0.saturating_sub(node.t_sent.0));
+                    if let Some(fin) = node.t_finished {
+                        handler.push(fin.0.saturating_sub(recv.0));
+                    }
+                }
+            }
+            rows.push(Row {
+                workers,
+                topo: topo.name.clone(),
+                cond,
+                hop: summarize(hop),
+                handler: summarize(handler),
+            });
+        }
+    }
+
+    print_observe_tables(&rows, pace_hz);
+}
+
+/// Print the lifecycle-harness HOP + HANDLER tables.
+#[allow(clippy::print_stdout, clippy::cast_precision_loss)]
+fn print_observe_tables(rows: &[Row], pace_hz: Option<u64>) {
+    let us = |ns: u64| -> String { format!("{:.2}", ns as f64 / 1000.0) };
+
+    println!();
+    println!("=== lifecycle-driven mail latency (all values µs; n = sample count) ===");
+    println!("driven by `advance` (real Tick fan-out → source → relay chain); harvested from the");
+    println!("trace ring via one DescribeWindow — no injector, no per-root block.");
+    if let Some(hz) = pace_hz {
+        println!("paced @ {hz} Hz — workers park between frames (realistic frame loop)");
+    } else {
+        println!("flat-out advance — workers stay warm (isolates per-hop dispatch cost)");
+    }
+    println!("{OBSERVE_FRAMES} frames/cell; relay-hop (`Ping`) samples only.");
+    println!();
+
+    for (label, pick) in [
+        (
+            "HOP LATENCY  (t_received - t_sent: enqueue + worker pickup)",
+            0usize,
+        ),
+        (
+            "HANDLER DUR  (t_finished - t_received: relay forward work)",
+            1,
+        ),
+    ] {
+        println!("-- {label} --");
+        println!(
+            "{:>3}w  {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
+            "", "topology", "cond", "p50", "p90", "p99", "max", "n"
+        );
+        for r in rows {
+            let s = if pick == 0 { r.hop } else { r.handler };
+            println!(
+                "{:>3}   {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
+                r.workers,
+                r.topo,
+                r.cond,
+                us(s.p50),
+                us(s.p90),
+                us(s.p99),
+                us(s.max),
+                s.n
+            );
+        }
+        println!();
+    }
 }
