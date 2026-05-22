@@ -296,7 +296,6 @@ fn describe_tree(tb: &mut TestBench, root: MailId) -> Option<Vec<MailNodeWire>> 
 
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-
 /// Multi-worker saturation profile target (samply). Boots the pool at
 /// max workers, wires a ring of N `RingRelay` actors, seeds M circulating
 /// tokens, and sleeps `PROFILE_SECS` while the workers churn at
@@ -690,12 +689,12 @@ fn print_observe_tables(rows: &[Row], pace_hz: Option<u64>) {
 
     println!();
     println!("=== lifecycle-driven mail latency (all values µs; n = sample count) ===");
-    println!(
-        "driven by `advance` (real Tick fan-out → source → relay chain); harvested from the"
-    );
+    println!("driven by `advance` (real Tick fan-out → source → relay chain); harvested from the");
     println!("trace ring via one DescribeWindow — no injector, no per-root block.");
     match pace_hz {
-        Some(hz) => println!("paced @ {hz} Hz — workers park between frames (realistic frame loop)"),
+        Some(hz) => {
+            println!("paced @ {hz} Hz — workers park between frames (realistic frame loop)")
+        }
         None => println!("flat-out advance — workers stay warm (isolates per-hop dispatch cost)"),
     }
     println!("{OBSERVE_FRAMES} frames/cell; relay-hop (`Ping`) samples only.");
