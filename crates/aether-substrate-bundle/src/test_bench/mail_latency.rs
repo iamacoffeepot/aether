@@ -31,7 +31,8 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Ping, Relay, SweepConfig, default_topologies, depth_chain, relay_id, run_sweep,
+    CellResult, Ping, Relay, SweepConfig, default_topologies, depth_chain, pace_hz_from_env,
+    relay_id, run_sweep,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -253,10 +254,7 @@ fn lifecycle_latency_observe() {
         .into_iter()
         .collect();
 
-    let pace_hz: Option<u64> = env::var("AETHER_LAT_PACE_HZ")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&h| h > 0);
+    let pace_hz = pace_hz_from_env();
 
     let cfg = SweepConfig {
         workers: worker_set,

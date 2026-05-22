@@ -43,3 +43,8 @@ spikes/*/target/
 /traces/*
 !/traces/.gitkeep
 .claude/release-state.json
+# Perf-comparison artifacts written by scripts/perf-compare.sh
+# (iamacoffeepot/aether#1077) — per-run JSON + sticky-comment markdown,
+# regenerated each CI run, never committed.
+/perf-report.json
+/perf-report.md

@@ -16,6 +16,7 @@
 //! pool size; a fan-out either parallelises across workers or queues on
 //! a small pool. So the sweep takes the worker set as an axis.
 
+use std::env;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -279,6 +280,17 @@ pub struct SweepConfig {
     pub topologies: Vec<Topology>,
     pub frames: u32,
     pub pace_hz: Option<u64>,
+}
+
+/// Read the optional `AETHER_LAT_PACE_HZ` pacing override (frames/sec;
+/// `None` = flat-out / warm). Shared by the on-demand harness test and
+/// the `perf-trial` bin so the parse lives in one place.
+#[must_use]
+pub fn pace_hz_from_env() -> Option<u64> {
+    env::var("AETHER_LAT_PACE_HZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&h| h > 0)
 }
 
 /// Drive the sweep and return per-cell percentiles. Each cell boots a
