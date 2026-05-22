@@ -468,10 +468,10 @@ impl TestBench {
     /// the caller chains `after_init` / `finish` against — the same
     /// shape callers reach for from the chassis-builder scope. Used by
     /// integration tests that exercise the spawn lifecycle without
-    /// going through a parent-actor handler. Test-only: the spawn
-    /// lifecycle is exercised by the in-crate unit test, and `execute`
-    /// (the public driver) doesn't model spawning.
-    #[cfg(test)]
+    /// going through a parent-actor handler, and by the perf sweep
+    /// harness ([`crate::perf::harness::run_sweep`], #1077) which the
+    /// `perf-trial` bin drives. `pub(crate)` — the public `execute`
+    /// driver doesn't model spawning.
     pub(crate) fn spawn_actor<'a, A>(
         &'a self,
         subname: aether_substrate::Subname<'a>,
