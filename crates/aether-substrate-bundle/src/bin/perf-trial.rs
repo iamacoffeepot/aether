@@ -22,7 +22,8 @@ use std::process::{Command, ExitCode};
 use std::thread::available_parallelism;
 
 use aether_substrate_bundle::perf::harness::{
-    SweepConfig, Topology, default_topologies, depth_chain, fanout, run_sweep, two_level_tree,
+    SweepConfig, Topology, default_topologies, depth_chain, fanout, pace_hz_from_env, run_sweep,
+    two_level_tree,
 };
 use aether_substrate_bundle::perf::report::TrialReport;
 
@@ -84,10 +85,7 @@ fn main() -> ExitCode {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
-    let pace_hz: Option<u64> = env::var("AETHER_LAT_PACE_HZ")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&h| h > 0);
+    let pace_hz = pace_hz_from_env();
 
     let cfg = SweepConfig {
         workers: parse_workers(),

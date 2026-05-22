@@ -214,6 +214,12 @@ pub struct CompareConfig {
     /// Minimum fractional change relative to the base median (practical
     /// significance) — suppresses tiny-but-consistent deltas.
     pub rel_floor: f64,
+    /// Absolute floor in nanoseconds — a change smaller than this is
+    /// below the harness's resolution (sub-microsecond dispatch-glue
+    /// differences read as noise; see the latency-sweep finding that
+    /// ~100ns deltas are unresolvable). Without it, a 50ns shift on a
+    /// 170ns sub-µs handler cell reads as a 30% "regression".
+    pub abs_floor_ns: f64,
     /// Fraction of trials whose delta must share the effect's sign.
     pub consistency: f64,
 }
@@ -223,6 +229,7 @@ impl Default for CompareConfig {
         Self {
             effect_floor_iqr: 1.5,
             rel_floor: 0.10,
+            abs_floor_ns: 300.0,
             consistency: 0.75,
         }
     }
@@ -354,7 +361,9 @@ fn classify(
         .count() as f64;
     let consistent = same_sign / n >= cfg.consistency;
 
-    let floor = (cfg.effect_floor_iqr * delta_iqr).max(cfg.rel_floor * base_median);
+    let floor = (cfg.effect_floor_iqr * delta_iqr)
+        .max(cfg.rel_floor * base_median)
+        .max(cfg.abs_floor_ns);
     let large = delta_median.abs() > floor;
 
     if consistent && large {
@@ -531,6 +540,19 @@ mod tests {
         // crying wolf on a sub-noise dispatch-glue change.
         let base = side(&[1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]);
         let cand = side(&[1030, 1030, 1030, 1030, 1030, 1030, 1030, 1030]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(p50_verdict(&rep), Verdict::Stable);
+    }
+
+    #[test]
+    fn sub_microsecond_consistent_shift_is_below_absolute_floor() {
+        // A consistent 170ns -> 120ns shift (50ns) on a sub-µs handler
+        // cell is a 30% relative change but below the harness's
+        // resolution — must read stable, not "improved". (Regression
+        // guard for the dry-run finding where identical binaries
+        // differed ~50ns on depth-1 handler and flagged a false win.)
+        let base = side(&[170, 170, 165, 172, 168, 170, 169, 171]);
+        let cand = side(&[120, 122, 118, 121, 119, 120, 123, 120]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(p50_verdict(&rep), Verdict::Stable);
     }
