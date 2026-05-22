@@ -214,7 +214,7 @@ where
         let thread_name = thread::current().name().map(str::to_owned);
         self.binding
             .mailer()
-            .record_received(inbound_mail_id, thread_name);
+            .record_received(inbound_mail_id, env.root, thread_name);
         local::with_stamped(&self.slots, || {
             let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
             // ADR-0081 framework-built-in dispatch arm for
@@ -223,7 +223,9 @@ where
                 super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
         });
-        self.binding.mailer().record_finished(inbound_mail_id);
+        self.binding
+            .mailer()
+            .record_finished(inbound_mail_id, env.root);
         if let Some(p) = &self.pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }

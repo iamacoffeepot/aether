@@ -201,14 +201,23 @@ impl Mailer {
             .record_sent(mail_id, root, parent_mail, sender, recipient, kind);
     }
 
-    /// ADR-0080 §2 producer hook for the `Received` event.
-    pub fn record_received(&self, mail_id: aether_data::MailId, thread_name: Option<String>) {
-        self.trace_handle.record_received(mail_id, thread_name);
+    /// ADR-0080 §2 producer hook for the `Received` event. `root` is the
+    /// mail's causal root — the trace queue shards on it so a root's
+    /// whole event stream stays in one FIFO shard (settlement ordering).
+    pub fn record_received(
+        &self,
+        mail_id: aether_data::MailId,
+        root: aether_data::MailId,
+        thread_name: Option<String>,
+    ) {
+        self.trace_handle
+            .record_received(mail_id, root, thread_name);
     }
 
-    /// ADR-0080 §2 producer hook for the `Finished` event.
-    pub fn record_finished(&self, mail_id: aether_data::MailId) {
-        self.trace_handle.record_finished(mail_id);
+    /// ADR-0080 §2 producer hook for the `Finished` event. `root` is the
+    /// mail's causal root (shard key — see [`Self::record_received`]).
+    pub fn record_finished(&self, mail_id: aether_data::MailId, root: aether_data::MailId) {
+        self.trace_handle.record_finished(mail_id, root);
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a settlement
@@ -449,9 +458,10 @@ fn route_mail(
         // no-ops. Stamped kinds (future debugger / describe_tree
         // replies) get the symmetric `Received`/`Finished` bracket.
         let inbound_mail_id = mail.mail_id;
+        let inbound_root = mail.root;
         if let Some(router) = chassis_router {
             let thread_name = thread::current().name().map(str::to_owned);
-            trace_handle.record_received(inbound_mail_id, thread_name);
+            trace_handle.record_received(inbound_mail_id, inbound_root, thread_name);
             router(mail);
         } else {
             tracing::warn!(
@@ -460,7 +470,7 @@ fn route_mail(
                 "chassis-addressed mail dropped — no chassis router installed",
             );
         }
-        trace_handle.record_finished(inbound_mail_id);
+        trace_handle.record_finished(inbound_mail_id, inbound_root);
         return;
     }
 
@@ -498,7 +508,7 @@ fn route_mail(
                 // drain (issue 838). Parked mail (the `Ok(WalkOutcome::Parked)`
                 // arm above) is deliberately NOT finished — it's held
                 // for replay when the handle resolves.
-                trace_handle.record_finished(mail.mail_id);
+                trace_handle.record_finished(mail.mail_id, mail.root);
                 return;
             }
         }
@@ -506,6 +516,7 @@ fn route_mail(
 
     let recipient = mail.recipient;
     let inbound_mail_id = mail.mail_id;
+    let inbound_root = mail.root;
     match registry.entry(recipient) {
         Some(MailboxEntry::Inbox(handler)) => {
             let kind_name = registry.kind_name(mail.kind).unwrap_or_default();
@@ -559,7 +570,7 @@ fn route_mail(
             // double-count-prematurely-settle hazard the split
             // avoids.
             let thread_name = thread::current().name().map(str::to_owned);
-            trace_handle.record_received(inbound_mail_id, thread_name);
+            trace_handle.record_received(inbound_mail_id, inbound_root, thread_name);
             handler.dispatch(MailDispatch {
                 kind: mail.kind,
                 kind_name: &kind_name,
@@ -571,7 +582,7 @@ fn route_mail(
                 root: mail.root,
                 parent_mail: mail.parent_mail,
             });
-            trace_handle.record_finished(inbound_mail_id);
+            trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
         Some(MailboxEntry::Dropped) => {
             tracing::warn!(
@@ -581,7 +592,7 @@ fn route_mail(
             );
             // ADR-0080 §2: balance the `Sent` so settlement chains
             // drain (issue 838). No `Received` — no handler ran.
-            trace_handle.record_finished(inbound_mail_id);
+            trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
         None => {
             // ADR-0037 Phase 1: unknown-locally mailboxes bubble up
@@ -625,7 +636,7 @@ fn route_mail(
                 // bubbled-up mail on its own settlement domain; no
                 // wire signal exists today for federated cross-engine
                 // settlement (and the issue body parks that design).
-                trace_handle.record_finished(inbound_mail_id);
+                trace_handle.record_finished(inbound_mail_id, inbound_root);
                 return;
             }
             // Issue 963: `aether.log.tail` (`actor_logs`) to an
@@ -667,7 +678,7 @@ fn route_mail(
                 // The synthesized reply is a fresh un-lineaged mail
                 // (`MailId::NONE`); the inbound still records `Finished`
                 // so its settlement chain balances (issue 838).
-                trace_handle.record_finished(inbound_mail_id);
+                trace_handle.record_finished(inbound_mail_id, inbound_root);
                 return;
             }
             tracing::warn!(
@@ -680,7 +691,7 @@ fn route_mail(
             // unloaded `"camera"` mailbox every tick; without this
             // every Tick chain has an orphaned `Sent` and never
             // settles.
-            trace_handle.record_finished(inbound_mail_id);
+            trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
     }
 }
@@ -1082,7 +1093,8 @@ mod tests {
     /// confuse the assertion.
     use aether_data::MailId;
     use aether_kinds::trace::TraceEvent;
-    use crossbeam_queue::SegQueue;
+
+    use crate::runtime::trace::ShardedTraceQueue;
 
     /// Borrow the queue Arc from a `Mailer`'s default trace handle.
     /// `Mailer::new` allocates a fresh handle per construction
@@ -1090,14 +1102,14 @@ mod tests {
     /// test's queue is naturally isolated. The `drain_events_for`
     /// filter by `sender` is no longer strictly necessary but kept
     /// to match the original assertion shape.
-    fn install_test_trace_handle(mailer: &Mailer) -> Arc<SegQueue<TraceEvent>> {
+    fn install_test_trace_handle(mailer: &Mailer) -> Arc<ShardedTraceQueue> {
         Arc::clone(mailer.trace_handle().queue())
     }
 
     /// Drain the trace queue and return only events whose `mail_id`
     /// is keyed to `sender` — lets parallel tests share the global
     /// queue without false positives.
-    fn drain_events_for(queue: &SegQueue<TraceEvent>, sender: MailboxId) -> Vec<TraceEvent> {
+    fn drain_events_for(queue: &ShardedTraceQueue, sender: MailboxId) -> Vec<TraceEvent> {
         let mut out = Vec::new();
         let mut leftover = Vec::new();
         while let Some(event) = queue.pop() {
@@ -1116,7 +1128,7 @@ mod tests {
             }
         }
         for ev in leftover {
-            queue.push(ev);
+            queue.restore(ev);
         }
         out
     }

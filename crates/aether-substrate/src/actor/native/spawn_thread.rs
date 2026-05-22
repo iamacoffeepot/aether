@@ -671,7 +671,7 @@ mod tests {
             }
         }
         for ev in leftover {
-            live.push(ev);
+            live.restore(ev);
         }
 
         assert_eq!(ours.len(), 2, "expected one HoldOpen + one Release");
@@ -726,7 +726,7 @@ mod tests {
             }
         }
         for ev in leftover {
-            live.push(ev);
+            live.restore(ev);
         }
         assert_eq!(
             none_events, 0,

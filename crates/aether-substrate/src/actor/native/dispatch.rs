@@ -145,7 +145,7 @@ pub fn dispatch_loop_run<A>(
         let thread_name = thread::current().name().map(str::to_owned);
         binding
             .mailer()
-            .record_received(inbound_mail_id, thread_name);
+            .record_received(inbound_mail_id, env.root, thread_name);
         local::with_stamped(slots, || {
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
             // ADR-0081: framework intercepts `aether.log.tail` before
@@ -156,7 +156,7 @@ pub fn dispatch_loop_run<A>(
                 typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
         });
-        binding.mailer().record_finished(inbound_mail_id);
+        binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -172,14 +172,14 @@ pub fn dispatch_loop_run<A>(
         let thread_name = thread::current().name().map(str::to_owned);
         binding
             .mailer()
-            .record_received(inbound_mail_id, thread_name);
+            .record_received(inbound_mail_id, env.root, thread_name);
         local::with_stamped(slots, || {
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
             if !dispatch_log_tail_if_matching(&mut ctx, &env) {
                 let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
             }
         });
-        binding.mailer().record_finished(inbound_mail_id);
+        binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }

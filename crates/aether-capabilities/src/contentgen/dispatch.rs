@@ -297,7 +297,7 @@ mod tests {
         // hold/release pairing is cumulative across the whole submit ->
         // reply lifecycle, not a one-shot read.
         for ev in scratch {
-            queue.push(ev);
+            queue.restore(ev);
         }
         net
     }
