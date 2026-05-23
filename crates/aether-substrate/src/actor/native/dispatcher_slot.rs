@@ -213,12 +213,9 @@ where
         // `aether-worker-N` name (shared across actors); `Thread`-
         // scheduled actors land on a per-actor name.
         let thread_name = thread::current().name().map(str::to_owned);
-        self.binding
-            .mailer()
-            .record_received(inbound_mail_id, env.root, thread_name.clone());
         local::with_stamped(&self.slots, || {
-            // ADR-0086 Phase 3 dual-write: `Received` / `Finished` land
-            // in this (recipient) actor's trace ring — only inside this
+            // ADR-0086 Phase 3: `Received` / `Finished` land in this
+            // (recipient) actor's trace ring — only inside this
             // `with_stamped` is its `ActorSlots` stamped. Mirrors
             // `dispatch::dispatch_loop_run`.
             let th = self.binding.mailer().trace_handle();

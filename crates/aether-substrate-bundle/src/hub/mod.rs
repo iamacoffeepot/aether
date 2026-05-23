@@ -3,7 +3,7 @@
 //! The hub is now a thin coordinator:
 //!
 //! - [`HubChassis`] / [`HubServerDriverCapability`] — Chassis marker +
-//!   driver capability. The hub stands up `TraceObserverCapability` +
+//!   driver capability. The hub stands up `TraceDispatchCapability` +
 //!   `EngineServer` + `RpcServerCapability` and blocks on SIGINT /
 //!   SIGTERM. The out-of-process `aether-mcp` crate dials the
 //!   `aether.rpc.server` bind.

@@ -89,11 +89,11 @@ pub trait Sender {
     /// between request and reply is broken by design. Reply-correlated
     /// requests always go through [`Self::send`].
     ///
-    /// PR 1 ships only the API surface (default body delegates to
-    /// [`Self::send`]). PR 2's tracing layer specialises this on each
-    /// per-target impl to suppress the `TraceEvent::Sent` push that
-    /// `send` would otherwise emit, breaking the recursion when the
-    /// drainer's outbound `BatchedTraceEvents` mail is itself a send.
+    /// Ships only the API surface (default body delegates to
+    /// [`Self::send`]); a tracing-aware impl can specialise it to
+    /// suppress the `TraceEvent::Sent` push that `send` would otherwise
+    /// emit, for chassis-internal mail that must not appear in the causal
+    /// trace.
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,

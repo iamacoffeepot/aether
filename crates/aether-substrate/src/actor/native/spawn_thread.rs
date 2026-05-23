@@ -620,88 +620,71 @@ mod tests {
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: `spawn_inherit`
-    /// acquires a `SettlementHold` on the parent root before spawning
-    /// and drops it on thread exit. Both events ride the per-mailer
-    /// trace queue (iamacoffeepot/aether#953 retired the
-    /// process-global queue).
+    /// acquires a `SettlementHold` on the inherited root before spawning
+    /// and drops it on thread exit. Post-ADR-0086 Phase 3c holds are
+    /// counter-only (no trace-queue events), so we observe the hold
+    /// through the emit-time `SettlementCounter`: the worker blocks on a
+    /// gate so the hold is observably open before we release it.
     #[test]
     fn spawn_inherit_acquires_and_releases_settlement_hold() {
-        use aether_kinds::trace::TraceEvent;
+        use std::sync::mpsc::channel;
 
         let (_registry, mailer) = fresh_substrate();
-        // Per-mailer queue (post #953): tests are isolated naturally
-        // — no shared global, no sender-prefix filter needed.
-        let live = Arc::clone(mailer.trace_handle().queue());
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let producer_mailbox = MailboxId(0xC0FE_C0FE_C0FE_C0FE);
         let binding = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             producer_mailbox,
         ));
-        // Root the test cares about — sender prefix is unique so we can
-        // filter events out of a shared queue.
         let inherited_root = MailId::new(MailboxId(0xC0FE_C0FE_C0FE_C0FE), 9001);
         let inherited_mail_id = MailId::new(MailboxId(0xC0FE_C0FE_C0FE_C0FE), 9002);
 
+        // Gate the worker so the hold stays open across the assertion.
+        let (gate_tx, gate_rx) = channel::<()>();
         let join = spawn_inherit::<StubActor, _>(
             Arc::clone(&binding),
             inherited_mail_id,
             inherited_root,
             move |_inherit| {
-                // No-op body — we're verifying the hold lifecycle, not
-                // outbound sends.
+                // Block until released — the SettlementHold (moved into
+                // this worker's InheritCtx) is held for the whole body.
+                let _ = gate_rx.recv();
             },
         );
+
+        // The hold is acquired on the parent thread before the spawn, so
+        // it is open now regardless of worker scheduling.
+        assert_eq!(
+            counter.held_open(inherited_root),
+            1,
+            "spawn_inherit must acquire a settlement hold on the inherited root"
+        );
+
+        gate_tx.send(()).expect("release worker");
         join.join().expect("inherit worker thread joins");
 
-        // Drain queue, partition into "ours" (root matches inherited_root)
-        // vs "others" (put back so other parallel tests aren't disturbed).
-        let mut ours: Vec<TraceEvent> = Vec::new();
-        let mut leftover: Vec<TraceEvent> = Vec::new();
-        while let Some(event) = live.pop() {
-            let belongs = match &event {
-                TraceEvent::HoldOpen { root, .. } | TraceEvent::Release { root, .. } => {
-                    *root == inherited_root
-                }
-                _ => false,
-            };
-            if belongs {
-                ours.push(event);
-            } else {
-                leftover.push(event);
-            }
-        }
-        for ev in leftover {
-            live.restore(ev);
-        }
-
-        assert_eq!(ours.len(), 2, "expected one HoldOpen + one Release");
-        assert!(
-            matches!(ours[0], TraceEvent::HoldOpen { root, .. } if root == inherited_root),
-            "first event is HoldOpen for inherited root, got {:?}",
-            ours[0]
-        );
-        assert!(
-            matches!(ours[1], TraceEvent::Release { root, .. } if root == inherited_root),
-            "second event is Release for inherited root, got {:?}",
-            ours[1]
+        // The InheritCtx dropped on worker exit → hold released → the
+        // (0, 0) cell is reclaimed.
+        assert_eq!(
+            counter.held_open(inherited_root),
+            0,
+            "the hold must release when the worker exits"
         );
     }
 
-    /// `MailId::NONE` inherited root skips the hold — there's no chain
-    /// to keep open. Verify no `HoldOpen` / `Release` events surface
-    /// from a `NONE`-rooted spawn.
+    /// `MailId::NONE` inherited root skips the hold — there's no chain to
+    /// keep open. Verify a `NONE`-rooted spawn creates no settlement cell.
     #[test]
     fn spawn_inherit_with_none_root_skips_hold() {
-        use aether_kinds::trace::TraceEvent;
-
         let (_registry, mailer) = fresh_substrate();
-        let live = Arc::clone(mailer.trace_handle().queue());
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let producer_mailbox = MailboxId(0xC0FE_DEAD_C0FE_DEAD);
         let binding = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             producer_mailbox,
         ));
 
+        let live_before = counter.live_roots();
         let join = spawn_inherit::<StubActor, _>(
             Arc::clone(&binding),
             MailId::NONE,
@@ -710,27 +693,15 @@ mod tests {
         );
         join.join().expect("inherit worker thread joins");
 
-        // Drain and inspect — there should be ZERO HoldOpen/Release
-        // events for `MailId::NONE` since spawn_inherit short-circuits
-        // the hold acquisition for NONE roots.
-        let mut leftover: Vec<TraceEvent> = Vec::new();
-        let mut none_events = 0usize;
-        while let Some(event) = live.pop() {
-            match &event {
-                TraceEvent::HoldOpen { root, .. } | TraceEvent::Release { root, .. }
-                    if *root == MailId::NONE =>
-                {
-                    none_events += 1;
-                }
-                _ => leftover.push(event),
-            }
-        }
-        for ev in leftover {
-            live.restore(ev);
-        }
         assert_eq!(
-            none_events, 0,
-            "MailId::NONE root must not produce HoldOpen/Release"
+            counter.held_open(MailId::NONE),
+            0,
+            "MailId::NONE root must not acquire a settlement hold"
+        );
+        assert_eq!(
+            counter.live_roots(),
+            live_before,
+            "a NONE-root spawn must not create a settlement cell"
         );
     }
 

@@ -30,8 +30,8 @@ use aether_kinds::{
     ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
     SubmitResult, TerminateEngine, TerminateEngineResult,
     trace::{
-        DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire,
-        TRACE_OBSERVER_MAILBOX_NAME, TraceTail, TraceTailResult,
+        DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
+        TraceTail, TraceTailResult,
     },
 };
 use base64::Engine as _;
@@ -220,11 +220,8 @@ impl Mcp {
         let mails = encode_traced_bundle(&descriptors, &args.mails)
             .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
         let timeout_ms = args.settlement_timeout_ms.unwrap_or(5000).min(30000);
-        let dispatch_envelope = engine_envelope(
-            engine,
-            TRACE_OBSERVER_MAILBOX_NAME,
-            &DispatchTraced { mails },
-        );
+        let dispatch_envelope =
+            engine_envelope(engine, TRACE_MAILBOX_NAME, &DispatchTraced { mails });
 
         // Round 1: ack carries the chassis-root MailId; ReplyEnd
         // closes when the chain settles substrate-side.
@@ -1079,7 +1076,7 @@ mod tests {
     use aether_capabilities::rpc::{
         PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
     };
-    use aether_capabilities::trace::TraceObserverCapability;
+    use aether_capabilities::trace::TraceDispatchCapability;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
@@ -1105,7 +1102,7 @@ mod tests {
         let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<EngineServer>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),

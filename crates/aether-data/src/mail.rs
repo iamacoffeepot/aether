@@ -27,11 +27,11 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 /// [`MailId::NONE`] sentinel below carries `MailboxId::NONE` instead —
 /// "no inbound mail" is structurally distinct from "chassis as sender".
 ///
-/// Serde-serializable so PR 2's `TraceEvent` (and its postcard-shaped
-/// `BatchedTraceEvents` envelope) can carry `MailId` over the in-
-/// process trace pipeline. The substrate's host-side `Envelope` and
-/// `Mail` types do not serialize, so the field additions on those
-/// remain wire-free.
+/// Serde-serializable so the ADR-0080 `TraceEvent` (and its
+/// postcard-shaped `TraceRingEntry`, the per-actor ring's wire element)
+/// can carry `MailId` when a trace ring is queried over the wire. The
+/// substrate's host-side `Envelope` and `Mail` types do not serialize,
+/// so the field additions on those remain wire-free.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]

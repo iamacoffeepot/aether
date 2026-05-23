@@ -6,14 +6,12 @@
 //!   compute `now.duration_since(SUBSTRATE_START).as_nanos() as u64`
 //!   per ADR-0080 §2.
 //! - [`TraceEvent`] — one trace event emitted at a producer site.
-//!   Three variants: `Sent` at the sender (every outbound mail),
-//!   `Received` at the receiver's dispatcher entry, `Finished` at the
-//!   receiver's dispatcher exit. The observer folds these into per-
-//!   root counters and the parent → mail graph.
-//! - [`BatchedTraceEvents`] — what the chassis drainer thread mails
-//!   to the [`TRACE_OBSERVER_MAILBOX_NAME`] sink, batching events to
-//!   amortise dispatch cost (defaults: `BATCH_MAX` = 256, `BATCH_INTERVAL`
-//!   = 1ms; see ADR-0080 §3).
+//!   `Sent` at the sender (every outbound mail), `Received` at the
+//!   receiver's dispatcher entry, `Finished` at the receiver's
+//!   dispatcher exit, plus the `HoldOpen` / `Release` settlement-hold
+//!   pair (ADR-0080 §12). Post-ADR-0086 Phase 3c these land in the
+//!   producing actor's per-actor ring ([`TraceRingEntry`]), queried via
+//!   [`TraceTail`] and stitched client-side; there is no central fold.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,11 +21,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::MailEnvelope;
 
-/// ADR-0080 §3: well-known mailbox name the chassis-owned drainer
-/// thread sends [`BatchedTraceEvents`] to. The
-/// `TraceObserverCapability` (in `aether-capabilities`) registers
-/// against this name at boot.
-pub const TRACE_OBSERVER_MAILBOX_NAME: &str = "aether.trace";
+/// ADR-0080 §3 (slimmed by ADR-0086 Phase 3c): well-known mailbox name
+/// the `TraceDispatchCapability` (in `aether-capabilities`) registers
+/// against at boot. It now services only [`DispatchTraced`] — the
+/// central trace drainer that used to ship `BatchedTraceEvents` here
+/// retired with the fold.
+pub const TRACE_MAILBOX_NAME: &str = "aether.trace";
 
 /// ADR-0080 §2: monotonic-since-boot timestamp in nanoseconds. Cheap
 /// to read (~10–20 ns VDSO `clock_gettime(CLOCK_MONOTONIC)` on
@@ -57,10 +56,9 @@ pub struct Nanos(pub u64);
 /// own `mail_id`, the chain `root` it inherits or originates, the
 /// optional `parent_mail` at the sender (None for chassis-root), the
 /// producer mailbox, the recipient mailbox, the kind, and the
-/// timestamp. `Received` and `Finished` only carry `mail_id` + `t` —
-/// the observer joins them to the originating `Sent` via the mail-id
-/// key in its [`MailNode`](self) graph (defined in the observer cap,
-/// not on the wire).
+/// timestamp. `Received` and `Finished` only carry `mail_id` + `t`;
+/// the guided walk (`trace_walk`) joins them to the originating `Sent`
+/// by the mail-id key while stitching the per-actor ring slices.
 ///
 /// Wire shape: postcard. The dispatcher delivers this through normal
 /// mail routing; no cast-shape optimisation because the variant tag +
@@ -117,56 +115,17 @@ pub enum TraceEvent {
     },
 }
 
-/// ADR-0080 §3: a batch of [`TraceEvent`]s the chassis drainer ships
-/// to the [`TRACE_OBSERVER_MAILBOX_NAME`] sink. Batching amortises the
-/// per-mail observer dispatch cost — defaults `BATCH_MAX = 256` events
-/// or `BATCH_INTERVAL = 1ms`, whichever fires first.
+/// ADR-0086 Phase 3b: reply shape the guided walk (`trace_walk`)
+/// produces after stitching the per-actor ring slices for one root.
+/// `Ok` carries the root's current `in_flight` count and one
+/// [`MailNodeWire`] per mail in the tree (no ordering guarantee —
+/// consumers reconstruct via `parent` edges). `Err::not_found` is
+/// returned when no ring held the root's own `Sent` (never-seen or
+/// lapped past every ring's window).
 ///
-/// The drainer pushes via `Sender::send_detached` (ADR-0080 §7) so the
-/// observer's own outbound mail does not recurse back through the
-/// trace pipeline.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.trace.batched_events")]
-pub struct BatchedTraceEvents {
-    pub events: Vec<TraceEvent>,
-}
-
-/// Issue 718 (ADR-0080 Phase 2): request kind sent to
-/// [`TRACE_OBSERVER_MAILBOX_NAME`] to describe the mail tree under a
-/// given root. The observer replies with [`DescribeTreeResult`]; the
-/// hub MCP `describe_tree` tool wraps the round-trip.
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.trace.describe_tree")]
-pub struct DescribeTree {
-    pub root: MailId,
-}
-
-/// Issue 718: reply to [`DescribeTree`]. `Ok` carries the root's
-/// current `in_flight` count and one [`MailNodeWire`] per mail in the
-/// tree (no ordering guarantee — agents reconstruct via `parent`
-/// edges). `Err::not_found` is returned when the root isn't present
-/// in the observer (never-seen or evicted past retention).
+/// Not routed as mail post-3c — the central observer that used to reply
+/// with it retired. Kept as the walk's output struct (still a `Kind` so
+/// the MCP layer can name/decode it uniformly).
 #[derive(
     Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
 )]
@@ -182,10 +141,10 @@ pub enum DescribeTreeResult {
     },
 }
 
-/// Issue 718: wire shape of one node in [`DescribeTreeResult`]. The
-/// observer keeps the same logical fields in its in-memory `MailNode`;
-/// this struct mirrors them on the wire so the hub can decode without
-/// pulling in the cap's internal type.
+/// One node in a [`DescribeTreeResult`]: a single mail folded from its
+/// `Sent` (+ optional `Received` / `Finished`) ring entries. The guided
+/// walk (`trace_walk`) builds these from the per-actor ring slices; the
+/// MCP layer renders them into the trace tree.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub struct MailNodeWire {
     pub mail_id: MailId,
@@ -201,75 +160,6 @@ pub struct MailNodeWire {
     /// `Received` event lands. See [`TraceEvent::Received::thread_name`]
     /// for the producer-side semantics.
     pub thread_name: Option<String>,
-}
-
-/// Issue 735: window selector for the time-window trace queries
-/// ([`DescribeWindow`] today; `dump_trace_window` Phase 3 reuses the
-/// same enum). The substrate resolves [`TraceWindow::Relative`] using
-/// its own `SUBSTRATE_START`-relative monotonic clock at handler
-/// entry, so callers don't have to deal with hub-vs-substrate clock
-/// skew.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
-pub enum TraceWindow {
-    /// Absolute nanoseconds since substrate boot. `end_ns: None`
-    /// means "open-ended through now" — resolved at handler entry to
-    /// the substrate's current `SUBSTRATE_START`-relative reading.
-    Absolute { start_ns: u64, end_ns: Option<u64> },
-    /// Last N milliseconds, relative to the substrate's monotonic
-    /// now at handler entry. Equivalent to
-    /// `Absolute { start_ns: now - last_ms, end_ns: None }`.
-    Relative { last_ms: u64 },
-}
-
-/// Issue 735: time-window mail query. Sent to
-/// [`TRACE_OBSERVER_MAILBOX_NAME`]; the observer replies with
-/// [`DescribeWindowResult`]. The hub MCP `describe_tree_window` and
-/// `dump_trace_window` tools wrap the round-trip.
-///
-/// **Strict `t_sent` containment.** A mail belongs to the window iff
-/// `start_ns <= mail.t_sent <= end_ns`. Long-running mail (still
-/// in flight when the window closes) re-surfaces in subsequent
-/// window queries while it remains tracked. Parent edges may dangle
-/// to mail outside the window — drill into a specific root via
-/// [`DescribeTree`] for full chain context.
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.trace.describe_window")]
-pub struct DescribeWindow {
-    pub window: TraceWindow,
-    /// Cap on the number of in-window mails the observer will
-    /// return. The observer counts the matching set first; if the
-    /// count exceeds `max_mails` (or the substrate-side default) the
-    /// reply is `Err { too_many: Some(count) }` instead of a
-    /// truncated set — the count tells the caller how to narrow the
-    /// window.
-    pub max_mails: Option<u32>,
-}
-
-/// Issue 735: reply to [`DescribeWindow`]. `Ok` carries the in-window
-/// mails in undefined order — agents reconstruct chains via `parent`
-/// edges (some of which may reference mail outside the window). `Err`
-/// carries `too_many: Some(matched)` when the window matched more
-/// mails than the requested cap, signalling the caller should narrow
-/// the window or raise `max_mails`. Future error variants extend the
-/// `Err` shape with additional `Option<...>` fields rather than
-/// adding sibling variants.
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
-#[kind(name = "aether.trace.describe_window_result")]
-pub enum DescribeWindowResult {
-    Ok { mails: Vec<MailNodeWire> },
-    Err { too_many: Option<u32> },
 }
 
 /// ADR-0086 Phase 3: one entry in an actor's `ActorTraceRing` as it
@@ -337,21 +227,22 @@ pub enum TraceTailResult {
     },
 }
 
-/// ADR-0080 §6 settlement notification. Emitted by
-/// [`BatchedTraceEvents`]'s consumer
-/// (`TraceObserverCapability`) when a causal chain's `in_flight`
-/// counter hits zero, addressed to
-/// [`MailboxId::CHASSIS_MAILBOX_ID`]. The chassis-side
-/// dispatcher switch routes this kind into the gate-site
-/// notification map and signals every subscriber waiting on `root`.
+/// ADR-0080 §6 settlement notification. Post-ADR-0086 Phase 2 it is
+/// fired by the emit-time `SettlementCounter` on the chassis
+/// `TraceHandle` (not a trace fold) the instant a causal chain's
+/// `(in_flight, held_open)` packed counter reaches zero: the producer
+/// hook calls `SettlementRegistry::fire_settled(root)` synchronously on
+/// the finishing thread. Channel subscribers
+/// (`subscribe_settlement`) wake directly; mail subscribers
+/// (`subscribe_settlement_mail`) receive a `Settled { root }` mail at
+/// their target.
 ///
 /// **Settlement is a hint, not a guarantee.** Per ADR-0080 §6,
-/// consumers MUST be idempotent — duplicate `Settled { root }` mail
-/// for the same root is a no-op for any waiter that already woke.
-/// The observer's eviction may also lose late `Finished` events, in
-/// which case settlement is reported earlier than strictly correct;
-/// the gate-site contract is "settles eventually," not "settles only
-/// once every dependency is provably done."
+/// consumers MUST be idempotent — a duplicate `Settled { root }` for
+/// the same root is a no-op for any waiter that already woke (the
+/// registry's `settled` set dedups). The gate-site contract is
+/// "settles eventually," not "settles only once every dependency is
+/// provably done."
 #[derive(
     Copy,
     Clone,
@@ -371,11 +262,11 @@ pub struct Settled {
 }
 
 /// Issue 749: request kind for the atomic batched-dispatch MCP tool
-/// `send_mail_traced`. Sent to [`TRACE_OBSERVER_MAILBOX_NAME`]; the
-/// observer dispatches every envelope inheriting the inbound chain so
-/// all children share a single root with the inbound itself, then
-/// replies synchronously with [`DispatchTracedAck`] carrying that root
-/// id.
+/// `send_mail_traced`. Sent to [`TRACE_MAILBOX_NAME`]; the
+/// `TraceDispatchCapability` dispatches every envelope inheriting the
+/// inbound chain so all children share a single root with the inbound
+/// itself, then replies synchronously with [`DispatchTracedAck`]
+/// carrying that root id.
 ///
 /// Carries [`MailEnvelope`]s — the same name-addressed batch shape
 /// `CaptureFrame` uses. The substrate-side handler resolves the
@@ -383,9 +274,10 @@ pub struct Settled {
 ///
 /// **Two-call protocol.** The synchronous ack closes round 1. The
 /// caller waits for the wire `ReplyEnd` (substrate-side chain
-/// settlement) and then issues a separate [`DescribeTree`] against the
-/// returned root to fetch the populated tree. This sidesteps the
-/// settle/reply race that a single-call shape would inherit from
+/// settlement) and then reconstructs the populated tree by walking the
+/// per-actor trace rings from the returned root ([`TraceTail`], stitched
+/// client-side — ADR-0086 Phase 3b). This sidesteps the settle/reply
+/// race that a single-call shape would inherit from
 /// `RpcServerCapability`'s settlement-driven `ReplyEnd`.
 #[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.trace.dispatch_traced")]
@@ -395,10 +287,10 @@ pub struct DispatchTraced {
 
 /// Issue 749: synchronous reply to [`DispatchTraced`]. `Ok` carries
 /// the chassis-root [`MailId`] every dispatched envelope inherited, so
-/// the caller can issue a follow-up [`DescribeTree`] once the wire
-/// `ReplyEnd` signals chain settlement. `Err` aborts the batch before
-/// any mail moved — typically a bad recipient or kind name in the
-/// batch (matches `CaptureFrameResult::Err`'s bundle-resolution
+/// the caller can walk the per-actor trace rings from that root once
+/// the wire `ReplyEnd` signals chain settlement. `Err` aborts the batch
+/// before any mail moved — typically a bad recipient or kind name in
+/// the batch (matches `CaptureFrameResult::Err`'s bundle-resolution
 /// failure shape).
 #[derive(Clone, Debug, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.trace.dispatch_traced_ack")]

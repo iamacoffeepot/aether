@@ -21,7 +21,6 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailboxId, ReplyTarget, ReplyTo};
-use std::thread;
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -259,8 +258,6 @@ impl ComponentCtx {
             Some(MailboxEntry::Inline(handler)) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 let origin = self.registry.mailbox_name(self.sender);
-                let thread_name = thread::current().name().map(str::to_owned);
-                self.queue.record_received(mail_id, root, thread_name);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,
                     kind_name: &kind_name,
@@ -272,6 +269,10 @@ impl ComponentCtx {
                     root,
                     parent_mail,
                 });
+                // ADR-0080 §2 settlement hook. Inline mailboxes have no
+                // per-actor trace ring, so post-ADR-0086 Phase 3c their
+                // Received/Finished trace events aren't recorded — only
+                // settlement accounting runs here.
                 self.queue.record_finished(mail_id, root);
                 return;
             }

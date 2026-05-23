@@ -1,7 +1,7 @@
 //! Hub chassis (post-issue-763 P5f). The hub is now a thin coordinator
 //! between the out-of-process `aether-mcp` MCP server and the
 //! substrates the engines cap forks: it stands up a `SubstrateBoot` to
-//! host actors, wires `TraceObserverCapability` + `EngineServer` +
+//! host actors, wires `TraceDispatchCapability` + `EngineServer` +
 //! `RpcServerCapability` (the inbound `aether-mcp` dials), and blocks
 //! on a SIGINT/SIGTERM signal in `run`. The OLD `EngineToHub` TCP
 //! listener, hub-side sessions, `ProcessCapability`, loopback drainers,
@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
-use aether_capabilities::{EngineServer, trace::TraceObserverCapability};
+use aether_capabilities::{EngineServer, trace::TraceDispatchCapability};
 use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
@@ -74,7 +74,7 @@ impl HubChassis {
         let driver = HubServerDriverCapability { boot };
 
         Builder::<Self>::new(registry, mailer)
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<EngineServer>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),

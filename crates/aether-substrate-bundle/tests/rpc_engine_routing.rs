@@ -22,7 +22,7 @@ use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
     WIRE_VERSION, WireFrame,
 };
-use aether_capabilities::trace::TraceObserverCapability;
+use aether_capabilities::trace::TraceDispatchCapability;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
 use aether_kinds::descriptors;
@@ -50,7 +50,7 @@ impl Chassis for TestChassis {
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
 /// (engine-addressed Calls route through `aether.engine`), the engines
-/// cap, and `TraceObserverCapability` so the `RpcServer`'s local Calls
+/// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// (`spawn`, `terminate`) settle and close.
 fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
@@ -61,7 +61,7 @@ fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let store = Arc::new(HandleStore::new(1024 * 1024));
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceObserverCapability>(())
+        .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use aether_capabilities::{
     CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
     InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, fs::NamespaceRoots,
-    trace::TraceObserverCapability,
+    trace::TraceDispatchCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
@@ -304,7 +304,7 @@ impl TestBenchChassis {
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_workers(pool_workers)
             .with_actor::<HandleCapability>(())
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<TcpCapability>(())

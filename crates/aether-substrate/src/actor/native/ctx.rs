@@ -91,7 +91,7 @@ impl<'a> NativeCtx<'a> {
     }
 
     /// Borrow the wired `Mailer`. Issue 953: surfaced so cap handlers
-    /// (`TraceObserverCapability` is the motivating consumer) can
+    /// (`TraceDispatchCapability` is the motivating consumer) can
     /// reach the per-chassis trace handle for `now_nanos` without
     /// going through `binding()`. Mirrors the `NativeInitCtx::mailer`
     /// accessor but returns a borrow rather than a clone — handler

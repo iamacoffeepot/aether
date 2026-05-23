@@ -39,8 +39,6 @@ use crate::mail::capability::MailboxCaps;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
-use crate::runtime::trace;
-use crate::runtime::trace::TraceDrainerHandle;
 use crate::scheduler::Drainable;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
@@ -1022,13 +1020,6 @@ struct BootedPassives {
     /// implicit field-drop ordering), so every Dedicated dispatcher
     /// thread is gone before pool workers join.
     _pool: PoolHandle,
-    /// ADR-0080 §3 trace drainer thread. Boots alongside the worker
-    /// pool; its `Drop` signals + joins the thread (final flush
-    /// included). Dropped after `shutdowns` and `_pool` per field
-    /// order, so the last batch may target an already-dead
-    /// `TraceObserver` mailbox — that's acceptable: the observer cap
-    /// drained its inbox during its own dispatcher's phase-2 drain.
-    _trace_drainer: TraceDrainerHandle,
     /// ADR-0080 §6 settlement registry. Cloned into the Mailer's
     /// chassis-router closure (which decodes `Settled { root }`
     /// mail addressed to `CHASSIS_MAILBOX_ID` and signals
@@ -1104,17 +1095,11 @@ fn boot_passives(
     });
     let pool = Pool::start(pool_config, Arc::clone(aborter));
 
-    // ADR-0080 §3 trace pipeline. The `Mailer` already carries a
-    // per-chassis `TraceHandle` allocated by `Mailer::new` (issue 953
-    // retired the process-global queue); pull its queue and hand a
-    // clone to `start_drainer`, which owns the thread that batches
-    // events into mail addressed to the `aether.trace` sink. The
-    // handle in `BootedPassives` joins the thread on chassis tear
-    // down.
-    let trace_drainer = trace::start_drainer(
-        Arc::clone(mailer.trace_handle().queue()),
-        Arc::clone(mailer),
-    );
+    // ADR-0086 Phase 3c: the central trace queue + drainer retired. The
+    // `Mailer`'s per-chassis `TraceHandle` records trace events directly
+    // into per-actor rings (queried via `aether.trace.tail`) and drives
+    // settlement through its emit-time `SettlementCounter` — no batching
+    // thread to spawn.
 
     // ADR-0080 §6 settlement registry + chassis-mail router. The registry
     // owns the gate-site notification map (`subscribe_settlement` /
@@ -1308,7 +1293,6 @@ fn boot_passives(
         actor_registry,
         spawner,
         _pool: pool,
-        _trace_drainer: trace_drainer,
         settlement_registry,
     })
 }
@@ -1356,6 +1340,7 @@ impl<C: Chassis> BuiltChassis<C> {
     ///     let _ = chassis.resolve_actor::<A>("anything");
     /// }
     /// ```
+    #[must_use]
     pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
         &self,
         subname: &str,
@@ -1381,6 +1366,7 @@ impl<C: Chassis> BuiltChassis<C> {
     /// the chassis registry from a handler. Reach for this from a
     /// driver / `TestBench` / scenario inspection step, not from
     /// production cap state. ADR-0079 supervisor-as-cap pattern.
+    #[must_use]
     pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
         &self,
     ) -> Vec<(String, MailboxId)> {
@@ -1412,6 +1398,7 @@ impl<C: Chassis> BuiltChassis<C> {
     /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
     /// embedders that want to introspect live instanced actors
     /// (test assertions, diagnostics) reach for this.
+    #[must_use]
     pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
         &self.booted.actor_registry
     }
@@ -1452,10 +1439,12 @@ impl<C: Chassis> fmt::Debug for PassiveChassis<C> {
 impl<C: Chassis> PassiveChassis<C> {
     /// Number of booted passives. Useful for tests; not expected to
     /// vary at runtime.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.booted.shutdowns.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.booted.shutdowns.is_empty()
     }
@@ -1465,6 +1454,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// that drive a `PassiveChassis` directly (`TestBench`, integration
     /// harnesses). `None` if no booted cap published a handle of that
     /// type.
+    #[must_use]
     pub fn handle<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
         self.booted.handles.get::<H>()
     }
@@ -1474,6 +1464,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// for this to call `subscribe_settlement(root)`; PR 3 surfaces
     /// the accessor for tests that pump synthetic events through the
     /// trace pipeline and wait on the resulting `Settled` signal.
+    #[must_use]
     pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         self.booted.settlement_registry()
     }
@@ -1493,6 +1484,7 @@ impl<C: Chassis> PassiveChassis<C> {
     ///     let _ = chassis.resolve_actor::<A>("anything");
     /// }
     /// ```
+    #[must_use]
     pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
         &self,
         subname: &str,
@@ -1512,6 +1504,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// `(subname, MailboxId)` pairs. Diagnostic-only contract: caps
     /// that supervise a fleet hold their own cap-local map; this is
     /// for tests and chassis-level introspection only.
+    #[must_use]
     pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
         &self,
     ) -> Vec<(String, MailboxId)> {
@@ -1542,6 +1535,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
     /// embedders that want to introspect live instanced actors
     /// (test assertions, diagnostics) reach for this.
+    #[must_use]
     pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
         &self.booted.actor_registry
     }

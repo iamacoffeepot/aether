@@ -1,6 +1,6 @@
 //! DAG-executor scenario tests (iamacoffeepot/aether#976).
 //!
-//! Each fixture boots a real chassis (`TraceObserverCapability` +
+//! Each fixture boots a real chassis (`TraceDispatchCapability` +
 //! `HandleCapability` + `DagCapability` + the relevant test caps from
 //! [`super::test_support`]) through the same `Builder` the production
 //! chassis uses, enqueues an `aether.dag.submit` at the dag cap's
@@ -9,7 +9,7 @@
 //! dispatch + parking + settlement path and asserts on the observer's
 //! recorded payloads / the DAG's `status`.
 //!
-//! `TraceObserverCapability` is load-bearing for every `Call` fixture:
+//! `TraceDispatchCapability` is load-bearing for every `Call` fixture:
 //! it folds substrate-wide trace events into per-root counters and
 //! fires `Settled { root }` mail once a root drains — without it the
 //! executor's per-`Call` settlement subscription never wakes and the
@@ -49,7 +49,7 @@ use super::test_support::{
     boom_transform_id, double_transform_id, seed_transform_id, slow_transform_id,
 };
 use crate::test_chassis::TestChassis;
-use crate::trace::TraceObserverCapability;
+use crate::trace::TraceDispatchCapability;
 
 /// Build a substrate seed (registry pre-loaded with `descriptors::all()`,
 /// mailer wired to a drainable loopback egress). Like the crate's
@@ -67,14 +67,14 @@ fn fresh_substrate_with_rx() -> (Arc<Registry>, Arc<Mailer>, Receiver<EgressEven
 }
 
 /// A `Builder` carrying the base every DAG fixture shares —
-/// `TraceObserverCapability` (fires `Settled` so `Call` settlement
+/// `TraceDispatchCapability` (fires `Settled` so `Call` settlement
 /// subscriptions wake), `HandleCapability` (the store the executor
 /// resolves into), `DagCapability` (the executor under test), and
 /// `TestSourceActor` (the universal source). Each fixture chains its
 /// specific observer / call cap before `build_passive`.
 fn base_builder(registry: &Arc<Registry>, mailer: &Arc<Mailer>) -> Builder<TestChassis> {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
-        .with_actor::<TraceObserverCapability>(())
+        .with_actor::<TraceDispatchCapability>(())
         .with_actor::<crate::HandleCapability>(())
         .with_actor::<DagCapability>(())
         .with_actor::<TestSourceActor>(())

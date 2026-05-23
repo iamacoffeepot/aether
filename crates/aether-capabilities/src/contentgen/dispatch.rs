@@ -241,7 +241,6 @@ mod tests {
     use super::{DEFAULT_MAX_IN_FLIGHT, InFlightDispatch};
     use aether_data::{Kind, KindId, MailId, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
     use aether_kinds::Pong;
-    use aether_kinds::trace::TraceEvent;
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -273,33 +272,6 @@ mod tests {
             sender: MailboxId(1),
             correlation_id: cid,
         }
-    }
-
-    /// Net `held_open` count for `root` over every settlement event
-    /// currently in the mailer's trace queue: `+1` per `HoldOpen`, `-1`
-    /// per `Release`. The queue isn't drained — settlement tests poll it
-    /// repeatedly as the guard moves through actor state. A positive
-    /// value means the chain is still held (settlement gated); zero
-    /// means every acquired hold has released.
-    fn net_held_open(mailer: &Arc<Mailer>, root: MailId) -> i64 {
-        let queue = mailer.trace_handle().queue();
-        let mut net = 0;
-        let mut scratch = Vec::new();
-        while let Some(ev) = queue.pop() {
-            match &ev {
-                TraceEvent::HoldOpen { root: r, .. } if *r == root => net += 1,
-                TraceEvent::Release { root: r, .. } if *r == root => net -= 1,
-                _ => {}
-            }
-            scratch.push(ev);
-        }
-        // Restore the events so a later poll sees the full history — the
-        // hold/release pairing is cumulative across the whole submit ->
-        // reply lifecycle, not a one-shot read.
-        for ev in scratch {
-            queue.restore(ev);
-        }
-        net
     }
 
     #[test]
@@ -482,7 +454,7 @@ mod tests {
         // running (or already finished) — either way the actor-state
         // guard keeps the chain held: net held_open == 1.
         assert_eq!(
-            net_held_open(&mailer, root),
+            mailer.trace_handle().settlement_counter().held_open(root),
             1,
             "the chain stays held after submit returns (before the reply lands)"
         );
@@ -493,7 +465,7 @@ mod tests {
             .expect("the call runs");
         // Still held — the result mail landing handler hasn't run yet.
         assert_eq!(
-            net_held_open(&mailer, root),
+            mailer.trace_handle().settlement_counter().held_open(root),
             1,
             "the worker finishing does not release the chain; the hold lives in actor state"
         );
@@ -502,13 +474,17 @@ mod tests {
         // (re-reply happens here in production), then drop it — that
         // fires Release.
         let landed = d.take_landed(1).expect("request 1 landed");
-        assert_eq!(net_held_open(&mailer, root), 1, "still held before drop");
+        assert_eq!(
+            mailer.trace_handle().settlement_counter().held_open(root),
+            1,
+            "still held before drop"
+        );
         drop(landed);
         let _ = d.on_reply_landed(&mailer, self_id);
 
         // Hold released — net back to 0, so the chain may settle.
         assert_eq!(
-            net_held_open(&mailer, root),
+            mailer.trace_handle().settlement_counter().held_open(root),
             0,
             "dropping the LandedReply after re-reply releases the chain"
         );
@@ -550,12 +526,12 @@ mod tests {
 
         // Both chains are held from accept — the queued one too.
         assert_eq!(
-            net_held_open(&mailer, root_a),
+            mailer.trace_handle().settlement_counter().held_open(root_a),
             1,
             "the running request holds its chain"
         );
         assert_eq!(
-            net_held_open(&mailer, root_b),
+            mailer.trace_handle().settlement_counter().held_open(root_b),
             1,
             "the queued request also holds its chain from accept"
         );
@@ -571,12 +547,12 @@ mod tests {
         assert_eq!(drained, Some(2), "the queued request drains");
 
         assert_eq!(
-            net_held_open(&mailer, root_a),
+            mailer.trace_handle().settlement_counter().held_open(root_a),
             0,
             "chain A released after request 1's reply"
         );
         assert_eq!(
-            net_held_open(&mailer, root_b),
+            mailer.trace_handle().settlement_counter().held_open(root_b),
             1,
             "chain B still held — its reply hasn't landed yet"
         );
@@ -588,7 +564,7 @@ mod tests {
         drop(d.take_landed(2).expect("request 2 landed"));
         let _ = d.on_reply_landed(&mailer, self_id);
         assert_eq!(
-            net_held_open(&mailer, root_b),
+            mailer.trace_handle().settlement_counter().held_open(root_b),
             0,
             "chain B released after request 2's reply"
         );

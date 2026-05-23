@@ -5,7 +5,7 @@
 //! stitched client-side.
 //!
 //! The walk self-directs. It seeds at the root mail's `sender` — the
-//! chassis-host pseudo-mailbox ([`aether_data::MailboxId::CHASSIS_MAILBOX_ID`])
+//! chassis-host pseudo-mailbox ([`MailboxId::CHASSIS_MAILBOX_ID`])
 //! for an injected root, an actor otherwise — to pick up the root's own
 //! `Sent`, then follows every `Sent` event's `recipient`. Each
 //! recipient's ring holds that mail's `Received` / `Finished` plus any
