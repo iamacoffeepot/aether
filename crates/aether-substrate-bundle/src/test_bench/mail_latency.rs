@@ -31,8 +31,8 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Ping, Relay, SweepConfig, default_topologies, depth_chain, pace_hz_from_env,
-    relay_id, run_sweep,
+    CellResult, Ping, Relay, RelayConfig, SweepConfig, default_topologies, depth_chain,
+    fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -184,9 +184,14 @@ fn sharded_trace_settles_every_root() {
     let depth = 5;
     let topo = depth_chain(depth);
     for i in 0..topo.downstreams.len() {
-        let downs: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+        let downstreams: Arc<[MailboxId]> =
+            topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
         let sub = i.to_string();
-        tb.spawn_actor::<Relay>(Subname::Named(&sub), downs)
+        let config = RelayConfig {
+            downstreams,
+            work_iters: topo.work_iters[i],
+        };
+        tb.spawn_actor::<Relay>(Subname::Named(&sub), config)
             .finish()
             .expect("spawn relay");
     }
@@ -256,9 +261,21 @@ fn lifecycle_latency_observe() {
 
     let pace_hz = pace_hz_from_env();
 
+    // The trivial default set always runs. When AETHER_LAT_HEAVY_WORK is
+    // set, append CPU-heavy fan-outs so the sweep can also exhibit the
+    // parallelism-wins regime (iamacoffeepot/aether#1074) — unset, the
+    // grid is byte-for-byte the historical one.
+    let mut topologies = default_topologies();
+    let heavy = heavy_work_iters_from_env();
+    if heavy > 0 {
+        for b in [2usize, 4, 8] {
+            topologies.push(fanout_heavy(b, heavy));
+        }
+    }
+
     let cfg = SweepConfig {
         workers: worker_set,
-        topologies: default_topologies(),
+        topologies,
         frames: OBSERVE_FRAMES,
         pace_hz,
     };
@@ -284,6 +301,12 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
         println!("paced @ {hz} Hz — workers park between frames (realistic frame loop)");
     } else {
         println!("flat-out advance — workers stay warm (isolates per-hop dispatch cost)");
+    }
+    let heavy = heavy_work_iters_from_env();
+    if heavy > 0 {
+        println!(
+            "heavy leaves: {heavy} spin-iters/handler (*-heavy rows; read HANDLER DUR for actual µs)"
+        );
     }
     println!("{OBSERVE_FRAMES} frames/cell; relay-hop (`Ping`) samples only.");
     println!();

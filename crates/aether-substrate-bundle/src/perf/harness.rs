@@ -17,6 +17,7 @@
 //! a small pool. So the sweep takes the worker set as an axis.
 
 use std::env;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -53,12 +54,42 @@ pub struct Ping {
     pub seq: u32,
 }
 
+/// Bounded, deterministic CPU spin: an FNV-1a-style integer mix run
+/// `iters` times. Real compute that occupies the worker thread for the
+/// duration — deliberately **not** `thread::sleep`, which would free the
+/// core and turn the measurement into park/wake latency instead of
+/// compute contention (iamacoffeepot/aether#1074). `black_box` on both
+/// the loop input and the accumulator stops the optimizer eliding the
+/// loop or folding it to a constant. `iters == 0` is a true no-op, so
+/// the trivial topologies stay byte-for-byte unchanged.
+#[inline(never)]
+fn busy_spin(iters: u64) {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis
+    for i in 0..iters {
+        acc ^= black_box(i);
+        acc = acc.wrapping_mul(0x0000_0100_0000_01b3); // FNV-1a 64-bit prime
+    }
+    black_box(acc);
+}
+
+/// Spawn config for a [`Relay`]: who to forward to, and how much CPU
+/// work to burn per inbound `Ping` before forwarding. `work_iters == 0`
+/// is the trivial relay; a non-zero count makes a leaf contend for a
+/// core (the parallel-heavy regime, iamacoffeepot/aether#1074).
+pub struct RelayConfig {
+    pub downstreams: Arc<[MailboxId]>,
+    pub work_iters: u64,
+}
+
 /// A relay forwards each inbound `Ping` to every configured downstream
 /// mailbox, inheriting the trace lineage so the whole topology is one
 /// causal tree. A leaf relay (empty `downstreams`) just receives and
-/// returns. Pooled (the `Actor` default).
+/// returns. Before forwarding it burns `work_iters` of `busy_spin`
+/// CPU — zero by default, so trivial topologies are unchanged. Pooled
+/// (the `Actor` default).
 pub struct Relay {
     downstreams: Arc<[MailboxId]>,
+    work_iters: u64,
 }
 
 impl aether_actor::Actor for Relay {
@@ -67,10 +98,11 @@ impl aether_actor::Actor for Relay {
 impl aether_actor::Instanced for Relay {}
 impl aether_actor::HandlesKind<Ping> for Relay {}
 impl NativeActor for Relay {
-    type Config = Arc<[MailboxId]>;
+    type Config = RelayConfig;
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
-            downstreams: config,
+            downstreams: config.downstreams,
+            work_iters: config.work_iters,
         })
     }
 }
@@ -84,6 +116,11 @@ impl NativeDispatch for Relay {
         if kind.0 != Ping::ID.0 {
             return None;
         }
+        // Burn the configured CPU budget on this worker thread before
+        // forwarding. With heavy leaves and idle cores this is what makes
+        // scattering children across workers pay off — the contention the
+        // trivial harness can't exhibit (iamacoffeepot/aether#1074).
+        busy_spin(self.work_iters);
         // Forward the bytes verbatim to each downstream. Each push
         // stamps its own `t_sent`, so later children in a fan-out reveal
         // any per-child enqueue skew.
@@ -155,22 +192,27 @@ pub fn ticksrc_id() -> MailboxId {
 
 /// A topology is a DAG over relay indices: `downstreams[i]` lists the
 /// relays that relay `i` forwards to. Relay 0 is always the entry. The
-/// number of relays is `downstreams.len()`.
+/// number of relays is `downstreams.len()`. `work_iters[i]` is the CPU
+/// spin budget relay `i` burns per inbound `Ping` (see `busy_spin`) —
+/// all-zero for the trivial topologies, non-zero on the heavy ones
+/// (iamacoffeepot/aether#1074). `work_iters.len() == downstreams.len()`.
 #[derive(Clone)]
 pub struct Topology {
     pub name: String,
     pub downstreams: Vec<Vec<usize>>,
+    pub work_iters: Vec<u64>,
 }
 
 /// `0 -> 1 -> ... -> d-1`. Each relay forwards to the next; the last is
 /// a leaf.
 #[must_use]
 pub fn depth_chain(d: usize) -> Topology {
-    let downstreams = (0..d)
+    let downstreams: Vec<Vec<usize>> = (0..d)
         .map(|i| if i + 1 < d { vec![i + 1] } else { vec![] })
         .collect();
     Topology {
         name: format!("depth-{d}"),
+        work_iters: vec![0; downstreams.len()],
         downstreams,
     }
 }
@@ -182,24 +224,48 @@ pub fn fanout(b: usize) -> Topology {
     downstreams[0] = (1..=b).collect();
     Topology {
         name: format!("fanout-{b}"),
+        work_iters: vec![0; downstreams.len()],
         downstreams,
     }
+}
+
+/// A `fanout(b)` whose `b` leaves each burn `work_iters` of `busy_spin`
+/// CPU per `Ping` (the entry stays trivial). This is the workload the
+/// trivial harness cannot exhibit: with enough per-leaf work and idle
+/// cores, scattering the leaves across workers (parallelism) beats
+/// keeping them on the producing worker (locality). Sweeping
+/// `work_iters` locates the crossover where a static keep-local policy
+/// flips from win to regression (iamacoffeepot/aether#1074).
+///
+/// `work_iters == 0` reproduces [`fanout`] exactly (modulo the `-heavy`
+/// name), so callers can include it unconditionally without perturbing
+/// the trivial baseline.
+#[must_use]
+pub fn fanout_heavy(b: usize, work_iters: u64) -> Topology {
+    let mut t = fanout(b);
+    t.name = format!("fanout-{b}-heavy");
+    for leaf in 1..=b {
+        t.work_iters[leaf] = work_iters;
+    }
+    t
 }
 
 /// `A -> {B, C} -> {D, E}, {E, F}`. E (index 4) has two parents (B and
 /// C) — the shared-node contention case.
 #[must_use]
 pub fn two_level_tree() -> Topology {
+    let downstreams = vec![
+        vec![1, 2], // A -> B, C
+        vec![3, 4], // B -> D, E
+        vec![4, 5], // C -> E, F
+        vec![],     // D
+        vec![],     // E
+        vec![],     // F
+    ];
     Topology {
         name: "tree-A-BC-DEEF".to_owned(),
-        downstreams: vec![
-            vec![1, 2], // A -> B, C
-            vec![3, 4], // B -> D, E
-            vec![4, 5], // C -> E, F
-            vec![],     // D
-            vec![],     // E
-            vec![],     // F
-        ],
+        work_iters: vec![0; downstreams.len()],
+        downstreams,
     }
 }
 
@@ -293,6 +359,26 @@ pub fn pace_hz_from_env() -> Option<u64> {
         .filter(|&h| h > 0)
 }
 
+/// Read the optional heavy-leaf CPU work knob `AETHER_LAT_HEAVY_WORK` (a
+/// raw `busy_spin` iteration count per heavy leaf handler; see
+/// [`fanout_heavy`]). Unset, unparseable, or `0` means no heavy work —
+/// callers omit the heavy topology entirely, so the trivial sweep is
+/// byte-for-byte unchanged (iamacoffeepot/aether#1074).
+///
+/// A raw iteration count, not a microsecond budget, keeps the work
+/// *identical* across processes so a paired base-vs-candidate comparison
+/// (ADR-0085) isn't confounded by per-run calibration drift. To target a
+/// wall-clock budget, set a count and read the actual per-leaf
+/// microseconds off the harness's HANDLER DUR column (it already
+/// measures `t_finished - t_received`), then adjust.
+#[must_use]
+pub fn heavy_work_iters_from_env() -> u64 {
+    env::var("AETHER_LAT_HEAVY_WORK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Drive the sweep and return per-cell percentiles. Each cell boots a
 /// fresh [`TestBench`], wires the topology + tick source, advances, and
 /// harvests the trace ring once. A cell whose bench fails to boot (no
@@ -322,11 +408,15 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
             let n = topo.downstreams.len();
             let mut spawned_ok = true;
             for i in 0..n {
-                let downs: Arc<[MailboxId]> =
+                let downstreams: Arc<[MailboxId]> =
                     topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
                 let sub = i.to_string();
+                let config = RelayConfig {
+                    downstreams,
+                    work_iters: topo.work_iters[i],
+                };
                 if let Err(e) = tb
-                    .spawn_actor::<Relay>(Subname::Named(&sub), downs)
+                    .spawn_actor::<Relay>(Subname::Named(&sub), config)
                     .finish()
                 {
                     tracing::warn!(target: "aether_perf", topo = %topo.name, relay = i, error = ?e, "relay spawn failed");
