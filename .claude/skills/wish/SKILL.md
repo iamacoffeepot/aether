@@ -258,7 +258,7 @@ Read, selective on the theme:
 - `CLAUDE.md` — current architectural state + "Notes on …" prose where friction patterns surface.
 - `docs/adr/` — *Rejected alternatives* and *Future work* sections; parked aspirations live there.
 - `gh issue list --state open --limit 100 --json number,title,body,labels`.
-- `~/.claude/projects/-Users-hadynfitzgerald-workspace-aether/capture/log-*.jsonl` — grep `"I wish"` literally; scan for repeated tool calls hitting the same wall, manual workarounds, frustration markers.
+- `~/.claude/projects/<project-slug>/capture/log-*.jsonl` (`<project-slug>` = the Claude Code project directory that holds your auto-memory `MEMORY.md`) — grep `"I wish"` literally; scan for repeated tool calls hitting the same wall, manual workarounds, frustration markers.
 - `git log --oneline main | head -50`.
 - Empathy material (especially for non-agent roles): general knowledge of how the role works in similar engines/contexts, the user's published vision in memory entries, domain patterns from training.
 
