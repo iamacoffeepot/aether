@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
 #[cfg(test)]
 use aether_kinds::Tick;
+#[cfg(test)]
+use aether_kinds::trace::{TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
@@ -515,6 +517,16 @@ impl TestBench {
             .push_chassis_root_mail(cid, recipient, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
         (root, rx)
+    }
+
+    /// ADR-0086 Phase 3: read the chassis-host trace ring — where the
+    /// `Sent` for off-actor / injected root mail (e.g. [`Self::inject_root`])
+    /// lands, since it's produced outside any actor's stamped slots.
+    /// Per-actor rings are queried via `aether.trace.tail` mail; this
+    /// ring belongs to no actor, so the test reads it directly.
+    #[cfg(test)]
+    pub(crate) fn chassis_host_trace_tail(&self, request: &TraceTail) -> TraceTailResult {
+        self.queue.trace_handle().chassis_host_tail(request)
     }
 
     /// Bytes-level request/reply: push `(kind, payload)` to

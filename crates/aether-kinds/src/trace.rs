@@ -327,6 +327,71 @@ pub enum DescribeWindowResult {
     Err { too_many: Option<u32> },
 }
 
+/// ADR-0086 Phase 3: one entry in an actor's `ActorTraceRing` as it
+/// appears on the wire when a coordinator queries the ring via
+/// [`TraceTail`] / [`TraceTailResult`].
+///
+/// `sequence` is monotonic *per ring*, starting at 1 — the cursor for
+/// [`TraceTail::since`]. `root` is stored explicitly even for
+/// `Received` / `Finished` events (whose [`TraceEvent`] variants don't
+/// carry it on the wire) because the producer hooks have it at push
+/// time; this lets a coordinator filter a ring by root server-side and
+/// stitch the tree without the central observer's by-mail join.
+///
+/// Not a `Kind` — only addressable as an element of
+/// [`TraceTailResult::Ok::entries`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
+pub struct TraceRingEntry {
+    pub sequence: u64,
+    pub root: MailId,
+    pub event: TraceEvent,
+}
+
+/// ADR-0086 Phase 3: `aether.trace.tail` — query one actor's
+/// `ActorTraceRing`. Routed to a specific actor by `MailboxId`; the
+/// framework dispatch loop services it directly (every native actor and
+/// every wasm trampoline answers without the author writing a handler),
+/// the same surface [`crate::LogTail`] established for log rings. The
+/// trace-tree coordinator fans this out across live actors and stitches
+/// the per-ring slices by lineage keys. Reply: [`TraceTailResult`].
+///
+/// - `max == 0` resolves to the substrate-default cap; the reply slice
+///   never exceeds the ring's hard ceiling even on a full ring.
+/// - `since: None` returns from the oldest entry; `Some(n)` returns only
+///   entries with `sequence > n` (the per-ring cursor).
+/// - `root: None` returns every event in the ring; `Some(r)` returns
+///   only the events tagged with root `r` — the targeted/guided-walk
+///   strategy that touches only the actors in one tree.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.trace.tail")]
+pub struct TraceTail {
+    pub max: u32,
+    pub since: Option<u64>,
+    pub root: Option<MailId>,
+}
+
+/// Reply to [`TraceTail`]. `Ok::entries` slices the responder's ring
+/// matching `(since, root)`, ordered oldest-to-newest (ascending
+/// `sequence`). `next_since` is the highest `sequence` in `entries` (or
+/// the caller's `since` echoed back on an empty reply) — thread it into
+/// the next [`TraceTail::since`] for a stable per-ring cursor.
+/// `truncated_before` is set when the ring evicted entries the caller
+/// hadn't seen yet (the lowest `sequence` still in the ring), so a
+/// reconstructed tree can flag itself known-incomplete rather than fail
+/// silently.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.trace.tail_result")]
+pub enum TraceTailResult {
+    Ok {
+        entries: Vec<TraceRingEntry>,
+        next_since: u64,
+        truncated_before: Option<u64>,
+    },
+    Err {
+        error: String,
+    },
+}
+
 /// ADR-0080 §6 settlement notification. Emitted by
 /// [`BatchedTraceEvents`]'s consumer
 /// (`TraceObserverCapability`) when a causal chain's `in_flight`

@@ -42,8 +42,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use aether_data::{KindId, MailId, MailboxId};
-use aether_kinds::trace::{BatchedTraceEvents, Nanos, TRACE_OBSERVER_MAILBOX_NAME, TraceEvent};
+use aether_kinds::trace::{
+    BatchedTraceEvents, Nanos, TRACE_OBSERVER_MAILBOX_NAME, TraceEvent, TraceTail, TraceTailResult,
+};
 use crossbeam_queue::SegQueue;
+
+use aether_actor::Local;
+use aether_actor::trace_ring::ActorTraceRing;
 
 use crate::chassis::settlement::SettlementRegistry;
 use crate::chassis::settlement_counter::SettlementCounter;
@@ -162,6 +167,13 @@ pub struct TraceHandle {
     boot_time: Instant,
     settlement_counter: Arc<SettlementCounter>,
     settlement_registry: Arc<OnceLock<Arc<SettlementRegistry>>>,
+    /// ADR-0086 Phase 3: ring for trace events produced *outside* any
+    /// actor's dispatch — chassis-root / injected mail (`Tick`, MCP
+    /// sends, test injects) records its `Sent` off any actor's stamped
+    /// `ActorSlots`. A `Mutex` (not the `Local` per-actor rings' lock-
+    /// free path) because off-actor producers run on arbitrary threads.
+    /// The trace-tree coordinator includes this ring in its fan-out.
+    chassis_host_ring: Arc<Mutex<ActorTraceRing>>,
 }
 
 // Manual `Debug` — `SettlementRegistry` carries non-`Debug` subscriber
@@ -201,6 +213,7 @@ impl TraceHandle {
             boot_time: Instant::now(),
             settlement_counter: Arc::new(SettlementCounter::new()),
             settlement_registry: Arc::new(OnceLock::new()),
+            chassis_host_ring: Arc::new(Mutex::new(ActorTraceRing::default())),
         }
     }
 
@@ -229,6 +242,54 @@ impl TraceHandle {
         if let Some(registry) = self.settlement_registry.get() {
             registry.fire_settled(root);
         }
+    }
+
+    /// ADR-0086 Phase 3: dual-write a trace event into the per-actor
+    /// [`ActorTraceRing`] alongside the central queue. Lands in the
+    /// current actor's ring when one is stamped — `Sent` on the
+    /// sender's dispatch (this hook runs inside the sender's handler),
+    /// `Received` / `Finished` on the recipient's (the dispatch loop
+    /// calls this inside its `with_stamped`). Off any actor's dispatch
+    /// (chassis-root / injected mail) it falls back to the chassis-host
+    /// ring. Additive until Phase 3c retires the central queue.
+    ///
+    /// # Panics
+    /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
+    /// ADR-0063) — only reachable on the off-actor fallback path.
+    pub fn push_trace_ring(&self, root: MailId, event: TraceEvent) {
+        // Move the event into whichever ring applies. `try_with_mut`
+        // skips the closure entirely when no actor is stamped, leaving
+        // `slot` populated for the chassis-host fallback — so the event
+        // moves exactly once with no clone.
+        let mut slot = Some(event);
+        ActorTraceRing::try_with_mut(|ring| {
+            if let Some(event) = slot.take() {
+                ring.push(root, event);
+            }
+        });
+        if let Some(event) = slot.take() {
+            self.chassis_host_ring
+                .lock()
+                .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
+                .push(root, event);
+        }
+    }
+
+    /// Read the chassis-host ring (ADR-0086 Phase 3). The trace-tree
+    /// coordinator queries the per-actor rings via `aether.trace.tail`
+    /// mail, but the chassis-host ring belongs to no actor, so it is
+    /// read directly through this handle. Returns the same
+    /// `TraceTailResult` shape for a uniform stitch.
+    ///
+    /// # Panics
+    /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
+    /// ADR-0063).
+    #[must_use]
+    pub fn chassis_host_tail(&self, request: &TraceTail) -> TraceTailResult {
+        self.chassis_host_ring
+            .lock()
+            .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063")
+            .tail(request)
     }
 
     /// Borrow the queue Arc so the chassis builder can pass it to
@@ -269,18 +330,17 @@ impl TraceHandle {
         recipient: MailboxId,
         kind: KindId,
     ) {
-        self.queue.push(
+        let event = TraceEvent::Sent {
+            mail_id,
             root,
-            TraceEvent::Sent {
-                mail_id,
-                root,
-                parent_mail,
-                sender,
-                recipient,
-                kind,
-                t: self.now_nanos(),
-            },
-        );
+            parent_mail,
+            sender,
+            recipient,
+            kind,
+            t: self.now_nanos(),
+        };
+        self.queue.push(root, event.clone());
+        self.push_trace_ring(root, event);
         if root != MailId::NONE {
             self.settlement_counter.record_sent(root);
         }
