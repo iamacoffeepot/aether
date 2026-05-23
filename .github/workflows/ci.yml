@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      qodana: ${{ steps.filter.outputs.qodana }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -26,6 +27,16 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.github/workflows/**'
+            # Qodana's gate is the code set plus its own config, so a
+            # qodana.yaml edit still triggers a scan even though it
+            # changes no Rust.
+            qodana:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/**'
+              - 'qodana.yaml'
 
   fmt:
     name: Format
@@ -169,15 +180,19 @@ jobs:
 
   # Qodana scan folded in from .github/workflows/qodana.yml so the
   # ci-pass aggregator can needs: it directly (iamacoffeepot/aether#941).
-  # No `needs: changes` gate — Qodana scans the whole workspace and we
-  # want it to fire on docs/workflow-only PRs too. The cache cycle is
-  # split out of qodana-action so we can interleave an ownership chown
-  # between the root-written scan and the tar save (qodana-action's
-  # built-in save runs inside its own step, before any post-scan step
-  # we could add, so we can't fix the ownership in time without taking
-  # over the save side).
+  # Gated on the `qodana` changes filter (code paths + qodana.yaml) so a
+  # docs / .claude / scripts-only PR skips it instead of blocking the
+  # merge gate on a multi-minute scan with no Rust to analyze
+  # (iamacoffeepot/aether#1089); ci-pass accepts a skipped qodana the
+  # same way it does clippy/docs/test. The cache cycle is split out of
+  # qodana-action so we can interleave an ownership chown between the
+  # root-written scan and the tar save (qodana-action's built-in save
+  # runs inside its own step, before any post-scan step we could add, so
+  # we can't fix the ownership in time without taking over the save side).
   qodana:
     name: Qodana scan
+    needs: changes
+    if: needs.changes.outputs.qodana == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -302,5 +317,5 @@ jobs:
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.desktop.result }}" == "success" || "${{ needs.desktop.result }}" == "skipped" ]] || fail=1
-          [[ "${{ needs.qodana.result }}"  == "success" ]] || fail=1
+          [[ "${{ needs.qodana.result }}"  == "success" || "${{ needs.qodana.result }}" == "skipped" ]] || fail=1
           exit $fail
