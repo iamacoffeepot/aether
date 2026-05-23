@@ -113,6 +113,28 @@ pub fn stitch(
     root: MailId,
     entries: impl IntoIterator<Item = TraceRingEntry>,
 ) -> DescribeTreeResult {
+    let mails = fold_nodes(entries);
+    if !mails.iter().any(|n| n.mail_id == root) {
+        return DescribeTreeResult::Err { not_found: root };
+    }
+    let in_flight =
+        u32::try_from(mails.iter().filter(|n| n.t_finished.is_none()).count()).unwrap_or(u32::MAX);
+    DescribeTreeResult::Ok {
+        root,
+        in_flight,
+        mails,
+    }
+}
+
+/// The order-independent fold under [`stitch`], without the root /
+/// `in_flight` framing: collapse a flat event stream into one
+/// [`MailNodeWire`] per `mail_id`. A node with no `Sent` (its sender's
+/// ring never visited, or evicted) is dropped — `MailNodeWire` requires
+/// the topology fields a `Sent` carries. Exposed for callers that
+/// aggregate across many roots' rings at once (the latency harness folds
+/// every relay's ring this way) rather than reconstructing one tree.
+#[must_use]
+pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<MailNodeWire> {
     let mut nodes: BTreeMap<MailId, PartialNode> = BTreeMap::new();
     for entry in entries {
         match entry.event {
@@ -149,18 +171,10 @@ pub fn stitch(
         }
     }
 
-    if nodes.get(&root).is_none_or(|n| n.sent.is_none()) {
-        return DescribeTreeResult::Err { not_found: root };
-    }
-
-    let mut in_flight: u32 = 0;
-    let mails: Vec<MailNodeWire> = nodes
+    nodes
         .into_iter()
         .filter_map(|(mail_id, node)| {
             let sent = node.sent?;
-            if node.t_finished.is_none() {
-                in_flight = in_flight.saturating_add(1);
-            }
             Some(MailNodeWire {
                 mail_id,
                 parent: sent.parent,
@@ -173,13 +187,7 @@ pub fn stitch(
                 thread_name: node.thread_name,
             })
         })
-        .collect();
-
-    DescribeTreeResult::Ok {
-        root,
-        in_flight,
-        mails,
-    }
+        .collect()
 }
 
 #[derive(Default)]

@@ -827,7 +827,9 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     println!();
     println!("=== lifecycle-driven mail latency (all values µs; n = sample count) ===");
     println!("driven by `advance` (real Tick fan-out → source → relay chain); harvested from the");
-    println!("trace ring via one DescribeWindow — no injector, no per-root block.");
+    println!(
+        "per-actor trace rings (aether.trace.tail per relay) — no injector, no per-root block."
+    );
     if let Some(hz) = pace_hz {
         println!("paced @ {hz} Hz — workers park between frames (realistic frame loop)");
     } else {

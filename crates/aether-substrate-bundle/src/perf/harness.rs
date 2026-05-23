@@ -22,10 +22,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
-use aether_kinds::trace::{
-    DescribeWindow, DescribeWindowResult, TRACE_OBSERVER_MAILBOX_NAME, TraceWindow,
-};
+use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{SubscribeInput, SubscribeInputResult, Tick};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
@@ -407,25 +406,19 @@ pub fn wide_fanout_widths_from_env() -> Vec<usize> {
     out
 }
 
-/// Per-cell cap on harvested trace nodes. The `DescribeWindow` query
-/// refuses windows larger than this (replying `too_many`), and a frame
-/// produces roughly one trace node per relay delivery — so a wide
-/// fan-out at the full frame count would overflow. Kept under the 100k
-/// query cap to leave margin for the per-frame tick/setup nodes the
-/// window also holds (iamacoffeepot/aether#1075).
-const MAX_NODES_PER_CELL: u32 = 90_000;
-
 /// Drive the sweep and return per-cell percentiles. Each cell boots a
-/// fresh [`TestBench`], wires the topology + tick source, advances, and
-/// harvests the trace ring once. A cell whose bench fails to boot (no
-/// wgpu adapter) or whose harvest overflows is logged via `tracing` and
-/// skipped — so a driverless box returns fewer cells (possibly empty)
-/// rather than panicking.
+/// fresh [`TestBench`], wires the topology + tick source, advances, then
+/// harvests every participating actor's per-actor trace ring (ADR-0086
+/// Phase 3) directly by name and folds them into one node set. A cell
+/// whose bench fails to boot (no wgpu adapter) or whose ring harvest
+/// errors is logged via `tracing` and skipped — so a driverless box
+/// returns fewer cells (possibly empty) rather than panicking.
 ///
-/// The per-cell frame count is clamped so wide fan-outs stay under
-/// `MAX_NODES_PER_CELL`; this is a no-op for the narrow default
-/// topologies (their full frame count is well under the cap), so their
-/// numbers are unchanged.
+/// The full frame count runs unclamped: the per-actor rings self-bound
+/// at their capacity and self-report truncation, so a long wide fan-out
+/// laps a busy relay's ring and the cell's stats come from the
+/// most-recent window (valid percentiles, fewer samples) with a logged
+/// note, instead of being capped up front.
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 #[must_use]
 pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
@@ -497,19 +490,13 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
                 }
             }
 
-            // Clamp the per-cell frame count so a wide fan-out stays
-            // under the trace-window node cap. Each frame produces ~one
-            // `Ping` node per relay delivery (every downstream forward
-            // plus the tick source's send into the entry); `+ 8` leaves
-            // slack for the per-frame tick/setup nodes. A no-op for the
-            // narrow default topologies (iamacoffeepot/aether#1075).
-            let deliveries_per_frame = 1 + topo.downstreams.iter().map(Vec::len).sum::<usize>();
-            let frame_cap =
-                MAX_NODES_PER_CELL / u32::try_from(deliveries_per_frame + 8).unwrap_or(u32::MAX);
-            let frames = cfg.frames.min(frame_cap.max(1));
+            // Per-actor rings (ADR-0086 Phase 3) self-bound at their
+            // capacity, so there's no central node cap to clamp against —
+            // run the full frame count. A busy relay's ring laps under a
+            // long wide fan-out and self-reports it (handled at harvest).
+            let frames = cfg.frames;
 
             // Drive via the real lifecycle.
-            let t0 = Instant::now();
             match cfg.pace_hz {
                 Some(hz) => {
                     let period = Duration::from_secs_f64(1.0 / hz as f64);
@@ -525,43 +512,72 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
                     let _ = tb.advance(frames);
                 }
             }
-            let drive_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            // Harvest the resident ring once, after the run. The
-            // `Ping`-kind filter isolates relay hops, so setup / Tick /
-            // query mail never counts.
-            let req = DescribeWindow {
-                window: TraceWindow::Relative {
-                    last_ms: drive_ms.saturating_add(1_000),
-                },
-                max_mails: Some(100_000),
-            }
-            .encode_into_bytes();
-            let mails = match tb.send_bytes_and_await(
-                TRACE_OBSERVER_MAILBOX_NAME,
-                DescribeWindow::ID,
-                req,
-            ) {
-                Ok(reply) => match DescribeWindowResult::decode_from_bytes(&reply) {
-                    Some(DescribeWindowResult::Ok { mails }) => mails,
-                    Some(DescribeWindowResult::Err { too_many }) => {
-                        tracing::warn!(
-                            target: "aether_perf",
-                            topo = %topo.name, workers, ?too_many,
-                            "describe_window over cap — lower frames or raise AETHER_TRACE_RING_CAPACITY",
-                        );
-                        continue;
-                    }
-                    None => {
-                        tracing::warn!(target: "aether_perf", topo = %topo.name, "describe_window decode failed");
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "describe_window send failed");
-                    continue;
+            // Harvest each participating actor's trace ring directly
+            // (ADR-0086 Phase 3, decentralized trace): we built the
+            // topology, so we know the tick source + relays by name — no
+            // central window query, no root enumeration. Fold every ring
+            // into one node set; the `Ping`-kind filter below isolates
+            // relay hops (the per-actor `aether.trace.tail` query mail
+            // carries a different kind and is dropped). Rings self-report
+            // truncation: a relay ring (cap 4096) laps under a long wide
+            // fan-out, leaving stats from the most-recent window — valid
+            // percentiles, fewer samples.
+            let mut names: Vec<String> = Vec::with_capacity(n + 1);
+            names.push(format!("{TICKSRC_NS}:src"));
+            names.extend((0..n).map(|i| format!("{RELAY_NS}:{i}")));
+
+            let mut entries: Vec<TraceRingEntry> = Vec::new();
+            let mut truncated = false;
+            let mut harvest_failed = false;
+            for name in &names {
+                // `max: u32::MAX` clamps to the ring capacity — pull the
+                // whole ring, `root: None` across every tree in the run.
+                let req = TraceTail {
+                    max: u32::MAX,
+                    since: None,
+                    root: None,
                 }
-            };
+                .encode_into_bytes();
+                match tb.send_bytes_and_await(name, TraceTail::ID, req) {
+                    Ok(reply) => match TraceTailResult::decode_from_bytes(&reply) {
+                        Some(TraceTailResult::Ok {
+                            entries: ring,
+                            truncated_before,
+                            ..
+                        }) => {
+                            truncated |= truncated_before.is_some();
+                            entries.extend(ring);
+                        }
+                        Some(TraceTailResult::Err { error }) => {
+                            tracing::warn!(target: "aether_perf", topo = %topo.name, %name, %error, "trace.tail error");
+                            harvest_failed = true;
+                            break;
+                        }
+                        None => {
+                            tracing::warn!(target: "aether_perf", topo = %topo.name, %name, "trace.tail decode failed");
+                            harvest_failed = true;
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(target: "aether_perf", topo = %topo.name, %name, error = ?e, "trace.tail send failed");
+                        harvest_failed = true;
+                        break;
+                    }
+                }
+            }
+            if harvest_failed {
+                continue;
+            }
+            if truncated {
+                tracing::warn!(
+                    target: "aether_perf",
+                    topo = %topo.name, workers,
+                    "a relay ring lapped during the run — stats are from the most-recent window",
+                );
+            }
+            let mails = fold_nodes(entries);
 
             let mut hop = Vec::new();
             let mut handler = Vec::new();
