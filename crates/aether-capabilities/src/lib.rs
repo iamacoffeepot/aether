@@ -58,6 +58,11 @@ pub mod test_bench;
 #[cfg(test)]
 pub(crate) mod test_chassis;
 pub mod trace;
+// ADR-0086 Phase 3b decentralized trace-tree reconstruction. Pure,
+// transport-agnostic guided walk + stitch over the per-actor trace
+// rings; the MCP and the in-process harness each supply their own
+// fetch. No `native` deps — reachable in every feature config.
+pub mod trace_walk;
 pub mod trampoline;
 pub mod window;
 

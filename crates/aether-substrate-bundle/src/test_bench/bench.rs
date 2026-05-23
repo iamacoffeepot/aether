@@ -30,11 +30,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use aether_capabilities::trace_walk::TreeWalk;
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
 #[cfg(test)]
 use aether_kinds::Tick;
 #[cfg(test)]
-use aether_kinds::trace::{TraceTail, TraceTailResult};
+use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
@@ -527,6 +529,63 @@ impl TestBench {
     #[cfg(test)]
     pub(crate) fn chassis_host_trace_tail(&self, request: &TraceTail) -> TraceTailResult {
         self.queue.trace_handle().chassis_host_tail(request)
+    }
+
+    /// Like [`Self::send_bytes_and_await`] but addresses the recipient
+    /// by [`MailboxId`] directly. The trace-tree guided walk (ADR-0086
+    /// Phase 3b) discovers recipients as ids from `Sent` events, never
+    /// as names — there's no name to resolve back from a hash.
+    #[cfg(test)]
+    pub(crate) fn send_bytes_and_await_id(
+        &mut self,
+        mailbox: MailboxId,
+        kind: KindId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, TestBenchError> {
+        let cid = self.fresh_correlation_id();
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+        self.queue
+            .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
+        self.pump_until_reply_bytes(cid, "<await-reply bytes>")
+    }
+
+    /// ADR-0086 Phase 3b: reconstruct `root`'s trace tree via the
+    /// decentralized guided walk over per-actor rings — the in-process
+    /// counterpart to the central observer's `DescribeTree`, and the
+    /// model the MCP mirrors over the wire. Seeds at `root.sender`
+    /// (`CHASSIS_MAILBOX_ID` for an injected root, an actor otherwise),
+    /// then fans out across each `Sent`'s recipient. Every ring —
+    /// including the chassis-host ring, reached by the ADR-0086 Phase 3b
+    /// wire route at `CHASSIS_MAILBOX_ID` — answers the same
+    /// `aether.trace.tail` mail, so this drives the identical path the
+    /// MCP does. The `root` filter on every tail isolates the tree from
+    /// the trace-query traffic itself.
+    #[cfg(test)]
+    pub(crate) fn describe_tree_walked(&mut self, root: MailId) -> DescribeTreeResult {
+        let mut walk = TreeWalk::new(root);
+        while let Some(mailbox) = walk.next_mailbox() {
+            let request = TraceTail {
+                max: 0,
+                since: None,
+                root: Some(root),
+            };
+            // A send error (no live actor at this id) or an undecodable
+            // reply yields no entries; the walk still completes from the
+            // rings that do answer.
+            let result = self
+                .send_bytes_and_await_id(mailbox, TraceTail::ID, request.encode_into_bytes())
+                .ok()
+                .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
+                .unwrap_or(TraceTailResult::Ok {
+                    entries: Vec::new(),
+                    next_since: 0,
+                    truncated_before: None,
+                });
+            if let TraceTailResult::Ok { entries, .. } = result {
+                walk.absorb(entries);
+            }
+        }
+        walk.finish()
     }
 
     /// Bytes-level request/reply: push `(kind, payload)` to

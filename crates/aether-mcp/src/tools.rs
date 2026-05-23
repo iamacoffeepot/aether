@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
+use aether_capabilities::trace_walk::TreeWalk;
 use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
@@ -29,8 +30,8 @@ use aether_kinds::{
     ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
     SubmitResult, TerminateEngine, TerminateEngineResult,
     trace::{
-        DescribeTree, DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire,
-        TRACE_OBSERVER_MAILBOX_NAME,
+        DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire,
+        TRACE_OBSERVER_MAILBOX_NAME, TraceTail, TraceTailResult,
     },
 };
 use base64::Engine as _;
@@ -255,21 +256,37 @@ impl Mcp {
             }
         };
 
-        // Round 2: pull the populated tree. Microseconds — already
-        // in-memory in the substrate's TraceObserver at this point.
-        let tree_reply = self
-            .session
-            .call_one(engine_envelope(
-                engine,
-                TRACE_OBSERVER_MAILBOX_NAME,
-                &DescribeTree { root },
-            ))
-            .await
-            .map_err(internal)?;
-        let tree = DescribeTreeResult::decode_from_bytes(&tree_reply.payload)
-            .ok_or_else(|| internal_msg("undecodable DescribeTreeResult"))?;
+        // Round 2: reconstruct the tree by a guided walk over the
+        // per-actor trace rings (ADR-0086 Phase 3b). Seed at
+        // `root.sender` (`CHASSIS_MAILBOX_ID` for this chassis-rooted
+        // dispatch), follow each `Sent`'s recipient, fetch every ring
+        // with one `aether.trace.tail` addressed by id — the chassis-
+        // host ring answers at `CHASSIS_MAILBOX_ID`. The walk touches
+        // only the actors in the tree; the rings are in-memory and the
+        // chain has already settled, so each hop is microseconds. A
+        // failed or undecodable per-ring reply contributes no entries —
+        // the walk completes from the rings that answer.
+        let mut walk = TreeWalk::new(root);
+        while let Some(mailbox) = walk.next_mailbox() {
+            let request = TraceTail {
+                max: 0,
+                since: None,
+                root: Some(root),
+            };
+            let entries = match self
+                .session
+                .call_one(engine_envelope_by_id(engine, mailbox, &request))
+                .await
+                .ok()
+                .and_then(|reply| TraceTailResult::decode_from_bytes(&reply.payload))
+            {
+                Some(TraceTailResult::Ok { entries, .. }) => entries,
+                Some(TraceTailResult::Err { .. }) | None => Vec::new(),
+            };
+            walk.absorb(entries);
+        }
 
-        match tree {
+        match walk.finish() {
             DescribeTreeResult::Ok {
                 root,
                 in_flight,
@@ -770,10 +787,23 @@ fn engine_envelope<K: Kind + serde::Serialize>(
     mailbox: &str,
     kind: &K,
 ) -> MailEnvelope {
+    engine_envelope_by_id(engine, mailbox_id_from_name(mailbox), kind)
+}
+
+/// Like [`engine_envelope`] but addresses the recipient by
+/// [`MailboxId`] directly. The trace-tree guided walk (ADR-0086 Phase
+/// 3b) discovers recipients as ids embedded in `Sent` events, never as
+/// names — a `MailboxId` is a one-way name hash, so there's no name to
+/// reconstruct.
+fn engine_envelope_by_id<K: Kind + serde::Serialize>(
+    engine: EngineId,
+    mailbox: MailboxId,
+    kind: &K,
+) -> MailEnvelope {
     MailEnvelope {
         to: MailboxAddress {
             engine: Some(engine),
-            mailbox: mailbox_id_from_name(mailbox),
+            mailbox,
         },
         from: None,
         kind: K::ID,

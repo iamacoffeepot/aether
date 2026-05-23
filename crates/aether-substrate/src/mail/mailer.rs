@@ -33,8 +33,8 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
-use aether_data::{HandleId, KindId};
-use aether_kinds::trace::Nanos;
+use aether_data::{HandleId, Kind, KindId};
+use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
 
 pub struct Mailer {
@@ -386,7 +386,7 @@ impl Mailer {
     /// receive mail.
     pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
-        K: aether_data::Kind + serde::Serialize,
+        K: Kind + serde::Serialize,
     {
         match sender.target {
             ReplyTarget::None => false,
@@ -459,9 +459,57 @@ fn route_mail(
         // replies) get the symmetric `Received`/`Finished` bracket.
         let inbound_mail_id = mail.mail_id;
         let inbound_root = mail.root;
-        if let Some(router) = chassis_router {
+        // `Received` brackets a mail only when something handles it
+        // (the `TraceTail` arm answers; a router consumes). A
+        // chassis-addressed mail that no handler claims is dropped and
+        // records `Finished` only — enough to balance its `Sent` so
+        // settlement drains, without a phantom `Received`.
+        if mail.kind == TraceTail::ID || chassis_router.is_some() {
             let thread_name = thread::current().name().map(str::to_owned);
             trace_handle.record_received(inbound_mail_id, inbound_root, thread_name);
+        }
+        if mail.kind == TraceTail::ID {
+            // ADR-0086 Phase 3b: the chassis-host trace ring holds the
+            // off-actor root `Sent`s — every injected root carries
+            // `sender = CHASSIS_MAILBOX_ID`, so the guided walk seeds at
+            // `root.sender`, which lands here over the wire. Answer the
+            // tail and reply to the caller. (In-process callers reach
+            // the same ring via `TraceHandle::chassis_host_tail`.)
+            let result = TraceTail::decode_from_bytes(&mail.payload).map_or_else(
+                || TraceTailResult::Err {
+                    error: "undecodable TraceTail to chassis-host ring".to_owned(),
+                },
+                |request| trace_handle.chassis_host_tail(&request),
+            );
+            match mail.reply_to.target {
+                ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => {
+                    if let Some(outbound) = outbound {
+                        outbound.send_reply(mail.reply_to, &result);
+                    }
+                }
+                ReplyTarget::Component(target) => {
+                    // The MCP Call path replies via Component (mirrors
+                    // the `LogTail`-to-unknown arm below): re-route a
+                    // fresh, un-lineaged reply into the target's inbox.
+                    if let Ok(payload) = postcard::to_allocvec(&result) {
+                        let reply_to = ReplyTo::with_correlation(
+                            ReplyTarget::None,
+                            mail.reply_to.correlation_id,
+                        );
+                        route_mail(
+                            Mail::new(target, TraceTailResult::ID, payload, 1)
+                                .with_reply_to(reply_to),
+                            registry,
+                            outbound,
+                            store,
+                            chassis_router,
+                            trace_handle,
+                        );
+                    }
+                }
+                ReplyTarget::None => {}
+            }
+        } else if let Some(router) = chassis_router {
             router(mail);
         } else {
             tracing::warn!(
@@ -660,7 +708,7 @@ fn route_mail(
             // takes via `RpcServerCapability::handle_call`) is routed;
             // `Session`/`EngineMailbox` targets fall through to the
             // warn-drop, keeping the blast radius minimal.
-            if mail.kind.0 == <aether_kinds::LogTail as aether_data::Kind>::ID.0 {
+            if mail.kind.0 == <aether_kinds::LogTail as Kind>::ID.0 {
                 let err = aether_kinds::LogTailResult::Err {
                     error: format!("mailbox {recipient} not registered on engine"),
                 };
@@ -672,7 +720,7 @@ fn route_mail(
                     route_mail(
                         Mail::new(
                             target,
-                            <aether_kinds::LogTailResult as aether_data::Kind>::ID,
+                            <aether_kinds::LogTailResult as Kind>::ID,
                             payload,
                             1,
                         )
@@ -868,6 +916,67 @@ mod tests {
             recorded.read().unwrap().is_empty(),
             "non-LogTail unknown-mailbox mail warn-drops with no reply",
         );
+    }
+
+    /// ADR-0086 Phase 3b: `aether.trace.tail` to `CHASSIS_MAILBOX_ID`
+    /// answers from the chassis-host ring and replies to the inbound's
+    /// `Component` target — the hop the MCP's `send_mail_traced` guided
+    /// walk takes to fetch the off-actor root `Sent` over the wire (the
+    /// in-process harness reaches the same ring via
+    /// `TraceHandle::chassis_host_tail`). Seeds the ring with one
+    /// chassis-root `Sent`, queries it, and asserts the recorded reply
+    /// is a `TraceTailResult::Ok` carrying that `Sent`, correlation
+    /// echoed.
+    #[test]
+    fn chassis_host_trace_tail_replies_to_component_target() {
+        use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
+
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+
+        let (recorder_id, recorded) = record_inline(&registry);
+
+        // An off-actor chassis-root mail records its `Sent` in the
+        // chassis-host ring (the recipient is unregistered and the mail
+        // itself warn-drops, but the off-actor `Sent` still lands).
+        let root =
+            mailer.push_chassis_root_mail(0x55, MailboxId(0x1234), KindId(0xFEED), vec![], 1);
+
+        // Query the chassis-host ring for that root, replying to a
+        // `Component` target (the MCP RPC-server reply hop).
+        let request = TraceTail {
+            max: 0,
+            since: None,
+            root: Some(root),
+        };
+        mailer.push(
+            Mail::new(
+                MailboxId::CHASSIS_MAILBOX_ID,
+                TraceTail::ID,
+                request.encode_into_bytes(),
+                1,
+            )
+            .with_reply_to(ReplyTo::with_correlation(
+                ReplyTarget::Component(recorder_id),
+                0xCAFE,
+            )),
+        );
+
+        let recorded = recorded.read().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one TraceTailResult reply");
+        let (kind, correlation, payload) = &recorded[0];
+        assert_eq!(*kind, TraceTailResult::ID);
+        assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
+        match postcard::from_bytes::<TraceTailResult>(payload).unwrap() {
+            TraceTailResult::Ok { entries, .. } => assert!(
+                entries
+                    .iter()
+                    .any(|e| e.root == root && matches!(e.event, TraceEvent::Sent { .. })),
+                "the chassis-host root Sent came back: {entries:?}",
+            ),
+            TraceTailResult::Err { error } => panic!("expected Ok, got Err {error}"),
+        }
     }
 
     // ------------------------------------------------------------
