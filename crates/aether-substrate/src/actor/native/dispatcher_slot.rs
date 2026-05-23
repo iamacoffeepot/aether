@@ -45,6 +45,7 @@ use std::time::Instant;
 use crate::actor::native::Envelope;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
+use aether_kinds::trace::TraceEvent;
 use std::ops::Deref;
 use std::sync::PoisonError;
 use std::thread;
@@ -214,14 +215,37 @@ where
         let thread_name = thread::current().name().map(str::to_owned);
         self.binding
             .mailer()
-            .record_received(inbound_mail_id, env.root, thread_name);
+            .record_received(inbound_mail_id, env.root, thread_name.clone());
         local::with_stamped(&self.slots, || {
+            // ADR-0086 Phase 3 dual-write: `Received` / `Finished` land
+            // in this (recipient) actor's trace ring — only inside this
+            // `with_stamped` is its `ActorSlots` stamped. Mirrors
+            // `dispatch::dispatch_loop_run`.
+            let th = self.binding.mailer().trace_handle();
+            th.push_trace_ring(
+                env.root,
+                TraceEvent::Received {
+                    mail_id: inbound_mail_id,
+                    t: th.now_nanos(),
+                    thread_name,
+                },
+            );
             let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
-            // ADR-0081 framework-built-in dispatch arm for
-            // `aether.log.tail`. See `dispatch::dispatch_loop_run`.
-            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &env) {
+            // ADR-0081 / ADR-0086 framework-built-in dispatch arms for
+            // `aether.log.tail` + `aether.trace.tail`. See
+            // `dispatch::dispatch_loop_run`.
+            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &env)
+                && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, &env)
+            {
                 super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
+            th.push_trace_ring(
+                env.root,
+                TraceEvent::Finished {
+                    mail_id: inbound_mail_id,
+                    t: th.now_nanos(),
+                },
+            );
         });
         self.binding
             .mailer()

@@ -40,7 +40,9 @@ use aether_actor::Local;
 use aether_actor::MailCtx;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
+use aether_actor::trace_ring::ActorTraceRing;
 use aether_data::Kind;
+use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
 use aether_kinds::{LogTail, LogTailResult};
 
 use crate::actor::native::binding::NativeBinding;
@@ -110,6 +112,32 @@ pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) ->
     true
 }
 
+/// ADR-0086 Phase 3 framework-built-in dispatch arm for
+/// `aether.trace.tail` — the trace-side sibling of
+/// [`dispatch_log_tail_if_matching`]. Reads the receiving actor's
+/// [`ActorTraceRing`] via the currently-stamped `ActorSlots` and
+/// replies inline; the dispatcher then skips the user's typed/fallback
+/// dispatch for this envelope. The trace-tree coordinator fans this out
+/// across live actors and stitches the per-ring slices.
+pub fn dispatch_trace_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
+    if env.kind.0 != <TraceTail as Kind>::ID.0 {
+        return false;
+    }
+    let Some(request) = <TraceTail as Kind>::decode_from_bytes(&env.payload) else {
+        ctx.reply(&TraceTailResult::Err {
+            error: "aether.trace.tail: payload failed to decode".to_owned(),
+        });
+        return true;
+    };
+    let reply = ActorTraceRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| {
+        TraceTailResult::Err {
+            error: "aether.trace.tail: actor has no stamped slots".to_owned(),
+        }
+    });
+    ctx.reply(&reply);
+    true
+}
+
 /// Run one actor's dispatcher loop on the calling thread. Returns
 /// when the binding signals shutdown (self-shutdown flag set or
 /// inbox sender disconnected). See module doc-comment for the full
@@ -145,16 +173,38 @@ pub fn dispatch_loop_run<A>(
         let thread_name = thread::current().name().map(str::to_owned);
         binding
             .mailer()
-            .record_received(inbound_mail_id, env.root, thread_name);
+            .record_received(inbound_mail_id, env.root, thread_name.clone());
         local::with_stamped(slots, || {
+            // ADR-0086 Phase 3 dual-write: `Received` lands in this
+            // (recipient) actor's trace ring — only inside this
+            // `with_stamped` is its `ActorSlots` stamped. The central
+            // `record_received` above keeps the queue path until 3c.
+            let th = binding.mailer().trace_handle();
+            th.push_trace_ring(
+                env.root,
+                TraceEvent::Received {
+                    mail_id: inbound_mail_id,
+                    t: th.now_nanos(),
+                    thread_name,
+                },
+            );
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-            // ADR-0081: framework intercepts `aether.log.tail` before
-            // the actor's typed/fallback dispatch. The actor never
-            // sees the envelope; the framework reads its ring and
-            // replies inline.
-            if !dispatch_log_tail_if_matching(&mut ctx, &env) {
+            // ADR-0081 / ADR-0086: the framework intercepts
+            // `aether.log.tail` and `aether.trace.tail` before the
+            // actor's typed/fallback dispatch. The actor never sees
+            // these; the framework reads its rings and replies inline.
+            if !dispatch_log_tail_if_matching(&mut ctx, &env)
+                && !dispatch_trace_tail_if_matching(&mut ctx, &env)
+            {
                 typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
+            th.push_trace_ring(
+                env.root,
+                TraceEvent::Finished {
+                    mail_id: inbound_mail_id,
+                    t: th.now_nanos(),
+                },
+            );
         });
         binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {
@@ -172,12 +222,30 @@ pub fn dispatch_loop_run<A>(
         let thread_name = thread::current().name().map(str::to_owned);
         binding
             .mailer()
-            .record_received(inbound_mail_id, env.root, thread_name);
+            .record_received(inbound_mail_id, env.root, thread_name.clone());
         local::with_stamped(slots, || {
+            let th = binding.mailer().trace_handle();
+            th.push_trace_ring(
+                env.root,
+                TraceEvent::Received {
+                    mail_id: inbound_mail_id,
+                    t: th.now_nanos(),
+                    thread_name,
+                },
+            );
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-            if !dispatch_log_tail_if_matching(&mut ctx, &env) {
+            if !dispatch_log_tail_if_matching(&mut ctx, &env)
+                && !dispatch_trace_tail_if_matching(&mut ctx, &env)
+            {
                 let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
             }
+            th.push_trace_ring(
+                env.root,
+                TraceEvent::Finished {
+                    mail_id: inbound_mail_id,
+                    t: th.now_nanos(),
+                },
+            );
         });
         binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {

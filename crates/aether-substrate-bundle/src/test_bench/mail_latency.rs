@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{
-    DescribeTree, DescribeTreeResult, MailNodeWire, TRACE_OBSERVER_MAILBOX_NAME,
+    DescribeTree, DescribeTreeResult, MailNodeWire, TRACE_OBSERVER_MAILBOX_NAME, TraceEvent,
+    TraceRingEntry, TraceTail, TraceTailResult,
 };
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
@@ -376,6 +377,88 @@ fn emit_settlement_settles_with_holds() {
             "hold root {idx} never settled — the hold's Release must fire the counter"
         );
     }
+}
+
+/// Query one actor's per-actor trace ring over the mail wire
+/// (`aether.trace.tail`), filtered to `root`. Returns the ring slice.
+fn trace_tail(tb: &mut TestBench, mailbox_name: &str, root: MailId) -> Vec<TraceRingEntry> {
+    let req = TraceTail {
+        max: 0,
+        since: None,
+        root: Some(root),
+    }
+    .encode_into_bytes();
+    let reply = tb
+        .send_bytes_and_await(mailbox_name, TraceTail::ID, req)
+        .expect("aether.trace.tail reply");
+    match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
+        TraceTailResult::Ok { entries, .. } => entries,
+        TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
+    }
+}
+
+/// ADR-0086 Phase 3a: the producer hooks dual-write into the per-actor
+/// trace rings (and the chassis-host ring for off-actor sends) alongside
+/// the central observer. Inject a single-mail root at a leaf relay,
+/// settle it, then assert the rings recorded the right events on the
+/// right owners: the injected `Sent` (produced off-actor on the inject
+/// thread) lands in the chassis-host ring; the recipient relay's
+/// `Received` + `Finished` land in its own per-actor ring, queryable via
+/// `aether.trace.tail`. Validates the dispatch-arm + the `root` filter
+/// too (the trace-query mail's own events carry a different root and are
+/// excluded).
+#[test]
+#[allow(clippy::print_stderr)]
+fn trace_ring_dual_write_routes_events_to_owning_rings() {
+    let Ok(mut tb) = TestBench::builder()
+        .with_workers(Some(2))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping trace_ring_dual_write_routes_events_to_owning_rings: no wgpu adapter");
+        return;
+    };
+
+    spawn_topology(&tb, &depth_chain(1));
+    let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
+    assert!(
+        rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
+        "injected root never settled"
+    );
+
+    // The recipient relay's own ring holds the mail's Received + Finished.
+    let relay = trace_tail(&mut tb, "mlat.relay:0", root);
+    assert!(
+        relay
+            .iter()
+            .any(|e| matches!(e.event, TraceEvent::Received { .. })),
+        "relay ring missing Received; got {relay:?}"
+    );
+    assert!(
+        relay
+            .iter()
+            .any(|e| matches!(e.event, TraceEvent::Finished { .. })),
+        "relay ring missing Finished; got {relay:?}"
+    );
+    assert!(
+        relay.iter().all(|e| e.root == root),
+        "root filter leaked other roots (e.g. the trace-query mail): {relay:?}"
+    );
+
+    // The off-actor injected Sent landed in the chassis-host ring.
+    let host = match tb.chassis_host_trace_tail(&TraceTail {
+        max: 0,
+        since: None,
+        root: Some(root),
+    }) {
+        TraceTailResult::Ok { entries, .. } => entries,
+        TraceTailResult::Err { error } => panic!("chassis-host trace.tail error: {error}"),
+    };
+    assert!(
+        host.iter()
+            .any(|e| matches!(e.event, TraceEvent::Sent { .. }) && e.root == root),
+        "chassis-host ring missing the injected Sent; got {host:?}"
+    );
 }
 
 const OBSERVE_FRAMES: u32 = 1000;

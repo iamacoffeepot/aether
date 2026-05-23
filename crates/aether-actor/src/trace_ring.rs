@@ -22,7 +22,7 @@
 //! (one OS thread per actor at a time), so the `sequence` counter and
 //! the `VecDeque` need no lock internally. Cross-thread reads run
 //! through the `Local` path on the responding actor's dispatcher (the
-//! framework-built-in `aether.trace.tail` arm invokes [`Self::tail`]
+//! framework-built-in `aether.trace.tail` arm invokes [`ActorTraceRing::tail`]
 //! from inside the dispatch loop). Off-actor `Sent`s (chassis-root /
 //! injected mail produced outside any actor's dispatch) have no
 //! `ActorSlots` to land in; the chassis trace handle keeps a separate
