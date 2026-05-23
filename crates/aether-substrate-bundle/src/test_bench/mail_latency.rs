@@ -134,6 +134,22 @@ fn hold_id() -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{HOLD_NS}:0")).0)
 }
 
+/// Spawn every relay in `topo` onto `tb` (subname = relay index), wiring
+/// each relay's downstream ids. Shared by the settlement guards.
+fn spawn_topology(tb: &TestBench, topo: &Topology) {
+    for i in 0..topo.downstreams.len() {
+        let downstreams: Arc<[MailboxId]> =
+            topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+        let config = RelayConfig {
+            downstreams,
+            work_iters: topo.work_iters[i],
+        };
+        tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config)
+            .finish()
+            .expect("spawn relay");
+    }
+}
+
 /// Query the trace observer for one root's whole tree over the mail
 /// wire. Returns the node list, or `None` if the observer no longer has
 /// the root (only happens if the ring lapped it — not expected at these
@@ -235,18 +251,7 @@ fn sharded_trace_settles_every_root() {
 
     let depth = 5;
     let topo = depth_chain(depth);
-    for i in 0..topo.downstreams.len() {
-        let downstreams: Arc<[MailboxId]> =
-            topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-        let sub = i.to_string();
-        let config = RelayConfig {
-            downstreams,
-            work_iters: topo.work_iters[i],
-        };
-        tb.spawn_actor::<Relay>(Subname::Named(&sub), config)
-            .finish()
-            .expect("spawn relay");
-    }
+    spawn_topology(&tb, &topo);
     let entry = relay_id(0);
 
     // 800 roots × depth 5 = 4000 mails — well under the trace ring
@@ -316,18 +321,7 @@ fn shadow_settlement_agrees_with_observer(topo: &Topology) {
     // enable, which would desync the counter).
     tb.settlement_shadow().set_enabled(true);
 
-    for i in 0..topo.downstreams.len() {
-        let downstreams: Arc<[MailboxId]> =
-            topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-        let sub = i.to_string();
-        let config = RelayConfig {
-            downstreams,
-            work_iters: topo.work_iters[i],
-        };
-        tb.spawn_actor::<Relay>(Subname::Named(&sub), config)
-            .finish()
-            .expect("spawn relay");
-    }
+    spawn_topology(&tb, topo);
     let entry = relay_id(0);
 
     let roots = 500u32;
