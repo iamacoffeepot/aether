@@ -31,9 +31,9 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Ping, Relay, RelayConfig, SweepConfig, default_topologies, depth_chain, fanout,
-    fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep,
-    wide_fanout_widths_from_env,
+    CellResult, Ping, Relay, RelayConfig, Stats, SweepConfig, default_topologies, depth_chain,
+    fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep,
+    summarize, wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -292,6 +292,108 @@ fn lifecycle_latency_observe() {
         return;
     }
     print_observe_tables(&rows, pace_hz);
+}
+
+/// ADR-0086 Phase 0: size the settlement-detection latency the
+/// decoupled-settlement redesign removes. Today settlement rides the
+/// trace pipeline — a producer's `Finished` lands in the sharded queue,
+/// the drainer ships it after a ≤1 ms park, the observer folds it, and
+/// only then does `Settled` fire. So the gap between *work actually
+/// finished* and *settlement observed* is roughly the drainer interval.
+/// The emit-time counter (`chassis::settlement_counter`) collapses that
+/// gap to an inline atomic on the producing thread.
+///
+/// Measures it directly: inject a trivial single-mail root, time
+/// inject → its settlement receiver firing. A trivial root's dispatch +
+/// handler cost is sub-microsecond (see the HOP/HANDLER tables above),
+/// so the measured latency is dominated by the settlement pipeline. A
+/// small pseudo-random jitter before each injection decorrelates the
+/// inject phase from the drainer's 1 ms cycle, so the samples span the
+/// true `[0, interval]` distribution rather than aligning just after a
+/// drain.
+///
+/// `#[ignore]` — a measurement, not a gate. Skips cleanly without a wgpu
+/// adapter. Run release:
+///
+/// ```text
+/// cargo test -p aether-substrate-bundle --release \
+///     settlement_detection_latency -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "measurement harness — run on demand with --ignored --nocapture --release"]
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::cast_precision_loss
+)]
+fn settlement_detection_latency() {
+    let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    let Ok(tb) = TestBench::builder()
+        .with_workers(Some(workers))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping settlement_detection_latency: TestBench boot failed (no wgpu adapter)");
+        return;
+    };
+
+    // A single leaf relay: receives a `Ping`, does no work, forwards
+    // nothing, returns. Its whole causal tree is the one injected mail,
+    // so settlement fires on that mail's `Finished` alone.
+    let topo = depth_chain(1);
+    let config = RelayConfig {
+        downstreams: topo.downstreams[0].iter().map(|&j| relay_id(j)).collect(),
+        work_iters: 0,
+    };
+    tb.spawn_actor::<Relay>(Subname::Named("0"), config)
+        .finish()
+        .expect("spawn leaf relay");
+    let entry = relay_id(0);
+
+    let samples: usize = env::var("SETTLE_SAMPLES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
+
+    // Cheap xorshift for the decorrelating jitter (no rand dependency).
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next_jitter_us = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng % 1500 // [0, 1500) µs — wider than the 1 ms drainer cycle
+    };
+
+    let mut lat = Vec::with_capacity(samples);
+    for seq in 0..samples {
+        thread::sleep(Duration::from_micros(next_jitter_us()));
+        let t0 = Instant::now();
+        let seq = u32::try_from(seq).unwrap_or(u32::MAX);
+        let (_root, rx) = tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes());
+        if rx.recv_timeout(SETTLE_TIMEOUT).is_err() {
+            eprintln!("settlement_detection_latency: root {seq} never settled");
+            return;
+        }
+        lat.push(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    }
+
+    let s: Stats = summarize(lat);
+    let us = |ns: u64| ns as f64 / 1000.0;
+    println!();
+    println!("=== settlement-detection latency (inject → Settled), trivial single-mail root ===");
+    println!(
+        "{workers}w, {} samples, jittered injection (decorrelated from the drainer cycle)",
+        s.n
+    );
+    println!("dominated by the trace-pipeline settlement path (drainer park + observer fold +");
+    println!("Settled mail hop); the emit-time counter (ADR-0086) removes it.");
+    println!(
+        "  p50 {:.1}µs  p90 {:.1}µs  p99 {:.1}µs  max {:.1}µs",
+        us(s.p50),
+        us(s.p90),
+        us(s.p99),
+        us(s.max)
+    );
 }
 
 /// Print the lifecycle-harness HOP + HANDLER tables.
