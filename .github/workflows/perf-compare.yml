@@ -50,8 +50,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # Two release builds (base build is cache-cold in its worktree) plus
-    # the interleaved trials. Cap so a stall doesn't burn the quota.
+    # Candidate build + interleaved trials. The base build is skipped on a
+    # cache hit (iamacoffeepot/aether#1084) and shares the candidate's
+    # target dir when cold. Cap so a stall doesn't burn the quota.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +64,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
           mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
+      # Cache the base (merge-base) trial binary across pushes
+      # (iamacoffeepot/aether#1084). The merge-base is fixed for a PR's
+      # life, so once built it can be reused on every re-push, skipping
+      # the cold dependency compile. Key on the merge-base sha + the
+      # toolchain (rustc tracks `stable`, so a compiler bump rebuilds the
+      # base with the same rustc as the candidate — keeping the paired
+      # comparison apples-to-apples).
+      - name: Resolve base cache key
+        id: perfbase
+        run: |
+          git fetch --no-tags --quiet origin main
+          {
+            echo "base=$(git merge-base HEAD FETCH_HEAD)"
+            echo "rustc=$(rustc -V | sha256sum | cut -c1-12)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Cache base perf-trial binary
+        uses: actions/cache@v4
+        with:
+          path: .perf-cache/aether-perf-trial-base
+          key: >-
+            perf-base-${{ runner.os }}-${{ steps.perfbase.outputs.rustc }}-${{ steps.perfbase.outputs.base }}
       - name: Run perf comparison
+        env:
+          PERF_BASE_CACHE: ${{ github.workspace }}/.perf-cache/aether-perf-trial-base
         run: scripts/perf-compare.sh
       - name: Upsert sticky PR comment
         env:
