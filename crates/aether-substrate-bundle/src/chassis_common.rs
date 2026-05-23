@@ -20,7 +20,7 @@ use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
     InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
-    trace::TraceObserverCapability,
+    trace::TraceDispatchCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
@@ -86,7 +86,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
         .with_actor::<HandleCapability>(())
-        .with_actor::<TraceObserverCapability>(())
+        .with_actor::<TraceDispatchCapability>(())
         .with_actor::<DagCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)

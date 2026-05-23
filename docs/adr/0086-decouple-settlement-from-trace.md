@@ -5,7 +5,7 @@
 
 ## Context
 
-Mail tracing (ADR-0080) and lifecycle settlement (ADR-0082) currently share one pipeline. The producer hooks (`record_sent` / `record_received` / `record_finished`, plus `HoldOpen` / `Release` for the settlement hold contract) push `TraceEvent`s onto a per-root-sharded queue (`ShardedTraceQueue`, #1063). A drainer thread parks `BATCH_INTERVAL = 1ms` between drains and ships `BatchedTraceEvents` to the `TraceObserverCapability`. The observer folds events into per-root state — `RootState { in_flight, held_open }` in a fixed ring (#1054) — and fires `Settled { root }` (mail to the chassis mailbox) on the zero-transition `(in_flight == 0 && held_open == 0)`. The lifecycle driver gates each frame advance on `Settled` for the advance's root (ADR-0082).
+Mail tracing (ADR-0080) and lifecycle settlement (ADR-0082) currently share one pipeline. The producer hooks (`record_sent` / `record_received` / `record_finished`, plus `HoldOpen` / `Release` for the settlement hold contract) push `TraceEvent`s onto a per-root-sharded queue (`ShardedTraceQueue`, #1063). A drainer thread parks `BATCH_INTERVAL = 1ms` between drains and ships `BatchedTraceEvents` to the `TraceDispatchCapability`. The observer folds events into per-root state — `RootState { in_flight, held_open }` in a fixed ring (#1054) — and fires `Settled { root }` (mail to the chassis mailbox) on the zero-transition `(in_flight == 0 && held_open == 0)`. The lifecycle driver gates each frame advance on `Settled` for the advance's root (ADR-0082).
 
 This fuses two concerns with opposite requirements:
 
@@ -42,7 +42,7 @@ Trace events move to **per-actor rings** — the same per-actor storage ADR-0081
 
 ### 3. Retire
 
-Once the above lands: the per-root `ShardedTraceQueue` (#1063), the central drainer thread, and the `TraceObserverCapability`'s role as settlement authority (it reduces to the query coordinator, or is removed in favour of per-actor rings + a coordinator).
+Once the above lands: the per-root `ShardedTraceQueue` (#1063), the central drainer thread, and the `TraceDispatchCapability`'s role as settlement authority (it reduces to the query coordinator, or is removed in favour of per-actor rings + a coordinator).
 
 ## Consequences
 
@@ -71,8 +71,8 @@ Each phase lands independently and is measurable on its own.
 - **Phase 0 — De-risk.** Instrument settlement-detection latency (advance `Sent` → `Settled`) on a real workload to size the win. Microbench the packed-`u64` counter + race-free zero-transition in isolation. Go/no-go gate.
 - **Phase 1 — Emit-time counters, shadow mode.** Add the per-root atomic accounting at the producer hooks *alongside* the existing observer fold; fire a shadow `Settled` and assert it agrees with the observer's. Risky kernel landed dormant + cross-checked against the incumbent.
 - **Phase 2 — Flip frame-gating.** Lifecycle subscribes to the emit-time `Settled`; frame advances synchronously. Keep the advance-timeout net. Observer is no longer the settlement authority. Measure latency before/after.
-- **Phase 3 — Decentralize trace.** Per-actor trace rings (extend ADR-0081); `aether.trace.tail`; `DescribeTree` / `DescribeWindow` become a fan-out-and-stitch coordinator; the harness queries per-actor. Retire `ShardedTraceQueue` (#1063) + drainer.
-- **Phase 4 — Cleanup.** Remove the sharded queue / drainer / observer settlement role; supersede the affected ADR-0080 sections.
+- **Phase 3 — Decentralize trace.** Per-actor trace rings (extend ADR-0081); `aether.trace.tail`; a coordinator reconstructs trees per-actor; the harness queries per-actor. Split in implementation into 3a (dormant rings), 3b (the guided-walk reader, observer kept as oracle), and 3c (cleanup) — see the as-built amendments below. The "fan-out-and-stitch coordinator" sharpened into a guided walk from a known root.
+- **Phase 4 — Cleanup.** Folded into **Phase 3c**: removed the sharded queue / drainer / observer fold + its settlement role; rehomed `DispatchTraced` onto a thin `TraceDispatchCapability`; superseded the affected ADR-0080 sections.
 
 ## Alternatives considered
 
@@ -109,3 +109,37 @@ This directly bounds the cost concern a barrier raises: a trace query issued dur
 ### Trust gate
 
 3b keeps the observer live as an oracle: an in-process cross-check settles a branching tree, reconstructs it both via the observer and via the guided walk, and asserts the node sets match (topology + presence + causal order). Cleanup retires the observer only once the walk is the trusted path.
+
+## Phase 3c as built (amendment, 2026-05-23)
+
+3c is the cleanup (the original "Phase 4" folded in here). With the guided walk trusted, the central pipeline retires and the rings become the sole trace storage.
+
+### Retired
+
+- **`ShardedTraceQueue` (#1063) + the drainer thread.** `start_drainer` / `drainer_loop` / `ship_all` / `ship_one` / `TraceDrainerHandle` and the `_trace_drainer` field on `BootedPassives` are gone; the chassis builder no longer spawns a batching thread.
+- **The `TraceObserverCapability` fold.** The ring-of-slots, `by_mail` / `roots` / `mails_by_root` maps, `apply_event`, `recycle_slot`, and the `on_batched_trace_events` / `on_describe_tree` / `on_describe_window` handlers are removed, along with the cap's own `Settled`-to-`CHASSIS_MAILBOX_ID` emission (the emit-time counter has been the authority since Phase 2; the cap's copy was a redundant, idempotent, later fire).
+- **Wire vocabulary.** `BatchedTraceEvents`, `DescribeTree` (request), `DescribeWindow` / `DescribeWindowResult`, and `TraceWindow` are removed. `DescribeTreeResult` + `MailNodeWire` survive as the guided walk's output (no longer routed as mail).
+
+### `DispatchTraced` rehomed
+
+The cap was not deleted — `send_mail_traced`'s atomic batched-dispatch entry (`DispatchTraced` → `DispatchTracedAck`) must survive. `TraceObserverCapability` renamed to **`TraceDispatchCapability`**: a thin actor still registered at `aether.trace` whose only handler is `on_dispatch_traced` (resolve the batch against the registry, dispatch each envelope inheriting the inbound chain, ack with the root). It holds no fold state — just the registry handle. `TRACE_OBSERVER_MAILBOX_NAME` renamed to `TRACE_MAILBOX_NAME`.
+
+### Dual-write stopped — rings are the sole trace path
+
+- `record_sent` pushes the `Sent` only into the producing actor's ring (chassis-host ring off-actor) and bumps the settlement counter. No queue.
+- `record_received` is **deleted**. Its only job was the queue; the recipient's ring gets `Received` from the dispatch loop's existing `push_trace_ring` call, which runs *inside* `with_stamped` (so it lands in the right ring — `record_received` ran outside that scope and could not). Inline mailboxes (no per-actor ring) simply stop recording `Received`; they never had a queryable ring.
+- `record_finished` is now **settlement-only** (counter decrement + `fire_settled`); the recipient's ring `Finished` is the dispatch loop's inline `push_trace_ring`. `fire_settled` deliberately stays *outside* `with_stamped` — it can resolve mail subscribers inline on the firing thread, so it must run unstamped (re-entrancy hazard).
+- Settlement holds were already counter-only (decision C); `acquire_settlement_hold` / `SettlementHold::drop` drop their queue pushes and keep only the counter calls.
+
+The Phase-3b dual-write findings dissolve: the **timestamp jitter** is gone by construction (one source — the ring), and the **`tail` self-pollution** caveat survives unchanged (a tight repeated walk can still evict; the harness and the single-root reconstruction test avoid it by walking once / pacing — exclude-framework-arm-mails-from-ring-recording remains a parked cleanup).
+
+### Trust gate cleared; tests re-pointed to the counter
+
+The observer oracle is gone, so the cross-checks it backed move to self-consistency or to the settlement counter:
+
+- `guided_walk_matches_observer_tree` → `guided_walk_reconstructs_causal_tree`: settle one root, walk it once, assert node count + causal coherence (`assert_causal_order`) on the walk alone.
+- The mailer issue-838 lifecycle suite (which drained the queue for `Received`/`Finished`) re-points to the emit-time counter: a `settle_probe` seeds the chain's `Sent` and the per-path meta-test asserts a binary **does the chain settle?** (the `Received`-vs-`Finished` distinction collapses — `route_mail` no longer records `Received`). The spawn-thread hold tests and the content-gen dispatch tests read `SettlementCounter::held_open(root)` (a new assertion accessor) instead of scanning the queue for `HoldOpen`/`Release`.
+
+### Incidental
+
+Shrinking `runtime::trace`'s public API surface shifted clippy's reachability analysis enough that `clippy::must_use_candidate` (pedantic, workspace-enabled) now flags the `BuiltChassis` / `PassiveChassis` introspection getters (`resolve_actor`, `resolve_actors`, `actor_registry`, `len`, `is_empty`, `handle`, `settlement_registry`). They genuinely warrant `#[must_use]` (ignoring a resolve/handle result is a bug), so the attribute was added rather than an `#[allow]`.

@@ -449,7 +449,7 @@ mod tests {
     use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
     use crate::rpc::wire::PeerKind;
     use crate::test_chassis::{TestChassis, fresh_substrate};
-    use crate::trace::TraceObserverCapability;
+    use crate::trace::TraceDispatchCapability;
     use aether_actor::Actor;
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_substrate::Subname;
@@ -483,7 +483,7 @@ mod tests {
             // TraceObserver produces the `Settled` mail RpcServer's
             // settlement subscription waits on; without it the `Call`
             // never closes with a `ReplyEnd`.
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TestEchoActor>(())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
             .with_actor::<RpcServerCapability>(RpcServerConfig {

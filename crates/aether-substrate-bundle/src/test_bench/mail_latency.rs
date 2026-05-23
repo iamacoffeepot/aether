@@ -25,8 +25,7 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{
-    DescribeTree, DescribeTreeResult, MailNodeWire, TRACE_OBSERVER_MAILBOX_NAME, TraceEvent,
-    TraceRingEntry, TraceTail, TraceTailResult,
+    DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult,
 };
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
@@ -151,21 +150,6 @@ fn spawn_topology(tb: &TestBench, topo: &Topology) {
     }
 }
 
-/// Query the trace observer for one root's whole tree over the mail
-/// wire. Returns the node list, or `None` if the observer no longer has
-/// the root (only happens if the ring lapped it — not expected at these
-/// volumes).
-fn describe_tree(tb: &mut TestBench, root: MailId) -> Option<Vec<MailNodeWire>> {
-    let req = DescribeTree { root }.encode_into_bytes();
-    let reply = tb
-        .send_bytes_and_await(TRACE_OBSERVER_MAILBOX_NAME, DescribeTree::ID, req)
-        .ok()?;
-    match DescribeTreeResult::decode_from_bytes(&reply)? {
-        DescribeTreeResult::Ok { mails, .. } => Some(mails),
-        DescribeTreeResult::Err { .. } => None,
-    }
-}
-
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Multi-worker saturation profile target (samply). Boots the pool at
@@ -226,27 +210,28 @@ fn mail_saturation_profile() {
     );
 }
 
-/// Regression guard for the per-root trace-queue sharding
-/// (iamacoffeepot/aether#1059): drive many concurrent roots through a
-/// multi-worker pool and assert every one *settles*.
-///
-/// The sharded trace queue keeps each root's events in one FIFO shard so
-/// ADR-0080's per-root `Sent`-before-`Finished` ordering holds. If that
-/// ordering broke, a root's `in_flight` accounting would never balance
-/// and its settlement signal would never fire — so "every injected root
-/// settles within the timeout" is the exactness check. Each surviving
-/// trace tree is also asserted complete (full depth chain), catching a
-/// settle that fired on a truncated chain.
+/// Settlement regression guard over a depth chain
+/// (iamacoffeepot/aether#1059): drive 800 concurrent roots through a
+/// multi-worker pool and assert every one *settles*. Post-ADR-0086 the
+/// emit-time `SettlementCounter` is the settlement authority — a stuck
+/// `in_flight` (broken lineage accounting) leaves a root's cell non-zero
+/// forever, so its receiver never fires and the test times out. The
+/// depth-chain topology + high root count complement
+/// [`emit_settlement_settles_every_root`]'s fan-out / two-parent
+/// coverage. (Pre-3c this also asserted each settled tree was complete,
+/// guarding the observer fold against settling on a truncated chain;
+/// that failure mode retired with the fold — the counter never settles
+/// on a partial chain.)
 #[test]
 #[allow(clippy::print_stderr)]
-fn sharded_trace_settles_every_root() {
+fn depth_chain_settles_every_root() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(mut tb) = TestBench::builder()
+    let Ok(tb) = TestBench::builder()
         .with_workers(Some(workers))
         .size(16, 16)
         .build()
     else {
-        eprintln!("skipping sharded_trace_settles_every_root: TestBench boot failed (no wgpu)");
+        eprintln!("skipping depth_chain_settles_every_root: TestBench boot failed (no wgpu)");
         return;
     };
 
@@ -255,9 +240,6 @@ fn sharded_trace_settles_every_root() {
     spawn_topology(&tb, &topo);
     let entry = relay_id(0);
 
-    // 800 roots × depth 5 = 4000 mails — well under the trace ring
-    // capacity (1<<18), so nothing laps and every live root keeps its
-    // settlement state.
     let roots = 800u32;
     let mut pending = Vec::with_capacity(roots as usize);
     for seq in 0..roots {
@@ -267,28 +249,17 @@ fn sharded_trace_settles_every_root() {
     for (idx, (_root, rx)) in pending.iter().enumerate() {
         assert!(
             rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-            "root {idx} never settled — per-root trace ordering may be broken (in_flight stuck)"
+            "root {idx} never settled — per-root lineage accounting may be broken (in_flight stuck)"
         );
-    }
-
-    for (root, _) in &pending {
-        if let Some(mails) = describe_tree(&mut tb, *root) {
-            assert_eq!(
-                mails.len(),
-                depth,
-                "root {root:?} settled on a truncated tree ({} of {depth} hops)",
-                mails.len()
-            );
-        }
     }
 }
 
-/// Flake-soak duplicate of [`sharded_trace_settles_every_root`] (the
+/// Flake-soak duplicate of [`depth_chain_settles_every_root`] (the
 /// `flaky_` prefix is the soak selector; see CLAUDE.md "Flake soak").
 #[test]
 #[allow(clippy::print_stderr)]
-fn flaky_sharded_trace_settles_every_root() {
-    sharded_trace_settles_every_root();
+fn flaky_depth_chain_settles_every_root() {
+    depth_chain_settles_every_root();
 }
 
 /// ADR-0086 Phase 2 emit-authority guard: the emit-time
@@ -461,41 +432,28 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     );
 }
 
-/// ADR-0086 Phase 3b: the decentralized guided walk reconstructs the
-/// exact same tree as the central observer. Drive a branching topology
-/// (the diamond `two_level_tree`, where relay 4 has two parents),
-/// settle one injected root, then describe it both ways — the
-/// observer's `DescribeTree` over its central `mails_by_root` index,
-/// and the guided fan-out across per-actor rings — and assert the node
-/// sets match structurally: same mail-ids, same parent/sender/recipient/
-/// kind/`thread_name` per node, same `t_received`/`t_finished` presence.
-/// On convergence both trees are also checked for causal coherence (see
-/// [`assert_causal_order`]).
+/// ADR-0086 Phase 3: the decentralized guided walk reconstructs a
+/// causally-coherent tree for a settled root over the per-actor rings —
+/// the rings are the source of truth post-3c (the central observer this
+/// once cross-checked against retired with the fold). Drive a branching
+/// topology (the diamond `two_level_tree`, where relay 4 has two
+/// parents), settle one injected root, walk it, and assert the node
+/// count + causal ordering ([`assert_causal_order`]).
 ///
-/// Exact timestamps are *not* compared. `record_sent` writes one
-/// `TraceEvent` clone to both the central queue and the ring (so
-/// `t_sent` agrees), but `record_received`/`record_finished` push only
-/// to the central queue — the ring's `Received`/`Finished` are sampled
-/// separately in the dispatch loop, so their nanos differ by sampling
-/// jitter. That divergence is a harmless dual-write transient (the ring
-/// is internally consistent and becomes the sole source once Phase 3c
-/// retires the observer); the *topology* is what this gate guards.
-///
-/// The observer is fed by ADR-0080's async batch drainer, which Phase 2
-/// decoupled from settlement — so the observer's tree lags the `rx`
-/// settlement signal by a drainer hop, while the guided walk reads the
-/// rings synchronously at the producer hook (never stale). We poll the
-/// lagging observer until it converges with the walk; non-convergence
-/// within the timeout is the failure.
+/// The rings are written synchronously at the producer hooks, so a
+/// single walk right after settlement sees the complete tree — no poll
+/// loop. (A single walk also avoids the query self-pollution that a
+/// tight repeated walk would cause: each `trace.tail` query mail records
+/// its own `Received`/`Finished` into the queried actor's bounded ring.)
 #[test]
 #[allow(clippy::print_stderr)]
-fn guided_walk_matches_observer_tree() {
+fn guided_walk_reconstructs_causal_tree() {
     let Ok(mut tb) = TestBench::builder()
         .with_workers(Some(2))
         .size(16, 16)
         .build()
     else {
-        eprintln!("skipping guided_walk_matches_observer_tree: no wgpu adapter");
+        eprintln!("skipping guided_walk_reconstructs_causal_tree: no wgpu adapter");
         return;
     };
 
@@ -506,86 +464,14 @@ fn guided_walk_matches_observer_tree() {
         "injected root never settled"
     );
 
-    // The guided walk is synchronously complete; the observer catches up
-    // a drainer hop later. Poll until they agree, then assert exact
-    // equality (the timeout-path assert prints the diff on a real bug).
-    //
-    // Poll cadence is deliberately slow (20 ms): each `describe_tree_walked`
-    // sends a `trace.tail` query mail to every visited actor, and the
-    // dispatch loop records that query's own `Received`/`Finished` into
-    // the queried actor's ring (under the query's root). A tight poll
-    // floods relay 0's bounded ring and evicts the very tree events being
-    // queried — so the walk would truncate. At 20 ms cadence the handful
-    // of iterations needed for the drainer to catch up stays far under the
-    // ring cap.
-    let deadline = Instant::now() + SETTLE_TIMEOUT;
-    loop {
-        let walked = match tb.describe_tree_walked(root) {
-            DescribeTreeResult::Ok { mails, .. } => mails,
-            DescribeTreeResult::Err { not_found } => panic!("guided walk lost root {not_found:?}"),
-        };
-
-        if let Some(observed) = describe_tree(&mut tb, root) {
-            if node_shapes(&walked) == node_shapes(&observed) {
-                // root (chassis -> relay 0) + 0->{1,2} + 1->{3,4} +
-                // 2->{4,5} = 7 mails (relay 4 receives two).
-                assert_eq!(walked.len(), 7, "two_level_tree under one root is 7 mails");
-                // Both trees must be causally coherent on their own
-                // timestamps; a violation on the trusted observer would
-                // flag the invariant itself, not the walk.
-                assert_causal_order(&walked);
-                assert_causal_order(&observed);
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "guided-walk tree never converged with observer:\n walked={:#?}\n observer={:#?}",
-                node_shapes(&walked),
-                node_shapes(&observed)
-            );
-        } else {
-            assert!(
-                Instant::now() < deadline,
-                "observer never populated the root tree within the timeout"
-            );
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Structural projection of a `MailNodeWire` — every field but the exact
-/// timestamps (which differ by dual-write sampling jitter; see
-/// [`guided_walk_matches_observer_tree`]). `t_received` / `t_finished`
-/// collapse to presence bools. Returned sorted, for set comparison.
-type NodeShape = (
-    MailId,
-    Option<MailId>,
-    MailboxId,
-    MailboxId,
-    KindId,
-    bool,
-    bool,
-    Option<String>,
-);
-
-fn node_shapes(mails: &[MailNodeWire]) -> Vec<NodeShape> {
-    let mut v: Vec<NodeShape> = mails
-        .iter()
-        .map(|n| {
-            (
-                n.mail_id,
-                n.parent,
-                n.sender,
-                n.recipient,
-                n.kind,
-                n.t_received.is_some(),
-                n.t_finished.is_some(),
-                n.thread_name.clone(),
-            )
-        })
-        .collect();
-    v.sort();
-    v
+    let mails = match tb.describe_tree_walked(root) {
+        DescribeTreeResult::Ok { mails, .. } => mails,
+        DescribeTreeResult::Err { not_found } => panic!("guided walk lost root {not_found:?}"),
+    };
+    // root (chassis -> relay 0) + 0->{1,2} + 1->{3,4} + 2->{4,5} = 7
+    // mails (relay 4 receives two).
+    assert_eq!(mails.len(), 7, "two_level_tree under one root is 7 mails");
+    assert_causal_order(&mails);
 }
 
 /// Assert the causal invariants a correct trace tree must satisfy on its

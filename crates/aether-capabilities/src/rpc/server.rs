@@ -703,7 +703,7 @@ mod tests {
     /// Boot a chassis hosting only `RpcServerCapability`, connect a
     /// client `TcpStream` to its OS-picked port, and apply
     /// `read_timeout`. Tests that need additional caps (e.g.
-    /// `TestEchoActor`, `TraceObserverCapability`) build their own
+    /// `TestEchoActor`, `TraceDispatchCapability`) build their own
     /// chassis and reach for [`connect_to_rpc_server`] for the
     /// connect / timeout half. Returns `(chassis, stream)`; both must
     /// stay alive for the listener to keep accepting.
@@ -822,7 +822,7 @@ mod tests {
     fn call_echo_round_trip_event_then_end() {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
         use crate::rpc::wire::{MailEnvelope, MailboxAddress};
-        use crate::trace::TraceObserverCapability;
+        use crate::trace::TraceDispatchCapability;
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
 
@@ -833,7 +833,7 @@ mod tests {
             // chassis-mailbox once a root drains. Without it,
             // RpcServer's settlement subscription never wakes and
             // the `Call` never produces a `ReplyEnd`.
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TestEchoActor>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
@@ -904,13 +904,13 @@ mod tests {
     fn call_deferred_echo_settles_after_reply() {
         use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
         use crate::rpc::wire::{MailEnvelope, MailboxAddress};
-        use crate::trace::TraceObserverCapability;
+        use crate::trace::TraceDispatchCapability;
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
 
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<DeferredEchoActor>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),

@@ -1,24 +1,26 @@
-//! ADR-0086 Phase 0/1 — emit-time settlement counter (de-risk spike).
+//! ADR-0086 — emit-time settlement counter (the settlement authority).
 //!
-//! The decoupled-settlement design (ADR-0086) moves per-root accounting
-//! off the trace pipeline and onto the producing thread. Today the
-//! [`crate::actor::native`] producer hooks push `TraceEvent`s onto the
-//! sharded queue; a 1 ms-parking drainer ships them in batches to the
-//! `TraceObserverCapability`, which folds them into
-//! `RootState { in_flight, held_open }` and fires `Settled` on the
-//! `(in_flight == 0 && held_open == 0)` transition. So settlement is not
-//! observed until up to a drainer interval after the work actually
-//! finished.
+//! The decoupled-settlement design (ADR-0086) moved per-root accounting
+//! off the trace pipeline and onto the producing thread. This module is
+//! that counting kernel: a per-root counter updated **synchronously, at
+//! emit time, on the producing thread**, so the zero-transition fires
+//! the instant the work completes — no queue, no drainer, no fold. The
+//! [`crate::actor::native`] producer hooks call
+//! [`SettlementCounter::record_sent`] /
+//! [`SettlementCounter::record_finished`] (and
+//! [`SettlementCounter::record_hold_open`] /
+//! [`SettlementCounter::record_release`] for ADR-0080 §12 holds)
+//! directly, and on the `(in_flight == 0 && held_open == 0)` transition
+//! fire `Settled` through the chassis `SettlementRegistry`.
 //!
-//! This module is the replacement counting kernel: a per-root counter
-//! updated **synchronously, at emit time, on the producing thread**, so
-//! the zero-transition fires the instant the work completes — no queue,
-//! no drainer, no fold. It is **not yet wired** into the producer hooks
-//! (ADR-0086 Phase 1 does that, in shadow mode, cross-checked against the
-//! incumbent fold). Phase 0 lands the kernel standalone and stress-proves
-//! the part the ADR flagged riskiest: a concurrent zero-transition that
+//! History: Phase 0 landed this kernel standalone and stress-proved the
+//! part the ADR flagged riskiest — a concurrent zero-transition that
 //! must fire exactly once even when a `Finished`'s decrement-to-zero
-//! races a re-opening `Sent`.
+//! races a re-opening `Sent`. Phase 1 ran it in shadow mode beside the
+//! incumbent observer fold; Phase 2 made it the authority; Phase 3c
+//! retired the fold (and the central sharded queue + drainer) entirely,
+//! leaving this as the sole settlement path. Trace storage now lives in
+//! per-actor rings (ADR-0086 Phase 3), independent of settlement.
 //!
 //! **Why packing both counts into one `u64` removes the CAS loop the ADR
 //! anticipated.** With `in_flight` in the high 32 bits and `held_open` in
@@ -264,6 +266,22 @@ impl SettlementCounter {
                     .len()
             })
             .sum()
+    }
+
+    /// Current `held_open` count for `root` (0 if no live cell). For
+    /// assertions — e.g. proving a settlement hold gates a chain while a
+    /// spawned thread runs. Production settlement reads the decrement's
+    /// return value, never this. (Post-ADR-0086 Phase 3c the trace queue
+    /// that hold tests used to drain is gone; this is the replacement
+    /// inspection surface.)
+    ///
+    /// # Panics
+    /// Panics on a poisoned stripe mutex (fail-fast per ADR-0063).
+    #[must_use]
+    pub fn held_open(&self, root: MailId) -> u32 {
+        self.lock_stripe(root)
+            .get(&root)
+            .map_or(0, |cell| cell.load().1)
     }
 }
 
@@ -525,24 +543,19 @@ mod tests {
         assert_eq!(counter.live_roots(), 0, "settled roots are reclaimed");
     }
 
-    /// Many roots, many threads, balanced workload: every root receives
-    /// equal `Sent`/`Finished` (and matched `Hold`/`Release`) across
-    /// threads. Each root must end settled (cell reclaimed), the map must
-    /// be empty, and every root must have fired at least once.
-    /// Producer-hot-path throughput microbench (ADR-0086 Phase 0).
-    /// Times, per trivial-mail lifecycle (one `Sent` + one `Finished`):
+    /// Producer-hot-path throughput microbench (ADR-0086 Phase 0; the
+    /// `ShardedTraceQueue` baseline it once compared against retired in
+    /// Phase 3c). Times, per trivial-mail lifecycle (one `Sent` + one
+    /// `Finished`):
     ///
-    /// 1. `ShardedTraceQueue::push` ×2 — the current producer enqueue
-    ///    cost, the work the emit-time counter replaces on the hot path.
-    /// 2. `SettlementCounter` (striped lock + map) — the new cost, which
-    ///    additionally performs settlement detection *inline* (the queue
-    ///    defers that to the ≤1 ms drainer + observer fold).
-    /// 3. `CounterCell` lock-free — the future cached-cell hot path.
+    /// 1. `SettlementCounter` (striped lock + map) — the emit-time
+    ///    producer cost, which performs settlement detection *inline*.
+    /// 2. `CounterCell` lock-free — the future cached-cell hot path.
     ///
     /// Each is measured single-threaded (warm) and under `threads`-way
     /// contention on distinct roots (the saturated multi-worker regime
-    /// the trace sharding fought, iamacoffeepot/aether#1063). `#[ignore]`
-    /// — a measurement, not a gate. Run release:
+    /// the retired trace sharding fought, iamacoffeepot/aether#1063).
+    /// `#[ignore]` — a measurement, not a gate. Run release:
     ///
     /// ```text
     /// cargo test -p aether-substrate --release --lib \
@@ -551,15 +564,8 @@ mod tests {
     /// ```
     #[test]
     #[ignore = "throughput microbench — run release with --ignored --nocapture"]
-    #[allow(
-        clippy::print_stdout,
-        clippy::cast_precision_loss,
-        clippy::too_many_lines
-    )]
+    #[allow(clippy::print_stdout, clippy::cast_precision_loss)]
     fn bench_producer_hot_path() {
-        use crate::runtime::trace::ShardedTraceQueue;
-        use aether_data::KindId;
-        use aether_kinds::trace::{Nanos, TraceEvent};
         use std::env;
         use std::hint::black_box;
         use std::time::{Duration, Instant};
@@ -573,48 +579,10 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(8);
 
-        let mk_sent = |r: MailId| TraceEvent::Sent {
-            mail_id: r,
-            root: r,
-            parent_mail: None,
-            sender: MailboxId(1),
-            recipient: MailboxId(2),
-            kind: KindId(3),
-            t: Nanos(0),
-        };
-        let fin = |r: MailId| TraceEvent::Finished {
-            mail_id: r,
-            t: Nanos(0),
-        };
         let ns_per = |d: Duration, ops: u64| d.as_nanos() as f64 / ops as f64;
-
-        // Push-only producer cost, drained untimed in bounded batches so
-        // memory stays flat (production drains on a separate thread, so
-        // the producer never pays pop; measuring push alone is the fair
-        // baseline). Returns ns per Sent+Finished pair.
-        let batch: u64 = 50_000;
-        let bench_queue_push = |q: &ShardedTraceQueue, r: MailId, pairs: u64| -> f64 {
-            let mut elapsed = Duration::ZERO;
-            let mut done = 0u64;
-            while done < pairs {
-                let n = batch.min(pairs - done);
-                let t = Instant::now();
-                for _ in 0..n {
-                    q.push(r, mk_sent(r));
-                    q.push(r, fin(r));
-                }
-                elapsed += t.elapsed();
-                while q.pop().is_some() {} // untimed drain
-                done += n;
-            }
-            ns_per(elapsed, pairs)
-        };
 
         // Single-threaded warm timings.
         let r = root(1, 0);
-
-        let q = ShardedTraceQueue::new();
-        let q_warm = bench_queue_push(&q, r, iters);
 
         let counter = SettlementCounter::new();
         let t0 = Instant::now();
@@ -633,39 +601,9 @@ mod tests {
         let cell_warm = ns_per(t0.elapsed(), iters);
 
         // Contended: distinct root + mailbox per thread so they stripe
-        // apart (a correct sharded/striped structure shows no degradation
-        // here — that is the point of striping). Each thread accumulates
-        // only its push/record time; drains (queue path) are untimed.
-        // Mean ns/pair = summed per-thread elapsed / total pairs.
-        let q = Arc::new(ShardedTraceQueue::new());
-        let mut hs = Vec::new();
-        for t in 0..threads {
-            let q = Arc::clone(&q);
-            hs.push(thread::spawn(move || -> Duration {
-                let r = root(t + 1, t);
-                let mut elapsed = Duration::ZERO;
-                let mut done = 0u64;
-                while done < iters {
-                    let n = batch.min(iters - done);
-                    let ts = Instant::now();
-                    for _ in 0..n {
-                        q.push(r, mk_sent(r));
-                        q.push(r, fin(r));
-                    }
-                    elapsed += ts.elapsed();
-                    while let Some(e) = q.pop() {
-                        black_box(e);
-                    }
-                    done += n;
-                }
-                elapsed
-            }));
-        }
-        let q_cont = ns_per(
-            hs.into_iter().map(|h| h.join().unwrap()).sum(),
-            iters * threads,
-        );
-
+        // apart (a correct striped structure shows no degradation here —
+        // that is the point of striping). Mean ns/pair = summed
+        // per-thread elapsed / total pairs.
         let counter = Arc::new(SettlementCounter::new());
         let mut hs = Vec::new();
         for t in 0..threads {
@@ -691,10 +629,6 @@ mod tests {
         println!("{:<34} {:>10} {:>12}", "path", "warm", "contended");
         println!(
             "{:<34} {:>10.1} {:>12.1}",
-            "ShardedTraceQueue push x2", q_warm, q_cont
-        );
-        println!(
-            "{:<34} {:>10.1} {:>12.1}",
             "SettlementCounter (striped+inline)", c_warm, c_cont
         );
         println!(
@@ -702,8 +636,8 @@ mod tests {
             "CounterCell (lock-free)", cell_warm, "-"
         );
         println!();
-        println!("note: the queue defers settlement detection to the ~1ms drainer + observer");
-        println!("fold; the counter performs it inline, so its cost SUBSUMES that pipeline.");
+        println!("note: settlement detection is inline in the counter — there is no separate");
+        println!("drainer/observer fold pipeline post-ADR-0086 Phase 3c.");
     }
 
     #[test]

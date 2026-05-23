@@ -169,16 +169,13 @@ pub fn dispatch_loop_run<A>(
             break;
         };
         let inbound_mail_id = env.mail_id;
-        // ADR-0080 §2 producer hook: `Received` at handler entry.
+        // Issue 734: capture the OS thread name at the dispatcher's
+        // receive hook so the trace renderer can stamp per-thread rows.
         let thread_name = thread::current().name().map(str::to_owned);
-        binding
-            .mailer()
-            .record_received(inbound_mail_id, env.root, thread_name.clone());
         local::with_stamped(slots, || {
-            // ADR-0086 Phase 3 dual-write: `Received` lands in this
+            // ADR-0086 Phase 3: `Received` / `Finished` land in this
             // (recipient) actor's trace ring — only inside this
-            // `with_stamped` is its `ActorSlots` stamped. The central
-            // `record_received` above keeps the queue path until 3c.
+            // `with_stamped` is its `ActorSlots` stamped.
             let th = binding.mailer().trace_handle();
             th.push_trace_ring(
                 env.root,
@@ -206,6 +203,9 @@ pub fn dispatch_loop_run<A>(
                 },
             );
         });
+        // ADR-0080 §2 settlement hook, outside `with_stamped` so the
+        // `fire_settled` notification runs unstamped (it may resolve mail
+        // subscribers inline).
         binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
@@ -220,9 +220,6 @@ pub fn dispatch_loop_run<A>(
     while let Some(env) = binding.try_recv() {
         let inbound_mail_id = env.mail_id;
         let thread_name = thread::current().name().map(str::to_owned);
-        binding
-            .mailer()
-            .record_received(inbound_mail_id, env.root, thread_name.clone());
         local::with_stamped(slots, || {
             let th = binding.mailer().trace_handle();
             th.push_trace_ring(

@@ -274,7 +274,7 @@ mod tests {
         HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame,
     };
     use crate::test_chassis::{TestChassis, fresh_substrate};
-    use crate::trace::TraceObserverCapability;
+    use crate::trace::TraceDispatchCapability;
     use aether_actor::Actor;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{Kind, mailbox_id_from_name};
@@ -318,7 +318,7 @@ mod tests {
     }
 
     /// Full socket round-trip: boot `RpcServerCapability` + the echo
-    /// actor + `TraceObserverCapability`, connect a real `RpcClient`,
+    /// actor + `TraceDispatchCapability`, connect a real `RpcClient`,
     /// fire a `Call` carrying a `TestEchoRequest`, and drain the inbound
     /// channel — expect `ReplyEvent { TestEchoReply }` then
     /// `ReplyEnd { Ok }`. Issue 750's tests dispatched in-process; this
@@ -330,7 +330,7 @@ mod tests {
             // TraceObserver fires `Settled { root }` once a dispatched
             // chain drains; without it RpcServer's settlement
             // subscription never wakes and no `ReplyEnd` is written.
-            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TestEchoActor>(())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),

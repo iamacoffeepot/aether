@@ -549,10 +549,11 @@ impl TestBench {
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
     }
 
-    /// ADR-0086 Phase 3b: reconstruct `root`'s trace tree via the
+    /// ADR-0086 Phase 3: reconstruct `root`'s trace tree via the
     /// decentralized guided walk over per-actor rings — the in-process
-    /// counterpart to the central observer's `DescribeTree`, and the
-    /// model the MCP mirrors over the wire. Seeds at `root.sender`
+    /// counterpart to the MCP's over-the-wire walk (there is no central
+    /// observer post-3c; the rings are the source of truth). Seeds at
+    /// `root.sender`
     /// (`CHASSIS_MAILBOX_ID` for an injected root, an actor otherwise),
     /// then fans out across each `Sent`'s recipient. Every ring —
     /// including the chassis-host ring, reached by the ADR-0086 Phase 3b
