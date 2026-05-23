@@ -1126,11 +1126,18 @@ fn boot_passives(
     let settlement_registry: Arc<SettlementRegistry> = Arc::new(SettlementRegistry::new());
     mailer.install_settlement_registry(Arc::clone(&settlement_registry));
     let registry_for_router = Arc::clone(&settlement_registry);
+    // ADR-0086 Phase 1: feed the observer's authoritative `Settled` into
+    // the shadow cross-check so it can be matched against the emit-time
+    // counter's settle for the same root. Inert unless shadow is enabled.
+    let shadow_for_router = Arc::clone(mailer.trace_handle().shadow());
     let settled_kind = <Settled as aether_data::Kind>::ID;
     mailer.install_chassis_router(Box::new(move |mail| {
         if mail.kind == settled_kind {
             match postcard::from_bytes::<Settled>(&mail.payload) {
-                Ok(notice) => registry_for_router.fire_settled(notice.root),
+                Ok(notice) => {
+                    shadow_for_router.on_observer_settled(notice.root);
+                    registry_for_router.fire_settled(notice.root);
+                }
                 Err(e) => tracing::warn!(
                     target: "aether_substrate::chassis::settlement",
                     error = %e,
