@@ -379,12 +379,53 @@ pub fn heavy_work_iters_from_env() -> u64 {
         .unwrap_or(0)
 }
 
+/// Parse the optional `AETHER_LAT_WIDE_FANOUT` knob — a comma list of
+/// *extra* trivial fan-out widths to append to the sweep, e.g.
+/// `"16,32,64,128"`. Unset or empty appends nothing, so the default
+/// sweep is unchanged (iamacoffeepot/aether#1075). Widths should exceed
+/// the default `≤8` set; values are sorted and de-duplicated.
+///
+/// The point is to push past the default widths and locate the
+/// stickiness width-crossover `W*` — the width at which keeping a
+/// fan-out's children on the producing worker (`AETHER_LOCAL_STICKY_MAX`
+/// `≥ width`) stops winning, because draining `N` children serially on
+/// one worker overtakes the cross-worker handoff that keeping-local
+/// avoided. Sweep this against `AETHER_LOCAL_STICKY_MAX` (`1` vs width)
+/// and the win should invert somewhere past `W* ≈ handoff / per-child`.
+#[must_use]
+pub fn wide_fanout_widths_from_env() -> Vec<usize> {
+    let Ok(spec) = env::var("AETHER_LAT_WIDE_FANOUT") else {
+        return Vec::new();
+    };
+    let mut out: Vec<usize> = spec
+        .split(',')
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+        .filter(|&w| w > 0)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Per-cell cap on harvested trace nodes. The `DescribeWindow` query
+/// refuses windows larger than this (replying `too_many`), and a frame
+/// produces roughly one trace node per relay delivery — so a wide
+/// fan-out at the full frame count would overflow. Kept under the 100k
+/// query cap to leave margin for the per-frame tick/setup nodes the
+/// window also holds (iamacoffeepot/aether#1075).
+const MAX_NODES_PER_CELL: u32 = 90_000;
+
 /// Drive the sweep and return per-cell percentiles. Each cell boots a
 /// fresh [`TestBench`], wires the topology + tick source, advances, and
 /// harvests the trace ring once. A cell whose bench fails to boot (no
 /// wgpu adapter) or whose harvest overflows is logged via `tracing` and
 /// skipped — so a driverless box returns fewer cells (possibly empty)
 /// rather than panicking.
+///
+/// The per-cell frame count is clamped so wide fan-outs stay under
+/// `MAX_NODES_PER_CELL`; this is a no-op for the narrow default
+/// topologies (their full frame count is well under the cap), so their
+/// numbers are unchanged.
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 #[must_use]
 pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
@@ -456,12 +497,23 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
                 }
             }
 
+            // Clamp the per-cell frame count so a wide fan-out stays
+            // under the trace-window node cap. Each frame produces ~one
+            // `Ping` node per relay delivery (every downstream forward
+            // plus the tick source's send into the entry); `+ 8` leaves
+            // slack for the per-frame tick/setup nodes. A no-op for the
+            // narrow default topologies (iamacoffeepot/aether#1075).
+            let deliveries_per_frame = 1 + topo.downstreams.iter().map(Vec::len).sum::<usize>();
+            let frame_cap =
+                MAX_NODES_PER_CELL / u32::try_from(deliveries_per_frame + 8).unwrap_or(u32::MAX);
+            let frames = cfg.frames.min(frame_cap.max(1));
+
             // Drive via the real lifecycle.
             let t0 = Instant::now();
             match cfg.pace_hz {
                 Some(hz) => {
                     let period = Duration::from_secs_f64(1.0 / hz as f64);
-                    for _ in 0..cfg.frames {
+                    for _ in 0..frames {
                         let f = Instant::now();
                         let _ = tb.advance(1);
                         if let Some(rem) = period.checked_sub(f.elapsed()) {
@@ -470,7 +522,7 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
                     }
                 }
                 None => {
-                    let _ = tb.advance(cfg.frames);
+                    let _ = tb.advance(frames);
                 }
             }
             let drive_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);

@@ -31,8 +31,9 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Ping, Relay, RelayConfig, SweepConfig, default_topologies, depth_chain,
+    CellResult, Ping, Relay, RelayConfig, SweepConfig, default_topologies, depth_chain, fanout,
     fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep,
+    wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -272,6 +273,12 @@ fn lifecycle_latency_observe() {
             topologies.push(fanout_heavy(b, heavy));
         }
     }
+    // Wide trivial fan-outs to locate the stickiness width-crossover
+    // (iamacoffeepot/aether#1075); empty unless AETHER_LAT_WIDE_FANOUT is
+    // set, so the default grid is unchanged.
+    for w in wide_fanout_widths_from_env() {
+        topologies.push(fanout(w));
+    }
 
     let cfg = SweepConfig {
         workers: worker_set,
@@ -308,7 +315,13 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
             "heavy leaves: {heavy} spin-iters/handler (*-heavy rows; read HANDLER DUR for actual µs)"
         );
     }
-    println!("{OBSERVE_FRAMES} frames/cell; relay-hop (`Ping`) samples only.");
+    let wide = wide_fanout_widths_from_env();
+    if !wide.is_empty() {
+        println!(
+            "wide fan-outs: {wide:?} (sweep AETHER_LOCAL_STICKY_MAX=1 vs width to find W*; wide cells auto-cap frames)"
+        );
+    }
+    println!("{OBSERVE_FRAMES} frames/cell (wide cells fewer); relay-hop (`Ping`) samples only.");
     println!();
 
     for (label, pick) in [

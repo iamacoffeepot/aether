@@ -14,6 +14,8 @@
 //! - `AETHER_LAT_PACE_HZ` — pace one frame per period (else flat-out).
 //! - `AETHER_LAT_HEAVY_WORK` — when set, append CPU-heavy fan-outs
 //!   (iamacoffeepot/aether#1074); unset, the topology set is unchanged.
+//! - `AETHER_LAT_WIDE_FANOUT` — comma list of extra trivial fan-out
+//!   widths to append (iamacoffeepot/aether#1075); unset, unchanged.
 //! - `AETHER_PERF_GIT_SHA` — stamped into the report; falls back to
 //!   `git rev-parse HEAD`.
 
@@ -26,6 +28,7 @@ use std::thread::available_parallelism;
 use aether_substrate_bundle::perf::harness::{
     SweepConfig, Topology, default_topologies, depth_chain, fanout, fanout_heavy,
     heavy_work_iters_from_env, pace_hz_from_env, run_sweep, two_level_tree,
+    wide_fanout_widths_from_env,
 };
 use aether_substrate_bundle::perf::report::TrialReport;
 
@@ -74,6 +77,13 @@ fn parse_topologies() -> Vec<Topology> {
         for b in [4usize, 8] {
             topos.push(fanout_heavy(b, heavy));
         }
+    }
+    // Opt-in wide trivial fan-outs (iamacoffeepot/aether#1075): when
+    // AETHER_LAT_WIDE_FANOUT is set, append the listed widths so the
+    // stickiness width-crossover can be located through the comparison
+    // too. Unset, the topology set is unchanged.
+    for w in wide_fanout_widths_from_env() {
+        topos.push(fanout(w));
     }
     topos
 }
