@@ -132,16 +132,22 @@ fi
 
 # Pattern E: issue title must match `{type}({crate}): subject` (or
 # `{type}({crate}/{subfeat}): subject` for subfeatures). Scope must be
-# a registered `crate:*` label. Mirrors the server-side workflow at
-# `.github/workflows/issue-labels.yml`. Fires only on `gh issue
-# create` / `gh issue edit`.
+# a registered `crate:*` label OR a meta-scope. Mirrors the server-side
+# workflow at `.github/workflows/issue-labels.yml` (keep META_SCOPES in
+# sync). Fires only on `gh issue create` / `gh issue edit`.
 if [[ ",$allowed," != *",e,"* ]] && (( is_issue_cmd == 1 )) && [[ -n "$title" ]]; then
     title_re='^(feat|fix|chore|docs|perf|refactor|flake)\(([a-z0-9-]+)(/[a-z0-9-]+)?\):[[:space:]].+$'
+    # Meta-scopes: cross-cutting work that isn't a single crate. Must
+    # match META_SCOPES in .github/workflows/issue-labels.yml — the
+    # server accepts these, so the local hook must too or it
+    # false-positives on a title the server would pass.
+    meta_scopes=" ci docs adr qodana repo release workflow "
     if [[ "$title" =~ $title_re ]]; then
         scope="${BASH_REMATCH[2]}"
-        if ! gh label list --search "crate:$scope" --json name --jq '.[].name' 2>/dev/null | grep -qx "crate:$scope"; then
+        if [[ "$meta_scopes" != *" $scope "* ]] \
+            && ! gh label list --search "crate:$scope" --json name --jq '.[].name' 2>/dev/null | grep -qx "crate:$scope"; then
             valid_crates=$(gh label list --limit 100 --json name --jq '.[].name | select(startswith("crate:")) | sub("^crate:"; "")' 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')
-            issues+=("Pattern E: issue title scope '$scope' is not a known crate. Valid: $valid_crates")
+            issues+=("Pattern E: issue title scope '$scope' is not a known crate or meta-scope. Valid crates: $valid_crates. Valid meta-scopes:${meta_scopes}")
         fi
     else
         issues+=("Pattern E: issue title must match {type}({crate}): subject (subfeatures via {type}({crate}/{subfeat}): subject). Allowed types: feat, fix, chore, docs, perf, refactor, flake")
@@ -154,8 +160,14 @@ if (( ${#issues[@]} )); then
         for i in "${issues[@]}"; do
             printf '  - %s\n' "$i"
         done
-        printf '\nSee feedback_heredoc_no_backtick_escape.md (auto-memory) for context.\n'
-        printf 'To override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d/e, comma-separated; only listed patterns are skipped).\n'
+        printf '\nRules reference (so the next attempt is right, not another guess):\n'
+        printf '  - Issue title: {type}({scope}): <subject>. Types: feat fix chore docs perf refactor flake.\n'
+        printf '  - PR title: same {type}({scope}): <subject> shape; PR types additionally allow test build ci style revert.\n'
+        printf '  - Subject (issue + PR) must start lowercase.\n'
+        printf '  - Scope is a crate name OR a meta-scope: ci docs adr qodana repo release workflow.\n'
+        printf '  - Body: no backslash before a backtick/dollar (A); no bare hash-number, use owner/repo#NNN (B); no dollar-delimited math span, use backticks (D).\n'
+        printf '\nTo override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d/e, comma-separated; only listed patterns are skipped).\n'
+        printf 'Context: feedback_heredoc_no_backtick_escape.md (auto-memory).\n'
     } >&2
     exit 2
 fi
