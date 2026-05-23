@@ -89,7 +89,7 @@ fn ring_id(i: usize) -> MailboxId {
 /// the handler then returns (dropping `in_flight` to zero) but the root
 /// must NOT settle until the worker exits and releases the hold. Used to
 /// exercise the `HoldOpen` / `Release` producer hooks end-to-end against
-/// the shadow cross-check.
+/// the emit-time settlement counter (ADR-0086).
 struct HoldRelay;
 
 impl aether_actor::Actor for HoldRelay {
@@ -290,36 +290,30 @@ fn flaky_sharded_trace_settles_every_root() {
     sharded_trace_settles_every_root();
 }
 
-/// ADR-0086 Phase 1 shadow-mode agreement guard: with the emit-time
-/// `SettlementCounter` enabled alongside the incumbent observer fold,
-/// every root must settle identically on both paths. Drives `topo` with
-/// many concurrent roots through a multi-worker pool, waits for the
-/// observer's authoritative settle on each, then asserts the shadow
-/// cross-check is balanced (no root settled by one path but not the
-/// other) with zero disagreements.
+/// ADR-0086 Phase 2 emit-authority guard: the emit-time
+/// `SettlementCounter` is now the *only* path that fires `Settled`
+/// through the registry (the chassis-router swallows the observer's
+/// superseded copy), so `inject_root`'s settlement receiver firing
+/// *proves* the counter drove the zero-transition. Drives `topo` with
+/// many concurrent roots through a multi-worker pool and asserts every
+/// one settles within the timeout.
 ///
-/// The emit-time settle fires synchronously on the producer thread; the
-/// observer settle follows ~1 ms later (drainer + fold) and is what
-/// `inject_root`'s receiver waits on. The chassis-router notes the
-/// observer settle *before* firing the receiver, so by the time every
-/// receiver has fired, both notes are in for every root and the balance
-/// must be zero.
+/// A stuck `in_flight` (broken lineage accounting) would leave a root's
+/// cell non-zero forever, so its receiver never fires and the test times
+/// out — the exactness check. Covers the topologies the trivial
+/// depth-chain guard ([`sharded_trace_settles_every_root`]) doesn't:
+/// fan-out and a shared (two-parent) node.
 #[allow(clippy::print_stderr)]
-fn shadow_settlement_agrees_with_observer(topo: &Topology) {
+fn emit_settlement_settles_every_root(topo: &Topology) {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
     let Ok(tb) = TestBench::builder()
         .with_workers(Some(workers))
         .size(16, 16)
         .build()
     else {
-        eprintln!("skipping shadow_settlement_agrees_with_observer: no wgpu adapter");
+        eprintln!("skipping emit_settlement_settles_every_root: no wgpu adapter");
         return;
     };
-    // Enable shadow before any traffic. The bench is quiescent after a
-    // synchronous multi-pass boot, so the counter sees every injected
-    // root's full Sent/Finished from the first event (no mid-stream
-    // enable, which would desync the counter).
-    tb.settlement_shadow().set_enabled(true);
 
     spawn_topology(&tb, topo);
     let entry = relay_id(0);
@@ -332,71 +326,40 @@ fn shadow_settlement_agrees_with_observer(topo: &Topology) {
     for (idx, (_root, rx)) in pending.iter().enumerate() {
         assert!(
             rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-            "root {idx} never settled (observer side)"
+            "root {idx} never settled — the emit-time counter must fire Settled"
         );
     }
-
-    let xc = tb.settlement_shadow().cross_check();
-    // Non-vacuity: the emit path must actually have run. Each injected
-    // root settles exactly once on each path (no re-open via inject), so
-    // both monotonic counts equal the root count. Without this, a
-    // silently-disabled shadow would pass with an empty, never-touched
-    // ledger.
-    assert_eq!(
-        xc.emit_settles(),
-        u64::from(roots),
-        "emit-time counter did not settle every root (shadow inactive?)"
-    );
-    assert_eq!(xc.observer_settles(), u64::from(roots));
-    let outstanding = xc.outstanding();
-    assert!(
-        outstanding.is_empty(),
-        "shadow disagreement — roots settled by one path only: {outstanding:?}"
-    );
-    assert_eq!(
-        xc.disagreements(),
-        0,
-        "observer settled a root the emit-time counter missed (negative balance)"
-    );
 }
 
 /// Rich topology: fan-out + a shared (two-parent) node + depth.
 #[test]
-fn shadow_settlement_agrees_two_level_tree() {
-    shadow_settlement_agrees_with_observer(&two_level_tree());
+fn emit_settlement_settles_two_level_tree() {
+    emit_settlement_settles_every_root(&two_level_tree());
 }
 
 /// Flake-soak duplicate (concurrent multi-worker dispatch; see CLAUDE.md).
 #[test]
-fn flaky_shadow_settlement_agrees_two_level_tree() {
-    shadow_settlement_agrees_two_level_tree();
+fn flaky_emit_settlement_settles_two_level_tree() {
+    emit_settlement_settles_two_level_tree();
 }
 
-/// Depth chain — exercises the per-root `Sent`-before-`Finished` ordering
-/// the counter relies on across a serial hand-off.
-#[test]
-fn shadow_settlement_agrees_depth_chain() {
-    shadow_settlement_agrees_with_observer(&depth_chain(6));
-}
-
-/// Hold-path agreement: a `spawn_inherit` worker keeps the root open past
-/// the handler's `Finished`, so settlement is gated on the worker's
-/// `Release` (ADR-0080 §12). Exercises the `HoldOpen` / `Release`
-/// producer hooks — the only ones the topology tests above don't hit —
-/// against the shadow cross-check.
+/// Hold path: a `spawn_inherit` worker keeps the root open past the
+/// handler's `Finished`, so settlement is gated on the worker's `Release`
+/// (ADR-0080 §12). Exercises the `HoldOpen` / `Release` producer hooks —
+/// the only ones the topology guards don't hit — through the emit-time
+/// counter. Each injected root must settle only after its hold releases.
 #[test]
 #[allow(clippy::print_stderr)]
-fn shadow_settlement_agrees_with_holds() {
+fn emit_settlement_settles_with_holds() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
     let Ok(tb) = TestBench::builder()
         .with_workers(Some(workers))
         .size(16, 16)
         .build()
     else {
-        eprintln!("skipping shadow_settlement_agrees_with_holds: no wgpu adapter");
+        eprintln!("skipping emit_settlement_settles_with_holds: no wgpu adapter");
         return;
     };
-    tb.settlement_shadow().set_enabled(true);
     tb.spawn_actor::<HoldRelay>(Subname::Named("0"), ())
         .finish()
         .expect("spawn hold relay");
@@ -410,23 +373,9 @@ fn shadow_settlement_agrees_with_holds() {
     for (idx, (_root, rx)) in pending.iter().enumerate() {
         assert!(
             rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-            "hold root {idx} never settled — Release may not have fired"
+            "hold root {idx} never settled — the hold's Release must fire the counter"
         );
     }
-
-    let xc = tb.settlement_shadow().cross_check();
-    assert_eq!(
-        xc.emit_settles(),
-        u64::from(roots),
-        "emit-time counter did not settle every held root"
-    );
-    assert_eq!(xc.observer_settles(), u64::from(roots));
-    assert!(
-        xc.outstanding().is_empty(),
-        "shadow disagreement on the hold path: {:?}",
-        xc.outstanding()
-    );
-    assert_eq!(xc.disagreements(), 0);
 }
 
 const OBSERVE_FRAMES: u32 = 1000;
@@ -489,23 +438,27 @@ fn lifecycle_latency_observe() {
     print_observe_tables(&rows, pace_hz);
 }
 
-/// ADR-0086 Phase 0: size the settlement-detection latency the
-/// decoupled-settlement redesign removes. Today settlement rides the
-/// trace pipeline — a producer's `Finished` lands in the sharded queue,
-/// the drainer ships it after a ≤1 ms park, the observer folds it, and
-/// only then does `Settled` fire. So the gap between *work actually
-/// finished* and *settlement observed* is roughly the drainer interval.
-/// The emit-time counter (`chassis::settlement_counter`) collapses that
-/// gap to an inline atomic on the producing thread.
+/// ADR-0086: measure the settlement-detection latency (inject → the
+/// root's `Settled` receiver firing). The before/after vehicle for the
+/// decouple.
+///
+/// **Before (pre-Phase-2 / `main`):** settlement rode the trace pipeline
+/// — a producer's `Finished` landed in the sharded queue, the drainer
+/// shipped it after a ≤1 ms park, the observer folded it, and only then
+/// did `Settled` fire — so the gap was roughly the drainer interval (the
+/// Phase-0 sizing: ~0.9 ms p50). **After (Phase 2, this branch):** the
+/// emit-time counter fires `Settled` synchronously on the producing
+/// thread's zero-transition, so the same gap collapses to one atomic plus
+/// the single registry → driver notice-mail hop.
 ///
 /// Measures it directly: inject a trivial single-mail root, time
 /// inject → its settlement receiver firing. A trivial root's dispatch +
-/// handler cost is sub-microsecond (see the HOP/HANDLER tables above),
-/// so the measured latency is dominated by the settlement pipeline. A
-/// small pseudo-random jitter before each injection decorrelates the
-/// inject phase from the drainer's 1 ms cycle, so the samples span the
-/// true `[0, interval]` distribution rather than aligning just after a
-/// drain.
+/// handler cost is sub-microsecond (see the HOP/HANDLER tables above), so
+/// the measured latency is dominated by the settlement path. A small
+/// pseudo-random jitter before each injection decorrelates the inject
+/// phase from the (still-running, ≤1 ms) drainer cycle, so a regression
+/// back onto the drained path would re-appear as the old `[0, interval]`
+/// spread rather than aligning just after a drain.
 ///
 /// `#[ignore]` — a measurement, not a gate. Skips cleanly without a wgpu
 /// adapter. Run release:
@@ -580,8 +533,11 @@ fn settlement_detection_latency() {
         "{workers}w, {} samples, jittered injection (decorrelated from the drainer cycle)",
         s.n
     );
-    println!("dominated by the trace-pipeline settlement path (drainer park + observer fold +");
-    println!("Settled mail hop); the emit-time counter (ADR-0086) removes it.");
+    println!("Phase 2 (this branch): emit-time counter fires Settled synchronously on the");
+    println!("producing thread — one atomic + the registry → driver notice hop. Compare against");
+    println!(
+        "main (the drained path: drainer park + observer fold + Settled mail hop, ~0.9ms p50)."
+    );
     println!(
         "  p50 {:.1}µs  p90 {:.1}µs  p99 {:.1}µs  max {:.1}µs",
         us(s.p50),

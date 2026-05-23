@@ -25,7 +25,6 @@ pub mod frame_loop;
 pub mod helpers;
 pub mod settlement;
 pub mod settlement_counter;
-pub mod settlement_shadow;
 
 use crate::chassis::builder::{BuiltChassis, DriverCapability};
 use crate::chassis::error::BootError;

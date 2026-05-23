@@ -32,9 +32,11 @@
 //! structurally correct and unlocks future in-process multi-substrate
 //! workflows. Filed as iamacoffeepot/aether#953.
 
+use std::fmt;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -43,7 +45,8 @@ use aether_data::{KindId, MailId, MailboxId};
 use aether_kinds::trace::{BatchedTraceEvents, Nanos, TRACE_OBSERVER_MAILBOX_NAME, TraceEvent};
 use crossbeam_queue::SegQueue;
 
-use crate::chassis::settlement_shadow::ShadowSettlement;
+use crate::chassis::settlement::SettlementRegistry;
+use crate::chassis::settlement_counter::SettlementCounter;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::MailboxEntry;
@@ -144,17 +147,36 @@ impl Default for ShardedTraceQueue {
 /// boot-time anchor (Copy), so the chassis drainer and every producer
 /// site can hold an independent `TraceHandle` cheaply.
 ///
-/// The handle also carries the ADR-0086 Phase-1 [`ShadowSettlement`]
-/// apparatus (shared via `Arc` across clones — one per chassis). Every
-/// producer hook on this type funnels the same event into it, so the
-/// emit-time settlement counter sees exactly what the trace queue does;
-/// it is inert unless `AETHER_SETTLEMENT_SHADOW` (or the test setter)
-/// turns it on.
-#[derive(Clone, Debug)]
+/// The handle also carries the ADR-0086 emit-time [`SettlementCounter`]
+/// (shared via `Arc` across clones — one per chassis). Every producer
+/// hook funnels its event into the counter, and on the zero-transition
+/// fires `Settled` synchronously through the chassis [`SettlementRegistry`]
+/// — so the lifecycle gate wakes the instant work finishes, without
+/// waiting for the drainer + observer fold (ADR-0086 Phase 2). The
+/// registry is installed at boot via [`Self::install_settlement_registry`];
+/// before install (boot is quiescent, so no real traffic) the
+/// zero-transition simply skips the fire.
+#[derive(Clone)]
 pub struct TraceHandle {
     queue: Arc<ShardedTraceQueue>,
     boot_time: Instant,
-    shadow: Arc<ShadowSettlement>,
+    settlement_counter: Arc<SettlementCounter>,
+    settlement_registry: Arc<OnceLock<Arc<SettlementRegistry>>>,
+}
+
+// Manual `Debug` — `SettlementRegistry` carries non-`Debug` subscriber
+// handles (a `Mailer`), so the registry is summarised as an
+// installed/absent flag rather than printed.
+impl fmt::Debug for TraceHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TraceHandle")
+            .field("boot_time", &self.boot_time)
+            .field(
+                "settlement_registry_installed",
+                &self.settlement_registry.get().is_some(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl TraceHandle {
@@ -177,17 +199,36 @@ impl TraceHandle {
         Self {
             queue,
             boot_time: Instant::now(),
-            shadow: Arc::new(ShadowSettlement::from_env()),
+            settlement_counter: Arc::new(SettlementCounter::new()),
+            settlement_registry: Arc::new(OnceLock::new()),
         }
     }
 
-    /// The ADR-0086 Phase-1 shadow-settlement apparatus. Tests and
-    /// shadow-validation runs reach it to enable the cross-check and
-    /// inspect agreement; the chassis-router reaches it to feed the
-    /// observer's authoritative `Settled` into the cross-check.
+    /// Install the chassis [`SettlementRegistry`] so the emit-time counter
+    /// can fire `Settled` on the zero-transition (ADR-0086 Phase 2).
+    /// Called once at chassis boot, after the registry is constructed; a
+    /// second install is a no-op (the `OnceLock` keeps the first).
+    pub fn install_settlement_registry(&self, registry: Arc<SettlementRegistry>) {
+        let _ = self.settlement_registry.set(registry);
+    }
+
+    /// The emit-time [`SettlementCounter`] — the settlement authority
+    /// (ADR-0086 Phase 2). Exposed for diagnostics / tests
+    /// (`live_roots`); production settlement flows through the producer
+    /// hooks on this handle.
     #[must_use]
-    pub fn shadow(&self) -> &Arc<ShadowSettlement> {
-        &self.shadow
+    pub fn settlement_counter(&self) -> &Arc<SettlementCounter> {
+        &self.settlement_counter
+    }
+
+    /// Fire `Settled` for `root` through the installed registry, if one
+    /// is installed. Called on the emit-time zero-transition from the
+    /// producing thread.
+    #[inline]
+    fn fire_settled(&self, root: MailId) {
+        if let Some(registry) = self.settlement_registry.get() {
+            registry.fire_settled(root);
+        }
     }
 
     /// Borrow the queue Arc so the chassis builder can pass it to
@@ -240,7 +281,9 @@ impl TraceHandle {
                 t: self.now_nanos(),
             },
         );
-        self.shadow.on_sent(root);
+        if root != MailId::NONE {
+            self.settlement_counter.record_sent(root);
+        }
     }
 
     /// ADR-0080 §2 producer hook for the `Received` event. Pushed by
@@ -286,7 +329,9 @@ impl TraceHandle {
                 t: self.now_nanos(),
             },
         );
-        self.shadow.on_finished(root);
+        if root != MailId::NONE && self.settlement_counter.record_finished(root) {
+            self.fire_settled(root);
+        }
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a
@@ -313,7 +358,9 @@ impl TraceHandle {
                 t: self.now_nanos(),
             },
         );
-        self.shadow.on_hold_open(root);
+        if root != MailId::NONE {
+            self.settlement_counter.record_hold_open(root);
+        }
         SettlementHold {
             handle: self.clone(),
             root,
@@ -357,7 +404,9 @@ impl Drop for SettlementHold {
                 t: self.handle.now_nanos(),
             },
         );
-        self.handle.shadow.on_release(self.root);
+        if self.root != MailId::NONE && self.handle.settlement_counter.record_release(self.root) {
+            self.handle.fire_settled(self.root);
+        }
     }
 }
 
@@ -504,4 +553,112 @@ fn ship_one(mailer: &Arc<Mailer>, recipient: MailboxId, kind: KindId, events: Ve
         }
     };
     mailer.push(Mail::new(recipient, kind, payload, 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mid(sender: u64, cid: u64) -> MailId {
+        MailId {
+            sender: MailboxId(sender),
+            correlation_id: cid,
+        }
+    }
+
+    /// A `TraceHandle` with a fresh registry installed, plus the registry
+    /// so the test can subscribe to a root and observe the emit-time fire.
+    fn handle_with_registry() -> (TraceHandle, Arc<SettlementRegistry>) {
+        let handle = TraceHandle::new();
+        let registry = Arc::new(SettlementRegistry::new());
+        handle.install_settlement_registry(Arc::clone(&registry));
+        (handle, registry)
+    }
+
+    /// ADR-0086 Phase 2: a `Sent` then its matching `Finished` drives the
+    /// emit-time counter to zero and fires `Settled` *synchronously* on
+    /// the calling thread — no drainer, no observer fold. The registry
+    /// subscriber wakes immediately, which is the whole latency win.
+    #[test]
+    fn finished_zero_transition_fires_settled_synchronously() {
+        let (handle, registry) = handle_with_registry();
+        let root = mid(1, 7);
+        let rx = registry.subscribe_settlement(root);
+
+        handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
+        assert!(rx.try_recv().is_err(), "must not settle before Finished");
+
+        handle.record_finished(root, root);
+        assert!(
+            rx.try_recv().is_ok(),
+            "emit-time counter must fire Settled on the Finished zero-transition"
+        );
+        assert_eq!(
+            handle.settlement_counter().live_roots(),
+            0,
+            "cell reclaimed"
+        );
+    }
+
+    /// The hold contract (ADR-0080 §12): `Finished` dropping `in_flight`
+    /// to zero does NOT settle while a hold is open; only the hold's
+    /// `Release` (with `in_flight` already zero) fires `Settled`.
+    #[test]
+    fn hold_gates_settlement_until_release() {
+        let (handle, registry) = handle_with_registry();
+        let root = mid(2, 9);
+        let rx = registry.subscribe_settlement(root);
+
+        let hold = handle.acquire_settlement_hold(root);
+        handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
+        handle.record_finished(root, root);
+        assert!(
+            rx.try_recv().is_err(),
+            "an open hold must keep the root from settling"
+        );
+
+        drop(hold);
+        assert!(
+            rx.try_recv().is_ok(),
+            "releasing the last hold fires Settled"
+        );
+        assert_eq!(handle.settlement_counter().live_roots(), 0);
+    }
+
+    /// `MailId::NONE` is the recursion-break sentinel and never carries
+    /// settlement accounting: a NONE-rooted event must not touch the
+    /// counter or fire.
+    #[test]
+    fn none_root_carries_no_settlement() {
+        let (handle, registry) = handle_with_registry();
+        let rx = registry.subscribe_settlement(MailId::NONE);
+        handle.record_sent(
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            MailboxId(1),
+            MailboxId(2),
+            KindId(3),
+        );
+        handle.record_finished(mid(1, 1), MailId::NONE);
+        assert!(rx.try_recv().is_err(), "NONE root must never settle");
+        assert_eq!(handle.settlement_counter().live_roots(), 0);
+    }
+
+    /// Before a registry is installed the zero-transition is silent (no
+    /// panic): boot-time events that fire before
+    /// `install_settlement_registry` simply don't notify. Boot is
+    /// quiescent, so this is the trivial no-traffic case.
+    #[test]
+    fn fire_before_registry_install_is_silent() {
+        let handle = TraceHandle::new();
+        let root = mid(3, 3);
+        handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
+        handle.record_finished(root, root);
+        assert_eq!(
+            handle.settlement_counter().live_roots(),
+            0,
+            "still reclaimed"
+        );
+    }
 }

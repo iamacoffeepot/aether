@@ -1116,35 +1116,33 @@ fn boot_passives(
         Arc::clone(mailer),
     );
 
-    // ADR-0080 §6 settlement registry + chassis-mail router. The
-    // registry owns the gate-site notification map; the router
-    // closure decodes `Settled { root }` mail addressed to
-    // `CHASSIS_MAILBOX_ID` and signals the matching subscribers.
-    // Other chassis-internal kinds (none today; future debugger /
-    // describe_tree replies could land here) add matching arms inside
-    // the router closure without touching the Mailer's surface.
+    // ADR-0080 §6 settlement registry + chassis-mail router. The registry
+    // owns the gate-site notification map (`subscribe_settlement` /
+    // `subscribe_settlement_mail`); the lifecycle driver and other gate
+    // sites wait on it.
+    //
+    // ADR-0086 Phase 2: settlement is now fired by the emit-time
+    // `SettlementCounter` on the trace handle — synchronously on the
+    // producing thread's zero-transition — not by the observer's drained
+    // fold. Install the registry into the trace handle so the counter can
+    // reach `fire_settled`.
     let settlement_registry: Arc<SettlementRegistry> = Arc::new(SettlementRegistry::new());
     mailer.install_settlement_registry(Arc::clone(&settlement_registry));
-    let registry_for_router = Arc::clone(&settlement_registry);
-    // ADR-0086 Phase 1: feed the observer's authoritative `Settled` into
-    // the shadow cross-check so it can be matched against the emit-time
-    // counter's settle for the same root. Inert unless shadow is enabled.
-    let shadow_for_router = Arc::clone(mailer.trace_handle().shadow());
+    mailer
+        .trace_handle()
+        .install_settlement_registry(Arc::clone(&settlement_registry));
     let settled_kind = <Settled as aether_data::Kind>::ID;
     mailer.install_chassis_router(Box::new(move |mail| {
-        if mail.kind == settled_kind {
-            match postcard::from_bytes::<Settled>(&mail.payload) {
-                Ok(notice) => {
-                    shadow_for_router.on_observer_settled(notice.root);
-                    registry_for_router.fire_settled(notice.root);
-                }
-                Err(e) => tracing::warn!(
-                    target: "aether_substrate::chassis::settlement",
-                    error = %e,
-                    "Settled mail decode failed; subscribers not woken",
-                ),
-            }
-        } else {
+        // The observer still folds the trace stream and emits a `Settled`
+        // per root, but the emit-time counter already fired that root
+        // synchronously (~1ms earlier), so the observer's late copy is
+        // superseded — swallow it (acting on it would be a redundant
+        // idempotent no-op). The observer's settlement *emission* is
+        // removed in Phase 4 alongside the drainer; until then this guard
+        // keeps the late mail from warn-storming as an unhandled kind.
+        // Future chassis-internal kinds (debugger / describe_tree replies)
+        // add matching arms here without touching the Mailer's surface.
+        if mail.kind != settled_kind {
             tracing::warn!(
                 target: "aether_substrate::chassis",
                 kind = %mail.kind,
