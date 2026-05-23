@@ -45,7 +45,7 @@ Don't post a blocker for anything in this list — the scan finds them.
 
 ## Sources scanned (posted blockers)
 
-Path: `~/.claude/projects/-Users-hadynfitzgerald-workspace-aether/secretary/blockers.jsonl`
+Path: `~/.claude/projects/<project-slug>/secretary/blockers.jsonl` (`<project-slug>` is the Claude Code project directory that also holds your auto-memory `MEMORY.md` — the project's absolute path with each `/` replaced by `-`).
 
 Format — one JSON object per line:
 
@@ -186,6 +186,6 @@ Posted blockers stay in the JSONL with `resolved: false` until explicitly resolv
 
 ## Storage
 
-Posted blockers: `~/.claude/projects/-Users-hadynfitzgerald-workspace-aether/secretary/blockers.jsonl` (per-user, not in repo).
+Posted blockers: `~/.claude/projects/<project-slug>/secretary/blockers.jsonl` (per-user, not in repo; same project directory as your auto-memory `MEMORY.md`).
 
 The skill creates the directory if absent; the file is `chmod 644` (readable, not sensitive but personal).
