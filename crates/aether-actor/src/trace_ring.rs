@@ -30,8 +30,8 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
 use aether_data::MailId;
 use aether_kinds::trace::{TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};

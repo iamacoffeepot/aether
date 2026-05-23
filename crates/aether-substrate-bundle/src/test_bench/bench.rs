@@ -33,9 +33,9 @@ use std::time::{Duration, Instant};
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
 #[cfg(test)]
 use aether_kinds::Tick;
-use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 #[cfg(test)]
 use aether_kinds::trace::{TraceTail, TraceTailResult};
+use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_actor::Actor;
