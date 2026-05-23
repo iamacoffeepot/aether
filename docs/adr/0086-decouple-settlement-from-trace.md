@@ -80,3 +80,32 @@ Each phase lands independently and is measurable on its own.
 - **Weighted reference counting / credit-passing** (credit rides on each mail, splits on send, returns on finish; root settles on full reclaim). Reduces updates to the shared cell but still needs a convergence point, and is more machinery than our scale (one frame root, modest fan-out) warrants. Noted as a future optimization if counter contention ever bites.
 - **Keep per-root sharding, tune it.** Rejected: a band-aid that keeps a contended shared structure in the hot path and exists only to preserve the stream ordering the decouple makes unnecessary. The decision is to install permanent infrastructure, not a better band-aid.
 - **Leave settlement on the trace pipeline; only shorten/eagerly-wake the drainer.** Rejected: trades latency for drain overhead and does nothing about the critical-path coupling #1048 flagged — the same band-aid posture.
+
+## Phase 3 as built (amendment, 2026-05-23)
+
+Implementation split the original "Phase 3 — Decentralize trace" into three landable steps (3a/3b/3c). The decentralized **reader** turned out to want a sharper shape than the "fan-out-and-stitch coordinator" the Decision sketched. Recorded here so the deviation and its rationale survive.
+
+### Reconstruction is a guided walk from a known root, not a broad fan-out
+
+The original framing — fan `tail` queries out across actors and stitch — implies enumerating actors. There is no client-side actor-enumeration surface (the MCP exposes `list_engines` and `describe_component`-by-id, never "list this engine's actors"), and adding one would invite exactly the "I don't know what I'm looking for" fishing query. Instead, reconstruction is a **guided walk**: seed at the root mail's `sender`, follow each `Sent` event's `recipient` (each recipient's ring holds that mail's `Received`/`Finished` plus any onward `Sent`s), recurse. The frontier expands purely from observed recipients, so the walk visits **exactly the actors in the tree** and never enumerates the full set.
+
+This directly bounds the cost concern a barrier raises: a trace query issued during a settlement barrier costs `hop × nodes-on-the-path`, touching `O(tree)` actors, not `O(live actors)`. (Per-frontier-level parallel fetch is a future option; the first cut walks sequentially.) It also means every query *starts from a root the caller already holds* — `send_mail_traced` gets its root from the dispatch ack — which is the model the engine should encourage.
+
+### Decisions
+
+- **(A) The stitch coordinator is client-side.** A pure, transport-agnostic `TreeWalk` + `stitch` (in `aether-capabilities::trace_walk`) is driven by both `aether-mcp` (over the RPC wire) and the in-process harness, each owning only its `fetch`. No substrate-side aggregator — mirroring ADR-0081's client-side log aggregation (substrate fan-out hit friction, #960). Revisit if a substrate-side coordinator ever earns its keep.
+- **(B) Off-actor `Sent`s land in a chassis-host ring.** A root injected from outside any actor's dispatch (every such root carries `sender = CHASSIS_MAILBOX_ID`) records its `Sent` in a locked chassis-host ring on the trace handle, since there's no `ActorSlots` to stamp. The walk seeds at `root.sender`, so over the wire it addresses `aether.trace.tail` to `CHASSIS_MAILBOX_ID`; `route_mail`'s chassis arm answers from that ring (replying to both `Session` and `Component` targets). The in-process harness reaches the same ring directly.
+- **(C) Settlement holds are not stored in trace rings.** `HoldOpen` / `Release` aren't tree nodes, and settlement no longer rides the trace stream after Phase 2 — the emit-time counter owns them. The rings store only `Sent` / `Received` / `Finished`.
+
+### `list_active_roots` dropped; `describe_window` deferred to cleanup
+
+`list_active_roots` (recent-roots discovery) had zero callers and is the fishing query the guided-walk model makes unnecessary — removed in 3b. `describe_window`'s only caller is the `#[ignore]` latency harness's window-harvest; it stays observer-served until the harness moves off it. Because the harness rework is coupled to observer removal (both die together), `describe_window` removal + the harness rework + retiring the `ShardedTraceQueue` / drainer / observer group into the cleanup phase. The harness reworks to query the per-actor relay rings *directly* — it built the topology, so it knows its actors by name — folding `Ping` events the same way the walk stitches.
+
+### Findings carried out of 3b
+
+- **Timestamp sampling jitter is expected during dual-write.** `record_sent` writes one `TraceEvent` clone to both the central queue and the ring, so `t_sent` agrees; but `record_received` / `record_finished` push only to the queue, and the ring's `Received` / `Finished` are sampled by a separate `now_nanos()` in the dispatch loop. So those nanos differ by ~µs between the observer's tree and the walked tree. Harmless: each tree is internally consistent, and the ring becomes the sole source at cleanup. The cross-check gate compares topology + timestamp *presence* + causal ordering (`t_sent ≤ t_received ≤ t_finished`; a child is sent within its parent's handler window), not exact nanos.
+- **A `tail` query self-pollutes the queried actor's ring.** The query mail is dispatched to the actor, so its own `Received` / `Finished` land in that actor's ring (under the query's own root — filtered out of results, but consuming ring capacity). Negligible for ordinary queries; a tight poll can evict the very events being queried. Candidate for cleanup: exclude framework-arm mails (`trace.tail` / `log.tail`) from ring recording.
+
+### Trust gate
+
+3b keeps the observer live as an oracle: an in-process cross-check settles a branching tree, reconstructs it both via the observer and via the guided walk, and asserts the node sets match (topology + presence + causal order). Cleanup retires the observer only once the walk is the trusted path.
