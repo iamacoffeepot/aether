@@ -62,6 +62,7 @@ pub mod ffi;
 pub mod local;
 pub mod log;
 pub mod mail;
+pub mod trace_ring;
 
 pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, Resolver};
 pub use actor::sender::{MailCtx, Sender};
