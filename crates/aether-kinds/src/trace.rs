@@ -203,61 +203,6 @@ pub struct MailNodeWire {
     pub thread_name: Option<String>,
 }
 
-/// Issue 718: request kind for the recent-roots summary. `since_ms`
-/// filters to roots whose originating `Sent` event is no older than
-/// the given window (default `60_000` ms). `max` caps the reply length
-/// (default 50, hard cap 1000).
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.trace.list_active_roots")]
-pub struct ListActiveRoots {
-    pub since_ms: Option<u32>,
-    pub max: Option<u32>,
-}
-
-/// Issue 718: reply to [`ListActiveRoots`]. `roots` is sorted by
-/// `t_sent` descending (most recent first). Empty when the observer
-/// has no roots in the requested window.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.trace.list_active_roots_result")]
-pub struct ListActiveRootsResult {
-    pub roots: Vec<RootSummaryWire>,
-}
-
-/// Issue 718: per-root summary in [`ListActiveRootsResult`]. The
-/// non-counter fields (`kind`, `sender`, `recipient`, `t_sent`) come
-/// from the root's own `MailNode` — the observer guarantees the root
-/// node lives as long as the root entry, so the lookup never misses.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
-pub struct RootSummaryWire {
-    pub root: MailId,
-    pub kind: KindId,
-    pub sender: MailboxId,
-    pub recipient: MailboxId,
-    pub t_sent: Nanos,
-    pub in_flight: u32,
-}
-
 /// Issue 735: window selector for the time-window trace queries
 /// ([`DescribeWindow`] today; `dump_trace_window` Phase 3 reuses the
 /// same enum). The substrate resolves [`TraceWindow::Relative`] using

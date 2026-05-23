@@ -18,18 +18,15 @@
 
 use aether_kinds::trace::{
     BatchedTraceEvents, DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult,
-    DispatchTraced, DispatchTracedAck, ListActiveRoots, ListActiveRootsResult, MailNodeWire,
-    RootSummaryWire, TraceWindow,
+    DispatchTraced, DispatchTracedAck, MailNodeWire, TraceWindow,
 };
 
 #[aether_actor::bridge(singleton)]
 mod native {
     use super::{
         BatchedTraceEvents, DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult,
-        DispatchTraced, DispatchTracedAck, ListActiveRoots, ListActiveRootsResult, MailNodeWire,
-        RootSummaryWire, TraceWindow,
+        DispatchTraced, DispatchTracedAck, MailNodeWire, TraceWindow,
     };
-    use std::cmp::Reverse;
     #[cfg(test)]
     use std::collections::HashSet;
     use std::env;
@@ -502,47 +499,6 @@ mod native {
             }
         }
 
-        /// Issue 718: pure compute path for `on_list_active_roots`.
-        /// `now` is injected so tests can drive deterministic windows
-        /// without depending on `SUBSTRATE_START` being initialised.
-        pub(crate) fn build_list_active_roots(
-            &self,
-            request: ListActiveRoots,
-            now: Nanos,
-        ) -> ListActiveRootsResult {
-            const DEFAULT_SINCE_MS: u32 = 60_000;
-            const DEFAULT_MAX: u32 = 50;
-            const HARD_MAX: u32 = 1000;
-
-            let since_ms = request.since_ms.unwrap_or(DEFAULT_SINCE_MS);
-            let max = request.max.unwrap_or(DEFAULT_MAX).min(HARD_MAX) as usize;
-            let cutoff_ns = u64::from(since_ms).saturating_mul(1_000_000);
-
-            let mut summaries: Vec<RootSummaryWire> = self
-                .roots
-                .iter()
-                .filter_map(|(root_id, root_state)| {
-                    // The root mail (mail_id == root) is live whenever the
-                    // root is; an orphan-hold root with no mail is skipped.
-                    let slot = self.slot_for(*root_id)?;
-                    if now.0.saturating_sub(slot.t_sent.0) > cutoff_ns {
-                        return None;
-                    }
-                    Some(RootSummaryWire {
-                        root: *root_id,
-                        kind: slot.kind,
-                        sender: slot.sender,
-                        recipient: slot.recipient,
-                        t_sent: slot.t_sent,
-                        in_flight: root_state.in_flight,
-                    })
-                })
-                .collect();
-            summaries.sort_by_key(|s| Reverse(s.t_sent));
-            summaries.truncate(max);
-            ListActiveRootsResult { roots: summaries }
-        }
-
         /// Issue 735: pure compute path for `on_describe_window`.
         /// `now` is injected so tests can drive deterministic windows
         /// without depending on `SUBSTRATE_START` being initialised.
@@ -702,19 +658,6 @@ mod native {
         #[handler]
         fn on_describe_tree(&mut self, ctx: &mut NativeCtx<'_>, request: DescribeTree) {
             let result = self.build_describe_tree(request.root);
-            ctx.reply(&result);
-        }
-
-        /// # Agent
-        /// Returns recent root summaries for agent root-discovery.
-        /// `since_ms` filters by the root's originating `Sent`
-        /// timestamp (default `60_000`); `max` caps the reply length
-        /// (default 50, hard cap 1000). Sorted by `t_sent` descending.
-        /// Issue 718 / ADR-0080 Phase 2.
-        #[handler]
-        fn on_list_active_roots(&mut self, ctx: &mut NativeCtx<'_>, request: ListActiveRoots) {
-            let now = ctx.mailer().now_nanos();
-            let result = self.build_list_active_roots(request, now);
             ctx.reply(&result);
         }
 
@@ -1462,69 +1405,6 @@ mod native {
                 obs.build_describe_tree(missing),
                 DescribeTreeResult::Err { not_found: missing }
             );
-        }
-
-        #[test]
-        fn list_active_roots_filters_by_window_and_sorts() {
-            let mut obs = boot_observer();
-            // Three roots at t = 100, 5_000_000_000 (5s), 10_000_000_000 (10s).
-            // Window since_ms = 6000 keeps the latter two.
-            for (cid, t) in [(1u64, 100u64), (2, 5_000_000_000), (3, 10_000_000_000)] {
-                let m = mail(1, cid);
-                apply_sent_event(
-                    &mut obs,
-                    m,
-                    m,
-                    None,
-                    MailboxId(1),
-                    MailboxId(2),
-                    KindId(0xABCD),
-                    Nanos(t),
-                );
-            }
-
-            // "Now" is 11s past boot.
-            let now = Nanos(11_000_000_000);
-            let result = obs.build_list_active_roots(
-                ListActiveRoots {
-                    since_ms: Some(6_000),
-                    max: None,
-                },
-                now,
-            );
-            assert_eq!(result.roots.len(), 2);
-            // Sorted desc by t_sent — newer first.
-            assert_eq!(result.roots[0].root, mail(1, 3));
-            assert_eq!(result.roots[1].root, mail(1, 2));
-        }
-
-        #[test]
-        fn list_active_roots_caps_to_max() {
-            let mut obs = boot_observer();
-            for cid in 1..=5 {
-                let m = mail(1, cid);
-                apply_sent_event(
-                    &mut obs,
-                    m,
-                    m,
-                    None,
-                    MailboxId(1),
-                    MailboxId(2),
-                    KindId(0xABCD),
-                    Nanos(cid * 100),
-                );
-            }
-            let result = obs.build_list_active_roots(
-                ListActiveRoots {
-                    since_ms: Some(60_000),
-                    max: Some(2),
-                },
-                Nanos(1_000),
-            );
-            assert_eq!(result.roots.len(), 2);
-            // Top 2 by t_sent desc: cid 5 (t=500), cid 4 (t=400).
-            assert_eq!(result.roots[0].root, mail(1, 5));
-            assert_eq!(result.roots[1].root, mail(1, 4));
         }
 
         #[test]
