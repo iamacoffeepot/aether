@@ -22,10 +22,16 @@ set -u
 input=$(cat)
 command=$(printf '%s' "$input" | jq -r '.tool_input.command // ""')
 
-case "$command" in
-    *"git push"*|*"gh pr create"*) ;;
-    *) exit 0 ;;
-esac
+# Match `git push` / `gh pr create` only in command position — at the
+# start of a line or right after a separator (`;`, `&`, `|`, and thus
+# `&&` / `||`). A real invocation is always in command position; a
+# heredoc or quoted body that merely *mentions* the command name (e.g.
+# an issue describing `gh pr create`) is not, so it no longer
+# false-positives a `gh issue create` whose body quotes the name.
+if ! printf '%s' "$command" \
+    | grep -qE '(^|[;&|])[[:space:]]*(git[[:space:]]+push|gh[[:space:]]+pr[[:space:]]+create)'; then
+    exit 0
+fi
 
 # User-elected bypass. The git pre-push hook will also see --no-verify.
 case "$command" in
