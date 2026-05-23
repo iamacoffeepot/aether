@@ -17,7 +17,7 @@
 //! Release matters: the numbers are dominated by enqueue + worker wake,
 //! which a debug build inflates several-fold.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
 use std::thread::{self, available_parallelism};
@@ -459,6 +459,194 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
             .any(|e| matches!(e.event, TraceEvent::Sent { .. }) && e.root == root),
         "chassis-host ring missing the injected Sent; got {host:?}"
     );
+}
+
+/// ADR-0086 Phase 3b: the decentralized guided walk reconstructs the
+/// exact same tree as the central observer. Drive a branching topology
+/// (the diamond `two_level_tree`, where relay 4 has two parents),
+/// settle one injected root, then describe it both ways — the
+/// observer's `DescribeTree` over its central `mails_by_root` index,
+/// and the guided fan-out across per-actor rings — and assert the node
+/// sets match structurally: same mail-ids, same parent/sender/recipient/
+/// kind/`thread_name` per node, same `t_received`/`t_finished` presence.
+/// On convergence both trees are also checked for causal coherence (see
+/// [`assert_causal_order`]).
+///
+/// Exact timestamps are *not* compared. `record_sent` writes one
+/// `TraceEvent` clone to both the central queue and the ring (so
+/// `t_sent` agrees), but `record_received`/`record_finished` push only
+/// to the central queue — the ring's `Received`/`Finished` are sampled
+/// separately in the dispatch loop, so their nanos differ by sampling
+/// jitter. That divergence is a harmless dual-write transient (the ring
+/// is internally consistent and becomes the sole source once Phase 3c
+/// retires the observer); the *topology* is what this gate guards.
+///
+/// The observer is fed by ADR-0080's async batch drainer, which Phase 2
+/// decoupled from settlement — so the observer's tree lags the `rx`
+/// settlement signal by a drainer hop, while the guided walk reads the
+/// rings synchronously at the producer hook (never stale). We poll the
+/// lagging observer until it converges with the walk; non-convergence
+/// within the timeout is the failure.
+#[test]
+#[allow(clippy::print_stderr)]
+fn guided_walk_matches_observer_tree() {
+    let Ok(mut tb) = TestBench::builder()
+        .with_workers(Some(2))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping guided_walk_matches_observer_tree: no wgpu adapter");
+        return;
+    };
+
+    spawn_topology(&tb, &two_level_tree());
+    let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
+    assert!(
+        rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
+        "injected root never settled"
+    );
+
+    // The guided walk is synchronously complete; the observer catches up
+    // a drainer hop later. Poll until they agree, then assert exact
+    // equality (the timeout-path assert prints the diff on a real bug).
+    //
+    // Poll cadence is deliberately slow (20 ms): each `describe_tree_walked`
+    // sends a `trace.tail` query mail to every visited actor, and the
+    // dispatch loop records that query's own `Received`/`Finished` into
+    // the queried actor's ring (under the query's root). A tight poll
+    // floods relay 0's bounded ring and evicts the very tree events being
+    // queried — so the walk would truncate. At 20 ms cadence the handful
+    // of iterations needed for the drainer to catch up stays far under the
+    // ring cap.
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    loop {
+        let walked = match tb.describe_tree_walked(root) {
+            DescribeTreeResult::Ok { mails, .. } => mails,
+            DescribeTreeResult::Err { not_found } => panic!("guided walk lost root {not_found:?}"),
+        };
+
+        if let Some(observed) = describe_tree(&mut tb, root) {
+            if node_shapes(&walked) == node_shapes(&observed) {
+                // root (chassis -> relay 0) + 0->{1,2} + 1->{3,4} +
+                // 2->{4,5} = 7 mails (relay 4 receives two).
+                assert_eq!(walked.len(), 7, "two_level_tree under one root is 7 mails");
+                // Both trees must be causally coherent on their own
+                // timestamps; a violation on the trusted observer would
+                // flag the invariant itself, not the walk.
+                assert_causal_order(&walked);
+                assert_causal_order(&observed);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "guided-walk tree never converged with observer:\n walked={:#?}\n observer={:#?}",
+                node_shapes(&walked),
+                node_shapes(&observed)
+            );
+        } else {
+            assert!(
+                Instant::now() < deadline,
+                "observer never populated the root tree within the timeout"
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Structural projection of a `MailNodeWire` — every field but the exact
+/// timestamps (which differ by dual-write sampling jitter; see
+/// [`guided_walk_matches_observer_tree`]). `t_received` / `t_finished`
+/// collapse to presence bools. Returned sorted, for set comparison.
+type NodeShape = (
+    MailId,
+    Option<MailId>,
+    MailboxId,
+    MailboxId,
+    KindId,
+    bool,
+    bool,
+    Option<String>,
+);
+
+fn node_shapes(mails: &[MailNodeWire]) -> Vec<NodeShape> {
+    let mut v: Vec<NodeShape> = mails
+        .iter()
+        .map(|n| {
+            (
+                n.mail_id,
+                n.parent,
+                n.sender,
+                n.recipient,
+                n.kind,
+                n.t_received.is_some(),
+                n.t_finished.is_some(),
+                n.thread_name.clone(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Assert the causal invariants a correct trace tree must satisfy on its
+/// own timestamps:
+///
+/// - per node, `t_sent <= t_received <= t_finished` (sent, then
+///   received, then the handler returns);
+/// - per parent->child edge, `parent.t_received <= child.t_sent <=
+///   parent.t_finished` — a child is sent from inside its parent's
+///   handler, and all three reads land on the parent's dispatch thread
+///   (one monotonic clock), so this holds even under the multi-worker
+///   pool. (`child.t_received` is deliberately *not* bounded by
+///   `parent.t_finished`: parallelism lets a child be received before
+///   its parent's handler returns.)
+fn assert_causal_order(mails: &[MailNodeWire]) {
+    let by_id: BTreeMap<MailId, &MailNodeWire> = mails.iter().map(|n| (n.mail_id, n)).collect();
+    for n in mails {
+        if let Some(received) = n.t_received {
+            assert!(
+                n.t_sent.0 <= received.0,
+                "node {:?}: t_sent {} > t_received {}",
+                n.mail_id,
+                n.t_sent.0,
+                received.0
+            );
+            if let Some(finished) = n.t_finished {
+                assert!(
+                    received.0 <= finished.0,
+                    "node {:?}: t_received {} > t_finished {}",
+                    n.mail_id,
+                    received.0,
+                    finished.0
+                );
+            }
+        }
+        if let Some(parent_id) = n.parent {
+            let parent = by_id
+                .get(&parent_id)
+                .unwrap_or_else(|| panic!("parent {parent_id:?} of {:?} absent", n.mail_id));
+            if let Some(parent_received) = parent.t_received {
+                assert!(
+                    parent_received.0 <= n.t_sent.0,
+                    "child {:?} sent at {} before parent {:?} received at {}",
+                    n.mail_id,
+                    n.t_sent.0,
+                    parent_id,
+                    parent_received.0
+                );
+            }
+            if let Some(parent_finished) = parent.t_finished {
+                assert!(
+                    n.t_sent.0 <= parent_finished.0,
+                    "child {:?} sent at {} after parent {:?} finished at {}",
+                    n.mail_id,
+                    n.t_sent.0,
+                    parent_id,
+                    parent_finished.0
+                );
+            }
+        }
+    }
 }
 
 const OBSERVE_FRAMES: u32 = 1000;
