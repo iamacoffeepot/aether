@@ -553,10 +553,13 @@ impl TestBench {
     /// decentralized guided walk over per-actor rings — the in-process
     /// counterpart to the central observer's `DescribeTree`, and the
     /// model the MCP mirrors over the wire. Seeds at `root.sender`
-    /// (the chassis-host ring for an injected root, an actor
-    /// otherwise), then fans out across each `Sent`'s recipient. The
-    /// `root` filter on every tail isolates the tree from the
-    /// trace-query traffic itself.
+    /// (`CHASSIS_MAILBOX_ID` for an injected root, an actor otherwise),
+    /// then fans out across each `Sent`'s recipient. Every ring —
+    /// including the chassis-host ring, reached by the ADR-0086 Phase 3b
+    /// wire route at `CHASSIS_MAILBOX_ID` — answers the same
+    /// `aether.trace.tail` mail, so this drives the identical path the
+    /// MCP does. The `root` filter on every tail isolates the tree from
+    /// the trace-query traffic itself.
     #[cfg(test)]
     pub(crate) fn describe_tree_walked(&mut self, root: MailId) -> DescribeTreeResult {
         let mut walk = TreeWalk::new(root);
@@ -566,21 +569,18 @@ impl TestBench {
                 since: None,
                 root: Some(root),
             };
-            let result = if mailbox == MailboxId::CHASSIS_MAILBOX_ID {
-                self.chassis_host_trace_tail(&request)
-            } else {
-                // A send error (no live actor at this id) or an
-                // undecodable reply yields no entries; the walk still
-                // completes from the rings that do answer.
-                self.send_bytes_and_await_id(mailbox, TraceTail::ID, request.encode_into_bytes())
-                    .ok()
-                    .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
-                    .unwrap_or(TraceTailResult::Ok {
-                        entries: Vec::new(),
-                        next_since: 0,
-                        truncated_before: None,
-                    })
-            };
+            // A send error (no live actor at this id) or an undecodable
+            // reply yields no entries; the walk still completes from the
+            // rings that do answer.
+            let result = self
+                .send_bytes_and_await_id(mailbox, TraceTail::ID, request.encode_into_bytes())
+                .ok()
+                .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
+                .unwrap_or(TraceTailResult::Ok {
+                    entries: Vec::new(),
+                    next_since: 0,
+                    truncated_before: None,
+                });
             if let TraceTailResult::Ok { entries, .. } = result {
                 walk.absorb(entries);
             }
