@@ -31,9 +31,9 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Ping, Relay, RelayConfig, Stats, SweepConfig, default_topologies, depth_chain,
-    fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep,
-    summarize, wide_fanout_widths_from_env,
+    CellResult, Ping, Relay, RelayConfig, Stats, SweepConfig, Topology, default_topologies,
+    depth_chain, fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id,
+    run_sweep, summarize, two_level_tree, wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -81,6 +81,57 @@ const RING_NS: &str = "mlat.ring";
 
 fn ring_id(i: usize) -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{RING_NS}:{i}")).0)
+}
+
+/// On each `Ping`, spawns an inherited worker thread (ADR-0080 §12) that
+/// outlives the handler by a short sleep before exiting. The
+/// `spawn_inherit` acquires a settlement hold before the worker starts;
+/// the handler then returns (dropping `in_flight` to zero) but the root
+/// must NOT settle until the worker exits and releases the hold. Used to
+/// exercise the `HoldOpen` / `Release` producer hooks end-to-end against
+/// the shadow cross-check.
+struct HoldRelay;
+
+impl aether_actor::Actor for HoldRelay {
+    const NAMESPACE: &'static str = "mlat.hold";
+}
+// Both markers: `Instanced` lets the bench's `spawn_actor` place it,
+// `Singleton` satisfies `spawn_inherit`'s bound (the worker-thread hold
+// primitive is singleton-oriented). A test fixture only — production
+// actors pick one role.
+impl aether_actor::Instanced for HoldRelay {}
+impl aether_actor::Singleton for HoldRelay {}
+impl aether_actor::HandlesKind<Ping> for HoldRelay {}
+impl NativeActor for HoldRelay {
+    type Config = ();
+    fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+}
+impl NativeDispatch for HoldRelay {
+    fn __aether_dispatch_envelope(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        kind: KindId,
+        _payload: &[u8],
+    ) -> Option<()> {
+        if kind.0 != Ping::ID.0 {
+            return None;
+        }
+        // Hold acquired before the worker spawns; the worker sleeps so
+        // the handler's `Finished` lands first (in_flight 0, held_open 1
+        // — not settled), then exits to release the hold (settle).
+        let _join = ctx.spawn_inherit::<Self, _>(|_inherit| {
+            thread::sleep(Duration::from_millis(1));
+        });
+        Some(())
+    }
+}
+
+const HOLD_NS: &str = "mlat.hold";
+
+fn hold_id() -> MailboxId {
+    MailboxId(mailbox_id_from_name(&format!("{HOLD_NS}:0")).0)
 }
 
 /// Query the trace observer for one root's whole tree over the mail
@@ -232,6 +283,156 @@ fn sharded_trace_settles_every_root() {
 #[allow(clippy::print_stderr)]
 fn flaky_sharded_trace_settles_every_root() {
     sharded_trace_settles_every_root();
+}
+
+/// ADR-0086 Phase 1 shadow-mode agreement guard: with the emit-time
+/// `SettlementCounter` enabled alongside the incumbent observer fold,
+/// every root must settle identically on both paths. Drives `topo` with
+/// many concurrent roots through a multi-worker pool, waits for the
+/// observer's authoritative settle on each, then asserts the shadow
+/// cross-check is balanced (no root settled by one path but not the
+/// other) with zero disagreements.
+///
+/// The emit-time settle fires synchronously on the producer thread; the
+/// observer settle follows ~1 ms later (drainer + fold) and is what
+/// `inject_root`'s receiver waits on. The chassis-router notes the
+/// observer settle *before* firing the receiver, so by the time every
+/// receiver has fired, both notes are in for every root and the balance
+/// must be zero.
+#[allow(clippy::print_stderr)]
+fn shadow_settlement_agrees_with_observer(topo: &Topology) {
+    let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    let Ok(tb) = TestBench::builder()
+        .with_workers(Some(workers))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping shadow_settlement_agrees_with_observer: no wgpu adapter");
+        return;
+    };
+    // Enable shadow before any traffic. The bench is quiescent after a
+    // synchronous multi-pass boot, so the counter sees every injected
+    // root's full Sent/Finished from the first event (no mid-stream
+    // enable, which would desync the counter).
+    tb.settlement_shadow().set_enabled(true);
+
+    for i in 0..topo.downstreams.len() {
+        let downstreams: Arc<[MailboxId]> =
+            topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+        let sub = i.to_string();
+        let config = RelayConfig {
+            downstreams,
+            work_iters: topo.work_iters[i],
+        };
+        tb.spawn_actor::<Relay>(Subname::Named(&sub), config)
+            .finish()
+            .expect("spawn relay");
+    }
+    let entry = relay_id(0);
+
+    let roots = 500u32;
+    let mut pending = Vec::with_capacity(roots as usize);
+    for seq in 0..roots {
+        pending.push(tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes()));
+    }
+    for (idx, (_root, rx)) in pending.iter().enumerate() {
+        assert!(
+            rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
+            "root {idx} never settled (observer side)"
+        );
+    }
+
+    let xc = tb.settlement_shadow().cross_check();
+    // Non-vacuity: the emit path must actually have run. Each injected
+    // root settles exactly once on each path (no re-open via inject), so
+    // both monotonic counts equal the root count. Without this, a
+    // silently-disabled shadow would pass with an empty, never-touched
+    // ledger.
+    assert_eq!(
+        xc.emit_settles(),
+        u64::from(roots),
+        "emit-time counter did not settle every root (shadow inactive?)"
+    );
+    assert_eq!(xc.observer_settles(), u64::from(roots));
+    let outstanding = xc.outstanding();
+    assert!(
+        outstanding.is_empty(),
+        "shadow disagreement — roots settled by one path only: {outstanding:?}"
+    );
+    assert_eq!(
+        xc.disagreements(),
+        0,
+        "observer settled a root the emit-time counter missed (negative balance)"
+    );
+}
+
+/// Rich topology: fan-out + a shared (two-parent) node + depth.
+#[test]
+fn shadow_settlement_agrees_two_level_tree() {
+    shadow_settlement_agrees_with_observer(&two_level_tree());
+}
+
+/// Flake-soak duplicate (concurrent multi-worker dispatch; see CLAUDE.md).
+#[test]
+fn flaky_shadow_settlement_agrees_two_level_tree() {
+    shadow_settlement_agrees_two_level_tree();
+}
+
+/// Depth chain — exercises the per-root `Sent`-before-`Finished` ordering
+/// the counter relies on across a serial hand-off.
+#[test]
+fn shadow_settlement_agrees_depth_chain() {
+    shadow_settlement_agrees_with_observer(&depth_chain(6));
+}
+
+/// Hold-path agreement: a `spawn_inherit` worker keeps the root open past
+/// the handler's `Finished`, so settlement is gated on the worker's
+/// `Release` (ADR-0080 §12). Exercises the `HoldOpen` / `Release`
+/// producer hooks — the only ones the topology tests above don't hit —
+/// against the shadow cross-check.
+#[test]
+#[allow(clippy::print_stderr)]
+fn shadow_settlement_agrees_with_holds() {
+    let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    let Ok(tb) = TestBench::builder()
+        .with_workers(Some(workers))
+        .size(16, 16)
+        .build()
+    else {
+        eprintln!("skipping shadow_settlement_agrees_with_holds: no wgpu adapter");
+        return;
+    };
+    tb.settlement_shadow().set_enabled(true);
+    tb.spawn_actor::<HoldRelay>(Subname::Named("0"), ())
+        .finish()
+        .expect("spawn hold relay");
+    let entry = hold_id();
+
+    let roots = 50u32;
+    let mut pending = Vec::with_capacity(roots as usize);
+    for seq in 0..roots {
+        pending.push(tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes()));
+    }
+    for (idx, (_root, rx)) in pending.iter().enumerate() {
+        assert!(
+            rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
+            "hold root {idx} never settled — Release may not have fired"
+        );
+    }
+
+    let xc = tb.settlement_shadow().cross_check();
+    assert_eq!(
+        xc.emit_settles(),
+        u64::from(roots),
+        "emit-time counter did not settle every held root"
+    );
+    assert_eq!(xc.observer_settles(), u64::from(roots));
+    assert!(
+        xc.outstanding().is_empty(),
+        "shadow disagreement on the hold path: {:?}",
+        xc.outstanding()
+    );
+    assert_eq!(xc.disagreements(), 0);
 }
 
 const OBSERVE_FRAMES: u32 = 1000;

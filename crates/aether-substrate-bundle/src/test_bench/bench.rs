@@ -45,6 +45,9 @@ use aether_substrate::{
     mail::{CapabilityRegistry, Mail, MailId, MailboxId},
 };
 
+#[cfg(test)]
+use aether_substrate::chassis::settlement_shadow::ShadowSettlement;
+
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
@@ -408,6 +411,17 @@ impl TestBench {
     #[must_use]
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         self.queue.capability_registry()
+    }
+
+    /// ADR-0086 Phase 1: the shadow-settlement apparatus on this bench's
+    /// trace handle. Tests enable the cross-check
+    /// (`settlement_shadow().set_enabled(true)`) before driving traffic
+    /// and assert `cross_check().outstanding()` / `disagreements()`
+    /// afterwards. `pub(crate)` — exercised by the in-crate agreement
+    /// tests, not part of the public bench surface.
+    #[cfg(test)]
+    pub(crate) fn settlement_shadow(&self) -> &Arc<ShadowSettlement> {
+        self.queue.trace_handle().shadow()
     }
 
     /// Bytes-level fire-and-settle send: resolve `recipient_name` in

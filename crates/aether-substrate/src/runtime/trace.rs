@@ -43,6 +43,7 @@ use aether_data::{KindId, MailId, MailboxId};
 use aether_kinds::trace::{BatchedTraceEvents, Nanos, TRACE_OBSERVER_MAILBOX_NAME, TraceEvent};
 use crossbeam_queue::SegQueue;
 
+use crate::chassis::settlement_shadow::ShadowSettlement;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::MailboxEntry;
@@ -142,10 +143,18 @@ impl Default for ShardedTraceQueue {
 /// Cloning shares the underlying [`SegQueue`] (Arc) and copies the
 /// boot-time anchor (Copy), so the chassis drainer and every producer
 /// site can hold an independent `TraceHandle` cheaply.
+///
+/// The handle also carries the ADR-0086 Phase-1 [`ShadowSettlement`]
+/// apparatus (shared via `Arc` across clones — one per chassis). Every
+/// producer hook on this type funnels the same event into it, so the
+/// emit-time settlement counter sees exactly what the trace queue does;
+/// it is inert unless `AETHER_SETTLEMENT_SHADOW` (or the test setter)
+/// turns it on.
 #[derive(Clone, Debug)]
 pub struct TraceHandle {
     queue: Arc<ShardedTraceQueue>,
     boot_time: Instant,
+    shadow: Arc<ShadowSettlement>,
 }
 
 impl TraceHandle {
@@ -168,7 +177,17 @@ impl TraceHandle {
         Self {
             queue,
             boot_time: Instant::now(),
+            shadow: Arc::new(ShadowSettlement::from_env()),
         }
+    }
+
+    /// The ADR-0086 Phase-1 shadow-settlement apparatus. Tests and
+    /// shadow-validation runs reach it to enable the cross-check and
+    /// inspect agreement; the chassis-router reaches it to feed the
+    /// observer's authoritative `Settled` into the cross-check.
+    #[must_use]
+    pub fn shadow(&self) -> &Arc<ShadowSettlement> {
+        &self.shadow
     }
 
     /// Borrow the queue Arc so the chassis builder can pass it to
@@ -221,6 +240,7 @@ impl TraceHandle {
                 t: self.now_nanos(),
             },
         );
+        self.shadow.on_sent(root);
     }
 
     /// ADR-0080 §2 producer hook for the `Received` event. Pushed by
@@ -266,6 +286,7 @@ impl TraceHandle {
                 t: self.now_nanos(),
             },
         );
+        self.shadow.on_finished(root);
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: acquire a
@@ -292,6 +313,7 @@ impl TraceHandle {
                 t: self.now_nanos(),
             },
         );
+        self.shadow.on_hold_open(root);
         SettlementHold {
             handle: self.clone(),
             root,
@@ -335,6 +357,7 @@ impl Drop for SettlementHold {
                 t: self.handle.now_nanos(),
             },
         );
+        self.handle.shadow.on_release(self.root);
     }
 }
 
