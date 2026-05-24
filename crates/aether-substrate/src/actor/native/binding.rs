@@ -47,28 +47,38 @@ use std::time::{Duration, Instant};
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
-use crate::mail::ring::{MailRing, OutMail, RingFull};
+use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 
-/// Per-actor outbound ring capacity (ADR-0087 / 2b). Sized to hold a
-/// typical handler's small-mail fan-out as one blob; a blob that
-/// doesn't fit (a large payload, or a very wide fan-out) degrades to
-/// the [`MailRef::Owned`] copy-out valve in [`NativeBinding::flush_outbound`]
-/// rather than blocking — the large-payload zero-copy path is the
-/// deferred fork on iamacoffeepot/aether#1105.
+/// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
+/// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
+/// large payload, or a very wide fan-out that fills the ring) degrades to
+/// the [`MailRef::Owned`] copy-out valve in
+/// [`NativeBinding::flush_outbound`] / `push_envelope_buffered` rather
+/// than blocking — the large-payload zero-copy path is the deferred fork
+/// on iamacoffeepot/aether#1101.
 const ACTOR_RING_BYTES: usize = 64 * 1024;
 
-/// One outbound mail a handler buffered, pending flush. The payload
-/// bytes live in [`OutboundBuffer::scratch`] at `[payload_off,
-/// payload_off + payload_len)`; everything else is the route metadata
-/// (correlation-derived `reply_to`/`mail_id`, inherited lineage) the
-/// flush stamps onto the [`Mail`] it builds.
+/// Where a buffered mail's payload lives until flush (2c,
+/// iamacoffeepot/aether#1110).
+enum PendingPayload {
+    /// Written into the actor's ring in place at send time; carries the
+    /// location to mint a [`MailRef::InRing`] from at flush.
+    InRing(MailLoc),
+    /// The copy-out fallback when the ring could not take the mail
+    /// (transiently full, or a payload larger than the ring).
+    Owned(Vec<u8>),
+}
+
+/// One outbound mail a handler buffered, pending flush. The payload is
+/// already in the ring (`InRing`) or copied out (`Owned`); the rest is
+/// route metadata (correlation-derived `reply_to`/`mail_id`, inherited
+/// lineage) the flush stamps onto the [`Mail`] it builds.
 struct PendingMail {
     recipient: u64,
     kind: u64,
-    payload_off: usize,
-    payload_len: usize,
+    payload: PendingPayload,
     count: u32,
     reply_to: ReplyTo,
     mail_id: MailId,
@@ -76,24 +86,26 @@ struct PendingMail {
     parent_mail: Option<MailId>,
 }
 
-/// Per-actor send-side buffer that forms blobs (ADR-0087 / 2b). A
-/// handler's outbound mail accumulates here during dispatch and flushes
-/// as one ring blob at handler end (or before a blocking `wait_reply`).
+/// Per-actor send-side buffer that builds blobs **in place** (2c,
+/// iamacoffeepot/aether#1110). `push_envelope_buffered` writes each send
+/// straight into the ring as it happens — the blob is opened lazily on
+/// the first send of a flush window — and records only route metadata
+/// here. `flush_outbound` seals the blob and routes. There is no payload
+/// staging buffer: the bytes land in the ring exactly once (the only
+/// copy is out of the caller's slice, which is unavoidable since it is
+/// not stable past the call).
 ///
-/// `scratch` and `mails` are **reused** across handlers (cleared, not
-/// freed, after each flush) so buffering a send is allocation-free once
-/// warm — the win the blob is after, since a per-send heap allocation is
-/// exactly the cost Phase 0 located. `ring` is lazily created on first
-/// flush so actors that never buffer (wasm trampolines, inline-only
-/// caps) pay no ring allocation.
+/// `mails` is **reused** across windows (cleared, not freed). `ring` is
+/// lazily created on the first buffered send, so actors that never buffer
+/// (wasm trampolines, inline-only caps) pay no ring allocation.
 struct OutboundBuffer {
-    /// Lazily allocated on first flush. `Arc` so each minted
+    /// Lazily created on the first buffered send. `Arc` so each minted
     /// [`MailRef::InRing`] carries the ring's lifetime by refcount.
     ring: Option<Arc<MailRing>>,
-    /// Reused payload arena: each buffered send appends its bytes here.
-    scratch: Vec<u8>,
-    /// Reused per-mail metadata, parallel to the payload slices in
-    /// `scratch`.
+    /// Whether a ring blob is currently open — between the first send of
+    /// a flush window and the flush's `seal`.
+    blob_open: bool,
+    /// Per-mail route metadata for the current flush window.
     mails: Vec<PendingMail>,
 }
 
@@ -101,7 +113,7 @@ impl OutboundBuffer {
     fn new() -> Self {
         Self {
             ring: None,
-            scratch: Vec::new(),
+            blob_open: false,
             mails: Vec::new(),
         }
     }
@@ -548,13 +560,30 @@ impl NativeBinding {
             .outbound
             .lock()
             .expect("outbound buffer poisoned; fail-fast per ADR-0063");
-        let payload_off = buf.scratch.len();
-        buf.scratch.extend_from_slice(bytes);
+        // Write the payload into the ring in place. Open the blob lazily
+        // on the first send of this flush window; on `RingFull` (full ring
+        // or oversized payload) copy out to `Owned` — the never-block
+        // valve. The open blob is left intact on `RingFull`, so a later
+        // send (after a consumer frees space) can still extend it.
+        let payload = {
+            let OutboundBuffer {
+                ring, blob_open, ..
+            } = &mut *buf;
+            let ring =
+                ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
+            if !*blob_open {
+                ring.open_blob();
+                *blob_open = true;
+            }
+            match ring.append(recipient, kind, bytes) {
+                Ok(loc) => PendingPayload::InRing(loc),
+                Err(RingFull) => PendingPayload::Owned(bytes.to_vec()),
+            }
+        };
         buf.mails.push(PendingMail {
             recipient,
             kind,
-            payload_off,
-            payload_len: bytes.len(),
+            payload,
             count,
             reply_to,
             mail_id,
@@ -564,18 +593,19 @@ impl NativeBinding {
         mail_id
     }
 
-    /// ADR-0087 / 2b: flush the buffered outbound mail as one ring blob.
-    /// Called at handler end (via [`super::ctx::NativeCtx`]'s `Drop`) and
-    /// before a blocking [`Self::wait_reply`] (else the awaited mail
-    /// never goes out). A no-op when nothing is buffered.
+    /// ADR-0087 / 2c: seal the open ring blob and route the buffered
+    /// mail. Called at handler end (via [`super::ctx::NativeCtx`]'s
+    /// `Drop`) and before a blocking [`Self::wait_reply`] (else the
+    /// awaited mail never goes out). A no-op when nothing is buffered.
     ///
-    /// Forms the blob with one [`MailRing::push_blob`]; on success mints
-    /// one [`MailRef::InRing`] per mail (the recipient reads the bytes in
-    /// place). On [`RingFull`] — a transient-full ring or a blob larger
-    /// than the ring — the never-block copy-out valve materializes each
-    /// mail as [`MailRef::Owned`] instead (the same allocation the eager
-    /// path pays). Either way the route metadata is identical, so the
-    /// dispatch read path is unchanged.
+    /// The payloads are already in the ring (written by
+    /// `push_envelope_buffered` as each send happened) or copied out to
+    /// `Owned`; this just [`seal`](MailRing::seal)s the blob — publishing
+    /// each in-ring mail's lock — and mints one [`MailRef`] per pending
+    /// entry: [`MailRef::InRing`] for ring-resident payloads (the
+    /// recipient reads them in place), [`MailRef::Owned`] for the
+    /// copy-out fallback. The route metadata is identical for both, so
+    /// the dispatch read path is unchanged.
     ///
     /// The buffer lock is released **before** routing: `Mailer::push` can
     /// run an inline handler synchronously, and holding the lock across
@@ -594,56 +624,34 @@ impl NativeBinding {
                 .outbound
                 .lock()
                 .expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            // Seal the open blob first (publishes the in-ring locks), so a
+            // `MailRef::InRing` minted below reads a finalized header.
+            if buf.blob_open {
+                if let Some(ring) = buf.ring.as_ref() {
+                    ring.seal();
+                }
+                buf.blob_open = false;
+            }
             if buf.mails.is_empty() {
                 return;
             }
-            let build = |p: &PendingMail, payload: MailRef| {
-                Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
-                    .with_reply_to(p.reply_to)
-                    .with_lineage(p.mail_id, p.root, p.parent_mail)
-            };
-            // Inner scope: the destructured borrows + `out_mails` (which
-            // borrows `scratch`) must end before the `clear()`s reborrow
-            // `buf`. `routed` owns its data (owned `MailRef`s / `Arc`
-            // clones), so it escapes the scope cleanly.
-            let routed: Vec<Mail> = {
-                let OutboundBuffer {
-                    ring,
-                    scratch,
-                    mails,
-                } = &mut *buf;
-                let ring =
-                    ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
-                // Lazy front-advance so prior blobs whose consumers have
-                // released free their space before we size this write.
-                ring.reclaim();
-                let out_mails: Vec<OutMail<'_>> = mails
-                    .iter()
-                    .map(|p| OutMail {
-                        recipient: p.recipient,
-                        kind: p.kind,
-                        payload: &scratch[p.payload_off..p.payload_off + p.payload_len],
-                    })
-                    .collect();
-                match ring.push_blob(&out_mails) {
-                    Ok(locs) => mails
-                        .iter()
-                        .zip(locs)
-                        .map(|(p, loc)| build(p, MailRef::in_ring(Arc::clone(ring), loc)))
-                        .collect(),
-                    Err(RingFull) => mails
-                        .iter()
-                        .map(|p| {
-                            let bytes =
-                                scratch[p.payload_off..p.payload_off + p.payload_len].to_vec();
-                            build(p, MailRef::from(bytes))
-                        })
-                        .collect(),
-                }
-            };
-            buf.scratch.clear();
-            buf.mails.clear();
-            routed
+            let OutboundBuffer { ring, mails, .. } = &mut *buf;
+            let ring = ring.as_ref();
+            mails
+                .drain(..)
+                .map(|p| {
+                    let payload = match p.payload {
+                        PendingPayload::InRing(loc) => MailRef::in_ring(
+                            Arc::clone(ring.expect("ring exists once an InRing mail was minted")),
+                            loc,
+                        ),
+                        PendingPayload::Owned(bytes) => MailRef::from(bytes),
+                    };
+                    Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
+                        .with_reply_to(p.reply_to)
+                        .with_lineage(p.mail_id, p.root, p.parent_mail)
+                })
+                .collect()
         };
         for mail in routed {
             self.mailer.push(mail);
