@@ -230,6 +230,7 @@ dependencies = [
  "bytemuck",
  "cpal",
  "crossbeam-channel",
+ "crossbeam-deque",
  "crossbeam-queue",
  "dirs",
  "libc",

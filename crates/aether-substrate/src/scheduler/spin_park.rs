@@ -165,9 +165,11 @@ impl SpinPark {
     /// runs the spin-then-park loop until `scan` yields a slot or
     /// shutdown is signalled.
     ///
-    /// `scan` is the non-blocking ready-queue probe (e.g.
-    /// `|| ready_rx.try_recv().ok()`). It is called repeatedly; it must
-    /// be cheap and must not block.
+    /// `scan` is the non-blocking work probe (post-Phase-3a, a steal
+    /// into the worker's own deque from the injector + siblings). It is
+    /// called repeatedly — in the spin loop and once more in the
+    /// park-commit recheck, which makes it the pre-park steal-rescan —
+    /// so it must be cheap and must not block.
     pub fn acquire<T, F: Fn() -> Option<T>>(&self, scan: F) -> Acquired<T> {
         loop {
             if self.shutdown.load(Ordering::Acquire) {

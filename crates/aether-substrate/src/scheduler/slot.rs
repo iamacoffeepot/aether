@@ -36,9 +36,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
+use crossbeam_deque::Injector;
 
-use super::local_slot;
 use super::spin_park::SpinPark;
+use super::worker_deque;
 
 /// Default per-cycle envelope cap. Once a worker has dispatched this
 /// many envelopes from a single slot, it yields to other ready slots
@@ -297,23 +298,26 @@ pub trait Drainable: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// The destination a [`WakeHandle`] routes a spilled slot to: the
-/// shared ready queue plus the [`SpinPark`] coordinator it notifies
-/// after pushing. Bundled so the "where woken work goes + how we wake a
-/// worker" pair travels as one value through the chassis wiring rather
-/// than two parallel fields. Cloned per registered slot.
+/// The destination a [`WakeHandle`] routes a *spilled* slot to: the
+/// pool's shared [`Injector`] plus the [`SpinPark`] coordinator it
+/// notifies after pushing (ADR-0087 Phase 3a — the shared
+/// `crossbeam_channel` ready queue retired). Bundled so the "where woken
+/// work goes + how we wake a worker" pair travels as one value through
+/// the chassis wiring. Cloned per registered slot. (The affinity path —
+/// pushing to the *current worker's own* deque — goes through
+/// the `worker_deque` thread-local, not this sink.)
 #[derive(Clone)]
 pub struct WakeSink {
-    ready_tx: Sender<Arc<dyn Drainable>>,
+    injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
 }
 
 impl WakeSink {
-    /// Bundle the pool's ready-queue sender and spin/park coordinator.
+    /// Bundle the pool's shared injector and spin/park coordinator.
     /// The chassis builds one from [`super::PoolHandle::wake_sink`].
     #[must_use]
-    pub fn new(ready_tx: Sender<Arc<dyn Drainable>>, spin: Arc<SpinPark>) -> Self {
-        Self { ready_tx, spin }
+    pub fn new(injector: Arc<Injector<Arc<dyn Drainable>>>, spin: Arc<SpinPark>) -> Self {
+        Self { injector, spin }
     }
 }
 
@@ -355,25 +359,25 @@ impl WakeHandle {
             // gone the state never matters.
             return false;
         };
-        // Affinity (iamacoffeepot/aether#1059): if this wake runs on a
-        // pool worker, stash the slot in that worker's local run-queue so
-        // the chain stays warm — no shared-queue round-trip, no wakeup. The
-        // local path is invisible to the spin coordinator; the same worker
-        // drains it on its next loop. The queue holds up to the stickiness
-        // cap (`AETHER_LOCAL_STICKY_MAX`, default 1): at 1 the chain head
-        // stays local and every fan-out extra spills; higher keeps the
-        // fan-out extras local too, trading cross-worker parallelism for
-        // locality.
+        // Affinity (iamacoffeepot/aether#1059, now the deque's own-pop):
+        // if this wake runs on a pool worker and its own deque is under
+        // the local bound, push the slot there so the chain stays warm —
+        // no injector round-trip, no wakeup; the same worker drains it
+        // LIFO on its next loop, invisible to the spin coordinator. The
+        // bound is the stickiness cap (`AETHER_LOCAL_STICKY_MAX`, default
+        // 1): at 1 the chain head stays local and every fan-out extra
+        // spills; higher keeps fan-out extras local too, trading
+        // cross-worker parallelism for locality.
         //
-        // Otherwise (not a pool thread, or the local queue is full — fan-out
-        // spill), push to the shared queue and notify the coordinator
-        // (iamacoffeepot/aether#1064): it routes to a spinning worker
-        // when one exists and only unparks a dormant worker when none
-        // is. A closed ready queue means the pool is shutting down —
-        // skip the notify.
-        if let Err(slot) = local_slot::try_stash_next(slot, local_slot::sticky_cap())
-            && self.sink.ready_tx.send(slot).is_ok()
-        {
+        // Otherwise (not a pool thread, or the own deque is at the bound —
+        // fan-out spill), push to the shared injector and notify the
+        // coordinator (iamacoffeepot/aether#1064): it routes to a spinning
+        // worker when one exists and only unparks a dormant worker when
+        // none is. The injector push is infallible; shutdown is observed
+        // through the coordinator's flag, so there is no closed-channel
+        // case to skip here.
+        if let Err(slot) = worker_deque::try_push_local(slot, worker_deque::sticky_cap()) {
+            self.sink.injector.push(slot);
             self.sink.spin.notify();
         }
         true
@@ -399,7 +403,7 @@ pub mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::time::Duration;
 
-    use crossbeam_channel::unbounded;
+    use crossbeam_deque::Steal;
     use std::collections::VecDeque;
     use std::hint;
     use std::thread;
@@ -701,23 +705,31 @@ pub mod tests {
 
     #[test]
     fn wake_handle_pushes_to_ready_queue_once_per_idle() {
-        let (ready_tx, ready_rx) = unbounded::<Arc<dyn Drainable>>();
+        // The test thread isn't a pool worker, so a wake spills straight
+        // to the injector (the affinity own-deque path is skipped).
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let slot = CounterSlot::new("wake");
         let weak: Weak<dyn Drainable> = Arc::downgrade(&(slot.clone() as Arc<dyn Drainable>));
-        let sink = WakeSink::new(ready_tx, Arc::new(SpinPark::new()));
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
-        // First wake should push.
+        // First wake should spill one slot.
         assert!(wake.wake());
         // Second wake against Ready: no push.
         assert!(!wake.wake());
-        // Drain the queue: exactly one entry.
-        let _drained = ready_rx
-            .recv_timeout(Duration::from_millis(50))
-            .expect("queue should hold the woken slot");
+        // Exactly one entry in the injector (retry past transient steal
+        // contention; Empty means the wake never spilled).
+        let first = loop {
+            match injector.steal() {
+                Steal::Success(s) => break Some(s),
+                Steal::Retry => {}
+                Steal::Empty => break None,
+            }
+        };
+        assert!(first.is_some(), "injector should hold the woken slot");
         assert!(
-            ready_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "queue should not hold a duplicate"
+            !matches!(injector.steal(), Steal::Success(_)),
+            "injector should not hold a duplicate"
         );
     }
 }
