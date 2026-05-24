@@ -332,7 +332,7 @@ mod server_native {
             // to catch. Recognize it here, write the wire `ReplyEnd`,
             // and clear the in-flight entry.
             if env.kind == <CallSettled as Kind>::ID {
-                let result = match CallSettled::decode_from_bytes(&env.payload) {
+                let result = match CallSettled::decode_from_bytes(env.payload.bytes()) {
                     Some(CallSettled::Ok) => Ok(()),
                     Some(CallSettled::Err { error }) => Err(RpcError::Other { reason: error }),
                     None => Err(RpcError::Other {
@@ -358,7 +358,7 @@ mod server_native {
                 },
                 kind: env.kind,
                 correlation_id: Some(entry.wire_cid),
-                payload: env.payload.clone(),
+                payload: env.payload.bytes().to_vec(),
             };
             self.write_frame_to(
                 entry.conn_id,

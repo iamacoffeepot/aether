@@ -340,7 +340,7 @@ mod tests {
             Arc::new(move |dispatch: OwnedDispatch| {
                 captured_clone.lock().unwrap().push(CapturedDispatch {
                     kind: dispatch.kind,
-                    payload: dispatch.payload,
+                    payload: dispatch.payload.into_vec(),
                     count: dispatch.count,
                 });
             }),

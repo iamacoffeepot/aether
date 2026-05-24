@@ -30,7 +30,7 @@ use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
-use crate::mail::{Mail, ReplyTarget, ReplyTo};
+use crate::mail::{Mail, MailRef, ReplyTarget, ReplyTo};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use aether_data::{HandleId, Kind, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
@@ -582,7 +582,7 @@ fn route_mail(
                 kind_name: lookup.kind_name,
                 origin: None,
                 sender: mail.reply_to,
-                payload: mail.payload,
+                payload: MailRef::from(mail.payload),
                 count: mail.count,
                 mail_id: mail.mail_id,
                 root: mail.root,
@@ -1043,7 +1043,7 @@ mod tests {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(move |dispatch: OwnedDispatch| {
-                captured.write().unwrap().push(dispatch.payload);
+                captured.write().unwrap().push(dispatch.payload.into_vec());
                 count.fetch_add(1, Ordering::SeqCst);
             })
         }

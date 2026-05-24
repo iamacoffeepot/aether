@@ -281,9 +281,14 @@ mod native {
             // `root`. Without this, the trampoline's wrapped Mail
             // defaults to `MailId::NONE` and the guest's outbound looks
             // like a fresh root.
-            let mail = Mail::new(self.mailbox, env.kind, env.payload.clone(), env.count)
-                .with_reply_to(env.sender)
-                .with_lineage(env.mail_id, env.root, env.parent_mail);
+            let mail = Mail::new(
+                self.mailbox,
+                env.kind,
+                env.payload.bytes().to_vec(),
+                env.count,
+            )
+            .with_reply_to(env.sender)
+            .with_lineage(env.mail_id, env.root, env.parent_mail);
             if let Err(e) = component.deliver(&mail) {
                 // ADR-0063 fail-fast: a wasm trap (or host-fn error
                 // returned through `Component::deliver`) kills the

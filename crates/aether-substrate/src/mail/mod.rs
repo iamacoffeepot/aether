@@ -9,11 +9,13 @@
 
 pub mod capability;
 pub mod helpers;
+pub mod mail_ref;
 pub mod mailer;
 pub mod outbound;
 pub mod registry;
 
 pub use capability::{CapabilityRegistry, MailboxCaps};
+pub use mail_ref::MailRef;
 pub use mailer::Mailer;
 pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
 pub use registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Registry};

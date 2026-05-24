@@ -38,7 +38,7 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
-use aether_substrate::mail::{ReplyTarget, ReplyTo};
+use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
 
 use super::DagCapability;
 use super::test_support::{
@@ -125,7 +125,7 @@ fn enqueue<K: Kind + serde::Serialize>(
         kind_name: K::NAME.to_owned(),
         origin: None,
         sender,
-        payload: bytes,
+        payload: MailRef::from(bytes),
         count: 1,
         mail_id: MailId::NONE,
         root: MailId::NONE,

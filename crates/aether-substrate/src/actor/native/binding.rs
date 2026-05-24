@@ -552,7 +552,7 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
     if env.payload.len() > out.len() {
         return -2;
     }
-    out[..env.payload.len()].copy_from_slice(&env.payload);
+    out[..env.payload.len()].copy_from_slice(env.payload.bytes());
     env.payload.len() as i32
 }
 
@@ -563,6 +563,7 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 )]
 mod tests {
     use super::*;
+    use crate::mail::MailRef;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::test_util::fresh_substrate;
     use std::sync::mpsc;
@@ -647,7 +648,7 @@ mod tests {
             kind_name: String::new(),
             origin: None,
             sender: ReplyTo::with_correlation(ReplyTarget::None, correlation),
-            payload,
+            payload: MailRef::from(payload),
             count: 1,
             mail_id: MailId::NONE,
             root: MailId::NONE,

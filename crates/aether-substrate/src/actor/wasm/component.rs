@@ -20,7 +20,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{MailboxEntry, Registry};
-use crate::mail::{Mail, MailId, MailKind, MailboxId, ReplyTarget, ReplyTo};
+use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, ReplyTarget, ReplyTo};
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -247,7 +247,7 @@ impl ComponentCtx {
                     kind_name,
                     origin,
                     sender: reply_to,
-                    payload,
+                    payload: MailRef::from(payload),
                     count,
                     mail_id,
                     root,

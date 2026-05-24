@@ -218,7 +218,7 @@ mod native {
             let correlation = env.sender.correlation_id;
             let matched =
                 self.executor
-                    .on_reply(ctx, correlation, KindId(env.kind.0), &env.payload);
+                    .on_reply(ctx, correlation, KindId(env.kind.0), env.payload.bytes());
             if !matched {
                 tracing::debug!(
                     target: "aether_substrate::dag",

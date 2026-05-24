@@ -68,7 +68,7 @@ where
     A: NativeActor + NativeDispatch,
 {
     if actor
-        .__aether_dispatch_envelope(ctx, env.kind, &env.payload)
+        .__aether_dispatch_envelope(ctx, env.kind, env.payload.bytes())
         .is_none()
         && !actor.__aether_dispatch_fallback(ctx, env)
     {
@@ -98,7 +98,7 @@ pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) ->
     if env.kind.0 != <LogTail as Kind>::ID.0 {
         return false;
     }
-    let Some(request) = <LogTail as Kind>::decode_from_bytes(&env.payload) else {
+    let Some(request) = <LogTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
         ctx.reply(&LogTailResult::Err {
             error: "aether.log.tail: payload failed to decode".to_owned(),
         });
@@ -123,7 +123,7 @@ pub fn dispatch_trace_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) 
     if env.kind.0 != <TraceTail as Kind>::ID.0 {
         return false;
     }
-    let Some(request) = <TraceTail as Kind>::decode_from_bytes(&env.payload) else {
+    let Some(request) = <TraceTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
         ctx.reply(&TraceTailResult::Err {
             error: "aether.trace.tail: payload failed to decode".to_owned(),
         });
@@ -234,7 +234,7 @@ pub fn dispatch_loop_run<A>(
             if !dispatch_log_tail_if_matching(&mut ctx, &env)
                 && !dispatch_trace_tail_if_matching(&mut ctx, &env)
             {
-                let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
+                let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, env.payload.bytes());
             }
             th.push_trace_ring(
                 env.root,

@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use rustc_hash::FxHashMap;
 
 use crate::handle_store::schema_contains_ref;
-use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
+use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
 use std::error;
 
 /// Test-only helper that builds a [`MailDispatch`] with empty
@@ -72,7 +72,7 @@ pub(crate) fn test_owned_dispatch(
         kind_name: kind_name.to_owned(),
         origin: None,
         sender: ReplyTo::NONE,
-        payload: payload.to_vec(),
+        payload: MailRef::from(payload.to_vec()),
         count,
         mail_id: MailId::NONE,
         root: MailId::NONE,
@@ -163,11 +163,13 @@ pub struct OwnedDispatch {
     /// Remote reply target of the mail (ADR-0008 / ADR-0037 /
     /// ADR-0042). Carries the correlation id for reply-routing.
     pub sender: ReplyTo,
-    /// Payload bytes (the kind's encoded representation per ADR-0019).
-    /// Owned `Vec<u8>` — handlers move this into the downstream
-    /// envelope rather than cloning the borrowed slice every
-    /// dispatch (the perf win called out in iamacoffeepot/aether#848).
-    pub payload: Vec<u8>,
+    /// Payload bytes (the kind's encoded representation per ADR-0019),
+    /// held as a [`MailRef`] (ADR-0087, iamacoffeepot/aether#1104).
+    /// Phase 1 only ever carries `MailRef::Owned` — handlers move it
+    /// into the downstream envelope rather than cloning every dispatch
+    /// (the perf win called out in iamacoffeepot/aether#848); Phase 2
+    /// adds the zero-copy `InRing` ref. Read via [`MailRef::bytes`].
+    pub payload: MailRef,
     /// Kind-implied item count.
     pub count: u32,
     /// ADR-0080 §1: the producer-minted identity of this mail.
@@ -1135,7 +1137,7 @@ mod tests {
             kind_name: "aether.tick".to_owned(),
             origin: Some("physics".to_owned()),
             sender: ReplyTo::NONE,
-            payload: Vec::new(),
+            payload: MailRef::from(Vec::new()),
             count: 3,
             mail_id: MailId::NONE,
             root: MailId::NONE,
@@ -1622,7 +1624,10 @@ mod tests {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
             // Payload moves straight into the captured Vec — no clone
             // or `to_vec()` on a borrowed slice.
-            collected_for_handler.lock().unwrap().push(dispatch.payload);
+            collected_for_handler
+                .lock()
+                .unwrap()
+                .push(dispatch.payload.into_vec());
         });
 
         handler.enqueue(OwnedDispatch {
@@ -1630,7 +1635,7 @@ mod tests {
             kind_name: "aether.audio.note_on".to_owned(),
             origin: None,
             sender: ReplyTo::NONE,
-            payload: vec![1, 2, 3],
+            payload: MailRef::from(vec![1, 2, 3]),
             count: 1,
             mail_id: MailId::NONE,
             root: MailId::NONE,
@@ -1641,7 +1646,7 @@ mod tests {
             kind_name: "aether.audio.note_on".to_owned(),
             origin: None,
             sender: ReplyTo::NONE,
-            payload: vec![4, 5, 6, 7],
+            payload: MailRef::from(vec![4, 5, 6, 7]),
             count: 1,
             mail_id: MailId::NONE,
             root: MailId::NONE,
@@ -1679,7 +1684,7 @@ mod tests {
             kind_name: "aether.fs.write".to_owned(),
             origin: Some("aether.fs".to_owned()),
             sender: ReplyTo::NONE,
-            payload: vec![0xAB, 0xCD],
+            payload: MailRef::from(vec![0xAB, 0xCD]),
             count: 1,
             mail_id: MailId::NONE,
             root: MailId::NONE,
@@ -1689,7 +1694,7 @@ mod tests {
         let received = rx.try_recv().expect("hand-rolled enqueue should send");
         assert_eq!(received.kind, KindId(42));
         assert_eq!(received.kind_name, "aether.fs.write");
-        assert_eq!(received.payload, vec![0xAB, 0xCD]);
+        assert_eq!(received.payload.into_vec(), vec![0xAB, 0xCD]);
         assert!(
             rx.try_recv().is_err(),
             "exactly one enqueue should send exactly one envelope",

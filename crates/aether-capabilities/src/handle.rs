@@ -223,7 +223,7 @@ mod native {
         use aether_substrate::mail::registry;
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
-        use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
 
         fn fresh_substrate() -> (
             Arc<HandleStore>,
@@ -277,7 +277,7 @@ mod native {
                 kind_name: "aether.handle.publish".to_owned(),
                 origin: None,
                 sender: session_reply_to(),
-                payload: bytes,
+                payload: MailRef::from(bytes),
                 count: 1,
                 mail_id: MailId::NONE,
                 root: MailId::NONE,
@@ -355,7 +355,7 @@ mod native {
                 kind_name: "aether.handle.describe".to_owned(),
                 origin: None,
                 sender: session_reply_to(),
-                payload: bytes,
+                payload: MailRef::from(bytes),
                 count: 1,
                 mail_id: MailId::NONE,
                 root: MailId::NONE,
