@@ -19,8 +19,8 @@ use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
-    InputCapability, InputConfig, TcpCapability, fs::NamespaceRoots, http::HttpConfig,
-    trace::TraceDispatchCapability,
+    InputCapability, InputConfig, InventoryCapability, TcpCapability, fs::NamespaceRoots,
+    http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
@@ -91,6 +91,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
         .with_actor::<FsCapability>(boot.namespace_roots)
+        .with_actor::<InventoryCapability>(())
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
         .with_actor::<AnthropicCapability>(boot.anthropic)
