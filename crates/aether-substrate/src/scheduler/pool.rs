@@ -1,18 +1,20 @@
-//! [`Pool`] — N worker threads cooperatively draining the ready queue.
+//! [`Pool`] — N worker threads cooperatively draining work-stealing
+//! deques (ADR-0087 Phase 3a, iamacoffeepot/aether#1112).
 //!
-//! The pool's only inputs at construction time are a worker count, a
-//! shared [`FatalAborter`], and an optional
-//! ready-queue capacity (today the queue is unbounded — backpressure
-//! happens at the per-actor inbox level, not at the scheduler).
+//! The pool's only inputs at construction time are a worker count and a
+//! shared [`FatalAborter`]. Each worker owns a LIFO deque; off-worker
+//! producers feed a shared injector; idle workers steal from siblings'
+//! tails. Backpressure happens at the per-actor inbox level, not at the
+//! scheduler.
 //!
 //! Worker loop:
 //!
 //! ```text
 //! loop {
-//!     slot = acquire_slot()?;             // try_recv → spin → park
+//!     slot = acquire_slot()?;             // own deque → steal → spin → park
 //!     match catch_unwind(|| slot.run_cycle()) {
 //!         Ok(Idle | Closed) => drop(slot),
-//!         Ok(Requeue)       => ready_tx.send(slot)?,
+//!         Ok(Requeue)       => { injector.push(slot); spin.notify(); }
 //!         Err(payload)      => aborter.abort(panic_reason(payload)),
 //!     }
 //! }
@@ -32,10 +34,10 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_deque::{Injector, Stealer, Worker};
 
-use crate::scheduler::local_slot;
 use crate::scheduler::spin_park::{Acquired, DEFAULT_SPIN_WINDOW_USEC, SpinPark};
+use crate::scheduler::worker_deque;
 
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::slot::{BatchBudget, CycleResult, Drainable, WakeSink};
@@ -102,35 +104,24 @@ impl BudgetTemplate {
 /// on the ready queue, so dropping a sender is not the stop signal it
 /// was under the old `select!` park.
 pub struct PoolHandle {
-    // `Option` so `Drop` and the consuming `shutdown` method can both
-    // take the sender without a clone. Production drops on `PoolHandle`
-    // drop, tests consume via `shutdown_with_results` to inspect any
-    // worker-thread panics.
-    ready_tx: Option<Sender<Arc<dyn Drainable>>>,
+    /// Shared off-worker injector — the spill target for a wake that
+    /// can't push to a worker's own deque (off-worker producer, or the
+    /// own deque is at the local bound). Cloned into every [`WakeSink`].
+    injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
     workers: Vec<PoolWorkerJoin>,
 }
 
 impl PoolHandle {
-    /// Hand out a [`WakeSink`] — the ready-queue sender plus the
-    /// spin/park coordinator. The chassis bundles this into each
+    /// Hand out a [`WakeSink`] — the shared injector plus the spin/park
+    /// coordinator. The chassis bundles this into each
     /// [`crate::scheduler::WakeHandle`] when registering a dispatcher
-    /// slot, so a wake both enqueues the slot and routes the
-    /// notification through the coordinator.
-    ///
-    /// # Panics
-    /// Panics if the pool has already been shut down (the sender slot
-    /// is `None`) — fail-fast per ADR-0063: registering a wake handle
-    /// after pool shutdown is a chassis-lifecycle bug.
+    /// slot, so a wake pushes to the producing worker's own deque
+    /// (affinity) or spills to the injector + routes the notification
+    /// through the coordinator.
     #[must_use]
     pub fn wake_sink(&self) -> WakeSink {
-        WakeSink::new(
-            self.ready_tx
-                .as_ref()
-                .expect("pool already shut down")
-                .clone(),
-            Arc::clone(&self.spin),
-        )
+        WakeSink::new(Arc::clone(&self.injector), Arc::clone(&self.spin))
     }
 
     /// Shut down the pool, joining every worker, and return each
@@ -144,16 +135,16 @@ impl PoolHandle {
     fn shutdown_inner(&mut self) -> Vec<thread::Result<()>> {
         // Signal shutdown via the coordinator flag, then unpark every
         // worker: parked workers wake and observe the flag, spinning
-        // workers see it in their loop. Drop the ready-queue sender so
-        // any future `wake` no-ops via SendError. Finally join. The
-        // unpark must precede the join — a parked worker that's never
-        // unparked would block the join forever. Idempotent: re-calling
-        // drains the (empty) workers Vec and returns an empty Vec.
+        // workers see it in their loop. Finally join. The unpark must
+        // precede the join — a parked worker that's never unparked would
+        // block the join forever. A late `wake` after this still pushes
+        // to the injector but no worker drains it (they're exiting),
+        // which is harmless. Idempotent: re-calling drains the (empty)
+        // workers Vec and returns an empty Vec.
         self.spin.set_shutdown();
         for w in &self.workers {
             w.handle.thread().unpark();
         }
-        self.ready_tx.take();
         mem::take(&mut self.workers)
             .into_iter()
             .map(|w| w.handle.join())
@@ -203,25 +194,31 @@ impl Pool {
     #[allow(clippy::needless_pass_by_value)]
     pub fn start(config: PoolConfig, aborter: Arc<dyn FatalAborter>) -> PoolHandle {
         assert!(config.workers >= 1, "pool needs at least one worker");
-        let (ready_tx, ready_rx) = unbounded::<Arc<dyn Drainable>>();
         let spin = Arc::new(SpinPark::with_spin_window(spin_window_from_env()));
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        // One LIFO deque per worker; collect every stealer so each worker
+        // can steal from its siblings' tails when its own deque runs dry.
+        let deques: Vec<Worker<Arc<dyn Drainable>>> =
+            (0..config.workers).map(|_| Worker::new_lifo()).collect();
+        let stealers: Arc<[Stealer<Arc<dyn Drainable>>]> =
+            deques.iter().map(Worker::stealer).collect();
         let mut workers = Vec::with_capacity(config.workers);
-        for n in 0..config.workers {
-            let name = format!("aether-worker-{n}");
-            let rx = ready_rx.clone();
-            let tx = ready_tx.clone();
+        for (idx, deque) in deques.into_iter().enumerate() {
+            let name = format!("aether-worker-{idx}");
+            let stealers = Arc::clone(&stealers);
+            let injector = Arc::clone(&injector);
             let spin = Arc::clone(&spin);
             let aborter = Arc::clone(&aborter);
             let template = config.budget_template;
             let thread_name = name.clone();
             let handle = thread::Builder::new()
                 .name(thread_name)
-                .spawn(move || worker_loop(rx, tx, spin, aborter, template))
+                .spawn(move || worker_loop(idx, deque, stealers, injector, spin, aborter, template))
                 .expect("spawn pool worker thread");
             workers.push(PoolWorkerJoin { handle, name });
         }
         PoolHandle {
-            ready_tx: Some(ready_tx),
+            injector,
             spin,
             workers,
         }
@@ -244,18 +241,21 @@ fn spin_window_from_env() -> Duration {
 // for its lifetime — the function is the worker thread's body.
 #[allow(clippy::needless_pass_by_value)]
 fn worker_loop(
-    ready_rx: Receiver<Arc<dyn Drainable>>,
-    ready_tx: Sender<Arc<dyn Drainable>>,
+    idx: usize,
+    deque: Worker<Arc<dyn Drainable>>,
+    stealers: Arc<[Stealer<Arc<dyn Drainable>>]>,
+    injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
     aborter: Arc<dyn FatalAborter>,
     template: BudgetTemplate,
 ) {
-    // Mark this thread as a pool worker so a handler's wake of a
-    // downstream slot can stash it in this worker's local cell (affinity)
-    // rather than the shared queue. iamacoffeepot/aether#1059.
-    local_slot::mark_pool_worker();
+    // Hand this worker's deque to the thread-local so a handler's wake of
+    // a downstream slot (running on this thread) pushes to it directly —
+    // the affinity path that keeps a relay chain on one warm worker
+    // (iamacoffeepot/aether#1059, now the deque's LIFO own-pop).
+    worker_deque::install(deque);
     loop {
-        let Some(slot) = acquire_slot(&ready_rx, &spin) else {
+        let Some(slot) = acquire_slot(idx, &stealers, &injector, &spin) else {
             // Shutdown signalled. Exit.
             return;
         };
@@ -270,15 +270,12 @@ fn worker_loop(
             }
             Ok(CycleResult::Requeue) => {
                 // Yielded mid-drain (budget hit) or post-empty recheck
-                // found new work. Re-push and notify the coordinator so
-                // a parked worker can run the slot in parallel if no
-                // worker is already spinning. This worker also loops
-                // straight into `acquire_slot` and may pick it up first
-                // — the `enter_running` CAS ensures only one wins.
-                if ready_tx.send(slot).is_err() {
-                    // Pool shutting down: ready queue closed. Exit.
-                    return;
-                }
+                // found new work. Spill to the shared injector (not our
+                // own deque) so the yield actually yields — any worker,
+                // incl. this one after its own deque, can steal it;
+                // notify routes to a spinner or unparks one. Shutdown is
+                // observed at the next `acquire_slot`.
+                injector.push(slot);
                 spin.notify();
             }
             Err(payload) => {
@@ -299,40 +296,45 @@ fn worker_loop(
     }
 }
 
-/// Acquire the next ready slot for a worker: worker-local hand-off first,
-/// then a `try_recv` fast path, then the spin-then-park coordinator.
-/// Returns `None` only on shutdown.
+/// Acquire the next ready slot for a worker: own deque first (LIFO —
+/// the affinity warm path), then one non-blocking steal pass (injector +
+/// siblings), then the spin-then-park coordinator. Returns `None` only
+/// on shutdown.
 ///
-/// The worker-local run-queue (iamacoffeepot/aether#1059) is the affinity
-/// lever: when a handler running on this worker wakes a downstream slot,
-/// that slot is stashed here instead of the shared queue, so a relay
-/// chain stays on the same warm worker and never pays the ~4.3µs
-/// parked-worker wakeup. The queue holds up to the stickiness cap
-/// (`AETHER_LOCAL_STICKY_MAX`, default 1): at 1 the chain head stays local
-/// and a fan-out spills its extras to the shared queue (independent work
-/// parallelises across workers); higher keeps the fan-out extras local for
-/// the producing worker to drain in sequence, trading parallelism for
-/// locality. `take_next` is checked first so a stashed slot is never
-/// stranded; the queue can only be populated by *this* worker during its
-/// own `run_cycle`, so one pop per acquire suffices.
+/// The own deque (iamacoffeepot/aether#1059, now a `crossbeam_deque`
+/// `Worker`) is the affinity lever: a handler running on this worker
+/// pushes a woken downstream slot there, so a relay chain stays on the
+/// same warm worker and never pays the ~4.3µs parked-worker wakeup. Its
+/// LIFO pop keeps the freshest hop warmest. The local bound is the
+/// stickiness cap (`AETHER_LOCAL_STICKY_MAX`, default 1): at 1 the chain
+/// head stays local and a fan-out spills its extras to the injector
+/// (independent work parallelises by being stolen); higher keeps fan-out
+/// extras local. The own deque is checked first so a pushed slot is never
+/// stranded.
 ///
-/// When neither the cell nor a fast `try_recv` yields work, the
-/// coordinator (iamacoffeepot/aether#1064) takes over: it keeps the
-/// worker spinning (scanning `try_recv`) for a bounded window so a
-/// producer can route a spill or relay hop to it without a futex wake,
-/// then parks it. Shutdown is observed inside the coordinator (a flag +
-/// an explicit unpark of every worker on teardown).
+/// When the own deque is empty, the worker steals into it from the
+/// injector (off-worker producers + spilled fan-out + requeued yields)
+/// and its siblings' tails. When that turns up nothing, the coordinator
+/// (iamacoffeepot/aether#1064) takes over: it keeps the worker spinning
+/// (re-running the steal scan) for a bounded window so a producer can
+/// route a spill or relay hop to it without a futex wake, then parks it —
+/// and the coordinator's park-commit recheck re-runs the steal scan,
+/// which *is* the pre-park steal-rescan that closes the lost-wakeup
+/// window. Shutdown is observed inside the coordinator (a flag + an
+/// explicit unpark of every worker on teardown).
 fn acquire_slot(
-    ready_rx: &Receiver<Arc<dyn Drainable>>,
+    idx: usize,
+    stealers: &[Stealer<Arc<dyn Drainable>>],
+    injector: &Injector<Arc<dyn Drainable>>,
     spin: &SpinPark,
 ) -> Option<Arc<dyn Drainable>> {
-    if let Some(slot) = local_slot::take_next() {
+    if let Some(slot) = worker_deque::pop_local() {
         return Some(slot);
     }
-    if let Ok(slot) = ready_rx.try_recv() {
+    if let Some(slot) = worker_deque::steal_into_local(idx, stealers, injector) {
         return Some(slot);
     }
-    match spin.acquire(|| ready_rx.try_recv().ok()) {
+    match spin.acquire(|| worker_deque::steal_into_local(idx, stealers, injector)) {
         Acquired::Slot(slot) => Some(slot),
         Acquired::Shutdown => None,
     }
@@ -363,6 +365,7 @@ mod tests {
     use crate::scheduler::slot::BATCH_MAX_USEC;
     use crate::scheduler::slot::tests::CounterSlot;
     use crate::scheduler::{SlotStateLabel, WakeHandle};
+    use crossbeam_deque::Steal;
     use std::sync::Weak;
     use std::time::Duration;
     use std::time::Instant;
@@ -519,28 +522,35 @@ mod tests {
         // No worker pool — exercise WakeHandle directly. The state
         // sequence: Idle → wake → Ready → enter_running → Running →
         // wake (no-op) → mark_idle → recheck (already Idle, but no
-        // mail) → Idle.
-        let (ready_tx, ready_rx) = unbounded::<Arc<dyn Drainable>>();
+        // mail) → Idle. This test runs on the test thread (not a pool
+        // worker), so a wake always spills to the injector.
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let slot = CounterSlot::new("running-wake");
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         drop(slot_dyn);
-        let sink = WakeSink::new(ready_tx, Arc::new(SpinPark::new()));
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         slot.push(1);
         assert!(wake.wake(), "first wake transitions Idle→Ready");
 
-        // Drain the queue (simulate worker pop), enter Running.
-        let _popped = ready_rx.recv().unwrap();
+        // Drain the injector (simulate a worker stealing it), enter Running.
+        let popped = loop {
+            match injector.steal() {
+                Steal::Success(s) => break s,
+                Steal::Retry => {}
+                Steal::Empty => panic!("first wake must have spilled a slot to the injector"),
+            }
+        };
+        let _ = popped;
         assert!(slot.state.enter_running());
 
         // Second wake while Running: no-op, no duplicate enqueue.
         assert!(!wake.wake(), "wake against Running is a no-op");
-        assert_eq!(
-            ready_rx.try_recv().err(),
-            Some(crossbeam_channel::TryRecvError::Empty),
-            "ready queue should be empty"
+        assert!(
+            matches!(injector.steal(), Steal::Empty),
+            "injector should be empty — the Running wake must not enqueue"
         );
     }
 

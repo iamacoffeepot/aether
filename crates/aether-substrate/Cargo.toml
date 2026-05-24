@@ -55,8 +55,14 @@ cpal = { version = "0.17", optional = true }
 # ADR-0080 trace queue (always on — substrate-wide tracing).
 crossbeam-queue = "0.3"
 # Issue 635 PR B worker-pool ready queue. MPMC channel — std mpsc is
-# single-consumer so it can't load-balance across pool workers.
+# single-consumer so it can't load-balance across pool workers. Still
+# used for settlement/capture one-shots + the close-done signal; the
+# pool ready-queue moved to `crossbeam-deque` (ADR-0087 Phase 3a).
 crossbeam-channel = "0.5"
+# ADR-0087 Phase 3a (iamacoffeepot/aether#1112): per-worker work-stealing
+# deques + a shared injector replace the single shared ready channel —
+# the blob (Phase 3b) becomes the stealable unit.
+crossbeam-deque = "0.8"
 # Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
 # `aether.kinds` section. Pin to the version wasmtime re-exports
