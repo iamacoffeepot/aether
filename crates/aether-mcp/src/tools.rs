@@ -50,8 +50,10 @@ use crate::args::{
     ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
     SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
+use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
 use aether_kinds::descriptors;
+use aether_kinds::{Manifest, ManifestResult, Resolve, ResolveResult};
 use base64::engine::general_purpose::STANDARD;
 use std::time::Duration;
 use tokio::fs;
@@ -68,12 +70,26 @@ const RENDER_CAP: &str = "aether.render";
 const HANDLE_CAP: &str = "aether.handle";
 /// Mailbox name of a substrate's DAG-executor cap (ADR-0047).
 const DAG_CAP: &str = "aether.dag";
+/// Mailbox name of a substrate's reverse-lookup inventory cap
+/// (ADR-0088 §6) — the `aether.inventory.manifest` / `resolve` target.
+const INVENTORY_CAP: &str = "aether.inventory";
 
 /// Component receive-side capabilities, keyed by `(engine, mailbox)`.
 /// Populated from `load_component` / `replace_component` replies and
 /// read by `describe_component` — the forward-model stand-in for the
 /// embedded hub's component registry.
 pub type ComponentCache = Mutex<HashMap<(EngineId, MailboxId), ComponentCapabilities>>;
+
+/// Per-engine reverse-lookup state, keyed by [`EngineId`] (ADR-0088 §8).
+/// Each [`EngineNames`] folds that engine's served `aether.inventory`
+/// manifest into a `hash → name` map plus a dynamic-resolve cache. Built
+/// lazily on first need (the first id render for an engine), cached for
+/// the engine's lifetime, and shared across cloned [`Mcp`] sessions —
+/// statics are build-identical but dynamic instances are per-engine, so
+/// the map can't be process-global. An engine that doesn't answer the
+/// manifest gets an empty map (every lookup falls back to hex) rather
+/// than erroring the tool.
+pub type ReverseNameCache = Mutex<HashMap<EngineId, EngineNames>>;
 
 /// Per-session MCP service. `rmcp` calls the factory once per session
 /// and may clone the result for concurrent tool dispatch — `session`
@@ -83,6 +99,9 @@ pub type ComponentCache = Mutex<HashMap<(EngineId, MailboxId), ComponentCapabili
 pub struct Mcp {
     session: Arc<RpcSession>,
     components: Arc<ComponentCache>,
+    /// Per-engine reverse-lookup maps (ADR-0088 §8), shared across cloned
+    /// sessions so a manifest fetched for one tool call serves the next.
+    names: Arc<ReverseNameCache>,
     // The `#[tool_router]` macro stores the router instance here; it's
     // consumed by `#[tool_handler]` codegen rather than read by name, so
     // the dead-code lint fires under `-D warnings` despite the field
@@ -93,11 +112,16 @@ pub struct Mcp {
 
 impl Mcp {
     /// Construct a per-session service over an established hub
-    /// connection + the process-wide component cache.
-    pub fn new(session: Arc<RpcSession>, components: Arc<ComponentCache>) -> Self {
+    /// connection + the process-wide component and reverse-name caches.
+    pub fn new(
+        session: Arc<RpcSession>,
+        components: Arc<ComponentCache>,
+        names: Arc<ReverseNameCache>,
+    ) -> Self {
         Self {
             session,
             components,
+            names,
             tool_router: Self::tool_router(),
         }
     }
@@ -288,12 +312,27 @@ impl Mcp {
                 root,
                 in_flight,
                 mails,
-            } => json(&SendMailTracedResponse {
-                status: "settled".into(),
-                root: Some(mail_id_to_json(root)),
-                mails: Some(mails.into_iter().map(mail_node_to_json).collect()),
-                in_flight: Some(in_flight),
-            }),
+            } => {
+                // Reverse mailbox / kind ids to real names through the
+                // engine's inventory map (ADR-0088 §8). `render_mail_nodes`
+                // builds + resolves the map; the root id then renders
+                // through the now-populated cache (its sender is the
+                // chassis mailbox — a static name).
+                let mails = self.render_mail_nodes(engine, mails).await;
+                let root = {
+                    let cache = self
+                        .names
+                        .lock()
+                        .expect("reverse-name cache mutex is never poisoned");
+                    mail_id_to_json(root, cache.get(&engine))
+                };
+                json(&SendMailTracedResponse {
+                    status: "settled".into(),
+                    root: Some(root),
+                    mails: Some(mails),
+                    in_flight: Some(in_flight),
+                })
+            }
             DescribeTreeResult::Err { not_found } => Err(internal_msg(&format!(
                 "describe_tree: root {not_found:?} not found"
             ))),
@@ -749,6 +788,141 @@ impl Mcp {
         };
         self.session.call_settled(envelope).await
     }
+
+    /// Ensure `engine`'s reverse-name map is built (ADR-0088 §8). On the
+    /// first need for an engine, fetch `aether.inventory.manifest` and
+    /// fold it into an [`EngineNames`]; on any subsequent call the cached
+    /// map is reused. An engine that doesn't answer the manifest (older
+    /// build, headless without the cap, transient error) gets an empty
+    /// map cached — every lookup then falls back to the hex tag rather
+    /// than erroring the tool or re-fetching on every render.
+    async fn ensure_names(&self, engine: EngineId) {
+        if self
+            .names
+            .lock()
+            .expect("reverse-name cache mutex is never poisoned")
+            .contains_key(&engine)
+        {
+            return;
+        }
+        // Fetch outside the lock — the await must not hold a std Mutex.
+        // No / undecodable reply caches an empty map so we fall back to
+        // hex for this engine without re-querying every render.
+        let manifest = self
+            .session
+            .call_one(engine_envelope(engine, INVENTORY_CAP, &Manifest {}))
+            .await
+            .ok()
+            .and_then(|reply| ManifestResult::decode_from_bytes(&reply.payload))
+            .unwrap_or_else(|| ManifestResult {
+                names: Vec::new(),
+                templates: Vec::new(),
+            });
+        let mut cache = self
+            .names
+            .lock()
+            .expect("reverse-name cache mutex is never poisoned");
+        // A concurrent session may have populated it while we awaited —
+        // first writer wins, both maps are equivalent.
+        cache
+            .entry(engine)
+            .or_insert_with(|| EngineNames::from_manifest(&manifest));
+    }
+
+    /// Batch-resolve `ids` that the engine's static map missed via
+    /// `aether.inventory.resolve` and fold the answers (positive *and*
+    /// negative) into the per-engine dynamic cache. A no-op when `ids` is
+    /// empty or the resolve call fails — the unresolved ids then render
+    /// as hex tags. `ids` are raw `u64`s; the resolve wire takes tagged
+    /// strings, so each is encoded for the request and decoded back for
+    /// the cache key.
+    async fn resolve_dynamic(&self, engine: EngineId, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let tagged: Vec<String> = ids.iter().filter_map(|id| tagged_id::encode(*id)).collect();
+        if tagged.is_empty() {
+            return;
+        }
+        let Some(ResolveResult { resolved }) = self
+            .session
+            .call_one(engine_envelope(
+                engine,
+                INVENTORY_CAP,
+                &Resolve { ids: tagged },
+            ))
+            .await
+            .ok()
+            .and_then(|reply| ResolveResult::decode_from_bytes(&reply.payload))
+        else {
+            return;
+        };
+        let mut cache = self
+            .names
+            .lock()
+            .expect("reverse-name cache mutex is never poisoned");
+        if let Some(names) = cache.get_mut(&engine) {
+            for entry in resolved {
+                if let Ok(id) = tagged_id::decode(&entry.id) {
+                    names.cache_resolved(id, entry.name);
+                }
+            }
+        }
+    }
+
+    /// Reverse-render every id in a settled trace tree to a real name
+    /// (ADR-0088 §8). Builds the engine's reverse map if needed, collects
+    /// the ids that the static map misses, resolves them in one batched
+    /// `aether.inventory.resolve` query, then renders each `MailNodeWire`
+    /// through the now-populated map — falling back to the ADR-0064 hex
+    /// tag for any id that resolves to nothing. `Handle` / `Dag` ids stay
+    /// hex (they never enter the reverse map).
+    async fn render_mail_nodes(
+        &self,
+        engine: EngineId,
+        nodes: Vec<MailNodeWire>,
+    ) -> Vec<MailNodeJson> {
+        self.ensure_names(engine).await;
+
+        // Collect the mailbox / kind / thread ids that the static map
+        // misses, so one batched resolve covers the whole tree.
+        let mut misses: Vec<u64> = Vec::new();
+        {
+            let cache = self
+                .names
+                .lock()
+                .expect("reverse-name cache mutex is never poisoned");
+            if let Some(names) = cache.get(&engine) {
+                for node in &nodes {
+                    for id in node_reversible_ids(node) {
+                        if names.needs_resolve(id) {
+                            misses.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        misses.sort_unstable();
+        misses.dedup();
+        self.resolve_dynamic(engine, &misses).await;
+
+        let cache = self
+            .names
+            .lock()
+            .expect("reverse-name cache mutex is never poisoned");
+        match cache.get(&engine) {
+            Some(names) => nodes
+                .into_iter()
+                .map(|node| mail_node_to_json(node, Some(names)))
+                .collect(),
+            // No map for this engine (shouldn't happen post-ensure, but
+            // be defensive): render every id as a hex tag.
+            None => nodes
+                .into_iter()
+                .map(|n| mail_node_to_json(n, None))
+                .collect(),
+        }
+    }
 }
 
 #[tool_handler]
@@ -942,36 +1116,67 @@ fn encode_traced_bundle(
         .collect()
 }
 
-/// Encode an unwrapped raw `u64` mailbox id as the tagged-id string the
-/// MCP wire surfaces (`mbx-…`, ADR-0064). Panics only if the id has
-/// no tag bits set — chassis-minted ids always do.
-fn mailbox_id_to_tagged(id: MailboxId) -> String {
-    tagged_id::encode(id.0).expect("mailbox id is taggable")
+/// Render a raw `u64` mailbox / kind / thread id to its display string
+/// (ADR-0088 §8): the engine's real name when `names` resolves it, else
+/// the ADR-0064 tagged-id string (`mbx-…` / `knd-…` / `thr-…`), else a
+/// hex literal if the tag bits are unencodable. `names == None` (no
+/// reverse map for the engine) renders the tag directly — the unchanged
+/// pre-inventory output.
+fn render_id(id: u64, names: Option<&EngineNames>) -> String {
+    names.map_or_else(
+        || tagged_id::encode(id).unwrap_or_else(|| format!("{id:#x}")),
+        |names| names.render(id),
+    )
 }
 
-fn kind_id_to_tagged(id: KindId) -> String {
-    tagged_id::encode(id.0).expect("kind id is taggable")
+/// Reverse-render a [`MailboxId`] through the engine's name map (or the
+/// hex tag on a miss / no map). Chassis-minted ids always carry tag bits,
+/// so the hex fallback never reaches the `{:#x}` arm in practice.
+fn mailbox_id_to_tagged(id: MailboxId, names: Option<&EngineNames>) -> String {
+    render_id(id.0, names)
 }
 
-fn mail_id_to_json(id: MailId) -> MailIdJson {
+fn kind_id_to_tagged(id: KindId, names: Option<&EngineNames>) -> String {
+    render_id(id.0, names)
+}
+
+fn mail_id_to_json(id: MailId, names: Option<&EngineNames>) -> MailIdJson {
     MailIdJson {
-        sender: mailbox_id_to_tagged(id.sender),
+        sender: mailbox_id_to_tagged(id.sender, names),
         correlation_id: id.correlation_id,
     }
 }
 
-fn mail_node_to_json(node: MailNodeWire) -> MailNodeJson {
+fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>) -> MailNodeJson {
     MailNodeJson {
-        mail_id: mail_id_to_json(node.mail_id),
-        parent: node.parent.map(mail_id_to_json),
-        sender: mailbox_id_to_tagged(node.sender),
-        recipient: mailbox_id_to_tagged(node.recipient),
-        kind: kind_id_to_tagged(node.kind),
+        mail_id: mail_id_to_json(node.mail_id, names),
+        parent: node.parent.map(|p| mail_id_to_json(p, names)),
+        sender: mailbox_id_to_tagged(node.sender, names),
+        recipient: mailbox_id_to_tagged(node.recipient, names),
+        kind: kind_id_to_tagged(node.kind, names),
         t_sent: node.t_sent.0,
         t_received: node.t_received.map(|n| n.0),
         t_finished: node.t_finished.map(|n| n.0),
         thread_name: node.thread_name,
     }
+}
+
+/// The mailbox / kind / thread ids in one `MailNodeWire` that reverse
+/// through the inventory (ADR-0088 §8): the two mailbox endpoints, the
+/// kind, and both `MailId` senders. `correlation_id` is a `Uuid`, not a
+/// tagged id, so it's excluded. Thread ids ride in `thread_name` already
+/// resolved substrate-side, so they aren't re-resolved here.
+fn node_reversible_ids(node: &MailNodeWire) -> Vec<u64> {
+    let mut ids = vec![
+        node.sender.0,
+        node.recipient.0,
+        node.kind.0,
+        node.mail_id.sender.0,
+    ];
+    if let Some(parent) = &node.parent {
+        ids.push(parent.sender.0);
+    }
+    ids
 }
 
 /// Encode a `capture_frame` mail bundle: resolve each spec's kind
@@ -1122,10 +1327,14 @@ mod tests {
     }
 
     /// Connect an `RpcSession` + wrap it in an `Mcp` against a booted
-    /// hub chassis, with a fresh component cache.
+    /// hub chassis, with fresh component + reverse-name caches.
     fn connect_mcp(port: u16) -> Mcp {
         let session = RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
-        Mcp::new(Arc::new(session), Arc::new(ComponentCache::default()))
+        Mcp::new(
+            Arc::new(session),
+            Arc::new(ComponentCache::default()),
+            Arc::new(ReverseNameCache::default()),
+        )
     }
 
     /// `list_engines` over the RPC round-trip yields an empty array on
