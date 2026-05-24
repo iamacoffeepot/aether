@@ -155,7 +155,7 @@ pub struct SettlementTable {
 }
 
 impl SettlementTable {
-    /// Allocate a table with [`DEFAULT_SLOTS`] slots.
+    /// Allocate a table with the default slot count (`DEFAULT_SLOTS`).
     #[must_use]
     pub fn new() -> Self {
         Self::with_slots(DEFAULT_SLOTS)
