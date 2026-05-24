@@ -116,3 +116,32 @@ pub use trampoline::WasmTrampoline;
 #[cfg(not(target_arch = "wasm32"))]
 pub use trampoline::WasmTrampolineConfig;
 pub use window::HeadlessWindowCapability;
+
+#[cfg(all(test, feature = "native"))]
+mod auto_name_inventory_tests {
+    use aether_actor::Actor;
+    use aether_data::{build_static_reverse_map, mailbox_id_from_name};
+
+    use crate::fs::FsCapability;
+
+    /// ADR-0088: `#[bridge(singleton)]` auto-emits a `NameEntry` for each
+    /// chassis cap's mailbox namespace, so a `MailboxId` reverses to its
+    /// real name through the static reverse map — no hand-maintained
+    /// registration list. Touching `FsCapability` forces its module (and
+    /// the macro-auto-emitted `NameEntry` submission alongside it) into
+    /// this unit-test binary, so the map must then reverse `aether.fs`.
+    /// Guards the macro -> submit -> reverse-map chain against a future
+    /// regression that stops the bridge emitting the entry.
+    #[test]
+    fn chassis_mailbox_name_reverses_via_macro_auto_emitted_name_entry() {
+        assert_eq!(FsCapability::NAMESPACE, "aether.fs");
+        let map = build_static_reverse_map();
+        let id = mailbox_id_from_name("aether.fs");
+        assert_eq!(
+            map.get(&id.0).map(String::as_str),
+            Some("aether.fs"),
+            "FsCapability's mailbox name should reverse via its \
+             #[bridge(singleton)] macro-auto-emitted NameEntry",
+        );
+    }
+}

@@ -48,6 +48,8 @@ pub mod canonical;
 pub mod hash;
 pub mod ids;
 pub mod mail;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod name_inventory;
 pub mod schema;
 pub mod tag_bits;
 pub mod tagged_id;
@@ -63,6 +65,10 @@ pub use ids::{
     type_name_for_type_id,
 };
 pub use mail::{MailId, ReplyTarget, ReplyTo};
+#[cfg(not(target_arch = "wasm32"))]
+pub use name_inventory::{
+    NameEntry, ParamKind, TemplateEntry, build_static_reverse_map, name_entries, template_entries,
+};
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
 pub use transform::{InvokeFn, TransformError};
