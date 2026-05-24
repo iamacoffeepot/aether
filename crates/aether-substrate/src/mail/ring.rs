@@ -5,7 +5,7 @@
 //! the live dispatch path constructs `MailRef::InRing` yet (that is the
 //! 2b integration). The ring is the substrate behind the blob axiom: a
 //! handler's outbound mail is buffered into one contiguous region (the
-//! blob), and recipients receive a [`MailRef::InRing`] ref into it
+//! blob), and recipients receive a `MailRef::InRing` ref into it
 //! instead of an owned `Vec<u8>` copy.
 //!
 //! # Distinct from the trace rings
@@ -106,8 +106,8 @@ pub struct OutMail<'a> {
 }
 
 /// Where one written mail landed in the ring: enough for the caller (2b)
-/// to mint a [`MailRef::InRing`] and route it. `header_off` locates the
-/// blob's [`BlobHeader`] for [`MailRing::release`]; `payload_off` /
+/// to mint a `MailRef::InRing` and route it. `header_off` locates the
+/// blob's `BlobHeader` for [`MailRing::release`]; `payload_off` /
 /// `len` bound the payload for [`MailRing::payload`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MailLoc {
@@ -188,7 +188,7 @@ impl fmt::Debug for MailRing {
 }
 
 impl MailRing {
-    /// Allocate a ring with `cap` bytes (rounded up to [`ALIGN`]). `cap`
+    /// Allocate a ring with `cap` bytes (rounded up to `ALIGN`). `cap`
     /// must be non-zero.
     ///
     /// # Panics
