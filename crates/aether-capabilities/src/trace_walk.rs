@@ -24,8 +24,35 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use aether_data::{KindId, MailId, MailboxId};
+use aether_data::{KindId, MailId, MailboxId, ThreadId};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, Nanos, TraceEvent, TraceRingEntry};
+
+/// Resolve a `Received` event's optional [`ThreadId`] (ADR-0088 §7) to a
+/// display name. The trace event carries a `Copy` [`ThreadId`] (no
+/// per-hop alloc); this cold fold path reverses it to the
+/// `aether-worker-N` / `aether-instanced-…` string for
+/// [`MailNodeWire::thread_name`].
+///
+/// `trace_walk` stays transport-agnostic and compiles in every feature
+/// config (including the wasm-component build), so the registry lookup
+/// is `native`-gated: the in-process substrate reverses through its
+/// process-global registry; the wasm build and the out-of-process MCP
+/// (which can't reach a substrate's registry until the ADR-0088 §6
+/// inventory actor lands) get `None` and the renderer falls back exactly
+/// as before — nothing regresses.
+fn resolve_thread_name(thread_id: Option<ThreadId>) -> Option<String> {
+    let thread_id = thread_id?;
+    #[cfg(feature = "native")]
+    {
+        use aether_substrate::runtime::thread_name;
+        thread_name::resolve(thread_id.0)
+    }
+    #[cfg(not(feature = "native"))]
+    {
+        let _ = thread_id;
+        None
+    }
+}
 
 /// A guided breadth-first walk of one root's mail tree across per-actor
 /// trace rings. Construct with [`TreeWalk::new`], then drive the loop:
@@ -97,7 +124,9 @@ impl TreeWalk {
 /// Fold a flat set of [`TraceRingEntry`]s — gathered from however many
 /// per-actor rings a walk visited — into one [`MailNodeWire`] per
 /// `mail_id`. `Sent` seeds the node's topology fields and `t_sent`;
-/// `Received` adds `t_received` + `thread_name`; `Finished` adds
+/// `Received` adds `t_received` + the dispatching thread's display name
+/// (resolved from the event's `Copy` [`ThreadId`] via the installed
+/// reverse-lookup resolver, ADR-0088 §7); `Finished` adds
 /// `t_finished`. Holds (`HoldOpen` / `Release`) carry no `mail_id` and
 /// are skipped — they aren't tree nodes (ADR-0086 Phase 3 §C). The fold
 /// is order-independent, so a node first seen via `Received` (its `Sent`
@@ -158,11 +187,13 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
             TraceEvent::Received {
                 mail_id,
                 t,
-                thread_name,
+                thread_id,
             } => {
                 let node = nodes.entry(mail_id).or_default();
                 node.t_received = Some(t);
-                node.thread_name = thread_name;
+                // ADR-0088 §7: the event carries a `Copy` `ThreadId`;
+                // resolve it to a display name on this cold fold path.
+                node.thread_name = resolve_thread_name(thread_id);
             }
             TraceEvent::Finished { mail_id, t } => {
                 nodes.entry(mail_id).or_default().t_finished = Some(t);
@@ -242,6 +273,12 @@ mod tests {
         }
     }
 
+    /// The thread name every `received` fixture event hashes into a
+    /// `ThreadId`. [`register_fixture_thread_name`] seeds the substrate's
+    /// reverse-lookup registry so the `native`-gated fold path reverses
+    /// it back.
+    const FIXTURE_THREAD_NAME: &str = "aether-worker-0";
+
     fn received(mail_id: MailId, root: MailId) -> TraceRingEntry {
         TraceRingEntry {
             sequence: 0,
@@ -249,9 +286,19 @@ mod tests {
             event: TraceEvent::Received {
                 mail_id,
                 t: Nanos(mail_id.correlation_id + 1),
-                thread_name: Some("aether-worker-0".into()),
+                thread_id: Some(ThreadId::from_name(FIXTURE_THREAD_NAME)),
             },
         }
+    }
+
+    /// Register the fixture thread name in the substrate's process-global
+    /// reverse-lookup registry so [`resolve_thread_name`] reverses the
+    /// fixture `ThreadId` back to its display name (ADR-0088 §7).
+    /// Idempotent — `register` no-ops on a duplicate.
+    fn register_fixture_thread_name() {
+        use aether_substrate::runtime::thread_name;
+        let id = ThreadId::from_name(FIXTURE_THREAD_NAME);
+        thread_name::register(id.0, FIXTURE_THREAD_NAME);
     }
 
     fn finished(mail_id: MailId, root: MailId) -> TraceRingEntry {
@@ -280,6 +327,7 @@ mod tests {
     /// `Sent` still produces one complete node.
     #[test]
     fn stitch_folds_events_per_mail_id_regardless_of_order() {
+        register_fixture_thread_name();
         let root = mid(1, 1);
         let entries = vec![
             finished(root, root),
@@ -296,6 +344,8 @@ mod tests {
         assert_eq!(node.t_sent, Nanos(1));
         assert_eq!(node.t_received, Some(Nanos(2)));
         assert_eq!(node.t_finished, Some(Nanos(3)));
+        // The cold fold resolved the event's `ThreadId` back to the
+        // fixture display name via the test resolver (ADR-0088 §7).
         assert_eq!(node.thread_name.as_deref(), Some("aether-worker-0"));
     }
 

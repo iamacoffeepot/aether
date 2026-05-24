@@ -52,8 +52,8 @@ use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
+use crate::runtime::thread_name;
 use aether_actor::local;
-use std::thread;
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
@@ -169,9 +169,9 @@ pub fn dispatch_loop_run<A>(
             break;
         };
         let inbound_mail_id = env.mail_id;
-        // Issue 734: capture the OS thread name at the dispatcher's
-        // receive hook so the trace renderer can stamp per-thread rows.
-        let thread_name = thread::current().name().map(str::to_owned);
+        // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
+        // name-hashed `ThreadId` (cached per thread, zero per-hop alloc).
+        let thread_id = thread_name::current_thread_id();
         local::with_stamped(slots, || {
             // ADR-0086 Phase 3: `Received` / `Finished` land in this
             // (recipient) actor's trace ring — only inside this
@@ -182,7 +182,7 @@ pub fn dispatch_loop_run<A>(
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
                     t: th.now_nanos(),
-                    thread_name,
+                    thread_id,
                 },
             );
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
@@ -219,7 +219,7 @@ pub fn dispatch_loop_run<A>(
     // the full inbox.
     while let Some(env) = binding.try_recv() {
         let inbound_mail_id = env.mail_id;
-        let thread_name = thread::current().name().map(str::to_owned);
+        let thread_id = thread_name::current_thread_id();
         local::with_stamped(slots, || {
             let th = binding.mailer().trace_handle();
             th.push_trace_ring(
@@ -227,7 +227,7 @@ pub fn dispatch_loop_run<A>(
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
                     t: th.now_nanos(),
-                    thread_name,
+                    thread_id,
                 },
             );
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);

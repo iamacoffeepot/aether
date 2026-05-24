@@ -169,7 +169,16 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 #[ignore = "profiling target — run under samply, not a correctness gate"]
 #[allow(clippy::print_stderr)]
 fn mail_saturation_profile() {
-    let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    // `WORKERS=1` isolates the warm per-hop dispatch glue with zero
+    // cross-worker contention (the inline demux keeps every ring hop on
+    // the one worker, which is always fed by the circulating tokens) —
+    // the clean profile for the warm-floor decomposition. Unset, the
+    // default saturates the whole pool (the throughput/contention view).
+    let workers = env::var("WORKERS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&w| w >= 1)
+        .unwrap_or_else(|| available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1)));
     let Ok(tb) = TestBench::builder()
         .with_workers(Some(workers))
         .size(16, 16)

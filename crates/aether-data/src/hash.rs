@@ -6,7 +6,7 @@
 //! `MailboxId`-into-`KindId` slot (or vice versa) hashes to a
 //! different value rather than colliding silently.
 
-use crate::ids::{HandleId, MailboxId, TransformId};
+use crate::ids::{HandleId, MailboxId, ThreadId, TransformId};
 use crate::tagged_id::{Tag, with_tag};
 
 /// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
@@ -28,6 +28,16 @@ pub const KIND_DOMAIN: &[u8] = b"kind:";
 /// `"type:aether.mailbox_id"`). Disjoint from mailbox / kind domains
 /// so a typed-id `TYPE_ID` cannot alias either space.
 pub const TYPE_DOMAIN: &[u8] = b"type:";
+
+/// ADR-0088 §7: domain prefix for thread-name hashes. Hashed input is
+/// `THREAD_DOMAIN ++ thread_name.as_bytes()` (e.g.
+/// `"thread:aether-worker-0"`). See `MAILBOX_DOMAIN` for the
+/// disjointness rationale; a `ThreadId` carries `Tag::Thread` bits and
+/// hashes under this prefix so it can't alias the mailbox / kind / type
+/// spaces. The reverse-lookup registry recovers the origin name from a
+/// `ThreadId` so the dispatch hot path can store a `Copy` u64 instead
+/// of allocating the thread name string per hop.
+pub const THREAD_DOMAIN: &[u8] = b"thread:";
 
 /// ADR-0048 §1: 16-byte domain prefix for native-transform id hashes.
 /// Hashed input is `TRANSFORM_DOMAIN ++ "{crate}::{module}::{fn}"`. A
@@ -134,5 +144,20 @@ pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
     MailboxId(with_tag(
         Tag::Mailbox,
         fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes()),
+    ))
+}
+
+/// ADR-0088 §7: compute the deterministic [`ThreadId`] for an OS thread
+/// name. FNV-1a with the `THREAD_DOMAIN` prefix, ADR-0064 tag bits
+/// stamped into the high nibble. Uniform with [`mailbox_id_from_name`]
+/// so a thread id encodes to the `thr-XXXX-XXXX-XXXX` string form and
+/// reverses through the same inventory chain. Computed once per worker
+/// thread off the dispatch hot path (the value is `Copy`), so storing
+/// it in a trace event costs no per-hop allocation.
+#[must_use]
+pub const fn thread_id_from_name(name: &str) -> ThreadId {
+    ThreadId(with_tag(
+        Tag::Thread,
+        fnv1a_64_prefixed(THREAD_DOMAIN, name.as_bytes()),
     ))
 }
