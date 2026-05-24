@@ -47,8 +47,65 @@ use std::time::{Duration, Instant};
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTarget, ReplyTo};
+use crate::mail::ring::{MailRing, OutMail, RingFull};
+use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+
+/// Per-actor outbound ring capacity (ADR-0087 / 2b). Sized to hold a
+/// typical handler's small-mail fan-out as one blob; a blob that
+/// doesn't fit (a large payload, or a very wide fan-out) degrades to
+/// the [`MailRef::Owned`] copy-out valve in [`NativeBinding::flush_outbound`]
+/// rather than blocking — the large-payload zero-copy path is the
+/// deferred fork on iamacoffeepot/aether#1105.
+const ACTOR_RING_BYTES: usize = 64 * 1024;
+
+/// One outbound mail a handler buffered, pending flush. The payload
+/// bytes live in [`OutboundBuffer::scratch`] at `[payload_off,
+/// payload_off + payload_len)`; everything else is the route metadata
+/// (correlation-derived `reply_to`/`mail_id`, inherited lineage) the
+/// flush stamps onto the [`Mail`] it builds.
+struct PendingMail {
+    recipient: u64,
+    kind: u64,
+    payload_off: usize,
+    payload_len: usize,
+    count: u32,
+    reply_to: ReplyTo,
+    mail_id: MailId,
+    root: MailId,
+    parent_mail: Option<MailId>,
+}
+
+/// Per-actor send-side buffer that forms blobs (ADR-0087 / 2b). A
+/// handler's outbound mail accumulates here during dispatch and flushes
+/// as one ring blob at handler end (or before a blocking `wait_reply`).
+///
+/// `scratch` and `mails` are **reused** across handlers (cleared, not
+/// freed, after each flush) so buffering a send is allocation-free once
+/// warm — the win the blob is after, since a per-send heap allocation is
+/// exactly the cost Phase 0 located. `ring` is lazily created on first
+/// flush so actors that never buffer (wasm trampolines, inline-only
+/// caps) pay no ring allocation.
+struct OutboundBuffer {
+    /// Lazily allocated on first flush. `Arc` so each minted
+    /// [`MailRef::InRing`] carries the ring's lifetime by refcount.
+    ring: Option<Arc<MailRing>>,
+    /// Reused payload arena: each buffered send appends its bytes here.
+    scratch: Vec<u8>,
+    /// Reused per-mail metadata, parallel to the payload slices in
+    /// `scratch`.
+    mails: Vec<PendingMail>,
+}
+
+impl OutboundBuffer {
+    fn new() -> Self {
+        Self {
+            ring: None,
+            scratch: Vec::new(),
+            mails: Vec::new(),
+        }
+    }
+}
 
 /// Per-actor binding state every native capability owns. Each
 /// capability constructs one at boot via [`NativeBinding::new`] and
@@ -111,6 +168,22 @@ pub struct NativeBinding {
     /// Substrate-shutdown (channel disconnect) flows through the same
     /// drain → close → exit path without setting the flag.
     shutdown_flag: Arc<AtomicBool>,
+    /// ADR-0087 / 2b (iamacoffeepot/aether#1105): per-actor send-side
+    /// blob buffer. The per-handler [`super::ctx::NativeCtx`] /
+    /// [`super::mailbox::NativeActorMailbox`] send path buffers into
+    /// this (via [`Self::push_envelope_buffered`]); the handler-end
+    /// flush ([`Self::flush_outbound`], driven by `NativeCtx`'s `Drop`
+    /// and `wait_reply`) forms one ring blob and routes a
+    /// [`MailRef::InRing`] per mail.
+    ///
+    /// `Mutex` only for the `&self` interior-mutability + `Sync`
+    /// requirements — the buffer has a single logical producer (this
+    /// actor's dispatcher thread, only during its own handler dispatch),
+    /// so the lock is uncontended. Spawned-worker sends
+    /// ([`super::spawn_thread`]) and wasm-guest sends run on other
+    /// threads / a different path and stay on the eager [`Self::send_mail`]
+    /// route, preserving the ring's single-writer discipline.
+    outbound: Mutex<OutboundBuffer>,
 }
 
 impl NativeBinding {
@@ -144,6 +217,7 @@ impl NativeBinding {
             aborter,
             spawner,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            outbound: Mutex::new(OutboundBuffer::new()),
         }
     }
 
@@ -427,6 +501,155 @@ impl NativeBinding {
         mail_id
     }
 
+    /// ADR-0087 / 2b: the buffering counterpart to
+    /// [`Self::push_envelope_returning_root`], used by the per-handler
+    /// send surface ([`super::ctx::NativeCtx`] /
+    /// [`super::mailbox::NativeActorMailbox`]). Rather than allocating an
+    /// owned `Vec` and routing immediately, it copies the bytes into the
+    /// reused per-actor scratch arena and records the route
+    /// metadata; [`Self::flush_outbound`] forms the blob and routes at
+    /// handler end (or before a blocking `wait_reply`).
+    ///
+    /// `record_sent` stays **eager** (fired here, at send time, not at
+    /// flush) so the chain's `in_flight` is exact and settlement
+    /// (ADR-0082) never settles early — only the route + enqueue is
+    /// deferred. Returns the minted `MailId` (== the new root when
+    /// `inherited_root.is_none()`) exactly like the eager variant, so
+    /// settlement subscription works unchanged.
+    ///
+    /// # Panics
+    /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub fn push_envelope_buffered(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        parent_mail: Option<MailId>,
+        inherited_root: Option<MailId>,
+    ) -> MailId {
+        let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
+        let recipient_id = MailboxId(recipient);
+        let reply_to =
+            ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
+        let mail_id = MailId::new(self.self_mailbox, correlation);
+        let root = inherited_root.unwrap_or(mail_id);
+        // Eager producer hook (see doc) — identical to the eager path.
+        self.mailer.record_sent(
+            mail_id,
+            root,
+            parent_mail,
+            self.self_mailbox,
+            recipient_id,
+            KindId(kind),
+        );
+        let mut buf = self
+            .outbound
+            .lock()
+            .expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        let payload_off = buf.scratch.len();
+        buf.scratch.extend_from_slice(bytes);
+        buf.mails.push(PendingMail {
+            recipient,
+            kind,
+            payload_off,
+            payload_len: bytes.len(),
+            count,
+            reply_to,
+            mail_id,
+            root,
+            parent_mail,
+        });
+        mail_id
+    }
+
+    /// ADR-0087 / 2b: flush the buffered outbound mail as one ring blob.
+    /// Called at handler end (via [`super::ctx::NativeCtx`]'s `Drop`) and
+    /// before a blocking [`Self::wait_reply`] (else the awaited mail
+    /// never goes out). A no-op when nothing is buffered.
+    ///
+    /// Forms the blob with one [`MailRing::push_blob`]; on success mints
+    /// one [`MailRef::InRing`] per mail (the recipient reads the bytes in
+    /// place). On [`RingFull`] — a transient-full ring or a blob larger
+    /// than the ring — the never-block copy-out valve materializes each
+    /// mail as [`MailRef::Owned`] instead (the same allocation the eager
+    /// path pays). Either way the route metadata is identical, so the
+    /// dispatch read path is unchanged.
+    ///
+    /// The buffer lock is released **before** routing: `Mailer::push` can
+    /// run an inline handler synchronously, and holding the lock across
+    /// arbitrary handler code would be a needless contention/re-entrancy
+    /// hazard. A single drain suffices — the buffer is written only by
+    /// this actor's per-handler send path, never re-entrantly during
+    /// routing (inline handlers receive a `MailDispatch`, not a
+    /// buffering `NativeCtx`).
+    ///
+    /// # Panics
+    /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub fn flush_outbound(&self) {
+        let routed: Vec<Mail> = {
+            let mut buf = self
+                .outbound
+                .lock()
+                .expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            if buf.mails.is_empty() {
+                return;
+            }
+            let build = |p: &PendingMail, payload: MailRef| {
+                Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
+                    .with_reply_to(p.reply_to)
+                    .with_lineage(p.mail_id, p.root, p.parent_mail)
+            };
+            // Inner scope: the destructured borrows + `out_mails` (which
+            // borrows `scratch`) must end before the `clear()`s reborrow
+            // `buf`. `routed` owns its data (owned `MailRef`s / `Arc`
+            // clones), so it escapes the scope cleanly.
+            let routed: Vec<Mail> = {
+                let OutboundBuffer {
+                    ring,
+                    scratch,
+                    mails,
+                } = &mut *buf;
+                let ring =
+                    ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
+                // Lazy front-advance so prior blobs whose consumers have
+                // released free their space before we size this write.
+                ring.reclaim();
+                let out_mails: Vec<OutMail<'_>> = mails
+                    .iter()
+                    .map(|p| OutMail {
+                        recipient: p.recipient,
+                        kind: p.kind,
+                        payload: &scratch[p.payload_off..p.payload_off + p.payload_len],
+                    })
+                    .collect();
+                match ring.push_blob(&out_mails) {
+                    Ok(locs) => mails
+                        .iter()
+                        .zip(locs)
+                        .map(|(p, loc)| build(p, MailRef::in_ring(Arc::clone(ring), loc)))
+                        .collect(),
+                    Err(RingFull) => mails
+                        .iter()
+                        .map(|p| {
+                            let bytes =
+                                scratch[p.payload_off..p.payload_off + p.payload_len].to_vec();
+                            build(p, MailRef::from(bytes))
+                        })
+                        .collect(),
+                }
+            };
+            buf.scratch.clear();
+            buf.mails.clear();
+            routed
+        };
+        for mail in routed {
+            self.mailer.push(mail);
+        }
+    }
+
     /// Block this actor's thread until a mail of `expected_kind`
     /// (and, when `expected_correlation != 0`, also matching that
     /// correlation id) arrives, then copy up to `out.len()` bytes of
@@ -448,6 +671,11 @@ impl NativeBinding {
         timeout_ms: u32,
         expected_correlation: u64,
     ) -> i32 {
+        // ADR-0087 / 2b: flush buffered outbound mail before blocking —
+        // a send-then-wait_reply in the same handler would otherwise
+        // deadlock, since the awaited reply depends on a mail still
+        // sitting unsent in the blob buffer.
+        self.flush_outbound();
         let Some(inbox_mutex) = self.inbox.get() else {
             tracing::error!(
                 target: "aether_substrate::native_transport",
@@ -772,5 +1000,155 @@ mod tests {
         let mut buf = [0u8; 16];
         let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
         assert_eq!(rc, -3);
+    }
+
+    /// 2b: the buffered send path holds mail until flush, then forms one
+    /// blob and routes each mail to its recipient with bytes + kind
+    /// intact. Nothing reaches the sink before `flush_outbound`.
+    #[test]
+    fn buffered_sends_route_only_after_flush() {
+        let (registry, mailer) = fresh_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        let recipient = registry.lookup("test.sink").unwrap();
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(0x5151));
+
+        transport.push_envelope_buffered(recipient.0, 7, &[1, 2, 3], 1, None, None);
+        transport.push_envelope_buffered(recipient.0, 9, &[4, 5], 1, None, None);
+        assert!(
+            rx.try_recv().is_err(),
+            "buffered sends must not route before flush"
+        );
+
+        transport.flush_outbound();
+        let a = rx.try_recv().expect("first mail delivered after flush");
+        let b = rx.try_recv().expect("second mail delivered after flush");
+        assert_eq!(a.payload.bytes(), &[1, 2, 3]);
+        assert_eq!(a.kind, KindId(7));
+        assert_eq!(b.payload.bytes(), &[4, 5]);
+        assert_eq!(b.kind, KindId(9));
+        // Buffer drained — a second flush is a no-op.
+        transport.flush_outbound();
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// 2b: a payload larger than the per-actor ring degrades to the
+    /// `Owned` copy-out valve rather than panicking, still delivering the
+    /// bytes intact (the large-payload zero-copy path is deferred).
+    #[test]
+    fn buffered_oversized_payload_flushes_via_copy_out() {
+        let (registry, mailer) = fresh_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        let recipient = registry.lookup("test.sink").unwrap();
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(0x6262));
+
+        // Larger than the whole ring — never fits, so the valve copies out.
+        let big = vec![0xABu8; ACTOR_RING_BYTES + 4096];
+        transport.push_envelope_buffered(recipient.0, 3, &big, 1, None, None);
+        transport.flush_outbound();
+
+        let env = rx
+            .try_recv()
+            .expect("oversized mail still delivered via copy-out");
+        assert_eq!(env.payload.len(), big.len());
+        assert_eq!(env.payload.bytes(), &big[..]);
+    }
+
+    /// 2b: flushing an empty buffer is a no-op — the common idempotent
+    /// case, since `NativeCtx::Drop` flushes every handler and most send
+    /// nothing. Must not panic or allocate a ring.
+    #[test]
+    fn buffered_flush_empty_is_noop() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(0x7373));
+        transport.flush_outbound();
+        transport.flush_outbound();
+    }
+
+    /// 2b load-bearing race: the producer flushes tagged blobs into its
+    /// ring while consumer threads read each `InRing` payload in place
+    /// and drop the envelope (RAII-releasing the blob lock). A reused
+    /// region — the producer overwriting bytes a consumer is mid-read on
+    /// — would surface as a tag mismatch. This lifts the 2a ring stress
+    /// test onto the full 2b path: buffer → flush → route → mpsc →
+    /// consumer drop. Soaked via the `flaky_` duplicate below.
+    #[test]
+    fn buffered_concurrent_flush_and_consumer_release() {
+        use std::thread;
+
+        let (registry, mailer) = fresh_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        let recipient = registry.lookup("test.sink").unwrap();
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(0x9191));
+
+        let rx = Arc::new(Mutex::new(rx));
+        let done = Arc::new(AtomicBool::new(false));
+        let consumed = Arc::new(AtomicU64::new(0));
+        let n_consumers = 4;
+
+        let consumers: Vec<_> = (0..n_consumers)
+            .map(|_| {
+                let rx = Arc::clone(&rx);
+                let done = Arc::clone(&done);
+                let consumed = Arc::clone(&consumed);
+                thread::spawn(move || {
+                    loop {
+                        let got = {
+                            let guard = rx.lock().expect("rx mutex poisoned");
+                            guard.recv_timeout(Duration::from_millis(20))
+                        };
+                        match got {
+                            Ok(env) => {
+                                let bytes = env.payload.bytes();
+                                let tag = bytes[0];
+                                assert!(
+                                    bytes.iter().all(|&b| b == tag),
+                                    "decode-in-place saw a reused region: expected tag {tag}"
+                                );
+                                drop(env); // RAII release of the blob lock
+                                consumed.fetch_add(1, Ordering::AcqRel);
+                            }
+                            // Empty for the timeout: exit only once the
+                            // producer is done (channel fully drained).
+                            Err(_) if done.load(Ordering::Acquire) => break,
+                            Err(_) => {}
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let mut sent = 0u64;
+        for i in 0..4_000u32 {
+            let tag = (i & 0xff) as u8;
+            let n = (i % 4 + 1) as usize;
+            let payload = vec![tag; 8 + (i as usize % 24)];
+            for _ in 0..n {
+                transport.push_envelope_buffered(recipient.0, 7, &payload, 1, None, None);
+                sent += 1;
+            }
+            transport.flush_outbound();
+        }
+        // All flushes returned synchronously, so every envelope is in the
+        // channel before we signal done.
+        done.store(true, Ordering::Release);
+        for h in consumers {
+            h.join().expect("consumer thread joins");
+        }
+        assert_eq!(
+            consumed.load(Ordering::Acquire),
+            sent,
+            "every flushed mail must be consumed"
+        );
+    }
+
+    /// Flake-soak duplicate (per `scripts/flake-soak.sh`) of the 2b
+    /// producer-flush / consumer-release race — run many times in fresh
+    /// processes to surface timing-dependent reclaim bugs.
+    #[test]
+    fn flaky_buffered_concurrent_flush_and_consumer_release() {
+        buffered_concurrent_flush_and_consumer_release();
     }
 }

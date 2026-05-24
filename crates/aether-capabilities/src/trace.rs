@@ -94,7 +94,7 @@ mod native {
                 }
             };
             for mail in resolved {
-                let _ = ctx.send_envelope_traced(mail.recipient, mail.kind, &mail.payload);
+                let _ = ctx.send_envelope_traced(mail.recipient, mail.kind, mail.payload.bytes());
             }
             ctx.reply(&DispatchTracedAck::Ok { root });
         }
@@ -232,6 +232,12 @@ mod native {
                     ],
                 },
             );
+            // 2b: the handler buffers its forwarded envelopes into the
+            // actor's send-side ring; they route on handler-end flush.
+            // Driving the handler directly (no dispatch loop), we drop the
+            // ctx to trigger that flush — mirroring `dispatch_loop_run`
+            // dropping its per-envelope ctx — before inspecting the sink.
+            drop(ctx);
 
             let snapshot = captured
                 .lock()

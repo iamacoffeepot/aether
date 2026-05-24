@@ -66,7 +66,14 @@ pub type MailKind = KindId;
 pub struct Mail {
     pub recipient: MailboxId,
     pub kind: MailKind,
-    pub payload: Vec<u8>,
+    /// The payload bytes, carried as a [`MailRef`] so a producer that
+    /// buffered this mail into its per-actor ring (ADR-0087 / 2b) routes
+    /// a zero-copy `InRing` reference, while cross-boundary and
+    /// substrate-generated mail carries an `Owned` heap buffer. The whole
+    /// routing path (`route_mail`) is variant-agnostic — it reads
+    /// `payload.bytes()` and only materializes to `Owned` at the few
+    /// sites that move bytes off-engine.
+    pub payload: MailRef,
     pub count: u32,
     pub reply_to: ReplyTo,
     /// ADR-0080 §1: this mail's identity. The producer mints it from
@@ -89,11 +96,16 @@ pub struct Mail {
 
 impl Mail {
     #[must_use]
-    pub fn new(recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32) -> Self {
+    pub fn new(
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: impl Into<MailRef>,
+        count: u32,
+    ) -> Self {
         Self {
             recipient,
             kind,
-            payload,
+            payload: payload.into(),
             count,
             reply_to: ReplyTo::NONE,
             mail_id: MailId::NONE,

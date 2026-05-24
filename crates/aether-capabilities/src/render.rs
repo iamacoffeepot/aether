@@ -363,8 +363,11 @@ mod native {
             let settlement_registry = self.mailer.settlement_registry().cloned();
             let mut pre_settlements = Vec::with_capacity(pre.len());
             for envelope in pre {
-                let mail_id =
-                    ctx.send_envelope_as_root(envelope.recipient, envelope.kind, &envelope.payload);
+                let mail_id = ctx.send_envelope_as_root(
+                    envelope.recipient,
+                    envelope.kind,
+                    envelope.payload.bytes(),
+                );
                 if let Some(reg) = settlement_registry.as_deref() {
                     pre_settlements.push(reg.subscribe_settlement(mail_id));
                 }

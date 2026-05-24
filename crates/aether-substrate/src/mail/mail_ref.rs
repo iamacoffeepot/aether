@@ -94,6 +94,20 @@ impl MailRef {
         self.bytes().to_vec()
     }
 
+    /// Materialize into the `Owned` variant, releasing any ring lock.
+    /// `Owned` is returned unchanged (no copy); `InRing` copies its
+    /// region out to a heap buffer and drops, freeing the ring region.
+    /// Used where a mail may be held for an unbounded window — parked on
+    /// a missing handle, or queued for cross-engine egress — so it never
+    /// pins a producer ring region for that whole time (2b).
+    #[must_use]
+    pub fn into_owned(self) -> Self {
+        match self {
+            owned @ Self::Owned(_) => owned,
+            in_ring => Self::Owned(in_ring.bytes().to_vec().into_boxed_slice()),
+        }
+    }
+
     /// Payload length in bytes. Reads the `InRing` length field directly —
     /// no region access — so it is valid even without holding the borrow.
     #[must_use]

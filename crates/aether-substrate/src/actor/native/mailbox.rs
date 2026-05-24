@@ -85,7 +85,12 @@ impl<R: Actor> NativeActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail(self.mailbox, K::ID.0, &bytes, 1);
+        // 2b: buffer into the actor's send-side ring (chassis-root —
+        // `send` mints a fresh chain, unlike the lineage-aware
+        // `send_traced`). Flushed at handler end by `NativeCtx`'s `Drop`.
+        let _ = self
+            .binding
+            .push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only.
@@ -99,7 +104,9 @@ impl<R: Actor> NativeActorMailbox<'_, R> {
         // realistic mail batches stay well below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
-        self.binding.send_mail(self.mailbox, K::ID.0, bytes, count);
+        let _ =
+            self.binding
+                .push_envelope_buffered(self.mailbox, K::ID.0, bytes, count, None, None);
     }
 
     /// ADR-0080: like [`Self::send`] but returns the minted `MailId`
@@ -126,7 +133,7 @@ impl<R: Actor> NativeActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_returning_root(
+        self.binding.push_envelope_buffered(
             self.mailbox,
             K::ID.0,
             &bytes,
