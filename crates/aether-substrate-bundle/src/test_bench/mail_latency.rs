@@ -315,6 +315,26 @@ fn flaky_emit_settlement_settles_two_level_tree() {
     emit_settlement_settles_two_level_tree();
 }
 
+/// ADR-0087 Phase 3b focused guard: a wide single-source fan-out — one
+/// handler emits to N free recipients in **one blob**, the exact shape
+/// the blob demux runs (claim-or-deposit per recipient, free ones inline
+/// on the demuxing worker). Every injected root must settle, proving the
+/// inline-demux path balances `Sent`/`Finished` for every fanned mail —
+/// a dropped or double-counted demux mail would wedge `in_flight` and
+/// the root would never settle.
+#[test]
+fn emit_settlement_settles_wide_fanout() {
+    emit_settlement_settles_every_root(&fanout(8));
+}
+
+/// Flake-soak duplicate of the 3b wide-fan-out demux — the
+/// inline-vs-deposit (free-vs-busy) claim race across workers is
+/// timing-sensitive (see CLAUDE.md "Flake soak").
+#[test]
+fn flaky_emit_settlement_settles_wide_fanout() {
+    emit_settlement_settles_wide_fanout();
+}
+
 /// Hold path: a `spawn_inherit` worker keeps the root open past the
 /// handler's `Finished`, so settlement is gated on the worker's `Release`
 /// (ADR-0080 §12). Exercises the `HoldOpen` / `Release` producer hooks —
