@@ -1,12 +1,17 @@
 //! `MailRing` — a single-producer, multi-consumer reclaiming byte ring
 //! for blob-of-mail dispatch (ADR-0087, Phase 2 / iamacoffeepot/aether#1105).
 //!
-//! Phase 2a builds and unit-tests the mechanism in isolation; nothing on
-//! the live dispatch path constructs `MailRef::InRing` yet (that is the
-//! 2b integration). The ring is the substrate behind the blob axiom: a
-//! handler's outbound mail is buffered into one contiguous region (the
-//! blob), and recipients receive a `MailRef::InRing` ref into it
-//! instead of an owned `Vec<u8>` copy.
+//! The ring is the substrate behind the blob axiom: a handler's outbound
+//! mail is written into one contiguous region (the blob), and recipients
+//! receive a `MailRef::InRing` ref into it instead of an owned `Vec<u8>`
+//! copy. Two producer APIs build a blob:
+//!
+//! - [`MailRing::push_blob`] — atomic, whole-blob: all mails at once
+//!   (used by tests / the microbench, and available as a convenience).
+//! - [`MailRing::open_blob`] / [`MailRing::append`] / [`MailRing::seal`]
+//!   — the incremental in-place FSM (2c, iamacoffeepot/aether#1110) the
+//!   native dispatch path uses: each send is written straight into the
+//!   ring as it happens, with no staging buffer.
 //!
 //! # Distinct from the trace rings
 //!
@@ -18,10 +23,12 @@
 //!
 //! # Concurrency model (the Disruptor single-writer discipline)
 //!
-//! - **One producer** (the owning actor's thread, or the chassis for
-//!   off-actor producers). It alone calls [`MailRing::push_blob`] and
-//!   [`MailRing::reclaim`], and is the sole writer of the `write` /
-//!   `front` cursors and of the buffer bytes.
+//! - **One producer** (the owning actor's thread). It alone calls the
+//!   build APIs ([`MailRing::push_blob`], or [`MailRing::open_blob`] /
+//!   [`MailRing::append`] / [`MailRing::seal`]) and [`MailRing::reclaim`],
+//!   and is the sole writer of the `write` / `front` cursors, the `build`
+//!   FSM state, and the buffer bytes. Reclaim runs only at `open_blob`
+//!   (never while a blob is open), so it never reads a half-built header.
 //! - **Many consumers** (worker threads). Per blob they read payload
 //!   bytes ([`MailRing::payload`]) and decrement the blob's lock
 //!   ([`MailRing::release`]). Consumers never touch the cursors or write
@@ -125,6 +132,30 @@ pub struct MailLoc {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingFull;
 
+/// Producer-only state for the blob being built in place via the
+/// [`open_blob`](MailRing::open_blob) / [`append`](MailRing::append) /
+/// [`seal`](MailRing::seal) FSM (ADR-0087 / 2c, iamacoffeepot/aether#1110).
+/// Between `seal` and the next `open_blob` the state is `Closed`. The
+/// blob's header is written by `append` only once the first mail lands
+/// (so an open-but-empty blob writes nothing and `seal` is a clean
+/// no-op), then finalized by `seal`.
+#[derive(Clone, Copy)]
+enum BuildState {
+    /// No blob open. The resting state.
+    Closed,
+    /// A blob is open but no mail has been appended yet — no header
+    /// placed.
+    Empty,
+    /// A blob with `n_mails` (>= 1) appended; its header sits at
+    /// `header_off`, the next free byte is `cursor`. The header is
+    /// provisional (`lock` / `total_len` unwritten) until `seal`.
+    Building {
+        header_off: u32,
+        cursor: u32,
+        n_mails: u32,
+    },
+}
+
 /// A single-producer, multi-consumer reclaiming byte ring. See the
 /// module docs for the concurrency model.
 pub struct MailRing {
@@ -143,6 +174,11 @@ pub struct MailRing {
     /// free-space math is a single subtraction rather than a cursor
     /// comparison that has to disambiguate full-vs-empty.
     live: UnsafeCell<usize>,
+    /// Producer-only FSM state for the in-place blob build (2c). Touched
+    /// only by `open_blob` / `append` / `seal`, all on the producer
+    /// thread — never by consumers — so it rides the same single-writer
+    /// discipline as `write` / `front` / `live`.
+    build: UnsafeCell<BuildState>,
     _backing: BufOwner,
 }
 
@@ -214,6 +250,7 @@ impl MailRing {
             write: AtomicU32::new(0),
             front: AtomicU32::new(0),
             live: UnsafeCell::new(0),
+            build: UnsafeCell::new(BuildState::Closed),
             _backing: BufOwner { ptr, layout },
         }
     }
@@ -390,33 +427,251 @@ impl MailRing {
             let mut locs = Vec::with_capacity(mails.len());
             let mut cur = start + HEADER_LEN;
             for m in mails {
-                let entry = MailEntry {
-                    len: m.payload.len() as u32,
-                    _pad: 0,
-                    recipient: m.recipient,
-                    kind: m.kind,
-                };
-                // Entry is Pod; write its bytes at `cur`.
-                self.buf
-                    .add(cur)
-                    .copy_from_nonoverlapping((&raw const entry).cast::<u8>(), ENTRY_LEN);
-                let payload_off = cur + ENTRY_LEN;
-                if !m.payload.is_empty() {
-                    self.buf
-                        .add(payload_off)
-                        .copy_from_nonoverlapping(m.payload.as_ptr(), m.payload.len());
-                }
-                locs.push(MailLoc {
-                    recipient: m.recipient,
-                    kind: m.kind,
-                    header_off: start as u32,
-                    payload_off: payload_off as u32,
-                    len: m.payload.len() as u32,
-                });
-                cur = payload_off + align_up(m.payload.len());
+                let loc = self.write_entry_at(cur, start, m.recipient, m.kind, m.payload);
+                cur = loc.payload_off as usize + align_up(m.payload.len());
+                locs.push(loc);
             }
             locs
         }
+    }
+
+    /// Write one mail's [`MailEntry`] + payload at `off` and return its
+    /// [`MailLoc`] (carrying `header_off` for the consumer's later
+    /// [`release`](Self::release)). Does **not** write the blob header —
+    /// that is the atomic [`Self::write_blob_at`] (whole-blob) or
+    /// [`Self::seal`] (incremental FSM, written once the blob is final).
+    ///
+    /// # Safety
+    /// `off` must be producer-owned free space [`ALIGN`]-aligned with room
+    /// for `ENTRY_LEN + payload.len()` bytes, and `header_off` must be the
+    /// offset of the blob this entry belongs to.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "offsets and payload lengths are bounded by capacity, asserted <= u32::MAX in with_capacity"
+    )]
+    unsafe fn write_entry_at(
+        &self,
+        off: usize,
+        header_off: usize,
+        recipient: u64,
+        kind: u64,
+        payload: &[u8],
+    ) -> MailLoc {
+        // SAFETY: caller guarantees `off` is aligned, in-bounds free space
+        // with room for the entry + payload.
+        unsafe {
+            let entry = MailEntry {
+                len: payload.len() as u32,
+                _pad: 0,
+                recipient,
+                kind,
+            };
+            self.buf
+                .add(off)
+                .copy_from_nonoverlapping((&raw const entry).cast::<u8>(), ENTRY_LEN);
+            let payload_off = off + ENTRY_LEN;
+            if !payload.is_empty() {
+                self.buf
+                    .add(payload_off)
+                    .copy_from_nonoverlapping(payload.as_ptr(), payload.len());
+            }
+            MailLoc {
+                recipient,
+                kind,
+                header_off: header_off as u32,
+                payload_off: payload_off as u32,
+                len: payload.len() as u32,
+            }
+        }
+    }
+
+    /// Begin building a new blob in place (ADR-0087 / 2c). The producer
+    /// then [`append`](Self::append)s each mail and [`seal`](Self::seal)s
+    /// at the end — payloads land in the ring once, with no staging
+    /// buffer. **Producer-only.**
+    ///
+    /// Reclaims first: this is the *only* safe point to reclaim, because
+    /// reclaim walks blob headers and an open blob's header is not yet
+    /// finalized. No other method reclaims, so reclaim never races a
+    /// half-built header.
+    ///
+    /// # Panics
+    /// Panics if a blob is already open (`open_blob` without an
+    /// intervening `seal`).
+    pub fn open_blob(&self) {
+        // SAFETY: producer-only state.
+        let state = unsafe { &mut *self.build.get() };
+        assert!(
+            matches!(state, BuildState::Closed),
+            "open_blob called while a blob is already open"
+        );
+        self.reclaim();
+        *state = BuildState::Empty;
+    }
+
+    /// Append one mail to the open blob, writing its entry + payload into
+    /// the ring in place, and return its [`MailLoc`]. **Producer-only.**
+    ///
+    /// Returns [`RingFull`] if the mail does not fit; the caller copies it
+    /// out to an owned buffer (the never-block valve) and may keep
+    /// appending — the open blob is left intact, so a later append (after
+    /// a consumer frees space) can still extend it. When the mail would
+    /// cross the buffer's end, the current blob is sealed early, a wrap
+    /// filler is laid, and a fresh blob is opened at offset 0 (one
+    /// handler's fan-out then spans two physical blobs — fine, each mail
+    /// still gets its own `InRing` ref).
+    ///
+    /// # Panics
+    /// Panics if no blob is open (`append` without [`Self::open_blob`]).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "cursor/offsets are bounded by capacity, asserted <= u32::MAX in with_capacity"
+    )]
+    pub fn append(&self, recipient: u64, kind: u64, payload: &[u8]) -> Result<MailLoc, RingFull> {
+        let entry_size = ENTRY_LEN + align_up(payload.len());
+        // SAFETY: producer-only state.
+        let state = unsafe { &mut *self.build.get() };
+        match *state {
+            BuildState::Closed => panic!("append called without an open blob"),
+            BuildState::Empty => {
+                let start = self.place_blob_start(HEADER_LEN + entry_size)?;
+                // SAFETY: `place_blob_start` returned a producer-owned,
+                // ALIGN-aligned region with room for the header + this
+                // entry; the entry goes right after the (not-yet-written)
+                // header slot.
+                let loc = unsafe {
+                    self.write_entry_at(start + HEADER_LEN, start, recipient, kind, payload)
+                };
+                *state = BuildState::Building {
+                    header_off: start as u32,
+                    cursor: (start + HEADER_LEN + entry_size) as u32,
+                    n_mails: 1,
+                };
+                Ok(loc)
+            }
+            BuildState::Building {
+                header_off,
+                cursor,
+                n_mails,
+            } => {
+                let cur = cursor as usize;
+                if cur + entry_size > self.cap {
+                    // Crosses the buffer end: seal the current blob, then
+                    // reopen at 0 (the recursive call lays the wrap filler
+                    // via `place_blob_start` and writes the entry there).
+                    self.finalize_header(header_off, cursor, n_mails);
+                    *state = BuildState::Empty;
+                    return self.append(recipient, kind, payload);
+                }
+                let open_bytes = cur - header_off as usize;
+                if open_bytes + entry_size > self.free_bytes() {
+                    // Ring full: leave the open blob as-is, caller spills
+                    // this mail to an owned buffer.
+                    return Err(RingFull);
+                }
+                // SAFETY: `cur` is the ALIGN-aligned tail of the open blob
+                // in producer-owned free space, and the two checks above
+                // guarantee `[cur, cur + entry_size)` is in-bounds and does
+                // not overrun the live region.
+                let loc = unsafe {
+                    self.write_entry_at(cur, header_off as usize, recipient, kind, payload)
+                };
+                *state = BuildState::Building {
+                    header_off,
+                    cursor: (cur + entry_size) as u32,
+                    n_mails: n_mails + 1,
+                };
+                Ok(loc)
+            }
+        }
+    }
+
+    /// Seal the open blob: finalize its header (`total_len`, publish
+    /// `lock = n_mails`), advance `write`, and add it to the live set.
+    /// **Producer-only.** A no-op for an open-but-empty blob (every mail
+    /// spilled to the copy-out valve, or no sends happened).
+    ///
+    /// # Panics
+    /// Panics if no blob is open (`seal` without [`Self::open_blob`]).
+    pub fn seal(&self) {
+        // SAFETY: producer-only state.
+        let state = unsafe { &mut *self.build.get() };
+        match *state {
+            BuildState::Closed => panic!("seal called without an open blob"),
+            BuildState::Empty => {}
+            BuildState::Building {
+                header_off,
+                cursor,
+                n_mails,
+            } => self.finalize_header(header_off, cursor, n_mails),
+        }
+        *state = BuildState::Closed;
+    }
+
+    /// Pick the start offset for a blob needing `needed` contiguous bytes
+    /// (header + first entry), wrapping with a tail filler if the tail is
+    /// too small, and leave `write` pointing at the chosen start. Mirrors
+    /// the placement [`push_blob`](Self::push_blob) does atomically.
+    /// **Producer-only.** Returns [`RingFull`] if it doesn't fit even
+    /// after a wrap (nothing is mutated in that case).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "offsets are bounded by capacity, asserted <= u32::MAX in with_capacity"
+    )]
+    fn place_blob_start(&self, needed: usize) -> Result<usize, RingFull> {
+        let write = self.write.load(Ordering::Relaxed) as usize;
+        let tail_room = self.cap - write;
+        if needed <= tail_room {
+            if needed > self.free_bytes() {
+                return Err(RingFull);
+            }
+            Ok(write)
+        } else {
+            // Wrap: a filler over `[write, cap)` plus the blob at 0. Both
+            // must fit in current free space (same check as `push_blob`).
+            if tail_room + needed > self.free_bytes() {
+                return Err(RingFull);
+            }
+            if tail_room > 0 {
+                self.write_filler(write, tail_room);
+                // SAFETY: producer-only counter; the filler bytes are now
+                // live until reclaimed.
+                unsafe {
+                    *self.live.get() += tail_room;
+                }
+            }
+            self.write.store(0, Ordering::Relaxed);
+            Ok(0)
+        }
+    }
+
+    /// Finalize a built blob's header at `header_off` (publish
+    /// `lock = n_mails`, write `total_len`), advance `write` past it, and
+    /// add its bytes to the live set. Shared by [`Self::seal`] and the
+    /// seal-early wrap in [`Self::append`]. **Producer-only.**
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "offsets are bounded by capacity, asserted <= u32::MAX in with_capacity"
+    )]
+    fn finalize_header(&self, header_off: u32, cursor: u32, n_mails: u32) {
+        let header_off = header_off as usize;
+        let cursor = cursor as usize;
+        let total = cursor - header_off;
+        // SAFETY: `[header_off, cursor)` is the producer-owned region just
+        // written by `append`; we write the header fields once. The lock's
+        // initialized value is published to consumers through the inbox
+        // channel handoff of the minted `MailRef` (see module docs), so a
+        // plain write suffices here.
+        unsafe {
+            let hdr = self.header_ptr(header_off);
+            (&raw mut (*hdr).lock).write(AtomicU32::new(n_mails));
+            (&raw mut (*hdr).n_mails).write(n_mails);
+            (&raw mut (*hdr).total_len).write(total as u32);
+            (&raw mut (*hdr).is_filler).write(0);
+            *self.live.get() += total;
+        }
+        let new_write = if cursor == self.cap { 0 } else { cursor };
+        self.write.store(new_write as u32, Ordering::Relaxed);
     }
 
     /// Borrow a mail's payload bytes for in-place decode. **Consumer-safe**
@@ -530,6 +785,8 @@ impl MailRing {
     reason = "test code: unwraps assert via panic; unsafe blocks exercise the ring API whose safety contracts are documented on the methods and upheld by construction here; casts are capacity-bounded; the consumer-handle collect forces every thread to spawn before any join"
 )]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn out(recipient: u64, kind: u64, payload: &[u8]) -> OutMail<'_> {
@@ -634,6 +891,150 @@ mod tests {
         // The ring is untouched — a later in-bounds blob still fits.
         assert_eq!(ring.live_bytes(), 0);
         assert!(ring.push_blob(&[out(2, 2, &[7; 16])]).is_ok());
+    }
+
+    #[test]
+    fn open_append_seal_round_trips() {
+        let ring = MailRing::with_capacity(4096);
+        ring.open_blob();
+        let l0 = ring.append(1, 10, &[1, 2, 3]).expect("first appends");
+        let l1 = ring.append(2, 20, &[4, 5, 6, 7]).expect("second appends");
+        ring.seal();
+        // Both mails landed in one blob (same header).
+        assert_eq!(l0.header_off, l1.header_off);
+        assert_eq!(l0.recipient, 1);
+        assert_eq!(l1.kind, 20);
+        // SAFETY: locks held (not released) until below; region is live.
+        unsafe {
+            assert_eq!(ring.payload(l0.payload_off, l0.len), &[1, 2, 3]);
+            assert_eq!(ring.payload(l1.payload_off, l1.len), &[4, 5, 6, 7]);
+        }
+        let live = ring.live_bytes();
+        assert!(live > 0);
+        // Lock is n_mails (2): one release isn't enough.
+        // SAFETY: each ref releases its one held count.
+        unsafe { ring.release(l0.header_off) };
+        assert_eq!(ring.reclaim(), 0);
+        // SAFETY: second (last) release.
+        unsafe { ring.release(l1.header_off) };
+        assert_eq!(ring.reclaim(), live);
+        assert_eq!(ring.live_bytes(), 0);
+    }
+
+    #[test]
+    fn fsm_empty_seal_is_noop() {
+        let ring = MailRing::with_capacity(256);
+        ring.open_blob();
+        // No mails appended — seal writes nothing.
+        ring.seal();
+        assert_eq!(ring.live_bytes(), 0);
+        // The ring is still fully usable afterward.
+        ring.open_blob();
+        let l = ring.append(1, 1, &[9, 9]).expect("appends");
+        ring.seal();
+        // SAFETY: lock held.
+        unsafe {
+            assert_eq!(ring.payload(l.payload_off, l.len), &[9, 9]);
+            ring.release(l.header_off);
+        }
+        assert!(ring.reclaim() > 0);
+    }
+
+    #[test]
+    fn fsm_append_returns_ring_full_when_no_space() {
+        let ring = MailRing::with_capacity(128);
+        ring.open_blob();
+        // One 64-byte mail fits (16 header + 24 entry + 64 payload = 104).
+        let _l = ring.append(1, 1, &[0; 64]).expect("first fits");
+        // A second won't fit and can't wrap into the (full) ring.
+        let r = ring.append(2, 2, &[0; 64]);
+        assert_eq!(r, Err(RingFull));
+        ring.seal();
+    }
+
+    #[test]
+    fn fan_out_spanning_tail_uses_two_blobs() {
+        // Advance `write` toward the tail while keeping the ring free:
+        // push → release → reclaim marches `write`/`front` forward together.
+        let ring = MailRing::with_capacity(256);
+        for _ in 0..3 {
+            let l = ring.push_blob(&[out(9, 9, &[0; 8])]).unwrap(); // 48 B each
+            // SAFETY: single held count, released immediately.
+            unsafe { ring.release(l[0].header_off) };
+            ring.reclaim();
+        }
+        // `write` now sits at 144 with the ring otherwise free. Build a wide
+        // fan-out that must cross the 256-byte tail mid-build.
+        ring.open_blob();
+        let mut locs = Vec::new();
+        for k in 0..7u64 {
+            locs.push(
+                ring.append(k, k, &[0xAA; 8])
+                    .expect("appends fit the free ring"),
+            );
+        }
+        ring.seal();
+        // The fan-out crossed the tail, so it spans >= 2 physical blobs.
+        let distinct: BTreeSet<u32> = locs.iter().map(|l| l.header_off).collect();
+        assert!(
+            distinct.len() >= 2,
+            "fan-out should span >=2 blobs across the wrap; header_offs: {distinct:?}"
+        );
+        // Every payload still reads back intact across the split.
+        for l in &locs {
+            // SAFETY: locks held until released below.
+            let bytes = unsafe { ring.payload(l.payload_off, l.len) };
+            assert!(
+                bytes.iter().all(|&b| b == 0xAA),
+                "payload corrupted across wrap"
+            );
+        }
+        for l in &locs {
+            // SAFETY: one held count per loc.
+            unsafe { ring.release(l.header_off) };
+        }
+        while ring.reclaim() > 0 {}
+        assert_eq!(ring.live_bytes(), 0);
+    }
+
+    #[test]
+    fn fsm_build_many_cycles_round_trips() {
+        // Single-threaded soak of open/append/seal over a small ring:
+        // wraps (placement + seal-early) and reclaim recur as `write`
+        // circles. A reused-region bug would show as a tag mismatch.
+        let ring = MailRing::with_capacity(512);
+        for i in 0..2000u32 {
+            let tag = (i & 0xff) as u8;
+            let n = (i % 4 + 1) as usize;
+            ring.open_blob();
+            let mut locs = Vec::new();
+            for k in 0..n {
+                let payload = vec![tag; 8 + k * 8];
+                if let Ok(loc) = ring.append(k as u64, u64::from(tag), &payload) {
+                    locs.push((loc, payload.len()));
+                }
+                // A RingFull here would (in production) spill to Owned; the
+                // free-every-cycle pattern keeps the ring from filling, so
+                // we simply don't record a spilled mail.
+            }
+            ring.seal();
+            for (loc, len) in &locs {
+                assert_eq!(loc.len as usize, *len);
+                // SAFETY: lock held until the release loop below.
+                let bytes = unsafe { ring.payload(loc.payload_off, loc.len) };
+                assert!(
+                    bytes.iter().all(|&b| b == tag),
+                    "cycle {i}: tag {tag} corrupted"
+                );
+            }
+            for (loc, _) in &locs {
+                // SAFETY: one held count per loc.
+                unsafe { ring.release(loc.header_off) };
+            }
+            ring.reclaim();
+        }
+        while ring.reclaim() > 0 {}
+        assert_eq!(ring.live_bytes(), 0);
     }
 
     #[test]
