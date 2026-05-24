@@ -147,7 +147,7 @@ pub fn steal_into_local(
 /// return the **free** recipient slots it woke. While `deposit` runs,
 /// any [`WakeHandle::wake`](crate::scheduler::WakeHandle::wake) that
 /// wins its recipient's `Idle → Ready` CAS routes the slot into a
-/// thread-local collect buffer (via [`try_collect_demux`]) instead of
+/// thread-local collect buffer (via `try_collect_demux`) instead of
 /// pushing it to a deque — so the caller (`BlobWork::run_cycle`) can run
 /// those recipients **inline** on this worker rather than waking parked
 /// siblings. Busy recipients (lost the CAS) are never collected: their

@@ -617,10 +617,10 @@ impl NativeBinding {
     ///
     /// ADR-0087 Phase 3b: when a pool [`WakeSink`](crate::scheduler::WakeSink)
     /// is wired (every production binding — derived from the chassis
-    /// `Spawner`), the whole blob is pushed as **one**
-    /// [`BlobWork`](super::blob_work::BlobWork) work item rather than
-    /// routed per mail, so a fan-out of N costs one deque push + an
-    /// inline demux instead of N pushes + up to N parked-worker wakeups.
+    /// `Spawner`), the whole blob is pushed as **one** `BlobWork` work
+    /// item rather than routed per mail, so a fan-out of N costs one
+    /// deque push + an inline demux instead of N pushes + up to N
+    /// parked-worker wakeups.
     /// A binding with no `Spawner` (test transports built via
     /// [`Self::new_for_test`]) keeps the eager per-mail route.
     ///
