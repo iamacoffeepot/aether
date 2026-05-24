@@ -1103,14 +1103,46 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
             #scheduling_const
         }
     };
+    // The cardinality marker (issue 625 / ADR-0079) plus its ADR-0088
+    // §3/§4 reverse-lookup submission. The bridge already knows the
+    // actor's `NAMESPACE` and cardinality, so it auto-submits the
+    // name-inventory entry next to the marker — no per-actor registration
+    // list to keep in sync (the drift hazard iamacoffeepot/aether#1036
+    // flags). A **singleton**'s `NAMESPACE` *is* its mailbox name, so it
+    // submits a `NameEntry` (the static reverse map folds it, letting a
+    // `MailboxId` reverse to `aether.audio` instead of a hex tag). An
+    // **instanced** actor's `NAMESPACE` is the prefix of
+    // `<NAMESPACE>:<subname>` instances, so it submits a `Dynamic`
+    // `TemplateEntry` — the family's shape is declared, individual
+    // instances reverse via the runtime registry. (Typed instance
+    // parameters are future work; for now the convention is a single
+    // `:<subname>` string hole.) Both submissions are gated by the same
+    // `native_cfg` as the rest of the native surface (the `inventory`
+    // crate doesn't link on wasm32, and a feature-gated cap's entry
+    // tracks the cap's availability).
     let cardinality_marker = match cardinality {
-        Some(BridgeCardinality::Singleton) => Some(quote! {
+        Some(BridgeCardinality::Singleton) => quote! {
             impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
-        }),
-        Some(BridgeCardinality::Instanced) => Some(quote! {
+            #native_cfg
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_data::name_inventory::NameEntry {
+                    domain: ::aether_data::MAILBOX_DOMAIN,
+                    name: #namespace_expr,
+                }
+            }
+        },
+        Some(BridgeCardinality::Instanced) => quote! {
             impl #impl_generics ::aether_actor::Instanced for #self_ty #where_clause {}
-        }),
-        None => None,
+            #native_cfg
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_data::name_inventory::TemplateEntry {
+                    domain: ::aether_data::MAILBOX_DOMAIN,
+                    template: concat!(#namespace_expr, ":{subname}"),
+                    param: ::aether_data::name_inventory::ParamKind::Dynamic,
+                }
+            }
+        },
+        None => quote! {},
     };
     // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
     // one blanket `impl<K: Kind> HandlesKind<K> for X {}` so typed
