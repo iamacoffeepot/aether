@@ -31,3 +31,8 @@ pub const TAG_DAG: u8 = 0x4;
 /// Tag value for native-transform ids (ADR-0048). Name-hashed global
 /// identity for a registered transform.
 pub const TAG_TRANSFORM: u8 = 0x5;
+
+/// Tag value for thread ids (ADR-0088 §7). Name-hashed identity for an
+/// OS thread (`aether-worker-N`, `aether-root-<NAMESPACE>`, …),
+/// reversed to a display name through the inventory.
+pub const TAG_THREAD: u8 = 0x6;

@@ -43,12 +43,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::actor::native::Envelope;
+use crate::runtime::thread_name;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use aether_kinds::trace::TraceEvent;
 use std::ops::Deref;
 use std::sync::PoisonError;
-use std::thread;
 
 /// `ActorSlots` uses `RefCell` internally because the dedicated-thread
 /// dispatcher path only ever reaches it from one OS thread. Worker-pool
@@ -206,13 +206,16 @@ where
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
         let inbound_mail_id = env.mail_id;
-        // Issue 734: capture the OS thread name at the dispatcher's
-        // receive hook so the trace renderer can stamp each event
-        // with a per-thread tid + thread_name M event. With the
-        // `Pooled` default scheduler (issue 635) this is the worker's
-        // `aether-worker-N` name (shared across actors); `Thread`-
-        // scheduled actors land on a per-actor name.
-        let thread_name = thread::current().name().map(str::to_owned);
+        // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
+        // name-hashed `ThreadId` (a `Copy` u64) onto the `Received`
+        // event. Resolved once per worker thread via a thread-local
+        // cache — no per-hop `str::to_owned`, no `thread::current()`
+        // `Arc` bump. The display name is recovered on the cold render
+        // path through the reverse-lookup registry. With the `Pooled`
+        // default scheduler (issue 635) this is the worker's
+        // `aether-worker-N`; `Thread`-scheduled actors land on a
+        // per-actor name.
+        let thread_id = thread_name::current_thread_id();
         local::with_stamped(&self.slots, || {
             // ADR-0086 Phase 3: `Received` / `Finished` land in this
             // (recipient) actor's trace ring — only inside this
@@ -224,7 +227,7 @@ where
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
                     t: th.now_nanos(),
-                    thread_name,
+                    thread_id,
                 },
             );
             let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);

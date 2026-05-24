@@ -16,7 +16,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::{KindId, MailId, MailboxId};
+use aether_data::{KindId, MailId, MailboxId, ThreadId};
 use serde::{Deserialize, Serialize};
 
 use crate::MailEnvelope;
@@ -77,18 +77,20 @@ pub enum TraceEvent {
     Received {
         mail_id: MailId,
         t: Nanos,
-        /// Issue 734: OS thread name captured at the dispatcher's
-        /// receive hook (`std::thread::current().name()`). The
-        /// substrate's default `Pooled` scheduler (post-issue-635)
-        /// names worker threads `aether-worker-N`, so the trace
-        /// renderer (`hub::mcp::trace`) can distinguish per-thread
-        /// rows even when one OS thread serves multiple actors. Actors that opt into
-        /// the `Thread` scheduler get `aether-instanced-<full_name>` /
-        /// `aether-root-<NAMESPACE>` from `actor::native::spawn` and
-        /// `spawn_thread`. `None` when the OS thread has no name
-        /// (anonymous test threads, `std::thread::spawn` without
-        /// `Builder::new().name(...)`).
-        thread_name: Option<String>,
+        /// Issue 734 / ADR-0088 §7: the dispatching OS thread's
+        /// name-hashed [`ThreadId`], captured at the dispatcher's receive
+        /// hook. Stored as a `Copy` tagged id rather than a fresh
+        /// `String` per hop — the per-hop `str::to_owned` (~25% of the
+        /// warm dispatch hop) was the forcing function for the
+        /// reverse-lookup inventory. The substrate's default `Pooled`
+        /// scheduler names worker threads `aether-worker-N`; `Thread`-
+        /// scheduled actors land on `aether-instanced-<full_name>` /
+        /// `aether-root-<NAMESPACE>`. The display name is recovered on
+        /// the cold render path (`trace_walk::fold_nodes` ->
+        /// `MailNodeWire.thread_name`) via the runtime registry. `None`
+        /// when the OS thread has no name (anonymous test threads,
+        /// `std::thread::spawn` without `Builder::new().name(...)`).
+        thread_id: Option<ThreadId>,
     },
     Finished {
         mail_id: MailId,
@@ -155,10 +157,13 @@ pub struct MailNodeWire {
     pub t_sent: Nanos,
     pub t_received: Option<Nanos>,
     pub t_finished: Option<Nanos>,
-    /// Issue 734: OS thread name captured at the dispatcher's receive
-    /// hook (`std::thread::current().name()`). `None` until the
-    /// `Received` event lands. See [`TraceEvent::Received::thread_name`]
-    /// for the producer-side semantics.
+    /// Issue 734 / ADR-0088 §7: the dispatching OS thread's display
+    /// name, resolved on the cold fold path (`trace_walk::fold_nodes`)
+    /// from the `Received` event's [`ThreadId`] via the runtime
+    /// reverse-lookup registry. `None` until the `Received` event lands,
+    /// or when the thread was anonymous / the id wasn't registered (the
+    /// fold falls back to no name rather than a hex tag here, since this
+    /// field is the human display string the renderer prints directly).
     pub thread_name: Option<String>,
 }
 

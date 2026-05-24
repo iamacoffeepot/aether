@@ -19,7 +19,7 @@ use alloc::string::String;
 use core::fmt;
 
 pub use crate::tag_bits::{
-    HASH_MASK, TAG_DAG, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT, TAG_TRANSFORM,
+    HASH_MASK, TAG_DAG, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT, TAG_THREAD, TAG_TRANSFORM,
 };
 
 /// Type tag identifying an id space. Encoded in the high 4 bits of
@@ -42,6 +42,9 @@ pub enum Tag {
     /// Native-transform id (ADR-0048) — name-hashed global identity for
     /// a registered transform.
     Transform = TAG_TRANSFORM,
+    /// Thread id (ADR-0088 §7) — name-hashed identity for an OS thread,
+    /// reversed to a display name through the inventory.
+    Thread = TAG_THREAD,
 }
 
 impl Tag {
@@ -56,12 +59,13 @@ impl Tag {
             Self::Handle => "hdl",
             Self::Dag => "dag",
             Self::Transform => "trn",
+            Self::Thread => "thr",
         }
     }
 
     /// Decode a 4-bit tag value from the high nibble of a `u64`.
     /// Returns `None` for `0x0` (the reserved invalid sentinel) and
-    /// for any reserved-future value (`0x6..=0xF`).
+    /// for any reserved-future value (`0x7..=0xF`).
     #[must_use]
     pub const fn from_bits(bits: u8) -> Option<Self> {
         match bits {
@@ -70,6 +74,7 @@ impl Tag {
             TAG_HANDLE => Some(Self::Handle),
             TAG_DAG => Some(Self::Dag),
             TAG_TRANSFORM => Some(Self::Transform),
+            TAG_THREAD => Some(Self::Thread),
             _ => None,
         }
     }
@@ -172,6 +177,7 @@ pub fn decode(s: &str) -> Result<u64, DecodeError> {
         b"hdl" | b"HDL" => Tag::Handle,
         b"dag" | b"DAG" => Tag::Dag,
         b"trn" | b"TRN" => Tag::Transform,
+        b"thr" | b"THR" => Tag::Thread,
         _ => return Err(DecodeError::Malformed),
     };
     if bytes[3] != b'-' || bytes[8] != b'-' || bytes[13] != b'-' {
@@ -223,6 +229,7 @@ mod tests {
             Tag::Handle,
             Tag::Dag,
             Tag::Transform,
+            Tag::Thread,
         ] {
             for hash in [0u64, 0x1, 0x0FFF_FFFF_FFFF_FFFF, 0xDEAD_BEEF_CAFE_BABE] {
                 let id = with_tag(tag, hash);
@@ -264,6 +271,16 @@ mod tests {
         assert!(s.starts_with("trn-"));
         assert_eq!(s, "trn-aaaa-aaaa-aaaa");
         assert_eq!(decode(&s).expect("test setup: transform id decodes"), id);
+    }
+
+    #[test]
+    fn thread_tag_encoding_shape() {
+        let id = with_tag(Tag::Thread, 0);
+        let s = encode(id).expect("test setup: Thread id encodes (tag is non-zero)");
+        assert_eq!(s.len(), 18);
+        assert!(s.starts_with("thr-"));
+        assert_eq!(s, "thr-aaaa-aaaa-aaaa");
+        assert_eq!(decode(&s).expect("test setup: thread id decodes"), id);
     }
 
     #[test]

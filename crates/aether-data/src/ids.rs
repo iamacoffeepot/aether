@@ -18,7 +18,7 @@ use core::fmt;
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::hash::{TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name};
+use crate::hash::{TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, thread_id_from_name};
 use crate::tagged_id::{self, Tag};
 
 /// Shared `Display` body — render tagged-string form when the tag
@@ -111,6 +111,8 @@ pub const fn tag_for_type_id(type_id: u64) -> Option<Tag> {
         Some(Tag::Dag)
     } else if type_id == TransformId::TYPE_ID {
         Some(Tag::Transform)
+    } else if type_id == ThreadId::TYPE_ID {
+        Some(Tag::Thread)
     } else {
         None
     }
@@ -131,6 +133,8 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
         Some(DagId::TYPE_NAME)
     } else if type_id == TransformId::TYPE_ID {
         Some(TransformId::TYPE_NAME)
+    } else if type_id == ThreadId::TYPE_ID {
+        Some(ThreadId::TYPE_NAME)
     } else {
         None
     }
@@ -335,6 +339,49 @@ impl<'de> Deserialize<'de> for TransformId {
     }
 }
 
+/// ADR-0088 §7 name-hashed identity for an OS thread (`aether-worker-N`,
+/// `aether-root-<NAMESPACE>`, `aether-instanced-<full_name>`). Carries
+/// the `Tag::Thread` discriminator + a 60-bit FNV-1a hash of the thread
+/// name under `THREAD_DOMAIN`. The dispatch hot path stores this `Copy`
+/// id in `TraceEvent::Received` instead of allocating the name string
+/// per hop; the cold render path reverses it to a display name through
+/// the runtime registry. `#[repr(transparent)]` over `u64`.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+pub struct ThreadId(pub u64);
+
+impl ThreadId {
+    pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.thread_id");
+    pub const TYPE_NAME: &'static str = "aether.thread_id";
+
+    /// Compute the deterministic id for an OS thread name. Same
+    /// algorithm as [`crate::hash::thread_id_from_name`]; the dispatch
+    /// hot path calls this once per worker thread (cached in a
+    /// thread-local) so the per-hop cost is a `Copy`, not an alloc.
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        thread_id_from_name(name)
+    }
+}
+
+impl fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+impl Serialize for ThreadId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_id(self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ThreadId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        deserialize_id(d, Tag::Thread).map(ThreadId)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +447,31 @@ mod tests {
         let decoded = tagged_id::decode_with_tag(&encoded, Tag::Transform)
             .expect("TransformId round-trips via decode");
         assert_eq!(decoded, id);
+    }
+
+    /// ADR-0088 §7: a `ThreadId` carrying `Tag::Thread` bits encodes to
+    /// the `thr-XXXX-XXXX-XXXX` form, resolves its codec arm, and
+    /// `from_name` is deterministic + tag-stamped — uniform with the
+    /// mailbox / kind id derivation.
+    #[test]
+    fn thread_id_is_tagged_and_resolves_codec_arm() {
+        assert_eq!(tag_for_type_id(ThreadId::TYPE_ID), Some(Tag::Thread));
+        assert_eq!(
+            type_name_for_type_id(ThreadId::TYPE_ID),
+            Some("aether.thread_id")
+        );
+        let id = tagged_id::with_tag(Tag::Thread, 0x77);
+        let encoded = tagged_id::encode(id).expect("ThreadId tag-encodes");
+        assert!(encoded.starts_with("thr-"), "expected tagged: {encoded}");
+        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Thread)
+            .expect("ThreadId round-trips via decode");
+        assert_eq!(decoded, id);
+
+        let a = ThreadId::from_name("aether-worker-0");
+        let b = ThreadId::from_name("aether-worker-0");
+        let c = ThreadId::from_name("aether-worker-1");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(tagged_id::tag_of(a.0), Some(Tag::Thread));
     }
 }
