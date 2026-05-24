@@ -8,7 +8,13 @@ name: Perf compare
 # Informational by construction: this workflow's job is NOT in ci.yml's
 # `ci-pass` aggregator, so a regression never blocks a merge (ADR-0085
 # §4). Cost-bounded: path-filtered + label-gated, so it does not run on
-# every PR.
+# every PR. The path filter watches the whole substrate runtime, not a
+# hand-picked file list — the dispatch hot path is spread across
+# scheduler / mail / actor / chassis and moves over time (a narrow list
+# silently went stale and skipped the iamacoffeepot/aether#1116 blob-demux
+# change, which lives in `actor/native/`). Substrate changes the harness
+# can't measure (fs adapters, handle store, capture) produce a no-delta
+# run; suppress those per-PR with the `perf-skip` label.
 
 on:
   pull_request:
@@ -33,15 +39,14 @@ jobs:
         with:
           filters: |
             perf:
-              - 'crates/aether-substrate/src/scheduler/**'
-              - 'crates/aether-substrate/src/mail/**'
+              - 'crates/aether-substrate/src/**'
               - 'crates/aether-substrate-bundle/src/perf/**'
 
   compare:
     name: Compare dispatch perf vs merge-base
     needs: changes
-    # Auto-run on scheduler / mail / perf path changes, or when the
-    # `perf` label is present; force-skip with `perf-skip`.
+    # Auto-run on any substrate-runtime / perf-harness path change, or
+    # when the `perf` label is present; force-skip with `perf-skip`.
     if: >-
       !contains(github.event.pull_request.labels.*.name, 'perf-skip') &&
       (needs.changes.outputs.perf == 'true' ||
