@@ -50,6 +50,11 @@ pub mod gemini;
 pub mod handle;
 pub mod http;
 pub mod input;
+// ADR-0088 §3 link-time `NameEntry` submissions for the chassis-owned
+// mailbox namespaces. Native-only — the submissions ride the `inventory`
+// crate, which doesn't link on wasm32 (the header-only component build).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod name_inventory;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod rpc;

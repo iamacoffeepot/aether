@@ -1,0 +1,330 @@
+//! ADR-0088 §3/§4 static name inventory + name templates — the
+//! compile-time half of the reverse-lookup chain.
+//!
+//! Every substrate id is a one-way hash (ADR-0029/0030/0064): you cannot
+//! recover the origin name from the id. ADR-0088 layers an additive
+//! side table over the ids; this module holds its **link-time** arm. It
+//! generalizes the `Kind` descriptor inventory (issue #243) into a name
+//! inventory that any declared-name family submits into, plus a template
+//! inventory for instanced families whose instances are not statically
+//! enumerable.
+//!
+//! ## Two link-time inventories
+//!
+//! - [`NameEntry`] — a declared name (`{ domain, name }`). Submitted for
+//!   chassis-owned mailbox `NAMESPACE` consts. Kinds reuse the existing
+//!   [`DescriptorEntry`] (its `name` field) and transforms reuse
+//!   [`TransformEntry`] (its `name` field), so a declared kind /
+//!   transform needs no second submission.
+//! - [`TemplateEntry`] — an instanced family (`{ domain, template,
+//!   param }`). The `template` is a pattern with one `{…}` hole
+//!   (`"aether-worker-{N}"`), and [`ParamKind`] says how the hole is
+//!   filled:
+//!     - [`ParamKind::Bounded`] — a finite integer range, enumerated and
+//!       pre-hashed at boot (the common-case "embed the expected hashes"
+//!       path).
+//!     - [`ParamKind::Declared`] — the hole ranges over another
+//!       inventory's names (`aether-root-{NAMESPACE}` over the mailbox
+//!       names declared under [`crate::MAILBOX_DOMAIN`]).
+//!     - [`ParamKind::Dynamic`] — instances are minted at runtime from an
+//!       unbounded parameter; the template declares only the family's
+//!       existence and shape. Individual instances reverse via the
+//!       runtime registry (the substrate-side arm), not this map.
+//!
+//! ## The static reverse map
+//!
+//! [`build_static_reverse_map`] folds the two inventories (plus kinds +
+//! transforms) into a `hash → name` map at boot. `NameEntry`s are
+//! rehashed under their own `domain` so the key matches the id space
+//! exactly; `Bounded` / `Declared` templates enumerate and prehash each
+//! instantiation. `Dynamic` templates contribute nothing to the map —
+//! the runtime registry covers them. The substrate composes this map
+//! with its runtime registry + the ADR-0064 hex-tag fallback to form the
+//! full four-step `resolve` (ADR-0088 §2).
+//!
+//! Everything here is native-only: the inventories ride on the
+//! `inventory` crate (std-linker-only, exactly like the `Kind`
+//! descriptor inventory), so the wasm guest build skips the module
+//! entirely.
+
+#![cfg(not(target_arch = "wasm32"))]
+
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+
+use crate::__inventory::DescriptorEntry;
+use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
+use crate::tagged_id::{Tag, with_tag};
+use crate::transform::TransformEntry;
+
+/// Re-export of the `inventory` crate so consumer crates can
+/// `inventory::submit!` a [`NameEntry`] / [`TemplateEntry`] without naming
+/// the `inventory` dependency directly (it isn't on most consumers'
+/// dependency lists). Mirrors `transform::__transform_runtime`'s
+/// re-export for the same reason.
+pub use ::inventory;
+
+/// A declared name, collected at link time (ADR-0088 §3). Sibling of the
+/// `Kind` [`DescriptorEntry`]; `inventory::submit!`-ed for chassis-owned
+/// mailbox `NAMESPACE` consts (and any other statically-known declared
+/// name). Owns nothing — both fields are `'static` so the value is
+/// const-constructible from `inventory::submit!`.
+///
+/// `domain` is the byte-domain prefix the id is hashed under
+/// ([`crate::MAILBOX_DOMAIN`] for a mailbox name). The reverse-map
+/// builder rehashes `name` under `domain` so the map key matches the id
+/// space exactly.
+pub struct NameEntry {
+    /// Byte-domain prefix the name is hashed under (e.g.
+    /// [`crate::MAILBOX_DOMAIN`]). Determines both the hash and the
+    /// tag bits of the reconstructed id.
+    pub domain: &'static [u8],
+    /// The declared name (e.g. `"aether.audio"`).
+    pub name: &'static str,
+}
+
+inventory::collect!(NameEntry);
+
+/// How a [`TemplateEntry`]'s single `{…}` hole is filled (ADR-0088 §4).
+pub enum ParamKind {
+    /// Finite inclusive integer range. The reverse-map builder
+    /// enumerates `lo..=hi`, substitutes each value into the template,
+    /// and prehashes the result — exact reverse at zero runtime cost.
+    /// Used for `aether-worker-{N}`.
+    Bounded {
+        /// Inclusive lower bound.
+        lo: u64,
+        /// Inclusive upper bound.
+        hi: u64,
+    },
+    /// The hole ranges over the names declared in another inventory
+    /// under `domain` — every [`NameEntry`] whose `domain` matches.
+    /// Used for `aether-root-{NAMESPACE}`, which ranges over the
+    /// declared mailbox namespaces.
+    Declared {
+        /// The byte-domain whose [`NameEntry`] names fill the hole.
+        domain: &'static [u8],
+    },
+    /// Instances are minted at runtime from an unbounded parameter
+    /// (`aether-instanced-{full_name}`, `aether.component.trampoline:{name}`).
+    /// The template declares the family's existence + shape; individual
+    /// instances reverse via the runtime registry, not this map.
+    Dynamic,
+}
+
+/// A name template for an instanced family, collected at link time
+/// (ADR-0088 §4). The `template` carries one `{…}` hole; [`ParamKind`]
+/// says how it is filled. Owns nothing but `'static` data so it is
+/// const-constructible from `inventory::submit!`.
+pub struct TemplateEntry {
+    /// Byte-domain prefix the instantiated names are hashed under
+    /// (e.g. [`crate::THREAD_DOMAIN`] for thread-name families).
+    pub domain: &'static [u8],
+    /// Pattern with one `{…}` hole, e.g. `"aether-worker-{N}"`.
+    pub template: &'static str,
+    /// How the hole is filled.
+    pub param: ParamKind,
+}
+
+inventory::collect!(TemplateEntry);
+
+/// Iterate every [`NameEntry`] collected at link time.
+pub fn name_entries() -> impl Iterator<Item = &'static NameEntry> {
+    inventory::iter::<NameEntry>.into_iter()
+}
+
+/// Iterate every [`TemplateEntry`] collected at link time.
+pub fn template_entries() -> impl Iterator<Item = &'static TemplateEntry> {
+    inventory::iter::<TemplateEntry>.into_iter()
+}
+
+/// Map a byte-domain prefix to the ADR-0064 [`Tag`] a reconstructed id
+/// in that domain carries. `None` for a domain that doesn't correspond
+/// to a tagged-id family (so the builder skips it rather than minting a
+/// mis-tagged id).
+fn tag_for_domain(domain: &[u8]) -> Option<Tag> {
+    if domain == crate::MAILBOX_DOMAIN {
+        Some(Tag::Mailbox)
+    } else if domain == KIND_DOMAIN {
+        Some(Tag::Kind)
+    } else if domain == crate::THREAD_DOMAIN {
+        Some(Tag::Thread)
+    } else if domain == crate::TRANSFORM_DOMAIN {
+        Some(Tag::Transform)
+    } else {
+        None
+    }
+}
+
+/// Reconstruct the tagged id for `name` under `domain`, matching the id
+/// space exactly. `None` if `domain` isn't a known tagged-id family.
+fn id_for_name(domain: &[u8], name: &str) -> Option<u64> {
+    let tag = tag_for_domain(domain)?;
+    Some(with_tag(tag, fnv1a_64_prefixed(domain, name.as_bytes())))
+}
+
+/// Substitute `value` for the single `{…}` hole in `template`. Returns
+/// `None` if the template has no `{` / `}` pair, which is an authoring
+/// error (a template with no hole is just a `NameEntry`).
+fn fill_template(template: &str, value: &str) -> Option<String> {
+    let open = template.find('{')?;
+    let close = template[open..].find('}')? + open;
+    let mut out = String::with_capacity(template.len() + value.len());
+    out.push_str(&template[..open]);
+    out.push_str(value);
+    out.push_str(&template[close + 1..]);
+    Some(out)
+}
+
+/// Fold the link-time inventories into a `hash → name` reverse map
+/// (ADR-0088 §3/§4). Built once at boot; read cold at render time.
+///
+/// Contributions, in insertion order (later inserts win on the
+/// vanishingly-unlikely 60-bit collision):
+///
+/// 1. Every [`NameEntry`], rehashed under its `domain`.
+/// 2. Every kind ([`DescriptorEntry`]), rehashed under [`KIND_DOMAIN`].
+/// 3. Every transform ([`TransformEntry`]), keyed on its `transform_id`.
+/// 4. Every [`ParamKind::Bounded`] template, each instantiation
+///    enumerated + prehashed.
+/// 5. Every [`ParamKind::Declared`] template, instantiated over the
+///    matching-domain [`NameEntry`] names.
+///
+/// [`ParamKind::Dynamic`] templates contribute nothing — their instances
+/// reverse via the substrate-side runtime registry (ADR-0088 §5).
+#[must_use]
+pub fn build_static_reverse_map() -> BTreeMap<u64, String> {
+    let mut map: BTreeMap<u64, String> = BTreeMap::new();
+
+    // 1. Declared names (mailbox NAMESPACE consts, etc.).
+    for entry in name_entries() {
+        if let Some(id) = id_for_name(entry.domain, entry.name) {
+            map.insert(id, entry.name.to_string());
+        }
+    }
+
+    // 2. Kinds reuse the existing `DescriptorEntry` inventory.
+    for entry in inventory::iter::<DescriptorEntry>() {
+        if let Some(id) = id_for_name(KIND_DOMAIN, entry.name) {
+            map.insert(id, entry.name.to_string());
+        }
+    }
+
+    // 3. Transforms reuse the existing `TransformEntry` inventory — its
+    //    `transform_id` is already the tagged id, no rehash needed.
+    for entry in inventory::iter::<TransformEntry>() {
+        map.insert(entry.transform_id.0, entry.name.to_string());
+    }
+
+    // 4 + 5. Templates: enumerate Bounded / Declared, prehash each
+    //        instantiation. Dynamic templates declare shape only.
+    for tmpl in template_entries() {
+        match tmpl.param {
+            ParamKind::Bounded { lo, hi } => {
+                for n in lo..=hi {
+                    let value = n.to_string();
+                    if let Some(name) = fill_template(tmpl.template, &value)
+                        && let Some(id) = id_for_name(tmpl.domain, &name)
+                    {
+                        map.insert(id, name);
+                    }
+                }
+            }
+            ParamKind::Declared { domain } => {
+                for entry in name_entries() {
+                    if entry.domain != domain {
+                        continue;
+                    }
+                    if let Some(name) = fill_template(tmpl.template, entry.name)
+                        && let Some(id) = id_for_name(tmpl.domain, &name)
+                    {
+                        map.insert(id, name);
+                    }
+                }
+            }
+            ParamKind::Dynamic => {}
+        }
+    }
+
+    map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MAILBOX_DOMAIN;
+    use crate::hash::{THREAD_DOMAIN, mailbox_id_from_name, thread_id_from_name};
+    use alloc::format;
+
+    // Test-only declared name + templates. `inventory::submit!` is
+    // additive and process-global, so these ride alongside whatever the
+    // rest of the binary declares; the assertions key on the specific
+    // names rather than the map's total size.
+    inventory::submit! {
+        NameEntry { domain: MAILBOX_DOMAIN, name: "aether.test.inventory_mailbox" }
+    }
+    inventory::submit! {
+        TemplateEntry {
+            domain: THREAD_DOMAIN,
+            template: "aether-test-worker-{N}",
+            param: ParamKind::Bounded { lo: 0, hi: 3 },
+        }
+    }
+    inventory::submit! {
+        TemplateEntry {
+            domain: THREAD_DOMAIN,
+            template: "aether-test-root-{NAMESPACE}",
+            param: ParamKind::Declared { domain: MAILBOX_DOMAIN },
+        }
+    }
+
+    #[test]
+    fn fill_template_substitutes_single_hole() {
+        assert_eq!(
+            fill_template("aether-worker-{N}", "7").as_deref(),
+            Some("aether-worker-7")
+        );
+        assert_eq!(
+            fill_template("aether.component.trampoline:{name}", "cam").as_deref(),
+            Some("aether.component.trampoline:cam")
+        );
+        assert_eq!(fill_template("no-hole", "x"), None);
+    }
+
+    #[test]
+    fn static_name_entry_reverses_to_real_name() {
+        let map = build_static_reverse_map();
+        let id = mailbox_id_from_name("aether.test.inventory_mailbox");
+        assert_eq!(
+            map.get(&id.0).map(String::as_str),
+            Some("aether.test.inventory_mailbox")
+        );
+    }
+
+    #[test]
+    fn bounded_template_reconstructs_each_instantiation() {
+        let map = build_static_reverse_map();
+        for n in 0..=3 {
+            let name = format!("aether-test-worker-{n}");
+            let id = thread_id_from_name(&name);
+            assert_eq!(
+                map.get(&id.0).map(String::as_str),
+                Some(name.as_str()),
+                "bounded template instantiation {name} not in reverse map"
+            );
+        }
+        // Out of the declared range — not prehashed.
+        let outside = thread_id_from_name("aether-test-worker-4");
+        assert_eq!(map.get(&outside.0), None);
+    }
+
+    #[test]
+    fn declared_template_reconstructs_over_mailbox_names() {
+        let map = build_static_reverse_map();
+        // The test mailbox NameEntry above is a declared mailbox name, so
+        // the Declared root template instantiates over it.
+        let name = "aether-test-root-aether.test.inventory_mailbox";
+        let id = thread_id_from_name(name);
+        assert_eq!(map.get(&id.0).map(String::as_str), Some(name));
+    }
+}
