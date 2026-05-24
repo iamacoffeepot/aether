@@ -14,6 +14,7 @@ use std::env;
 use tokio::net::TcpListener;
 use tokio::task;
 mod args;
+mod reverse;
 mod rpc;
 #[cfg(test)]
 mod test_chassis;
@@ -25,7 +26,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use crate::rpc::RpcSession;
-use crate::tools::{ComponentCache, Mcp};
+use crate::tools::{ComponentCache, Mcp, ReverseNameCache};
 
 /// Default port the MCP HTTP server binds. Distinct from the embedded
 /// hub MCP's 8888 so the two coexist until the P5d cutover.
@@ -72,13 +73,21 @@ async fn main() -> anyhow::Result<()> {
     // populate it, `describe_component` reads it.
     let components: Arc<ComponentCache> = Arc::new(ComponentCache::default());
 
+    // Process-wide per-engine reverse-name cache (ADR-0088 §8), shared
+    // into every per-session `Mcp` — built lazily from each engine's
+    // served `aether.inventory` manifest the first time MCP renders an id
+    // for that engine, then reused across tool calls and sessions.
+    let names: Arc<ReverseNameCache> = Arc::new(ReverseNameCache::default());
+
     let factory_session = Arc::clone(&session);
     let factory_components = Arc::clone(&components);
+    let factory_names = Arc::clone(&names);
     let service = StreamableHttpService::new(
         move || {
             Ok(Mcp::new(
                 Arc::clone(&factory_session),
                 Arc::clone(&factory_components),
+                Arc::clone(&factory_names),
             ))
         },
         Arc::new(LocalSessionManager::default()),

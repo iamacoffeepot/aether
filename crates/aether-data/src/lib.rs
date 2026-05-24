@@ -67,7 +67,8 @@ pub use ids::{
 pub use mail::{MailId, ReplyTarget, ReplyTo};
 #[cfg(not(target_arch = "wasm32"))]
 pub use name_inventory::{
-    NameEntry, ParamKind, TemplateEntry, build_static_reverse_map, name_entries, template_entries,
+    NameEntry, ParamKind, TemplateEntry, build_static_reverse_map, fill_template, id_for_name,
+    name_entries, template_entries,
 };
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};

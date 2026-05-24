@@ -158,7 +158,13 @@ fn tag_for_domain(domain: &[u8]) -> Option<Tag> {
 
 /// Reconstruct the tagged id for `name` under `domain`, matching the id
 /// space exactly. `None` if `domain` isn't a known tagged-id family.
-fn id_for_name(domain: &[u8], name: &str) -> Option<u64> {
+///
+/// Public so the `aether-mcp` client arm (ADR-0088 §8) reconstructs ids
+/// from a served manifest's wire `domain` bytes through the *same* hash +
+/// tag derivation the substrate uses to build its static reverse map —
+/// one shared helper rather than a drift-prone re-implementation.
+#[must_use]
+pub fn id_for_name(domain: &[u8], name: &str) -> Option<u64> {
     let tag = tag_for_domain(domain)?;
     Some(with_tag(tag, fnv1a_64_prefixed(domain, name.as_bytes())))
 }
@@ -166,7 +172,11 @@ fn id_for_name(domain: &[u8], name: &str) -> Option<u64> {
 /// Substitute `value` for the single `{…}` hole in `template`. Returns
 /// `None` if the template has no `{` / `}` pair, which is an authoring
 /// error (a template with no hole is just a `NameEntry`).
-fn fill_template(template: &str, value: &str) -> Option<String> {
+///
+/// Public so the `aether-mcp` client arm (ADR-0088 §8) expands templates
+/// the same way [`build_static_reverse_map`] does — see [`id_for_name`].
+#[must_use]
+pub fn fill_template(template: &str, value: &str) -> Option<String> {
     let open = template.find('{')?;
     let close = template[open..].find('}')? + open;
     let mut out = String::with_capacity(template.len() + value.len());
