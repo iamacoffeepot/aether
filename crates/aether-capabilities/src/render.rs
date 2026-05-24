@@ -731,6 +731,7 @@ mod native {
         use aether_actor::Actor;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::mail::MailId;
+        use aether_substrate::mail::MailRef;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
@@ -762,7 +763,7 @@ mod native {
                 kind_name: "test.kind".to_owned(),
                 origin: None,
                 sender: ReplyTo::NONE,
-                payload: payload.to_vec(),
+                payload: MailRef::from(payload.to_vec()),
                 count: 1,
                 mail_id: MailId::NONE,
                 root: MailId::NONE,

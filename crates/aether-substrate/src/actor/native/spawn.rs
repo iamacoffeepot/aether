@@ -36,7 +36,7 @@ use crate::chassis::error::BootError;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
-use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
+use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
 use crate::scheduler::WakeHandle;
@@ -679,7 +679,7 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
             kind_name: <K as Kind>::NAME.to_owned(),
             origin: None,
             sender: self.sender,
-            payload,
+            payload: MailRef::from(payload),
             count: 1,
             mail_id: MailId::NONE,
             root: MailId::NONE,

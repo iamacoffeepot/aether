@@ -563,7 +563,7 @@ mod cap_native {
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
-        use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
         use serde::de::DeserializeOwned;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
@@ -630,7 +630,7 @@ mod cap_native {
                 kind_name: K::NAME.to_owned(),
                 origin: None,
                 sender: session_reply(),
-                payload: bytes,
+                payload: MailRef::from(bytes),
                 count: 1,
                 mail_id: MailId::NONE,
                 root: MailId::NONE,

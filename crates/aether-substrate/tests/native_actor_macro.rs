@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, ReplyTo};
 use aether_substrate::handle_store::HandleStore;
-use aether_substrate::mail::MailId;
 use aether_substrate::mail::registry::OwnedDispatch;
+use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::{
     Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
     NativeInitCtx, NeverDriver, PassiveChassis, Registry, mail::MailboxId,
@@ -142,7 +142,7 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         kind_name: K::NAME.to_owned(),
         origin: None,
         sender: ReplyTo::NONE,
-        payload: bytes,
+        payload: MailRef::from(bytes),
         count: 1,
         mail_id: MailId::NONE,
         root: MailId::NONE,

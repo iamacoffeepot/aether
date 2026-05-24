@@ -372,7 +372,7 @@ impl App {
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_window_envelope(&mut self, env: Envelope) {
         if env.kind == self.kind_set_window_mode {
-            let payload: SetWindowMode = match postcard::from_bytes(&env.payload) {
+            let payload: SetWindowMode = match postcard::from_bytes(env.payload.bytes()) {
                 Ok(p) => p,
                 Err(e) => {
                     self.outbound.send_reply(
@@ -387,7 +387,7 @@ impl App {
             let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
             self.outbound.send_reply(env.sender, &result);
         } else if env.kind == self.kind_set_window_title {
-            let payload: SetWindowTitle = match postcard::from_bytes(&env.payload) {
+            let payload: SetWindowTitle = match postcard::from_bytes(env.payload.bytes()) {
                 Ok(p) => p,
                 Err(e) => {
                     self.outbound.send_reply(
