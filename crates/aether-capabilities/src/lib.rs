@@ -50,6 +50,10 @@ pub mod gemini;
 pub mod handle;
 pub mod http;
 pub mod input;
+// `aether.inventory` reverse-lookup inventory cap (ADR-0088 §6, issue
+// 1122). Serves the per-build name/template manifest + dynamic-instance
+// resolve over mail.
+pub mod inventory;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod rpc;
@@ -99,6 +103,7 @@ pub use http::{HttpCapability, HttpConfig};
 pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
+pub use inventory::InventoryCapability;
 
 pub use fs::FsCapability;
 // ADR-0050 `aether.gemini` cap (issue 1015).

@@ -138,7 +138,16 @@ fn static_map() -> &'static BTreeMap<u64, String> {
 /// Separate from [`resolve`] so the four-step chain reads cleanly and so
 /// callers that specifically want the runtime arm (tests, diagnostics)
 /// can reach it without the static-map / hex-fallback steps.
-fn resolve_runtime(id: u64) -> Option<String> {
+///
+/// This is the arm the `aether.inventory.resolve` actor (ADR-0088 §6)
+/// serves: a client folds the manifest's declared names + expandable
+/// templates locally, so the only thing it *can't* compute is a
+/// dynamically-minted instance — exactly what this map holds. Returning
+/// `None` on a miss (rather than the hex fallback [`resolve`] applies)
+/// lets the wire reply carry `Option<String>` with `None` meaning "fall
+/// back to rendering the ADR-0064 tagged-id string yourself."
+#[must_use]
+pub fn resolve_runtime(id: u64) -> Option<String> {
     registry()
         .read()
         .unwrap_or_else(PoisonError::into_inner)
