@@ -319,6 +319,22 @@ impl WakeSink {
     pub fn new(injector: Arc<Injector<Arc<dyn Drainable>>>, spin: Arc<SpinPark>) -> Self {
         Self { injector, spin }
     }
+
+    /// Schedule a runnable `slot`: push to the current worker's own
+    /// deque when this runs on a pool worker under the local bound (the
+    /// affinity warm path — no notify, the same worker drains it LIFO),
+    /// else spill to the shared injector and notify the coordinator
+    /// (route-to-spinner / unpark-one). This is the non-demux wake
+    /// destination, shared by [`WakeHandle::wake`], the producer-side
+    /// blob push, and an inline recipient that yielded mid-drain
+    /// (ADR-0087 Phase 3b). The injector push is infallible; shutdown is
+    /// observed through the coordinator's flag.
+    pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
+        if let Err(slot) = worker_deque::try_push_local(slot, worker_deque::sticky_cap()) {
+            self.injector.push(slot);
+            self.spin.notify();
+        }
+    }
 }
 
 /// Sender-side wake hook the chassis hands to the inbox sender path
@@ -359,27 +375,21 @@ impl WakeHandle {
             // gone the state never matters.
             return false;
         };
-        // Affinity (iamacoffeepot/aether#1059, now the deque's own-pop):
-        // if this wake runs on a pool worker and its own deque is under
-        // the local bound, push the slot there so the chain stays warm —
-        // no injector round-trip, no wakeup; the same worker drains it
-        // LIFO on its next loop, invisible to the spin coordinator. The
-        // bound is the stickiness cap (`AETHER_LOCAL_STICKY_MAX`, default
-        // 1): at 1 the chain head stays local and every fan-out extra
-        // spills; higher keeps fan-out extras local too, trading
-        // cross-worker parallelism for locality.
-        //
-        // Otherwise (not a pool thread, or the own deque is at the bound —
-        // fan-out spill), push to the shared injector and notify the
-        // coordinator (iamacoffeepot/aether#1064): it routes to a spinning
-        // worker when one exists and only unparks a dormant worker when
-        // none is. The injector push is infallible; shutdown is observed
-        // through the coordinator's flag, so there is no closed-channel
-        // case to skip here.
-        if let Err(slot) = worker_deque::try_push_local(slot, worker_deque::sticky_cap()) {
-            self.sink.injector.push(slot);
-            self.sink.spin.notify();
-        }
+        // ADR-0087 Phase 3b: if this wake fires inside a blob-demux
+        // window (a `BlobWork` depositing its fan-out on this worker),
+        // hand the just-woken free recipient to the demuxer so it runs
+        // inline on this worker — no deque push, no notify. The demuxer
+        // owns the slot until it runs it; nothing else can see a slot
+        // that's `Ready` but on no deque.
+        let Err(slot) = worker_deque::try_collect_demux(slot) else {
+            return true;
+        };
+        // Not demuxing — today's affinity / spill path
+        // (iamacoffeepot/aether#1059 own-deque, #1064 route-to-spinner):
+        // own deque under the local bound keeps a chain warm with no
+        // notify; otherwise spill to the injector + notify a spinner (or
+        // unpark one). See [`WakeSink::schedule`].
+        self.sink.schedule(slot);
         true
     }
 

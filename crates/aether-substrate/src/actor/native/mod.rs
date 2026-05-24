@@ -63,6 +63,7 @@
 //! unknown kinds.
 
 pub mod binding;
+pub(crate) mod blob_work;
 pub mod ctx;
 pub(crate) mod dispatch;
 pub(crate) mod dispatcher_slot;

@@ -615,10 +615,38 @@ impl NativeBinding {
     /// routing (inline handlers receive a `MailDispatch`, not a
     /// buffering `NativeCtx`).
     ///
+    /// ADR-0087 Phase 3b: when a pool [`WakeSink`](crate::scheduler::WakeSink)
+    /// is wired (every production binding — derived from the chassis
+    /// `Spawner`), the whole blob is pushed as **one**
+    /// [`BlobWork`](super::blob_work::BlobWork) work item rather than
+    /// routed per mail, so a fan-out of N costs one deque push + an
+    /// inline demux instead of N pushes + up to N parked-worker wakeups.
+    /// A binding with no `Spawner` (test transports built via
+    /// [`Self::new_for_test`]) keeps the eager per-mail route.
+    ///
     /// # Panics
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub fn flush_outbound(&self) {
+        self.flush_outbound_inner(true);
+    }
+
+    /// `wait_reply`-side flush: routes the buffered blob **eagerly**
+    /// (per-mail, never as a deferred `BlobWork`). A send-then-`wait_reply`
+    /// handler blocks this thread on the reply, which depends on the sent
+    /// mail being delivered first — deferring it to a `BlobWork` that
+    /// only a worker drains could wedge the wait (e.g. if this binding's
+    /// own worker is the one now parked in the wait). Eager routing
+    /// matches the pre-3b delivery point exactly.
+    fn flush_outbound_eager(&self) {
+        self.flush_outbound_inner(false);
+    }
+
+    /// Seal the open blob, mint a [`MailRef`] per buffered mail, and
+    /// route. `allow_blob` picks the deferred [`BlobWork`] path (handler
+    /// end) vs eager per-mail routing (`wait_reply`); both are no-ops
+    /// when nothing is buffered.
+    fn flush_outbound_inner(&self, allow_blob: bool) {
         let routed: Vec<Mail> = {
             let mut buf = self
                 .outbound
@@ -653,8 +681,19 @@ impl NativeBinding {
                 })
                 .collect()
         };
-        for mail in routed {
-            self.mailer.push(mail);
+
+        // ADR-0087 Phase 3b: push the whole blob as one work item when a
+        // pool sink is wired and the caller allows deferral; the demuxing
+        // worker runs free recipients inline. Otherwise route per mail
+        // (eager `wait_reply` flush, or a test binding with no Spawner).
+        if let (true, Some(sink)) = (allow_blob, self.spawner.as_ref().map(|s| s.wake_sink())) {
+            let blob =
+                super::blob_work::BlobWork::new(routed, Arc::clone(&self.mailer), sink.clone());
+            sink.schedule(blob);
+        } else {
+            for mail in routed {
+                self.mailer.push(mail);
+            }
         }
     }
 
@@ -682,8 +721,10 @@ impl NativeBinding {
         // ADR-0087 / 2b: flush buffered outbound mail before blocking —
         // a send-then-wait_reply in the same handler would otherwise
         // deadlock, since the awaited reply depends on a mail still
-        // sitting unsent in the blob buffer.
-        self.flush_outbound();
+        // sitting unsent in the blob buffer. Route eagerly (3b): the
+        // reply depends on delivery happening before we park, so this
+        // flush must not defer the blob to a worker that might be us.
+        self.flush_outbound_eager();
         let Some(inbox_mutex) = self.inbox.get() else {
             tracing::error!(
                 target: "aether_substrate::native_transport",
