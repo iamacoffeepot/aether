@@ -446,7 +446,7 @@ fn route_mail(
             // `root.sender`, which lands here over the wire. Answer the
             // tail and reply to the caller. (In-process callers reach
             // the same ring via `TraceHandle::chassis_host_tail`.)
-            let result = TraceTail::decode_from_bytes(&mail.payload).map_or_else(
+            let result = TraceTail::decode_from_bytes(mail.payload.bytes()).map_or_else(
                 || TraceTailResult::Err {
                     error: "undecodable TraceTail to chassis-host ring".to_owned(),
                 },
@@ -510,10 +510,10 @@ fn route_mail(
     // through with the original bytes. `ref_schema` is `Some` only on
     // that ref-carrying path.
     if let Some(schema) = &lookup.ref_schema {
-        match handle_store::walk_and_resolve(schema, &mail.payload, store) {
+        match handle_store::walk_and_resolve(schema, mail.payload.bytes(), store) {
             Ok(WalkOutcome::Resolved { payload }) => {
                 if let Cow::Owned(bytes) = payload {
-                    mail.payload = bytes;
+                    mail.payload = MailRef::from(bytes);
                 }
                 // Cow::Borrowed: mail.payload already matches the
                 // resolved bytes (no substitutions happened).
@@ -526,6 +526,11 @@ fn route_mail(
                     recipient = ?mail.recipient,
                     "parking mail on missing handle",
                 );
+                // A parked mail sits in the store until the handle
+                // resolves (an unbounded window); materialize it to
+                // `Owned` so it never pins a producer ring region for
+                // that whole time (2b, iamacoffeepot/aether#1105).
+                mail.payload = mail.payload.into_owned();
                 store.park(handle, mail);
                 return;
             }
@@ -582,7 +587,7 @@ fn route_mail(
                 kind_name: lookup.kind_name,
                 origin: None,
                 sender: mail.reply_to,
-                payload: MailRef::from(mail.payload),
+                payload: mail.payload,
                 count: mail.count,
                 mail_id: mail.mail_id,
                 root: mail.root,
@@ -603,7 +608,7 @@ fn route_mail(
                 kind_name: &lookup.kind_name,
                 origin: None,
                 sender: mail.reply_to,
-                payload: &mail.payload,
+                payload: mail.payload.bytes(),
                 count: mail.count,
                 mail_id: mail.mail_id,
                 root: mail.root,
@@ -652,7 +657,7 @@ fn route_mail(
                 outbound.egress_unresolved_mail(
                     recipient,
                     mail.kind,
-                    mail.payload,
+                    mail.payload.into_vec(),
                     mail.count,
                     source_mailbox_id,
                     correlation_id,

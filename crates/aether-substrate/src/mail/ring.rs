@@ -268,13 +268,17 @@ impl MailRing {
     /// return where each mail landed. Initializes the blob lock to
     /// `mails.len()`. **Producer-only.**
     ///
-    /// Returns [`RingFull`] if the blob does not fit even after a wrap;
-    /// the caller's copy-out valve handles that without blocking.
+    /// Returns [`RingFull`] if the blob does not fit — either transiently
+    /// (the ring is full of un-reclaimed blobs) or structurally (the blob
+    /// is larger than the whole ring). Both cases route to the caller's
+    /// copy-out valve, which materializes the mails as owned buffers
+    /// without blocking. A producer (a handler's fan-out) can emit an
+    /// arbitrarily large blob, so an oversized one must degrade rather
+    /// than panic the substrate (2b, iamacoffeepot/aether#1105).
     ///
     /// # Panics
     /// Panics if `mails` is empty (a blob always carries at least one
-    /// mail) or if a single blob is larger than the whole ring (a
-    /// misconfiguration — the ring must be sized for the largest blob).
+    /// mail).
     #[allow(
         clippy::cast_possible_truncation,
         reason = "offsets are bounded by capacity, asserted <= u32::MAX in with_capacity"
@@ -282,11 +286,11 @@ impl MailRing {
     pub fn push_blob(&self, mails: &[OutMail<'_>]) -> Result<Vec<MailLoc>, RingFull> {
         assert!(!mails.is_empty(), "push_blob requires at least one mail");
         let size = Self::blob_size(mails);
-        assert!(
-            size <= self.cap,
-            "blob ({size} B) larger than ring capacity ({} B)",
-            self.cap
-        );
+        // A blob larger than the whole ring can never fit; hand it to the
+        // copy-out valve instead of panicking.
+        if size > self.cap {
+            return Err(RingFull);
+        }
 
         let write = self.write.load(Ordering::Relaxed) as usize;
         let tail_room = self.cap - write;
@@ -617,6 +621,19 @@ mod tests {
         // space (nothing released), so the valve must trigger.
         let r = ring.push_blob(&[out(2, 2, &[0; 64])]);
         assert_eq!(r, Err(RingFull));
+    }
+
+    #[test]
+    fn oversized_blob_returns_ring_full_not_panic() {
+        // A single blob larger than the whole ring degrades to the
+        // copy-out valve rather than panicking (2b: handler fan-out is
+        // unbounded; the substrate must not crash on a big blob).
+        let ring = MailRing::with_capacity(128);
+        let r = ring.push_blob(&[out(1, 1, &[0; 256])]);
+        assert_eq!(r, Err(RingFull));
+        // The ring is untouched — a later in-bounds blob still fits.
+        assert_eq!(ring.live_bytes(), 0);
+        assert!(ring.push_blob(&[out(2, 2, &[7; 16])]).is_ok());
     }
 
     #[test]

@@ -362,10 +362,10 @@ impl NativeCtx<'_> {
         let root = self.outbound_root();
         let kind = K::ID.0;
         self.binding
-            .send_mail_with_lineage(first.0, kind, &bytes, 1, parent, root);
+            .push_envelope_buffered(first.0, kind, &bytes, 1, parent, root);
         for recipient in recipients {
             self.binding
-                .send_mail_with_lineage(recipient.0, kind, &bytes, 1, parent, root);
+                .push_envelope_buffered(recipient.0, kind, &bytes, 1, parent, root);
         }
     }
 
@@ -398,7 +398,7 @@ impl NativeCtx<'_> {
     /// fire-and-forget case.
     #[must_use]
     pub fn send_envelope_traced(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
-        self.binding.push_envelope_returning_root(
+        self.binding.push_envelope_buffered(
             recipient.0,
             kind.0,
             bytes,
@@ -433,7 +433,24 @@ impl NativeCtx<'_> {
         bytes: &[u8],
     ) -> MailId {
         self.binding
-            .push_envelope_returning_root(recipient.0, kind.0, bytes, 1, None, None)
+            .push_envelope_buffered(recipient.0, kind.0, bytes, 1, None, None)
+    }
+}
+
+impl Drop for NativeCtx<'_> {
+    /// ADR-0087 / 2b (iamacoffeepot/aether#1105): handler-end flush. One
+    /// `NativeCtx` is built per dispatched envelope (and one for
+    /// `unwire`), so its scope *is* the handler's lifetime — dropping it
+    /// is the universal "handler finished" hook. Flushing the binding's
+    /// outbound buffer here forms the handler's buffered sends into one
+    /// ring blob and routes them, covering the main dispatch loop, the
+    /// shutdown-drain loop, and `unwire` with a single hook (no
+    /// per-call-site flush to forget and silently drop mail). A
+    /// mid-handler `wait_reply` flushes eagerly
+    /// ([`NativeBinding::wait_reply`]); this catches everything sent
+    /// after the last such flush. Idempotent — an empty buffer no-ops.
+    fn drop(&mut self) {
+        self.binding.flush_outbound();
     }
 }
 
@@ -445,7 +462,7 @@ impl Sender for NativeCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
+        self.binding.push_envelope_buffered(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             &bytes,
@@ -466,7 +483,7 @@ impl Sender for NativeCtx<'_> {
         // realistic mail batches stay well below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
-        self.binding.send_mail_with_lineage(
+        self.binding.push_envelope_buffered(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             bytes,
@@ -479,7 +496,7 @@ impl Sender for NativeCtx<'_> {
     //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
+        self.binding.push_envelope_buffered(
             mailbox_id_from_name(name).0,
             K::ID.0,
             &bytes,
@@ -627,7 +644,7 @@ impl MailSender for NativeCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
+        self.binding.push_envelope_buffered(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             &bytes,
@@ -648,7 +665,7 @@ impl MailSender for NativeCtx<'_> {
         // realistic mail batches stay well below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
-        self.binding.send_mail_with_lineage(
+        self.binding.push_envelope_buffered(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             bytes,
@@ -661,7 +678,7 @@ impl MailSender for NativeCtx<'_> {
     //noinspection DuplicatedCode
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
+        self.binding.push_envelope_buffered(
             mailbox_id_from_name(name).0,
             K::ID.0,
             &bytes,

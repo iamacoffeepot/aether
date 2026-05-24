@@ -544,7 +544,7 @@ impl Component {
             None => NO_REPLY_HANDLE,
         };
         self.memory
-            .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
+            .write(&mut self.store, MAIL_OFFSET as usize, mail.payload.bytes())?;
         // Wasm32 ABI carries `u32` byte lengths; mail payloads are
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
