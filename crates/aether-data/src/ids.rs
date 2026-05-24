@@ -355,7 +355,7 @@ impl ThreadId {
     pub const TYPE_NAME: &'static str = "aether.thread_id";
 
     /// Compute the deterministic id for an OS thread name. Same
-    /// algorithm as [`crate::hash::thread_id_from_name`]; the dispatch
+    /// algorithm as [`thread_id_from_name`]; the dispatch
     /// hot path calls this once per worker thread (cached in a
     /// thread-local) so the per-hop cost is a `Copy`, not an alloc.
     #[must_use]
