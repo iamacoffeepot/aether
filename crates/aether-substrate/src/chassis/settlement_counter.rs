@@ -74,6 +74,16 @@ impl CounterCell {
         }
     }
 
+    /// Force the cell back to `(0, 0)`. Only sound when the caller holds
+    /// exclusive access to the cell — the open-addressing table
+    /// ([`crate::chassis::settlement_table`]) calls this during the
+    /// `CLAIMING` transient, after it has CAS-won the slot and before it
+    /// publishes `OCCUPIED`, so no other thread can observe or mutate the
+    /// cell across the reset.
+    pub fn reset(&self) {
+        self.packed.store(0, Ordering::Release);
+    }
+
     /// Current `(in_flight, held_open)`. For assertions / diagnostics;
     /// the firing decision never reads this (it uses the decrement's
     /// return value), so there is no read-then-act race.

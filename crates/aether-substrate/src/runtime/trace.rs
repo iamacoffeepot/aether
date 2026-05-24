@@ -16,7 +16,7 @@
 //!   (ADR-0086 Phase 3b) — there is no central queue, drainer, or
 //!   observer fold (those retired in Phase 3c).
 //! - **Settlement** — every hook funnels its root into the emit-time
-//!   [`SettlementCounter`], and on the `(in_flight, held_open)`
+//!   [`SettlementTable`], and on the `(in_flight, held_open)`
 //!   zero-transition fires `Settled` synchronously through the chassis
 //!   [`SettlementRegistry`], so the lifecycle gate wakes the instant
 //!   work finishes (ADR-0086 Phase 2). Settlement is independent of the
@@ -40,13 +40,13 @@ use aether_actor::Local;
 use aether_actor::trace_ring::ActorTraceRing;
 
 use crate::chassis::settlement::SettlementRegistry;
-use crate::chassis::settlement_counter::SettlementCounter;
+use crate::chassis::settlement_table::SettlementTable;
 
 /// Per-chassis trace-pipeline handle. Owned by the chassis `Mailer`;
 /// producer-side hooks reach it via `mailer.trace_handle()` or the
 /// `mailer.record_*` shortcuts that wrap the methods on this type.
 ///
-/// Cloning shares the emit-time [`SettlementCounter`] + the chassis-host
+/// Cloning shares the emit-time [`SettlementTable`] + the chassis-host
 /// ring (both `Arc`) and copies the boot-time anchor (`Copy`), so every
 /// producer site can hold an independent `TraceHandle` cheaply.
 ///
@@ -61,7 +61,7 @@ use crate::chassis::settlement_counter::SettlementCounter;
 #[derive(Clone)]
 pub struct TraceHandle {
     boot_time: Instant,
-    settlement_counter: Arc<SettlementCounter>,
+    settlement_counter: Arc<SettlementTable>,
     settlement_registry: Arc<OnceLock<Arc<SettlementRegistry>>>,
     /// ADR-0086 Phase 3: ring for trace events produced *outside* any
     /// actor's dispatch — chassis-root / injected mail (`Tick`, MCP
@@ -96,7 +96,7 @@ impl TraceHandle {
     pub fn new() -> Self {
         Self {
             boot_time: Instant::now(),
-            settlement_counter: Arc::new(SettlementCounter::new()),
+            settlement_counter: Arc::new(SettlementTable::new()),
             settlement_registry: Arc::new(OnceLock::new()),
             chassis_host_ring: Arc::new(Mutex::new(ActorTraceRing::default())),
         }
@@ -110,12 +110,13 @@ impl TraceHandle {
         let _ = self.settlement_registry.set(registry);
     }
 
-    /// The emit-time [`SettlementCounter`] — the settlement authority
-    /// (ADR-0086 Phase 2). Exposed for diagnostics / tests
-    /// (`live_roots`); production settlement flows through the producer
-    /// hooks on this handle.
+    /// The emit-time settlement authority — the lock-free
+    /// [`SettlementTable`] (ADR-0086 Phase 2; iamacoffeepot/aether#1059
+    /// swapped the striped-lock map for the open-addressing table).
+    /// Exposed for diagnostics / tests (`live_roots`); production
+    /// settlement flows through the producer hooks on this handle.
     #[must_use]
-    pub fn settlement_counter(&self) -> &Arc<SettlementCounter> {
+    pub fn settlement_counter(&self) -> &Arc<SettlementTable> {
         &self.settlement_counter
     }
 
