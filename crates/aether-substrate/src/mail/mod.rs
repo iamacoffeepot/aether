@@ -13,6 +13,7 @@ pub mod mail_ref;
 pub mod mailer;
 pub mod outbound;
 pub mod registry;
+pub mod ring;
 
 pub use capability::{CapabilityRegistry, MailboxCaps};
 pub use mail_ref::MailRef;
