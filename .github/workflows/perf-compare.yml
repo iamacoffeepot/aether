@@ -53,7 +53,12 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'perf'))
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write — push the rendered plots to the `perf-plots` branch (a blob
+      # store) so the public-repo raw URLs render inline in the sticky
+      # comment (iamacoffeepot/aether#1155). Fork PRs get a read-only token
+      # regardless, so the push no-ops and the artifact upload is the
+      # fallback.
+      contents: write
       pull-requests: write
     # Candidate build + interleaved trials. The base build is skipped on a
     # cache hit (iamacoffeepot/aether#1084) and shares the candidate's
@@ -94,6 +99,46 @@ jobs:
         env:
           PERF_BASE_CACHE: ${{ github.workspace }}/.perf-cache/aether-perf-trial-base
         run: scripts/perf-compare.sh
+      # iamacoffeepot/aether#1155: render the candidate's per-cell
+      # queued/drain/handler sample distributions (the shape the
+      # percentile table can't show) and upload them as artifacts.
+      # Candidate-only for now — the merge-base binary has no plot
+      # surface, so a base-vs-candidate overlay waits until this lands.
+      # `continue-on-error` keeps a plot hiccup from reddening this
+      # informational job.
+      - name: Render candidate span distributions
+        continue-on-error: true
+        env:
+          AETHER_PERF_WORKERS: max,2
+          AETHER_PERF_TOPOS: ci
+          AETHER_PERF_FRAMES: "200"
+          AETHER_PERF_PLOT_DIR: perf-plots
+        run: |
+          cargo build --release -p aether-substrate-bundle \
+            --bin aether-perf-plot
+          ./target/release/aether-perf-plot
+      - name: Upload span-distribution plots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-span-distributions
+          path: perf-plots/
+          if-no-files-found: warn
+      # iamacoffeepot/aether#1155: push the PNGs to the `perf-plots` branch
+      # and append inline embeds to the sticky comment, so the plots render
+      # in the comment (not just as downloadable artifacts). Runs before
+      # the upsert so the embeds land in the same body. `continue-on-error`
+      # so a fork PR's read-only token (push fails) doesn't redden the job.
+      - name: Publish span distributions + embed in the comment
+        if: hashFiles('perf-plots/*.png') != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PLOT_DIR: perf-plots
+          MD_OUT: perf-report.md
+        run: scripts/perf-publish-plots.sh
       - name: Upsert sticky PR comment
         env:
           GH_TOKEN: ${{ github.token }}
