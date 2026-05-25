@@ -121,7 +121,11 @@ impl PoolHandle {
     /// through the coordinator.
     #[must_use]
     pub fn wake_sink(&self) -> WakeSink {
-        WakeSink::new(Arc::clone(&self.injector), Arc::clone(&self.spin))
+        WakeSink::new(
+            Arc::clone(&self.injector),
+            Arc::clone(&self.spin),
+            self.workers.len(),
+        )
     }
 
     /// Shut down the pool, joining every worker, and return each
@@ -533,7 +537,7 @@ mod tests {
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         drop(slot_dyn);
-        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), 8);
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         slot.push(1);
