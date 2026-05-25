@@ -783,7 +783,10 @@ impl Registry {
             .expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get(&id) {
             Some(slot)
-                if matches!(slot.entry, MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) =>
+                if matches!(
+                    slot.entry,
+                    MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)
+                ) =>
             {
                 inner.mailboxes.remove(&id);
                 true
@@ -1591,7 +1594,10 @@ mod tests {
         let reloaded = r.try_register_inbox("loaded", noop_handler()).unwrap();
         assert_eq!(reloaded, id);
         assert_eq!(r.lookup("loaded"), Some(reloaded));
-        assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox { .. })));
+        assert!(matches!(
+            r.entry(reloaded),
+            Some(MailboxEntry::Inbox { .. })
+        ));
     }
 
     #[test]

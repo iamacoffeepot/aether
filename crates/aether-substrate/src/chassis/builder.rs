@@ -1835,7 +1835,8 @@ mod tests {
         let mailbox_id = registry
             .lookup(<ProbeCap as Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Inbox { handler, .. } =
+            registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("ProbeCap claim must be a sink entry");
         };
@@ -1956,7 +1957,8 @@ mod tests {
         let mailbox_id = registry
             .lookup(<LocalProbe as Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Inbox { handler, .. } =
+            registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("LocalProbe claim must be a sink entry");
         };
@@ -2246,7 +2248,8 @@ mod tests {
         // registered sink handler. The handler's `ctx.shutdown()`
         // flips the dispatcher's flag; after the handler returns the
         // trampoline drains, runs `unwire`, marks Dead, tombstones.
-        let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("sink registered") else {
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("sink registered")
+        else {
             panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
@@ -2608,8 +2611,10 @@ mod tests {
         // Drive the watcher to register the monitor by pushing a
         // WatchOrder through its sink handler. After this returns
         // the watcher's handle is stored in `self.handle`.
-        let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-            registry.entry(watcher_id).expect("watcher sink registered")
+        let MailboxEntry::Inbox {
+            handler: watcher_handler,
+            ..
+        } = registry.entry(watcher_id).expect("watcher sink registered")
         else {
             panic!("expected mailbox entry for watcher");
         };
@@ -2642,8 +2647,10 @@ mod tests {
         // Fire Quit at the target — its handler self-shuts; the
         // dispatcher's close path runs `close_actor`, which fans out
         // a MonitorNotice mail to watcher_id.
-        let MailboxEntry::Inbox { handler: target_handler, .. } =
-            registry.entry(target_id).expect("target sink registered")
+        let MailboxEntry::Inbox {
+            handler: target_handler,
+            ..
+        } = registry.entry(target_id).expect("target sink registered")
         else {
             panic!("expected mailbox entry for target");
         };
@@ -2828,8 +2835,10 @@ mod tests {
             .expect("spawn watcher");
 
         // Watcher registers monitor against target.
-        let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-            registry.entry(watcher_id).expect("watcher sink registered")
+        let MailboxEntry::Inbox {
+            handler: watcher_handler,
+            ..
+        } = registry.entry(watcher_id).expect("watcher sink registered")
         else {
             panic!("expected mailbox entry for watcher");
         };
@@ -3013,7 +3022,8 @@ mod tests {
         // Close c — Quit it through the sink handler. After close,
         // resolve_actors drops to two and resolve_actor::<Member>("c")
         // returns None.
-        let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered") else {
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered")
+        else {
             panic!("expected mailbox entry for c");
         };
         handler.enqueue(registry::test_owned_dispatch(
@@ -3306,8 +3316,10 @@ mod tests {
             .expect("spawn parent");
 
         // Trigger parent → grandchild spawn.
-        let MailboxEntry::Inbox { handler: parent_handler, .. } =
-            registry.entry(parent_id).expect("parent sink registered")
+        let MailboxEntry::Inbox {
+            handler: parent_handler,
+            ..
+        } = registry.entry(parent_id).expect("parent sink registered")
         else {
             panic!("expected mailbox entry for parent");
         };

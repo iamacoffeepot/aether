@@ -498,12 +498,14 @@ mod tests {
     #[test]
     fn busy_recipient_deposited() {
         let (registry, mailer) = fresh_substrate();
-        let (recipient, fixture, direct_rx, deposit_rx) =
-            seizable_recipient(&registry, "seizable");
+        let (recipient, fixture, direct_rx, deposit_rx) = seizable_recipient(&registry, "seizable");
 
         // Mark the recipient busy before the demux: its `Idle → Running`
         // seize must lose, falling through to the deposit path.
-        assert!(fixture.state.seize(), "fixture starts Idle, seize wins once");
+        assert!(
+            fixture.state.seize(),
+            "fixture starts Idle, seize wins once"
+        );
 
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
@@ -549,7 +551,12 @@ mod tests {
         // the closure reads). The test asserts the routing *decision*: a
         // ref kind is deposited (so `route_mail` owns the walk), never
         // direct-dispatched.
-        let mails = vec![Mail::new(recipient, ref_kind, MailRef::from(vec![0u8, 0u8]), 1)];
+        let mails = vec![Mail::new(
+            recipient,
+            ref_kind,
+            MailRef::from(vec![0u8, 0u8]),
+            1,
+        )];
         let blob = BlobWork::with_chunk(mails, mailer, sink, usize::MAX);
 
         blob.run_cycle(BatchBudget::standard());
