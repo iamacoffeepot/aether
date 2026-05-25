@@ -27,7 +27,22 @@ use std::env;
 use std::fs;
 use std::process::{Command, ExitCode};
 
-use aether_substrate_bundle::perf::report::{CompareConfig, TrialReport, compare, markdown};
+use aether_substrate_bundle::perf::report::{
+    CompareConfig, STICKY_MARKER, TRIAL_SCHEMA, TrialReport, compare, markdown, probe_schema,
+};
+
+/// A trial subprocess run that didn't yield a comparable [`TrialReport`].
+enum TrialErr {
+    /// An operational failure — the trial crashed, bad args, unparseable
+    /// output. Non-zero exit (this is what gates the *operational*
+    /// health of the run, ADR-0085 §4).
+    Op(String),
+    /// The trial used a different schema tag than this comparator expects
+    /// — the metric set changed (iamacoffeepot/aether#1151). A paired
+    /// comparison across the change is meaningless, so it is an
+    /// informational skip, not a crash. Carries the trial's tag.
+    Schema(String),
+}
 
 struct Args {
     base: String,
@@ -101,20 +116,45 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-fn run_trial(path: &str, extra: &[(String, String)]) -> Result<TrialReport, String> {
+fn run_trial(path: &str, extra: &[(String, String)]) -> Result<TrialReport, TrialErr> {
     let out = Command::new(path)
         .envs(extra.iter().cloned())
         .output()
-        .map_err(|e| format!("spawn {path}: {e}"))?;
+        .map_err(|e| TrialErr::Op(format!("spawn {path}: {e}")))?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(TrialErr::Op(format!(
             "{path} exited {:?}: {}",
             out.status.code(),
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )));
+    }
+    // iamacoffeepot/aether#1151: read the schema tag before the full
+    // parse. A base trial built before the queued/drain/handler migration
+    // carries the retired metric names, and `from_slice::<TrialReport>`
+    // would hard-fail on serde's unknown-`Metric`-variant error. Surface
+    // the transition as its own case so the comparison skips gracefully
+    // rather than reading as an operational crash.
+    if let Some(tag) = probe_schema(&out.stdout)
+        && tag != TRIAL_SCHEMA
+    {
+        return Err(TrialErr::Schema(tag));
     }
     serde_json::from_slice::<TrialReport>(&out.stdout)
-        .map_err(|e| format!("parse trial json from {path}: {e}"))
+        .map_err(|e| TrialErr::Op(format!("parse trial json from {path}: {e}")))
+}
+
+/// A trial used a schema tag this comparator doesn't speak (the metric
+/// set changed, iamacoffeepot/aether#1151). Emit an informational sticky
+/// note and exit 0 — this job never gates (ADR-0085 §4), and the next
+/// comparison resumes once the new schema is on both sides.
+fn schema_skip(side: &str, got: &str) -> ExitCode {
+    println!(
+        "{STICKY_MARKER}\n## dispatch perf\n\n_The {side} trial uses schema `{got}`, but this comparator expects `{TRIAL_SCHEMA}` — the metric set changed (iamacoffeepot/aether#1151), so a paired comparison isn't meaningful this run. The next comparison resumes once the new schema is on both sides._\n"
+    );
+    eprintln!(
+        "perf-compare: {side} schema {got} != expected {TRIAL_SCHEMA} — schema transition, comparison skipped (informational)"
+    );
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {
@@ -132,14 +172,16 @@ fn main() -> ExitCode {
         eprintln!("perf-compare: trial {}/{}", t + 1, args.k);
         match run_trial(&args.base, &args.base_env) {
             Ok(r) => base_reports.push(r),
-            Err(e) => {
+            Err(TrialErr::Schema(tag)) => return schema_skip("base", &tag),
+            Err(TrialErr::Op(e)) => {
                 eprintln!("perf-compare: base trial {t} failed: {e}");
                 return ExitCode::from(1);
             }
         }
         match run_trial(&args.cand, &args.cand_env) {
             Ok(r) => cand_reports.push(r),
-            Err(e) => {
+            Err(TrialErr::Schema(tag)) => return schema_skip("candidate", &tag),
+            Err(TrialErr::Op(e)) => {
                 eprintln!("perf-compare: candidate trial {t} failed: {e}");
                 return ExitCode::from(1);
             }

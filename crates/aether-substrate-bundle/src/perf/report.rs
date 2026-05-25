@@ -23,19 +23,21 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which leg of the per-hop measurement a cell reports.
+/// Which per-mail span a cell reports (iamacoffeepot/aether#1150). Each
+/// measures one property, so a regression points at a mechanism rather
+/// than a smeared rollup.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
-    /// `t_received − t_sent`: the whole hop (enqueue + worker pickup).
-    Hop,
-    /// iamacoffeepot/aether#1134: `t_enqueue − t_sent`: producer-side
-    /// (rest of the sender's handler + flush + blob pickup + demux).
-    SendEnqueue,
-    /// iamacoffeepot/aether#1134: `t_received − t_enqueue`: consumer-side
-    /// queue residence (slot schedule + worker wakeup + recv).
-    Residence,
-    /// `t_finished − t_received`: in-handler work.
+    /// `t_enqueue − t_sent`: flush-begin → the worker picks up the blob —
+    /// wakeup / scheduling latency. Tight on a warm worker.
+    Queued,
+    /// `t_received − t_enqueue`: blob pickup → this mail's handler entry —
+    /// where in the blob's drain it landed. The only cardinality-sensitive
+    /// span (a serial fan-out's late leaf waited behind its siblings), so
+    /// high-variance by design.
+    Drain,
+    /// `t_finished − t_received`: the recipient's own handler work.
     Handler,
 }
 
@@ -43,9 +45,8 @@ impl Metric {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Hop => "hop",
-            Self::SendEnqueue => "send_enqueue",
-            Self::Residence => "residence",
+            Self::Queued => "queued",
+            Self::Drain => "drain",
             Self::Handler => "handler",
         }
     }
@@ -101,13 +102,15 @@ pub struct TrialReport {
     pub cells: Vec<CellJson>,
 }
 
-/// Current trial schema tag.
-pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v1";
+/// Current trial schema tag. Bumped to `v2` by iamacoffeepot/aether#1150
+/// when `hop` / `send_enqueue` / `residence` gave way to the
+/// `queued` / `drain` / `handler` span model.
+pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v2";
 
 impl TrialReport {
     /// Build a trial report from a sweep's [`CellResult`]s — each cell
-    /// expands to four `CellJson` rows (`hop` + `send_enqueue` +
-    /// `residence` + `handler`). `depth` is a count, not a latency, so it
+    /// expands to three `CellJson` rows (`queued` + `drain` + `handler`,
+    /// iamacoffeepot/aether#1150). `depth` is a count, not a latency, so it
     /// is omitted from the latency compare (it lives only in the on-demand
     /// observe table).
     ///
@@ -119,12 +122,11 @@ impl TrialReport {
         pace_hz: Option<u64>,
         git_sha: Option<String>,
     ) -> Self {
-        let mut out = Vec::with_capacity(cells.len() * 4);
+        let mut out = Vec::with_capacity(cells.len() * 3);
         for c in cells {
             for (metric, s) in [
-                (Metric::Hop, &c.hop),
-                (Metric::SendEnqueue, &c.send_enqueue),
-                (Metric::Residence, &c.residence),
+                (Metric::Queued, &c.queued),
+                (Metric::Drain, &c.drain),
                 (Metric::Handler, &c.handler),
             ] {
                 out.push(CellJson {
@@ -147,6 +149,25 @@ impl TrialReport {
             cells: out,
         }
     }
+}
+
+/// Read just the `schema` tag from a trial's JSON, ignoring the rest.
+/// The comparator uses this to detect a base-vs-candidate schema
+/// transition (a changed metric set) *before* the full [`TrialReport`]
+/// parse — which would otherwise hard-fail on serde's
+/// unknown-`Metric`-variant error when an older base trial still carries
+/// the retired `hop` / `send_enqueue` / `residence` names
+/// (iamacoffeepot/aether#1151). `None` if the bytes aren't a JSON object
+/// carrying a string `schema` field.
+#[must_use]
+pub fn probe_schema(json: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct SchemaProbe {
+        schema: String,
+    }
+    serde_json::from_slice::<SchemaProbe>(json)
+        .ok()
+        .map(|p| p.schema)
 }
 
 #[derive(Clone, Copy)]
@@ -470,7 +491,7 @@ mod tests {
     use super::*;
 
     /// Build a K-trial side from a per-trial `p50` series for one cell
-    /// (`fanout-8 @ 11w`, hop). Other percentiles track p50 ×1.2 / ×1.5
+    /// (`fanout-8 @ 11w`, drain). Other percentiles track p50 ×1.2 / ×1.5
     /// so the cell is well-formed; tests assert on p50.
     #[allow(
         clippy::cast_precision_loss,
@@ -487,7 +508,7 @@ mod tests {
                 cells: vec![CellJson {
                     workers: 11,
                     topo: "fanout-8".to_owned(),
-                    metric: Metric::Hop,
+                    metric: Metric::Drain,
                     p50,
                     p90: (p50 as f64 * 1.2) as u64,
                     p99: (p50 as f64 * 1.5) as u64,
@@ -517,6 +538,17 @@ mod tests {
         ]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(p50_verdict(&rep), Verdict::Improved);
+    }
+
+    #[test]
+    fn probe_schema_reads_tag_past_unknown_metric_variants() {
+        // An older base trial carries the retired `hop` variant; the probe
+        // must read its schema tag without choking on it (a full parse
+        // would hard-fail on the unknown `Metric` variant — that is the
+        // whole point of probing first, iamacoffeepot/aether#1151).
+        let v1 = br#"{"schema":"aether.perf.trial.v1","cells":[{"metric":"hop","p50":1}]}"#;
+        assert_eq!(probe_schema(v1).as_deref(), Some("aether.perf.trial.v1"));
+        assert_eq!(probe_schema(b"not json"), None);
     }
 
     #[test]
