@@ -189,6 +189,39 @@ impl Mailer {
             .record_sent(mail_id, root, parent_mail, sender, recipient, kind);
     }
 
+    /// iamacoffeepot/aether#1150: push the `Sent` trace event with an
+    /// explicit flush-begin timestamp (no settlement bump — that fired
+    /// eagerly via [`Self::record_sent_inflight`]). The buffered send
+    /// path calls this once per mail at flush.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_sent_event_at(
+        &self,
+        mail_id: aether_data::MailId,
+        root: aether_data::MailId,
+        parent_mail: Option<aether_data::MailId>,
+        sender: aether_data::MailboxId,
+        recipient: aether_data::MailboxId,
+        kind: KindId,
+        t: Nanos,
+    ) {
+        self.trace_handle.record_sent_event_at(
+            mail_id,
+            root,
+            parent_mail,
+            sender,
+            recipient,
+            kind,
+            t,
+        );
+    }
+
+    /// iamacoffeepot/aether#1150: eager settlement-counter increment for
+    /// an outbound mail's `root`, split from the `Sent` trace event so
+    /// the buffered path keeps `in_flight` exact at send time.
+    pub fn record_sent_inflight(&self, root: aether_data::MailId) {
+        self.trace_handle.record_sent_inflight(root);
+    }
+
     /// ADR-0080 §2 settlement hook for the `Finished` event: decrements
     /// the root's emit-time `in_flight` count and fires `Settled` on the
     /// zero-transition. (The `Finished` trace event itself is pushed into

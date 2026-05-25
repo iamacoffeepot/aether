@@ -530,12 +530,16 @@ impl NativeBinding {
     /// metadata; [`Self::flush_outbound`] forms the blob and routes at
     /// handler end (or before a blocking `wait_reply`).
     ///
-    /// `record_sent` stays **eager** (fired here, at send time, not at
-    /// flush) so the chain's `in_flight` is exact and settlement
-    /// (ADR-0082) never settles early — only the route + enqueue is
-    /// deferred. Returns the minted `MailId` (== the new root when
-    /// `inherited_root.is_none()`) exactly like the eager variant, so
-    /// settlement subscription works unchanged.
+    /// The settlement-counter increment stays **eager** (fired here, at
+    /// send time, not at flush) so the chain's `in_flight` is exact and
+    /// settlement (ADR-0082) never settles early. The `Sent` *trace*
+    /// event, by contrast, is deferred to [`Self::flush_outbound`] and
+    /// stamped with the frame-level flush-begin instant
+    /// (iamacoffeepot/aether#1150) — anchoring it there instead of this
+    /// smeared per-send call site, which otherwise absorbs the rest of
+    /// the handler that ran after the send. Returns the minted `MailId`
+    /// (== the new root when `inherited_root.is_none()`) exactly like the
+    /// eager variant, so settlement subscription works unchanged.
     ///
     /// # Panics
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
@@ -550,20 +554,16 @@ impl NativeBinding {
         inherited_root: Option<MailId>,
     ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
-        let recipient_id = MailboxId(recipient);
         let reply_to =
             ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
-        // Eager producer hook (see doc) — identical to the eager path.
-        self.mailer.record_sent(
-            mail_id,
-            root,
-            parent_mail,
-            self.self_mailbox,
-            recipient_id,
-            KindId(kind),
-        );
+        // iamacoffeepot/aether#1150: only the settlement increment is
+        // eager here; the `Sent` trace event emits at flush against the
+        // flush-begin anchor (see `flush_outbound_inner`). The recipient
+        // id, kind, and lineage ride the `PendingMail` to flush, where the
+        // deferred `Sent` is built from the routed `Mail`.
+        self.mailer.record_sent_inflight(root);
         let mut buf = self
             .outbound
             .lock()
@@ -654,7 +654,18 @@ impl NativeBinding {
     /// route. `allow_blob` picks the deferred [`BlobWork`] path (handler
     /// end) vs eager per-mail routing (`wait_reply`); both are no-ops
     /// when nothing is buffered.
+    ///
+    /// iamacoffeepot/aether#1150: this is the frame's flush-begin
+    /// instant. Once the buffer is known non-empty, one `now_nanos` read
+    /// stamps `flush_begin`, and every mail in the frame emits its
+    /// deferred `Sent` trace event against that shared anchor (the
+    /// per-send call site only bumped `in_flight`). Anchoring `Sent`
+    /// here, not at the send call, drops the smear of "the rest of the
+    /// handler that ran after the send" from the producer-side span. The
+    /// clock read sits behind the emptiness check so a no-send handler
+    /// return stays free.
     fn flush_outbound_inner(&self, allow_blob: bool) {
+        let flush_begin;
         let routed: Vec<Mail> = {
             let mut buf = self
                 .outbound
@@ -671,6 +682,7 @@ impl NativeBinding {
             if buf.mails.is_empty() {
                 return;
             }
+            flush_begin = self.mailer.now_nanos();
             let OutboundBuffer { ring, mails, .. } = &mut *buf;
             let ring = ring.as_ref();
             mails
@@ -689,6 +701,23 @@ impl NativeBinding {
                 })
                 .collect()
         };
+
+        // iamacoffeepot/aether#1150: emit each buffered mail's deferred
+        // `Sent` trace event against the shared flush-begin anchor before
+        // routing (the lock is already released — `push_trace_ring` runs
+        // off the actor's own ring). `in_flight` was bumped eagerly at
+        // the send call, so this is purely the trace-event half.
+        for mail in &routed {
+            self.mailer.record_sent_event_at(
+                mail.mail_id,
+                mail.root,
+                mail.parent_mail,
+                self.self_mailbox,
+                mail.recipient,
+                mail.kind,
+                flush_begin,
+            );
+        }
 
         // ADR-0087 / iamacoffeepot/aether#1137: fold the blob into this
         // actor's single active cursor-shared blob (recipient-grouped,
