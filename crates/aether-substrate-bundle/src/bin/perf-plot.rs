@@ -116,16 +116,34 @@ fn quantile_us(sorted: &[u64], q: f64) -> f64 {
     (sorted[idx.min(sorted.len() - 1)].max(1) as f64) / 1000.0
 }
 
-/// Render one cell's three spans as overlaid log-x histograms (outline /
-/// step lines so three series read cleanly), with a legend carrying each
-/// span's p50.
-fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
-    let spans: [(&str, &[u64], RGBColor); 4] = [
+/// The cell's four spans paired with their plot colour + label, in
+/// lifecycle order. Shared by both renderers so the mapping lives in one
+/// place (and the array isn't a duplicated fragment across them).
+fn cell_spans(c: &CellSamples) -> [(&'static str, &[u64], RGBColor); 4] {
+    [
         ("construct", &c.construct, CONSTRUCT),
         ("queued", &c.queued, BLUE),
         ("drain", &c.drain, RED),
         ("handler", &c.handler, GREEN),
-    ];
+    ]
+}
+
+/// Encode a finished RGB frame buffer to a PNG at `path` (shared by both
+/// renderers).
+fn write_png(path: &Path, buf: &[u8]) -> Result<(), Box<dyn Error>> {
+    let file = fs::File::create(path)?;
+    let mut enc = png::Encoder::new(BufWriter::new(file), WIDTH, HEIGHT);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(buf)?;
+    Ok(())
+}
+
+/// Render one cell's three spans as overlaid log-x histograms (outline /
+/// step lines so three series read cleanly), with a legend carrying each
+/// span's p50.
+fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
+    let spans = cell_spans(c);
 
     // Combined positive range across the spans, in microseconds. A span
     // sample can be 0ns (sub-resolution); clamp to 1ns so the log axis
@@ -212,12 +230,7 @@ fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
         root.present()?;
     }
 
-    let file = fs::File::create(path)?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), WIDTH, HEIGHT);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header()?.write_image_data(&buf)?;
-    Ok(())
+    write_png(path, &buf)
 }
 
 /// One per-percentile point for the latency-by-percentile plot: the
@@ -243,12 +256,7 @@ struct PctSeries {
 /// steep tail reads as a tall bar and the flat body as a short one.
 /// Companion to the histogram in [`render_cell`] (iamacoffeepot/aether#1155).
 fn render_cell_percentiles(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
-    let spans: [(&str, &[u64], RGBColor); 4] = [
-        ("construct", &c.construct, CONSTRUCT),
-        ("queued", &c.queued, BLUE),
-        ("drain", &c.drain, RED),
-        ("handler", &c.handler, GREEN),
-    ];
+    let spans = cell_spans(c);
 
     let percentiles: Vec<u32> = (5..=95).step_by(5).collect();
     let mut series: Vec<PctSeries> = Vec::new();
@@ -339,10 +347,5 @@ fn render_cell_percentiles(path: &Path, c: &CellSamples) -> Result<(), Box<dyn E
         root.present()?;
     }
 
-    let file = fs::File::create(path)?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), WIDTH, HEIGHT);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header()?.write_image_data(&buf)?;
-    Ok(())
+    write_png(path, &buf)
 }
