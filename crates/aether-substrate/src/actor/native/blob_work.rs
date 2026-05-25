@@ -88,7 +88,7 @@
 //! EWMA); until then a heavy `<= 8` fan-out stays serial.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::mem;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -99,11 +99,14 @@ use crate::mail::mailer::Mailer;
 use crate::mail::{Mail, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink};
 
-/// Floor for a fresh blob's group-array capacity. A blob sized to its
-/// first flush still gets at least this many slots so a few subsequent
-/// flushes to new recipients can accumulate before the array overflows and
-/// the producer rolls a fresh blob.
-const GROUP_CAP_MIN: usize = 16;
+/// Floor for a fresh blob's group-array capacity — a little headroom so a
+/// couple of subsequent flushes to *new* recipients can accumulate before
+/// the array overflows and the producer rolls a fresh blob. Kept small: a
+/// wide fan-out already sizes its array to its own width
+/// ([`group_cap_for`]), so the floor only governs *narrow* flushes (a chain
+/// hop, a tiny fan-out), where a large floor is pure wasted allocation —
+/// those blobs almost always drain before any second flush appends.
+const GROUP_CAP_MIN: usize = 4;
 
 /// Minimum fresh-group count for a flush to broadcast-recruit siblings.
 /// Read once from `AETHER_BLOB_RECRUIT_MIN`; values `< 1` and unparseable
@@ -263,60 +266,40 @@ impl BlobWork {
         routed: Vec<Mail>,
         index: &mut HashMap<MailboxId, usize>,
     ) -> FlushOutcome {
-        // Partition the flush: pushes onto already-known groups vs new
-        // recipients (bucketed in first-seen order so a recipient that
-        // appears twice in one flush becomes one group with both mails in
-        // order).
-        let mut new_order: Vec<MailboxId> = Vec::new();
-        let mut new_buckets: HashMap<MailboxId, Vec<Mail>> = HashMap::new();
-        for mail in routed {
-            if let Some(&g) = index.get(&mail.recipient) {
-                // Seen recipient → push onto its group; a closed group
-                // (already drained) deposits through the router instead.
-                let group = self.groups[g].get().expect("indexed group is published");
-                if let Err(mail) = group.push(mail) {
-                    self.mailer.push(mail);
-                }
-            } else {
-                new_buckets
-                    .entry(mail.recipient)
-                    .or_insert_with(|| {
-                        new_order.push(mail.recipient);
-                        Vec::new()
-                    })
-                    .push(mail);
-            }
-        }
-
-        if new_order.is_empty() {
-            return FlushOutcome {
-                leftover: Vec::new(),
-                fresh_groups: 0,
-            };
-        }
-
-        // Stage new groups into the array starting at the current len, then
-        // publish. `peek_len` is valid as a plain load — len has a single
-        // writer (this producer).
+        // Single pass: a recipient already in `index` (a prior flush, or one
+        // staged earlier in *this* flush) pushes onto its existing group; a
+        // brand-new recipient stages a fresh group at the next free index,
+        // updating `index` so a repeat in the same flush coalesces onto it
+        // (per-recipient FIFO, one group per recipient). `index` itself is
+        // the in-flush dedup, so there is no separate bucket map / order
+        // vector to allocate. `peek_len` is a plain load — `len` has a
+        // single writer (this producer).
         let base = self.lifecycle.peek_len();
         let cap = self.groups.len();
         let mut staged = 0usize;
         let mut leftover: Vec<Mail> = Vec::new();
-        for recipient in new_order {
-            let mails = new_buckets.remove(&recipient).expect("bucket exists");
-            let idx = base + staged;
-            if idx >= cap {
-                // Group array full — roll the rest into a fresh blob. These
-                // are new recipients, so no overlap with this blob.
-                leftover.extend(mails);
-                continue;
+        for mail in routed {
+            if let Some(&g) = index.get(&mail.recipient) {
+                // Existing group — push in send order; a closed (drained)
+                // group deposits through the router instead.
+                let group = self.groups[g].get().expect("indexed group is set");
+                if let Err(mail) = group.push(mail) {
+                    self.mailer.push(mail);
+                }
+            } else if base + staged >= cap {
+                // Group array full — roll the rest into a fresh blob. Only
+                // *new* recipients reach here (seen ones push above), so a
+                // rolled blob shares no recipient with this one.
+                leftover.push(mail);
+            } else {
+                let recipient = mail.recipient;
+                self.groups[base + staged]
+                    .set(Group::new(recipient, vec![mail]))
+                    .ok()
+                    .expect("group slot written once");
+                index.insert(recipient, base + staged);
+                staged += 1;
             }
-            self.groups[idx]
-                .set(Group::new(recipient, mails))
-                .ok()
-                .expect("group slot written once");
-            index.insert(recipient, idx);
-            staged += 1;
         }
 
         match self.lifecycle.publish(staged) {
@@ -494,11 +477,14 @@ impl BlobProducer {
     }
 }
 
-/// Size a fresh blob's group array to a flush's distinct recipient count
-/// (with the [`GROUP_CAP_MIN`] floor, capped at the wire ceiling).
+/// Size a fresh blob's group array. The mail count is an upper bound on the
+/// distinct-recipient count (the real group count), so sizing to it —
+/// clamped to the [`GROUP_CAP_MIN`] floor and the wire ceiling — never
+/// under-sizes the first flush, and avoids a throwaway `HashSet` built just
+/// to count distinct recipients on every flush. Over-sizing when a flush
+/// has intra-flush duplicate recipients is harmless headroom.
 fn group_cap_for(routed: &[Mail]) -> usize {
-    let distinct: HashSet<MailboxId> = routed.iter().map(|m| m.recipient).collect();
-    distinct.len().clamp(GROUP_CAP_MIN, MAX_GROUPS)
+    routed.len().clamp(GROUP_CAP_MIN, MAX_GROUPS)
 }
 
 #[cfg(test)]
