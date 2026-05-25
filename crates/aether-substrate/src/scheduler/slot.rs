@@ -386,17 +386,26 @@ impl WakeSink {
         }
     }
 
-    /// Schedule a runnable `slot`: push to the current worker's own
-    /// deque when this runs on a pool worker under the local bound (the
-    /// affinity warm path — no notify, the same worker drains it LIFO),
-    /// else spill to the shared injector and notify the coordinator
-    /// (route-to-spinner / unpark-one). This is the non-demux wake
-    /// destination, shared by [`WakeHandle::wake`], the producer-side
-    /// blob push, and an inline recipient that yielded mid-drain
-    /// (ADR-0087 Phase 3b). The injector push is infallible; shutdown is
-    /// observed through the coordinator's flag.
+    /// Schedule a runnable `slot`: push to the current worker's own deque
+    /// when this runs on a pool worker and the keep-local budget says to
+    /// keep it (the affinity warm path — no notify, the same worker drains
+    /// it LIFO), else spill to the shared injector and notify the
+    /// coordinator (route-to-spinner / unpark-one). The keep-local-vs-spill
+    /// decision is the per-burst mail + sampled-time budget
+    /// ([`worker_deque::try_push_local_budgeted`], iamacoffeepot/aether#1160);
+    /// the default config reproduces the historical `cap == 1` spill-any-
+    /// fan-out-extra behaviour. This is the non-demux wake destination,
+    /// shared by [`WakeHandle::wake`], the producer-side blob push, and an
+    /// inline recipient that yielded mid-drain (ADR-0087 Phase 3b). The
+    /// injector push is infallible; shutdown is observed through the
+    /// coordinator's flag.
     pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
-        if let Err(slot) = worker_deque::try_push_local(slot, worker_deque::sticky_cap()) {
+        let kept = worker_deque::try_push_local_budgeted(
+            slot,
+            worker_deque::mail_budget(),
+            worker_deque::hard_cap(),
+        );
+        if let Err(slot) = kept {
             self.injector.push(slot);
             self.spin.notify();
         }
