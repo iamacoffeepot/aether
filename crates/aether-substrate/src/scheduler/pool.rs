@@ -313,16 +313,20 @@ fn worker_loop(
 /// `Worker`) is the affinity lever: a handler running on this worker
 /// pushes a woken downstream slot there, so a relay chain stays on the
 /// same warm worker and never pays the ~4.3µs parked-worker wakeup. Its
-/// LIFO pop keeps the freshest hop warmest. The local bound is the
-/// stickiness cap (`AETHER_LOCAL_STICKY_MAX`, default 1): at 1 the chain
-/// head stays local and a fan-out spills its extras to the injector
-/// (independent work parallelises by being stolen); higher keeps fan-out
-/// extras local. The own deque is checked first so a pushed slot is never
-/// stranded.
+/// LIFO pop keeps the freshest hop warmest. Whether a fan-out's extra blobs
+/// stay local or spill is the keep-local budget
+/// (`WakeSink::schedule` → `worker_deque::try_push_local_budgeted`,
+/// iamacoffeepot/aether#1160); the default config reproduces the historical
+/// `cap == 1` "spill any fan-out extra" behaviour. The own deque is checked
+/// first so a pushed slot is never stranded.
 ///
-/// When the own deque is empty, the worker steals into it from the
-/// injector (off-worker producers + spilled fan-out + requeued yields)
-/// and its siblings' tails. When that turns up nothing, the coordinator
+/// When the own deque is empty, this resets the local-drain burst
+/// (iamacoffeepot/aether#1160) — one local cascade is one burst, so the
+/// next cascade (this worker's freshly-produced blobs, or work it's about
+/// to steal) starts a fresh keep-local budget — then steals into the deque
+/// from the injector (off-worker producers + spilled fan-out + requeued
+/// yields) and its siblings' tails. When that turns up nothing, the
+/// coordinator
 /// (iamacoffeepot/aether#1064) takes over: it keeps the worker spinning
 /// (re-running the steal scan) for a bounded window so a producer can
 /// route a spill or relay hop to it without a futex wake, then parks it —
@@ -339,6 +343,10 @@ fn acquire_slot(
     if let Some(slot) = worker_deque::pop_local() {
         return Some(slot);
     }
+    // Own deque drained empty — the local cascade is over. Close its
+    // keep-local burst (iamacoffeepot/aether#1160) so stolen work, or this
+    // worker's next cascade, starts under a fresh mail/time budget.
+    worker_deque::burst_reset();
     if let Some(slot) = worker_deque::steal_into_local(idx, stealers, injector) {
         return Some(slot);
     }

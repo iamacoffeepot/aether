@@ -90,7 +90,8 @@ use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
 use crate::scheduler::{
-    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState,
+    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail,
+    clock_stride, time_budget,
 };
 
 /// Worker-pool-side wrapper for a native actor. One instance per
@@ -217,6 +218,13 @@ where
     // happen to, but the surface mirrors the owning dispatch loop.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
+        // iamacoffeepot/aether#1160: count this envelope against the
+        // worker's local-drain burst *before* running the handler, so a
+        // blob this handler produces (scheduled at `ctx` drop below) sees
+        // the current envelope in the keep-local budget. Off a pool worker
+        // / in the default-preserving config this is a single `Cell`
+        // increment (no clock).
+        burst_note_mail(clock_stride(), time_budget());
         let inbound_mail_id = env.mail_id;
         // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
         // name-hashed `ThreadId` (a `Copy` u64) onto the `Received`
