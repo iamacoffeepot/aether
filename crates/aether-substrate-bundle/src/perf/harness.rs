@@ -330,25 +330,23 @@ pub fn summarize(mut samples: Vec<u64>) -> Stats {
 pub struct CellResult {
     pub workers: usize,
     pub topo: String,
-    /// `t_received − t_sent` — the whole hop. Kept as the headline /
-    /// backward-compatible metric; equals `send_enqueue + residence`
-    /// within clock granularity.
-    pub hop: Stats,
-    /// iamacoffeepot/aether#1134: `t_enqueue − t_sent` — producer-side
-    /// span (rest of the sender's handler + flush + blob pickup + demux
-    /// up to the recipient-inbox deposit).
-    pub send_enqueue: Stats,
-    /// iamacoffeepot/aether#1134: `t_received − t_enqueue` — consumer-side
-    /// queue residence (deposit → the recipient's dispatcher picks it up
-    /// = slot schedule + worker wakeup + recv). The span the fast-path
-    /// inbox-bypass would attack.
-    pub residence: Stats,
-    /// `t_finished − t_received` — in-handler work.
+    /// iamacoffeepot/aether#1150: `t_enqueue − t_sent` (flush-begin → the
+    /// worker picks up the blob this mail rode in / the deposit lands) —
+    /// wakeup + scheduling latency. ~0 on the producer's own warm worker.
+    pub queued: Stats,
+    /// iamacoffeepot/aether#1150: `t_received − t_enqueue` (blob pickup →
+    /// this mail's handler entry) — where in the blob's drain the mail
+    /// landed. The only cardinality-sensitive span: a serial fan-out's
+    /// late leaf waited behind its siblings here, so it reads high by
+    /// design (the scheduler's serialize-vs-recruit choice, not per-mail
+    /// cost — cross-reference `handler` to judge it).
+    pub drain: Stats,
+    /// `t_finished − t_received` — the recipient's own handler work.
     pub handler: Stats,
-    /// iamacoffeepot/aether#1134: scheduler ready-queue depth at deposit
-    /// (`enqueue_depth`), as a distribution — *counts, not nanoseconds*.
-    /// p50 ≈ 0 means residence is dominated by wakeup (empty queue); a
-    /// rising tail means wait-behind-N (offered load).
+    /// iamacoffeepot/aether#1134: scheduler ready-queue depth at the
+    /// deposit (`enqueue_depth`), as a distribution — *counts, not
+    /// nanoseconds*. p50 ≈ 0 means `queued` is wakeup-dominated (empty
+    /// queue); a rising tail means wait-behind-N (offered load).
     pub depth: Stats,
 }
 
@@ -597,9 +595,8 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
             }
             let mails = fold_nodes(entries);
 
-            let mut hop = Vec::new();
-            let mut send_enqueue = Vec::new();
-            let mut residence = Vec::new();
+            let mut queued = Vec::new();
+            let mut drain = Vec::new();
             let mut handler = Vec::new();
             let mut depth = Vec::new();
             for node in &mails {
@@ -607,16 +604,16 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
                     continue;
                 }
                 if let Some(recv) = node.t_received {
-                    hop.push(recv.0.saturating_sub(node.t_sent.0));
                     if let Some(fin) = node.t_finished {
                         handler.push(fin.0.saturating_sub(recv.0));
                     }
-                    // iamacoffeepot/aether#1134: split the hop at the
-                    // deposit instant. `t_enqueue` lands with `Received`,
-                    // so it is present exactly when `t_received` is.
+                    // iamacoffeepot/aether#1150: `t_enqueue` (blob pickup)
+                    // lands with `Received`, so it is present exactly when
+                    // `t_received` is. `queued` = flush-begin → pickup;
+                    // `drain` = pickup → this mail's handler entry.
                     if let Some(enq) = node.t_enqueue {
-                        send_enqueue.push(enq.0.saturating_sub(node.t_sent.0));
-                        residence.push(recv.0.saturating_sub(enq.0));
+                        queued.push(enq.0.saturating_sub(node.t_sent.0));
+                        drain.push(recv.0.saturating_sub(enq.0));
                     }
                 }
                 if let Some(d) = node.enqueue_depth {
@@ -626,9 +623,8 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
             rows.push(CellResult {
                 workers,
                 topo: topo.name.clone(),
-                hop: summarize(hop),
-                send_enqueue: summarize(send_enqueue),
-                residence: summarize(residence),
+                queued: summarize(queued),
+                drain: summarize(drain),
                 handler: summarize(handler),
                 depth: summarize(depth),
             });

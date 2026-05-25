@@ -819,25 +819,22 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     println!("{OBSERVE_FRAMES} frames/cell (wide cells fewer); relay-hop (`Ping`) samples only.");
     println!();
 
-    // iamacoffeepot/aether#1134: HOP now splits into SEND→ENQUEUE
-    // (producer side) + QUEUE RESIDENCE (consumer side). HOP ≈ their sum
-    // within clock granularity; it stays as the headline continuity row.
+    // iamacoffeepot/aether#1150: the per-mail hop decomposes into three
+    // single-property spans. QUEUED + DRAIN sum to the old full hop within
+    // clock granularity; each now measures one thing (wakeup vs in-blob
+    // serialization vs handler work).
     for (label, pick) in [
         (
-            "HOP          (t_received - t_sent: full hop = send→enqueue + residence)",
+            "QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the blob = wakeup/schedule)",
             0usize,
         ),
         (
-            "SEND→ENQUEUE (t_enqueue - t_sent: producer handler + flush + blob demux to deposit)",
+            "DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the blob's drain it landed)",
             1,
         ),
         (
-            "QUEUE RESID. (t_received - t_enqueue: deposit → dispatcher pickup = schedule + wakeup)",
-            2,
-        ),
-        (
             "HANDLER DUR  (t_finished - t_received: relay forward work)",
-            3,
+            2,
         ),
     ] {
         println!("-- {label} --");
@@ -847,9 +844,8 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
         );
         for r in rows {
             let s = match pick {
-                0 => r.hop,
-                1 => r.send_enqueue,
-                2 => r.residence,
+                0 => r.queued,
+                1 => r.drain,
                 _ => r.handler,
             };
             println!(
@@ -869,7 +865,7 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
 
     // iamacoffeepot/aether#1134: enqueue depth is a *count* (scheduler
     // ready-queue len at deposit), printed raw — not µs. p50 ≈ 0 means
-    // residence is wakeup-dominated (empty queue); a rising tail is
+    // `queued` is wakeup-dominated (empty queue); a rising tail is
     // wait-behind-N offered load (the fan-out queueing signal).
     println!(
         "-- ENQUEUE DEPTH (scheduler ready-queue len at deposit; counts, not µs: 0 = wakeup, n = behind-n) --"
