@@ -389,18 +389,25 @@ impl WakeSink {
 
     /// Recruit `count` workers to a shared cooperative blob
     /// (iamacoffeepot/aether#1137): push `count` clones of the same
-    /// `Drainable` onto the shared injector and notify the coordinator
-    /// once per clone, so parked siblings wake and race its cursor. This is
-    /// the broadcast-recruit the own-deque [`Self::schedule`] cannot do
-    /// (that path keeps work local with no notify). Over-recruiting is
-    /// harmless: a worker that pops a copy after the cursor is drained
-    /// finds no group to claim and drops the clone. `count == 0` is a
-    /// no-op.
+    /// `Drainable` onto the shared injector, then wake up to `count` parked
+    /// siblings to race its cursor. This is the broadcast-recruit the
+    /// own-deque [`Self::schedule`] cannot do (that path keeps work local
+    /// with no notify). Over-recruiting is harmless: a worker that pops a
+    /// copy after the cursor is drained finds no group to claim and drops
+    /// the clone. `count == 0` is a no-op.
+    ///
+    /// The wake goes through [`SpinPark::wake_workers`], **not** a per-clone
+    /// [`SpinPark::notify`]: `notify` routes-to-spinner (skips the unpark
+    /// when any worker is spinning), and a single spinner cannot drain
+    /// `count` independent clones — so per-clone notifies collapse the
+    /// recruitment to whoever was already spinning, leaving parked siblings
+    /// idle (iamacoffeepot/aether#1143). One batch wake unparks the parked
+    /// siblings directly; spinners still scan the clones as a bonus.
     pub(crate) fn recruit(&self, slot: &Arc<dyn Drainable>, count: usize) {
         for _ in 0..count {
             self.injector.push(Arc::clone(slot));
-            self.spin.notify();
         }
+        self.spin.wake_workers(count);
     }
 }
 

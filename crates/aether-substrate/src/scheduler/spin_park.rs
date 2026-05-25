@@ -160,6 +160,44 @@ impl SpinPark {
         }
     }
 
+    /// Producer side: call **after** pushing `n` slots, to wake up to `n`
+    /// parked workers to drain them in parallel. Unlike [`Self::notify`],
+    /// this does **not** route-to-spinner — a single spinner cannot drain
+    /// `n` independent slots, so a batch producer must wake the parked
+    /// siblings directly (iamacoffeepot/aether#1137 recruitment). Spinners
+    /// still opportunistically scan the pushed slots, so the effective
+    /// drainer count is the woken parked workers *plus* any spinners; over-
+    /// waking is harmless (a worker that finds no work re-parks).
+    ///
+    /// Lost-wakeup-safe by the same discipline as [`Self::notify`]: the
+    /// `SeqCst` fence orders the caller's pushes before the idle-list read,
+    /// and the parking worker's register-before-decrement makes any worker
+    /// that committed to parking visible to the pop. The unpark token is
+    /// sticky, so a worker that re-enters its spin loop between our pop and
+    /// its park still observes the work.
+    pub fn wake_workers(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        // StoreLoad barrier: pushes-before, idle-read-after (see `notify`).
+        fence(Ordering::SeqCst);
+        // Pop up to `n` parked handles under one lock, then unpark them all
+        // after releasing the guard (no unpark while holding the lock).
+        let mut woken: Vec<Thread> = Vec::new();
+        {
+            let mut idle = self.idle();
+            for _ in 0..n {
+                match idle.pop() {
+                    Some(t) => woken.push(t),
+                    None => break,
+                }
+            }
+        }
+        for t in woken {
+            t.unpark();
+        }
+    }
+
     /// Worker side: wait for work. The caller has already tried its
     /// worker-local affinity cell and one non-blocking `scan`; this
     /// runs the spin-then-park loop until `scan` yields a slot or
@@ -289,6 +327,37 @@ mod tests {
         assert_eq!(coord.idle().len(), 0, "notify must pop when no spinner");
         // We unparked ourselves; consume the sticky token so it doesn't
         // leak into a later `park` in this test thread.
+        thread::park_timeout(Duration::from_millis(0));
+    }
+
+    /// `wake_workers` must unpark up to `n` parked workers **even when a
+    /// spinner is present** — unlike `notify`, it does not route-to-spinner
+    /// (a lone spinner cannot drain `n` independent recruited clones). It
+    /// also caps at the parked count rather than under/over-running.
+    /// Regression guard for the recruit under-wake (iamacoffeepot/aether#1143).
+    #[test]
+    fn wake_workers_unparks_despite_spinner() {
+        let coord = SpinPark::new();
+        // A spinner is present (this would make `notify` skip the unpark),
+        // and three workers are parked.
+        coord.spinning.fetch_add(1, Ordering::Relaxed);
+        for _ in 0..3 {
+            coord.idle().push(thread::current());
+        }
+
+        coord.wake_workers(3);
+        assert_eq!(
+            coord.idle().len(),
+            0,
+            "wake_workers must unpark all n parked despite the spinner"
+        );
+
+        // n beyond the parked count is a no-op tail (no panic / underflow).
+        coord.wake_workers(5);
+        assert_eq!(coord.idle().len(), 0, "empty idle list stays empty");
+
+        // Consume the sticky unpark token(s) delivered to this thread so
+        // they don't leak into a later `park`.
         thread::park_timeout(Duration::from_millis(0));
     }
 
