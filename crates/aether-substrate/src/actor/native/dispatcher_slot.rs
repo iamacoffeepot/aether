@@ -28,14 +28,24 @@
 //!      post-shutdown drain + `unwire` hook + registry finalize
 //!      sequence and is done forever.
 //!
-//! ## Today (PR C)
+//! ## Scheduling default
 //!
-//! Every actor in the workspace ships `SCHEDULING = Dedicated`, so
-//! this slot is constructed by the `Pooled` branch of
-//! `make_native_actor_boot` / `Spawner::spawn_actor` but never
-//! actually reached at runtime. The branch + slot impl are shaped so
-//! Phase 2 (PR D) can flip a single cap to `Pooled` and have the
-//! pool drive it.
+//! `Actor::SCHEDULING` defaults to `Pooled` (issue 635 Phase 3), so
+//! this slot is the runtime dispatch path for nearly every actor —
+//! chassis caps and loaded wasm trampolines alike. `Dedicated` is the
+//! opt-in escape hatch for actors that park their dispatcher (today only
+//! `ProcessCapability`, which `block_on`s a tokio runtime). The
+//! `Pooled` branch of `make_native_actor_boot` / `Spawner::spawn_actor`
+//! constructs the slot; the chassis worker pool drives it.
+//!
+//! ## In-place demux seed (iamacoffeepot/aether#1135)
+//!
+//! [`Self::seize_and_run`] is the demux-direct counterpart to
+//! [`Self::run_cycle`]: a [`crate::actor::native::blob_work::BlobWork`]
+//! that has **seized** this slot (`Idle → Running`) hands it one
+//! envelope to dispatch in place — skipping the inbox deposit +
+//! `try_recv` repop the deposit-then-wake path paid. Both methods share
+//! the same drain tail ([`Self::drain_after_seed`]).
 
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +89,9 @@ use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
-use crate::scheduler::{BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SlotState};
+use crate::scheduler::{
+    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState,
+};
 
 /// Worker-pool-side wrapper for a native actor. One instance per
 /// `Pooled` actor; held strongly by the chassis (so `unwire` and
@@ -294,28 +306,33 @@ where
             }
         }
     }
-}
 
-impl<A> Drainable for DispatcherSlot<A>
-where
-    A: NativeActor + NativeDispatch,
-{
-    fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
-        if !self.state.enter_running() {
-            // Invariant violation: the worker popped this slot and
-            // its state should have been Ready. Defensive fallback
-            // — bail without touching the actor.
-            tracing::warn!(
-                target: "aether_substrate::scheduler",
-                actor = A::NAMESPACE,
-                "DispatcherSlot::run_cycle entered without Ready state — skipping",
-            );
-            return CycleResult::Idle;
-        }
-
+    /// Shared drain tail for [`Drainable::run_cycle`] (no seed) and
+    /// [`Drainable::seize_and_run`] (one direct-dispatch seed,
+    /// iamacoffeepot/aether#1135). Caller invariant: the slot's
+    /// [`SlotState`] is already `Running` — `run_cycle` won the
+    /// `Ready → Running` CAS, `seize_and_run` won the `Idle → Running`
+    /// seize — so this method owns the actor exclusively. It locks the
+    /// actor, dispatches `seed` (if any) first, then runs the same drain
+    /// loop + shutdown / budget / post-empty-recheck finalization both
+    /// paths share, returning the [`CycleResult`].
+    fn drain_after_seed(&self, seed: Option<Envelope>, budget: BatchBudget) -> CycleResult {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(actor) = actor_guard.as_mut() else {
-            // Slot already finalized. Nothing to do.
+            // Slot already finalized — the actor box was taken by the
+            // `Closed` path. A `run_cycle` caller can't reach here (it
+            // failed `enter_running` against the `Idle` a finalized slot
+            // parks in), but a `seize_and_run` seed can race the narrow
+            // window between `finalize`'s `actor_guard.take()` and the
+            // strong slot Arc dropping: the `Idle → Running` seize wins
+            // and the `Weak` still upgrades. Balance the seed's `Sent` so
+            // its settlement chain still drains (ADR-0080 §2 — the same
+            // bracket `route_mail`'s `Dropped` arm records), then drop it.
+            if let Some(seed) = seed {
+                self.binding
+                    .mailer()
+                    .record_finished(seed.mail_id, seed.root);
+            }
             drop(actor_guard);
             self.state.mark_idle();
             // Issue 714: a wait that came in after the close cycle
@@ -323,6 +340,14 @@ where
             self.fire_close_done();
             return CycleResult::Closed;
         };
+
+        // iamacoffeepot/aether#1135: the demux-direct seed runs first,
+        // in place — no inbox deposit, no `try_recv` repop. The seed's
+        // `Received` already carries `t_enqueue ≈ now` / `enqueue_depth =
+        // 0` (stamped by the `BlobWork` demuxer), so residence ≈ 0.
+        if let Some(seed) = seed {
+            self.dispatch_one(actor, seed);
+        }
 
         let mut dispatched = 0u32;
         let mut cycle_start: Option<Instant> = None;
@@ -417,6 +442,38 @@ where
             }
             None => CycleResult::Idle,
         }
+    }
+}
+
+impl<A> Drainable for DispatcherSlot<A>
+where
+    A: NativeActor + NativeDispatch,
+{
+    fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
+        if !self.state.enter_running() {
+            // Invariant violation: the worker popped this slot and
+            // its state should have been Ready. Defensive fallback
+            // — bail without touching the actor.
+            tracing::warn!(
+                target: "aether_substrate::scheduler",
+                actor = A::NAMESPACE,
+                "DispatcherSlot::run_cycle entered without Ready state — skipping",
+            );
+            return CycleResult::Idle;
+        }
+        // State is `Running`; drain the inbox with no seed.
+        self.drain_after_seed(None, budget)
+    }
+
+    /// iamacoffeepot/aether#1135: dispatch one direct-dispatch `seed` in
+    /// place, then drain the rest of the inbox. Caller invariant: the
+    /// demuxer just won this slot's [`SlotState::seize`] CAS
+    /// (`Idle → Running`), so the slot is `Running` and exclusively ours
+    /// — no `enter_running` here (it would fail against `Running`). The
+    /// drain tail is shared with [`Self::run_cycle`] via
+    /// [`Self::drain_after_seed`].
+    fn seize_and_run(&self, seed: SeizeSeed, budget: BatchBudget) -> CycleResult {
+        self.drain_after_seed(Some(seed), budget)
     }
 
     fn label(&self) -> &'static str {

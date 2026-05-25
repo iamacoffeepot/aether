@@ -227,7 +227,7 @@ impl ComponentCtx {
         // downstream dispatch loop records the bracket. See
         // [`MailboxEntry`] docs for the contract.
         match self.registry.entry(recipient) {
-            Some(MailboxEntry::Inbox(handler)) => {
+            Some(MailboxEntry::Inbox { handler, .. }) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any

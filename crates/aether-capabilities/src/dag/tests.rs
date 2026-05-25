@@ -117,7 +117,7 @@ fn enqueue<K: Kind + serde::Serialize>(
     sender: ReplyTo,
 ) {
     let id = registry.lookup(mailbox_name).expect("mailbox registered");
-    let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
         panic!("expected inbox mailbox for {mailbox_name}");
     };
     let bytes = postcard::to_allocvec(payload).expect("encode request");

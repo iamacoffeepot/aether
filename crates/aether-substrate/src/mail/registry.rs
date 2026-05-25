@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
 
@@ -26,7 +26,24 @@ use aether_kinds::trace::Nanos;
 
 use crate::handle_store::schema_contains_ref;
 use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
+use crate::scheduler::SeizeHandle;
 use std::error;
+
+/// Deferred cell holding a `Pooled` actor's
+/// [`SeizeHandle`], carried on every
+/// [`MailboxEntry::Inbox`] entry (ADR-0087 §4, iamacoffeepot/aether#1135).
+///
+/// Registration (`register_inbox` / `try_register_inbox`) happens *before*
+/// the dispatcher slot exists — the actor isn't built into a
+/// `DispatcherSlot` until after `init` / `wire` — so the cell is empty
+/// (`None`) at register time and the `Pooled`-branch wiring in
+/// `chassis/builder.rs` + `actor/native/spawn.rs` installs the handle
+/// once the slot is constructed (mirroring the `MailboxWakeSlot`
+/// deferred-population pattern). The same `Arc` is shared between the
+/// registry entry and the wiring caller. Closure / `Inline` handlers
+/// have no slot to seize, so their cell stays empty forever and the blob
+/// demuxer deposits their mail as usual.
+pub(crate) type SeizeCell = Arc<OnceLock<SeizeHandle>>;
 
 /// Test-only helper that builds a [`MailDispatch`] with empty
 /// `origin` / `ReplyTo::NONE` / `MailId::NONE` defaults from the
@@ -318,7 +335,16 @@ pub enum MailboxEntry {
     /// separate dispatcher loop. Handler receives [`OwnedDispatch`]
     /// so payload + `kind_name` move into the downstream envelope —
     /// see [`InboxHandler`] for the full contract.
-    Inbox(Arc<dyn InboxHandler>),
+    ///
+    /// iamacoffeepot/aether#1135: `seize` is the deferred
+    /// `SeizeCell` — populated by the `Pooled`-branch wiring once the
+    /// recipient's dispatcher slot exists so the blob demuxer can resolve
+    /// recipient → slot and dispatch in place (ADR-0087 §4). Empty for
+    /// closure-backed inboxes and `Dedicated` actors (no pool slot).
+    Inbox {
+        handler: Arc<dyn InboxHandler>,
+        seize: SeizeCell,
+    },
     /// The handler body does its work inline on the pushing thread;
     /// there is no actor dispatch loop behind it. `Mailer::push`
     /// brackets this arm with `Received` and `Finished` so the
@@ -374,6 +400,14 @@ pub(crate) struct RouteLookup {
     pub(crate) entry: Option<MailboxEntry>,
     pub(crate) kind_name: String,
     pub(crate) ref_schema: Option<SchemaType>,
+    /// iamacoffeepot/aether#1135: the recipient's
+    /// [`SeizeHandle`], resolved under the
+    /// same read guard. `Some` only when the recipient is an `Inbox`
+    /// entry whose deferred [`SeizeCell`] was populated (a `Pooled`
+    /// actor's slot). `None` for closure / `Inline` / `Dropped` / unknown
+    /// recipients — the blob demuxer deposits their mail through
+    /// `route_mail` instead of dispatching in place.
+    pub(crate) seize: Option<SeizeHandle>,
 }
 
 /// One kind's bookkeeping, keyed in the registry on the hashed id.
@@ -574,7 +608,7 @@ impl Registry {
             return Err(DropError::UnknownId(id));
         };
         match slot.entry {
-            MailboxEntry::Inbox(_) | MailboxEntry::Inline(_) => {}
+            MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_) => {}
             MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
         }
         slot.entry = MailboxEntry::Dropped;
@@ -619,7 +653,13 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> MailboxId {
-        match self.insert(name.into(), MailboxEntry::Inbox(handler)) {
+        match self.insert(
+            name.into(),
+            MailboxEntry::Inbox {
+                handler,
+                seize: SeizeCell::default(),
+            },
+        ) {
             Ok(id) => {
                 self.notify_mailbox_change();
                 id
@@ -647,7 +687,13 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert(name.into(), MailboxEntry::Inbox(handler));
+        let result = self.insert(
+            name.into(),
+            MailboxEntry::Inbox {
+                handler,
+                seize: SeizeCell::default(),
+            },
+        );
         if result.is_ok() {
             self.notify_mailbox_change();
         }
@@ -737,7 +783,10 @@ impl Registry {
             .expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get(&id) {
             Some(slot)
-                if matches!(slot.entry, MailboxEntry::Inbox(_) | MailboxEntry::Inline(_)) =>
+                if matches!(
+                    slot.entry,
+                    MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)
+                ) =>
             {
                 inner.mailboxes.remove(&id);
                 true
@@ -787,6 +836,31 @@ impl Registry {
             .map(|m| m.entry.clone())
     }
 
+    /// Install a `Pooled` actor's [`SeizeHandle`]
+    /// onto its `Inbox` entry's deferred [`SeizeCell`] so the blob
+    /// demuxer can resolve recipient → slot and dispatch in place
+    /// (ADR-0087 §4, iamacoffeepot/aether#1135). Called by the
+    /// `Pooled`-branch wiring in `chassis/builder.rs` +
+    /// `actor/native/spawn.rs` once the dispatcher slot exists. Returns
+    /// `true` on a successful install; `false` if the id isn't a live
+    /// `Inbox` entry or the cell was already populated (idempotent — one
+    /// install per slot in production).
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn install_seize_handle(&self, id: MailboxId, handle: SeizeHandle) -> bool {
+        let inner = self
+            .inner
+            .read()
+            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let Some(MailboxEntry::Inbox { seize, .. }) = inner.mailboxes.get(&id).map(|m| &m.entry)
+        else {
+            return false;
+        };
+        seize.set(handle).is_ok()
+    }
+
     /// Hot-path combined lookup for the mailer's route step: resolves
     /// the recipient's [`MailboxEntry`], the kind's name, and whether
     /// the kind needs ADR-0045 handle resolution — all under a single
@@ -814,10 +888,19 @@ impl Registry {
             .filter(|s| s.has_ref)
             .map(|s| s.descriptor.schema.clone());
         let entry = inner.mailboxes.get(&recipient).map(|m| m.entry.clone());
+        // iamacoffeepot/aether#1135: hand the demuxer the recipient's
+        // seize handle under the same guard. Cloned out of the deferred
+        // cell — `Some` only when the recipient is a `Pooled` actor whose
+        // slot was wired in.
+        let seize = entry.as_ref().and_then(|e| match e {
+            MailboxEntry::Inbox { seize, .. } => seize.get().cloned(),
+            MailboxEntry::Inline(_) | MailboxEntry::Dropped => None,
+        });
         RouteLookup {
             entry,
             kind_name,
             ref_schema,
+            seize,
         }
     }
 
@@ -1134,7 +1217,70 @@ mod tests {
         let id = r.register_inbox("physics", noop_handler());
         assert_eq!(id, MailboxId::from_name("physics"));
         assert_eq!(r.lookup("physics"), Some(id));
-        assert!(matches!(r.entry(id), Some(MailboxEntry::Inbox(_))));
+        assert!(matches!(r.entry(id), Some(MailboxEntry::Inbox { .. })));
+    }
+
+    /// iamacoffeepot/aether#1135: a `Pooled` actor's `Inbox` entry exposes
+    /// a live seize handle once the slot is wired in; a closure-backed
+    /// inbox (no slot) exposes none.
+    #[test]
+    fn pooled_inbox_exposes_seize_handle_closure_does_not() {
+        use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState};
+        use std::any::Any;
+
+        // Minimal `Drainable` carrying a real `SlotState` so the installed
+        // seize handle can drive the `Idle → Running` CAS.
+        struct StatefulSlot {
+            state: Arc<SlotState>,
+        }
+        impl Drainable for StatefulSlot {
+            fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+                CycleResult::Idle
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let r = Registry::new();
+        let kind = r.register_kind("test.seize.kind");
+
+        // Closure-backed inbox: no slot, so no seize handle ever resolves.
+        let closure_id = r.register_inbox("closure", noop_handler());
+        assert!(
+            r.route_lookup(kind, closure_id).seize.is_none(),
+            "a closure-backed inbox exposes no seize handle"
+        );
+
+        // A `Pooled`-shaped inbox: empty before the slot is wired, then a
+        // live handle after `install_seize_handle`.
+        let pooled_id = r.register_inbox("pooled", noop_handler());
+        assert!(
+            r.route_lookup(kind, pooled_id).seize.is_none(),
+            "the seize cell is empty until the Pooled slot is wired"
+        );
+
+        let slot = Arc::new(StatefulSlot {
+            state: Arc::new(SlotState::new()),
+        });
+        let slot_dyn: Arc<dyn Drainable> = slot.clone();
+        let installed = r.install_seize_handle(
+            pooled_id,
+            SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn)),
+        );
+        assert!(installed, "install lands on a live Inbox entry");
+
+        let resolved = r
+            .route_lookup(kind, pooled_id)
+            .seize
+            .expect("Pooled inbox now exposes a seize handle");
+        // The handle is live: it wins the `Idle → Running` seize CAS and
+        // upgrades to the same slot.
+        assert!(
+            resolved.try_seize().is_some(),
+            "the resolved handle seizes a live slot"
+        );
+        let _ = slot_dyn;
     }
 
     #[test]
@@ -1148,7 +1294,7 @@ mod tests {
                 c2.fetch_add(dispatch.count, Ordering::SeqCst);
             }),
         );
-        let Some(MailboxEntry::Inbox(h)) = r.entry(id) else {
+        let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry(id) else {
             panic!("expected closure entry")
         };
         // Test-side id is irrelevant — the handler ignores it.
@@ -1448,7 +1594,10 @@ mod tests {
         let reloaded = r.try_register_inbox("loaded", noop_handler()).unwrap();
         assert_eq!(reloaded, id);
         assert_eq!(r.lookup("loaded"), Some(reloaded));
-        assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox(_))));
+        assert!(matches!(
+            r.entry(reloaded),
+            Some(MailboxEntry::Inbox { .. })
+        ));
     }
 
     #[test]

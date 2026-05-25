@@ -40,6 +40,16 @@ use crossbeam_deque::Injector;
 
 use super::spin_park::SpinPark;
 use super::worker_deque;
+use crate::actor::native::Envelope;
+
+/// The one envelope a [`Drainable::seize_and_run`] caller hands the
+/// just-seized slot to dispatch in place (ADR-0087 §4,
+/// iamacoffeepot/aether#1135). Alias for the actor-layer
+/// [`Envelope`] the `BlobWork` demuxer
+/// builds from the blob's [`Mail`](crate::mail::Mail), with
+/// `t_enqueue ≈ now` / `enqueue_depth = 0` (residence ≈ 0 — the measured
+/// win).
+pub type SeizeSeed = Envelope;
 
 /// Default per-cycle envelope cap. Once a worker has dispatched this
 /// many envelopes from a single slot, it yields to other ready slots
@@ -105,6 +115,28 @@ impl SlotState {
         self.state
             .compare_exchange(
                 STATE_READY,
+                STATE_RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Demux-side: claim a `free` slot for an *in-place* dispatch
+    /// (ADR-0087 §4, iamacoffeepot/aether#1135). CAS `Idle → Running`,
+    /// returning `true` on the winning transition. Distinct from
+    /// [`Self::enter_running`] (`Ready → Running`): a blob demuxer holds
+    /// the recipient's mail in hand and wants to run it *without* an
+    /// inbox round-trip, so it seizes a slot that no sender has woken
+    /// yet (state `Idle`). A `false` means the slot is already in flight
+    /// (`Ready` — a sender's `try_wake` won; or `Running` — a worker is
+    /// draining): the demuxer falls back to depositing the mail through
+    /// `route_mail`, and the holder/woken cycle drains it (per-recipient
+    /// FIFO preserved by the inbox's own ordering).
+    pub fn seize(&self) -> bool {
+        self.state
+            .compare_exchange(
+                STATE_IDLE,
                 STATE_RUNNING,
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -253,6 +285,25 @@ pub trait Drainable: Send + Sync + 'static {
     /// 4. Return the [`CycleResult`] telling the worker what to do.
     fn run_cycle(&self, budget: BatchBudget) -> CycleResult;
 
+    /// In-place demux dispatch (ADR-0087 §4, iamacoffeepot/aether#1135).
+    /// The caller has just **seized** this slot
+    /// ([`SlotState::seize`] / [`SeizeHandle::try_seize`]) — state is
+    /// `Running` — and holds one envelope for it (`seed`). Run the full
+    /// per-envelope wrapper on `seed` *without* an inbox deposit +
+    /// `try_recv` repop, then drain the rest of the inbox under `budget`
+    /// and run the post-empty recheck — i.e. the same drain tail as
+    /// [`Self::run_cycle`]. Returns the [`CycleResult`] telling the
+    /// demuxer what to do with the slot (`Requeue` → re-schedule; `Idle`
+    /// / `Closed` → drop).
+    ///
+    /// Default: deposit-only / unreachable. Mock fixtures (and the
+    /// `BlobWork` blob itself, which has no actor of its own) never get
+    /// seized, so the default just parks the slot back to `Idle` and
+    /// returns. A real `DispatcherSlot` overrides it.
+    fn seize_and_run(&self, _seed: SeizeSeed, _budget: BatchBudget) -> CycleResult {
+        CycleResult::Idle
+    }
+
     /// Debug label — used in tracing events when the worker logs slot
     /// activity. Default `"<unnamed>"`. Implementors override with
     /// something stable (e.g. the actor's namespace).
@@ -375,26 +426,88 @@ impl WakeHandle {
             // gone the state never matters.
             return false;
         };
-        // ADR-0087 Phase 3b: if this wake fires inside a blob-demux
-        // window (a `BlobWork` depositing its fan-out on this worker),
-        // hand the just-woken free recipient to the demuxer so it runs
-        // inline on this worker — no deque push, no notify. The demuxer
-        // owns the slot until it runs it; nothing else can see a slot
-        // that's `Ready` but on no deque.
-        let Err(slot) = worker_deque::try_collect_demux(slot) else {
-            return true;
-        };
-        // Not demuxing — today's affinity / spill path
-        // (iamacoffeepot/aether#1059 own-deque, #1064 route-to-spinner):
-        // own deque under the local bound keeps a chain warm with no
-        // notify; otherwise spill to the injector + notify a spinner (or
-        // unpark one). See [`WakeSink::schedule`].
+        // Today's affinity / spill path (iamacoffeepot/aether#1059
+        // own-deque, #1064 route-to-spinner): own deque under the local
+        // bound keeps a chain warm with no notify; otherwise spill to the
+        // injector + notify a spinner (or unpark one). See
+        // [`WakeSink::schedule`]. The Phase 3b blob-demux deposit+collect
+        // arm retired in iamacoffeepot/aether#1135 — `BlobWork` now
+        // seizes free recipients (`Idle → Running`) and dispatches in
+        // place rather than depositing through `route_mail` and
+        // collecting the woken slot here.
         self.sink.schedule(slot);
         true
     }
 
     /// Borrow the slot state. Tests reach for this; production code
     /// goes through `wake`.
+    #[must_use]
+    pub fn state(&self) -> &Arc<SlotState> {
+        &self.state
+    }
+}
+
+/// Demux-side handle to a recipient's dispatcher slot (ADR-0087 §4,
+/// iamacoffeepot/aether#1135). Surfaced on the registry's
+/// [`MailboxEntry::Inbox`](crate::mail::registry::MailboxEntry) entry so
+/// a `BlobWork` demuxing a fan-out can resolve recipient → slot up front
+/// and dispatch its mail *in place* — seizing the slot (`Idle → Running`)
+/// and running the full per-envelope wrapper rather than depositing the
+/// mail on the inbox mpsc and bouncing it back out through a `try_recv`
+/// repop.
+///
+/// Holds the same pair the [`WakeHandle`] does — the slot's
+/// [`SlotState`] (so the demuxer can drive the `Idle → Running` seize
+/// CAS) and a [`Weak<dyn Drainable>`] (so a seize after the slot dropped
+/// silently no-ops). The chassis registry owns the strong slot ref; this
+/// handle going stale just means the actor was torn down. Only `Pooled`
+/// actors expose one — closure / `Inline` handlers have no slot to seize,
+/// so their entry carries `None` and the demuxer deposits as usual.
+#[derive(Clone)]
+pub struct SeizeHandle {
+    state: Arc<SlotState>,
+    slot: Weak<dyn Drainable>,
+}
+
+impl SeizeHandle {
+    /// Construct a seize handle over a `Pooled` slot. The Pooled-branch
+    /// wiring in `chassis/builder.rs` + `actor/native/spawn.rs` builds
+    /// one once the slot exists and installs it into the registry entry.
+    #[must_use]
+    pub fn new(state: Arc<SlotState>, slot: Weak<dyn Drainable>) -> Self {
+        Self { state, slot }
+    }
+
+    /// Try to claim the recipient slot for an in-place seed dispatch.
+    /// Wins the `Idle → Running` CAS and upgrades the weak slot ref →
+    /// `Some(slot)` (the demuxer then runs [`Drainable::seize_and_run`]
+    /// on it and is responsible for the resulting [`CycleResult`]). A
+    /// `None` means the slot is busy (`Ready`/`Running` — lost the CAS)
+    /// or already dropped: the caller deposits the mail through
+    /// `route_mail` instead.
+    ///
+    /// On a lost CAS the state is untouched (`compare_exchange` only
+    /// flips on success), so a concurrent holder keeps its claim. On a
+    /// won CAS with a dropped slot we revert the state back to `Idle` so
+    /// it doesn't strand in `Running` — there is nothing to run.
+    #[must_use]
+    pub fn try_seize(&self) -> Option<Arc<dyn Drainable>> {
+        if !self.state.seize() {
+            return None;
+        }
+        let upgraded = self.slot.upgrade();
+        if upgraded.is_none() {
+            // Slot dropped between the CAS and the upgrade. We hold a
+            // `Running` claim on a corpse — revert to `Idle` so a later
+            // wake (against a re-registered slot under the same id) isn't
+            // blocked.
+            self.state.mark_idle();
+        }
+        upgraded
+    }
+
+    /// Borrow the slot state. Tests reach for this to assert the
+    /// post-cycle label; production code goes through [`Self::try_seize`].
     #[must_use]
     pub fn state(&self) -> &Arc<SlotState> {
         &self.state
@@ -591,6 +704,31 @@ pub mod tests {
             !state.enter_running(),
             "cannot re-enter Running from Running"
         );
+    }
+
+    #[test]
+    fn seize_only_succeeds_from_idle() {
+        // Demux-side `Idle → Running` (iamacoffeepot/aether#1135),
+        // distinct from `enter_running`'s `Ready → Running`.
+        let state = SlotState::new();
+        assert_eq!(state.current(), SlotStateLabel::Idle);
+        assert!(state.seize(), "Idle → Running seize should win");
+        assert_eq!(state.current(), SlotStateLabel::Running);
+        // A second seize against Running fails — only one runner.
+        assert!(!state.seize(), "cannot seize a Running slot");
+    }
+
+    #[test]
+    fn seize_fails_against_ready() {
+        // A sender's `try_wake` already flipped the slot to `Ready`
+        // (deposited mail, slot queued). The demuxer must lose the
+        // seize and fall back to depositing — per-recipient FIFO is
+        // then preserved by the inbox draining in send order.
+        let state = SlotState::new();
+        assert!(state.try_wake(), "Idle → Ready CAS should win");
+        assert_eq!(state.current(), SlotStateLabel::Ready);
+        assert!(!state.seize(), "cannot seize a Ready slot");
+        assert_eq!(state.current(), SlotStateLabel::Ready);
     }
 
     #[test]

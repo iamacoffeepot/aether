@@ -42,16 +42,6 @@ thread_local! {
     /// don't overlap.
     static LOCAL: RefCell<Option<Worker<Slot>>> = const { RefCell::new(None) };
 
-    /// Blob-demux collect buffer (ADR-0087 Phase 3b,
-    /// iamacoffeepot/aether#1113). `Some` only for the duration of a
-    /// [`run_demux`] window — i.e. while a `BlobWork` is depositing its
-    /// mails into recipient inboxes. While set, [`try_collect_demux`]
-    /// captures each just-woken **free** recipient slot here instead of
-    /// letting the wake push it to a deque, so the demuxing worker can
-    /// run those recipients inline (the Phase 3b fan-out win). Outside a
-    /// demux window it is `None` and the wake takes its normal path.
-    static DEMUX: RefCell<Option<Vec<Slot>>> = const { RefCell::new(None) };
-
     /// The shared off-worker [`Injector`], registered per worker by
     /// [`install_injector`] at the top of the worker loop
     /// (iamacoffeepot/aether#1134). Held only so [`pending_depth`] can read
@@ -177,56 +167,6 @@ pub fn steal_into_local(
     })
 }
 
-/// Run `deposit` inside a blob-demux window (ADR-0087 Phase 3b) and
-/// return the **free** recipient slots it woke. While `deposit` runs,
-/// any [`WakeHandle::wake`](crate::scheduler::WakeHandle::wake) that
-/// wins its recipient's `Idle → Ready` CAS routes the slot into a
-/// thread-local collect buffer (via `try_collect_demux`) instead of
-/// pushing it to a deque — so the caller (`BlobWork::run_cycle`) can run
-/// those recipients **inline** on this worker rather than waking parked
-/// siblings. Busy recipients (lost the CAS) are never collected: their
-/// mail is already deposited and their current holder drains it.
-///
-/// The deposit itself is just today's per-mail routing
-/// (`Mailer::push` → `route_mail`), so every routing concern —
-/// ADR-0045 ref-walk, the settlement/trace brackets, `Inline` /
-/// `Dropped` / unknown bubble-up — is inherited unchanged; only the
-/// wake's *destination* is intercepted.
-///
-/// Panics in debug if a demux window is already open on this thread —
-/// windows never nest (collected recipients run *after* the window
-/// closes, and `Inline` handlers reached during the deposit don't open
-/// their own window), so a nested open is a bug.
-pub fn run_demux<F: FnOnce()>(deposit: F) -> Vec<Slot> {
-    DEMUX.with(|d| {
-        debug_assert!(
-            d.borrow().is_none(),
-            "blob-demux windows must not nest — collected slots run after the window closes"
-        );
-        *d.borrow_mut() = Some(Vec::new());
-    });
-    deposit();
-    DEMUX.with(|d| d.borrow_mut().take().unwrap_or_default())
-}
-
-/// If a blob-demux window is open on this thread, capture `slot` in its
-/// collect buffer and return `Ok(())`; otherwise return `Err(slot)` so
-/// the caller takes its normal wake path. Called by
-/// [`WakeHandle::wake`](crate::scheduler::WakeHandle::wake) after it wins
-/// the `Idle → Ready` CAS — see [`run_demux`].
-pub fn try_collect_demux(slot: Slot) -> Result<(), Slot> {
-    DEMUX.with(|d| {
-        let mut d = d.borrow_mut();
-        match d.as_mut() {
-            Some(buf) => {
-                buf.push(slot);
-                Ok(())
-            }
-            None => Err(slot),
-        }
-    })
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -236,10 +176,6 @@ mod tests {
     use super::*;
     use crate::scheduler::slot::{BatchBudget, CycleResult, Drainable};
     use std::any::Any;
-
-    use crate::scheduler::slot::{SlotState, WakeHandle, WakeSink};
-    use crate::scheduler::spin_park::SpinPark;
-    use std::sync::Weak;
 
     struct Noop;
     impl Drainable for Noop {
@@ -253,33 +189,6 @@ mod tests {
 
     fn noop() -> Slot {
         Arc::new(Noop)
-    }
-
-    /// A `Drainable` carrying a real [`SlotState`] so a [`WakeHandle`]
-    /// can drive its `Idle → Ready` CAS in the demux-collect tests.
-    struct StatefulNoop {
-        state: Arc<SlotState>,
-    }
-    impl Drainable for StatefulNoop {
-        fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
-            CycleResult::Idle
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
-
-    /// Build a `StatefulNoop` plus a [`WakeHandle`] over it; the strong
-    /// `Arc` is returned so the handle's `Weak` upgrades.
-    fn stateful_with_wake() -> (Arc<StatefulNoop>, WakeHandle) {
-        let slot = Arc::new(StatefulNoop {
-            state: Arc::new(SlotState::new()),
-        });
-        let slot_dyn: Slot = slot.clone();
-        let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
-        let sink = WakeSink::new(Arc::new(Injector::new()), Arc::new(SpinPark::new()));
-        let wake = WakeHandle::new(Arc::clone(&slot.state), weak, sink);
-        (slot, wake)
     }
 
     /// Drain any residue so the per-thread deque starts empty regardless
@@ -351,59 +260,5 @@ mod tests {
         // Nothing anywhere → None.
         drain_local();
         assert!(steal_into_local(0, &[], &Injector::new()).is_none());
-    }
-
-    #[test]
-    fn run_demux_collects_woken_free_slot_not_deque() {
-        install(Worker::new_lifo());
-        drain_local();
-        let (_slot, wake) = stateful_with_wake();
-
-        // Inside a demux window, a wake of a free (Idle) recipient is
-        // captured for inline-run, not pushed to the worker's deque.
-        let collected = run_demux(|| {
-            assert!(wake.wake(), "Idle→Ready CAS should win");
-        });
-        assert_eq!(collected.len(), 1, "the free recipient is collected");
-        assert!(
-            pop_local().is_none(),
-            "a collected recipient must not also land on the deque"
-        );
-    }
-
-    #[test]
-    fn run_demux_skips_busy_slot() {
-        install(Worker::new_lifo());
-        drain_local();
-        let (slot, wake) = stateful_with_wake();
-
-        // Mark the recipient busy (Running) before the window: its wake
-        // loses the CAS, so it is neither collected nor deque-pushed —
-        // its current holder drains the deposited mail.
-        assert!(slot.state.try_wake());
-        assert!(slot.state.enter_running());
-
-        let collected = run_demux(|| {
-            assert!(!wake.wake(), "wake against Running is a no-op");
-        });
-        assert!(collected.is_empty(), "a busy recipient is not collected");
-        assert!(pop_local().is_none());
-    }
-
-    #[test]
-    fn wake_outside_demux_window_takes_normal_path() {
-        // Not a pool worker (no `install`): with no demux window open, a
-        // wake spills to the injector — the normal path is unchanged.
-        let collected = run_demux(|| {});
-        assert!(collected.is_empty(), "empty window collects nothing");
-        let (_slot, wake) = stateful_with_wake();
-        // Outside any `run_demux`, the wake spills (StatefulNoop's sink
-        // injector); `try_collect_demux` returns Err so the slot routes
-        // normally. We assert the demux buffer stays absent.
-        assert!(wake.wake());
-        assert!(
-            try_collect_demux(noop()).is_err(),
-            "no demux window is open outside run_demux"
-        );
     }
 }

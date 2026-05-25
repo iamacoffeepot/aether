@@ -554,7 +554,7 @@ fn route_mail(
     }
 
     match lookup.entry {
-        Some(MailboxEntry::Inbox(handler)) => {
+        Some(MailboxEntry::Inbox { handler, .. }) => {
             // Mail reaching a closure-bound mailbox through `push`
             // came from substrate core or a chassis (e.g. the frame
             // loop's FrameStats push, platform input fan-out). Per
@@ -1330,7 +1330,7 @@ mod tests {
         // Comment is normative.
         fn dispatch_path_for_entry(entry: &MailboxEntry) -> &'static str {
             match entry {
-                MailboxEntry::Inbox(_) => "Inbox",
+                MailboxEntry::Inbox { .. } => "Inbox",
                 MailboxEntry::Inline(_) => "Inline",
                 MailboxEntry::Dropped => "Dropped",
             }

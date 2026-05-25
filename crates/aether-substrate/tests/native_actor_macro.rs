@@ -134,7 +134,7 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
     use aether_substrate::mail::registry::MailboxEntry;
     let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
-    let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry exists") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient}");
     };
     let bytes = payload.encode_into_bytes();
@@ -182,6 +182,90 @@ fn macro_emitted_cap_routes_postcard_kind_through_dispatch() {
         "macro dispatcher should route Greet → on_greet within budget"
     );
     assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+
+    drop(chassis);
+}
+
+/// iamacoffeepot/aether#1135: a blob demuxer seeds a free `Pooled` actor
+/// via `seize_and_run` — the seed dispatches in place (no inbox deposit /
+/// `try_recv` repop) and the slot returns to `Idle`. Boots a real Pooled
+/// actor through the chassis, lets it quiesce, then resolves the seize
+/// handle off its registry `Inbox` entry, wins the `Idle → Running` seize,
+/// and runs one seed envelope.
+#[test]
+fn seize_and_run_dispatches_seed_in_place() {
+    use aether_substrate::mail::registry::MailboxEntry;
+    use aether_substrate::scheduler::{BatchBudget, SlotStateLabel};
+
+    let (registry, mailer) = fresh_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
+
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<MacroProbeCap>(ProbeConfig {
+                greet_total: Arc::clone(&greet_total),
+                ping_total: Arc::clone(&ping_total),
+            })
+            .build_passive()
+            .expect("macro-emitted cap boots");
+
+    let id = registry
+        .lookup(MacroProbeCap::NAMESPACE)
+        .expect("cap mailbox registered");
+
+    // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
+    // Resolve the seize handle off the `Inbox` entry's deferred cell (the
+    // #1135 surfacing) and wait for the slot to be seizable.
+    let MailboxEntry::Inbox { seize, .. } = registry.entry(id).expect("entry exists") else {
+        panic!("expected an Inbox entry for the Pooled cap");
+    };
+    let seize = seize.get().expect("a Pooled actor exposes a seize handle");
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let slot = loop {
+        if let Some(slot) = seize.try_seize() {
+            break slot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Pooled slot should quiesce to Idle and become seizable"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    // The seize put the slot in `Running`.
+    assert_eq!(seize.state().current(), SlotStateLabel::Running);
+
+    // Build one seed envelope and dispatch it in place — no inbox bounce.
+    let payload = Greet { tag: 11 }.encode_into_bytes();
+    let seed = OwnedDispatch {
+        kind: <Greet as Kind>::ID,
+        kind_name: Greet::NAME.to_owned(),
+        origin: None,
+        sender: ReplyTo::NONE,
+        payload: MailRef::from(payload),
+        count: 1,
+        mail_id: MailId::NONE,
+        root: MailId::NONE,
+        parent_mail: None,
+        // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
+        t_enqueue: Nanos(0),
+        enqueue_depth: 0,
+    };
+    slot.seize_and_run(seed, BatchBudget::standard());
+
+    // Handler ran exactly once; the slot drained empty back to `Idle`.
+    assert_eq!(
+        greet_total.load(AtomicOrdering::SeqCst),
+        11,
+        "the seed dispatched through on_greet in place"
+    );
+    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+    assert_eq!(
+        seize.state().current(),
+        SlotStateLabel::Idle,
+        "the slot drained empty and returned to Idle"
+    );
 
     drop(chassis);
 }

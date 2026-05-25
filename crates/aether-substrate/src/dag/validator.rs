@@ -514,7 +514,7 @@ fn declared_kind_id(mailboxes: &Registry, schema: &SchemaType) -> KindId {
 fn mailbox_exists(mailboxes: &Registry, id: MailboxId) -> bool {
     matches!(
         mailboxes.entry(id),
-        Some(MailboxEntry::Inbox(_) | MailboxEntry::Inline(_))
+        Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_))
     )
 }
 

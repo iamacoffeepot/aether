@@ -1,5 +1,6 @@
 //! [`BlobWork`] — a handler's buffered fan-out as a single
-//! work-stealing unit (ADR-0087 Phase 3b, iamacoffeepot/aether#1113).
+//! work-stealing unit (ADR-0087 Phase 3b, iamacoffeepot/aether#1113;
+//! claim-and-dispatch-direct demux, iamacoffeepot/aether#1135).
 //!
 //! Phase 2b/2c buffer a native handler's outbound mail into one sealed
 //! ring blob; Phase 3a made per-worker deques the scheduler's queue.
@@ -7,13 +8,21 @@
 //! eagerly (N pushes + up to N parked-worker wakeups for a fan-out of
 //! N), [`crate::actor::native::NativeBinding::flush_outbound`] pushes
 //! the whole blob as **one** `Drainable` onto the producing worker's
-//! deque. A worker pops it (or an idle sibling steals it) and demuxes:
+//! deque. A worker pops it (or an idle sibling steals it) and demuxes
+//! its mail in **send order** (ADR-0087 §4, the order-safe half of the
+//! iamacoffeepot/aether#1059 win):
 //!
-//! - **free** recipient (won the `Idle → Ready` CAS) → run its handler
-//!   **inline** on this worker — no inbox round-trip beyond the deposit,
-//!   no notify.
-//! - **busy** recipient (lost the CAS) → its mail is already deposited;
-//!   the holder draining it picks it up (today's wake-loses-CAS path).
+//! - **free** recipient (won the `Idle → Running` *seize* CAS, ref-free
+//!   kind) → build the envelope and dispatch it **in place** on this
+//!   worker via [`Drainable::seize_and_run`] — no inbox
+//!   deposit, no `try_recv` repop, residence ≈ 0
+//!   (iamacoffeepot/aether#1135 removed the 3b deposit+collect+repop
+//!   round-trip).
+//! - **busy** recipient (lost the seize), **non-`Pooled`** recipient (no
+//!   slot to seize), or an **ADR-0045 ref kind** → deposit through
+//!   today's [`Mailer::push`] → `route_mail`; the holder / woken cycle
+//!   drains it (per-recipient FIFO preserved by the inbox's own order),
+//!   and `route_mail` owns the ref handle walk / park.
 //!
 //! ## Chunked spill (Phase 3c, iamacoffeepot/aether#1116)
 //!
@@ -35,40 +44,56 @@
 //!
 //! ## How the demux reuses the one router
 //!
-//! `run_cycle` deposits via today's [`Mailer::push`] → `route_mail` for
-//! every mail, so **all** routing concerns are inherited unchanged:
-//! ADR-0045 ref-walk, the settlement/trace brackets (the inline run
-//! goes through `DispatcherSlot::run_cycle` → `dispatch_one`, which owns
-//! `Received`/`Finished` + `record_finished`), and the
-//! `Inline`/`Dropped`/unknown-bubble-up arms. The *only* thing 3b
-//! changes is the wake's destination: inside the [`run_demux`] window, a
-//! free recipient's wake is collected (not deque-pushed) so we can run it
-//! inline here.
+//! Both arms keep all routing concerns in one place. The **deposit** arm
+//! is today's [`Mailer::push`] → `route_mail`, so the ADR-0045 ref-walk,
+//! the `Inline` / `Dropped` / unknown-bubble-up arms, and that path's
+//! settlement/trace brackets are inherited unchanged. The **direct**
+//! arm runs the recipient's [`Drainable::seize_and_run`]
+//! → `DispatcherSlot::dispatch_one`, the *same* per-envelope wrapper a
+//! pooled `run_cycle` runs — `local::with_stamped`, `Received` /
+//! `Finished` (incl. the iamacoffeepot/aether#1134 `t_enqueue` /
+//! `enqueue_depth`), the `record_finished` settlement bracket, and the
+//! `log.tail` / `trace.tail` framework arms — so the only thing it skips
+//! is the mpsc deposit + `try_recv` repop. The demux resolves the
+//! recipient's seize handle (and ref-schema) up front via
+//! `Registry::route_lookup`, the same combined read `route_mail` uses,
+//! and falls back to deposit whenever direct dispatch doesn't apply.
+//!
+//! ## Single-runner, order-safe scope (iamacoffeepot/aether#1135)
+//!
+//! This blob stays **one-shot, single-runner**: `run_cycle` takes the
+//! mail out once (`mails.lock().take()`) and demuxes it on one worker in
+//! send order. The parallel multi-worker demux (cursor-shared groups +
+//! recruitment, which reorders across recipients — sound under the
+//! ordering spine but real concurrency machinery) is deferred to
+//! iamacoffeepot/aether#1137, gated on whether direct dispatch alone
+//! closes the residence gap. The 3c [`Vec::split_off`] spill below is the
+//! one stealable hand-off and is unchanged by #1135.
 //!
 //! ## Alternative not taken — explicit slot-demux registry (revisit?)
 //!
 //! The other shape (iamacoffeepot/aether#1113 design fork) was a
 //! first-class `MailboxId → (SlotState, Weak<slot>)` table the blob
 //! worker resolves directly, depositing via `ActorRegistry::live_sender`
-//! and routing only non-`Inbox` recipients through `route_mail`. It is
-//! more inspectable, but (1) it splits routing into a fast path + a
-//! `route_mail` fallback that must be kept in lockstep for every future
-//! routing concern, and (2) it adds a second shared read-hot map on the
-//! hottest path — a re-centralization against the grain of ADR-0086/0087
-//! (which removed the central `SegQueue` for per-actor/per-worker
-//! structures). The reuse approach here keeps one router and adds no
-//! shared map. **Reconsider the explicit table only if the scheduler
-//! later needs first-class slot addressing for other consumers**
-//! (affinity-as-data, slot introspection, NUMA placement) — at which
-//! point its real consumers exist and the table earns its keep.
+//! and routing only non-`Inbox` recipients through `route_mail`. The
+//! seize handle surfaced on the registry `Inbox` entry
+//! (iamacoffeepot/aether#1135) is the lighter form of that idea — it adds
+//! no second shared map (it rides the entry `route_lookup` already
+//! resolves) and keeps `route_mail` as the single fallback router, so the
+//! fast path and the deposit path don't drift. **Reconsider a dedicated
+//! table only if the scheduler later needs first-class slot addressing
+//! for other consumers** (affinity-as-data, slot introspection, NUMA
+//! placement) — at which point its real consumers exist and it earns its
+//! keep.
 
 use std::any::Any;
 use std::env;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+use crate::actor::native::Envelope;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
-use crate::scheduler::{BatchBudget, CycleResult, Drainable, WakeSink, run_demux};
+use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink};
 
 /// Inline-demux chunk cap K (ADR-0087 Phase 3c, iamacoffeepot/aether#1116).
 /// A `BlobWork` of more than `K` mails demuxes the first `K` inline and
@@ -108,9 +133,11 @@ pub struct BlobWork {
     /// a blob is demuxed by exactly one worker, so the lock is
     /// uncontended.
     mails: Mutex<Option<Vec<Mail>>>,
-    /// Routes each mail (deposit + wake) on the demuxing worker.
+    /// Resolves each mail's recipient (`route_lookup`) and deposits the
+    /// non-direct-dispatch mails (`push` → `route_mail`) on the demuxing
+    /// worker.
     mailer: Arc<Mailer>,
-    /// Where an inline recipient that yields mid-drain
+    /// Where a direct-dispatched recipient that yields mid-drain
     /// ([`CycleResult::Requeue`]) is re-scheduled — the same own-deque /
     /// injector path a normal wake uses.
     sink: WakeSink,
@@ -182,22 +209,79 @@ impl Drainable for BlobWork {
             ));
         }
 
-        // Deposit every mail through the one router; harvest the free
-        // recipients it woke (those that won the Idle→Ready CAS).
+        // ADR-0087 §4 (iamacoffeepot/aether#1135): walk the blob's mail in
+        // **send order** and dispatch each in place where we can.
+        //
+        // Per mail:
+        // - Resolve the recipient's seize handle + ref-schema under one
+        //   registry read (`route_lookup`).
+        // - **Direct-dispatch** when (1) the recipient exposes a seize
+        //   handle (a `Pooled` actor's slot), (2) the kind is ref-free
+        //   (ADR-0045 ref kinds need `route_mail`'s handle walk / park),
+        //   and (3) we win the `Idle → Running` seize CAS: build the
+        //   envelope and run the full per-envelope wrapper in place
+        //   (`Drainable::seize_and_run` → `dispatch_one` — `Received` /
+        //   `Finished` incl. the #1134 `t_enqueue` / `enqueue_depth`,
+        //   `record_finished` settlement bracket, the `log.tail` /
+        //   `trace.tail` framework arms), then drain the recipient's inbox
+        //   and run the post-empty recheck. No inbox deposit, no
+        //   `try_recv` repop — residence ≈ 0.
+        // - **Deposit** otherwise (no seize handle / busy slot / ref kind)
+        //   via today's `Mailer::push` → `route_mail`: the holder (or a
+        //   woken cycle) drains it, per-recipient FIFO preserved by the
+        //   inbox's own ordering.
+        //
+        // Per-recipient FIFO holds by construction: the send-order walk
+        // hands at most one seize per recipient before the slot returns to
+        // `Idle`, and the busy / deposited path goes through the inbox
+        // FIFO. Cross-recipient is async (the ordering spine's contract),
+        // so a busy recipient running on its own thread is correct.
         let mailer = &self.mailer;
-        let collected = run_demux(|| {
-            for mail in mails {
-                mailer.push(mail);
-            }
-        });
-
-        // Run each free recipient inline on this worker. A recipient
-        // that yields mid-drain (budget hit) is re-scheduled the same
-        // way a normal wake would spill it; Idle/Closed just drop.
-        for slot in collected {
-            match slot.run_cycle(budget) {
-                CycleResult::Requeue => self.sink.schedule(slot),
-                CycleResult::Idle | CycleResult::Closed => {}
+        for mail in mails {
+            let lookup = mailer.registry().route_lookup(mail.kind, mail.recipient);
+            // Direct-dispatch only a ref-free kind whose recipient is a
+            // `Pooled` slot we win the seize on. ADR-0045 ref kinds fall
+            // through to `route_mail` (the handle walk / park); so do
+            // non-`Pooled` recipients (no seize handle) and busy slots
+            // (lost the `Idle → Running` CAS — `try_seize` → `None`).
+            let seized = if lookup.ref_schema.is_some() {
+                None
+            } else {
+                lookup.seize.as_ref().and_then(SeizeHandle::try_seize)
+            };
+            match seized {
+                Some(slot) => {
+                    // Build the seed envelope from the held mail. The
+                    // recipient slot is `Running` (we won the seize); the
+                    // payload `MailRef` moves in directly (an `InRing` ref
+                    // stays pinned — the blob holds the region until this
+                    // demux drains, and the seed dispatches synchronously
+                    // here). `t_enqueue ≈ now` / `enqueue_depth = 0` — no
+                    // queue residence (the #1134 measured win).
+                    let seed = Envelope {
+                        kind: mail.kind,
+                        kind_name: lookup.kind_name,
+                        origin: None,
+                        sender: mail.reply_to,
+                        payload: mail.payload,
+                        count: mail.count,
+                        mail_id: mail.mail_id,
+                        root: mail.root,
+                        parent_mail: mail.parent_mail,
+                        t_enqueue: mailer.now_nanos(),
+                        enqueue_depth: 0,
+                    };
+                    match slot.seize_and_run(seed, budget) {
+                        // Budget hit mid-drain — re-schedule the recipient
+                        // the same way a normal wake would spill it.
+                        CycleResult::Requeue => self.sink.schedule(slot),
+                        CycleResult::Idle | CycleResult::Closed => {}
+                    }
+                }
+                // No seize handle, busy slot, or a ref-carrying kind:
+                // deposit through the one router and let the holder /
+                // woken cycle drain it.
+                None => mailer.push(mail),
             }
         }
         CycleResult::Idle
@@ -241,14 +325,23 @@ mod tests {
         }
     }
 
-    /// Register a sink that forwards each delivered mail's first payload
-    /// byte onto `tx`, and return its mailbox id.
-    fn counting_sink(registry: &Registry, tx: mpsc::Sender<u8>) -> MailboxId {
+    /// Register an inbox under `name` that forwards each delivered mail's
+    /// first payload byte onto `tx`; returns the registered mailbox id.
+    fn register_byte_forwarding_inbox(
+        registry: &Registry,
+        name: &str,
+        tx: mpsc::Sender<u8>,
+    ) -> MailboxId {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: OwnedDispatch| {
             let _ = tx.send(d.payload.bytes()[0]);
         });
-        registry.register_inbox("sink", handler);
-        registry.lookup("sink").unwrap()
+        registry.register_inbox(name, handler)
+    }
+
+    /// Register a sink at `"sink"` that forwards each delivered mail's
+    /// first payload byte onto `tx`, and return its mailbox id.
+    fn counting_sink(registry: &Registry, tx: mpsc::Sender<u8>) -> MailboxId {
+        register_byte_forwarding_inbox(registry, "sink", tx)
     }
 
     fn owned_mails(recipient: MailboxId, n: u8) -> Vec<Mail> {
@@ -310,6 +403,218 @@ mod tests {
             iter::from_fn(|| rx.try_recv().ok()).count(),
             5,
             "all mails delivered in the single pass"
+        );
+    }
+
+    use crate::scheduler::{SeizeSeed, SlotState};
+    use aether_data::{KindDescriptor, SchemaCell, SchemaType};
+
+    /// A `Pooled`-shaped recipient fixture for the claim-and-dispatch-
+    /// direct demux (iamacoffeepot/aether#1135): it carries a real
+    /// [`SlotState`] (so a [`SeizeHandle`] can drive the `Idle → Running`
+    /// seize CAS) and records each **direct-dispatched** seed's first
+    /// payload byte. [`Drainable::seize_and_run`] is the only arm a blob
+    /// demux reaches on this fixture; it stamps the byte and parks the
+    /// slot back to `Idle` (mirroring a real slot draining empty), so a
+    /// later mail to the same recipient can seize again — the send-order
+    /// FIFO property the demux must preserve.
+    struct SeizableSink {
+        state: Arc<SlotState>,
+        direct: mpsc::Sender<u8>,
+    }
+
+    impl Drainable for SeizableSink {
+        fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+            CycleResult::Idle
+        }
+        fn seize_and_run(&self, seed: SeizeSeed, _budget: BatchBudget) -> CycleResult {
+            let _ = self.direct.send(seed.payload.bytes()[0]);
+            // Real slots end an empty cycle back in `Idle` via the
+            // post-empty recheck; mirror that so the recipient is
+            // seizable for the next send-order mail.
+            self.state.mark_idle();
+            CycleResult::Idle
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Register a closure inbox under `name` (the **deposit** target) and
+    /// install a [`SeizeHandle`] over a [`SeizableSink`] fixture (the
+    /// **direct** target). Returns the recipient id plus a receiver for
+    /// each path so a test can tell which one a mail took. The fixture's
+    /// strong `Arc` is returned so the seize handle's `Weak` upgrades for
+    /// the duration of the test.
+    fn seizable_recipient(
+        registry: &Registry,
+        name: &str,
+    ) -> (
+        MailboxId,
+        Arc<SeizableSink>,
+        mpsc::Receiver<u8>,
+        mpsc::Receiver<u8>,
+    ) {
+        let (deposit_tx, deposit_rx) = mpsc::channel::<u8>();
+        let id = register_byte_forwarding_inbox(registry, name, deposit_tx);
+
+        let (direct_tx, direct_rx) = mpsc::channel::<u8>();
+        let fixture = Arc::new(SeizableSink {
+            state: Arc::new(SlotState::new()),
+            direct: direct_tx,
+        });
+        let slot_dyn: Arc<dyn Drainable> = fixture.clone();
+        let installed = registry.install_seize_handle(
+            id,
+            SeizeHandle::new(Arc::clone(&fixture.state), Arc::downgrade(&slot_dyn)),
+        );
+        assert!(installed, "seize handle installs on a live Inbox entry");
+        (id, fixture, direct_rx, deposit_rx)
+    }
+
+    /// Free `Pooled` recipient → the demux seizes it and dispatches in
+    /// place: the seed lands on the **direct** path, the inbox-deposit
+    /// path is never touched.
+    #[test]
+    fn free_recipient_dispatched_direct_no_inbox_bounce() {
+        let (registry, mailer) = fresh_substrate();
+        let (recipient, _fixture, direct_rx, deposit_rx) =
+            seizable_recipient(&registry, "seizable");
+
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
+        let blob = BlobWork::with_chunk(owned_mails(recipient, 1), mailer, sink, usize::MAX);
+
+        blob.run_cycle(BatchBudget::standard());
+
+        assert_eq!(
+            direct_rx.try_recv().ok(),
+            Some(0),
+            "seed dispatched in place"
+        );
+        assert!(
+            deposit_rx.try_recv().is_err(),
+            "a direct-dispatched mail never bounces through the inbox"
+        );
+    }
+
+    /// Busy `Pooled` recipient (slot already `Running`) → the seize loses
+    /// the CAS, so the mail is **deposited** through `route_mail`, not
+    /// dispatched in place.
+    #[test]
+    fn busy_recipient_deposited() {
+        let (registry, mailer) = fresh_substrate();
+        let (recipient, fixture, direct_rx, deposit_rx) = seizable_recipient(&registry, "seizable");
+
+        // Mark the recipient busy before the demux: its `Idle → Running`
+        // seize must lose, falling through to the deposit path.
+        assert!(
+            fixture.state.seize(),
+            "fixture starts Idle, seize wins once"
+        );
+
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
+        let blob = BlobWork::with_chunk(owned_mails(recipient, 1), mailer, sink, usize::MAX);
+
+        blob.run_cycle(BatchBudget::standard());
+
+        assert_eq!(
+            deposit_rx.try_recv().ok(),
+            Some(0),
+            "a busy recipient's mail is deposited"
+        );
+        assert!(
+            direct_rx.try_recv().is_err(),
+            "a busy recipient is not dispatched in place"
+        );
+    }
+
+    /// ADR-0045 ref-carrying kind → never direct-dispatched even to a free
+    /// `Pooled` recipient: `route_mail` owns the handle walk / park, so the
+    /// mail is **deposited**.
+    #[test]
+    fn ref_kind_deposited() {
+        let (registry, mailer) = fresh_substrate();
+        let (recipient, _fixture, direct_rx, deposit_rx) =
+            seizable_recipient(&registry, "seizable");
+
+        // A kind whose schema embeds a `Ref` → `route_lookup.ref_schema`
+        // is `Some`, so the demux falls through to deposit.
+        let ref_kind = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: "test.blob.ref_kind".to_owned(),
+                schema: SchemaType::Ref(SchemaCell::owned(SchemaType::Bytes)),
+            })
+            .expect("fresh ref kind registers");
+
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
+        // Inline-form `Ref` payload: discriminant 0 (inline) + the inner
+        // `Bytes` value (postcard `varint(len=0)` → empty). The ref-walk
+        // resolves it inline and the recipient's deposit handler receives
+        // the resolved bytes (first byte `0` — the inline discriminant
+        // the closure reads). The test asserts the routing *decision*: a
+        // ref kind is deposited (so `route_mail` owns the walk), never
+        // direct-dispatched.
+        let mails = vec![Mail::new(
+            recipient,
+            ref_kind,
+            MailRef::from(vec![0u8, 0u8]),
+            1,
+        )];
+        let blob = BlobWork::with_chunk(mails, mailer, sink, usize::MAX);
+
+        blob.run_cycle(BatchBudget::standard());
+
+        assert!(
+            direct_rx.try_recv().is_err(),
+            "a ref-carrying kind is never dispatched in place"
+        );
+        assert_eq!(
+            deposit_rx.try_recv().ok(),
+            Some(0),
+            "a ref-carrying kind is deposited so route_mail can walk it"
+        );
+    }
+
+    /// Two mails to one free recipient → both dispatch in place, in send
+    /// order (per-recipient FIFO). The fixture parks `Idle` after each
+    /// seed, so the second mail re-seizes the same slot.
+    #[test]
+    fn two_seeds_to_one_recipient_run_in_send_order() {
+        let (registry, mailer) = fresh_substrate();
+        let (recipient, _fixture, direct_rx, deposit_rx) =
+            seizable_recipient(&registry, "seizable");
+
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
+        // Two mails (bytes 0, 1) to the same recipient, in send order.
+        let blob = BlobWork::with_chunk(owned_mails(recipient, 2), mailer, sink, usize::MAX);
+
+        blob.run_cycle(BatchBudget::standard());
+
+        assert_eq!(direct_rx.try_recv().ok(), Some(0), "first seed first");
+        assert_eq!(direct_rx.try_recv().ok(), Some(1), "second seed second");
+        assert!(direct_rx.try_recv().is_err(), "exactly two seeds");
+        assert!(
+            deposit_rx.try_recv().is_err(),
+            "both mails dispatched in place — no inbox deposit"
+        );
+    }
+
+    /// A closure-backed inbox (no slot) exposes no seize handle, so its
+    /// mail is deposited — the path the legacy `counting_sink` tests
+    /// already exercise, asserted here against the seize-resolution.
+    #[test]
+    fn closure_inbox_has_no_seize_handle() {
+        let (registry, _mailer) = fresh_substrate();
+        let (tx, _rx) = mpsc::channel::<u8>();
+        let recipient = counting_sink(&registry, tx);
+        let lookup = registry.route_lookup(KindId(7), recipient);
+        assert!(
+            lookup.seize.is_none(),
+            "a closure-backed inbox has no slot to seize"
         );
     }
 }

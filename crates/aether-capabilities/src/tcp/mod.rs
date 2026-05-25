@@ -622,7 +622,7 @@ mod cap_native {
             let id = registry
                 .lookup(cap_namespace)
                 .expect("cap mailbox registered");
-            let MailboxEntry::Inbox(handler) = registry.entry(id).expect("cap entry") else {
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("cap entry") else {
                 panic!("expected mailbox entry");
             };
             let bytes = postcard::to_allocvec(mail).expect("encode");
