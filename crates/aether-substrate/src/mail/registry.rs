@@ -337,7 +337,7 @@ pub enum MailboxEntry {
     /// see [`InboxHandler`] for the full contract.
     ///
     /// iamacoffeepot/aether#1135: `seize` is the deferred
-    /// [`SeizeCell`] — populated by the `Pooled`-branch wiring once the
+    /// `SeizeCell` — populated by the `Pooled`-branch wiring once the
     /// recipient's dispatcher slot exists so the blob demuxer can resolve
     /// recipient → slot and dispatch in place (ADR-0087 §4). Empty for
     /// closure-backed inboxes and `Dedicated` actors (no pool slot).

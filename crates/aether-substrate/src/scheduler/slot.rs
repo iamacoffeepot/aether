@@ -45,10 +45,10 @@ use crate::actor::native::Envelope;
 /// The one envelope a [`Drainable::seize_and_run`] caller hands the
 /// just-seized slot to dispatch in place (ADR-0087 §4,
 /// iamacoffeepot/aether#1135). Alias for the actor-layer
-/// [`Envelope`](crate::actor::native::Envelope) the
-/// [`BlobWork`](crate::actor::native::blob_work::BlobWork) demuxer builds
-/// from the blob's [`Mail`](crate::mail::Mail), with `t_enqueue ≈ now` /
-/// `enqueue_depth = 0` (residence ≈ 0 — the measured win).
+/// [`Envelope`](crate::actor::native::Envelope) the `BlobWork` demuxer
+/// builds from the blob's [`Mail`](crate::mail::Mail), with
+/// `t_enqueue ≈ now` / `enqueue_depth = 0` (residence ≈ 0 — the measured
+/// win).
 pub type SeizeSeed = Envelope;
 
 /// Default per-cycle envelope cap. Once a worker has dispatched this
@@ -299,8 +299,7 @@ pub trait Drainable: Send + Sync + 'static {
     /// Default: deposit-only / unreachable. Mock fixtures (and the
     /// `BlobWork` blob itself, which has no actor of its own) never get
     /// seized, so the default just parks the slot back to `Idle` and
-    /// returns. A real [`crate::actor::native::DispatcherSlot`] overrides
-    /// it.
+    /// returns. A real `DispatcherSlot` overrides it.
     fn seize_and_run(&self, _seed: SeizeSeed, _budget: BatchBudget) -> CycleResult {
         CycleResult::Idle
     }
@@ -451,11 +450,11 @@ impl WakeHandle {
 /// Demux-side handle to a recipient's dispatcher slot (ADR-0087 §4,
 /// iamacoffeepot/aether#1135). Surfaced on the registry's
 /// [`MailboxEntry::Inbox`](crate::mail::registry::MailboxEntry) entry so
-/// a [`BlobWork`](crate::actor::native::blob_work::BlobWork) demuxing a
-/// fan-out can resolve recipient → slot up front and dispatch its mail
-/// *in place* — seizing the slot (`Idle → Running`) and running the full
-/// per-envelope wrapper rather than depositing the mail on the inbox mpsc
-/// and bouncing it back out through a `try_recv` repop.
+/// a `BlobWork` demuxing a fan-out can resolve recipient → slot up front
+/// and dispatch its mail *in place* — seizing the slot (`Idle → Running`)
+/// and running the full per-envelope wrapper rather than depositing the
+/// mail on the inbox mpsc and bouncing it back out through a `try_recv`
+/// repop.
 ///
 /// Holds the same pair the [`WakeHandle`] does — the slot's
 /// [`SlotState`] (so the demuxer can drive the `Idle → Running` seize
