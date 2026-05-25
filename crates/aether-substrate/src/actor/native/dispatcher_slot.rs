@@ -257,6 +257,10 @@ where
             {
                 super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
+            // iamacoffeepot/aether#1150: flush before `Finished` so a
+            // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
+            // its parent's `Finished`. See `dispatch::dispatch_loop_run`.
+            drop(ctx);
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Finished {
@@ -343,8 +347,10 @@ where
 
         // iamacoffeepot/aether#1135: the demux-direct seed runs first,
         // in place — no inbox deposit, no `try_recv` repop. The seed's
-        // `Received` already carries `t_enqueue ≈ now` / `enqueue_depth =
-        // 0` (stamped by the `BlobWork` demuxer), so residence ≈ 0.
+        // `Received` carries `enqueue_depth = 0` and (iamacoffeepot/aether#1150)
+        // `t_enqueue` = the blob-pickup stamp the `BlobWork` demuxer took at
+        // `run_cycle` entry, so `t_received − t_enqueue` is the real in-blob
+        // drain (pre-#1150 the pop-time stamp made it ≈ 0).
         if let Some(seed) = seed {
             self.dispatch_one(actor, seed);
         }

@@ -99,6 +99,7 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use aether_kinds::trace::Nanos;
 use rustc_hash::FxHashMap;
 
 use crate::actor::native::Envelope;
@@ -448,18 +449,23 @@ impl BlobWork {
     /// Dispatch one group's mail to its recipient, draining the closeable
     /// buffer in batches until empty (then the buffer self-closes — the
     /// FIFO barrier). Each batch's mail dispatches in send order via the
-    /// #1135 per-mail fast path.
-    fn dispatch_group(&self, group: &Group, budget: BatchBudget) {
+    /// #1135 per-mail fast path. `received` is the blob-pickup stamp this
+    /// worker took at `run_cycle` entry (iamacoffeepot/aether#1150),
+    /// threaded onto each dispatched mail's `t_enqueue`.
+    fn dispatch_group(&self, group: &Group, budget: BatchBudget, received: Nanos) {
         while let Some(batch) = group.take_or_close() {
             for mail in batch {
-                self.dispatch_one(group.recipient, mail, budget);
+                self.dispatch_one(group.recipient, mail, budget, received);
             }
         }
     }
 
     /// The iamacoffeepot/aether#1135 per-mail demux step: seize the
     /// recipient and dispatch in place, or deposit through `route_mail`.
-    fn dispatch_one(&self, recipient: MailboxId, mail: Mail, budget: BatchBudget) {
+    /// `received` is this worker's blob-pickup stamp
+    /// (iamacoffeepot/aether#1150), carried onto the in-place seed's
+    /// `t_enqueue`.
+    fn dispatch_one(&self, recipient: MailboxId, mail: Mail, budget: BatchBudget, received: Nanos) {
         let lookup = self.mailer.registry().route_lookup(mail.kind, recipient);
         // Direct-dispatch only a ref-free kind whose recipient is a
         // `Pooled` slot we win the seize on; everything else deposits.
@@ -480,7 +486,11 @@ impl BlobWork {
                     mail_id: mail.mail_id,
                     root: mail.root,
                     parent_mail: mail.parent_mail,
-                    t_enqueue: self.mailer.now_nanos(),
+                    // iamacoffeepot/aether#1150: the blob-pickup stamp, not
+                    // a fresh `now` — `now` here ≈ `t_received` and collapsed
+                    // residence to ~0. With the pickup instant, the recipient's
+                    // `Received` reads a real `t_received − t_enqueue` drain.
+                    t_enqueue: received,
                     enqueue_depth: 0,
                 };
                 match slot.seize_and_run(seed, budget) {
@@ -495,6 +505,15 @@ impl BlobWork {
 
 impl Drainable for BlobWork {
     fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
+        // iamacoffeepot/aether#1150: the blob-received stamp. One clock
+        // read marks when this worker picked up the blob and began
+        // draining; every mail it dispatches this cycle inherits it as
+        // `t_enqueue`, so `t_received − t_enqueue` measures where in the
+        // drain that mail's handler entry landed (the in-blob
+        // serialization a serial fan-out pays), not ~0. Stamped per
+        // `run_cycle`, so a recruited sibling worker anchors its own
+        // share of the groups against its own pickup instant.
+        let received = self.mailer.now_nanos();
         // Drain to cursor exhaustion: a worker that picks up the blob runs
         // it in full, claiming and dispatching every group it wins off the
         // shared cursor until the cursor is drained. The parallelism is
@@ -510,7 +529,7 @@ impl Drainable for BlobWork {
             // the `publish` that wrote slot `g`; the slot is initialized and
             // never mutated after that write.
             let group = unsafe { self.groups[g].get() };
-            self.dispatch_group(group, budget);
+            self.dispatch_group(group, budget, received);
             self.lifecycle.complete();
         }
         CycleResult::Idle

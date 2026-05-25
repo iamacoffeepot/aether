@@ -47,8 +47,9 @@ use crate::actor::native::Envelope;
 /// iamacoffeepot/aether#1135). Alias for the actor-layer
 /// [`Envelope`] the `BlobWork` demuxer
 /// builds from the blob's [`Mail`](crate::mail::Mail), with
-/// `t_enqueue ≈ now` / `enqueue_depth = 0` (residence ≈ 0 — the measured
-/// win).
+/// `enqueue_depth = 0` and (iamacoffeepot/aether#1150) `t_enqueue` set to
+/// the blob-pickup instant, so the recipient's `Received` reads a real
+/// `t_received − t_enqueue` drain rather than the pre-#1150 ≈ 0.
 pub type SeizeSeed = Envelope;
 
 /// Default per-cycle envelope cap. Once a worker has dispatched this

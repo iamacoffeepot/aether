@@ -199,7 +199,12 @@ impl TraceHandle {
 
     /// ADR-0080 §2 producer hook for the `Sent` event. Pushes the event
     /// into the producing actor's ring (chassis-host ring off-actor) and
-    /// increments the root's emit-time `in_flight` count.
+    /// increments the root's emit-time `in_flight` count. Stamps the
+    /// `Sent` timestamp at the call (eager paths route immediately, so
+    /// the call site *is* the frame-flush instant). The buffered send
+    /// path splits this — [`Self::record_sent_inflight`] eagerly, then
+    /// [`Self::record_sent_event_at`] at flush with the flush-begin
+    /// anchor (iamacoffeepot/aether#1150).
     pub fn record_sent(
         &self,
         mail_id: MailId,
@@ -208,6 +213,37 @@ impl TraceHandle {
         sender: MailboxId,
         recipient: MailboxId,
         kind: KindId,
+    ) {
+        self.record_sent_event_at(
+            mail_id,
+            root,
+            parent_mail,
+            sender,
+            recipient,
+            kind,
+            self.now_nanos(),
+        );
+        self.record_sent_inflight(root);
+    }
+
+    /// iamacoffeepot/aether#1150: push the `Sent` trace event with an
+    /// explicit timestamp, leaving the settlement counter untouched.
+    /// Split from [`Self::record_sent`] so the buffered send path can
+    /// defer the timestamp to flush-begin (the frame's first flush
+    /// instant) — anchoring `Sent` there instead of the smeared
+    /// per-send call site — while [`Self::record_sent_inflight`] keeps
+    /// `in_flight` exact at send time. `t` is the frame-level flush-begin
+    /// stamp; every mail in one flush shares it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_sent_event_at(
+        &self,
+        mail_id: MailId,
+        root: MailId,
+        parent_mail: Option<MailId>,
+        sender: MailboxId,
+        recipient: MailboxId,
+        kind: KindId,
+        t: Nanos,
     ) {
         self.push_trace_ring(
             root,
@@ -218,9 +254,17 @@ impl TraceHandle {
                 sender,
                 recipient,
                 kind,
-                t: self.now_nanos(),
+                t,
             },
         );
+    }
+
+    /// iamacoffeepot/aether#1150: the eager half of the producer `Sent`
+    /// hook — increment the root's emit-time `in_flight` count. The
+    /// buffered send path calls this at send time (so settlement stays
+    /// exact and never fires early, per ADR-0082) and defers the `Sent`
+    /// *trace* event to flush via [`Self::record_sent_event_at`].
+    pub fn record_sent_inflight(&self, root: MailId) {
         if root != MailId::NONE {
             self.settlement_counter.record_sent(root);
         }

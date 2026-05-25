@@ -201,14 +201,19 @@ pub struct OwnedDispatch {
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends.
     pub parent_mail: Option<MailId>,
-    /// iamacoffeepot/aether#1134: the deposit timestamp — when this
-    /// envelope was placed into the recipient's inbox at `route_mail`'s
-    /// Inbox arm. The recipient's dispatcher reads it at its `Received`
-    /// hook and folds it into [`TraceEvent::Received`]'s `t_enqueue` so
-    /// the hop splits into send→enqueue (`t_enqueue − t_sent`) and queue
-    /// residence (`t_received − t_enqueue`). `Nanos(0)` on construction
-    /// sites that don't stamp it (chassis-internal / test envelopes that
-    /// never enter the traced relay path).
+    /// iamacoffeepot/aether#1134, re-anchored by
+    /// iamacoffeepot/aether#1150: when the consumer side took this
+    /// envelope. On the `route_mail` Inbox arm it is the **deposit**
+    /// instant (placed into the recipient's inbox); on the #1135 in-place
+    /// blob path the `BlobWork` demuxer stamps it with the **blob-pickup**
+    /// instant instead (when the draining worker entered `run_cycle`),
+    /// shared by every mail that worker dispatches. The recipient's
+    /// dispatcher reads it at its `Received` hook and folds it into
+    /// [`TraceEvent::Received`]'s `t_enqueue`, so the hop splits into
+    /// **queued** (`t_enqueue − t_sent`) and **drain**
+    /// (`t_received − t_enqueue`). `Nanos(0)` on construction sites that
+    /// don't stamp it (chassis-internal / test envelopes that never enter
+    /// the traced relay path).
     ///
     /// [`TraceEvent::Received`]: aether_kinds::trace::TraceEvent
     pub t_enqueue: Nanos,

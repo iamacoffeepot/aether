@@ -200,6 +200,13 @@ pub fn dispatch_loop_run<A>(
             {
                 typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
+            // iamacoffeepot/aether#1150: drop `ctx` now to flush the
+            // handler's buffered sends (stamping each child `Sent` at
+            // flush-begin) before `Finished`, so a child's `t_sent`
+            // precedes its parent's `t_finished` — the causal order the
+            // trace walk expects. Otherwise the flush rides `ctx`'s
+            // scope-end `Drop`, landing after this push.
+            drop(ctx);
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Finished {
@@ -246,6 +253,10 @@ pub fn dispatch_loop_run<A>(
             {
                 let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, env.payload.bytes());
             }
+            // iamacoffeepot/aether#1150: flush before `Finished` so a
+            // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
+            // its parent's `Finished`. See the main-loop arm above.
+            drop(ctx);
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Finished {

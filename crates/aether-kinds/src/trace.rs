@@ -72,23 +72,36 @@ pub enum TraceEvent {
         sender: MailboxId,
         recipient: MailboxId,
         kind: KindId,
+        /// iamacoffeepot/aether#1150: for buffered sends this is the
+        /// frame's **flush-begin** instant (stamped once when the handler's
+        /// outbound buffer flushes, shared by every mail in the frame), not
+        /// the per-send call site. Eager paths (`wait_reply`-free direct
+        /// routes, chassis-root pushes) route immediately, so their call
+        /// site *is* the flush instant. Anchoring here drops the smear of
+        /// "the rest of the handler that ran after the send" that the
+        /// call-site stamp folded into the producer-side span.
         t: Nanos,
     },
     Received {
         mail_id: MailId,
         t: Nanos,
-        /// iamacoffeepot/aether#1134: the timestamp the mail was deposited
-        /// into the recipient's inbox (`route_mail`'s Inbox arm — the
-        /// single deposit chokepoint). Stamped onto the envelope at
-        /// deposit and read here at the recipient's dispatcher entry, so
-        /// the span splits into **send→enqueue** (`t_enqueue − t_sent`:
-        /// the producer's remaining handler + flush + blob pickup + demux)
-        /// and **queue residence** (`t − t_enqueue`: deposit → this
-        /// dispatcher picking it up = slot schedule + worker wakeup +
-        /// recv). Riding the existing `Received` event avoids a per-mail
-        /// ring entry and a second clock read on the recipient side. Equal
-        /// to `t` for the rare paths with no distinct deposit instant
-        /// (none today — every Inbox mail is deposited).
+        /// iamacoffeepot/aether#1134, re-anchored by
+        /// iamacoffeepot/aether#1150: the instant the consumer side first
+        /// took responsibility for this mail. On the #1135 in-place blob
+        /// path it is the **blob-pickup** stamp — when the draining worker
+        /// entered `run_cycle` for the blob this mail rode in (shared by
+        /// every mail that worker dispatches that cycle). On the
+        /// `route_mail` Inbox path it remains the **deposit** instant. With
+        /// `t_sent` now anchored at flush-begin (also #1150), the hop
+        /// decomposes cleanly: **queued** (`t_enqueue − t_sent`:
+        /// flush-begin → the worker picks up the blob / the deposit lands
+        /// = wakeup + scheduling) and **drain** (`t − t_enqueue`: pickup →
+        /// this mail's handler entry = where in the blob's drain it
+        /// landed, the in-blob serialization a serial fan-out pays). Riding
+        /// the existing `Received` event avoids a per-mail ring entry and a
+        /// second clock read on the recipient side. Pre-#1150 the in-place
+        /// path stamped this at pop time (≈ `t`), collapsing `drain` to ~0
+        /// — the latent bug #1150 fixes.
         t_enqueue: Nanos,
         /// iamacoffeepot/aether#1134: the scheduler ready-queue depth at
         /// deposit — this worker's own-deque len plus the shared injector
@@ -176,11 +189,14 @@ pub struct MailNodeWire {
     pub recipient: MailboxId,
     pub kind: KindId,
     pub t_sent: Nanos,
-    /// iamacoffeepot/aether#1134: when this mail was deposited into the
-    /// recipient's inbox (the `Received` event's `t_enqueue`). `None`
-    /// until the `Received` event lands. `t_enqueue − t_sent` is the
-    /// send→enqueue (producer-side) span; `t_received − t_enqueue` is
-    /// queue residence (consumer-side wakeup / wait).
+    /// iamacoffeepot/aether#1134, re-anchored by
+    /// iamacoffeepot/aether#1150 (the `Received` event's `t_enqueue`):
+    /// when the consumer side first took the mail — the blob-pickup
+    /// instant on the in-place path, or the inbox deposit on the
+    /// `route_mail` path. `None` until the `Received` event lands.
+    /// `t_enqueue − t_sent` is the **queued** span (flush-begin →
+    /// pickup); `t_received − t_enqueue` is the **drain** span (pickup →
+    /// handler entry).
     pub t_enqueue: Option<Nanos>,
     /// iamacoffeepot/aether#1134: scheduler ready-queue depth at deposit
     /// (own-deque + injector len). `None` until the `Received` event
