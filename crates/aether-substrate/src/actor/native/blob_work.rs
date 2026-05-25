@@ -643,7 +643,7 @@ mod tests {
     use std::sync::mpsc;
 
     fn wake_sink(injector: &Arc<Injector<Arc<dyn Drainable>>>) -> WakeSink {
-        WakeSink::new(Arc::clone(injector), Arc::new(SpinPark::new()))
+        WakeSink::new(Arc::clone(injector), Arc::new(SpinPark::new()), 8)
     }
 
     /// Drain the injector by running every queued `Drainable` to `Idle`

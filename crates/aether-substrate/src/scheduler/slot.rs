@@ -361,14 +361,28 @@ pub trait Drainable: Send + Sync + 'static {
 pub struct WakeSink {
     injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
+    /// Pool worker count — the hard cap on how many blob clones a recruit
+    /// injects (iamacoffeepot/aether#1147). Recruiting more copies than
+    /// workers cannot add parallelism (no more than `workers` can drain
+    /// concurrently); the excess just churns the injector. See
+    /// [`Self::recruit`].
+    workers: usize,
 }
 
 impl WakeSink {
-    /// Bundle the pool's shared injector and spin/park coordinator.
-    /// The chassis builds one from [`super::PoolHandle::wake_sink`].
+    /// Bundle the pool's shared injector, spin/park coordinator, and worker
+    /// count. The chassis builds one from [`super::PoolHandle::wake_sink`].
     #[must_use]
-    pub fn new(injector: Arc<Injector<Arc<dyn Drainable>>>, spin: Arc<SpinPark>) -> Self {
-        Self { injector, spin }
+    pub fn new(
+        injector: Arc<Injector<Arc<dyn Drainable>>>,
+        spin: Arc<SpinPark>,
+        workers: usize,
+    ) -> Self {
+        Self {
+            injector,
+            spin,
+            workers,
+        }
     }
 
     /// Schedule a runnable `slot`: push to the current worker's own
@@ -403,7 +417,16 @@ impl WakeSink {
     /// recruitment to whoever was already spinning, leaving parked siblings
     /// idle (iamacoffeepot/aether#1143). One batch wake unparks the parked
     /// siblings directly; spinners still scan the clones as a bonus.
+    ///
+    /// `count` is capped at `workers - 1` (iamacoffeepot/aether#1147): the
+    /// producer drains its own [`Self::schedule`] copy, so at most that many
+    /// *other* workers can take clones. A wide fan-out asks for up to
+    /// `recruit_cap` (default 32); injecting more clones than workers cannot
+    /// add parallelism (only `workers` can drain at once) and just churns the
+    /// injector — each excess clone is a push + steal + `Arc` clone/drop and
+    /// a no-op `run_cycle` on an already-drained cursor.
     pub(crate) fn recruit(&self, slot: &Arc<dyn Drainable>, count: usize) {
+        let count = count.min(self.workers.saturating_sub(1));
         for _ in 0..count {
             self.injector.push(Arc::clone(slot));
         }
@@ -881,7 +904,7 @@ pub mod tests {
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let slot = CounterSlot::new("wake");
         let weak: Weak<dyn Drainable> = Arc::downgrade(&(slot.clone() as Arc<dyn Drainable>));
-        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()));
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), 8);
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         // First wake should spill one slot.
