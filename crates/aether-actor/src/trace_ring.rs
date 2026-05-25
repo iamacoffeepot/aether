@@ -190,6 +190,7 @@ mod tests {
             sender: MailboxId(1),
             recipient: MailboxId(2),
             kind: aether_data::KindId(3),
+            t_construct_start: Nanos(0),
             t: Nanos(0),
         }
     }

@@ -1154,6 +1154,7 @@ fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>) -> MailNod
         sender: mailbox_id_to_tagged(node.sender, names),
         recipient: mailbox_id_to_tagged(node.recipient, names),
         kind: kind_id_to_tagged(node.kind, names),
+        t_construct_start: node.t_construct_start.0,
         t_sent: node.t_sent.0,
         t_received: node.t_received.map(|n| n.0),
         t_finished: node.t_finished.map(|n| n.0),

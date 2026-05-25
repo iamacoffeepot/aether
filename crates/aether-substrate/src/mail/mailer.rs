@@ -193,6 +193,10 @@ impl Mailer {
     /// explicit flush-begin timestamp (no settlement bump — that fired
     /// eagerly via [`Self::record_sent_inflight`]). The buffered send
     /// path calls this once per mail at flush.
+    ///
+    /// iamacoffeepot/aether#1158: `t_construct_start` is the instant the
+    /// blob opened (the first buffered send of the flush window); `t −
+    /// t_construct_start` is the **construct** span.
     #[allow(clippy::too_many_arguments)]
     pub fn record_sent_event_at(
         &self,
@@ -202,6 +206,7 @@ impl Mailer {
         sender: aether_data::MailboxId,
         recipient: aether_data::MailboxId,
         kind: KindId,
+        t_construct_start: Nanos,
         t: Nanos,
     ) {
         self.trace_handle.record_sent_event_at(
@@ -211,6 +216,7 @@ impl Mailer {
             sender,
             recipient,
             kind,
+            t_construct_start,
             t,
         );
     }

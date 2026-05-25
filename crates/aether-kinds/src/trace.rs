@@ -72,6 +72,16 @@ pub enum TraceEvent {
         sender: MailboxId,
         recipient: MailboxId,
         kind: KindId,
+        /// iamacoffeepot/aether#1158: the instant the producer's
+        /// outbound blob **opened** — the first buffered send of the
+        /// flush window (stamped once when the handler's outbound buffer
+        /// transitions empty→non-empty, shared by every mail in the
+        /// frame). Eager paths (`wait_reply`-free direct routes,
+        /// chassis-root pushes, wasm trampoline) route immediately, so
+        /// their construct-start *is* `t` (construct ≈ 0). `t −
+        /// t_construct_start` is the **construct** span (the producer
+        /// building the blob), the producer-side leg ahead of `queued`.
+        t_construct_start: Nanos,
         /// iamacoffeepot/aether#1150: for buffered sends this is the
         /// frame's **flush-begin** instant (stamped once when the handler's
         /// outbound buffer flushes, shared by every mail in the frame), not
@@ -188,6 +198,13 @@ pub struct MailNodeWire {
     pub sender: MailboxId,
     pub recipient: MailboxId,
     pub kind: KindId,
+    /// iamacoffeepot/aether#1158: the instant the producer's outbound
+    /// blob opened (the first buffered send of the flush window), seeded
+    /// from the `Sent` event's `t_construct_start`. Always present (the
+    /// `Sent` event always carries it). `t_sent − t_construct_start` is
+    /// the **construct** span (the producer building the blob); on eager
+    /// paths it equals `t_sent`, so construct ≈ 0.
+    pub t_construct_start: Nanos,
     pub t_sent: Nanos,
     /// iamacoffeepot/aether#1134, re-anchored by
     /// iamacoffeepot/aether#1150 (the `Received` event's `t_enqueue`):

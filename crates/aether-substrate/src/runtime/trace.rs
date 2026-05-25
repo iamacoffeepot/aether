@@ -205,6 +205,10 @@ impl TraceHandle {
     /// path splits this — [`Self::record_sent_inflight`] eagerly, then
     /// [`Self::record_sent_event_at`] at flush with the flush-begin
     /// anchor (iamacoffeepot/aether#1150).
+    ///
+    /// iamacoffeepot/aether#1158: eager paths route immediately, so the
+    /// blob never lingered open — `t_construct_start` *is* the same `now`
+    /// the `Sent` timestamp takes, making the **construct** span ≈ 0.
     pub fn record_sent(
         &self,
         mail_id: MailId,
@@ -214,6 +218,7 @@ impl TraceHandle {
         recipient: MailboxId,
         kind: KindId,
     ) {
+        let now = self.now_nanos();
         self.record_sent_event_at(
             mail_id,
             root,
@@ -221,7 +226,8 @@ impl TraceHandle {
             sender,
             recipient,
             kind,
-            self.now_nanos(),
+            now,
+            now,
         );
         self.record_sent_inflight(root);
     }
@@ -234,6 +240,11 @@ impl TraceHandle {
     /// per-send call site — while [`Self::record_sent_inflight`] keeps
     /// `in_flight` exact at send time. `t` is the frame-level flush-begin
     /// stamp; every mail in one flush shares it.
+    ///
+    /// iamacoffeepot/aether#1158: `t_construct_start` is the instant the
+    /// producer's outbound blob opened (the first buffered send of the
+    /// flush window). `t − t_construct_start` is the **construct** span;
+    /// on the eager path the caller passes `t_construct_start == t`.
     #[allow(clippy::too_many_arguments)]
     pub fn record_sent_event_at(
         &self,
@@ -243,6 +254,7 @@ impl TraceHandle {
         sender: MailboxId,
         recipient: MailboxId,
         kind: KindId,
+        t_construct_start: Nanos,
         t: Nanos,
     ) {
         self.push_trace_ring(
@@ -254,6 +266,7 @@ impl TraceHandle {
                 sender,
                 recipient,
                 kind,
+                t_construct_start,
                 t,
             },
         );

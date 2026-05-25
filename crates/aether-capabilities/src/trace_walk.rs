@@ -173,6 +173,7 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
                 sender,
                 recipient,
                 kind,
+                t_construct_start,
                 t,
                 ..
             } => {
@@ -181,6 +182,7 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
                     sender,
                     recipient,
                     kind,
+                    t_construct_start,
                     t_sent: t,
                 });
             }
@@ -220,6 +222,7 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
                 sender: sent.sender,
                 recipient: sent.recipient,
                 kind: sent.kind,
+                t_construct_start: sent.t_construct_start,
                 t_sent: sent.t_sent,
                 t_enqueue: node.t_enqueue,
                 enqueue_depth: node.enqueue_depth,
@@ -246,6 +249,7 @@ struct SentFields {
     sender: MailboxId,
     recipient: MailboxId,
     kind: KindId,
+    t_construct_start: Nanos,
     t_sent: Nanos,
 }
 
@@ -280,6 +284,9 @@ mod tests {
                 sender: mail_id.sender,
                 recipient: MailboxId(recipient),
                 kind: KindId(0xAB),
+                // iamacoffeepot/aether#1158: fixture construct-start ==
+                // flush-begin (eager-path equivalent, construct ≈ 0).
+                t_construct_start: Nanos(mail_id.correlation_id),
                 t: Nanos(mail_id.correlation_id),
             },
         }
