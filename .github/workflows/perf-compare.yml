@@ -53,7 +53,12 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'perf'))
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write — push the rendered plots to the `perf-plots` branch (a blob
+      # store) so the public-repo raw URLs render inline in the sticky
+      # comment (iamacoffeepot/aether#1155). Fork PRs get a read-only token
+      # regardless, so the push no-ops and the artifact upload is the
+      # fallback.
+      contents: write
       pull-requests: write
     # Candidate build + interleaved trials. The base build is skipped on a
     # cache hit (iamacoffeepot/aether#1084) and shares the candidate's
@@ -119,6 +124,21 @@ jobs:
           name: perf-span-distributions
           path: perf-plots/
           if-no-files-found: warn
+      # iamacoffeepot/aether#1155: push the PNGs to the `perf-plots` branch
+      # and append inline embeds to the sticky comment, so the plots render
+      # in the comment (not just as downloadable artifacts). Runs before
+      # the upsert so the embeds land in the same body. `continue-on-error`
+      # so a fork PR's read-only token (push fails) doesn't redden the job.
+      - name: Publish span distributions + embed in the comment
+        if: hashFiles('perf-plots/*.png') != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PLOT_DIR: perf-plots
+          MD_OUT: perf-report.md
+        run: scripts/perf-publish-plots.sh
       - name: Upsert sticky PR comment
         env:
           GH_TOKEN: ${{ github.token }}
