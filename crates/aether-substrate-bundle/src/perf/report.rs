@@ -151,6 +151,25 @@ impl TrialReport {
     }
 }
 
+/// Read just the `schema` tag from a trial's JSON, ignoring the rest.
+/// The comparator uses this to detect a base-vs-candidate schema
+/// transition (a changed metric set) *before* the full [`TrialReport`]
+/// parse — which would otherwise hard-fail on serde's
+/// unknown-`Metric`-variant error when an older base trial still carries
+/// the retired `hop` / `send_enqueue` / `residence` names
+/// (iamacoffeepot/aether#1151). `None` if the bytes aren't a JSON object
+/// carrying a string `schema` field.
+#[must_use]
+pub fn probe_schema(json: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct SchemaProbe {
+        schema: String,
+    }
+    serde_json::from_slice::<SchemaProbe>(json)
+        .ok()
+        .map(|p| p.schema)
+}
+
 #[derive(Clone, Copy)]
 enum Pct {
     P50,
@@ -519,6 +538,17 @@ mod tests {
         ]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(p50_verdict(&rep), Verdict::Improved);
+    }
+
+    #[test]
+    fn probe_schema_reads_tag_past_unknown_metric_variants() {
+        // An older base trial carries the retired `hop` variant; the probe
+        // must read its schema tag without choking on it (a full parse
+        // would hard-fail on the unknown `Metric` variant — that is the
+        // whole point of probing first, iamacoffeepot/aether#1151).
+        let v1 = br#"{"schema":"aether.perf.trial.v1","cells":[{"metric":"hop","p50":1}]}"#;
+        assert_eq!(probe_schema(v1).as_deref(), Some("aether.perf.trial.v1"));
+        assert_eq!(probe_schema(b"not json"), None);
     }
 
     #[test]
