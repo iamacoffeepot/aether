@@ -45,20 +45,23 @@
 //!
 //! ## Closeable per-group buffer (the merge-vs-claim handshake)
 //!
-//! Each group's mail lives behind a [`Mutex`]-guarded closeable buffer.
-//! This is **SPSC**: the producing actor's thread pushes; exactly one
-//! cursor-winning worker drains+closes. The worker drains in a loop —
-//! taking whatever the buffer holds, dispatching it, then re-locking —
-//! and **closes only when it locks and finds the buffer empty**. That
-//! makes `close` a FIFO barrier: every mail the producer pushed before the
-//! close is captured and dispatched (in order); a push that loses the race
-//! sees `closed` and is deposited through `route_mail`, landing in the
-//! recipient inbox strictly *after* everything the worker dispatched. So a
-//! late cross-flush append never jumps ahead of earlier mail. (A
-//! lock-free Treiber stack is a possible future optimisation; on this
-//! low-contention SPSC path a mutex is trivially correct and FIFO-
-//! preserving, and mirrors the pre-#1137 `BlobWork`'s own
-//! `Mutex<Option<Vec<Mail>>>`.)
+//! Each group's mail lives behind a closeable buffer guarded by a one-byte
+//! atomic-flag spinlock (`Group`). This is **SPSC**: the producing actor's
+//! thread pushes; exactly one cursor-winning worker drains+closes. The
+//! worker drains in a loop — taking whatever the buffer holds, dispatching
+//! it, then re-locking — and **closes only when it locks and finds the
+//! buffer empty**. That makes `close` a FIFO barrier: every mail the
+//! producer pushed before the close is captured and dispatched (in order);
+//! a push that loses the race sees `closed` and is deposited through
+//! `route_mail`, landing in the recipient inbox strictly *after* everything
+//! the worker dispatched. So a late cross-flush append never jumps ahead of
+//! earlier mail. The atomic flag (not a `std::sync::Mutex`) avoids the
+//! per-group `pthread_mutex_t` create-on-first-lock + destroy-on-drop churn
+//! that the #1140 profile found dominant on macOS — a fresh group per flush
+//! means a fresh OS mutex object per flush. Contention is rare by
+//! construction (one producer, one worker), so the spin almost never loops;
+//! a lock-free Treiber stack would reverse send order (LIFO), so it is
+//! *not* a drop-in for the FIFO barrier.
 //!
 //! ## Reusing the one router (unchanged from #1135)
 //!
@@ -88,10 +91,15 @@
 //! EWMA); until then a heavy `<= 8` fan-out stays serial.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::cell::UnsafeCell;
 use std::env;
+use std::hint::spin_loop;
 use std::mem;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use rustc_hash::FxHashMap;
 
 use crate::actor::native::Envelope;
 use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
@@ -99,11 +107,14 @@ use crate::mail::mailer::Mailer;
 use crate::mail::{Mail, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink};
 
-/// Floor for a fresh blob's group-array capacity. A blob sized to its
-/// first flush still gets at least this many slots so a few subsequent
-/// flushes to new recipients can accumulate before the array overflows and
-/// the producer rolls a fresh blob.
-const GROUP_CAP_MIN: usize = 16;
+/// Floor for a fresh blob's group-array capacity — a little headroom so a
+/// couple of subsequent flushes to *new* recipients can accumulate before
+/// the array overflows and the producer rolls a fresh blob. Kept small: a
+/// wide fan-out already sizes its array to its own width
+/// ([`group_cap_for`]), so the floor only governs *narrow* flushes (a chain
+/// hop, a tiny fan-out), where a large floor is pure wasted allocation —
+/// those blobs almost always drain before any second flush appends.
+const GROUP_CAP_MIN: usize = 4;
 
 /// Minimum fresh-group count for a flush to broadcast-recruit siblings.
 /// Read once from `AETHER_BLOB_RECRUIT_MIN`; values `< 1` and unparseable
@@ -153,18 +164,53 @@ struct GroupBuf {
 
 struct Group {
     recipient: MailboxId,
-    buf: Mutex<GroupBuf>,
+    /// SPSC spinlock guarding [`Self::buf`]: `false` = free, `true` = held.
+    /// Replaces a `std::sync::Mutex` — on macOS that lazily creates a
+    /// `pthread_mutex_t` on first lock and destroys it on drop, and the
+    /// #1140 profile found that per-group create + destroy churn (a fresh
+    /// group per flush) to be the dominant blob-machinery cost. A bare
+    /// atomic flag has no OS object: zero-cost to construct and drop.
+    /// Contention is rare by construction (one producer, one cursor-winning
+    /// worker — §Closeable per-group buffer), so the spin almost never loops.
+    lock: AtomicBool,
+    buf: UnsafeCell<GroupBuf>,
 }
+
+// SAFETY: `buf` is touched only while holding `lock` ([`Group::with_buf`]
+// CAS-acquires before access, release-stores after), so the producer's
+// `push` and the one cursor-winning worker's `take_or_close` never access it
+// concurrently; `recipient` is immutable. So `&Group` is safe to share
+// across the producer + worker threads.
+unsafe impl Sync for Group {}
 
 impl Group {
     fn new(recipient: MailboxId, mails: Vec<Mail>) -> Self {
         Self {
             recipient,
-            buf: Mutex::new(GroupBuf {
+            lock: AtomicBool::new(false),
+            buf: UnsafeCell::new(GroupBuf {
                 closed: false,
                 mails,
             }),
         }
+    }
+
+    /// Run `f` over the buffer under the spinlock. The closures below are
+    /// allocation-light and panic-free (`Vec` ops abort, not unwind, on OOM),
+    /// so the lock is always released — no poison state to model.
+    fn with_buf<R>(&self, f: impl FnOnce(&mut GroupBuf) -> R) -> R {
+        while self
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+        // SAFETY: the CAS above acquired the lock, so we hold exclusive
+        // access to `buf` until the release-store below.
+        let r = f(unsafe { &mut *self.buf.get() });
+        self.lock.store(false, Ordering::Release);
+        r
     }
 
     /// Producer: append `mail`, or hand it back (`Err`) if the group has
@@ -176,37 +222,107 @@ impl Group {
         reason = "the rejected Mail moves back to the caller for deposit on the cold closed-group path; boxing it would add a cold-path alloc and break the Mail-by-value convention"
     )]
     fn push(&self, mail: Mail) -> Result<(), Mail> {
-        let mut b = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
-        let result = if b.closed {
-            Err(mail)
-        } else {
-            b.mails.push(mail);
-            Ok(())
-        };
-        drop(b);
-        result
+        self.with_buf(|b| {
+            if b.closed {
+                Err(mail)
+            } else {
+                b.mails.push(mail);
+                Ok(())
+            }
+        })
     }
 
     /// Claiming worker: take the next batch of pending mail (send order),
     /// or `None` once the buffer is empty — at which point this call closes
     /// the group (the FIFO barrier). The worker loops until `None`.
     fn take_or_close(&self) -> Option<Vec<Mail>> {
-        let mut b = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
-        if b.mails.is_empty() {
-            b.closed = true;
-            None
-        } else {
-            Some(mem::take(&mut b.mails))
+        self.with_buf(|b| {
+            if b.mails.is_empty() {
+                b.closed = true;
+                None
+            } else {
+                Some(mem::take(&mut b.mails))
+            }
+        })
+    }
+
+    /// Consume a group whose [`Lifecycle::publish`] failed (retired / full),
+    /// so it was never claimable, and return its mail for the producer to
+    /// roll into a fresh blob. No worker can have touched it (the cursor
+    /// never reached its index), so taking it by value is sound.
+    fn into_mails(self) -> Vec<Mail> {
+        self.buf.into_inner().mails
+    }
+}
+
+/// A write-once slot in a blob's group array. Backed by a bare
+/// `UnsafeCell<MaybeUninit<Group>>` rather than a `OnceLock`: the per-slot
+/// `Once` synchronization a `OnceLock` performs is **redundant** here,
+/// because publication is already ordered by the lifecycle word — the
+/// producer writes the slot before [`Lifecycle::publish`]'s release of
+/// `len`, and a worker reads it only after [`Lifecycle::claim`]'s acquire
+/// observes `len > idx` (the `blob_lifecycle` publication-ordering note).
+/// Dropping the `OnceLock` drops a CAS (write) + an acquire load (read)
+/// per group.
+struct GroupSlot {
+    cell: UnsafeCell<MaybeUninit<Group>>,
+}
+
+// SAFETY: `BlobWork` is shared across worker threads via `Arc`, so its
+// group slots must be `Sync`. Concurrent access is sound by the
+// write-once / publish-before-claim discipline: (1) the single producer
+// writes each slot exactly once, before the `publish` whose release-store
+// of `len` makes the slot claimable; (2) a worker reads a slot only after
+// its `claim` acquire-loaded `len > idx`, synchronizing-with that publish,
+// so the write happens-before the read; (3) the slot itself is never
+// re-written after that initial write (the `Group`'s mail buffer mutates
+// behind its own `Mutex`, not the slot). No two accesses to one slot are
+// unsynchronized.
+unsafe impl Sync for GroupSlot {}
+
+impl GroupSlot {
+    const fn empty() -> Self {
+        Self {
+            cell: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
 
-    /// Reclaim mail from a group that was staged into the array but whose
-    /// [`Lifecycle::publish`] failed (retired / full), so it was never
-    /// claimable. The producer rolls these into a fresh blob. No worker can
-    /// have touched it (the cursor never reached its index).
-    fn reclaim(&self) -> Vec<Mail> {
-        let mut b = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
-        mem::take(&mut b.mails)
+    /// Producer: write the group into this slot.
+    ///
+    /// # Safety
+    /// Caller is the single producer, this slot has not been written, and
+    /// the write is sequenced before the `publish` that makes the slot
+    /// claimable (see the type's `Sync` contract).
+    unsafe fn write(&self, group: Group) {
+        // SAFETY: the `# Safety` contract above — single producer, unwritten
+        // slot, sequenced before the publish that makes it claimable.
+        unsafe { (*self.cell.get()).write(group) };
+    }
+
+    /// Read the group.
+    ///
+    /// # Safety
+    /// The slot is initialized and either published (the caller's `claim`
+    /// acquired `len > idx`) or being read by the producer that wrote it;
+    /// the slot is never mutated after the write, so the shared reference
+    /// is sound.
+    unsafe fn get(&self) -> &Group {
+        // SAFETY: the `# Safety` contract above — slot initialized and
+        // published (or read by the producer that wrote it), never mutated.
+        unsafe { (*self.cell.get()).assume_init_ref() }
+    }
+
+    /// Producer: move the group back out — `publish` failed, so the slot
+    /// was never claimable. The slot is logically uninitialized afterward;
+    /// the caller must not read or drop it again.
+    ///
+    /// # Safety
+    /// The slot was written this flush and never published, so no worker
+    /// can have claimed it; the producer reclaims sole ownership.
+    unsafe fn take(&self) -> Group {
+        // SAFETY: the `# Safety` contract above — slot written this flush,
+        // never published, producer reclaims sole ownership.
+        unsafe { (*self.cell.get()).assume_init_read() }
     }
 }
 
@@ -227,12 +343,14 @@ struct FlushOutcome {
 /// workers via the [`Drainable`] impl.
 pub struct BlobWork {
     lifecycle: Lifecycle,
-    /// Fixed-capacity group array. Index `< lifecycle.len()` is published
-    /// (the producer wrote it before the `publish` that advanced `len`, so
-    /// a worker that claims the index sees it `Some`). Sized to the first
-    /// flush (with a [`GROUP_CAP_MIN`] floor); the producer rolls a fresh
-    /// blob on overflow.
-    groups: Box<[OnceLock<Group>]>,
+    /// Fixed-capacity group array. The initialized prefix is exactly
+    /// `[0, lifecycle.len())`: the producer writes a slot before the
+    /// `publish` that advances `len`, and a failed publish takes its staged
+    /// groups back out (see [`Self::append_flush`]), so `len` always tracks
+    /// the initialized prefix — which [`Drop`] relies on. Sized to the
+    /// first flush (with a [`GROUP_CAP_MIN`] floor); the producer rolls a
+    /// fresh blob on overflow.
+    groups: Box<[GroupSlot]>,
     mailer: Arc<Mailer>,
     /// Where a recipient that yields mid-drain ([`CycleResult::Requeue`]) is
     /// re-scheduled — the same path a normal wake uses.
@@ -240,9 +358,9 @@ pub struct BlobWork {
 }
 
 impl BlobWork {
-    /// An empty blob with a `cap`-slot group array.
+    /// An empty blob with a `cap`-slot group array (all slots uninit).
     fn empty(cap: usize, mailer: Arc<Mailer>, sink: WakeSink) -> Arc<Self> {
-        let groups = (0..cap).map(|_| OnceLock::new()).collect();
+        let groups = (0..cap).map(|_| GroupSlot::empty()).collect();
         Arc::new(Self {
             lifecycle: Lifecycle::new(0),
             groups,
@@ -261,62 +379,44 @@ impl BlobWork {
     fn append_flush(
         &self,
         routed: Vec<Mail>,
-        index: &mut HashMap<MailboxId, usize>,
+        index: &mut FxHashMap<MailboxId, usize>,
     ) -> FlushOutcome {
-        // Partition the flush: pushes onto already-known groups vs new
-        // recipients (bucketed in first-seen order so a recipient that
-        // appears twice in one flush becomes one group with both mails in
-        // order).
-        let mut new_order: Vec<MailboxId> = Vec::new();
-        let mut new_buckets: HashMap<MailboxId, Vec<Mail>> = HashMap::new();
-        for mail in routed {
-            if let Some(&g) = index.get(&mail.recipient) {
-                // Seen recipient → push onto its group; a closed group
-                // (already drained) deposits through the router instead.
-                let group = self.groups[g].get().expect("indexed group is published");
-                if let Err(mail) = group.push(mail) {
-                    self.mailer.push(mail);
-                }
-            } else {
-                new_buckets
-                    .entry(mail.recipient)
-                    .or_insert_with(|| {
-                        new_order.push(mail.recipient);
-                        Vec::new()
-                    })
-                    .push(mail);
-            }
-        }
-
-        if new_order.is_empty() {
-            return FlushOutcome {
-                leftover: Vec::new(),
-                fresh_groups: 0,
-            };
-        }
-
-        // Stage new groups into the array starting at the current len, then
-        // publish. `peek_len` is valid as a plain load — len has a single
-        // writer (this producer).
+        // Single pass: a recipient already in `index` (a prior flush, or one
+        // staged earlier in *this* flush) pushes onto its existing group; a
+        // brand-new recipient stages a fresh group at the next free index,
+        // updating `index` so a repeat in the same flush coalesces onto it
+        // (per-recipient FIFO, one group per recipient). `index` itself is
+        // the in-flush dedup, so there is no separate bucket map / order
+        // vector to allocate. `peek_len` is a plain load — `len` has a
+        // single writer (this producer).
         let base = self.lifecycle.peek_len();
         let cap = self.groups.len();
         let mut staged = 0usize;
         let mut leftover: Vec<Mail> = Vec::new();
-        for recipient in new_order {
-            let mails = new_buckets.remove(&recipient).expect("bucket exists");
-            let idx = base + staged;
-            if idx >= cap {
-                // Group array full — roll the rest into a fresh blob. These
-                // are new recipients, so no overlap with this blob.
-                leftover.extend(mails);
-                continue;
+        for mail in routed {
+            if let Some(&g) = index.get(&mail.recipient) {
+                // Existing group — push in send order; a closed (drained)
+                // group deposits through the router instead. SAFETY: `g` is
+                // in `index`, so it was written this flush or a prior one by
+                // this producer; the slot is initialized.
+                let group = unsafe { self.groups[g].get() };
+                if let Err(mail) = group.push(mail) {
+                    self.mailer.push(mail);
+                }
+            } else if base + staged >= cap {
+                // Group array full — roll the rest into a fresh blob. Only
+                // *new* recipients reach here (seen ones push above), so a
+                // rolled blob shares no recipient with this one.
+                leftover.push(mail);
+            } else {
+                let recipient = mail.recipient;
+                // SAFETY: producer-only; `base + staged` advances
+                // contiguously and is unwritten, and the write is sequenced
+                // before the `publish` below.
+                unsafe { self.groups[base + staged].write(Group::new(recipient, vec![mail])) };
+                index.insert(recipient, base + staged);
+                staged += 1;
             }
-            self.groups[idx]
-                .set(Group::new(recipient, mails))
-                .ok()
-                .expect("group slot written once");
-            index.insert(recipient, idx);
-            staged += 1;
         }
 
         match self.lifecycle.publish(staged) {
@@ -327,11 +427,15 @@ impl BlobWork {
             Published::Retired | Published::Full => {
                 // The blob retired (or hit the wire ceiling) between staging
                 // and publish: the staged groups never became claimable.
-                // Reclaim their mail and roll everything into a fresh blob.
+                // Take each back out (restoring the initialized prefix to
+                // `[0, len)`) and roll its mail into a fresh blob.
                 for j in 0..staged {
-                    let group = self.groups[base + j].get().expect("staged group present");
+                    // SAFETY: slot `base + j` was written this flush and never
+                    // published (`len` did not advance), so no worker claimed
+                    // it; the producer reclaims sole ownership.
+                    let group = unsafe { self.groups[base + j].take() };
                     index.remove(&group.recipient);
-                    leftover.extend(group.reclaim());
+                    leftover.extend(group.into_mails());
                 }
                 FlushOutcome {
                     leftover,
@@ -402,9 +506,10 @@ impl Drainable for BlobWork {
         // drain inside `dispatch_group`. Late appends past the cursor are
         // picked up by the producer's re-submit on the next flush.
         while let Some(g) = self.lifecycle.claim() {
-            let group = self.groups[g]
-                .get()
-                .expect("claimed index < len is published");
+            // SAFETY: `claim` acquire-loaded `len > g`, synchronizing-with
+            // the `publish` that wrote slot `g`; the slot is initialized and
+            // never mutated after that write.
+            let group = unsafe { self.groups[g].get() };
             self.dispatch_group(group, budget);
             self.lifecycle.complete();
         }
@@ -420,6 +525,21 @@ impl Drainable for BlobWork {
     }
 }
 
+impl Drop for BlobWork {
+    fn drop(&mut self) {
+        // The initialized slots are exactly `[0, len)` (see the `groups`
+        // field doc): each is a `Group` that must be dropped — a bare
+        // `MaybeUninit` would otherwise leak it. `[len, cap)` are uninit.
+        // All `Arc` refs are gone (we are in `Drop`), so no slot is
+        // concurrently accessed.
+        let len = self.lifecycle.peek_len();
+        for slot in &self.groups[..len] {
+            // SAFETY: slot `< len` is initialized and no longer shared.
+            unsafe { (*slot.cell.get()).assume_init_drop() };
+        }
+    }
+}
+
 /// One producing actor's blob lifecycle: keeps a single active blob,
 /// appends each flush to it (rolling a fresh one when it retires or
 /// overflows), and recruits drainers. Lives on the actor's [`NativeBinding`]
@@ -430,7 +550,7 @@ pub struct BlobProducer {
     sink: WakeSink,
     /// The active blob + its producer-private recipient → group-index map.
     /// `None` until the first flush, and after a retired blob is dropped.
-    active: Option<(Arc<BlobWork>, HashMap<MailboxId, usize>)>,
+    active: Option<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
 }
 
 impl BlobProducer {
@@ -459,7 +579,7 @@ impl BlobProducer {
             if need_new {
                 let cap = group_cap_for(&pending);
                 let blob = BlobWork::empty(cap, Arc::clone(&self.mailer), self.sink.clone());
-                self.active = Some((blob, HashMap::new()));
+                self.active = Some((blob, FxHashMap::default()));
             }
 
             let (blob, index) = self.active.as_mut().expect("active set above");
@@ -494,11 +614,14 @@ impl BlobProducer {
     }
 }
 
-/// Size a fresh blob's group array to a flush's distinct recipient count
-/// (with the [`GROUP_CAP_MIN`] floor, capped at the wire ceiling).
+/// Size a fresh blob's group array. The mail count is an upper bound on the
+/// distinct-recipient count (the real group count), so sizing to it —
+/// clamped to the [`GROUP_CAP_MIN`] floor and the wire ceiling — never
+/// under-sizes the first flush, and avoids a throwaway `HashSet` built just
+/// to count distinct recipients on every flush. Over-sizing when a flush
+/// has intra-flush duplicate recipients is harmless headroom.
 fn group_cap_for(routed: &[Mail]) -> usize {
-    let distinct: HashSet<MailboxId> = routed.iter().map(|m| m.recipient).collect();
-    distinct.len().clamp(GROUP_CAP_MIN, MAX_GROUPS)
+    routed.len().clamp(GROUP_CAP_MIN, MAX_GROUPS)
 }
 
 #[cfg(test)]
