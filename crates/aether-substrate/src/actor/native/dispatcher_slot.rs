@@ -319,7 +319,18 @@ where
     fn drain_after_seed(&self, seed: Option<Envelope>, budget: BatchBudget) -> CycleResult {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(actor) = actor_guard.as_mut() else {
-            // Slot already finalized. Nothing to do — drop any seed.
+            // Slot already finalized — the actor box was taken by the
+            // `Closed` path. A `run_cycle` caller can't reach here (it
+            // failed `enter_running` against the `Idle` a finalized slot
+            // parks in), but a `seize_and_run` seed can race the narrow
+            // window between `finalize`'s `actor_guard.take()` and the
+            // strong slot Arc dropping: the `Idle → Running` seize wins
+            // and the `Weak` still upgrades. Balance the seed's `Sent` so
+            // its settlement chain still drains (ADR-0080 §2 — the same
+            // bracket `route_mail`'s `Dropped` arm records), then drop it.
+            if let Some(seed) = seed {
+                self.binding.mailer().record_finished(seed.mail_id, seed.root);
+            }
             drop(actor_guard);
             self.state.mark_idle();
             // Issue 714: a wait that came in after the close cycle
