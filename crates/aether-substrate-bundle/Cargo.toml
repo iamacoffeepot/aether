@@ -45,18 +45,10 @@ name = "aether-perf-compare"
 path = "src/bin/perf-compare.rs"
 
 # iamacoffeepot/aether#1155: renders per-cell queued/drain/handler sample
-# distributions to PNGs. Behind the `perf-plot` feature so a normal build
-# (incl. the chassis bins) never compiles plotters.
+# distributions to PNGs.
 [[bin]]
 name = "aether-perf-plot"
 path = "src/bin/perf-plot.rs"
-required-features = ["perf-plot"]
-
-[features]
-# iamacoffeepot/aether#1155: opt-in plotting. Gated so the chassis bins
-# don't pull plotters on a normal build; the perf-compare workflow builds
-# with this feature to render the distribution artifacts.
-perf-plot = ["dep:plotters"]
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render", "audio"] }
@@ -73,11 +65,13 @@ bytemuck = { version = "1.19", features = ["derive"] }
 png = "0.18"
 pollster = "0.4.0"
 # iamacoffeepot/aether#1155: distribution-plot rendering for the
-# `perf-plot` bin (optional, behind the `perf-plot` feature). `ab_glyph`
-# keeps fonts pure-Rust (no font-kit / system freetype — headless-CI
-# friendly); we render to an RGB buffer and encode with the `png` dep
-# above, so no `image` / `bitmap_encoder` pull.
-plotters = { version = "0.3", optional = true, default-features = false, features = [
+# `perf-plot` bin. `ab_glyph` keeps fonts pure-Rust (no font-kit / system
+# freetype — headless-CI friendly); we render to an RGB buffer and encode
+# with the `png` dep above, so no `image` / `bitmap_encoder` pull. Not
+# feature-gated: a few small pure-Rust crates next to the chassis's
+# wgpu/wasmtime aren't worth gating off the build for, and gating left the
+# bin uncovered by Qodana / clippy (the "missing features" finding).
+plotters = { version = "0.3", default-features = false, features = [
     "bitmap_backend",
     "ab_glyph",
     "line_series",

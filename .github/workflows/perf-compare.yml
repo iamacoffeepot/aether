@@ -110,7 +110,7 @@ jobs:
           AETHER_PERF_PLOT_DIR: perf-plots
         run: |
           cargo build --release -p aether-substrate-bundle \
-            --bin aether-perf-plot --features perf-plot
+            --bin aether-perf-plot
           ./target/release/aether-perf-plot
       - name: Upload span-distribution plots
         if: always()

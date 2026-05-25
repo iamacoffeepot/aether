@@ -2,8 +2,7 @@
 //! and render each cell's `queued` / `drain` / `handler` sample
 //! distributions as a single overlaid PNG, so the shape the percentiles
 //! hide (drain's spread vs the tight queued / handler) is visible at a
-//! glance. Feature-gated (`perf-plot`) so plotters stays off normal
-//! builds.
+//! glance.
 //!
 //! Diagnostics go to stderr; PNGs land in `AETHER_PERF_PLOT_DIR`
 //! (default `./perf-plots`), one per `(topology × worker-count)` cell.
