@@ -40,6 +40,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::Drainable;
+use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Actor;
@@ -646,6 +647,17 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 );
                 let slot_dyn: Arc<dyn Drainable> = slot.clone();
                 let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+                // iamacoffeepot/aether#1135: surface the seize handle on
+                // this actor's `Inbox` entry so the blob demuxer can
+                // dispatch its fan-out in place rather than depositing +
+                // repop'ing through the inbox. Same `(state, weak)` pair
+                // the wake handle carries; the registry owns the strong
+                // slot ref, so the demuxer's `Weak` upgrade fails cleanly
+                // after teardown.
+                ctx.registry().install_seize_handle(
+                    mailbox_id,
+                    SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+                );
                 drop(slot_dyn);
                 let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
                 // Issue 697 multi-pass: mail addressed at this actor
@@ -705,8 +717,10 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
 ///    final cycle. The pool's `Drop` joins workers, so any in-flight
 ///    cycle finishes before chassis shutdown returns.
 ///
-/// Today no production cap is `Pooled`, so this struct is reachable
-/// but unused at runtime.
+/// `Pooled` is the `Actor::SCHEDULING` default (issue 635 Phase 3), so
+/// this is the runtime shutdown path for nearly every chassis cap; only
+/// the `Dedicated` opt-outs (today `ProcessCapability`) take the
+/// thread-join `NativeActorShutdown` arm instead.
 struct PooledActorShutdown<A>
 where
     A: NativeActor + NativeDispatch,
@@ -1013,10 +1027,9 @@ struct BootedPassives {
     actor_registry: Arc<crate::ActorRegistry>,
     spawner: Arc<crate::Spawner>,
     /// Issue 635 PR C: chassis-owned worker pool. Boots empty in
-    /// [`boot_passives`] before any cap; today no cap is `Pooled` so
-    /// the pool sits idle, but the infrastructure is live so PR D /
-    /// Phase 2 can flip individual caps without touching this layer
-    /// again. Drops *after* `shutdowns` (per `BootedPassives::Drop` +
+    /// [`boot_passives`] before any cap, then drains every `Pooled` actor
+    /// (the `Actor::SCHEDULING` default since issue 635 Phase 3 — nearly
+    /// every cap). Drops *after* `shutdowns` (per `BootedPassives::Drop` +
     /// implicit field-drop ordering), so every Dedicated dispatcher
     /// thread is gone before pool workers join.
     _pool: PoolHandle,
@@ -1822,7 +1835,7 @@ mod tests {
         let mailbox_id = registry
             .lookup(<ProbeCap as Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Inbox(handler) = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("ProbeCap claim must be a sink entry");
         };
@@ -1943,7 +1956,7 @@ mod tests {
         let mailbox_id = registry
             .lookup(<LocalProbe as Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Inbox(handler) = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("LocalProbe claim must be a sink entry");
         };
@@ -2115,7 +2128,7 @@ mod tests {
         let parent_id = registry
             .lookup(<ParentCap as Actor>::NAMESPACE)
             .expect("ParentCap claimed");
-        let MailboxEntry::Inbox(handler) = registry.entry(parent_id).expect("sink") else {
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
             panic!("expected mailbox entry");
         };
         let bytes = (Hatch { tag: 1 }).encode_into_bytes();
@@ -2233,7 +2246,7 @@ mod tests {
         // registered sink handler. The handler's `ctx.shutdown()`
         // flips the dispatcher's flag; after the handler returns the
         // trampoline drains, runs `unwire`, marks Dead, tombstones.
-        let MailboxEntry::Inbox(handler) = registry.entry(id).expect("sink registered") else {
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("sink registered") else {
             panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
@@ -2595,7 +2608,7 @@ mod tests {
         // Drive the watcher to register the monitor by pushing a
         // WatchOrder through its sink handler. After this returns
         // the watcher's handle is stored in `self.handle`.
-        let MailboxEntry::Inbox(watcher_handler) =
+        let MailboxEntry::Inbox { handler: watcher_handler, .. } =
             registry.entry(watcher_id).expect("watcher sink registered")
         else {
             panic!("expected mailbox entry for watcher");
@@ -2629,7 +2642,7 @@ mod tests {
         // Fire Quit at the target — its handler self-shuts; the
         // dispatcher's close path runs `close_actor`, which fans out
         // a MonitorNotice mail to watcher_id.
-        let MailboxEntry::Inbox(target_handler) =
+        let MailboxEntry::Inbox { handler: target_handler, .. } =
             registry.entry(target_id).expect("target sink registered")
         else {
             panic!("expected mailbox entry for target");
@@ -2815,7 +2828,7 @@ mod tests {
             .expect("spawn watcher");
 
         // Watcher registers monitor against target.
-        let MailboxEntry::Inbox(watcher_handler) =
+        let MailboxEntry::Inbox { handler: watcher_handler, .. } =
             registry.entry(watcher_id).expect("watcher sink registered")
         else {
             panic!("expected mailbox entry for watcher");
@@ -3000,7 +3013,7 @@ mod tests {
         // Close c — Quit it through the sink handler. After close,
         // resolve_actors drops to two and resolve_actor::<Member>("c")
         // returns None.
-        let MailboxEntry::Inbox(handler) = registry.entry(id_c).expect("c sink registered") else {
+        let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered") else {
             panic!("expected mailbox entry for c");
         };
         handler.enqueue(registry::test_owned_dispatch(
@@ -3293,7 +3306,7 @@ mod tests {
             .expect("spawn parent");
 
         // Trigger parent → grandchild spawn.
-        let MailboxEntry::Inbox(parent_handler) =
+        let MailboxEntry::Inbox { handler: parent_handler, .. } =
             registry.entry(parent_id).expect("parent sink registered")
         else {
             panic!("expected mailbox entry for parent");

@@ -263,7 +263,7 @@ mod native {
             let id = registry
                 .lookup(HandleCapability::NAMESPACE)
                 .expect("mailbox registered");
-            let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry") else {
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
                 panic!("expected mailbox entry");
             };
 
@@ -347,7 +347,7 @@ mod native {
             let id = registry
                 .lookup(HandleCapability::NAMESPACE)
                 .expect("mailbox registered");
-            let MailboxEntry::Inbox(handler) = registry.entry(id).expect("entry") else {
+            let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
                 panic!("expected mailbox entry");
             };
 

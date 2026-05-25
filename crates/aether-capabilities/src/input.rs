@@ -281,7 +281,7 @@ mod native {
     /// subscribers if any future driver wants one.
     fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
         match registry.entry(id) {
-            Some(MailboxEntry::Inbox(_) | MailboxEntry::Inline(_)) => Ok(()),
+            Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
             Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
             None => Err(format!("unknown mailbox id {id:?}")),
         }

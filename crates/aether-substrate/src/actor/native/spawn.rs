@@ -40,6 +40,7 @@ use crate::mail::registry::{NameConflict, Registry};
 use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
+use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::WakeSink;
 use aether_actor::local;
@@ -559,6 +560,16 @@ impl Spawner {
                 );
                 let slot_dyn: Arc<dyn Drainable> = slot.clone();
                 let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+                // iamacoffeepot/aether#1135: surface the seize handle on
+                // this instanced actor's `Inbox` entry so the blob
+                // demuxer dispatches its fan-out in place (ADR-0087 §4).
+                // The registry holds the strong slot ref via
+                // `instanced_slots` below; the demuxer's `Weak` upgrade
+                // fails cleanly once the actor is torn down.
+                self.registry.install_seize_handle(
+                    id,
+                    SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+                );
                 let wake = WakeHandle::new(Arc::clone(slot.state()), weak, self.wake_sink.clone());
                 // Stash the slot's strong Arc so wakes can upgrade their
                 // `Weak`. PR C dropped it here, which broke every wake
