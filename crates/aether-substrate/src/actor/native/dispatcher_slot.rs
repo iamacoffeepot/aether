@@ -91,7 +91,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
 use crate::scheduler::{
     BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail,
-    clock_stride, time_budget,
+    time_budget,
 };
 
 /// Worker-pool-side wrapper for a native actor. One instance per
@@ -224,7 +224,7 @@ where
         // the current envelope in the keep-local budget. Off a pool worker
         // / in the default-preserving config this is a single `Cell`
         // increment (no clock).
-        burst_note_mail(clock_stride(), time_budget());
+        burst_note_mail(time_budget());
         let inbound_mail_id = env.mail_id;
         // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
         // name-hashed `ThreadId` (a `Copy` u64) onto the `Received`

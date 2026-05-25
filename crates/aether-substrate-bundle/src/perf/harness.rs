@@ -268,6 +268,48 @@ pub fn two_level_tree() -> Topology {
     }
 }
 
+/// [`two_level_tree`] with **every** node (A–F) burning `work_iters` of
+/// `busy_spin` CPU per `Ping` — a *uniform*-cost heavy cascade. This is the
+/// multi-blob workload that exercises the keep-local **time budget**
+/// (iamacoffeepot/aether#1160): the spill decision for the deepest blob
+/// fires after the interior nodes (A/B/C) have run, so with heavy interiors
+/// the burst's elapsed exceeds the time budget and the blob spills →
+/// parallelises, matching the `cap == 1` baseline. A *mail-count-only*
+/// budget keeps it local and serialises the heavy leaves — a regression the
+/// time budget exists to prevent.
+///
+/// `work_iters == 0` reproduces [`two_level_tree`] exactly (modulo the
+/// `-heavy` name).
+#[must_use]
+pub fn two_level_tree_heavy(work_iters: u64) -> Topology {
+    let mut t = two_level_tree();
+    "tree-A-BC-DEEF-heavy".clone_into(&mut t.name);
+    for w in &mut t.work_iters {
+        *w = work_iters;
+    }
+    t
+}
+
+/// [`two_level_tree`] with only the **leaves** (D, E, F) heavy and the
+/// interior routers (A, B, C) trivial — a *non-uniform* "trivial router →
+/// heavy worker" cascade. This is the time budget's **blind spot**
+/// (iamacoffeepot/aether#1160): the spill decision fires *before* the heavy
+/// leaves run, so the burst's elapsed (only the trivial interiors) never
+/// exceeds the time budget, the deepest blob is kept local, and the heavy
+/// leaves serialise — a regression that a *past-elapsed* budget structurally
+/// cannot catch (the cost is in the blob being scheduled, i.e. the future).
+/// Only a cost-aware bound (per-handler EWMA, #1128) resolves it. Included
+/// so the sweep measures the blind spot honestly rather than hiding it.
+#[must_use]
+pub fn two_level_tree_router_heavy(work_iters: u64) -> Topology {
+    let mut t = two_level_tree();
+    "tree-A-BC-DEEF-routed".clone_into(&mut t.name);
+    for leaf in [3usize, 4, 5] {
+        t.work_iters[leaf] = work_iters;
+    }
+    t
+}
+
 /// The full default topology set (depth chains 1/2/4/8, fan-outs 2/4/8,
 /// the two-level tree) — what the on-demand `lifecycle_latency_observe`
 /// harness sweeps.
@@ -522,6 +564,11 @@ pub fn parse_topologies() -> Vec<Topology> {
         for b in [4usize, 8] {
             topos.push(fanout_heavy(b, heavy));
         }
+        // The narrow-heavy multi-blob cascades that stress the keep-local
+        // time budget (iamacoffeepot/aether#1160): uniform-heavy (the valve
+        // fires) and trivial-router→heavy-leaf (the valve's blind spot).
+        topos.push(two_level_tree_heavy(heavy));
+        topos.push(two_level_tree_router_heavy(heavy));
     }
     for w in wide_fanout_widths_from_env() {
         topos.push(fanout(w));

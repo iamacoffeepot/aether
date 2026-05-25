@@ -403,6 +403,7 @@ impl WakeSink {
         let kept = worker_deque::try_push_local_budgeted(
             slot,
             worker_deque::mail_budget(),
+            worker_deque::time_budget(),
             worker_deque::hard_cap(),
         );
         if let Err(slot) = kept {

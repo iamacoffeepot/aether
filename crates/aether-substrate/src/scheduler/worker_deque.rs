@@ -59,23 +59,18 @@ thread_local! {
     /// (iamacoffeepot/aether#1160). A *burst* is the run of local-deque work
     /// a worker drains between two "own deque drained empty" transitions —
     /// one local cascade. [`burst_note_mail`] increments it per dispatched
-    /// envelope; [`burst_over_budget`] consults it per produced blob;
-    /// [`burst_reset`] zeroes it when `acquire_slot` finds the deque empty.
-    /// Single-writer (only the running worker touches it, never across a
-    /// `run_cycle`), so a plain `Cell` — no atomics.
+    /// envelope; [`burst_over_budget`] consults it per keep-vs-spill
+    /// decision; [`burst_reset`] zeroes it when `acquire_slot` finds the
+    /// deque empty. Single-writer (only the running worker touches it, never
+    /// across a `run_cycle`), so a plain `Cell` — no atomics.
     static BURST_MAIL: Cell<u32> = const { Cell::new(0) };
 
-    /// First-sampled instant of the current burst, set lazily on the first
-    /// stride-boundary mail (iamacoffeepot/aether#1160). `None` until a
-    /// burst runs past [`clock_stride`] mail, so a short burst never reads
-    /// the clock.
+    /// Start instant of the current burst, anchored on its first mail by
+    /// [`burst_note_mail`] when time budgeting is on (iamacoffeepot/aether#1160).
+    /// `None` when time budgeting is off (the default — no clock ever read)
+    /// or before the burst's first mail. [`burst_over_budget`] reads
+    /// `elapsed()` against it at decision time.
     static BURST_START: Cell<Option<Instant>> = const { Cell::new(None) };
-
-    /// Sticky "this burst ran past its time budget" flag
-    /// (iamacoffeepot/aether#1160). Set once a stride sample observes
-    /// `elapsed >= time_budget`; read by [`burst_over_budget`] with no
-    /// clock read. Cleared by [`burst_reset`].
-    static BURST_OVER_TIME: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Move this worker's deque into its thread-local. Called once at the top
@@ -164,57 +159,49 @@ pub fn time_budget() -> Duration {
     Duration::from_micros(us)
 }
 
-/// Clock-sample stride for the keep-local time budget
-/// (iamacoffeepot/aether#1160). Read once from `AETHER_LOCAL_CLOCK_STRIDE`;
-/// default **8** (matches `CLOCK_CHECK_STRIDE`). [`burst_note_mail`] samples
-/// the wall clock only every Nth mail, so a burst shorter than the stride
-/// never reads it — the same amortization the per-cycle drain uses.
-#[must_use]
-pub fn clock_stride() -> u32 {
-    static S: OnceLock<u32> = OnceLock::new();
-    *S.get_or_init(|| {
-        env::var("AETHER_LOCAL_CLOCK_STRIDE")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&n| n >= 1)
-            .unwrap_or(8)
-    })
-}
-
 /// Note one dispatched envelope against the current local-drain burst
-/// (iamacoffeepot/aether#1160). Increments the burst mail counter, and —
-/// only when time budgeting is enabled (`time_budget > 0`) and only on
-/// every `stride`-th mail — samples the wall clock to set the sticky
-/// over-time flag. A burst shorter than `stride` mail never reads the
-/// clock (the `CLOCK_CHECK_STRIDE` amortization); with `time_budget == 0`
-/// (the default-preserving config) the clock is never read at all.
-/// Cheap on the dispatch hot path: one `Cell` increment plus, off the
-/// default config, a strided clock read.
-pub fn burst_note_mail(stride: u32, time_budget: Duration) {
+/// (iamacoffeepot/aether#1160). Increments the burst mail counter and, when
+/// time budgeting is on (`time_budget > 0`), anchors the burst start on the
+/// first mail so `burst_over_budget` can measure elapsed at decision time.
+/// With `time_budget == 0` (the default-preserving config) the clock is
+/// never read — a single `Cell` increment. The clock is sampled at
+/// *decision* time, not per mail (iamacoffeepot/aether#1160 fix): the prior
+/// strided per-mail sample never fired for a sub-stride burst, so a narrow
+/// *heavy* cascade (few mail × expensive handlers) never tripped the time
+/// budget — exactly the case the valve exists to catch.
+pub fn burst_note_mail(time_budget: Duration) {
     let n = BURST_MAIL.get().saturating_add(1);
     BURST_MAIL.set(n);
-    if time_budget.is_zero() {
-        return;
-    }
-    if n.is_multiple_of(stride.max(1)) {
-        let start = BURST_START.get().unwrap_or_else(Instant::now);
-        BURST_START.set(Some(start));
-        if start.elapsed() >= time_budget {
-            BURST_OVER_TIME.set(true);
-        }
+    // Anchor the burst start at its first mail (one clock read per burst,
+    // only when time budgeting is on) so a heavy first handler's elapsed is
+    // counted by the time path — not deferred to the first decision, which
+    // would under-count the work that already ran.
+    if !time_budget.is_zero() && n == 1 {
+        BURST_START.set(Some(Instant::now()));
     }
 }
 
 /// Has the current burst exceeded its keep-local budget
 /// (iamacoffeepot/aether#1160)? `true` once the burst has dispatched
-/// `mail_budget` envelopes or run past its time budget. `mail_budget == 0`
-/// means "always over" — the default-preserving config reproducing the
-/// historical `cap == 1` "spill any fan-out extra" behaviour. No clock
-/// read (the time path is the sticky flag [`burst_note_mail`] maintains).
+/// `mail_budget` envelopes (`mail_budget == 0` ⇒ always over — the
+/// default-preserving config reproducing the historical `cap == 1`) or has
+/// run past `time_budget` since its first mail. The mail count short-
+/// circuits, so the wall clock is read only when the count is under budget
+/// *and* time budgeting is on — i.e. once per genuine keep-vs-spill
+/// decision on a multi-blob backlog, never on the trivial path. Called by
+/// [`try_push_local_budgeted`] only after the `depth > 0` guard, so a
+/// single-blob fan-out or a chain (depth 0) reads no clock at all.
 #[must_use]
-pub fn burst_over_budget(mail_budget: u32) -> bool {
-    let count_over = mail_budget == 0 || BURST_MAIL.get() >= mail_budget;
-    count_over || BURST_OVER_TIME.get()
+pub fn burst_over_budget(mail_budget: u32, time_budget: Duration) -> bool {
+    if mail_budget == 0 || BURST_MAIL.get() >= mail_budget {
+        return true;
+    }
+    if time_budget.is_zero() {
+        return false;
+    }
+    BURST_START
+        .get()
+        .is_some_and(|start| start.elapsed() >= time_budget)
 }
 
 /// Reset the local-drain burst counters (iamacoffeepot/aether#1160). Called
@@ -224,7 +211,6 @@ pub fn burst_over_budget(mail_budget: u32) -> bool {
 pub fn burst_reset() {
     BURST_MAIL.set(0);
     BURST_START.set(None);
-    BURST_OVER_TIME.set(false);
 }
 
 /// Budget-aware push of a just-produced blob onto this worker's own deque
@@ -232,35 +218,43 @@ pub fn burst_reset() {
 /// says to spill:
 ///
 /// ```text
-/// spill  ⟺  (burst_over_budget(mail_budget) && local_deque_len > 0)
-///           || local_deque_len >= hard_cap
+/// spill  ⟺  local_deque_len >= hard_cap
+///           || (local_deque_len > 0 && burst_over_budget(mail_budget, time_budget))
 /// ```
 ///
-/// The `local_deque_len > 0` guard is load-bearing: a serial relay chain
-/// has an **empty** deque at schedule time (the current blob was popped,
-/// nothing else queued), so it never spills regardless of depth or
-/// accumulated mail — a chain has no independent work to parallelize, so a
-/// spill would only buy a wakeup. A tree / fan-out builds `len > 0`, so the
-/// budget then governs: a trivial cascade stays local (under budget — no
-/// wakeup, the measured win), a large or heavy one spills past budget
+/// The `local_deque_len > 0` guard is load-bearing **and short-circuits the
+/// budget check (and thus the clock read)**: a serial relay chain or a
+/// single-blob fan-out has an **empty** deque at schedule time (the current
+/// blob was popped, nothing else queued), so it is kept local unconditionally
+/// — no budget consulted, no clock read — because there is no independent
+/// backlog to parallelize, so a spill would only buy a wakeup. Only a
+/// multi-blob backlog (`len > 0`) reaches [`burst_over_budget`], where the
+/// mail count + time budget decide: a trivial cascade stays local (under
+/// budget — no wakeup, the measured win), a large *or heavy* one spills
 /// (independent work + idle workers ⇒ parallelism amortizes the wakeup).
 /// `hard_cap` is a deque-length backstop only.
 ///
-/// With `mail_budget == 0` (default) [`burst_over_budget`] is always
-/// `true`, so the rule collapses to "spill iff `len > 0`" — identical to
-/// the pre-#1160 `try_push_local(slot, 1)`.
+/// With `mail_budget == 0` (default) [`burst_over_budget`] is always `true`,
+/// so the rule collapses to "spill iff `len > 0`" — identical to the
+/// pre-#1160 `try_push_local(slot, 1)`, and with no clock read.
 ///
 /// Returns `Ok(())` when kept local (the caller skips injector + notify),
 /// or `Err(slot)` to spill. Off a pool worker there is no own deque, so
 /// always `Err` (spill).
-pub fn try_push_local_budgeted(slot: Slot, mail_budget: u32, hard_cap: usize) -> Result<(), Slot> {
-    let over = burst_over_budget(mail_budget);
+pub fn try_push_local_budgeted(
+    slot: Slot,
+    mail_budget: u32,
+    time_budget: Duration,
+    hard_cap: usize,
+) -> Result<(), Slot> {
     LOCAL.with(|w| {
         let w = w.borrow();
         match w.as_ref() {
             Some(worker) => {
                 let len = worker.len();
-                if (over && len > 0) || len >= hard_cap {
+                let spill =
+                    len >= hard_cap || (len > 0 && burst_over_budget(mail_budget, time_budget));
+                if spill {
                     Err(slot)
                 } else {
                     worker.push(slot);
@@ -355,7 +349,7 @@ mod tests {
     fn budgeted_off_worker_always_spills() {
         // This test never calls `install`, so it isn't a pool worker:
         // every push must spill regardless of budget or backlog.
-        assert!(try_push_local_budgeted(noop(), 1000, 256).is_err());
+        assert!(try_push_local_budgeted(noop(), 1000, Duration::ZERO, 256).is_err());
         assert!(pop_local().is_none());
     }
 
@@ -369,10 +363,10 @@ mod tests {
         burst_reset();
 
         // Empty deque: kept local.
-        assert!(try_push_local_budgeted(noop(), 0, 256).is_ok());
+        assert!(try_push_local_budgeted(noop(), 0, Duration::ZERO, 256).is_ok());
         // Deque now at depth 1: the next spills.
         assert!(
-            try_push_local_budgeted(noop(), 0, 256).is_err(),
+            try_push_local_budgeted(noop(), 0, Duration::ZERO, 256).is_err(),
             "default (mail_budget 0) spills any fan-out extra, like cap 1"
         );
         drain_local();
@@ -389,14 +383,14 @@ mod tests {
         drain_local();
         burst_reset();
         for _ in 0..100 {
-            burst_note_mail(8, Duration::ZERO); // far past any small budget
+            burst_note_mail(Duration::ZERO); // far past any small budget
         }
         assert!(
-            burst_over_budget(1),
+            burst_over_budget(1, Duration::ZERO),
             "burst should read over a 1-mail budget"
         );
         assert!(
-            try_push_local_budgeted(noop(), 1, 256).is_ok(),
+            try_push_local_budgeted(noop(), 1, Duration::ZERO, 256).is_ok(),
             "depth 0 keeps local even over budget (the chain guard)"
         );
         drain_local();
@@ -411,7 +405,7 @@ mod tests {
         burst_reset();
         for _ in 0..5 {
             assert!(
-                try_push_local_budgeted(noop(), 1000, 256).is_ok(),
+                try_push_local_budgeted(noop(), 1000, Duration::ZERO, 256).is_ok(),
                 "under budget keeps local"
             );
         }
@@ -426,13 +420,13 @@ mod tests {
         drain_local();
         burst_reset();
         for _ in 0..10 {
-            burst_note_mail(8, Duration::ZERO);
+            burst_note_mail(Duration::ZERO);
         }
         // Empty deque first push keeps (the depth-0 chain guard).
-        assert!(try_push_local_budgeted(noop(), 4, 256).is_ok());
+        assert!(try_push_local_budgeted(noop(), 4, Duration::ZERO, 256).is_ok());
         // Now depth 1 + over budget → spill.
         assert!(
-            try_push_local_budgeted(noop(), 4, 256).is_err(),
+            try_push_local_budgeted(noop(), 4, Duration::ZERO, 256).is_err(),
             "over budget with backlog spills"
         );
         drain_local();
@@ -446,11 +440,38 @@ mod tests {
         drain_local();
         burst_reset();
         // hard_cap 2, large mail_budget (never trips by count).
-        assert!(try_push_local_budgeted(noop(), 1000, 2).is_ok()); // len 0 → 1
-        assert!(try_push_local_budgeted(noop(), 1000, 2).is_ok()); // len 1 → 2
+        assert!(try_push_local_budgeted(noop(), 1000, Duration::ZERO, 2).is_ok()); // len 0 → 1
+        assert!(try_push_local_budgeted(noop(), 1000, Duration::ZERO, 2).is_ok()); // len 1 → 2
         assert!(
-            try_push_local_budgeted(noop(), 1000, 2).is_err(),
+            try_push_local_budgeted(noop(), 1000, Duration::ZERO, 2).is_err(),
             "len == hard_cap spills regardless of budget"
+        );
+        drain_local();
+    }
+
+    #[test]
+    fn budgeted_time_valve_spills_few_mail_heavy() {
+        // The core #1160 fix: a *few-mail* burst that has run past the time
+        // budget spills its backlog (depth > 0), even though the mail count
+        // is far under budget — the narrow-heavy case the strided per-mail
+        // clock used to miss (it never sampled a sub-stride burst).
+        install(Worker::new_lifo());
+        drain_local();
+        burst_reset();
+        let tiny = Duration::from_nanos(1);
+        burst_note_mail(tiny); // 1 mail, anchors the burst start
+        thread::sleep(Duration::from_micros(50)); // now well past `tiny`
+        // Depth 0 still keeps — the chain guard short-circuits before the
+        // budget (and before any clock read).
+        assert!(
+            try_push_local_budgeted(noop(), 1000, tiny, 256).is_ok(),
+            "depth 0 keeps regardless of elapsed time"
+        );
+        // Depth 1, only 1 mail (≪ 1000 budget), but over the time budget →
+        // spill. Mail-only (the pre-fix behaviour) would have kept it.
+        assert!(
+            try_push_local_budgeted(noop(), 1000, tiny, 256).is_err(),
+            "few mail but over the time budget spills the backlog (the valve fix)"
         );
         drain_local();
     }
@@ -459,39 +480,58 @@ mod tests {
     fn burst_counts_and_resets() {
         burst_reset();
         for _ in 0..5 {
-            burst_note_mail(8, Duration::ZERO);
+            burst_note_mail(Duration::ZERO);
         }
-        assert!(burst_over_budget(5), "5 mail meets a 5-mail budget");
-        assert!(!burst_over_budget(6), "5 mail is under a 6-mail budget");
+        assert!(
+            burst_over_budget(5, Duration::ZERO),
+            "5 mail meets a 5-mail budget"
+        );
+        assert!(
+            !burst_over_budget(6, Duration::ZERO),
+            "5 mail is under a 6-mail budget"
+        );
         burst_reset();
-        assert!(!burst_over_budget(1), "reset zeroes the counter");
+        assert!(
+            !burst_over_budget(1, Duration::ZERO),
+            "reset zeroes the counter"
+        );
     }
 
     #[test]
     fn burst_mail_budget_zero_is_always_over() {
         burst_reset();
-        assert!(burst_over_budget(0), "mail_budget 0 trips at zero mail");
+        assert!(
+            burst_over_budget(0, Duration::ZERO),
+            "mail_budget 0 trips at zero mail"
+        );
     }
 
     #[test]
     fn burst_time_path_trips_over_budget() {
-        // With time budgeting on, a burst that runs past the time budget
-        // trips even when the mail count is nowhere near its budget. Stride
-        // 1 samples every mail; a tiny time budget + a real sleep makes the
-        // elapsed check deterministic.
+        // With time budgeting on, a burst that has run past the time budget
+        // trips at decision time even when the mail count is nowhere near
+        // its budget — the few-mail-heavy case the strided per-mail sample
+        // used to miss (iamacoffeepot/aether#1160). The start is anchored on
+        // the first mail; a tiny budget + a real sleep makes the elapsed
+        // check at the decision deterministic.
         burst_reset();
         let tiny = Duration::from_nanos(1);
-        burst_note_mail(1, tiny); // sets BURST_START
+        burst_note_mail(tiny); // n == 1 anchors BURST_START
         thread::sleep(Duration::from_micros(50));
-        burst_note_mail(1, tiny); // elapsed ≫ 1ns → over-time flag set
         assert!(
-            burst_over_budget(u32::MAX),
-            "only the time path can trip here (mail count is 2, budget u32::MAX)"
+            burst_over_budget(u32::MAX, tiny),
+            "only the time path can trip here (mail count is 1, mail budget u32::MAX)"
+        );
+        // Time budgeting off ⇒ the time path is never consulted, even though
+        // the same elapsed time has passed.
+        assert!(
+            !burst_over_budget(u32::MAX, Duration::ZERO),
+            "time_budget 0 never trips on elapsed"
         );
         burst_reset();
         assert!(
-            !burst_over_budget(u32::MAX),
-            "reset clears the over-time flag"
+            !burst_over_budget(u32::MAX, tiny),
+            "reset clears the burst start"
         );
     }
 
