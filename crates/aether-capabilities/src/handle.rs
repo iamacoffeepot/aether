@@ -215,6 +215,7 @@ mod native {
         };
         use crate::test_chassis::{TestChassis, boot_test_chassis_with};
         use aether_kinds::descriptors;
+        use aether_kinds::trace::Nanos;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::MailId;
         use aether_substrate::mail::mailer::Mailer;
@@ -282,6 +283,8 @@ mod native {
                 mail_id: MailId::NONE,
                 root: MailId::NONE,
                 parent_mail: None,
+                t_enqueue: Nanos(0),
+                enqueue_depth: 0,
             });
 
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -360,6 +363,8 @@ mod native {
                 mail_id: MailId::NONE,
                 root: MailId::NONE,
                 parent_mail: None,
+                t_enqueue: Nanos(0),
+                enqueue_depth: 0,
             });
 
             let deadline = Instant::now() + Duration::from_secs(2);

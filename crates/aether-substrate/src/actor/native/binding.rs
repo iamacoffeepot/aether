@@ -843,6 +843,7 @@ mod tests {
     use crate::mail::MailRef;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::test_util::fresh_substrate;
+    use aether_kinds::trace::Nanos;
     use std::sync::mpsc;
 
     /// Build a registry handler that forwards every [`MailDispatch`]
@@ -930,6 +931,8 @@ mod tests {
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
         }
     }
 

@@ -538,8 +538,9 @@ fn guided_walk_reconstructs_causal_tree() {
 /// Assert the causal invariants a correct trace tree must satisfy on its
 /// own timestamps:
 ///
-/// - per node, `t_sent <= t_received <= t_finished` (sent, then
-///   received, then the handler returns);
+/// - per node, `t_sent <= t_enqueue <= t_received <= t_finished` (sent,
+///   deposited into the recipient inbox, received, then the handler
+///   returns — iamacoffeepot/aether#1134 inserts the deposit instant);
 /// - per parent->child edge, `parent.t_received <= child.t_sent <=
 ///   parent.t_finished` — a child is sent from inside its parent's
 ///   handler, and all three reads land on the parent's dispatch thread
@@ -556,6 +557,27 @@ fn assert_causal_order(mails: &[MailNodeWire]) {
                 "node {:?}: t_sent {} > t_received {}",
                 n.mail_id,
                 n.t_sent.0,
+                received.0
+            );
+            // iamacoffeepot/aether#1134: the deposit stamp rides the same
+            // `Received` event, so it must be present whenever a node is
+            // received, and must fall between send and receive (monotonic
+            // process clock; deposit happens-after send, before pickup).
+            let enq = n
+                .t_enqueue
+                .expect("a received node must carry t_enqueue (#1134)");
+            assert!(
+                n.t_sent.0 <= enq.0,
+                "node {:?}: t_sent {} > t_enqueue {}",
+                n.mail_id,
+                n.t_sent.0,
+                enq.0
+            );
+            assert!(
+                enq.0 <= received.0,
+                "node {:?}: t_enqueue {} > t_received {}",
+                n.mail_id,
+                enq.0,
                 received.0
             );
             if let Some(finished) = n.t_finished {
@@ -797,14 +819,25 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     println!("{OBSERVE_FRAMES} frames/cell (wide cells fewer); relay-hop (`Ping`) samples only.");
     println!();
 
+    // iamacoffeepot/aether#1134: HOP now splits into SEND→ENQUEUE
+    // (producer side) + QUEUE RESIDENCE (consumer side). HOP ≈ their sum
+    // within clock granularity; it stays as the headline continuity row.
     for (label, pick) in [
         (
-            "HOP LATENCY  (t_received - t_sent: enqueue + worker pickup)",
+            "HOP          (t_received - t_sent: full hop = send→enqueue + residence)",
             0usize,
         ),
         (
-            "HANDLER DUR  (t_finished - t_received: relay forward work)",
+            "SEND→ENQUEUE (t_enqueue - t_sent: producer handler + flush + blob demux to deposit)",
             1,
+        ),
+        (
+            "QUEUE RESID. (t_received - t_enqueue: deposit → dispatcher pickup = schedule + wakeup)",
+            2,
+        ),
+        (
+            "HANDLER DUR  (t_finished - t_received: relay forward work)",
+            3,
         ),
     ] {
         println!("-- {label} --");
@@ -813,7 +846,12 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
             "", "topology", "cond", "p50", "p90", "p99", "max", "n"
         );
         for r in rows {
-            let s = if pick == 0 { r.hop } else { r.handler };
+            let s = match pick {
+                0 => r.hop,
+                1 => r.send_enqueue,
+                2 => r.residence,
+                _ => r.handler,
+            };
             println!(
                 "{:>3}   {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
                 r.workers,
@@ -828,4 +866,24 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
         }
         println!();
     }
+
+    // iamacoffeepot/aether#1134: enqueue depth is a *count* (scheduler
+    // ready-queue len at deposit), printed raw — not µs. p50 ≈ 0 means
+    // residence is wakeup-dominated (empty queue); a rising tail is
+    // wait-behind-N offered load (the fan-out queueing signal).
+    println!(
+        "-- ENQUEUE DEPTH (scheduler ready-queue len at deposit; counts, not µs: 0 = wakeup, n = behind-n) --"
+    );
+    println!(
+        "{:>3}w  {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
+        "", "topology", "cond", "p50", "p90", "p99", "max", "n"
+    );
+    for r in rows {
+        let s = r.depth;
+        println!(
+            "{:>3}   {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
+            r.workers, r.topo, cond, s.p50, s.p90, s.p99, s.max, s.n
+        );
+    }
+    println!();
 }

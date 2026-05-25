@@ -27,8 +27,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
-    /// `t_received − t_sent`: enqueue + worker pickup.
+    /// `t_received − t_sent`: the whole hop (enqueue + worker pickup).
     Hop,
+    /// iamacoffeepot/aether#1134: `t_enqueue − t_sent`: producer-side
+    /// (rest of the sender's handler + flush + blob pickup + demux).
+    SendEnqueue,
+    /// iamacoffeepot/aether#1134: `t_received − t_enqueue`: consumer-side
+    /// queue residence (slot schedule + worker wakeup + recv).
+    Residence,
     /// `t_finished − t_received`: in-handler work.
     Handler,
 }
@@ -38,6 +44,8 @@ impl Metric {
     pub fn label(self) -> &'static str {
         match self {
             Self::Hop => "hop",
+            Self::SendEnqueue => "send_enqueue",
+            Self::Residence => "residence",
             Self::Handler => "handler",
         }
     }
@@ -98,7 +106,10 @@ pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v1";
 
 impl TrialReport {
     /// Build a trial report from a sweep's [`CellResult`]s — each cell
-    /// expands to two `CellJson` rows (hop + handler).
+    /// expands to four `CellJson` rows (`hop` + `send_enqueue` +
+    /// `residence` + `handler`). `depth` is a count, not a latency, so it
+    /// is omitted from the latency compare (it lives only in the on-demand
+    /// observe table).
     ///
     /// [`CellResult`]: super::harness::CellResult
     #[must_use]
@@ -108,9 +119,14 @@ impl TrialReport {
         pace_hz: Option<u64>,
         git_sha: Option<String>,
     ) -> Self {
-        let mut out = Vec::with_capacity(cells.len() * 2);
+        let mut out = Vec::with_capacity(cells.len() * 4);
         for c in cells {
-            for (metric, s) in [(Metric::Hop, &c.hop), (Metric::Handler, &c.handler)] {
+            for (metric, s) in [
+                (Metric::Hop, &c.hop),
+                (Metric::SendEnqueue, &c.send_enqueue),
+                (Metric::Residence, &c.residence),
+                (Metric::Handler, &c.handler),
+            ] {
                 out.push(CellJson {
                     workers: c.workers,
                     topo: c.topo.clone(),

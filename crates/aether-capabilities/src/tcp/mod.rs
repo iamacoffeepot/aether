@@ -556,6 +556,7 @@ mod cap_native {
         use aether_actor::Actor;
         use aether_data::{Kind, SessionToken, Uuid};
         use aether_kinds::descriptors;
+        use aether_kinds::trace::Nanos;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::MailId;
@@ -635,6 +636,8 @@ mod cap_native {
                 mail_id: MailId::NONE,
                 root: MailId::NONE,
                 parent_mail: None,
+                t_enqueue: Nanos(0),
+                enqueue_depth: 0,
             });
 
             let deadline = Instant::now() + Duration::from_secs(2);

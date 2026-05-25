@@ -732,6 +732,7 @@ mod native {
         use super::*;
         use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
+        use aether_kinds::trace::Nanos;
         use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::mail::MailId;
         use aether_substrate::mail::MailRef;
@@ -771,6 +772,8 @@ mod native {
                 mail_id: MailId::NONE,
                 root: MailId::NONE,
                 parent_mail: None,
+                t_enqueue: Nanos(0),
+                enqueue_depth: 0,
             });
         }
 

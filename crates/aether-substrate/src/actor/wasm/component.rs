@@ -21,6 +21,7 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, ReplyTarget, ReplyTo};
+use crate::scheduler::pending_depth;
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -252,6 +253,13 @@ impl ComponentCtx {
                     mail_id,
                     root,
                     parent_mail,
+                    // iamacoffeepot/aether#1134: the second production
+                    // deposit chokepoint (ComponentCtx's inline send
+                    // bypasses `route_mail`), so stamp the deposit instant
+                    // + scheduler backlog here too — else the recipient's
+                    // `Received` would read a zeroed `t_enqueue`.
+                    t_enqueue: self.queue.now_nanos(),
+                    enqueue_depth: pending_depth(),
                 });
                 return;
             }

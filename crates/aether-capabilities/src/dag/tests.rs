@@ -27,6 +27,7 @@ use std::{env, thread};
 use aether_actor::Actor;
 use aether_data::{DagId, Kind, KindId, MailId, MailboxId, SessionToken, Uuid};
 use aether_kinds::descriptors;
+use aether_kinds::trace::Nanos;
 use aether_kinds::{
     Bundle, Cancel, CancelResult, DagDescriptor, DagReapTick, Edge, Node, NodeId, Status,
     StatusResult, Submit, SubmitResult,
@@ -130,6 +131,8 @@ fn enqueue<K: Kind + serde::Serialize>(
         mail_id: MailId::NONE,
         root: MailId::NONE,
         parent_mail: None,
+        t_enqueue: Nanos(0),
+        enqueue_depth: 0,
     });
 }
 

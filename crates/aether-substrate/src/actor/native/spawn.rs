@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{Kind, mailbox_id_from_name};
+use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatch;
@@ -684,6 +685,11 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
+            // Bootstrap seed carries no lineage (`MailId::NONE`), so it
+            // never folds into a traced tree node — no deposit instant to
+            // record (iamacoffeepot/aether#1134).
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
         };
         self.after_init.push(env);
         self

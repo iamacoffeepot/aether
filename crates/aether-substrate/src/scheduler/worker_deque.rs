@@ -51,12 +51,46 @@ thread_local! {
     /// run those recipients inline (the Phase 3b fan-out win). Outside a
     /// demux window it is `None` and the wake takes its normal path.
     static DEMUX: RefCell<Option<Vec<Slot>>> = const { RefCell::new(None) };
+
+    /// The shared off-worker [`Injector`], registered per worker by
+    /// [`install_injector`] at the top of the worker loop
+    /// (iamacoffeepot/aether#1134). Held only so [`pending_depth`] can read
+    /// the injector backlog without threading a reference through the
+    /// deposit path; `None` on non-worker threads (chassis main, hub,
+    /// off-worker injects), where `pending_depth` reports `0`.
+    static INJECTOR: RefCell<Option<Arc<Injector<Slot>>>> = const { RefCell::new(None) };
 }
 
 /// Move this worker's deque into its thread-local. Called once at the top
 /// of the worker loop; enables local push/pop on this thread.
 pub fn install(worker: Worker<Slot>) {
     LOCAL.with(|w| *w.borrow_mut() = Some(worker));
+}
+
+/// Register the shared injector for this worker thread so
+/// [`pending_depth`] can read its backlog (iamacoffeepot/aether#1134).
+/// Called once alongside [`install`] at the top of the worker loop;
+/// no-op effect on dispatch (depth is measurement-only).
+pub fn install_injector(injector: Arc<Injector<Slot>>) {
+    INJECTOR.with(|i| *i.borrow_mut() = Some(injector));
+}
+
+/// Scheduler ready-queue depth observed from this thread: this worker's
+/// own-deque len plus the shared injector len (iamacoffeepot/aether#1134).
+/// `0` off any pool worker (no own deque installed) — chassis-root
+/// injects and other off-worker deposits report no backlog. Read at mail
+/// deposit and carried on the envelope so the latency harness can split
+/// queue residence into *wakeup* (depth 0) vs *wait-behind-N* (load).
+///
+/// Both `Worker::len` and `Injector::len` are cheap O(1)-ish reads; this
+/// is a relaxed snapshot, not a synchronization point — a racing push by
+/// a sibling may land just after the read, which is fine for a profiling
+/// signal.
+#[must_use]
+pub fn pending_depth() -> u32 {
+    let own = LOCAL.with(|w| w.borrow().as_ref().map_or(0, Worker::len));
+    let injected = INJECTOR.with(|i| i.borrow().as_ref().map_or(0, |inj| inj.len()));
+    u32::try_from(own.saturating_add(injected)).unwrap_or(u32::MAX)
 }
 
 /// Own-deque local bound — the max slots a worker keeps on its own deque

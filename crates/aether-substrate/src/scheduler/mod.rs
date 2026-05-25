@@ -44,4 +44,4 @@ pub use slot::{
     Drainable, SlotState, SlotStateLabel, WakeHandle, WakeSink,
 };
 pub use spin_park::{Acquired, SpinPark};
-pub use worker_deque::run_demux;
+pub use worker_deque::{pending_depth, run_demux};

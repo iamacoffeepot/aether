@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, ReplyTo};
+use aether_kinds::trace::Nanos;
 use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::mail::{MailId, MailRef};
@@ -147,6 +148,8 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         mail_id: MailId::NONE,
         root: MailId::NONE,
         parent_mail: None,
+        t_enqueue: Nanos(0),
+        enqueue_depth: 0,
     });
 }
 

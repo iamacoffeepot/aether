@@ -89,6 +89,11 @@ wat = "1"
 # test binary picks up the derive macros without the lib pulling them
 # in for non-test builds.
 aether-data = { path = "../aether-data", features = ["derive"] }
+# iamacoffeepot/aether#1134: integration tests build `OwnedDispatch`
+# literals, which now carry a `t_enqueue: Nanos` field — naming the type
+# needs aether-kinds in scope (integration tests see only the lib +
+# dev-deps, not the lib's regular deps).
+aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1.19", features = ["derive"] }
 
 [lints]

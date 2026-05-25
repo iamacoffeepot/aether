@@ -187,10 +187,18 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
             TraceEvent::Received {
                 mail_id,
                 t,
+                t_enqueue,
+                enqueue_depth,
                 thread_id,
             } => {
                 let node = nodes.entry(mail_id).or_default();
                 node.t_received = Some(t);
+                // iamacoffeepot/aether#1134: the deposit instant + backlog
+                // ride the `Received` event; carry them onto the node so
+                // the harness can split the hop into send→enqueue +
+                // residence.
+                node.t_enqueue = Some(t_enqueue);
+                node.enqueue_depth = Some(enqueue_depth);
                 // ADR-0088 §7: the event carries a `Copy` `ThreadId`;
                 // resolve it to a display name on this cold fold path.
                 node.thread_name = resolve_thread_name(thread_id);
@@ -213,6 +221,8 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
                 recipient: sent.recipient,
                 kind: sent.kind,
                 t_sent: sent.t_sent,
+                t_enqueue: node.t_enqueue,
+                enqueue_depth: node.enqueue_depth,
                 t_received: node.t_received,
                 t_finished: node.t_finished,
                 thread_name: node.thread_name,
@@ -224,6 +234,8 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
 #[derive(Default)]
 struct PartialNode {
     sent: Option<SentFields>,
+    t_enqueue: Option<Nanos>,
+    enqueue_depth: Option<u32>,
     t_received: Option<Nanos>,
     t_finished: Option<Nanos>,
     thread_name: Option<String>,
@@ -286,6 +298,10 @@ mod tests {
             event: TraceEvent::Received {
                 mail_id,
                 t: Nanos(mail_id.correlation_id + 1),
+                // iamacoffeepot/aether#1134: fixture deposit just before
+                // receive (correlation_id) at depth 0 (warm chain).
+                t_enqueue: Nanos(mail_id.correlation_id),
+                enqueue_depth: 0,
                 thread_id: Some(ThreadId::from_name(FIXTURE_THREAD_NAME)),
             },
         }
