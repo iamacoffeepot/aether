@@ -316,9 +316,9 @@ fn worker_loop(
 /// LIFO pop keeps the freshest hop warmest. Whether a fan-out's extra blobs
 /// stay local or spill is the keep-local budget
 /// (`WakeSink::schedule` → `worker_deque::try_push_local_budgeted`,
-/// iamacoffeepot/aether#1160); the default config reproduces the historical
-/// `cap == 1` "spill any fan-out extra" behaviour. The own deque is checked
-/// first so a pushed slot is never stranded.
+/// iamacoffeepot/aether#1160); the Phase 3 default keeps a small cascade
+/// local (`AETHER_LOCAL_MAIL_BUDGET=0` restores the historical `cap == 1`).
+/// The own deque is checked first so a pushed slot is never stranded.
 ///
 /// When the own deque is empty, this resets the local-drain burst
 /// (iamacoffeepot/aether#1160) — one local cascade is one burst, so the
