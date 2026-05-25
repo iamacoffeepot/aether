@@ -29,6 +29,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
+    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start`: blob open →
+    /// flush-begin — the producer-side time spent building the blob, the
+    /// first leg of the four-stage lifecycle. ~0 on eager (non-buffered)
+    /// paths.
+    Construct,
     /// `t_enqueue − t_sent`: flush-begin → the worker picks up the blob —
     /// wakeup / scheduling latency. Tight on a warm worker.
     Queued,
@@ -45,6 +50,7 @@ impl Metric {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Construct => "construct",
             Self::Queued => "queued",
             Self::Drain => "drain",
             Self::Handler => "handler",
@@ -104,15 +110,17 @@ pub struct TrialReport {
 
 /// Current trial schema tag. Bumped to `v2` by iamacoffeepot/aether#1150
 /// when `hop` / `send_enqueue` / `residence` gave way to the
-/// `queued` / `drain` / `handler` span model.
-pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v2";
+/// `queued` / `drain` / `handler` span model; to `v3` by
+/// iamacoffeepot/aether#1158 when `construct` joined as the producer-side
+/// first leg, completing the four-stage lifecycle.
+pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v3";
 
 impl TrialReport {
     /// Build a trial report from a sweep's [`CellResult`]s — each cell
-    /// expands to three `CellJson` rows (`queued` + `drain` + `handler`,
-    /// iamacoffeepot/aether#1150). `depth` is a count, not a latency, so it
-    /// is omitted from the latency compare (it lives only in the on-demand
-    /// observe table).
+    /// expands to four `CellJson` rows (`construct` + `queued` + `drain` +
+    /// `handler`, in lifecycle order; iamacoffeepot/aether#1158). `depth`
+    /// is a count, not a latency, so it is omitted from the latency compare
+    /// (it lives only in the on-demand observe table).
     ///
     /// [`CellResult`]: super::harness::CellResult
     #[must_use]
@@ -122,9 +130,10 @@ impl TrialReport {
         pace_hz: Option<u64>,
         git_sha: Option<String>,
     ) -> Self {
-        let mut out = Vec::with_capacity(cells.len() * 3);
+        let mut out = Vec::with_capacity(cells.len() * 4);
         for c in cells {
             for (metric, s) in [
+                (Metric::Construct, &c.construct),
                 (Metric::Queued, &c.queued),
                 (Metric::Drain, &c.drain),
                 (Metric::Handler, &c.handler),

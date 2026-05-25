@@ -819,22 +819,27 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     println!("{OBSERVE_FRAMES} frames/cell (wide cells fewer); relay-hop (`Ping`) samples only.");
     println!();
 
-    // iamacoffeepot/aether#1150: the per-mail hop decomposes into three
-    // single-property spans. QUEUED + DRAIN sum to the old full hop within
-    // clock granularity; each now measures one thing (wakeup vs in-blob
+    // iamacoffeepot/aether#1158: the per-mail lifecycle decomposes into
+    // four non-overlapping single-property spans covering first-send →
+    // handler-done. CONSTRUCT + QUEUED + DRAIN sum to the producer→pickup
+    // span; each measures one thing (blob build vs wakeup vs in-blob
     // serialization vs handler work).
     for (label, pick) in [
         (
-            "QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the blob = wakeup/schedule)",
+            "CONSTRUCT    (t_sent - t_construct_start: blob open → flush-begin = producer builds the blob)",
             0usize,
         ),
         (
-            "DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the blob's drain it landed)",
+            "QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the blob = wakeup/schedule)",
             1,
         ),
         (
-            "HANDLER DUR  (t_finished - t_received: relay forward work)",
+            "DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the blob's drain it landed)",
             2,
+        ),
+        (
+            "HANDLER DUR  (t_finished - t_received: relay forward work)",
+            3,
         ),
     ] {
         println!("-- {label} --");
@@ -844,8 +849,9 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
         );
         for r in rows {
             let s = match pick {
-                0 => r.queued,
-                1 => r.drain,
+                0 => r.construct,
+                1 => r.queued,
+                2 => r.drain,
                 _ => r.handler,
             };
             println!(

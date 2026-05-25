@@ -44,6 +44,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use aether_kinds::trace::Nanos;
+
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
@@ -105,6 +107,14 @@ struct OutboundBuffer {
     /// Whether a ring blob is currently open — between the first send of
     /// a flush window and the flush's `seal`.
     blob_open: bool,
+    /// iamacoffeepot/aether#1158: the instant this flush window's blob
+    /// **opened** — stamped at the first buffered send (the `blob_open`
+    /// false→true transition), shared by every mail in the window. The
+    /// flush reads it as each deferred `Sent`'s `t_construct_start`
+    /// (falling back to `flush_begin` if somehow unset) so `t_sent −
+    /// t_construct_start` is the **construct** span, and resets it to
+    /// `None` after draining so the next window re-stamps.
+    construct_start: Option<Nanos>,
     /// Per-mail route metadata for the current flush window.
     mails: Vec<PendingMail>,
 }
@@ -114,6 +124,7 @@ impl OutboundBuffer {
         Self {
             ring: None,
             blob_open: false,
+            construct_start: None,
             mails: Vec::new(),
         }
     }
@@ -575,13 +586,22 @@ impl NativeBinding {
         // send (after a consumer frees space) can still extend it.
         let payload = {
             let OutboundBuffer {
-                ring, blob_open, ..
+                ring,
+                blob_open,
+                construct_start,
+                ..
             } = &mut *buf;
             let ring =
                 ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
             if !*blob_open {
                 ring.open_blob();
                 *blob_open = true;
+                // iamacoffeepot/aether#1158: the blob just opened — stamp
+                // the construct-start instant shared by every mail in this
+                // flush window. `t_sent − t_construct_start` (flush-begin −
+                // this) is the **construct** span (the producer building
+                // the blob).
+                *construct_start = Some(self.mailer.now_nanos());
             }
             match ring.append(recipient, kind, bytes) {
                 Ok(loc) => PendingPayload::InRing(loc),
@@ -666,6 +686,12 @@ impl NativeBinding {
     /// return stays free.
     fn flush_outbound_inner(&self, allow_blob: bool) {
         let flush_begin;
+        // iamacoffeepot/aether#1158: the construct-start anchor stamped
+        // when this window's blob opened (`push_envelope_buffered`). Read
+        // it here and reset for the next window; fall back to `flush_begin`
+        // (construct ≈ 0) on the impossible `None` so the field is never
+        // a wire hole.
+        let construct_start;
         let routed: Vec<Mail> = {
             let mut buf = self
                 .outbound
@@ -680,9 +706,13 @@ impl NativeBinding {
                 buf.blob_open = false;
             }
             if buf.mails.is_empty() {
+                // Reset the stale anchor so the next window re-stamps.
+                buf.construct_start = None;
                 return;
             }
             flush_begin = self.mailer.now_nanos();
+            // Take the anchor and reset so the next blob re-stamps.
+            construct_start = buf.construct_start.take().unwrap_or(flush_begin);
             let OutboundBuffer { ring, mails, .. } = &mut *buf;
             let ring = ring.as_ref();
             mails
@@ -715,6 +745,7 @@ impl NativeBinding {
                 self.self_mailbox,
                 mail.recipient,
                 mail.kind,
+                construct_start,
                 flush_begin,
             );
         }

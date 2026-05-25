@@ -334,6 +334,9 @@ pub fn summarize(mut samples: Vec<u64>) -> Stats {
 pub struct CellSamples {
     pub workers: usize,
     pub topo: String,
+    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (flush-begin
+    /// → blob open) — the producer building the blob.
+    pub construct: Vec<u64>,
     pub queued: Vec<u64>,
     pub drain: Vec<u64>,
     pub handler: Vec<u64>,
@@ -347,6 +350,7 @@ impl CellSamples {
         CellResult {
             workers: self.workers,
             topo: self.topo,
+            construct: summarize(self.construct),
             queued: summarize(self.queued),
             drain: summarize(self.drain),
             handler: summarize(self.handler),
@@ -360,6 +364,11 @@ impl CellSamples {
 pub struct CellResult {
     pub workers: usize,
     pub topo: String,
+    /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (blob open →
+    /// flush-begin) — the producer-side time spent building the blob, the
+    /// first leg of the four-stage lifecycle. ~0 on eager (non-buffered)
+    /// paths, where construct-start *is* `t_sent`.
+    pub construct: Stats,
     /// iamacoffeepot/aether#1150: `t_enqueue − t_sent` (flush-begin → the
     /// worker picks up the blob this mail rode in / the deposit lands) —
     /// wakeup + scheduling latency. ~0 on the producer's own warm worker.
@@ -685,6 +694,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             }
             let mails = fold_nodes(entries);
 
+            let mut construct = Vec::new();
             let mut queued = Vec::new();
             let mut drain = Vec::new();
             let mut handler = Vec::new();
@@ -697,11 +707,16 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                     if let Some(fin) = node.t_finished {
                         handler.push(fin.0.saturating_sub(recv.0));
                     }
+                    // iamacoffeepot/aether#1158: `t_construct_start` (blob
+                    // open) rides the `Sent` event, always present. The
+                    // four spans are non-overlapping and cover first-send →
+                    // handler-done: `construct` = blob open → flush-begin;
                     // iamacoffeepot/aether#1150: `t_enqueue` (blob pickup)
                     // lands with `Received`, so it is present exactly when
                     // `t_received` is. `queued` = flush-begin → pickup;
                     // `drain` = pickup → this mail's handler entry.
                     if let Some(enq) = node.t_enqueue {
+                        construct.push(node.t_sent.0.saturating_sub(node.t_construct_start.0));
                         queued.push(enq.0.saturating_sub(node.t_sent.0));
                         drain.push(recv.0.saturating_sub(enq.0));
                     }
@@ -713,6 +728,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             rows.push(CellSamples {
                 workers,
                 topo: topo.name.clone(),
+                construct,
                 queued,
                 drain,
                 handler,
