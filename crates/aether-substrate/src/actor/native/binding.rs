@@ -196,6 +196,13 @@ pub struct NativeBinding {
     /// threads / a different path and stay on the eager [`Self::send_mail`]
     /// route, preserving the ring's single-writer discipline.
     outbound: Mutex<OutboundBuffer>,
+    /// iamacoffeepot/aether#1137: this actor's single active cursor-shared
+    /// blob + its recruitment. Built lazily on the first deferred flush
+    /// from the spawner's [`WakeSink`](crate::scheduler::WakeSink), so a
+    /// test binding with no `Spawner` never builds one and stays on the
+    /// eager per-mail route. `Mutex` only for `&self` interior mutability —
+    /// driven solely from this actor's dispatch thread, so uncontended.
+    blob_producer: Mutex<Option<super::blob_work::BlobProducer>>,
 }
 
 impl NativeBinding {
@@ -230,6 +237,7 @@ impl NativeBinding {
             spawner,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             outbound: Mutex::new(OutboundBuffer::new()),
+            blob_producer: Mutex::new(None),
         }
     }
 
@@ -682,14 +690,27 @@ impl NativeBinding {
                 .collect()
         };
 
-        // ADR-0087 Phase 3b: push the whole blob as one work item when a
-        // pool sink is wired and the caller allows deferral; the demuxing
-        // worker runs free recipients inline. Otherwise route per mail
-        // (eager `wait_reply` flush, or a test binding with no Spawner).
-        if let (true, Some(sink)) = (allow_blob, self.spawner.as_ref().map(|s| s.wake_sink())) {
-            let blob =
-                super::blob_work::BlobWork::new(routed, Arc::clone(&self.mailer), sink.clone());
-            sink.schedule(blob);
+        // ADR-0087 / iamacoffeepot/aether#1137: fold the blob into this
+        // actor's single active cursor-shared blob (recipient-grouped,
+        // cooperatively drained, broadcast-recruited for wide fan-outs)
+        // when a pool sink is wired and the caller allows deferral.
+        // Otherwise route per mail (eager `wait_reply` flush, or a test
+        // binding with no `Spawner`).
+        if allow_blob && self.spawner.is_some() {
+            let mut guard = self
+                .blob_producer
+                .lock()
+                .expect("blob_producer poisoned; fail-fast per ADR-0063");
+            let producer = guard.get_or_insert_with(|| {
+                let sink = self
+                    .spawner
+                    .as_ref()
+                    .expect("spawner present in this branch")
+                    .wake_sink()
+                    .clone();
+                super::blob_work::BlobProducer::new(Arc::clone(&self.mailer), sink)
+            });
+            producer.flush(routed);
         } else {
             for mail in routed {
                 self.mailer.push(mail);
