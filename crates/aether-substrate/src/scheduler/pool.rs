@@ -254,6 +254,10 @@ fn worker_loop(
     // the affinity path that keeps a relay chain on one warm worker
     // (iamacoffeepot/aether#1059, now the deque's LIFO own-pop).
     worker_deque::install(deque);
+    // iamacoffeepot/aether#1134: register the shared injector so a deposit
+    // on this worker can read the scheduler ready-queue depth
+    // (`worker_deque::pending_depth`) for the latency harness.
+    worker_deque::install_injector(Arc::clone(&injector));
     loop {
         let Some(slot) = acquire_slot(idx, &stealers, &injector, &spin) else {
             // Shutdown signalled. Exit.

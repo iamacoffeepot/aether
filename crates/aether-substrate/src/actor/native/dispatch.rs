@@ -182,6 +182,11 @@ pub fn dispatch_loop_run<A>(
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
                     t: th.now_nanos(),
+                    // iamacoffeepot/aether#1134: the producer-stamped
+                    // deposit instant + scheduler backlog, splitting the
+                    // hop into send→enqueue + queue residence.
+                    t_enqueue: env.t_enqueue,
+                    enqueue_depth: env.enqueue_depth,
                     thread_id,
                 },
             );
@@ -227,6 +232,11 @@ pub fn dispatch_loop_run<A>(
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
                     t: th.now_nanos(),
+                    // iamacoffeepot/aether#1134: the producer-stamped
+                    // deposit instant + scheduler backlog, splitting the
+                    // hop into send→enqueue + queue residence.
+                    t_enqueue: env.t_enqueue,
+                    enqueue_depth: env.enqueue_depth,
                     thread_id,
                 },
             );

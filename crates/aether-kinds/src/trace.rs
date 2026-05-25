@@ -77,6 +77,27 @@ pub enum TraceEvent {
     Received {
         mail_id: MailId,
         t: Nanos,
+        /// iamacoffeepot/aether#1134: the timestamp the mail was deposited
+        /// into the recipient's inbox (`route_mail`'s Inbox arm — the
+        /// single deposit chokepoint). Stamped onto the envelope at
+        /// deposit and read here at the recipient's dispatcher entry, so
+        /// the span splits into **send→enqueue** (`t_enqueue − t_sent`:
+        /// the producer's remaining handler + flush + blob pickup + demux)
+        /// and **queue residence** (`t − t_enqueue`: deposit → this
+        /// dispatcher picking it up = slot schedule + worker wakeup +
+        /// recv). Riding the existing `Received` event avoids a per-mail
+        /// ring entry and a second clock read on the recipient side. Equal
+        /// to `t` for the rare paths with no distinct deposit instant
+        /// (none today — every Inbox mail is deposited).
+        t_enqueue: Nanos,
+        /// iamacoffeepot/aether#1134: the scheduler ready-queue depth at
+        /// deposit — this worker's own-deque len plus the shared injector
+        /// len (`worker_deque::pending_depth`). Splits residence into
+        /// *wakeup* (depth 0 → the deposit had to wake/schedule a worker)
+        /// vs *wait-behind-N* (depth N → N runnable slots/blobs already
+        /// ahead = offered load). `0` when the deposit ran off any pool
+        /// worker (chassis-root injects: `Tick`, MCP sends, test injects).
+        enqueue_depth: u32,
         /// Issue 734 / ADR-0088 §7: the dispatching OS thread's
         /// name-hashed [`ThreadId`], captured at the dispatcher's receive
         /// hook. Stored as a `Copy` tagged id rather than a fresh
@@ -155,6 +176,17 @@ pub struct MailNodeWire {
     pub recipient: MailboxId,
     pub kind: KindId,
     pub t_sent: Nanos,
+    /// iamacoffeepot/aether#1134: when this mail was deposited into the
+    /// recipient's inbox (the `Received` event's `t_enqueue`). `None`
+    /// until the `Received` event lands. `t_enqueue − t_sent` is the
+    /// send→enqueue (producer-side) span; `t_received − t_enqueue` is
+    /// queue residence (consumer-side wakeup / wait).
+    pub t_enqueue: Option<Nanos>,
+    /// iamacoffeepot/aether#1134: scheduler ready-queue depth at deposit
+    /// (own-deque + injector len). `None` until the `Received` event
+    /// lands. `Some(0)` distinguishes "woke a worker" from `Some(n)`
+    /// "queued behind n runnable slots."
+    pub enqueue_depth: Option<u32>,
     pub t_received: Option<Nanos>,
     pub t_finished: Option<Nanos>,
     /// Issue 734 / ADR-0088 §7: the dispatching OS thread's display

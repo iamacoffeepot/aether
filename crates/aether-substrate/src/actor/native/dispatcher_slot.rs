@@ -227,6 +227,12 @@ where
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
                     t: th.now_nanos(),
+                    // iamacoffeepot/aether#1134: surface the deposit
+                    // instant + scheduler backlog the producer stamped at
+                    // `route_mail`, so the hop splits into send→enqueue +
+                    // queue residence.
+                    t_enqueue: env.t_enqueue,
+                    enqueue_depth: env.enqueue_depth,
                     thread_id,
                 },
             );

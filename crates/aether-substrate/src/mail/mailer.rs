@@ -32,6 +32,7 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, MailRef, ReplyTarget, ReplyTo};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
+use crate::scheduler::pending_depth;
 use aether_data::{HandleId, Kind, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
@@ -592,6 +593,14 @@ fn route_mail(
                 mail_id: mail.mail_id,
                 root: mail.root,
                 parent_mail: mail.parent_mail,
+                // iamacoffeepot/aether#1134: stamp the deposit instant +
+                // scheduler backlog here — the single Inbox chokepoint
+                // every mail-to-an-actor funnels through. Read back at the
+                // recipient's `Received` hook to split the hop into
+                // send→enqueue vs queue residence. One clock read on the
+                // already-traced path; depth is `0` off a pool worker.
+                t_enqueue: trace_handle.now_nanos(),
+                enqueue_depth: pending_depth(),
             });
         }
         Some(MailboxEntry::Inline(handler)) => {

@@ -22,6 +22,8 @@ use std::sync::{Arc, RwLock};
 
 use rustc_hash::FxHashMap;
 
+use aether_kinds::trace::Nanos;
+
 use crate::handle_store::schema_contains_ref;
 use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
 use std::error;
@@ -77,6 +79,8 @@ pub(crate) fn test_owned_dispatch(
         mail_id: MailId::NONE,
         root: MailId::NONE,
         parent_mail: None,
+        t_enqueue: Nanos(0),
+        enqueue_depth: 0,
     }
 }
 
@@ -180,6 +184,23 @@ pub struct OwnedDispatch {
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends.
     pub parent_mail: Option<MailId>,
+    /// iamacoffeepot/aether#1134: the deposit timestamp — when this
+    /// envelope was placed into the recipient's inbox at `route_mail`'s
+    /// Inbox arm. The recipient's dispatcher reads it at its `Received`
+    /// hook and folds it into [`TraceEvent::Received`]'s `t_enqueue` so
+    /// the hop splits into send→enqueue (`t_enqueue − t_sent`) and queue
+    /// residence (`t_received − t_enqueue`). `Nanos(0)` on construction
+    /// sites that don't stamp it (chassis-internal / test envelopes that
+    /// never enter the traced relay path).
+    ///
+    /// [`TraceEvent::Received`]: aether_kinds::trace::TraceEvent
+    pub t_enqueue: Nanos,
+    /// iamacoffeepot/aether#1134: scheduler ready-queue depth at deposit
+    /// (`worker_deque::pending_depth`) — folded into
+    /// [`TraceEvent::Received`]'s `enqueue_depth`. `0` off any pool worker.
+    ///
+    /// [`TraceEvent::Received`]: aether_kinds::trace::TraceEvent
+    pub enqueue_depth: u32,
 }
 
 /// Synchronous handler installed under [`MailboxEntry::Inline`]. Runs
@@ -1142,6 +1163,8 @@ mod tests {
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
         });
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
@@ -1640,6 +1663,8 @@ mod tests {
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
         });
         handler.enqueue(OwnedDispatch {
             kind: KindId(0),
@@ -1651,6 +1676,8 @@ mod tests {
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
         });
 
         let collected = collected.lock().unwrap();
@@ -1689,6 +1716,8 @@ mod tests {
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
         });
 
         let received = rx.try_recv().expect("hand-rolled enqueue should send");
