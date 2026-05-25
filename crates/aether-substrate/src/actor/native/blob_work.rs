@@ -45,20 +45,23 @@
 //!
 //! ## Closeable per-group buffer (the merge-vs-claim handshake)
 //!
-//! Each group's mail lives behind a [`Mutex`]-guarded closeable buffer.
-//! This is **SPSC**: the producing actor's thread pushes; exactly one
-//! cursor-winning worker drains+closes. The worker drains in a loop —
-//! taking whatever the buffer holds, dispatching it, then re-locking —
-//! and **closes only when it locks and finds the buffer empty**. That
-//! makes `close` a FIFO barrier: every mail the producer pushed before the
-//! close is captured and dispatched (in order); a push that loses the race
-//! sees `closed` and is deposited through `route_mail`, landing in the
-//! recipient inbox strictly *after* everything the worker dispatched. So a
-//! late cross-flush append never jumps ahead of earlier mail. (A
-//! lock-free Treiber stack is a possible future optimisation; on this
-//! low-contention SPSC path a mutex is trivially correct and FIFO-
-//! preserving, and mirrors the pre-#1137 `BlobWork`'s own
-//! `Mutex<Option<Vec<Mail>>>`.)
+//! Each group's mail lives behind a closeable buffer guarded by a one-byte
+//! atomic-flag spinlock (`Group`). This is **SPSC**: the producing actor's
+//! thread pushes; exactly one cursor-winning worker drains+closes. The
+//! worker drains in a loop — taking whatever the buffer holds, dispatching
+//! it, then re-locking — and **closes only when it locks and finds the
+//! buffer empty**. That makes `close` a FIFO barrier: every mail the
+//! producer pushed before the close is captured and dispatched (in order);
+//! a push that loses the race sees `closed` and is deposited through
+//! `route_mail`, landing in the recipient inbox strictly *after* everything
+//! the worker dispatched. So a late cross-flush append never jumps ahead of
+//! earlier mail. The atomic flag (not a `std::sync::Mutex`) avoids the
+//! per-group `pthread_mutex_t` create-on-first-lock + destroy-on-drop churn
+//! that the #1140 profile found dominant on macOS — a fresh group per flush
+//! means a fresh OS mutex object per flush. Contention is rare by
+//! construction (one producer, one worker), so the spin almost never loops;
+//! a lock-free Treiber stack would reverse send order (LIFO), so it is
+//! *not* a drop-in for the FIFO barrier.
 //!
 //! ## Reusing the one router (unchanged from #1135)
 //!
@@ -90,9 +93,11 @@
 use std::any::Any;
 use std::cell::UnsafeCell;
 use std::env;
+use std::hint::spin_loop;
 use std::mem;
 use std::mem::MaybeUninit;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
 
@@ -159,18 +164,53 @@ struct GroupBuf {
 
 struct Group {
     recipient: MailboxId,
-    buf: Mutex<GroupBuf>,
+    /// SPSC spinlock guarding [`Self::buf`]: `false` = free, `true` = held.
+    /// Replaces a `std::sync::Mutex` — on macOS that lazily creates a
+    /// `pthread_mutex_t` on first lock and destroys it on drop, and the
+    /// #1140 profile found that per-group create + destroy churn (a fresh
+    /// group per flush) to be the dominant blob-machinery cost. A bare
+    /// atomic flag has no OS object: zero-cost to construct and drop.
+    /// Contention is rare by construction (one producer, one cursor-winning
+    /// worker — §Closeable per-group buffer), so the spin almost never loops.
+    lock: AtomicBool,
+    buf: UnsafeCell<GroupBuf>,
 }
+
+// SAFETY: `buf` is touched only while holding `lock` ([`Group::with_buf`]
+// CAS-acquires before access, release-stores after), so the producer's
+// `push` and the one cursor-winning worker's `take_or_close` never access it
+// concurrently; `recipient` is immutable. So `&Group` is safe to share
+// across the producer + worker threads.
+unsafe impl Sync for Group {}
 
 impl Group {
     fn new(recipient: MailboxId, mails: Vec<Mail>) -> Self {
         Self {
             recipient,
-            buf: Mutex::new(GroupBuf {
+            lock: AtomicBool::new(false),
+            buf: UnsafeCell::new(GroupBuf {
                 closed: false,
                 mails,
             }),
         }
+    }
+
+    /// Run `f` over the buffer under the spinlock. The closures below are
+    /// allocation-light and panic-free (`Vec` ops abort, not unwind, on OOM),
+    /// so the lock is always released — no poison state to model.
+    fn with_buf<R>(&self, f: impl FnOnce(&mut GroupBuf) -> R) -> R {
+        while self
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+        // SAFETY: the CAS above acquired the lock, so we hold exclusive
+        // access to `buf` until the release-store below.
+        let r = f(unsafe { &mut *self.buf.get() });
+        self.lock.store(false, Ordering::Release);
+        r
     }
 
     /// Producer: append `mail`, or hand it back (`Err`) if the group has
@@ -182,28 +222,28 @@ impl Group {
         reason = "the rejected Mail moves back to the caller for deposit on the cold closed-group path; boxing it would add a cold-path alloc and break the Mail-by-value convention"
     )]
     fn push(&self, mail: Mail) -> Result<(), Mail> {
-        let mut b = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
-        let result = if b.closed {
-            Err(mail)
-        } else {
-            b.mails.push(mail);
-            Ok(())
-        };
-        drop(b);
-        result
+        self.with_buf(|b| {
+            if b.closed {
+                Err(mail)
+            } else {
+                b.mails.push(mail);
+                Ok(())
+            }
+        })
     }
 
     /// Claiming worker: take the next batch of pending mail (send order),
     /// or `None` once the buffer is empty — at which point this call closes
     /// the group (the FIFO barrier). The worker loops until `None`.
     fn take_or_close(&self) -> Option<Vec<Mail>> {
-        let mut b = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
-        if b.mails.is_empty() {
-            b.closed = true;
-            None
-        } else {
-            Some(mem::take(&mut b.mails))
-        }
+        self.with_buf(|b| {
+            if b.mails.is_empty() {
+                b.closed = true;
+                None
+            } else {
+                Some(mem::take(&mut b.mails))
+            }
+        })
     }
 
     /// Consume a group whose [`Lifecycle::publish`] failed (retired / full),
@@ -211,7 +251,7 @@ impl Group {
     /// roll into a fresh blob. No worker can have touched it (the cursor
     /// never reached its index), so taking it by value is sound.
     fn into_mails(self) -> Vec<Mail> {
-        self.buf.into_inner().unwrap_or_else(PoisonError::into_inner).mails
+        self.buf.into_inner().mails
     }
 }
 
