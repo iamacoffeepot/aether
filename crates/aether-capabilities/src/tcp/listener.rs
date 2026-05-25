@@ -23,7 +23,7 @@ use aether_kinds::{Close, ConnectionReady};
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener_native::TcpListenerConfig;
 
-#[aether_actor::bridge(instanced)]
+#[aether_actor::bridge(instanced, one_per = "listener")]
 mod listener_native {
     use super::{Close, ConnectionReady};
     use aether_actor::actor;

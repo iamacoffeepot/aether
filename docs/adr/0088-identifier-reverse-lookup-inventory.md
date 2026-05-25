@@ -49,6 +49,20 @@ A `NameEntry { domain, name: &'static str }` link-time inventory, sibling to `De
 
 A template thus declares "ids in this family exist and look like *this*" even when it cannot say *which* exist — the distinction that a flat name list can't express.
 
+### 4 (v2). Cardinality — the how-many axis
+
+*Amendment, issue #1132.* §4's `ParamKind` conflated two questions: *how* a template's hole is filled (its **shape** — integer range / declared name / opaque string) and *how many* instances the family can have. v1 punted on the second: every instanced actor emitted `ParamKind::Dynamic`, so a manifest consumer saw four identical opaque families (trampoline, tcp session, tcp listener, engine proxy) and learned nothing about what each instance corresponds to.
+
+v2 splits the axes. `ParamKind` keeps the shape role (and drives the reverse-map enumeration unchanged). A new `Cardinality`, stated explicitly on **every** `TemplateEntry`, carries the how-many:
+
+- **`Bounded(u64)`** — a compile-time-known finite instance bound (`aether-worker-{N}` prehashes a ceiling).
+- **`OnePer(<entity>)`** — one instance per live entity of a named kind. This is the relationship all four instanced actors actually have: not "N instances" but "as many as there are components / connections / listeners / engines."
+- **`Unbounded`** — open-ended, runtime-minted, no fixed relationship (`aether-instanced-{full_name}`; the old `Dynamic`-only semantics, now a cardinality in its own right).
+
+`OnePer` is the load-bearing addition — it is what makes the manifest self-describing about instance shape. The axes are orthogonal: the same shape pairs with different cardinalities (every instanced actor is `ParamKind::Dynamic`, but the trampoline is `OnePer("component")` while the instanced thread-name fallback is `Unbounded`). The reverse-map builder reads only `ParamKind`; `Cardinality` is manifest metadata. Cardinality is declared at the `#[bridge(instanced, one_per = "component")]` site (absent ⇒ `Unbounded`) and rides through `TemplateEntryWire` to the served manifest.
+
+**Deferred (over-reach for v2):** typed-id holes — e.g. `aether.engine.proxy:{engine: EngineId}` where the hole is a tagged-id type rather than a bare string, enabling *chained* reversal (reverse the embedded `EngineId` to its engine name as part of reversing the instance name). That is a meaningfully larger change to the inventory's hole model and isn't needed to make the manifest expose cardinality shape; `OnePer(<entity>)` over a string hole delivers the self-describing-manifest win on its own.
+
 ### 5. Runtime registry for dynamic instances
 
 A process-global registry (substrate-side, `std` `RwLock<HashMap<u64, Box<str>>>`) maps id → name for dynamically-minted names. It is populated at the moment a name is minted — the thread-spawn name builders (`alloc_instanced_thread_name`, the `aether-worker-N` formatter), the trampoline mailbox registration, etc. Registration is lazy-safe: the same code path that builds the name and derives its hash also registers it, so any id that can appear in a trace or diagnostic is registered before it can be observed. Writes are rare (instance creation), reads are cold (render time), so the lock is uncontended in practice and off the dispatch hot path entirely.
