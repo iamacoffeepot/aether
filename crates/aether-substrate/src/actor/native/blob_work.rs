@@ -88,8 +88,10 @@
 //! EWMA); until then a heavy `<= 8` fan-out stays serial.
 
 use std::any::Any;
+use std::cell::UnsafeCell;
 use std::env;
 use std::mem;
+use std::mem::MaybeUninit;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use rustc_hash::FxHashMap;
@@ -204,13 +206,83 @@ impl Group {
         }
     }
 
-    /// Reclaim mail from a group that was staged into the array but whose
-    /// [`Lifecycle::publish`] failed (retired / full), so it was never
-    /// claimable. The producer rolls these into a fresh blob. No worker can
-    /// have touched it (the cursor never reached its index).
-    fn reclaim(&self) -> Vec<Mail> {
-        let mut b = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
-        mem::take(&mut b.mails)
+    /// Consume a group whose [`Lifecycle::publish`] failed (retired / full),
+    /// so it was never claimable, and return its mail for the producer to
+    /// roll into a fresh blob. No worker can have touched it (the cursor
+    /// never reached its index), so taking it by value is sound.
+    fn into_mails(self) -> Vec<Mail> {
+        self.buf.into_inner().unwrap_or_else(PoisonError::into_inner).mails
+    }
+}
+
+/// A write-once slot in a blob's group array. Backed by a bare
+/// `UnsafeCell<MaybeUninit<Group>>` rather than a `OnceLock`: the per-slot
+/// `Once` synchronization a `OnceLock` performs is **redundant** here,
+/// because publication is already ordered by the lifecycle word — the
+/// producer writes the slot before [`Lifecycle::publish`]'s release of
+/// `len`, and a worker reads it only after [`Lifecycle::claim`]'s acquire
+/// observes `len > idx` (the `blob_lifecycle` publication-ordering note).
+/// Dropping the `OnceLock` drops a CAS (write) + an acquire load (read)
+/// per group.
+struct GroupSlot {
+    cell: UnsafeCell<MaybeUninit<Group>>,
+}
+
+// SAFETY: `BlobWork` is shared across worker threads via `Arc`, so its
+// group slots must be `Sync`. Concurrent access is sound by the
+// write-once / publish-before-claim discipline: (1) the single producer
+// writes each slot exactly once, before the `publish` whose release-store
+// of `len` makes the slot claimable; (2) a worker reads a slot only after
+// its `claim` acquire-loaded `len > idx`, synchronizing-with that publish,
+// so the write happens-before the read; (3) the slot itself is never
+// re-written after that initial write (the `Group`'s mail buffer mutates
+// behind its own `Mutex`, not the slot). No two accesses to one slot are
+// unsynchronized.
+unsafe impl Sync for GroupSlot {}
+
+impl GroupSlot {
+    const fn empty() -> Self {
+        Self {
+            cell: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    /// Producer: write the group into this slot.
+    ///
+    /// # Safety
+    /// Caller is the single producer, this slot has not been written, and
+    /// the write is sequenced before the `publish` that makes the slot
+    /// claimable (see the type's `Sync` contract).
+    unsafe fn write(&self, group: Group) {
+        // SAFETY: the `# Safety` contract above — single producer, unwritten
+        // slot, sequenced before the publish that makes it claimable.
+        unsafe { (*self.cell.get()).write(group) };
+    }
+
+    /// Read the group.
+    ///
+    /// # Safety
+    /// The slot is initialized and either published (the caller's `claim`
+    /// acquired `len > idx`) or being read by the producer that wrote it;
+    /// the slot is never mutated after the write, so the shared reference
+    /// is sound.
+    unsafe fn get(&self) -> &Group {
+        // SAFETY: the `# Safety` contract above — slot initialized and
+        // published (or read by the producer that wrote it), never mutated.
+        unsafe { (*self.cell.get()).assume_init_ref() }
+    }
+
+    /// Producer: move the group back out — `publish` failed, so the slot
+    /// was never claimable. The slot is logically uninitialized afterward;
+    /// the caller must not read or drop it again.
+    ///
+    /// # Safety
+    /// The slot was written this flush and never published, so no worker
+    /// can have claimed it; the producer reclaims sole ownership.
+    unsafe fn take(&self) -> Group {
+        // SAFETY: the `# Safety` contract above — slot written this flush,
+        // never published, producer reclaims sole ownership.
+        unsafe { (*self.cell.get()).assume_init_read() }
     }
 }
 
@@ -231,12 +303,14 @@ struct FlushOutcome {
 /// workers via the [`Drainable`] impl.
 pub struct BlobWork {
     lifecycle: Lifecycle,
-    /// Fixed-capacity group array. Index `< lifecycle.len()` is published
-    /// (the producer wrote it before the `publish` that advanced `len`, so
-    /// a worker that claims the index sees it `Some`). Sized to the first
-    /// flush (with a [`GROUP_CAP_MIN`] floor); the producer rolls a fresh
-    /// blob on overflow.
-    groups: Box<[OnceLock<Group>]>,
+    /// Fixed-capacity group array. The initialized prefix is exactly
+    /// `[0, lifecycle.len())`: the producer writes a slot before the
+    /// `publish` that advances `len`, and a failed publish takes its staged
+    /// groups back out (see [`Self::append_flush`]), so `len` always tracks
+    /// the initialized prefix — which [`Drop`] relies on. Sized to the
+    /// first flush (with a [`GROUP_CAP_MIN`] floor); the producer rolls a
+    /// fresh blob on overflow.
+    groups: Box<[GroupSlot]>,
     mailer: Arc<Mailer>,
     /// Where a recipient that yields mid-drain ([`CycleResult::Requeue`]) is
     /// re-scheduled — the same path a normal wake uses.
@@ -244,9 +318,9 @@ pub struct BlobWork {
 }
 
 impl BlobWork {
-    /// An empty blob with a `cap`-slot group array.
+    /// An empty blob with a `cap`-slot group array (all slots uninit).
     fn empty(cap: usize, mailer: Arc<Mailer>, sink: WakeSink) -> Arc<Self> {
-        let groups = (0..cap).map(|_| OnceLock::new()).collect();
+        let groups = (0..cap).map(|_| GroupSlot::empty()).collect();
         Arc::new(Self {
             lifecycle: Lifecycle::new(0),
             groups,
@@ -282,8 +356,10 @@ impl BlobWork {
         for mail in routed {
             if let Some(&g) = index.get(&mail.recipient) {
                 // Existing group — push in send order; a closed (drained)
-                // group deposits through the router instead.
-                let group = self.groups[g].get().expect("indexed group is set");
+                // group deposits through the router instead. SAFETY: `g` is
+                // in `index`, so it was written this flush or a prior one by
+                // this producer; the slot is initialized.
+                let group = unsafe { self.groups[g].get() };
                 if let Err(mail) = group.push(mail) {
                     self.mailer.push(mail);
                 }
@@ -294,10 +370,10 @@ impl BlobWork {
                 leftover.push(mail);
             } else {
                 let recipient = mail.recipient;
-                self.groups[base + staged]
-                    .set(Group::new(recipient, vec![mail]))
-                    .ok()
-                    .expect("group slot written once");
+                // SAFETY: producer-only; `base + staged` advances
+                // contiguously and is unwritten, and the write is sequenced
+                // before the `publish` below.
+                unsafe { self.groups[base + staged].write(Group::new(recipient, vec![mail])) };
                 index.insert(recipient, base + staged);
                 staged += 1;
             }
@@ -311,11 +387,15 @@ impl BlobWork {
             Published::Retired | Published::Full => {
                 // The blob retired (or hit the wire ceiling) between staging
                 // and publish: the staged groups never became claimable.
-                // Reclaim their mail and roll everything into a fresh blob.
+                // Take each back out (restoring the initialized prefix to
+                // `[0, len)`) and roll its mail into a fresh blob.
                 for j in 0..staged {
-                    let group = self.groups[base + j].get().expect("staged group present");
+                    // SAFETY: slot `base + j` was written this flush and never
+                    // published (`len` did not advance), so no worker claimed
+                    // it; the producer reclaims sole ownership.
+                    let group = unsafe { self.groups[base + j].take() };
                     index.remove(&group.recipient);
-                    leftover.extend(group.reclaim());
+                    leftover.extend(group.into_mails());
                 }
                 FlushOutcome {
                     leftover,
@@ -386,9 +466,10 @@ impl Drainable for BlobWork {
         // drain inside `dispatch_group`. Late appends past the cursor are
         // picked up by the producer's re-submit on the next flush.
         while let Some(g) = self.lifecycle.claim() {
-            let group = self.groups[g]
-                .get()
-                .expect("claimed index < len is published");
+            // SAFETY: `claim` acquire-loaded `len > g`, synchronizing-with
+            // the `publish` that wrote slot `g`; the slot is initialized and
+            // never mutated after that write.
+            let group = unsafe { self.groups[g].get() };
             self.dispatch_group(group, budget);
             self.lifecycle.complete();
         }
@@ -401,6 +482,21 @@ impl Drainable for BlobWork {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Drop for BlobWork {
+    fn drop(&mut self) {
+        // The initialized slots are exactly `[0, len)` (see the `groups`
+        // field doc): each is a `Group` that must be dropped — a bare
+        // `MaybeUninit` would otherwise leak it. `[len, cap)` are uninit.
+        // All `Arc` refs are gone (we are in `Drop`), so no slot is
+        // concurrently accessed.
+        let len = self.lifecycle.peek_len();
+        for slot in &self.groups[..len] {
+            // SAFETY: slot `< len` is initialized and no longer shared.
+            unsafe { (*slot.cell.get()).assume_init_drop() };
+        }
     }
 }
 
