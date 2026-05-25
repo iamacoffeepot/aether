@@ -325,6 +325,36 @@ pub fn summarize(mut samples: Vec<u64>) -> Stats {
     }
 }
 
+/// One measured cell's **raw** samples (per worker count × topology),
+/// before percentile collapse. The latency spans are nanosecond
+/// samples; `depth` is the scheduler ready-queue length distribution
+/// (counts). [`Self::summarize`] folds these to a [`CellResult`]; the
+/// `perf-plot` bin (iamacoffeepot/aether#1155) renders them directly.
+#[derive(Clone, Debug)]
+pub struct CellSamples {
+    pub workers: usize,
+    pub topo: String,
+    pub queued: Vec<u64>,
+    pub drain: Vec<u64>,
+    pub handler: Vec<u64>,
+    pub depth: Vec<u64>,
+}
+
+impl CellSamples {
+    /// Collapse each span's samples to [`Stats`] percentiles.
+    #[must_use]
+    pub fn summarize(self) -> CellResult {
+        CellResult {
+            workers: self.workers,
+            topo: self.topo,
+            queued: summarize(self.queued),
+            drain: summarize(self.drain),
+            handler: summarize(self.handler),
+            depth: summarize(self.depth),
+        }
+    }
+}
+
 /// One fully-measured cell (per worker count × topology).
 #[derive(Clone, Debug)]
 pub struct CellResult {
@@ -435,10 +465,70 @@ pub fn wide_fanout_widths_from_env() -> Vec<usize> {
 /// laps a busy relay's ring and the cell's stats come from the
 /// most-recent window (valid percentiles, fewer samples) with a logged
 /// note, instead of being capped up front.
+/// Parse `AETHER_PERF_WORKERS` — a comma list of pool sizes; the token
+/// `max` resolves to `available_parallelism() - 1`. Default `max`.
+/// Shared by the `perf-trial` and `perf-plot` bins so their sweeps cover
+/// the identical worker axis.
+#[must_use]
+pub fn parse_workers() -> Vec<usize> {
+    let max = thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    let spec = env::var("AETHER_PERF_WORKERS").unwrap_or_else(|_| "max".to_owned());
+    let mut out: Vec<usize> = spec
+        .split(',')
+        .filter_map(|tok| {
+            let t = tok.trim();
+            if t.eq_ignore_ascii_case("max") {
+                Some(max)
+            } else {
+                t.parse::<usize>().ok().map(|w| w.max(1))
+            }
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    if out.is_empty() {
+        out.push(max);
+    }
+    out
+}
+
+/// Parse `AETHER_PERF_TOPOS` (`ci` — a chain/fan-out/tree subset — or
+/// `full`), then append the opt-in heavy (`AETHER_LAT_HEAVY_WORK`) and
+/// wide (`AETHER_LAT_WIDE_FANOUT`) fan-outs. Default `ci`. Shared by the
+/// `perf-trial` and `perf-plot` bins.
+#[must_use]
+pub fn parse_topologies() -> Vec<Topology> {
+    let mut topos = match env::var("AETHER_PERF_TOPOS").as_deref() {
+        Ok("full") => default_topologies(),
+        _ => vec![
+            depth_chain(1),
+            depth_chain(8),
+            fanout(4),
+            fanout(8),
+            two_level_tree(),
+        ],
+    };
+    let heavy = heavy_work_iters_from_env();
+    if heavy > 0 {
+        for b in [4usize, 8] {
+            topos.push(fanout_heavy(b, heavy));
+        }
+    }
+    for w in wide_fanout_widths_from_env() {
+        topos.push(fanout(w));
+    }
+    topos
+}
+
+/// Drive the sweep and return each cell's **raw** per-span samples
+/// (un-summarized). [`run_sweep`] wraps this and collapses to
+/// [`CellResult`]; the `perf-plot` bin (iamacoffeepot/aether#1155) reads
+/// the raw samples to render distribution plots, which the percentiles
+/// can't show.
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 #[must_use]
-pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
-    let mut rows: Vec<CellResult> = Vec::new();
+pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
+    let mut rows: Vec<CellSamples> = Vec::new();
 
     for &workers in &cfg.workers {
         for topo in &cfg.topologies {
@@ -620,15 +710,27 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
                     depth.push(u64::from(d));
                 }
             }
-            rows.push(CellResult {
+            rows.push(CellSamples {
                 workers,
                 topo: topo.name.clone(),
-                queued: summarize(queued),
-                drain: summarize(drain),
-                handler: summarize(handler),
-                depth: summarize(depth),
+                queued,
+                drain,
+                handler,
+                depth,
             });
         }
     }
     rows
+}
+
+/// Drive the sweep and return per-cell percentiles. Thin wrapper over
+/// [`run_sweep_samples`] that collapses each cell's raw samples to
+/// [`Stats`]; the historical entry point for `perf-trial` and the
+/// on-demand observe table.
+#[must_use]
+pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
+    run_sweep_samples(cfg)
+        .into_iter()
+        .map(CellSamples::summarize)
+        .collect()
 }

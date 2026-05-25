@@ -94,6 +94,31 @@ jobs:
         env:
           PERF_BASE_CACHE: ${{ github.workspace }}/.perf-cache/aether-perf-trial-base
         run: scripts/perf-compare.sh
+      # iamacoffeepot/aether#1155: render the candidate's per-cell
+      # queued/drain/handler sample distributions (the shape the
+      # percentile table can't show) and upload them as artifacts.
+      # Candidate-only for now — the merge-base binary has no plot
+      # surface, so a base-vs-candidate overlay waits until this lands.
+      # `continue-on-error` keeps a plot hiccup from reddening this
+      # informational job.
+      - name: Render candidate span distributions
+        continue-on-error: true
+        env:
+          AETHER_PERF_WORKERS: max,2
+          AETHER_PERF_TOPOS: ci
+          AETHER_PERF_FRAMES: "200"
+          AETHER_PERF_PLOT_DIR: perf-plots
+        run: |
+          cargo build --release -p aether-substrate-bundle \
+            --bin aether-perf-plot --features perf-plot
+          ./target/release/aether-perf-plot
+      - name: Upload span-distribution plots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-span-distributions
+          path: perf-plots/
+          if-no-files-found: warn
       - name: Upsert sticky PR comment
         env:
           GH_TOKEN: ${{ github.token }}
