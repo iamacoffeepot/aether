@@ -74,16 +74,18 @@ fn main() -> ExitCode {
 
     let mut rendered = 0usize;
     for c in &cells {
-        let path = format!("{dir}/{}-{}w.png", c.topo, c.workers);
-        match render_cell(Path::new(&path), c) {
+        let hist = format!("{dir}/{}-{}w.png", c.topo, c.workers);
+        match render_cell(Path::new(&hist), c) {
             Ok(()) => rendered += 1,
-            Err(e) => eprintln!("perf-plot: render {path} failed: {e}"),
+            Err(e) => eprintln!("perf-plot: render {hist} failed: {e}"),
+        }
+        let pct = format!("{dir}/{}-{}w-percentiles.png", c.topo, c.workers);
+        match render_cell_percentiles(Path::new(&pct), c) {
+            Ok(()) => rendered += 1,
+            Err(e) => eprintln!("perf-plot: render {pct} failed: {e}"),
         }
     }
-    eprintln!(
-        "perf-plot: wrote {rendered}/{} plot(s) to {dir}/",
-        cells.len()
-    );
+    eprintln!("perf-plot: wrote {rendered} plot(s) to {dir}/");
     if rendered == 0 {
         return ExitCode::from(1);
     }
@@ -98,6 +100,16 @@ fn p50_us(samples: &[u64]) -> f64 {
     let mut s = samples.to_vec();
     s.sort_unstable();
     s[s.len() / 2] as f64 / 1000.0
+}
+
+/// Quantile `q` (0.0–1.0) of a pre-sorted sample slice, in microseconds,
+/// clamped to >= 1ns so a log axis stays defined.
+fn quantile_us(sorted: &[u64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.001;
+    }
+    let idx = ((sorted.len() - 1) as f64 * q.clamp(0.0, 1.0)).round() as usize;
+    (sorted[idx.min(sorted.len() - 1)].max(1) as f64) / 1000.0
 }
 
 /// Render one cell's three spans as overlaid log-x histograms (outline /
@@ -186,6 +198,132 @@ fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
                 .legend(move |(x, y)| {
                     PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
                 });
+        }
+        chart
+            .configure_series_labels()
+            .border_style(BLACK)
+            .background_style(WHITE.mix(0.85))
+            .draw()?;
+        root.present()?;
+    }
+
+    let file = fs::File::create(path)?;
+    let mut enc = png::Encoder::new(BufWriter::new(file), WIDTH, HEIGHT);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&buf)?;
+    Ok(())
+}
+
+/// One per-percentile point for the latency-by-percentile plot: the
+/// quantile dot `mid` (µs) and its ±2.5% band edges `lo` / `hi`, at
+/// percentile `pct`.
+struct PctPoint {
+    pct: f64,
+    lo: f64,
+    mid: f64,
+    hi: f64,
+}
+
+/// One span's per-percentile series.
+struct PctSeries {
+    label: &'static str,
+    color: RGBColor,
+    points: Vec<PctPoint>,
+}
+
+/// Render one cell's spans as a latency-by-percentile plot: x = percentile
+/// (every 5%), y = latency (µs, log). Each point is a dot at the quantile
+/// value with a vertical error bar spanning the ±2.5% band around it, so a
+/// steep tail reads as a tall bar and the flat body as a short one.
+/// Companion to the histogram in [`render_cell`] (iamacoffeepot/aether#1155).
+fn render_cell_percentiles(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
+    let spans: [(&str, &[u64], RGBColor); 3] = [
+        ("queued", &c.queued, BLUE),
+        ("drain", &c.drain, RED),
+        ("handler", &c.handler, GREEN),
+    ];
+
+    let percentiles: Vec<u32> = (5..=95).step_by(5).collect();
+    let mut series: Vec<PctSeries> = Vec::new();
+    let mut y_floor = f64::MAX;
+    let mut y_ceil = f64::MIN;
+    for (label, samples, color) in spans {
+        if samples.is_empty() {
+            continue;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let points: Vec<PctPoint> = percentiles
+            .iter()
+            .map(|&q| {
+                let f = f64::from(q) / 100.0;
+                PctPoint {
+                    pct: f64::from(q),
+                    lo: quantile_us(&sorted, f - 0.025),
+                    mid: quantile_us(&sorted, f),
+                    hi: quantile_us(&sorted, f + 0.025),
+                }
+            })
+            .collect();
+        for p in &points {
+            y_floor = y_floor.min(p.lo);
+            y_ceil = y_ceil.max(p.hi);
+        }
+        series.push(PctSeries {
+            label,
+            color,
+            points,
+        });
+    }
+    if series.is_empty() {
+        return Ok(());
+    }
+    let y_floor = (y_floor * 0.9).max(0.001);
+    let y_ceil = (y_ceil * 1.1).max(y_floor * 1.001);
+
+    let mut buf = vec![0u8; (WIDTH * HEIGHT * 3) as usize];
+    {
+        let root = BitMapBackend::with_buffer(&mut buf, (WIDTH, HEIGHT)).into_drawing_area();
+        root.fill(&WHITE)?;
+        let mut chart = ChartBuilder::on(&root)
+            .caption(
+                format!("{} @ {}w — latency by percentile", c.topo, c.workers),
+                ("sans-serif", 22),
+            )
+            .margin(14)
+            .x_label_area_size(44)
+            .y_label_area_size(56)
+            .build_cartesian_2d(0f64..100f64, (y_floor..y_ceil).log_scale())?;
+        chart
+            .configure_mesh()
+            .x_desc("percentile")
+            .y_desc("latency (µs, log)")
+            .draw()?;
+        for s in &series {
+            let color = s.color;
+            // Quantile curve through the dots — carries the legend entry.
+            chart
+                .draw_series(LineSeries::new(
+                    s.points.iter().map(|p| (p.pct, p.mid)),
+                    color,
+                ))?
+                .label(s.label)
+                .legend(move |(x, y)| {
+                    PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
+                });
+            // Vertical ±2.5%-band error bars.
+            chart.draw_series(
+                s.points
+                    .iter()
+                    .map(|p| PathElement::new(vec![(p.pct, p.lo), (p.pct, p.hi)], color)),
+            )?;
+            // Dots at the quantile value.
+            chart.draw_series(
+                s.points
+                    .iter()
+                    .map(|p| Circle::new((p.pct, p.mid), 3, color.filled())),
+            )?;
         }
         chart
             .configure_series_labels()
