@@ -329,7 +329,9 @@ where
             // its settlement chain still drains (ADR-0080 §2 — the same
             // bracket `route_mail`'s `Dropped` arm records), then drop it.
             if let Some(seed) = seed {
-                self.binding.mailer().record_finished(seed.mail_id, seed.root);
+                self.binding
+                    .mailer()
+                    .record_finished(seed.mail_id, seed.root);
             }
             drop(actor_guard);
             self.state.mark_idle();
