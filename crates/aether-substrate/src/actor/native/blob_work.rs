@@ -88,10 +88,11 @@
 //! EWMA); until then a heavy `<= 8` fan-out stays serial.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::env;
 use std::mem;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use rustc_hash::FxHashMap;
 
 use crate::actor::native::Envelope;
 use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
@@ -264,7 +265,7 @@ impl BlobWork {
     fn append_flush(
         &self,
         routed: Vec<Mail>,
-        index: &mut HashMap<MailboxId, usize>,
+        index: &mut FxHashMap<MailboxId, usize>,
     ) -> FlushOutcome {
         // Single pass: a recipient already in `index` (a prior flush, or one
         // staged earlier in *this* flush) pushes onto its existing group; a
@@ -413,7 +414,7 @@ pub struct BlobProducer {
     sink: WakeSink,
     /// The active blob + its producer-private recipient → group-index map.
     /// `None` until the first flush, and after a retired blob is dropped.
-    active: Option<(Arc<BlobWork>, HashMap<MailboxId, usize>)>,
+    active: Option<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
 }
 
 impl BlobProducer {
@@ -442,7 +443,7 @@ impl BlobProducer {
             if need_new {
                 let cap = group_cap_for(&pending);
                 let blob = BlobWork::empty(cap, Arc::clone(&self.mailer), self.sink.clone());
-                self.active = Some((blob, HashMap::new()));
+                self.active = Some((blob, FxHashMap::default()));
             }
 
             let (blob, index) = self.active.as_mut().expect("active set above");
