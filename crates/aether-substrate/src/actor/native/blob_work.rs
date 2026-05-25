@@ -391,27 +391,24 @@ impl BlobWork {
 
 impl Drainable for BlobWork {
     fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
-        // Claim and drain groups off the shared cursor until the cursor is
-        // exhausted (Idle — drop this copy of the Arc) or the per-cycle
-        // group budget is hit (Requeue — the pool re-injects the blob so
-        // the cursor keeps being shared). Late appends past this worker's
-        // exhaustion are handled by the producer's re-submit on the next
-        // flush.
-        let mut ran: u32 = 0;
-        loop {
-            if ran >= budget.max_mails {
-                return CycleResult::Requeue;
-            }
-            let Some(g) = self.lifecycle.claim() else {
-                return CycleResult::Idle;
-            };
+        // Drain to cursor exhaustion: a worker that picks up the blob runs
+        // it in full, claiming and dispatching every group it wins off the
+        // shared cursor until the cursor is drained. The parallelism is
+        // cooperative — recruitment puts N copies of this blob in flight, so
+        // N workers race the one cursor and split the groups between them —
+        // not a per-worker yield. A blob is a finite, one-shot fan-out, so
+        // (unlike an actor's ongoing inbox) it needs no fairness throttle;
+        // the per-recipient `budget` still bounds each recipient's own inbox
+        // drain inside `dispatch_group`. Late appends past the cursor are
+        // picked up by the producer's re-submit on the next flush.
+        while let Some(g) = self.lifecycle.claim() {
             let group = self.groups[g]
                 .get()
                 .expect("claimed index < len is published");
             self.dispatch_group(group, budget);
             self.lifecycle.complete();
-            ran += 1;
         }
+        CycleResult::Idle
     }
 
     fn label(&self) -> &'static str {
