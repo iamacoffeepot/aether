@@ -30,7 +30,7 @@ use crate::scheduler::SeizeHandle;
 use std::error;
 
 /// Deferred cell holding a `Pooled` actor's
-/// [`SeizeHandle`](crate::scheduler::SeizeHandle), carried on every
+/// [`SeizeHandle`], carried on every
 /// [`MailboxEntry::Inbox`] entry (ADR-0087 §4, iamacoffeepot/aether#1135).
 ///
 /// Registration (`register_inbox` / `try_register_inbox`) happens *before*
@@ -401,7 +401,7 @@ pub(crate) struct RouteLookup {
     pub(crate) kind_name: String,
     pub(crate) ref_schema: Option<SchemaType>,
     /// iamacoffeepot/aether#1135: the recipient's
-    /// [`SeizeHandle`](crate::scheduler::SeizeHandle), resolved under the
+    /// [`SeizeHandle`], resolved under the
     /// same read guard. `Some` only when the recipient is an `Inbox`
     /// entry whose deferred [`SeizeCell`] was populated (a `Pooled`
     /// actor's slot). `None` for closure / `Inline` / `Dropped` / unknown
@@ -836,7 +836,7 @@ impl Registry {
             .map(|m| m.entry.clone())
     }
 
-    /// Install a `Pooled` actor's [`SeizeHandle`](crate::scheduler::SeizeHandle)
+    /// Install a `Pooled` actor's [`SeizeHandle`]
     /// onto its `Inbox` entry's deferred [`SeizeCell`] so the blob
     /// demuxer can resolve recipient → slot and dispatch in place
     /// (ADR-0087 §4, iamacoffeepot/aether#1135). Called by the

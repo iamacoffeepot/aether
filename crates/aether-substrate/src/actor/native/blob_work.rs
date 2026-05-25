@@ -14,7 +14,7 @@
 //!
 //! - **free** recipient (won the `Idle → Running` *seize* CAS, ref-free
 //!   kind) → build the envelope and dispatch it **in place** on this
-//!   worker via [`crate::scheduler::Drainable::seize_and_run`] — no inbox
+//!   worker via [`Drainable::seize_and_run`] — no inbox
 //!   deposit, no `try_recv` repop, residence ≈ 0
 //!   (iamacoffeepot/aether#1135 removed the 3b deposit+collect+repop
 //!   round-trip).
@@ -48,7 +48,7 @@
 //! is today's [`Mailer::push`] → `route_mail`, so the ADR-0045 ref-walk,
 //! the `Inline` / `Dropped` / unknown-bubble-up arms, and that path's
 //! settlement/trace brackets are inherited unchanged. The **direct**
-//! arm runs the recipient's [`crate::scheduler::Drainable::seize_and_run`]
+//! arm runs the recipient's [`Drainable::seize_and_run`]
 //! → `DispatcherSlot::dispatch_one`, the *same* per-envelope wrapper a
 //! pooled `run_cycle` runs — `local::with_stamped`, `Received` /
 //! `Finished` (incl. the iamacoffeepot/aether#1134 `t_enqueue` /
@@ -325,14 +325,23 @@ mod tests {
         }
     }
 
-    /// Register a sink that forwards each delivered mail's first payload
-    /// byte onto `tx`, and return its mailbox id.
-    fn counting_sink(registry: &Registry, tx: mpsc::Sender<u8>) -> MailboxId {
+    /// Register an inbox under `name` that forwards each delivered mail's
+    /// first payload byte onto `tx`; returns the registered mailbox id.
+    fn register_byte_forwarding_inbox(
+        registry: &Registry,
+        name: &str,
+        tx: mpsc::Sender<u8>,
+    ) -> MailboxId {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: OwnedDispatch| {
             let _ = tx.send(d.payload.bytes()[0]);
         });
-        registry.register_inbox("sink", handler);
-        registry.lookup("sink").unwrap()
+        registry.register_inbox(name, handler)
+    }
+
+    /// Register a sink at `"sink"` that forwards each delivered mail's
+    /// first payload byte onto `tx`, and return its mailbox id.
+    fn counting_sink(registry: &Registry, tx: mpsc::Sender<u8>) -> MailboxId {
+        register_byte_forwarding_inbox(registry, "sink", tx)
     }
 
     fn owned_mails(recipient: MailboxId, n: u8) -> Vec<Mail> {
@@ -447,10 +456,7 @@ mod tests {
         mpsc::Receiver<u8>,
     ) {
         let (deposit_tx, deposit_rx) = mpsc::channel::<u8>();
-        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: OwnedDispatch| {
-            let _ = deposit_tx.send(d.payload.bytes()[0]);
-        });
-        let id = registry.register_inbox(name, handler);
+        let id = register_byte_forwarding_inbox(registry, name, deposit_tx);
 
         let (direct_tx, direct_rx) = mpsc::channel::<u8>();
         let fixture = Arc::new(SeizableSink {

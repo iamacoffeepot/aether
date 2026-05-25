@@ -45,7 +45,7 @@ use crate::actor::native::Envelope;
 /// The one envelope a [`Drainable::seize_and_run`] caller hands the
 /// just-seized slot to dispatch in place (ADR-0087 §4,
 /// iamacoffeepot/aether#1135). Alias for the actor-layer
-/// [`Envelope`](crate::actor::native::Envelope) the `BlobWork` demuxer
+/// [`Envelope`] the `BlobWork` demuxer
 /// builds from the blob's [`Mail`](crate::mail::Mail), with
 /// `t_enqueue ≈ now` / `enqueue_depth = 0` (residence ≈ 0 — the measured
 /// win).
