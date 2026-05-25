@@ -840,16 +840,28 @@ enum BridgeCardinality {
 struct BridgeOpts {
     cardinality: Option<BridgeCardinality>,
     feature: Option<String>,
+    /// The `one_per = "entity"` instance-cardinality declaration
+    /// (ADR-0088 §4 v2). Only meaningful with `instanced`: it rides into
+    /// the emitted `TemplateEntry` as `Cardinality::OnePer(entity)`,
+    /// making the reverse-lookup manifest self-describing ("one mailbox
+    /// per loaded component") instead of an opaque `Dynamic` family.
+    /// Absent on an instanced actor ⇒ `Cardinality::Unbounded`.
+    one_per: Option<String>,
 }
 
 /// Parse `#[bridge]`'s optional arguments. Recognised:
 /// - `singleton` (positional flag) — emit `impl Singleton for X`
 /// - `instanced` (positional flag) — emit `impl Instanced for X`
+/// - `one_per = "entity"` — instanced cardinality (ADR-0088 §4 v2);
+///   `instanced`-only
 /// - `feature = "name"` — gate the inner mod on the named feature
 ///
 /// Empty attr (`#[bridge]`) emits no cardinality marker; the author is
 /// expected to hand-roll one (test fixtures, future cases). Mixing
 /// `singleton` and `instanced` is rejected — a cap is one or the other.
+/// `one_per` on a non-instanced bridge is rejected (the entity-relationship
+/// only describes an instanced family); it is validated in `expand_bridge`
+/// where both flags are known, since attribute arg order is unspecified.
 fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
     let mut opts = BridgeOpts::default();
     if attr.is_empty() {
@@ -874,14 +886,21 @@ fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
             }
             opts.cardinality = Some(BridgeCardinality::Instanced);
             Ok(())
+        } else if meta.path.is_ident("one_per") {
+            let value = meta.value()?;
+            let lit: syn::LitStr = value.parse()?;
+            opts.one_per = Some(lit.value());
+            Ok(())
         } else if meta.path.is_ident("feature") {
             let value = meta.value()?;
             let lit: syn::LitStr = value.parse()?;
             opts.feature = Some(lit.value());
             Ok(())
         } else {
-            Err(meta
-                .error("#[bridge] only accepts `singleton`, `instanced`, or `feature = \"name\"`"))
+            Err(meta.error(
+                "#[bridge] only accepts `singleton`, `instanced`, \
+                 `one_per = \"entity\"`, or `feature = \"name\"`",
+            ))
         }
     });
     Parser::parse(parser, attr)?;
@@ -898,7 +917,20 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     let BridgeOpts {
         cardinality,
         feature,
+        one_per,
     } = opts;
+    // `one_per` only describes an instanced family's entity relationship.
+    // On a singleton (or a bare `#[bridge]`) it is meaningless — reject it
+    // rather than silently dropping it. Validated here (not in the parser)
+    // because attribute arg order is unspecified, so `cardinality` may not
+    // be known yet when `one_per` is seen.
+    if one_per.is_some() && !matches!(cardinality, Some(BridgeCardinality::Instanced)) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[bridge] `one_per` requires `instanced` — it declares the entity \
+             relationship of an instanced family (ADR-0088 §4 v2)",
+        ));
+    }
     let Some((brace, items)) = item_mod.content.take() else {
         return Err(syn::Error::new_spanned(
             &item_mod,
@@ -1116,10 +1148,19 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     // `TemplateEntry` — the family's shape is declared, individual
     // instances reverse via the runtime registry. (Typed instance
     // parameters are future work; for now the convention is a single
-    // `:<subname>` string hole.) Both submissions are gated by the same
-    // `native_cfg` as the rest of the native surface (the `inventory`
-    // crate doesn't link on wasm32, and a feature-gated cap's entry
-    // tracks the cap's availability).
+    // `:<subname>` string hole.) ADR-0088 §4 v2 adds the orthogonal
+    // `cardinality`: `one_per = "entity"` ⇒ `Cardinality::OnePer(entity)`
+    // (the relationship every instanced actor actually has — one per
+    // component / connection / …), absent ⇒ `Cardinality::Unbounded`.
+    // Both submissions are gated by the same `native_cfg` as the rest of
+    // the native surface (the `inventory` crate doesn't link on wasm32,
+    // and a feature-gated cap's entry tracks the cap's availability).
+    let instanced_cardinality = if let Some(entity) = one_per.as_deref() {
+        let entity = syn::LitStr::new(entity, proc_macro2::Span::call_site());
+        quote! { ::aether_data::name_inventory::Cardinality::OnePer(#entity) }
+    } else {
+        quote! { ::aether_data::name_inventory::Cardinality::Unbounded }
+    };
     let cardinality_marker = match cardinality {
         Some(BridgeCardinality::Singleton) => quote! {
             impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
@@ -1139,6 +1180,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
                     domain: ::aether_data::MAILBOX_DOMAIN,
                     template: concat!(#namespace_expr, ":{subname}"),
                     param: ::aether_data::name_inventory::ParamKind::Dynamic,
+                    cardinality: #instanced_cardinality,
                 }
             }
         },

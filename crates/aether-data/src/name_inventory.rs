@@ -17,9 +17,13 @@
 //!   [`TransformEntry`] (its `name` field), so a declared kind /
 //!   transform needs no second submission.
 //! - [`TemplateEntry`] — an instanced family (`{ domain, template,
-//!   param }`). The `template` is a pattern with one `{…}` hole
-//!   (`"aether-worker-{N}"`), and [`ParamKind`] says how the hole is
-//!   filled:
+//!   param, cardinality }`). The `template` is a pattern with one `{…}`
+//!   hole (`"aether-worker-{N}"`); two orthogonal axes describe it.
+//!   [`ParamKind`] is the **shape** axis — how the hole is filled and
+//!   whether the family is statically enumerable; [`Cardinality`] is the
+//!   **how-many** axis — manifest metadata that makes the family
+//!   self-describing (`OnePer("component")` rather than an opaque
+//!   `Dynamic`). The reverse-map builder reads only [`ParamKind`]:
 //!     - [`ParamKind::Bounded`] — a finite integer range, enumerated and
 //!       pre-hashed at boot (the common-case "embed the expected hashes"
 //!       path).
@@ -112,18 +116,58 @@ pub enum ParamKind {
     Dynamic,
 }
 
+/// *How many* instances a [`TemplateEntry`] family can have, and the
+/// relationship each instance bears to a live entity (ADR-0088 §4 v2).
+///
+/// This is the **cardinality** axis, orthogonal to [`ParamKind`] (which
+/// is the *shape* axis — the type of the `{…}` hole and whether the
+/// family is statically enumerable). `ParamKind` is what
+/// [`build_static_reverse_map`] reads to enumerate; `Cardinality` is pure
+/// manifest metadata, never consulted by the reverse-map builder. It
+/// makes the served manifest self-describing: a consumer reads "trampoline
+/// = one mailbox per loaded component" instead of an opaque `Dynamic`
+/// family. Both axes are stated explicitly on every template — the same
+/// shape may pair with different cardinalities (every instanced actor is
+/// `ParamKind::Dynamic`, but `aether.component.trampoline` is
+/// `OnePer("component")` while `aether-instanced-{full_name}` is
+/// `Unbounded`).
+#[derive(Clone, Copy)]
+pub enum Cardinality {
+    /// A compile-time-known finite count (`aether-worker-{N}` prehashes a
+    /// fixed ceiling). The integer is the family's static instance bound,
+    /// not necessarily the count live at any moment.
+    Bounded(u64),
+    /// One instance per live entity of the named kind — the relationship
+    /// that the four instanced actors actually have: not "N instances" but
+    /// "as many as there are components / connections / listeners /
+    /// engines". The string is a bare entity tag (`"component"`); typed
+    /// entity holes (reverse-chaining an embedded `EngineId`) are deferred
+    /// (ADR-0088 §4 v2 "deferred").
+    OnePer(&'static str),
+    /// Open-ended, runtime-minted, no fixed relationship — the family is
+    /// unbounded (`aether-instanced-{full_name}`). The old `ParamKind`
+    /// `Dynamic`-only semantics, now a cardinality statement in its own
+    /// right.
+    Unbounded,
+}
+
 /// A name template for an instanced family, collected at link time
 /// (ADR-0088 §4). The `template` carries one `{…}` hole; [`ParamKind`]
-/// says how it is filled. Owns nothing but `'static` data so it is
-/// const-constructible from `inventory::submit!`.
+/// says how it is filled (the *shape* axis) and [`Cardinality`] says how
+/// many instances exist (the *cardinality* axis). Owns nothing but
+/// `'static` data so it is const-constructible from `inventory::submit!`.
 pub struct TemplateEntry {
     /// Byte-domain prefix the instantiated names are hashed under
     /// (e.g. [`crate::THREAD_DOMAIN`] for thread-name families).
     pub domain: &'static [u8],
     /// Pattern with one `{…}` hole, e.g. `"aether-worker-{N}"`.
     pub template: &'static str,
-    /// How the hole is filled.
+    /// How the hole is filled — the shape axis. Drives
+    /// [`build_static_reverse_map`].
     pub param: ParamKind,
+    /// How many instances the family can have — the cardinality axis.
+    /// Manifest metadata only; not read by the reverse-map builder.
+    pub cardinality: Cardinality,
 }
 
 inventory::collect!(TemplateEntry);
@@ -278,6 +322,7 @@ mod tests {
             domain: THREAD_DOMAIN,
             template: "aether-test-worker-{N}",
             param: ParamKind::Bounded { lo: 0, hi: 3 },
+            cardinality: Cardinality::Bounded(4),
         }
     }
     inventory::submit! {
@@ -285,6 +330,7 @@ mod tests {
             domain: THREAD_DOMAIN,
             template: "aether-test-root-{NAMESPACE}",
             param: ParamKind::Declared { domain: MAILBOX_DOMAIN },
+            cardinality: Cardinality::OnePer("mailbox"),
         }
     }
 

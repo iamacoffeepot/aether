@@ -39,7 +39,7 @@ use aether_kinds::{SessionClose, SessionDataReady, SessionWrite};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_native::TcpSessionConfig;
 
-#[aether_actor::bridge(instanced)]
+#[aether_actor::bridge(instanced, one_per = "connection")]
 mod session_native {
     use super::{SessionClose, SessionDataReady, SessionWrite};
     use aether_actor::actor;

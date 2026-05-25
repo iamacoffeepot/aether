@@ -72,7 +72,7 @@ use aether_kinds::{DropComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::WasmTrampolineConfig;
 
-#[aether_actor::bridge(instanced)]
+#[aether_actor::bridge(instanced, one_per = "component")]
 mod native {
     use std::sync::Arc;
 

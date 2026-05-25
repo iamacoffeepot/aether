@@ -34,9 +34,11 @@ mod native {
     use super::{Manifest, ManifestResult, Resolve, ResolveResult};
 
     use aether_actor::{MailCtx, actor};
-    use aether_data::name_inventory::{ParamKind, name_entries, template_entries};
+    use aether_data::name_inventory::{Cardinality, ParamKind, name_entries, template_entries};
     use aether_data::tagged_id;
-    use aether_kinds::{NameEntryWire, ParamKindWire, ResolvedName, TemplateEntryWire};
+    use aether_kinds::{
+        CardinalityWire, NameEntryWire, ParamKindWire, ResolvedName, TemplateEntryWire,
+    };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::runtime::thread_name::resolve_runtime;
@@ -58,6 +60,18 @@ mod native {
                 domain: domain.to_vec(),
             },
             ParamKind::Dynamic => ParamKindWire::Dynamic,
+        }
+    }
+
+    /// Project one link-time `Cardinality` onto its wire mirror (ADR-0088
+    /// §4 v2) — the orthogonal how-many axis the client surfaces verbatim.
+    fn cardinality_wire(cardinality: &Cardinality) -> CardinalityWire {
+        match *cardinality {
+            Cardinality::Bounded(count) => CardinalityWire::Bounded { count },
+            Cardinality::OnePer(entity) => CardinalityWire::OnePer {
+                entity: entity.into(),
+            },
+            Cardinality::Unbounded => CardinalityWire::Unbounded,
         }
     }
 
@@ -100,6 +114,7 @@ mod native {
                     domain: entry.domain.to_vec(),
                     template: entry.template.into(),
                     param: param_kind_wire(&entry.param),
+                    cardinality: cardinality_wire(&entry.cardinality),
                 })
                 .collect();
             ctx.reply(&ManifestResult { names, templates });
@@ -233,10 +248,14 @@ mod native {
                 "manifest should carry the aether.fs chassis mailbox NameEntry; names: {:?}",
                 result.names.iter().map(|n| &n.name).collect::<Vec<_>>(),
             );
+            // The worker template is `Bounded` on both axes: a `Bounded`
+            // `param` (enumerable integer hole) and a `Bounded` cardinality
+            // (the prehashed instance ceiling) — ADR-0088 §4 v2.
             assert!(
                 result.templates.iter().any(|t| {
                     t.template == "aether-worker-{N}"
                         && matches!(t.param, ParamKindWire::Bounded { .. })
+                        && matches!(t.cardinality, CardinalityWire::Bounded { .. })
                 }),
                 "manifest should carry the aether-worker-{{N}} Bounded template; templates: {:?}",
                 result
@@ -244,6 +263,40 @@ mod native {
                     .iter()
                     .map(|t| &t.template)
                     .collect::<Vec<_>>(),
+            );
+        }
+
+        /// ADR-0088 §4 v2: an instanced actor declaring `one_per` surfaces
+        /// a `OnePer(<entity>)` cardinality in the manifest, so a consumer
+        /// reads "trampoline = one mailbox per loaded component" instead of
+        /// an opaque `Dynamic` family. `WasmTrampoline` is the canonical
+        /// case (`#[bridge(instanced, one_per = "component")]`); touching
+        /// its `NAMESPACE` forces the macro-emitted `TemplateEntry` into
+        /// this test binary.
+        #[test]
+        fn manifest_surfaces_one_per_cardinality_for_trampoline() {
+            use crate::trampoline::WasmTrampoline;
+            use aether_actor::Actor;
+            assert_eq!(WasmTrampoline::NAMESPACE, "aether.component.trampoline");
+
+            let mut fix = fixture();
+            let mut ctx = session_ctx(&fix.transport);
+            fix.cap.on_manifest(&mut ctx, Manifest {});
+            drop(ctx);
+
+            let result = decode_reply::<ManifestResult>(&fix.rx);
+            let trampoline = result
+                .templates
+                .iter()
+                .find(|t| t.template == "aether.component.trampoline:{subname}")
+                .expect("manifest should carry the trampoline instanced-family template");
+            // Shape axis unchanged (opaque runtime string); cardinality
+            // axis now names the entity each instance tracks.
+            assert!(matches!(trampoline.param, ParamKindWire::Dynamic));
+            assert!(
+                matches!(&trampoline.cardinality, CardinalityWire::OnePer { entity } if entity == "component"),
+                "trampoline cardinality should be OnePer(\"component\"); got {:?}",
+                trampoline.cardinality,
             );
         }
 

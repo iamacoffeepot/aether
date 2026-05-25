@@ -45,7 +45,7 @@ use aether_kinds::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
 #[cfg(not(target_arch = "wasm32"))]
 pub use proxy_native::EngineProxyConfig;
 
-#[aether_actor::bridge(instanced)]
+#[aether_actor::bridge(instanced, one_per = "engine")]
 mod proxy_native {
     use super::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
     use crate::rpc::{
