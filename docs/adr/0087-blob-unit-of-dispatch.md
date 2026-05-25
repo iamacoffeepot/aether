@@ -90,3 +90,23 @@ A handler dispatched in place borrows `&[u8]` into a producer's ring. This is so
 - **Per-mail lock instead of per-blob.** Finer-grained reclaim, but one atomic per mail — rejected for the one-sync-per-blob axiom (with a batched decrement covering the all-hits case).
 - **Explicit cheap/heavy cost prediction for placement.** Rejected; lazy work-stealing decides placement implicitly and never mispredicts (it only "spills" via a steal when a worker is genuinely idle).
 - **Side-table refcount vs inline atomic.** Left as an open implementation fork (simpler `Pod` cast vs one extra indirection), not decided here.
+
+## Amendment — 2026-05-24: ordering spine + in-place demux phasing
+
+Implementation experience (#1134 hop decomposition, #1135) refined two points in §3/§4.
+
+### The mail-ordering spine
+
+The base ordering invariant the dispatch model guarantees:
+
+> **Same recipient + same sender context → handled in declaration order (per-recipient FIFO). Different recipients → no ordering guarantee; each send is async, like a server call.**
+
+Strict cross-recipient execution order is explicitly *not* a contract. Enforcing it is head-of-line blocking — one slow or blocked recipient would stall every later one in a handler's fan-out and re-couple independent actors, a starvation hazard. Cross-recipient effect sequencing is causal (B triggered by A's completion / A mails B), never inferred from send order. The spine is the minimum that makes local reasoning sound — a handler's repeated sends to one actor arrive in order — without the global coupling. It is the foundation both the in-place demux (§4) and the cooperative multi-worker demux (#1137) rest on: per-recipient FIFO is preserved by one-worker-per-recipient; cross-recipient concurrency is sound precisely because the spine does not order it.
+
+### §4 is in-place dispatch; the shipped 3b path was a shortcut
+
+§4 specifies that a free recipient is dispatched **in place** ("claim the token and dispatch in place"). The shipped Phase 3b demux instead deposited each mail through `route_mail`, collected the woken slot, and re-`try_recv`'d it — a deposit→repop round-trip #1134 measured as the residence half of the fan-out hop. #1135 realises §4 as written: the demux **seizes** a free recipient (`SlotState` `Idle→Running`) and runs its handler in place via `DispatcherSlot::dispatch_one`, depositing only when the seize loses (busy). The deposit-collect machinery (`run_demux` / `try_collect_demux`) retires.
+
+### Phasing: single-worker in-place first, cooperative multi-worker deferred
+
+§3 frames a blob as stolen whole by one owner. That holds for the single-worker in-place demux #1135 ships — order-safe under the spine (send-order walk, one worker). The **cooperative multi-worker** variant — several workers draining one blob via a shared cursor (#1137) — is a later phase that supersedes §3's one-owner framing. It is sound under the spine (cross-recipient async) but adds concurrency machinery (packed lifecycle word, per-group closeable-stack merge handshake, recruitment) and is gated on whether #1135's in-place dispatch still leaves serialization residence on wide/heavy fan-out.
