@@ -2301,8 +2301,12 @@ mod control_plane {
     /// `ContextLengthExceeded` → trim the prompt, `Unauthorized` →
     /// config issue, `ContentPolicyRefused` → surface to the user,
     /// `CliNotFound` → the `claude` binary isn't on PATH,
-    /// `UnknownModel` → typo / unsupported id. `AdapterError` is the
-    /// catchall preserving backend-specific detail as free-form text.
+    /// `UnknownModel` → typo / unsupported id,
+    /// `ParamNotSupported` → the request set a knob the backend has no
+    /// way to honor (e.g. `max_tokens` / `temperature` on the CLI path,
+    /// which the `claude` binary exposes no flag for — reject rather than
+    /// silently drop). `AdapterError` is the catchall preserving
+    /// backend-specific detail as free-form text.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum AnthropicError {
         Overloaded,
@@ -2318,6 +2322,10 @@ mod control_plane {
         UnknownModel {
             model: String,
             supported: Vec<String>,
+        },
+        ParamNotSupported {
+            param: String,
+            reason: String,
         },
         AdapterError(String),
     }
