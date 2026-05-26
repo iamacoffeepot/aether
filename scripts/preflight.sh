@@ -22,6 +22,12 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# iamacoffeepot/aether#1156: pin the sha the checks actually run against.
+# `stamp_pass` stamps *this* value and refuses to write if HEAD has moved
+# since, so a rebase / amend / concurrent op / worktree churn mid-run can't
+# leave a stamp attesting a sha the checks never validated.
+HEAD_AT_START="$(git rev-parse HEAD)"
+
 force=0
 explicit=0
 explicit_files=()
@@ -51,8 +57,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 stamp_pass() {
+    local now
+    now="$(git rev-parse HEAD)"
+    if [[ "$now" != "$HEAD_AT_START" ]]; then
+        echo "[preflight] HEAD moved during the run ($HEAD_AT_START -> $now) — re-run pre-flight." >&2
+        exit 1
+    fi
     mkdir -p "$(git rev-parse --git-dir)"
-    echo "$(git rev-parse HEAD) $(date -u +%s)" \
+    echo "$HEAD_AT_START $(date -u +%s)" \
         > "$(git rev-parse --git-dir)/aether-preflight-passed"
 }
 
