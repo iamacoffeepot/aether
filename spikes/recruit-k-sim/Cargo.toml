@@ -1,0 +1,15 @@
+# Standalone Cargo workspace so the parent aether workspace doesn't absorb it.
+[workspace]
+
+[package]
+name = "recruit-k-sim"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "recruit-k-sim"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
