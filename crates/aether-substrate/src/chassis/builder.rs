@@ -42,6 +42,7 @@ use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
+use crate::scheduler::log_handoff_calibration;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Actor;
 #[cfg(test)]
@@ -1107,6 +1108,14 @@ fn boot_passives(
         ..PoolConfig::default()
     });
     let pool = Pool::start(pool_config, Arc::clone(aborter));
+
+    // iamacoffeepot/aether#1182: calibrate this box's cross-worker handoff
+    // cost once at boot and log the keep-local budget the adaptive valve
+    // *would* pick (`k × cost`) next to the current fixed default. Dark —
+    // measurement only, drives no scheduling decision yet (the wiring is a
+    // follow-up); the calibrated cost is cached for the future valve and
+    // iamacoffeepot/aether#1127's recruiter.
+    log_handoff_calibration();
 
     // ADR-0086 Phase 3c: the central trace queue + drainer retired. The
     // `Mailer`'s per-chassis `TraceHandle` records trace events directly
