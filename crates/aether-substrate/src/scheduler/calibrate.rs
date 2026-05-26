@@ -31,20 +31,20 @@
 //!    pins the estimate to a fixed value and freezes live refinement
 //!    (deterministic tests / a known-good number on a noisy box).
 //!
-//! **This stage is dark.** [`handoff_cost`] drives no scheduling decision
-//! yet — [`log_handoff_calibration`] logs the calibrated cost next to the
-//! current fixed budget and the *effective multiplier* the fixed budget
-//! implies on this box (`current_budget / handoff_cost`), so the box-
-//! relative number can be validated across machines before it changes
-//! hot-path behavior. If that multiplier clusters across boxes it is the
-//! `k` the follow-up wires as `budget = k × handoff_cost`; if it scatters,
-//! `k × cost` is the wrong model — which is exactly what this measures. (A
-//! single `k` would just bake in the box the default was tuned on: 12µs is
-//! `≈ 3 ×` a 4.3µs handoff but `≈ 5.5 ×` a 2.2µs one, so the multiplier is
-//! a measurement, not a constant.) The same calibrated cost is the "is
-//! parallelism worth the handoff" reference iamacoffeepot/aether#1127's
-//! cost-aware recruiter needs, so it is measured once here and exposed for
-//! both consumers.
+//! [`handoff_cost`] now **drives the keep-local time valve**
+//! (iamacoffeepot/aether#1182): [`super::worker_deque::time_budget`] is a
+//! small multiple of it (`BUDGET_HANDOFF_MULTIPLIER`, clamped) instead of
+//! the prior fixed 12µs, so the valve out-amortises the *measured*
+//! per-box handoff rather than a one-box constant. That multiple was
+//! chosen from the box-relative `current_budget / handoff_cost` shadow the
+//! earlier dark stages logged: 12µs was `≈ 6 ×` this box's ~2µs handoff
+//! (not the `≈ 3 ×` a historical 4.3µs implied), so a single hardcoded `k`
+//! would have baked in whichever box it was tuned on — wiring it to the
+//! measurement is what makes it portable. [`log_handoff_calibration`]
+//! still logs the realized budget at boot for cross-box validation. The
+//! same calibrated cost is the "is parallelism worth the handoff"
+//! reference iamacoffeepot/aether#1127's cost-aware recruiter needs, so it
+//! is measured once here and read by both consumers.
 
 use std::env;
 use std::sync::Arc;
@@ -210,33 +210,31 @@ fn parse_cost_override(raw: Option<String>) -> Option<u64> {
     raw.and_then(|v| v.parse::<u64>().ok()).filter(|&n| n >= 1)
 }
 
-/// Log the calibrated handoff cost next to the current fixed keep-local
-/// budget and the *effective multiplier* the fixed budget implies on this
-/// box (`current_budget / handoff_cost`) — a shadow comparison so the
-/// box-relative number can be read out of `actor_logs` on any box
-/// (especially the CI VM) before it is wired to drive the valve. The
-/// multiplier is the validation signal: clustering across boxes means
-/// `budget = k × handoff_cost` is the right model and names `k`; scatter
-/// means it isn't. Called once at chassis boot; measures nothing beyond
-/// the cached [`handoff_cost`].
+/// Log the calibrated handoff cost and the keep-local time budget now
+/// derived from it ([`super::worker_deque::time_budget`]), plus their ratio
+/// — the *realized* multiplier, which equals `BUDGET_HANDOFF_MULTIPLIER`
+/// unless a clamp rail or an `AETHER_LOCAL_TIME_BUDGET_US` override bound
+/// it. The ratio is the cross-box validation signal: read it out of
+/// `actor_logs` on any box (especially the CI VM) to confirm the budget
+/// landed where intended. Called once at chassis boot.
 pub fn log_handoff_calibration() {
     let cost_ns = u64::try_from(handoff_cost().as_nanos()).unwrap_or(u64::MAX);
-    let current_budget_ns =
+    let budget_ns =
         u64::try_from(super::worker_deque::time_budget().as_nanos()).unwrap_or(u64::MAX);
-    // How many handoffs the current fixed budget spends before spilling on
-    // this box. Derived, never asserted — the cross-box clustering of this
-    // ratio is what tells the follow-up whether a single `k` exists.
+    // Realized handoffs-per-budget on this box: `BUDGET_HANDOFF_MULTIPLIER`
+    // in the common case, or off it when a rail / env override bound the
+    // budget — a one-glance check that the wiring landed as intended.
     #[allow(
         clippy::cast_precision_loss,
         reason = "nanosecond counts are well within f64's exact-integer range; the ratio is a diagnostic, not load-bearing"
     )]
-    let effective_multiplier = current_budget_ns as f64 / cost_ns as f64;
+    let realized_multiplier = budget_ns as f64 / cost_ns as f64;
     tracing::info!(
         target: "aether_substrate::scheduler",
         handoff_cost_ns = cost_ns,
-        current_budget_ns,
-        effective_multiplier,
-        "calibrated cross-worker handoff cost (iamacoffeepot/aether#1182, shadow: not wired to the keep-local valve)",
+        budget_ns,
+        realized_multiplier,
+        "keep-local time budget derived from the measured cross-worker handoff cost (iamacoffeepot/aether#1182)",
     );
 }
 
