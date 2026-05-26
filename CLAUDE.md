@@ -26,6 +26,7 @@ The chassis layer consolidated in May 2026 (ADR-0073). All four chassis live in 
 - **Planned work** (spikes, features, open investigations) lives in GitHub Issues. Referenced by the PR that closes them.
 - **Load-bearing architectural decisions** are recorded as ADRs in `docs/adr/NNNN-title.md`. Use `docs/adr/TEMPLATE.md` when starting a new one. Number sequentially. An ADR is reviewed via a PR like any other change.
 - **Branches**: `type/short-slug` (e.g. `chore/ci-bootstrap`, `feat/mail-runtime`, `docs/adr-workflow`).
+- **Worktrees** live under `./.claude/worktrees/` (gitignored), never as siblings of the repo. `git worktree add .claude/worktrees/<slug>` — the path is already excluded so the worktree never shows up in `git status`.
 - **Commits and PR titles** follow Conventional Commits (`type(scope): subject`). Enforced in CI against PR titles. Main uses squash-merge with PR title as the commit subject, so PR title quality matters.
 - **Merging**: `main` is protected (PR required, all CI checks required, linear history, no force-push). Claude does not push to `main`, does not force-push reviewed branches, does not self-merge, and asks before destructive operations.
 - **PRs** should be small and focused — one concept per PR.
