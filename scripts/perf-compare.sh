@@ -29,6 +29,11 @@
 #   AETHER_PERF_WORKERS  pool sizes (default "max,2")
 #   AETHER_PERF_FRAMES   frames per cell (default 200)
 #   AETHER_PERF_TOPOS    "ci" | "full" (default "ci")
+#   AETHER_PERF_BACKLOG  per-tick Ping burst for the saturate pass
+#                        (default 512; iamacoffeepot/aether#1202). Set
+#                        per pass internally — AETHER_PERF_DRIVE is NOT a
+#                        caller knob here; the script always runs both a
+#                        latency and a saturate pass and merges them.
 #   PERF_BASE_CACHE      file path for the cross-run base-binary cache
 #                        (set by the workflow; unset locally = always build)
 #   PERF_BASE_ENV        space-separated KEY=VALUE list applied as env to
@@ -149,17 +154,59 @@ EOF
     fi
 fi
 
-# Interleave K trials per side on this runner; render JSON + markdown.
-echo "[perf-compare] running $K interleaved trials per side…"
-"$compare_bin" \
+# A single comparator run is single-mode: AETHER_PERF_DRIVE applies to
+# *both* the base and candidate trial subprocesses, so one run yields
+# either the latency section or the throughput section, never both
+# (iamacoffeepot/aether#1202). Run the comparator twice — a latency pass
+# and a saturate pass — then concatenate the two rendered bodies into one
+# perf-report.md, stripping the second body's duplicate STICKY_MARKER (its
+# first line) so the workflow's marker-based upsert still matches a single
+# sticky comment. Each metric is then measured in its proper regime and
+# both land in the same comment. The release builds above are shared
+# across both passes; only the K interleaved trials repeat.
+sticky_marker='<!-- aether-perf-report -->'
+backlog="${AETHER_PERF_BACKLOG:-512}"
+
+# Pass 1: latency (today's behaviour). Writes the JSON report + the
+# primary markdown body (the STICKY_MARKER rides on its first line).
+echo "[perf-compare] pass 1/2: latency — $K interleaved trials per side…"
+AETHER_PERF_DRIVE=latency "$compare_bin" \
     --base "$base_trial" \
     --cand "$cand_trial" \
     ${base_env_args[@]+"${base_env_args[@]}"} \
     ${cand_env_args[@]+"${cand_env_args[@]}"} \
     -k "$K" \
     --out "$json_out" \
-    --title "PR vs merge-base $base_short" \
+    --title "latency — PR vs merge-base $base_short" \
     --subtitle "baseline $base_short · $K trials/config, interleaved on one runner$pin_note" \
     > "$md_out"
+
+# Pass 2: throughput under saturation. Drive both subprocesses in
+# saturate mode with the same backlog. Append its body to perf-report.md
+# with the leading STICKY_MARKER line dropped (tail -n +2), keeping a
+# single marker in the merged comment.
+echo "[perf-compare] pass 2/2: saturate (backlog=$backlog) — $K interleaved trials per side…"
+sat_md="$work/perf-report-saturate.md"
+AETHER_PERF_DRIVE=saturate AETHER_PERF_BACKLOG="$backlog" "$compare_bin" \
+    --base "$base_trial" \
+    --cand "$cand_trial" \
+    ${base_env_args[@]+"${base_env_args[@]}"} \
+    ${cand_env_args[@]+"${cand_env_args[@]}"} \
+    -k "$K" \
+    --title "throughput (saturation, backlog $backlog) — PR vs merge-base $base_short" \
+    --subtitle "baseline $base_short · $K trials/config, interleaved on one runner$pin_note" \
+    > "$sat_md"
+
+{
+    printf '\n'
+    tail -n +2 "$sat_md"
+} >> "$md_out"
+
+# Belt-and-braces: the merged body must carry exactly one sticky marker so
+# the workflow's upsert edits a single comment in place.
+marker_count="$(grep -cF "$sticky_marker" "$md_out" || true)"
+if [ "$marker_count" -ne 1 ]; then
+    echo "[perf-compare] WARNING: merged perf-report.md has $marker_count sticky markers (expected 1)" >&2
+fi
 
 echo "[perf-compare] wrote $json_out and $md_out"

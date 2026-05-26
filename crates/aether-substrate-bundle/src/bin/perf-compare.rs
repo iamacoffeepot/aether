@@ -305,21 +305,27 @@ fn main() -> ExitCode {
 }
 
 /// Sum improved / stable / regressed across the compared sections of a
-/// report (uncompared sections contribute nothing).
+/// report — latency and throughput alike (iamacoffeepot/aether#1202).
+/// Uncompared sections contribute nothing.
 fn roll_up(report: &ComparisonReport) -> (usize, usize, usize) {
-    report.sections.iter().fold((0, 0, 0), |(i, s, r), sec| {
-        if let SectionReport::Compared {
-            improved,
-            stable,
-            regressed,
-            ..
-        } = sec
-        {
-            (i + improved, s + stable, r + regressed)
-        } else {
-            (i, s, r)
-        }
-    })
+    report
+        .sections
+        .iter()
+        .fold((0, 0, 0), |(i, s, r), sec| match sec {
+            SectionReport::Compared {
+                improved,
+                stable,
+                regressed,
+                ..
+            }
+            | SectionReport::ThroughputCompared {
+                improved,
+                stable,
+                regressed,
+                ..
+            } => (i + improved, s + stable, r + regressed),
+            SectionReport::Uncompared { .. } => (i, s, r),
+        })
 }
 
 #[cfg(test)]

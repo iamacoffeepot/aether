@@ -144,6 +144,42 @@ impl LatencySection {
     pub const VERSION: &str = "v1";
 }
 
+/// One cell's measured throughput in a single trial
+/// (iamacoffeepot/aether#1202): completed mails/sec for a (worker ×
+/// topology) cell under saturation.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ThroughputCell {
+    pub workers: usize,
+    pub topo: String,
+    pub mails_per_sec: f64,
+}
+
+impl ThroughputCell {
+    fn key(&self) -> ThroughputKey {
+        ThroughputKey {
+            workers: self.workers,
+            topo: self.topo.clone(),
+        }
+    }
+}
+
+/// The throughput section (iamacoffeepot/aether#1202): one
+/// completed-mails/sec rate per (worker × topology) cell, emitted only by
+/// a `Drive::Saturate` trial. Its own `version` evolves independently of
+/// the latency section's, so adding it never blinds the latency verdict.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ThroughputSection {
+    pub cells: Vec<ThroughputCell>,
+}
+
+impl ThroughputSection {
+    /// The section name the comparator dispatches on. Mirrors the example
+    /// new section iamacoffeepot/aether#1206's fixtures already named.
+    pub const NAME: &str = "throughput";
+    /// The section version. Bumped when the throughput cell shape changes.
+    pub const VERSION: &str = "v1";
+}
+
 /// One fresh-process sweep run. The `perf-trial` bin emits this as JSON
 /// on stdout; the `perf-compare` bin collects K of each side.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -226,6 +262,48 @@ impl TrialReport {
         }
     }
 
+    /// Build a *saturation* trial report from a sweep's [`CellResult`]s
+    /// (iamacoffeepot/aether#1202). A saturate run reports **throughput
+    /// only** — per-hop latency under saturation is contended and
+    /// high-variance, so pairing it would compare noise. Each cell with a
+    /// measured `throughput_mps` (a truncated cell carries `None` and is
+    /// skipped) contributes one [`ThroughputCell`]; the rows ride in a
+    /// single [`ThroughputSection`].
+    ///
+    /// [`CellResult`]: super::harness::CellResult
+    #[must_use]
+    pub fn from_throughput_cells(
+        cells: &[super::harness::CellResult],
+        frames: u32,
+        git_sha: Option<String>,
+    ) -> Self {
+        let rows: Vec<ThroughputCell> = cells
+            .iter()
+            .filter_map(|c| {
+                c.throughput_mps.map(|mps| ThroughputCell {
+                    workers: c.workers,
+                    topo: c.topo.clone(),
+                    mails_per_sec: mps,
+                })
+            })
+            .collect();
+        let throughput = ThroughputSection { cells: rows };
+        let body = serde_json::to_value(&throughput).unwrap_or(serde_json::Value::Null);
+        Self {
+            schema: TRIAL_SCHEMA.to_owned(),
+            git_sha,
+            // Saturation isn't paced — the backlog drains flat-out per
+            // frame — so `pace_hz` is `None`.
+            pace_hz: None,
+            frames,
+            sections: vec![RawSection {
+                name: ThroughputSection::NAME.to_owned(),
+                version: ThroughputSection::VERSION.to_owned(),
+                body,
+            }],
+        }
+    }
+
     /// The section with the given name, if present.
     fn section(&self, name: &str) -> Option<&RawSection> {
         self.sections.iter().find(|s| s.name == name)
@@ -276,6 +354,25 @@ struct CellKey {
     metric: Metric,
 }
 
+/// Pairing key for a throughput cell (iamacoffeepot/aether#1202) — a
+/// (worker × topology) cell, no metric/percentile axis since throughput
+/// is a single rate per cell.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ThroughputKey {
+    workers: usize,
+    topo: String,
+}
+
+/// Which direction of paired delta is the win (iamacoffeepot/aether#1202).
+/// Latency is lower-is-better (a negative delta improves); throughput is
+/// higher-is-better (a positive delta improves). The only verdict knob
+/// that differs between the two sections.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    LowerIsBetter,
+    HigherIsBetter,
+}
+
 /// Find the cell matching `key` in one trial's latency cells (a free fn,
 /// not a closure, so the borrow of the returned `&CellJson` ties to the
 /// slice's lifetime).
@@ -312,6 +409,25 @@ pub struct CellComparison {
     pub verdict: Verdict,
 }
 
+/// One compared throughput cell (iamacoffeepot/aether#1202): the
+/// base/candidate median rate (mails/sec) with its across-trial IQR band,
+/// plus the higher-is-better paired-delta verdict. The throughput analog
+/// of [`CellComparison`] — no metric/percentile axis, since throughput is
+/// a single rate per (worker × topology) cell.
+#[derive(Serialize, Clone, Debug)]
+pub struct ThroughputComparison {
+    pub workers: usize,
+    pub topo: String,
+    /// Mails/sec.
+    pub base_median: f64,
+    pub base_iqr: f64,
+    pub cand_median: f64,
+    pub cand_iqr: f64,
+    pub delta_median: f64,
+    pub delta_pct: f64,
+    pub verdict: Verdict,
+}
+
 /// Why a section couldn't be paired into a verdict
 /// (iamacoffeepot/aether#1206). Picked per case so the markdown note and
 /// the JSON report both spell out the reason rather than a bare "skipped".
@@ -332,8 +448,12 @@ pub enum UncomparedReason {
     UnknownName,
 }
 
-/// One section's outcome in a [`ComparisonReport`]: either a typed
-/// verdict grid (`Compared`) or a reasoned skip (`Uncompared`).
+/// One section's outcome in a [`ComparisonReport`]: a typed verdict grid
+/// (`Compared` for latency, `ThroughputCompared` for the saturation rate,
+/// iamacoffeepot/aether#1202) or a reasoned skip (`Uncompared`). The two
+/// compared variants carry the same headline counts so the rollup sums
+/// over both, but distinct cell payloads so each renders with its own
+/// table.
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SectionReport {
@@ -343,6 +463,13 @@ pub enum SectionReport {
         stable: usize,
         regressed: usize,
         cells: Vec<CellComparison>,
+    },
+    ThroughputCompared {
+        name: String,
+        improved: usize,
+        stable: usize,
+        regressed: usize,
+        cells: Vec<ThroughputComparison>,
     },
     Uncompared {
         name: String,
@@ -480,6 +607,11 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
                 let cand_cells = decode_latency_cells(&cand[..k]);
                 sections.push(compare_latency(name, &base_cells, &cand_cells, k, cfg));
             }
+            ThroughputSection::NAME => {
+                let base_cells = decode_throughput_cells(&base[..k]);
+                let cand_cells = decode_throughput_cells(&cand[..k]);
+                sections.push(compare_throughput(name, &base_cells, &cand_cells, k, cfg));
+            }
             _ => sections.push(SectionReport::Uncompared {
                 name: name.clone(),
                 reason: UncomparedReason::UnknownName,
@@ -558,7 +690,14 @@ fn compare_latency(
             let delta_median = median_sorted(&delta_sorted);
             let delta_iqr = iqr_sorted(&delta_sorted);
 
-            let verdict = classify(&deltas, delta_median, delta_iqr, base_median, cfg);
+            let verdict = classify(
+                &deltas,
+                delta_median,
+                delta_iqr,
+                base_median,
+                Direction::LowerIsBetter,
+                cfg,
+            );
             let delta_pct = if base_median > 0.0 {
                 delta_median / base_median * 100.0
             } else {
@@ -599,12 +738,133 @@ fn compare_latency(
     }
 }
 
+/// Per-trial throughput cells: decode each trial's `throughput` section
+/// body, dropping any trial whose body doesn't decode (it then can't
+/// satisfy the present-in-every-trial gate below, exactly as a missing
+/// cell does for latency).
+fn decode_throughput_cells(trials: &[TrialReport]) -> Vec<Vec<ThroughputCell>> {
+    trials
+        .iter()
+        .map(|t| {
+            t.section(ThroughputSection::NAME)
+                .and_then(|s| serde_json::from_value::<ThroughputSection>(s.body.clone()).ok())
+                .map(|tp| tp.cells)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Find the throughput cell matching `key` in one trial's cells (a free
+/// fn so the returned borrow ties to the slice's lifetime, mirroring
+/// [`find_cell`]).
+fn find_throughput_cell<'a>(
+    cells: &'a [ThroughputCell],
+    key: &ThroughputKey,
+) -> Option<&'a ThroughputCell> {
+    cells
+        .iter()
+        .find(|c| c.workers == key.workers && c.topo == key.topo)
+}
+
+/// The throughput section's per-cell paired-delta compare
+/// (iamacoffeepot/aether#1202) — mirrors [`compare_latency`], but keyed by
+/// (workers, topo) only (throughput is a single rate per cell, no
+/// metric/percentile axis) and classified higher-is-better. A cell missing
+/// from any trial of either side is dropped, exactly as in the latency
+/// compare.
+#[allow(clippy::cast_precision_loss)]
+fn compare_throughput(
+    name: &str,
+    base_cells: &[Vec<ThroughputCell>],
+    cand_cells: &[Vec<ThroughputCell>],
+    k: usize,
+    cfg: CompareConfig,
+) -> SectionReport {
+    let mut cells: Vec<ThroughputComparison> = Vec::new();
+
+    let keys: Vec<ThroughputKey> = base_cells
+        .first()
+        .map(|c| c.iter().map(ThroughputCell::key).collect())
+        .unwrap_or_default();
+
+    for key in &keys {
+        let base_hits: Vec<&ThroughputCell> = base_cells[..k.min(base_cells.len())]
+            .iter()
+            .filter_map(|c| find_throughput_cell(c, key))
+            .collect();
+        let cand_hits: Vec<&ThroughputCell> = cand_cells[..k.min(cand_cells.len())]
+            .iter()
+            .filter_map(|c| find_throughput_cell(c, key))
+            .collect();
+        if base_hits.len() != k || cand_hits.len() != k || k == 0 {
+            continue; // cell not present in every trial — skip
+        }
+
+        let base_vals: Vec<f64> = base_hits.iter().map(|c| c.mails_per_sec).collect();
+        let cand_vals: Vec<f64> = cand_hits.iter().map(|c| c.mails_per_sec).collect();
+        let deltas: Vec<f64> = (0..k).map(|t| cand_vals[t] - base_vals[t]).collect();
+
+        let base_sorted = sorted(base_vals.clone());
+        let cand_sorted = sorted(cand_vals.clone());
+        let delta_sorted = sorted(deltas.clone());
+
+        let base_median = median_sorted(&base_sorted);
+        let cand_median = median_sorted(&cand_sorted);
+        let delta_median = median_sorted(&delta_sorted);
+        let delta_iqr = iqr_sorted(&delta_sorted);
+
+        let verdict = classify(
+            &deltas,
+            delta_median,
+            delta_iqr,
+            base_median,
+            Direction::HigherIsBetter,
+            cfg,
+        );
+        let delta_pct = if base_median > 0.0 {
+            delta_median / base_median * 100.0
+        } else {
+            0.0
+        };
+
+        cells.push(ThroughputComparison {
+            workers: key.workers,
+            topo: key.topo.clone(),
+            base_median,
+            base_iqr: iqr_sorted(&base_sorted),
+            cand_median,
+            cand_iqr: iqr_sorted(&cand_sorted),
+            delta_median,
+            delta_pct,
+            verdict,
+        });
+    }
+
+    let improved = cells
+        .iter()
+        .filter(|c| c.verdict == Verdict::Improved)
+        .count();
+    let regressed = cells
+        .iter()
+        .filter(|c| c.verdict == Verdict::Regressed)
+        .count();
+    let stable = cells.len() - improved - regressed;
+    SectionReport::ThroughputCompared {
+        name: name.to_owned(),
+        improved,
+        stable,
+        regressed,
+        cells,
+    }
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn classify(
     deltas: &[f64],
     delta_median: f64,
     delta_iqr: f64,
     base_median: f64,
+    dir: Direction,
     cfg: CompareConfig,
 ) -> Verdict {
     if deltas.is_empty() || delta_median == 0.0 {
@@ -617,19 +877,34 @@ fn classify(
         .count() as f64;
     let consistent = same_sign / n >= cfg.consistency;
 
+    // The absolute floor (`abs_floor_ns`) is a *nanosecond* resolution
+    // floor — meaningful for a latency span, meaningless for a mails/sec
+    // rate (iamacoffeepot/aether#1202). For a higher-is-better rate the
+    // verdict rests on the IQR + relative floors only; the ns floor is
+    // neutralised to zero.
+    let abs_floor = match dir {
+        Direction::LowerIsBetter => cfg.abs_floor_ns,
+        Direction::HigherIsBetter => 0.0,
+    };
     let floor = (cfg.effect_floor_iqr * delta_iqr)
         .max(cfg.rel_floor * base_median)
-        .max(cfg.abs_floor_ns);
+        .max(abs_floor);
     let large = delta_median.abs() > floor;
 
-    if consistent && large {
-        if delta_median < 0.0 {
-            Verdict::Improved
-        } else {
-            Verdict::Regressed
-        }
+    if !(consistent && large) {
+        return Verdict::Stable;
+    }
+    // A negative paired delta means the candidate's value fell; whether
+    // that reads `Improved` depends on the metric's direction.
+    let value_fell = delta_median < 0.0;
+    let improved = match dir {
+        Direction::LowerIsBetter => value_fell,
+        Direction::HigherIsBetter => !value_fell,
+    };
+    if improved {
+        Verdict::Improved
     } else {
-        Verdict::Stable
+        Verdict::Regressed
     }
 }
 
@@ -657,16 +932,24 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
 
     let (mut improved, mut stable, mut regressed) = (0usize, 0usize, 0usize);
     for sec in &report.sections {
-        if let SectionReport::Compared {
-            improved: i,
-            stable: st,
-            regressed: r,
-            ..
-        } = sec
-        {
-            improved += i;
-            stable += st;
-            regressed += r;
+        match sec {
+            SectionReport::Compared {
+                improved: i,
+                stable: st,
+                regressed: r,
+                ..
+            }
+            | SectionReport::ThroughputCompared {
+                improved: i,
+                stable: st,
+                regressed: r,
+                ..
+            } => {
+                improved += i;
+                stable += st;
+                regressed += r;
+            }
+            SectionReport::Uncompared { .. } => {}
         }
     }
     s.push_str(&format!(
@@ -679,6 +962,9 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
             SectionReport::Compared { name, cells, .. } => {
                 push_latency_section(&mut s, name, cells);
             }
+            SectionReport::ThroughputCompared { name, cells, .. } => {
+                push_throughput_section(&mut s, name, cells);
+            }
             SectionReport::Uncompared { name, .. } => {
                 s.push_str(&format!(
                     "_{name}: new this run — no baseline to compare_\n\n"
@@ -687,6 +973,42 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
         }
     }
     s
+}
+
+/// Shared tail for a compared section's markdown: the non-stable rows (or
+/// a "no cells moved" note when none did), then the collapsed full grid.
+/// `push_latency_section` and `push_throughput_section` each build their
+/// own header + per-row rendering and hand the rendered rows here, so the
+/// table scaffolding lives in one place.
+#[allow(clippy::format_push_string)]
+fn push_section_tables(
+    s: &mut String,
+    name: &str,
+    header: &str,
+    non_stable: &[String],
+    all: &[String],
+) {
+    if non_stable.is_empty() {
+        s.push_str(&format!(
+            "_{name}: no cells moved beyond the noise band._\n\n"
+        ));
+    } else {
+        s.push_str(header);
+        for r in non_stable {
+            s.push_str(r);
+        }
+        s.push('\n');
+    }
+
+    s.push_str(&format!(
+        "<details><summary>{name} full grid — {} cells</summary>\n\n",
+        all.len()
+    ));
+    s.push_str(header);
+    for r in all {
+        s.push_str(r);
+    }
+    s.push_str("\n</details>\n\n");
 }
 
 #[allow(clippy::format_push_string)]
@@ -713,31 +1035,55 @@ fn push_latency_section(s: &mut String, name: &str, cells: &[CellComparison]) {
         )
     };
 
-    let non_stable: Vec<&CellComparison> = cells
+    let all: Vec<String> = cells.iter().map(&row).collect();
+    let non_stable: Vec<String> = cells
         .iter()
         .filter(|c| c.verdict != Verdict::Stable)
+        .map(&row)
         .collect();
-    if non_stable.is_empty() {
-        s.push_str(&format!(
-            "_{name}: no cells moved beyond the noise band._\n\n"
-        ));
-    } else {
-        s.push_str(header);
-        for c in non_stable {
-            s.push_str(&row(c));
-        }
-        s.push('\n');
-    }
+    push_section_tables(s, name, header, &non_stable, &all);
+}
 
-    s.push_str(&format!(
-        "<details><summary>{name} full grid — {} cells</summary>\n\n",
-        cells.len()
-    ));
-    s.push_str(header);
-    for c in cells {
-        s.push_str(&row(c));
-    }
-    s.push_str("\n</details>\n\n");
+/// Render the throughput section (iamacoffeepot/aether#1202) — the
+/// higher-is-better mails/sec analog of [`push_latency_section`]:
+/// non-stable rows up top, full grid collapsed, rates in thousands of
+/// mails/sec.
+#[allow(clippy::format_push_string)]
+fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputComparison]) {
+    let header =
+        "| topology | w | base k/s | this k/s | Δ | verdict |\n|---|--:|--:|--:|--:|---|\n";
+    let row = |c: &ThroughputComparison| -> String {
+        let verdict = match c.verdict {
+            Verdict::Improved => "improved",
+            Verdict::Stable => "stable",
+            Verdict::Regressed => "regressed",
+        };
+        format!(
+            "| {} | {} | {} ±{} | {} ±{} | {:+.0}% | {} |\n",
+            c.topo,
+            c.workers,
+            kps(c.base_median),
+            kps(c.base_iqr),
+            kps(c.cand_median),
+            kps(c.cand_iqr),
+            c.delta_pct,
+            verdict,
+        )
+    };
+
+    let all: Vec<String> = cells.iter().map(&row).collect();
+    let non_stable: Vec<String> = cells
+        .iter()
+        .filter(|c| c.verdict != Verdict::Stable)
+        .map(&row)
+        .collect();
+    push_section_tables(s, name, header, &non_stable, &all);
+}
+
+/// Format a mails/sec rate in thousands (k/s), mirroring [`us`]'s
+/// scale-and-fixed-precision rendering for the latency table.
+fn kps(mps: f64) -> String {
+    format!("{:.1}", mps / 1000.0)
 }
 
 #[cfg(test)]
@@ -949,7 +1295,7 @@ mod tests {
             SectionReport::Uncompared { reason, .. } => {
                 assert_eq!(*reason, UncomparedReason::NewThisRun);
             }
-            SectionReport::Compared { .. } => panic!("throughput should not be compared"),
+            _ => panic!("throughput should not be compared"),
         }
     }
 
@@ -957,20 +1303,22 @@ mod tests {
     fn unknown_section_on_both_sides_reads_unknown_name() {
         // Present on both sides at an agreed version but with no typed
         // compare — that's the UnknownName reason, distinct from
-        // NewThisRun.
-        let base = with_extra_section(side(&[1000, 1000, 1000]), "throughput", "v1");
-        let cand = with_extra_section(side(&[1000, 1000, 1000]), "throughput", "v1");
+        // NewThisRun. (`throughput` is now a *known* section — this guard
+        // needs a name the comparator still has no compare for, so it uses
+        // `experimental`. iamacoffeepot/aether#1202.)
+        let base = with_extra_section(side(&[1000, 1000, 1000]), "experimental", "v1");
+        let cand = with_extra_section(side(&[1000, 1000, 1000]), "experimental", "v1");
         let rep = compare(&base, &cand, CompareConfig::default());
         let unknown = rep
             .sections
             .iter()
-            .find(|s| matches!(s, SectionReport::Uncompared { name, .. } if name == "throughput"))
-            .expect("uncompared throughput section present");
+            .find(|s| matches!(s, SectionReport::Uncompared { name, .. } if name == "experimental"))
+            .expect("uncompared experimental section present");
         match unknown {
             SectionReport::Uncompared { reason, .. } => {
                 assert_eq!(*reason, UncomparedReason::UnknownName);
             }
-            SectionReport::Compared { .. } => panic!("throughput should not be compared"),
+            _ => panic!("experimental should not be compared"),
         }
     }
 
@@ -1013,7 +1361,7 @@ mod tests {
                     }
                 );
             }
-            SectionReport::Compared { .. } => panic!("latency should not compare across versions"),
+            _ => panic!("latency should not compare across versions"),
         }
 
         // The `extra` section (v1 on both) still resolves — to UnknownName,
@@ -1036,5 +1384,122 @@ mod tests {
         assert!(md.contains("| topology | w | metric |"));
         // ... and the uncompared section's note rides alongside it.
         assert!(md.contains("throughput: new this run"));
+    }
+
+    /// Build a K-trial side carrying a single `throughput` section cell
+    /// (`fanout-8 @ 11w`) whose rate follows `rates` (mails/sec). The
+    /// throughput analog of [`side`] (iamacoffeepot/aether#1202).
+    fn throughput_side(rates: &[f64]) -> Vec<TrialReport> {
+        rates
+            .iter()
+            .map(|&mails_per_sec| {
+                let cells = vec![ThroughputCell {
+                    workers: 11,
+                    topo: "fanout-8".to_owned(),
+                    mails_per_sec,
+                }];
+                let body = serde_json::to_value(ThroughputSection { cells })
+                    .expect("encode throughput body");
+                TrialReport {
+                    schema: TRIAL_SCHEMA.to_owned(),
+                    git_sha: None,
+                    pace_hz: None,
+                    frames: 200,
+                    sections: vec![RawSection {
+                        name: ThroughputSection::NAME.to_owned(),
+                        version: ThroughputSection::VERSION.to_owned(),
+                        body,
+                    }],
+                }
+            })
+            .collect()
+    }
+
+    /// The single throughput cell's verdict in a comparison report.
+    fn throughput_verdict(rep: &ComparisonReport) -> Verdict {
+        rep.sections
+            .iter()
+            .find_map(|s| match s {
+                SectionReport::ThroughputCompared { cells, .. } => cells.first().map(|c| c.verdict),
+                _ => None,
+            })
+            .expect("compared throughput cell present")
+    }
+
+    #[test]
+    fn higher_throughput_reads_improved_not_regressed() {
+        // Throughput is higher-is-better: a clearly-higher candidate rate
+        // is an Improvement, even though its paired delta is *positive*
+        // (the opposite of a latency win).
+        let base = throughput_side(&[
+            100_000.0, 98_000.0, 102_000.0, 99_000.0, 101_000.0, 100_500.0,
+        ]);
+        let cand = throughput_side(&[
+            200_000.0, 198_000.0, 202_000.0, 199_000.0, 201_000.0, 200_500.0,
+        ]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(throughput_verdict(&rep), Verdict::Improved);
+    }
+
+    #[test]
+    fn lower_throughput_reads_regressed() {
+        // A clearly-lower candidate rate is a regression (a negative
+        // paired delta, the inverse of the latency direction).
+        let base = throughput_side(&[
+            200_000.0, 198_000.0, 202_000.0, 199_000.0, 201_000.0, 200_500.0,
+        ]);
+        let cand = throughput_side(&[
+            100_000.0, 98_000.0, 102_000.0, 99_000.0, 101_000.0, 100_500.0,
+        ]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(throughput_verdict(&rep), Verdict::Regressed);
+    }
+
+    #[test]
+    fn equal_throughput_reads_stable() {
+        // Near-identical rates pair to δ ≈ 0 — below the noise band, so
+        // stable regardless of the ns floor (neutralised for a rate).
+        let base = throughput_side(&[
+            100_000.0, 99_000.0, 101_000.0, 100_500.0, 99_500.0, 100_000.0,
+        ]);
+        let cand = throughput_side(&[
+            100_200.0, 99_100.0, 101_100.0, 100_400.0, 99_600.0, 100_100.0,
+        ]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(throughput_verdict(&rep), Verdict::Stable);
+    }
+
+    #[test]
+    fn report_json_round_trip_preserves_throughput_section() {
+        let trials = throughput_side(&[100_000.0, 110_000.0, 120_000.0]);
+        let report = &trials[0];
+        let json = serde_json::to_string(report).expect("serialize trial");
+        let back: TrialReport = serde_json::from_str(&json).expect("deserialize trial");
+        assert_eq!(back.sections.len(), 1);
+        let sec = &back.sections[0];
+        assert_eq!(sec.name, ThroughputSection::NAME);
+        assert_eq!(sec.version, ThroughputSection::VERSION);
+        let tp: ThroughputSection =
+            serde_json::from_value(sec.body.clone()).expect("decode throughput body");
+        assert_eq!(tp.cells.len(), 1);
+        assert!((tp.cells[0].mails_per_sec - 100_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn throughput_verdict_renders_in_markdown() {
+        // Step 4 round-trip: a report carrying a throughput section flows
+        // through `compare` → `markdown` and the higher-is-better verdict
+        // shows in the rendered body (the per-section dispatch routes it,
+        // no perf-compare change needed).
+        let base = throughput_side(&[100_000.0, 98_000.0, 102_000.0, 99_000.0]);
+        let cand = throughput_side(&[200_000.0, 198_000.0, 202_000.0, 199_000.0]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+        assert!(md.contains(STICKY_MARKER));
+        // The throughput table header (k/s units), the headline rollup
+        // counting the win, and the improved verdict are all present.
+        assert!(md.contains("| topology | w | base k/s |"));
+        assert!(md.contains("improved"));
+        assert!(md.contains("throughput full grid"));
     }
 }
