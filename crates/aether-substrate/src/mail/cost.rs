@@ -25,12 +25,28 @@
 #![allow(clippy::significant_drop_tightening)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use aether_actor::cost::CostCell;
 use aether_kinds::{CostRow, CostTail, CostTailResult};
 
 use crate::mail::{KindId, MailboxId};
+
+/// A single handler's measured cost, resolved from a [`CostCell`] under
+/// one read-lock. Carries the EWMA mean plus the two confidence signals
+/// the iamacoffeepot/aether#1178 recruiter gates on (`samples == 0` ⇒
+/// neutral seed; a high `mad_nanos` ⇒ bimodal / untrustworthy), so the
+/// caller never re-touches the cell after the batch read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CostSample {
+    /// EWMA mean execution time (nanos). `0` before the first fold.
+    pub mean_nanos: u64,
+    /// Folded-sample count. `0` is the neutral seed — known handler,
+    /// never run, so the mean is meaningless to the recruiter.
+    pub samples: u64,
+    /// EWMA mean-absolute-deviation (nanos) — the spread signal.
+    pub mad_nanos: u64,
+}
 
 /// Substrate-owned global index over every actor's per-handler
 /// [`CostCell`]s. Shared as part of the [`Mailer`](super::mailer::Mailer)
@@ -111,6 +127,27 @@ impl CostTable {
             .collect()
     }
 
+    /// Acquire one read-lock over the table and hand back a
+    /// [`CostLookup`] that resolves `(MailboxId, KindId)` point lookups
+    /// for the duration of a single flush — iamacoffeepot/aether#1178's
+    /// read side of iamacoffeepot/aether#1128's table. The recruiter
+    /// holds the returned guard across its whole group accumulation pass
+    /// so each mail's cost resolves under the *same* lock acquire, rather
+    /// than a `read()` per mail on the hot flush path (the rejected
+    /// per-mail point lookup). The lock is a low-contention `RwLock`
+    /// (writers are the rare seed / drop hooks), so holding the read-lock
+    /// for one producer's flush adds no measurable contention — the same
+    /// guard policy [`Self::tail`] uses.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned (see [`Self::seed`]).
+    #[must_use]
+    pub fn lookup(&self) -> CostLookup<'_> {
+        CostLookup {
+            cells: self.cells.read().expect("cost table lock poisoned"),
+        }
+    }
+
     /// Dump `mailbox`'s cost rows, filtered to `request.kind` when set.
     /// `kind_name` is left `None` here — the table holds ids, not names;
     /// the `cost.tail` dispatch arm (or the MCP layer) resolves names
@@ -135,6 +172,33 @@ impl CostTable {
             })
             .collect();
         CostTailResult::Ok { rows }
+    }
+}
+
+/// A read-lock held over a [`CostTable`] for the span of one flush, plus
+/// the point-lookup the recruiter resolves each mail's cost through.
+/// Acquired once via [`CostTable::lookup`] and dropped when the flush's
+/// group accumulation finishes — so the whole `Σw` / `w_max` pass runs
+/// under a single read acquire, not one per mail.
+#[derive(Debug)]
+pub struct CostLookup<'a> {
+    cells: RwLockReadGuard<'a, HashMap<(MailboxId, KindId), Arc<CostCell>>>,
+}
+
+impl CostLookup<'_> {
+    /// Resolve the measured cost of one `(mailbox, kind)` handler, or
+    /// `None` for a `(mailbox, kind)` the table has never seeded (the
+    /// handler is absent — distinct from a *seeded-but-unrun* cell, which
+    /// resolves to `Some` with `samples == 0`). The caller treats `None`
+    /// and `samples == 0` alike — both are "unknown cost" — but the
+    /// distinction is preserved for the dump / future callers.
+    #[must_use]
+    pub fn get(&self, mailbox: MailboxId, kind: KindId) -> Option<CostSample> {
+        self.cells.get(&(mailbox, kind)).map(|cell| CostSample {
+            mean_nanos: cell.mean_nanos(),
+            samples: cell.samples(),
+            mad_nanos: cell.mad_nanos(),
+        })
     }
 }
 
@@ -240,5 +304,57 @@ mod tests {
         assert_eq!(cells.len(), 2);
         assert!(cells.iter().any(|(k, _)| *k == KindId(10)));
         assert!(cells.iter().any(|(k, _)| *k == KindId(20)));
+    }
+
+    /// The batch [`CostTable::lookup`] resolves a seeded handler's folded
+    /// mean under one read-lock; an unseeded `(mailbox, kind)` resolves to
+    /// `None` and a seeded-but-unrun cell resolves to `Some` with
+    /// `samples == 0` (the neutral-seed distinction the recruiter gates on).
+    #[test]
+    fn batch_lookup_resolves_means_and_misses() {
+        let table = CostTable::new();
+        let mbx = MailboxId(7);
+        let handed = table.seed(mbx, &[KindId(10), KindId(20)]);
+        // Fold a sample into kind 10 only; kind 20 stays a neutral seed.
+        for (kind, cell) in &handed {
+            if *kind == KindId(10) {
+                cell.fold(3_000);
+            }
+        }
+
+        let lookup = table.lookup();
+        let ten = lookup.get(mbx, KindId(10)).expect("kind 10 seeded");
+        assert_eq!(ten.mean_nanos, 3_000);
+        assert_eq!(ten.samples, 1);
+
+        let twenty = lookup.get(mbx, KindId(20)).expect("kind 20 seeded");
+        assert_eq!(twenty.mean_nanos, 0, "neutral seed has no mean");
+        assert_eq!(twenty.samples, 0, "neutral seed reports zero samples");
+
+        assert!(
+            lookup.get(mbx, KindId(30)).is_none(),
+            "an unseeded handler resolves to None"
+        );
+        assert!(
+            lookup.get(MailboxId(8), KindId(10)).is_none(),
+            "a different mailbox's same kind id misses"
+        );
+    }
+
+    /// Two mails routed to the *same* handler resolve the same cost under
+    /// one batch read — the per-mail point lookup the recruiter sums into a
+    /// group's `Σw`, without a lock acquire per mail.
+    #[test]
+    fn batch_lookup_repeats_under_one_lock() {
+        let table = CostTable::new();
+        let mbx = MailboxId(7);
+        let handed = table.seed(mbx, &[KindId(10)]);
+        handed[0].1.fold(5_000);
+
+        let lookup = table.lookup();
+        let first = lookup.get(mbx, KindId(10)).expect("seeded");
+        let second = lookup.get(mbx, KindId(10)).expect("seeded");
+        assert_eq!(first, second);
+        assert_eq!(first.mean_nanos, 5_000);
     }
 }
