@@ -28,6 +28,7 @@ exclude = [
     "spikes/aether-mail-spike-guest",
     "spikes/aether-mail-spike-host",
     "spikes/prompt-pipeline-spike",
+    "spikes/recruit-k-sim",
 ]
 
 [workspace.package]
