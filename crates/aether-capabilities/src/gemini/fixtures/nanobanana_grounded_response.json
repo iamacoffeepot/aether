@@ -1,0 +1,38 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "TWFu"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "groundingMetadata": {
+        "webSearchQueries": [
+          "current eiffel tower height",
+          "eiffel tower color 2026"
+        ],
+        "groundingChunks": [
+          {
+            "uri": "https://en.wikipedia.org/wiki/Eiffel_Tower"
+          },
+          {
+            "uri": "https://www.toureiffel.paris/en"
+          }
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "candidatesTokenCount": 0,
+    "totalTokenCount": 12
+  },
+  "modelVersion": "gemini-3.1-flash-image-preview"
+}
