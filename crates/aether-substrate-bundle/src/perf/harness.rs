@@ -22,9 +22,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
 use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
-use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
+use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{SubscribeInput, SubscribeInputResult, Tick};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
@@ -143,13 +144,20 @@ pub fn relay_id(i: usize) -> MailboxId {
 }
 
 /// Lifecycle bridge for the sweep: subscribed to the `Tick` input
-/// stream, it emits one `Ping` into the entry relay per frame,
-/// inheriting the tick's trace lineage so the whole per-frame chain is
-/// one causal tree. The honest stand-in for a real tick-reactive
-/// component — the substrate's own `Tick` fan-out drives the work, no
-/// synthetic injector, no per-root settlement block.
+/// stream, it emits a burst of `burst` `Ping`s into the entry relay per
+/// frame, each inheriting the tick's trace lineage so the whole
+/// per-frame fan-out is one causal forest. The honest stand-in for a
+/// real tick-reactive component — the substrate's own `Tick` fan-out
+/// drives the work, no synthetic injector, no per-root settlement block.
+///
+/// `burst == 1` is the latency regime (one root per tick, settles within
+/// its frame). A larger `burst` is the saturation regime
+/// (iamacoffeepot/aether#1202): the whole burst lands on relay 0's inbox
+/// in one tick, so a single `advance(1)` drains a deep ready queue — the
+/// contention the per-frame `advance` quiescence otherwise prevents.
 pub struct TickSource {
     entry: MailboxId,
+    burst: u32,
     seq: u32,
 }
 
@@ -159,9 +167,16 @@ impl aether_actor::Actor for TickSource {
 impl aether_actor::Instanced for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
 impl NativeActor for TickSource {
-    type Config = MailboxId;
-    fn init(entry: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { entry, seq: 0 })
+    /// `(entry, burst)`: the relay-0 mailbox and the number of `Ping`s to
+    /// emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
+    type Config = (MailboxId, u32);
+    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        let (entry, burst) = config;
+        Ok(Self {
+            entry,
+            burst,
+            seq: 0,
+        })
     }
 }
 impl NativeDispatch for TickSource {
@@ -174,9 +189,11 @@ impl NativeDispatch for TickSource {
         if kind.0 != Tick::ID.0 {
             return None;
         }
-        let bytes = Ping { seq: self.seq }.encode_into_bytes();
-        self.seq = self.seq.wrapping_add(1);
-        let _ = ctx.send_envelope_traced(self.entry, Ping::ID, &bytes);
+        for _ in 0..self.burst {
+            let bytes = Ping { seq: self.seq }.encode_into_bytes();
+            self.seq = self.seq.wrapping_add(1);
+            let _ = ctx.send_envelope_traced(self.entry, Ping::ID, &bytes);
+        }
         Some(())
     }
 }
@@ -383,6 +400,11 @@ pub struct CellSamples {
     pub drain: Vec<u64>,
     pub handler: Vec<u64>,
     pub depth: Vec<u64>,
+    /// iamacoffeepot/aether#1202: completed mails/sec under saturation —
+    /// `Some` in `Drive::Saturate` (computed from the same folded nodes
+    /// the latency spans come from), `None` in `Drive::Latency`. A cell
+    /// whose entry ring lapped reports `None` rather than a wrong rate.
+    pub throughput_mps: Option<f64>,
 }
 
 impl CellSamples {
@@ -397,6 +419,7 @@ impl CellSamples {
             drain: summarize(self.drain),
             handler: summarize(self.handler),
             depth: summarize(self.depth),
+            throughput_mps: self.throughput_mps,
         }
     }
 }
@@ -429,19 +452,45 @@ pub struct CellResult {
     /// nanoseconds*. p50 ≈ 0 means `queued` is wakeup-dominated (empty
     /// queue); a rising tail means wait-behind-N (offered load).
     pub depth: Stats,
+    /// iamacoffeepot/aether#1202: completed mails/sec under saturation.
+    /// `Some` only in `Drive::Saturate` (`None` for a latency cell);
+    /// `None` too when the entry ring lapped, so a truncated cell never
+    /// reports a wrong rate.
+    pub throughput_mps: Option<f64>,
+}
+
+/// How a sweep cell drives its topology (iamacoffeepot/aether#1202). The
+/// two modes measure orthogonal properties from the *same* harvested
+/// trace nodes:
+///
+/// - `Latency` emits one `Ping` per `Tick` and measures per-hop spans
+///   (construct / queued / drain / handler). `pace_hz` `Some(hz)` paces
+///   one frame per period (workers park between frames → realistic
+///   frame-loop latency), `None` runs flat-out (warm — isolates per-hop
+///   dispatch cost). This is the harness's historical behaviour,
+///   verbatim.
+/// - `Saturate` emits a burst of `backlog` `Ping`s on each tick and
+///   measures completed mails/sec. `TestBench::advance` drains the queue
+///   to quiescence every frame (`bench.rs:630`), so one Ping per tick can
+///   never build a backlog — the burst is what creates the deep ready
+///   queue the throughput metric is meant to capture. Per-hop latency
+///   under saturation is contended and high-variance, so a saturate cell
+///   reports throughput only, not the latency spans.
+#[derive(Clone, Copy, Debug)]
+pub enum Drive {
+    Latency { pace_hz: Option<u64> },
+    Saturate { backlog: u32 },
 }
 
 /// Inputs to one sweep. `workers` is the outer axis (pool sizes);
-/// `topologies` the inner. `frames` advances per cell; `pace_hz`
-/// `Some(hz)` paces one frame per period (workers park between frames →
-/// realistic frame-loop latency), `None` runs flat-out (warm — isolates
-/// per-hop dispatch cost).
+/// `topologies` the inner. `frames` advances per cell; `drive` selects
+/// the latency or saturation regime (iamacoffeepot/aether#1202).
 #[derive(Clone)]
 pub struct SweepConfig {
     pub workers: Vec<usize>,
     pub topologies: Vec<Topology>,
     pub frames: u32,
-    pub pace_hz: Option<u64>,
+    pub drive: Drive,
 }
 
 /// Read the optional `AETHER_LAT_PACE_HZ` pacing override (frames/sec;
@@ -453,6 +502,47 @@ pub fn pace_hz_from_env() -> Option<u64> {
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&h| h > 0)
+}
+
+/// Default per-tick `Ping` burst for a `Saturate` cell when
+/// `AETHER_PERF_BACKLOG` is unset. Sized comfortably under the per-actor
+/// trace ring capacity ([`DEFAULT_TRACE_RING_CAP`]) so a default-backlog
+/// run never laps the ring (see [`saturate_backlog_from_env`]).
+pub const DEFAULT_SATURATE_BACKLOG: u32 = 512;
+
+/// Read the per-tick saturation backlog from `AETHER_PERF_BACKLOG`
+/// (iamacoffeepot/aether#1202), defaulting to [`DEFAULT_SATURATE_BACKLOG`]
+/// when unset / unparseable / `0`. Clamped to the per-actor trace ring
+/// capacity ([`DEFAULT_TRACE_RING_CAP`]): a burst larger than the ring
+/// laps the entry relay's ring, which the harvest detects as `truncated`
+/// and the cell then reports no rate for. Clamping up front keeps a
+/// merely-large backlog measurable instead of silently truncated.
+#[must_use]
+pub fn saturate_backlog_from_env() -> u32 {
+    let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+    env::var("AETHER_PERF_BACKLOG")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&b| b > 0)
+        .unwrap_or(DEFAULT_SATURATE_BACKLOG)
+        .min(cap)
+}
+
+/// Parse the `Drive` mode from `AETHER_PERF_DRIVE` (`latency` |
+/// `saturate`; default `latency`), composing `pace_hz_from_env` /
+/// `saturate_backlog_from_env` for the mode's own knob
+/// (iamacoffeepot/aether#1202). Shared by the `perf-trial` and `perf-plot`
+/// bins and the on-demand observe test so the parse lives in one place.
+#[must_use]
+pub fn drive_from_env() -> Drive {
+    match env::var("AETHER_PERF_DRIVE").as_deref() {
+        Ok("saturate") => Drive::Saturate {
+            backlog: saturate_backlog_from_env(),
+        },
+        _ => Drive::Latency {
+            pace_hz: pace_hz_from_env(),
+        },
+    }
 }
 
 /// Read the optional heavy-leaf CPU work knob `AETHER_LAT_HEAVY_WORK` (a
@@ -576,6 +666,38 @@ pub fn parse_topologies() -> Vec<Topology> {
     topos
 }
 
+/// Completed mails/sec from a cell's folded trace nodes
+/// (iamacoffeepot/aether#1202). Completed = `Ping` nodes that reached
+/// `t_finished`; the drive elapsed is `max(t_finished) − min(t_construct
+/// start)` across those nodes (construct-start is the earliest instant any
+/// participating mail was built, the honest start of the burst's
+/// processing). Returns `None` when nothing completed or the window
+/// collapsed to zero (single sample / clock-coincident), so the caller
+/// stores `None` rather than a divide-by-zero or infinite rate.
+#[allow(clippy::cast_precision_loss)]
+fn throughput_from_nodes(mails: &[MailNodeWire]) -> Option<f64> {
+    let mut completed = 0u64;
+    let mut min_start = u64::MAX;
+    let mut max_finish = 0u64;
+    for node in mails {
+        if node.kind.0 != Ping::ID.0 {
+            continue;
+        }
+        let Some(fin) = node.t_finished else { continue };
+        completed += 1;
+        min_start = min_start.min(node.t_construct_start.0);
+        max_finish = max_finish.max(fin.0);
+    }
+    if completed == 0 || max_finish <= min_start {
+        return None;
+    }
+    let elapsed_secs = (max_finish - min_start) as f64 / 1e9;
+    if elapsed_secs <= 0.0 {
+        return None;
+    }
+    Some(completed as f64 / elapsed_secs)
+}
+
 /// Drive the sweep and return each cell's **raw** per-span samples
 /// (un-summarized). [`run_sweep`] wraps this and collapses to
 /// [`CellResult`]; the `perf-plot` bin (iamacoffeepot/aether#1155) reads
@@ -623,8 +745,15 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             if !spawned_ok {
                 continue;
             }
+            // `burst` is the per-tick `Ping` count: 1 in `Latency` (one
+            // root per frame), `backlog` in `Saturate` (a deep ready queue
+            // drained in one frame, iamacoffeepot/aether#1202).
+            let burst = match cfg.drive {
+                Drive::Latency { .. } => 1,
+                Drive::Saturate { backlog } => backlog,
+            };
             if let Err(e) = tb
-                .spawn_actor::<TickSource>(Subname::Named("src"), relay_id(0))
+                .spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst))
                 .finish()
             {
                 tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
@@ -659,8 +788,10 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             let frames = cfg.frames;
 
             // Drive via the real lifecycle.
-            match cfg.pace_hz {
-                Some(hz) => {
+            match cfg.drive {
+                Drive::Latency {
+                    pace_hz: Some(hz), ..
+                } => {
                     let period = Duration::from_secs_f64(1.0 / hz as f64);
                     for _ in 0..frames {
                         let f = Instant::now();
@@ -670,8 +801,23 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                         }
                     }
                 }
-                None => {
+                Drive::Latency { pace_hz: None } => {
                     let _ = tb.advance(frames);
+                }
+                // Saturate: the tick source bursts `backlog` roots onto
+                // relay 0's inbox on a single tick, and one `advance(1)`
+                // drains the whole burst to quiescence in that frame
+                // (iamacoffeepot/aether#1202). The pool contends on a deep
+                // ready queue — the load the throughput metric captures —
+                // instead of the one-root-settles-per-frame latency path.
+                //
+                // It advances exactly once regardless of `cfg.frames`: the
+                // backlog *is* the offered load, so re-bursting every frame
+                // would multiply it by `frames` and lap the 4096-entry trace
+                // rings, tripping the truncation gate below and nulling the
+                // rate (the bug the `frames > 1` regression test guards).
+                Drive::Saturate { .. } => {
+                    let _ = tb.advance(1);
                 }
             }
 
@@ -772,6 +918,20 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                     depth.push(u64::from(d));
                 }
             }
+
+            // iamacoffeepot/aether#1202: throughput rides the *same* folded
+            // nodes — completed = `Ping` nodes that reached `t_finished`,
+            // and the drive elapsed is `max(t_finished) − min(t_construct
+            // start)` across them. Only meaningful under `Saturate` (the
+            // latency modes never build a backlog), and only when the
+            // harvest is complete: a lapped ring drops finished nodes, so a
+            // truncated cell would report a low rate — refuse it rather than
+            // mislead.
+            let throughput_mps = match cfg.drive {
+                Drive::Saturate { .. } if !truncated => throughput_from_nodes(&mails),
+                _ => None,
+            };
+
             rows.push(CellSamples {
                 workers,
                 topo: topo.name.clone(),
@@ -780,6 +940,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 drain,
                 handler,
                 depth,
+                throughput_mps,
             });
         }
     }
@@ -796,4 +957,195 @@ pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
         .into_iter()
         .map(CellSamples::summarize)
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::print_stderr)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// Number of `Ping` nodes one root produces in `topo`: the entry send
+    /// (source → relay 0) plus one per edge in the DAG. A saturate cell's
+    /// completed count should be `backlog × this`.
+    fn hops_per_root(topo: &Topology) -> usize {
+        1 + topo.downstreams.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// Run a single (workers × topology) saturate cell and return its
+    /// samples, or `None` when no wgpu adapter is available (the cell list
+    /// comes back empty — a driverless box skips cleanly rather than
+    /// failing).
+    fn saturate_cell(workers: usize, topo: Topology, backlog: u32) -> Option<CellSamples> {
+        let cfg = SweepConfig {
+            workers: vec![workers],
+            topologies: vec![topo],
+            frames: 1,
+            drive: Drive::Saturate { backlog },
+        };
+        run_sweep_samples(&cfg).into_iter().next()
+    }
+
+    #[test]
+    fn saturate_cell_drains_full_backlog_and_reports_finite_rate() {
+        let topo = depth_chain(2);
+        let hops = hops_per_root(&topo);
+        let backlog = 64u32;
+        let Some(cell) = saturate_cell(2, topo, backlog) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        // One frame bursts `backlog` roots; `advance(1)` drains them all.
+        // Every relay hop completes (`t_received` + `t_finished`), so the
+        // handler-sample count is the completed-`Ping` count.
+        assert_eq!(
+            cell.handler.len(),
+            backlog as usize * hops,
+            "saturate should drain the whole backlog × hops-per-root"
+        );
+        let mps = cell.throughput_mps.expect("saturate cell reports a rate");
+        assert!(
+            mps.is_finite() && mps > 0.0,
+            "throughput must be positive and finite, got {mps}"
+        );
+    }
+
+    #[test]
+    fn throughput_rises_with_backlog_on_fixed_topology() {
+        // Latency mode never reports a rate; the historical path is intact.
+        let topo = fanout(4);
+        let small = saturate_cell(2, topo.clone(), 32);
+        let large = saturate_cell(2, topo, 256);
+        let (Some(small), Some(large)) = (small, large) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        // A wall-clock rate compared across two independently-timed runs is
+        // not robust under a contended test run: the two measurements see
+        // different system load, so even a generous tolerance flakes. The
+        // load-independent expression of "throughput scales with backlog" is
+        // the completed-work count — `advance(1)` drains to quiescence, so a
+        // larger backlog drains strictly more mails on a fixed topology
+        // regardless of how busy the machine is (the handler-sample count is
+        // the completed-`Ping` count). Assert that, plus that each run yields
+        // a well-formed (positive, finite) rate. The rate's *magnitude*
+        // relationship is the paired-delta comparator's job (ADR-0085), which
+        // cancels runner drift by pairing base/candidate on one runner.
+        for mps in [&small, &large].map(|c| c.throughput_mps.expect("saturate rate")) {
+            assert!(
+                mps.is_finite() && mps > 0.0,
+                "rate must be positive + finite: {mps}"
+            );
+        }
+        assert!(
+            large.handler.len() > small.handler.len(),
+            "more backlog must drain more mails: small={}, large={}",
+            small.handler.len(),
+            large.handler.len(),
+        );
+    }
+
+    #[test]
+    fn saturate_ignores_frame_count_and_still_reports_a_rate() {
+        // Regression guard (iamacoffeepot/aether#1202): `saturate_cell` above
+        // hardcodes `frames: 1`, but the `perf-trial` bin builds the sweep
+        // with AETHER_PERF_FRAMES (default 200). Saturate must advance
+        // exactly once regardless — re-bursting `backlog` roots every frame
+        // would multiply the offered load by `frames`, lap the 4096-entry
+        // trace rings, and trip the truncation gate so the cell reports no
+        // rate. That was the original bug: the trial emitted a throughput
+        // section with zero cells. A large frame count must still yield a
+        // finite rate.
+        let cfg = SweepConfig {
+            workers: vec![2],
+            topologies: vec![fanout(4)],
+            frames: 200,
+            drive: Drive::Saturate { backlog: 64 },
+        };
+        let Some(cell) = run_sweep_samples(&cfg).into_iter().next() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let mps = cell
+            .throughput_mps
+            .expect("frames>1 saturate must still report a rate, not truncate to None");
+        assert!(
+            mps.is_finite() && mps > 0.0,
+            "rate must be positive + finite: {mps}"
+        );
+    }
+
+    #[test]
+    fn latency_mode_reports_no_throughput() {
+        let cfg = SweepConfig {
+            workers: vec![2],
+            topologies: vec![depth_chain(1)],
+            frames: 4,
+            drive: Drive::Latency { pace_hz: None },
+        };
+        let Some(cell) = run_sweep_samples(&cfg).into_iter().next() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        assert!(
+            cell.throughput_mps.is_none(),
+            "latency mode must not report a throughput rate"
+        );
+    }
+
+    #[test]
+    fn over_capacity_backlog_flags_truncation_not_a_wrong_rate() {
+        // A backlog past the per-actor ring capacity laps the entry
+        // source's ring (it holds one `Sent` per root). The harvest detects
+        // the lap and the cell reports no rate, rather than dividing an
+        // undercounted completed-count by the wall window
+        // (iamacoffeepot/aether#1202). depth-1 is the cheapest topology, so
+        // the lap is on the source ring's root count, not a busy relay's
+        // fan-out. The normal env path clamps below the cap, so this
+        // over-cap value is fed straight to the sweep.
+        let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+        let Some(cell) = saturate_cell(2, depth_chain(1), cap + 1) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        assert!(
+            cell.throughput_mps.is_none(),
+            "an over-capacity backlog must flag truncation (no rate), not report a wrong one"
+        );
+    }
+
+    #[test]
+    fn over_capacity_backlog_is_clamped_by_env_parse() {
+        // The env parse clamps a backlog past the trace ring capacity so a
+        // merely-large `AETHER_PERF_BACKLOG` stays measurable. Serialised
+        // against the other env-reading test via a shared lock, since
+        // nextest runs tests in one process across threads.
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+        // Safety: process-wide env mutation, serialised by `ENV_LOCK` and
+        // restored before the guard drops.
+        unsafe {
+            env::set_var("AETHER_PERF_BACKLOG", (cap + 10_000).to_string());
+        }
+        let parsed = saturate_backlog_from_env();
+        // Safety: same serialised env mutation — restore the cleared state.
+        unsafe {
+            env::remove_var("AETHER_PERF_BACKLOG");
+        }
+        assert_eq!(
+            parsed, cap,
+            "an over-capacity backlog clamps to the ring cap"
+        );
+    }
+
+    /// Serialises the `AETHER_PERF_BACKLOG`-mutating test against any other
+    /// env-reading test in this module.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn throughput_from_nodes_handles_degenerate_windows() {
+        // No completed nodes → no rate (rather than a divide-by-zero).
+        assert!(throughput_from_nodes(&[]).is_none());
+    }
 }

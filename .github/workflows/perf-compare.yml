@@ -62,7 +62,10 @@ jobs:
       pull-requests: write
     # Candidate build + interleaved trials. The base build is skipped on a
     # cache hit (iamacoffeepot/aether#1084) and shares the candidate's
-    # target dir when cold. Cap so a stall doesn't burn the quota.
+    # target dir when cold. The comparator runs twice — a latency pass and
+    # a saturate pass (iamacoffeepot/aether#1202) — so the *measurement*
+    # roughly doubles (the two release builds are shared across both
+    # passes; only the K interleaved trials repeat), still inside this cap.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

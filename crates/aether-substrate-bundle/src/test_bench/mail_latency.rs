@@ -31,7 +31,7 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Ping, Relay, RelayConfig, Stats, SweepConfig, Topology, default_topologies,
+    CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Topology, default_topologies,
     depth_chain, fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id,
     run_sweep, summarize, two_level_tree, wide_fanout_widths_from_env,
 };
@@ -668,7 +668,7 @@ fn lifecycle_latency_observe() {
         workers: worker_set,
         topologies,
         frames: OBSERVE_FRAMES,
-        pace_hz,
+        drive: Drive::Latency { pace_hz },
     };
     let rows = run_sweep(&cfg);
     if rows.is_empty() {

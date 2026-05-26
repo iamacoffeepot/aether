@@ -27,7 +27,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use aether_substrate_bundle::perf::harness::{
-    CellSamples, SweepConfig, pace_hz_from_env, parse_topologies, parse_workers, run_sweep_samples,
+    CellSamples, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep_samples,
 };
 use plotters::prelude::*;
 use plotters::style::register_font;
@@ -63,7 +63,7 @@ fn main() -> ExitCode {
         workers: parse_workers(),
         topologies: parse_topologies(),
         frames,
-        pace_hz: pace_hz_from_env(),
+        drive: drive_from_env(),
     };
 
     let cells = run_sweep_samples(&cfg);
