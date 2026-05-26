@@ -174,49 +174,30 @@ pub fn dispatch_cost_tail_if_matching(
 }
 
 /// iamacoffeepot/aether#1128 dark-instrumentation fold. Folds one
-/// handler-execution sample — `now − t_received`, the existing
+/// handler-execution sample — `finished − t_received`, the existing
 /// `(Finished.t − Received.t)` trace bracket with no new clock read on
 /// the fast path — into the per-handler [`aether_actor::cost::CostCell`]
-/// EWMA. Runs inside the dispatch `local::with_stamped` block on the
-/// actor's own thread, so it reaches its cell through the lock-free
-/// per-actor [`CostCells`] cache; a kind not in the cache (the framework
-/// arms `log.tail` / `trace.tail` / `cost.tail`, or a fallback dispatch)
-/// is skipped — that's the known-handler filter.
+/// EWMA. Runs inside the dispatch `local::with_stamped` block, so it
+/// reaches its cell through the lock-free per-actor [`CostCells`] cache.
+/// A kind not in the cache (the framework arms `log.tail` / `trace.tail`
+/// / `cost.tail`, or a fallback dispatch) is skipped — the known-handler
+/// filter.
 ///
-/// The per-actor cache is lazy-seeded from the global
-/// [`CostTable`](crate::mail::cost::CostTable) on first dispatch: the
-/// cap-registry seed hook runs cross-thread for the wasm-load path and
-/// can't stamp the actor's `Local<T>` directly, so the actual stamp into
-/// the cache happens here, once, on the actor's own thread — pulling the
-/// *same* `Arc<CostCell>`s the global table holds (the shared-index
-/// invariant). After that the lookup is a lock-free linear scan over a
-/// tiny `Vec`.
+/// The cache is seeded once at actor construction — `WasmTrampoline::init`
+/// for components, the native-cap boot wrap for caps — both inside the
+/// same `with_stamped(&slots, …)` the spawn path opens around `init`
+/// (the stamp binds to the actor's `ActorSlots`, not to a thread, so the
+/// seed runs wherever construction does). Every declared handler's cell
+/// is therefore present before the first dispatch: no lazy first-dispatch
+/// pull, no per-fold lock — just a linear scan over a tiny `Vec`.
 ///
 /// **No scheduling change** — this only writes the cell.
-pub fn fold_handler_cost(
-    binding: &NativeBinding,
-    kind: KindId,
-    t_received: Nanos,
-    finished: Nanos,
-) {
+pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
     // Sample = handler execution time. `finished >= t_received` always
     // (same monotonic clock, finished stamped after received); guard the
     // subtraction anyway so a clock anomaly can't underflow.
     let sample = finished.0.saturating_sub(t_received.0);
     CostCells::try_with_mut(|cells| {
-        if !cells.is_seeded() {
-            // First dispatch on this actor's thread: pull the shared
-            // cells the load-time seed planted in the global table.
-            // Empty stays empty (no declared handlers / not yet seeded
-            // globally) — a later dispatch retries the pull cheaply.
-            let pulled = binding
-                .mailer()
-                .cost_table()
-                .cells_for(binding.self_mailbox());
-            if !pulled.is_empty() {
-                cells.seed(pulled);
-            }
-        }
         if let Some(cell) = cells.get(kind) {
             cell.fold(sample);
         }
@@ -312,7 +293,7 @@ pub fn dispatch_loop_run<A>(
             // Lock-free through the per-actor `CostCells` cache; a
             // framework arm / fallback kind (not in the cache) is
             // skipped. Measure-only — no scheduling change.
-            fold_handler_cost(binding, env.kind, t_received, t_finished);
+            fold_handler_cost(env.kind, t_received, t_finished);
         });
         // ADR-0080 §2 settlement hook, outside `with_stamped` so the
         // `fire_settled` notification runs unstamped (it may resolve mail
@@ -368,7 +349,7 @@ pub fn dispatch_loop_run<A>(
             );
             // iamacoffeepot/aether#1128: fold execution cost (see the
             // main-loop arm above).
-            fold_handler_cost(binding, env.kind, t_received, t_finished);
+            fold_handler_cost(env.kind, t_received, t_finished);
         });
         binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {
@@ -407,29 +388,28 @@ pub fn dispatch_loop_run<A>(
 )]
 mod cost_tests {
     use super::*;
-    use crate::actor::native::binding::NativeBinding;
     use crate::test_util::fresh_substrate;
     use aether_actor::local::{ActorSlots, with_stamped};
     use aether_kinds::{CostTail, CostTailResult};
 
     /// iamacoffeepot/aether#1128 step 4: folding a known handler's
-    /// execution time moves its cell (through the lazy per-actor cache
-    /// pull from the seeded global table), and the global `cost.tail`
-    /// dump surfaces the moved row.
+    /// execution time moves its cell, and the global `cost.tail` dump
+    /// surfaces the moved row.
     #[test]
     fn fold_moves_seeded_handler_cell() {
         let (_registry, mailer) = fresh_substrate();
         let self_mbx = MailboxId(0x1128);
         let handled = KindId(10);
-        // Load-time seed: a neutral cell for the actor's one handler.
-        mailer.cost_table().seed(self_mbx, &[handled]);
-
-        let binding = NativeBinding::new_for_test(Arc::clone(&mailer), self_mbx);
+        // Construction seeds both indexes from the handler set — the
+        // global table and the actor's per-actor cache, over one shared
+        // `Arc<CostCell>`. Reproduce that: seed the table, stamp the
+        // returned Arcs into the cache under `with_stamped` (as `init` /
+        // the boot wrap do), then fold.
         let slots = ActorSlots::new();
-        // Fold runs inside `with_stamped` on the actor's own thread, as
-        // the dispatch loop does — the lazy pull stamps the cache here.
         with_stamped(&slots, || {
-            fold_handler_cost(&binding, handled, Nanos(1_000), Nanos(6_000));
+            let seeded = mailer.cost_table().seed(self_mbx, &[handled]);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+            fold_handler_cost(handled, Nanos(1_000), Nanos(6_000));
         });
 
         let CostTailResult::Ok { rows } =
@@ -453,15 +433,16 @@ mod cost_tests {
         let (_registry, mailer) = fresh_substrate();
         let self_mbx = MailboxId(0x1128);
         let handled = KindId(10);
-        mailer.cost_table().seed(self_mbx, &[handled]);
 
-        let binding = NativeBinding::new_for_test(Arc::clone(&mailer), self_mbx);
         let slots = ActorSlots::new();
-        // Fold a kind the actor never declared (a framework / fallback
+        // Seed only `handled` into the cache (as construction does), then
+        // fold a kind the actor never declared (a framework / fallback
         // kind) — it must not create a row.
         let stranger = KindId(<LogTail as Kind>::ID.0);
         with_stamped(&slots, || {
-            fold_handler_cost(&binding, stranger, Nanos(0), Nanos(9_999));
+            let seeded = mailer.cost_table().seed(self_mbx, &[handled]);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+            fold_handler_cost(stranger, Nanos(0), Nanos(9_999));
         });
 
         let CostTailResult::Ok { rows } =

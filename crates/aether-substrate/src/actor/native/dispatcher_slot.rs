@@ -288,7 +288,7 @@ where
             // per-actor cache; framework / fallback kinds skipped).
             // Measure-only — no scheduling change. See
             // `dispatch::fold_handler_cost`.
-            super::dispatch::fold_handler_cost(&self.binding, env.kind, t_received, t_finished);
+            super::dispatch::fold_handler_cost(env.kind, t_received, t_finished);
         });
         self.binding
             .mailer()

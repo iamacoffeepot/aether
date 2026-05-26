@@ -6,9 +6,12 @@
 //! [`crate::trace_ring`] dispatch bracket into a per-handler
 //! [`CostCell`] — a constant-α EWMA of the handler's execution time in
 //! fixed-point nanos. The fold runs inside the dispatch
-//! `local::with_stamped` block on the actor's own thread, so it reaches
-//! its cell through the per-actor [`CostCells`] [`Local`] cache — a
-//! lock-free, single-threaded lookup, the hot path.
+//! `local::with_stamped` block, so it reaches its cell through the
+//! per-actor [`CostCells`] [`Local`] cache — a lock-free lookup, the hot
+//! path. An actor dispatches on one worker at a time (the `Ready→Running`
+//! exclusivity), so the cell has a single writer at a time even though
+//! the worker varies across cycles — which is why the cells are atomic
+//! but the fold needs no CAS.
 //!
 //! The *same* `Arc<CostCell>` lives in a second index — a global
 //! `RwLock<HashMap<(MailboxId, KindId), Arc<CostCell>>>` hung off the
@@ -166,20 +169,12 @@ impl CostCells {
         Self(Vec::new())
     }
 
-    /// Has this cache been seeded with its handler set yet? `false`
-    /// until the first [`Self::seed`]. The dispatch path uses this to
-    /// pull the slice from the global table exactly once on the actor's
-    /// own thread (the seed point that cannot run cross-thread at the
-    /// cap-registry hook — see the module doc).
-    #[must_use]
-    pub fn is_seeded(&self) -> bool {
-        !self.0.is_empty()
-    }
-
     /// Install the actor's handler-kind cells, sharing each
-    /// `Arc<CostCell>` with the global table. Idempotent-ish: replaces
-    /// the cache wholesale (a `replace`-spawned actor re-seeds against
-    /// the post-replace handler set).
+    /// `Arc<CostCell>` with the global table. Called once at actor
+    /// construction (`WasmTrampoline::init` / the native-cap boot wrap,
+    /// both under `with_stamped`); a `replace`-spawned actor re-seeds
+    /// wholesale against the post-replace handler set, and drop seeds an
+    /// empty `Vec` to clear.
     pub fn seed(&mut self, cells: Vec<(KindId, Arc<CostCell>)>) {
         self.0 = cells;
     }
@@ -306,14 +301,13 @@ mod tests {
     #[test]
     fn cost_cells_seed_and_lookup() {
         let mut cells = CostCells::new();
-        assert!(!cells.is_seeded());
+        assert!(cells.get(KindId(10)).is_none(), "empty cache misses");
         let a = Arc::new(CostCell::new());
         let b = Arc::new(CostCell::new());
         cells.seed(alloc::vec![
             (KindId(10), Arc::clone(&a)),
             (KindId(20), Arc::clone(&b)),
         ]);
-        assert!(cells.is_seeded());
         assert!(cells.get(KindId(10)).is_some());
         assert!(cells.get(KindId(20)).is_some());
         assert!(cells.get(KindId(30)).is_none());

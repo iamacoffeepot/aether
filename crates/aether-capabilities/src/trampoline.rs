@@ -182,6 +182,24 @@ mod native {
             .map_err(|e| {
                 BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
             })?;
+
+            // iamacoffeepot/aether#1128: seed this component's per-handler
+            // cost cells from the guest's declared handler set
+            // (`config.capabilities`, parsed from the wasm's
+            // `aether.kinds.inputs` section). `init` runs inside the spawn
+            // path's `with_stamped(&slots, …)`, so the per-actor
+            // `CostCells` cache is stamped directly here — the cap's
+            // thread vs the trampoline's is irrelevant: the stamp binds to
+            // the actor's `ActorSlots`, not to a thread. The same
+            // `Arc<CostCell>`s seed the global `CostTable` for the cold
+            // `cost.tail` dump and the iamacoffeepot/aether#1178
+            // producer-side read. Replace re-seeds on the trampoline's own
+            // dispatch (`on_replace_component`); drop clears both indexes.
+            let handler_kinds: Vec<KindId> =
+                config.capabilities.handlers.iter().map(|h| h.id).collect();
+            let seeded = mailer.cost_table().seed(mailbox, &handler_kinds);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+
             Ok(Self {
                 component: Some(component),
                 engine: config.engine,

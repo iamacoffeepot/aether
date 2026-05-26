@@ -4,19 +4,20 @@
 //
 // The cold-path index over the per-handler [`CostCell`]s
 // (`aether_actor::cost`). Cost is *measured* at the recipient (its
-// handler runs, and the dispatch fold writes the cell on the recipient's
-// own thread through its lock-free per-actor `CostCells` cache) but
-// *consumed* cross-thread — by the `cost.tail` dump here, and by a
-// future iamacoffeepot/aether#1178 producer-side `Σw` / `w_max` read at
-// flush. Both reach the *same* `Arc<CostCell>` through this global table.
+// handler runs, and the dispatch fold writes the cell through that
+// actor's lock-free per-actor `CostCells` cache — on whichever worker is
+// dispatching it, exclusively) but *consumed* cross-thread — by the
+// `cost.tail` dump here, and by a future iamacoffeepot/aether#1178
+// producer-side `Σw` / `w_max` read at flush. Both reach the *same*
+// `Arc<CostCell>` through this global table.
 //
 // Mirrors the routing-sibling [`CapabilityRegistry`] (`capability.rs`):
 // `RwLock<HashMap<_, _>>` hung off the [`Mailer`](super::mailer::Mailer),
-// locked only at component load / replace / drop (rare) and on the cold
-// dump — never on the per-dispatch fold (that runs lock-free through the
-// per-actor cache). Keyed by `(MailboxId, KindId)` so one mailbox's
-// handler set is contiguous-by-filter and the recruiter can sum a
-// recipient group.
+// seeded/torn-down when an actor is constructed / replaced / dropped
+// (rare) and read on the cold dump — never on the per-dispatch fold
+// (that runs lock-free through the per-actor cache). Keyed by
+// `(MailboxId, KindId)` so one mailbox's handler set is
+// contiguous-by-filter and the recruiter can sum a recipient group.
 
 // The table's `RwLock` guard is held across the
 // resolve-then-row-build pair in `tail` — the same low-contention
@@ -59,9 +60,10 @@ impl CostTable {
     /// per-actor `CostCells` cache. Re-seeding an existing
     /// `(mailbox, kind)` reuses the prior cell (so a `replace` against
     /// the same handler set keeps its accumulated estimate); a fresh
-    /// kind gets a new neutral cell. Called at component load / replace
-    /// / native-cap boot — the same hook that populates the capability
-    /// registry's accept-set.
+    /// kind gets a new neutral cell. Called at actor construction
+    /// (`WasmTrampoline::init` / the native-cap boot wrap, both under
+    /// `with_stamped`) and on replace, paired with a `CostCells` cache
+    /// stamp of the returned `Arc`s so both indexes share the cell.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned — a poisoned lock means a
@@ -90,13 +92,12 @@ impl CostTable {
         guard.retain(|(m, _), _| *m != mailbox);
     }
 
-    /// The shared `Arc<CostCell>`s for one `mailbox`, as
-    /// `(kind, cell)` pairs. The per-actor cache lazy-seed pulls this on
-    /// the actor's own thread (the cap-registry hook runs cross-thread
-    /// for wasm load, so the actual stamp into the `Local<T>` cache
-    /// happens here, lazily, on first dispatch); a future
-    /// iamacoffeepot/aether#1178 recruiter sums these per recipient
-    /// group. Cold path — read lock.
+    /// The shared `Arc<CostCell>`s for one `mailbox`, as `(kind, cell)`
+    /// pairs — the cross-actor read the global index exists for. A future
+    /// iamacoffeepot/aether#1178 recruiter sums these per recipient group
+    /// at the producer's flush (the per-actor caches are private to each
+    /// recipient's dispatch; this table is how a producer reads them).
+    /// Cold path — read lock.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::seed`]).

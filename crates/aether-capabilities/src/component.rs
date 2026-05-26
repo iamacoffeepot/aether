@@ -317,16 +317,13 @@ mod native {
                 MailboxCaps::from_component_capabilities(&capabilities),
             );
 
-            // iamacoffeepot/aether#1128: seed a neutral per-handler cost
-            // cell (`samples = 0`) for each of the trampoline's handler
-            // kinds into the global `CostTable`, the same load hook that
-            // populates the cap-registry accept-set. The actor's
-            // per-actor `CostCells` cache lazy-pulls these (the *same*
-            // `Arc<CostCell>`s) on its first dispatch — the load runs on
-            // the cap's thread, not the trampoline's, so the cache stamp
-            // can't happen here. `aether.component.drop` clears them.
-            let handler_kinds: Vec<KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
-            self.mailer.cost_table().seed(mailbox_id, &handler_kinds);
+            // iamacoffeepot/aether#1128: the per-handler cost cells are
+            // seeded inside `WasmTrampoline::init` (run just above, under
+            // the spawn path's `with_stamped`), from the same
+            // `capabilities` — both the global `CostTable` and the
+            // trampoline's per-actor cache, over one shared `Arc`. Nothing
+            // to seed cap-side here: `init` has the `ActorSlots` stamp this
+            // thread does not.
 
             // ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
             // mail. The freshly-spawned trampoline owns its own
