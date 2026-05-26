@@ -8,6 +8,7 @@
 //! per-cap dispatchers.
 
 pub mod capability;
+pub mod cost;
 pub mod helpers;
 pub mod mail_ref;
 pub mod mailer;
@@ -16,6 +17,7 @@ pub mod registry;
 pub mod ring;
 
 pub use capability::{CapabilityRegistry, MailboxCaps};
+pub use cost::CostTable;
 pub use mail_ref::MailRef;
 pub use mailer::Mailer;
 pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};

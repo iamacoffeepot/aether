@@ -28,6 +28,7 @@ use std::sync::Arc;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::capability::CapabilityRegistry;
+use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, MailRef, ReplyTarget, ReplyTo};
@@ -106,6 +107,18 @@ pub struct Mailer {
     /// re-registers, drop clears. Allocated empty by [`Self::new`]
     /// (like `trace_handle`) so no call site changes.
     capability_registry: Arc<CapabilityRegistry>,
+    /// iamacoffeepot/aether#1128 global per-handler execution-cost
+    /// table — Phase 0 of the cost-aware recruiter. A sibling of
+    /// [`Self::capability_registry`]: the cold-path index over every
+    /// actor's per-handler [`aether_actor::cost::CostCell`]s, shared as
+    /// the same `Arc<CostCell>` the actor's lock-free per-actor
+    /// `CostCells` cache holds. The component-load / native-cap-boot
+    /// path seeds it (alongside the cap-registry accept-set); the
+    /// `cost.tail` dump and a future iamacoffeepot/aether#1178
+    /// producer-side `Σw` read it. Never touched on the per-dispatch
+    /// fold (that runs lock-free through the per-actor cache). Allocated
+    /// empty by [`Self::new`] (like `trace_handle`).
+    cost_table: Arc<CostTable>,
 }
 
 impl Mailer {
@@ -124,6 +137,7 @@ impl Mailer {
             settlement_registry: OnceLock::new(),
             trace_handle: TraceHandle::new(),
             capability_registry: Arc::new(CapabilityRegistry::new()),
+            cost_table: Arc::new(CostTable::new()),
         }
     }
 
@@ -336,6 +350,18 @@ impl Mailer {
     /// how [`Self::registry`] surfaces the routing table.
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         &self.capability_registry
+    }
+
+    /// Borrow the wired [`CostTable`] (iamacoffeepot/aether#1128). The
+    /// component-load / native-cap-boot path seeds it (alongside the
+    /// capability registry's accept-set); the `cost.tail` dispatch arm
+    /// dumps it, and a future iamacoffeepot/aether#1178 recruiter sums
+    /// recipient-group cells from it at flush. Shared via the `Mailer`
+    /// so any actor with `ctx.mailer()` reaches the same table —
+    /// mirroring how [`Self::capability_registry`] surfaces its sibling
+    /// index.
+    pub fn cost_table(&self) -> &Arc<CostTable> {
+        &self.cost_table
     }
 
     /// Hand `mail` to the substrate for dispatch. `Inbox`-bound

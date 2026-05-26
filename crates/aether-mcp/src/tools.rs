@@ -25,10 +25,11 @@ use aether_data::{
 };
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
-    Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, ListEngines,
-    ListEnginesResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope,
-    ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
-    SubmitResult, TerminateEngine, TerminateEngineResult,
+    Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
+    CostTailResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult,
+    MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SpawnEngine,
+    SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
+    TerminateEngineResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -43,6 +44,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use crate::args::ActorLogEntry;
 use crate::args::ActorLogsArgs;
 use crate::args::ActorLogsResponse;
+use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagDescriptorArg, DagStatusArgs,
     DescribeComponentArgs, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
@@ -587,6 +589,75 @@ impl Mcp {
     }
 
     #[tool(
+        description = "Dump one actor's per-handler execution-cost EWMA table \
+                       (iamacoffeepot/aether#1128, Phase 0 dark instrumentation). Sends \
+                       aether.cost.tail to the named mailbox and decodes aether.cost.tail_result. \
+                       The substrate folds (Finished − Received) from each dispatch's trace \
+                       bracket into a per-handler EWMA; this reads it back — MEASURE-ONLY, the \
+                       table has no scheduling effect. Every actor — native or wasm trampoline — \
+                       serves this kind via the substrate's framework dispatch arm, so any mailbox \
+                       is queryable. Each row carries the handler kind (id + resolved name when \
+                       known), `mean_nanos` / `mad_nanos` (the EWMA mean + mean-absolute-deviation \
+                       of execution time in nanos), and `samples` (folded-sample count; `0` is the \
+                       neutral seed — a handler the actor declares but hasn't run yet). Pass \
+                       `kind_id` (tagged `knd-…` or decimal) to filter to one handler. Use it to \
+                       check whether handler costs are heterogeneous enough to warrant the \
+                       cost-aware recruiter (iamacoffeepot/aether#1127)."
+    )]
+    pub async fn actor_cost(
+        &self,
+        Parameters(args): Parameters<ActorCostArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let engine_id_str = args.engine_id.clone();
+        let mailbox_name = args.mailbox_name.clone();
+        // Optional kind filter: accept a tagged `knd-…` id or a raw
+        // decimal `u64`, matching the rest of the MCP id surface.
+        let kind = match args.kind_id.as_deref() {
+            Some(s) => Some(parse_kind_id(s)?),
+            None => None,
+        };
+        let request = CostTail { kind };
+        let reply = self
+            .session
+            .call_one(engine_envelope(engine, &args.mailbox_name, &request))
+            .await
+            .map_err(internal)?;
+        match CostTailResult::decode_from_bytes(&reply.payload) {
+            Some(CostTailResult::Ok { rows }) => {
+                let response = ActorCostResponse {
+                    engine_id: engine_id_str,
+                    mailbox_name,
+                    rows: rows
+                        .into_iter()
+                        .map(|r| ActorCostRow {
+                            // Render the kind id as the ADR-0064 tagged
+                            // string the rest of the MCP wire uses, falling
+                            // back to a hex literal on an unencodable id.
+                            kind_id: tagged_id::encode(r.kind_id.0)
+                                .unwrap_or_else(|| format!("{:#x}", r.kind_id.0)),
+                            // The substrate ships `kind_name: None` (the
+                            // cost table holds ids, not names); resolve it
+                            // best-effort from the static kind inventory
+                            // the MCP harness ships with. Component-defined
+                            // kinds stay `None`.
+                            kind_name: r.kind_name.or_else(|| static_kind_name(r.kind_id)),
+                            mean_nanos: r.mean_nanos,
+                            mad_nanos: r.mad_nanos,
+                            samples: r.samples,
+                        })
+                        .collect(),
+                };
+                json(&response)
+            }
+            Some(CostTailResult::Err { error }) => Err(internal_msg(&format!(
+                "actor_cost: {mailbox_name} — {error}"
+            ))),
+            None => Err(internal_msg("undecodable CostTailResult")),
+        }
+    }
+
+    #[tool(
         description = "Summarize a substrate's persistent handle store (ADR-0049 §10). Sends \
                        aether.handle.describe to the engine's aether.handle cap and decodes \
                        aether.handle.describe_result. Returns total / in-memory / on-disk / pinned \
@@ -1005,6 +1076,34 @@ fn parse_dag_id(s: &str) -> Result<DagId, McpError> {
     tagged_id::decode_with_tag(s, Tag::Dag)
         .map(DagId)
         .map_err(|e| McpError::invalid_params(format!("dag_id: {e}"), None))
+}
+
+/// Parse a kind-id string for the `actor_cost` filter: a tagged
+/// `knd-…` id (ADR-0064) or a raw decimal `u64`. The raw form is
+/// accepted because a cost row's id round-trips back through this
+/// filter and a caller may paste a non-tagged synthetic id.
+fn parse_kind_id(s: &str) -> Result<KindId, McpError> {
+    if let Ok(id) = tagged_id::decode_with_tag(s, Tag::Kind) {
+        return Ok(KindId(id));
+    }
+    s.parse::<u64>().map(KindId).map_err(|_| {
+        McpError::invalid_params(
+            format!("kind_id: not a tagged `knd-…` id or a decimal u64: {s:?}"),
+            None,
+        )
+    })
+}
+
+/// Best-effort resolve a [`KindId`] to its name from the static kind
+/// inventory the MCP harness ships with (`describe_kinds`'s source).
+/// Component-defined kinds aren't in the inventory and return `None`.
+/// Cold path — recomputes the inventory's ids on each call; the cost
+/// dump is a diagnostic, not a hot loop.
+fn static_kind_name(id: KindId) -> Option<String> {
+    descriptors::all()
+        .into_iter()
+        .find(|d| kind_id_from_parts(&d.name, &d.schema) == id.0)
+        .map(|d| d.name)
 }
 
 /// Build the wire [`DagDescriptor`] from the typed tool arg, reading each
@@ -1638,6 +1737,58 @@ mod tests {
             actor_logs_err_message("aether.nope", "mailbox mbx-0000-0000-0000 not registered");
         assert!(msg.contains("aether.nope"), "names the mailbox: {msg}");
         assert!(msg.contains("not registered"), "carries the cause: {msg}");
+    }
+
+    /// iamacoffeepot/aether#1128: `actor_cost` with a malformed
+    /// `engine_id` rejects at the tool boundary without touching the
+    /// wire (mirrors `actor_logs_bad_engine_id_is_tool_error`).
+    #[tokio::test]
+    async fn actor_cost_bad_engine_id_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .actor_cost(Parameters(ActorCostArgs {
+                engine_id: "not-a-uuid".to_owned(),
+                mailbox_name: "aether.audio".to_owned(),
+                kind_id: None,
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "a malformed engine_id should be a tool error"
+        );
+    }
+
+    /// iamacoffeepot/aether#1128: `actor_cost`'s `kind_id` filter
+    /// accepts a tagged `knd-…` id and a raw decimal, and rejects
+    /// gibberish.
+    #[test]
+    fn parse_kind_id_accepts_tagged_and_decimal() {
+        let tagged = tagged_id::encode(with_tag(Tag::Kind, 42)).expect("encodes a kind id");
+        assert!(parse_kind_id(&tagged).is_ok(), "tagged knd- id parses");
+        assert_eq!(
+            parse_kind_id("12345").expect("decimal parses").0,
+            12345,
+            "raw decimal u64 parses",
+        );
+        assert!(parse_kind_id("not-an-id").is_err(), "gibberish rejected");
+    }
+
+    /// iamacoffeepot/aether#1128: `static_kind_name` resolves a known
+    /// substrate kind's id back to its name and misses on a stranger.
+    #[test]
+    fn static_kind_name_resolves_known_substrate_kind() {
+        let log_tail = KindId(<aether_kinds::LogTail as Kind>::ID.0);
+        assert_eq!(
+            static_kind_name(log_tail).as_deref(),
+            Some(aether_kinds::LogTail::NAME),
+            "a substrate kind resolves to its name",
+        );
+        assert_eq!(
+            static_kind_name(KindId(0xDEAD_BEEF_DEAD_BEEF)),
+            None,
+            "an unknown id has no static name",
+        );
     }
 
     /// `actor_logs` with an unknown `level` string is rejected at

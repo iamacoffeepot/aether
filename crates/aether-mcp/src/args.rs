@@ -189,6 +189,53 @@ pub struct ActorLogsResponse {
     pub truncated_before: Option<u64>,
 }
 
+/// `actor_cost` arguments — dump one actor's per-handler
+/// execution-cost EWMA table (iamacoffeepot/aether#1128). Phase 0
+/// dark instrumentation: the substrate folds `(Finished − Received)`
+/// from the dispatch trace bracket into a per-handler EWMA; this tool
+/// reads it back. Measure-only — no scheduling effect.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ActorCostArgs {
+    /// Engine UUID to pull from (from `list_engines`).
+    pub engine_id: String,
+    /// Mailbox name of the actor to query (e.g. `"aether.audio"`,
+    /// `"aether.component.trampoline:camera"`). Every actor serves
+    /// `aether.cost.tail` via the substrate's framework dispatch arm.
+    pub mailbox_name: String,
+    /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw
+    /// decimal). Omitted dumps every handler row the actor declares.
+    #[serde(default)]
+    pub kind_id: Option<String>,
+}
+
+/// One per-handler cost row as `actor_cost` returns it. Mirrors
+/// `aether_kinds::CostRow`. `mean_nanos` / `mad_nanos` are the
+/// fixed-point-nanos EWMA mean + mean-absolute-deviation of the
+/// handler's execution time; `samples` is the folded-sample count
+/// (`0` is the neutral seed — a handler the actor declares but hasn't
+/// run yet).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ActorCostRow {
+    /// Tagged kind id (`knd-XXXX-XXXX-XXXX`).
+    pub kind_id: String,
+    /// Substrate-resolved kind name, or `null` for a component-defined
+    /// kind the engine can't name.
+    pub kind_name: Option<String>,
+    pub mean_nanos: u64,
+    pub mad_nanos: u64,
+    pub samples: u64,
+}
+
+/// `actor_cost` response. `rows` is one [`ActorCostRow`] per handler
+/// the queried actor declares (filtered to `kind_id` when set), in
+/// unspecified order.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ActorCostResponse {
+    pub engine_id: String,
+    pub mailbox_name: String,
+    pub rows: Vec<ActorCostRow>,
+}
+
 /// `describe_handles` arguments (ADR-0049 §10). Summarizes a
 /// substrate's persistent handle store.
 #[derive(Debug, Deserialize, JsonSchema)]
