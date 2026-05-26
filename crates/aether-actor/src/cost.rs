@@ -24,7 +24,7 @@
 //! global index over one allocation.
 //!
 //! **No `unsafe`, no lock on the fold.** Soundness lives in the type:
-//! [`core::sync::atomic::AtomicU64`] makes every load/store race-free
+//! [`AtomicU64`] makes every load/store race-free
 //! for any access pattern (the producer reads a cell while the recipient
 //! folds it — a writer↔reader race atomics are required to make
 //! defined), and `Relaxed` lowers to a plain `mov`/`ldr` on the target
