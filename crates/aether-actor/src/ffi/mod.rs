@@ -134,9 +134,9 @@ impl From<String> for BootError {
 /// from `#[actor]`.
 ///
 /// Issue 525 Phase 4 split the trait surface: the [`crate::Actor`]
-/// super-trait owns the symmetric bits (`NAMESPACE`, `SCHEDULING`)
-/// shared with the substrate-side `NativeActor`; `FfiActor` adds the
-/// FFI lifecycle methods (`init`, `wire`, `unwire`). Hot-swap hooks
+/// super-trait owns the symmetric `NAMESPACE` shared with the
+/// substrate-side `NativeActor`; `FfiActor` adds the FFI lifecycle
+/// methods (`init`, `wire`, `unwire`). Hot-swap hooks
 /// (`on_replace`, `on_rehydrate`) moved to the opt-in [`Replaceable`]
 /// sub-trait. (Issue 584 Phase 3 retired `on_drop` — `unwire` now
 /// covers the pre-shutdown mail-allowed cleanup role.)

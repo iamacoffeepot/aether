@@ -1,65 +1,42 @@
-//! Shared dispatcher loop for native actors (issue 672).
+//! Shared dispatch helpers for the pooled `DispatcherSlot` path
+//! (issue 672; per-thread `Dedicated` dispatch removed in issue 1187).
 //!
-//! `dispatch_loop_run<A>` is the body every native-actor dispatcher
-//! thread runs. Singleton boots through `chassis::builder` and
-//! instanced spawns through `actor::native::spawn` both call into
-//! this — eliminating the historical divergence where instanced
-//! actors lacked the `local::with_stamped` wrapping the singleton
-//! path had.
+//! Every native actor — singleton chassis cap or instanced spawn —
+//! drains cooperatively on the chassis worker pool via
+//! [`crate::actor::native::dispatcher_slot::DispatcherSlot::run_cycle`].
+//! That loop owns the lifecycle (recv → per-envelope `local::with_stamped`
+//! dispatch → drain-on-shutdown → `unwire` → registry close + monitor
+//! fan-out); this module holds the per-envelope helpers it calls:
 //!
-//! ## Lifecycle
-//!
-//! 1. **Outer loop.** Polls `binding.should_shutdown()` (set by
-//!    `NativeCtx::shutdown`), then `binding.recv_blocking()`. Either
-//!    signal exits the loop.
-//! 2. **Per-envelope dispatch.** Each envelope runs inside
-//!    `local::with_stamped(slots, ...)` so the per-actor `ActorSlots`
-//!    are visible to `Local<T>` lookups — including the per-actor
-//!    [`ActorLogRing`] the `ActorAwareLayer` pushes into and the
-//!    framework-built-in `aether.log.tail` handler reads from
-//!    (ADR-0081 §1). Before the user dispatch runs, the framework
-//!    intercepts `aether.log.tail` envelopes and replies from the
-//!    actor's ring directly. Two-step typed → fallback dispatch
-//!    follows for everything else.
-//! 3. **Drain after shutdown.** Any envelope already in the inbox
-//!    when the shutdown signal fired is processed synchronously
-//!    before `unwire` runs (matches the existing singleton
-//!    semantics).
-//! 4. **`unwire`.** Last-chance hook with `ReplyTo::NONE`. Wrapped
-//!    in the same `with_stamped` so any final tracing or `Local<T>`
-//!    access works.
-//! 5. **Registry close + monitor fan-out.** `actor_registry.close_actor(id)`
-//!    drains `monitors_of[id]`, prunes `monitoring[id]` from each
-//!    target, marks the slot Dead. Returned watchers receive a
-//!    `MonitorNotice` mail through the supplied `Mailer`.
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+//! - [`typed_then_fallback_or_warn`] — typed `#[handler]` → `#[fallback]`
+//!   → warn-on-miss, the user-dispatch step.
+//! - [`dispatch_log_tail_if_matching`] / [`dispatch_trace_tail_if_matching`]
+//!   / [`dispatch_cost_tail_if_matching`] — the framework-built-in arms
+//!   for `aether.{log,trace,cost}.tail`, which read the receiving
+//!   actor's stamped per-actor rings / cost table and reply inline
+//!   before the user dispatch runs (ADR-0081 §1 / ADR-0086 Phase 3 /
+//!   iamacoffeepot/aether#1128).
+//! - [`fold_handler_cost`] — folds one handler-execution sample into
+//!   the per-handler EWMA (iamacoffeepot/aether#1128, measure-only).
 
 use aether_actor::Local;
 use aether_actor::MailCtx;
 use aether_actor::cost::CostCells;
-use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace_ring::ActorTraceRing;
 use aether_data::Kind;
-use aether_kinds::trace::{Nanos, TraceEvent, TraceTail, TraceTailResult};
+use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeDispatch};
-use crate::actor::registry::ActorRegistry;
-use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
-use crate::runtime::thread_name;
-use aether_actor::local;
+use crate::mail::KindId;
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
-/// fell through. Shared by `dispatch_loop_run`'s main loop and
-/// `DispatcherSlot::run_cycle`'s pool path.
+/// fell through. Called from `DispatcherSlot::run_cycle`'s pool path.
 ///
 /// Issue 576 framing: catch-all caps that own a `#[fallback]` return
 /// `true` after their fallback runs, which suppresses the warn.
@@ -204,183 +181,6 @@ pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
     });
 }
 
-/// Run one actor's dispatcher loop on the calling thread. Returns
-/// when the binding signals shutdown (self-shutdown flag set or
-/// inbox sender disconnected). See module doc-comment for the full
-/// lifecycle.
-///
-/// `pending` is decremented after every dispatched envelope when
-/// `Some`. Singletons now always pass `None` — ADR-0082 retired the
-/// frame-bound drain barrier that was the singleton consumer.
-/// Instanced actors pass their per-actor counter, which
-/// `Spawner::shutdown_instanced` reads to coordinate teardown (issue
-/// 685).
-pub fn dispatch_loop_run<A>(
-    binding: &Arc<NativeBinding>,
-    actor: &mut Box<A>,
-    slots: &ActorSlots,
-    pending: Option<&Arc<AtomicU64>>,
-    actor_registry: &Arc<ActorRegistry>,
-    mailer: &Arc<Mailer>,
-    self_id: MailboxId,
-) where
-    A: NativeActor + NativeDispatch,
-{
-    // Phase 1: main dispatch loop.
-    loop {
-        if binding.should_shutdown() {
-            break;
-        }
-        let Some(env) = binding.recv_blocking() else {
-            break;
-        };
-        let inbound_mail_id = env.mail_id;
-        // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
-        // name-hashed `ThreadId` (cached per thread, zero per-hop alloc).
-        let thread_id = thread_name::current_thread_id();
-        local::with_stamped(slots, || {
-            // ADR-0086 Phase 3: `Received` / `Finished` land in this
-            // (recipient) actor's trace ring — only inside this
-            // `with_stamped` is its `ActorSlots` stamped.
-            let th = binding.mailer().trace_handle();
-            // iamacoffeepot/aether#1128: capture the `Received` instant
-            // so the cost fold below reuses the existing trace bracket —
-            // no new timestamp on the hot path.
-            let t_received = th.now_nanos();
-            th.push_trace_ring(
-                env.root,
-                TraceEvent::Received {
-                    mail_id: inbound_mail_id,
-                    t: t_received,
-                    // iamacoffeepot/aether#1134: the producer-stamped
-                    // deposit instant + scheduler backlog, splitting the
-                    // hop into send→enqueue + queue residence.
-                    t_enqueue: env.t_enqueue,
-                    enqueue_depth: env.enqueue_depth,
-                    thread_id,
-                },
-            );
-            let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-            // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128: the
-            // framework intercepts `aether.log.tail`,
-            // `aether.trace.tail`, and `aether.cost.tail` before the
-            // actor's typed/fallback dispatch. The actor never sees
-            // these; the framework reads its rings / cost table and
-            // replies inline.
-            if !dispatch_log_tail_if_matching(&mut ctx, &env)
-                && !dispatch_trace_tail_if_matching(&mut ctx, &env)
-                && !dispatch_cost_tail_if_matching(binding, &mut ctx, &env)
-            {
-                typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
-            }
-            // iamacoffeepot/aether#1150: drop `ctx` now to flush the
-            // handler's buffered sends (stamping each child `Sent` at
-            // flush-begin) before `Finished`, so a child's `t_sent`
-            // precedes its parent's `t_finished` — the causal order the
-            // trace walk expects. Otherwise the flush rides `ctx`'s
-            // scope-end `Drop`, landing after this push.
-            drop(ctx);
-            let t_finished = th.now_nanos();
-            th.push_trace_ring(
-                env.root,
-                TraceEvent::Finished {
-                    mail_id: inbound_mail_id,
-                    t: t_finished,
-                },
-            );
-            // iamacoffeepot/aether#1128: fold this handler's execution
-            // time `(t_finished − t_received)` into its per-handler EWMA.
-            // Lock-free through the per-actor `CostCells` cache; a
-            // framework arm / fallback kind (not in the cache) is
-            // skipped. Measure-only — no scheduling change.
-            fold_handler_cost(env.kind, t_received, t_finished);
-        });
-        // ADR-0080 §2 settlement hook, outside `with_stamped` so the
-        // `fire_settled` notification runs unstamped (it may resolve mail
-        // subscribers inline).
-        binding.mailer().record_finished(inbound_mail_id, env.root);
-        if let Some(p) = pending {
-            p.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-
-    // Phase 2: drain remaining inbox synchronously. The shutdown
-    // flag / disconnect raced against any in-flight mail the sink
-    // handler already pushed; the actor sees it before `unwire`
-    // runs so a "please close" handler that flushes state observes
-    // the full inbox.
-    while let Some(env) = binding.try_recv() {
-        let inbound_mail_id = env.mail_id;
-        let thread_id = thread_name::current_thread_id();
-        local::with_stamped(slots, || {
-            let th = binding.mailer().trace_handle();
-            let t_received = th.now_nanos();
-            th.push_trace_ring(
-                env.root,
-                TraceEvent::Received {
-                    mail_id: inbound_mail_id,
-                    t: t_received,
-                    // iamacoffeepot/aether#1134: the producer-stamped
-                    // deposit instant + scheduler backlog, splitting the
-                    // hop into send→enqueue + queue residence.
-                    t_enqueue: env.t_enqueue,
-                    enqueue_depth: env.enqueue_depth,
-                    thread_id,
-                },
-            );
-            let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-            if !dispatch_log_tail_if_matching(&mut ctx, &env)
-                && !dispatch_trace_tail_if_matching(&mut ctx, &env)
-                && !dispatch_cost_tail_if_matching(binding, &mut ctx, &env)
-            {
-                let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, env.payload.bytes());
-            }
-            // iamacoffeepot/aether#1150: flush before `Finished` so a
-            // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
-            // its parent's `Finished`. See the main-loop arm above.
-            drop(ctx);
-            let t_finished = th.now_nanos();
-            th.push_trace_ring(
-                env.root,
-                TraceEvent::Finished {
-                    mail_id: inbound_mail_id,
-                    t: t_finished,
-                },
-            );
-            // iamacoffeepot/aether#1128: fold execution cost (see the
-            // main-loop arm above).
-            fold_handler_cost(env.kind, t_received, t_finished);
-        });
-        binding.mailer().record_finished(inbound_mail_id, env.root);
-        if let Some(p) = pending {
-            p.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-
-    // Phase 3: last-chance close hook. ReplyTo is None — no inbound
-    // envelope produced this call.
-    local::with_stamped(slots, || {
-        let mut close_ctx = NativeCtx::new(binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
-        actor.unwire(&mut close_ctx);
-    });
-
-    // Phase 4: close in the registry — drains `monitors_of[id]` for
-    // fan-out, prunes `monitoring[id]` from each watched target,
-    // marks Dead + tombstones the id. Singletons today don't sit in
-    // `actors` as `Live`, so the slot transition is purely sentinel;
-    // the reverse-prune is the load-bearing step. Instanced actors
-    // do sit Live and transition Live → Dead here.
-    let watchers = actor_registry.close_actor(self_id);
-    if !watchers.is_empty() {
-        let notice = aether_kinds::MonitorNotice { target: self_id };
-        let payload = <aether_kinds::MonitorNotice as Kind>::encode_into_bytes(&notice);
-        let kind = KindId(<aether_kinds::MonitorNotice as Kind>::ID.0);
-        for watcher in watchers {
-            mailer.push(Mail::new(watcher, kind, payload.clone(), 1));
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -388,6 +188,7 @@ pub fn dispatch_loop_run<A>(
 )]
 mod cost_tests {
     use super::*;
+    use crate::mail::MailboxId;
     use crate::test_util::fresh_substrate;
     use aether_actor::local::{ActorSlots, with_stamped};
     use aether_kinds::{CostTail, CostTailResult};

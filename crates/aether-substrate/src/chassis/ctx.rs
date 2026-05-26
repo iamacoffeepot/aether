@@ -57,16 +57,16 @@ pub struct DropOnShutdownClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
     pub mailbox_sender: MailboxSender,
-    /// Issue 635 PR C: optional wake hook for `Pooled` actors. The
-    /// mailbox closure invokes this after a successful inbox push so
-    /// the chassis worker pool re-queues the actor's
-    /// [`crate::scheduler::Drainable`] slot. `Dedicated` actors
-    /// (today: every cap) leave this empty — the closure's `get()`
-    /// is a single atomic load, ~free.
+    /// Issue 635 PR C: the pool wake hook. The mailbox closure invokes
+    /// it after a successful inbox push so the chassis worker pool
+    /// re-queues the actor's [`crate::scheduler::Drainable`] slot. Every
+    /// actor is pool-dispatched (issue 1187), so this is always
+    /// populated post-slot-construction; the [`OnceLock`] shape lets the
+    /// closure's `get()` stay a single relaxed atomic load while the
+    /// slot is still being built.
     ///
-    /// Populated post-claim by the `Pooled` branch of
-    /// `make_native_actor_boot` / `Spawner::spawn_actor` after the
-    /// slot exists.
+    /// Populated post-claim by `make_native_actor_boot` /
+    /// `Spawner::spawn_actor` after the slot exists.
     pub wake_slot: Arc<MailboxWakeSlot>,
 }
 
@@ -98,9 +98,11 @@ impl MailboxWakeSlot {
         let _ = self.inner.set(fn_);
     }
 
-    /// Borrow the installed hook. Returns `None` when the claim is
-    /// for a `Dedicated` actor (no hook ever installed). Hot path —
-    /// `OnceLock::get` is a single relaxed load.
+    /// Borrow the installed hook. Returns `None` only during the boot
+    /// window before the slot is constructed and the hook is set; every
+    /// actor is pool-dispatched (issue 1187), so a live actor always has
+    /// one installed. Hot path — `OnceLock::get` is a single relaxed
+    /// load.
     pub(crate) fn get(&self) -> Option<&MailboxWakeFn> {
         self.inner.get()
     }
@@ -312,10 +314,10 @@ impl<'a> ChassisCtx<'a> {
                     );
                     return;
                 }
-                // Issue 635 PR C: fire the `Pooled` wake hook (if
-                // installed). `Dedicated` actors leave it empty,
-                // so this is a single relaxed atomic load on the
-                // hot path.
+                // Issue 635 PR C: fire the pool wake hook (if installed).
+                // `get()` returns `None` only during the boot window
+                // before the slot is built, so this is a single relaxed
+                // atomic load on the hot path.
                 if let Some(wake) = wake_for_handler.get() {
                     wake();
                 }

@@ -265,16 +265,16 @@ pub enum CycleResult {
 }
 
 /// Trait the chassis-side dispatcher slot implements. PR C will
-/// implement this for `DispatcherSlot<A>` (one per `Pooled` actor).
+/// implement this for `DispatcherSlot<A>` (one per actor).
 /// PR B exercises it via an in-module `CounterSlot` test fixture.
 ///
 /// Implementors own:
 /// - The per-slot [`SlotState`] (so this trait can poll it).
 /// - The actor's inbox (so [`run_cycle`](Self::run_cycle) can drain).
 /// - Whatever the actor's handler invocation needs (a `Box<A>` plus
-///   the per-envelope wrapping that the crate-internal
-///   `dispatch_loop_run` does in `crate::actor::native::dispatch` —
-///   `local::with_stamped`, `log_install::with_actor_dispatch`, etc).
+///   the per-envelope wrapping `DispatcherSlot::dispatch_one` applies
+///   around the shared helpers in `crate::actor::native::dispatch` —
+///   `local::with_stamped`, etc).
 pub trait Drainable: Send + Sync + 'static {
     /// One drain cycle. Sequence:
     /// 1. CAS `Ready → Running` (caller holds the invariant: this
