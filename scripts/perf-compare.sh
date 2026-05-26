@@ -100,9 +100,17 @@ echo "[perf-compare] baseline = merge-base $base_short; K=$K, workers=$AETHER_PE
 # first keeps the base build from clobbering it.
 echo "[perf-compare] building candidate (PR) binaries…"
 cargo build --release -p aether-substrate-bundle \
-    --bin aether-perf-trial --bin aether-perf-compare
+    --bin aether-perf-trial --bin aether-perf-compare --bin aether-perf-plot
 cp "$ROOT/target/release/aether-perf-trial" "$cand_trial"
 cp "$ROOT/target/release/aether-perf-compare" "$compare_bin"
+# Copy the candidate `aether-perf-plot` aside too. The workflow's plot step
+# renders from THIS binary instead of rebuilding, because the base build below
+# clobbers the shared target's `aether-substrate` artifacts — a `cargo build
+# --bin aether-perf-plot` afterward links the stale merge-base substrate and
+# plots the wrong default (the distributions then diverge from the percentile
+# table the comparison reports). Lands in `target/` (gitignored; survives this
+# script's cleanup trap and persists across workflow steps).
+cp "$ROOT/target/release/aether-perf-plot" "$ROOT/target/aether-perf-plot-cand"
 
 # Resolve the base trial binary: prefer the cross-run cache, else build it
 # from a throwaway worktree (sharing the candidate's target dir).

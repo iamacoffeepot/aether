@@ -114,9 +114,17 @@ jobs:
           AETHER_PERF_FRAMES: "200"
           AETHER_PERF_PLOT_DIR: perf-plots
         run: |
-          cargo build --release -p aether-substrate-bundle \
-            --bin aether-perf-plot
-          ./target/release/aether-perf-plot
+          # Render from the candidate aether-perf-plot that
+          # scripts/perf-compare.sh built + copied aside BEFORE its base build
+          # clobbered the shared target dir. A `cargo build --bin
+          # aether-perf-plot` here would relink it against the base-clobbered
+          # aether-substrate and plot the stale merge-base default — making the
+          # distributions disagree with the percentile table.
+          if [ -x ./target/aether-perf-plot-cand ]; then
+            ./target/aether-perf-plot-cand
+          else
+            echo "no candidate perf-plot binary from perf-compare.sh; skipping plots"
+          fi
       - name: Upload span-distribution plots
         if: always()
         uses: actions/upload-artifact@v4
