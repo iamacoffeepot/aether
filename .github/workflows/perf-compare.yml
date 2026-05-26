@@ -29,7 +29,7 @@ concurrency:
 jobs:
   changes:
     name: Detect dispatch-path changes
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       perf: ${{ steps.filter.outputs.perf }}
     steps:
@@ -51,7 +51,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'perf-skip') &&
       (needs.changes.outputs.perf == 'true' ||
        contains(github.event.pull_request.labels.*.name, 'perf'))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       # write — push the rendered plots to the `perf-plots` branch (a blob
       # store) so the public-repo raw URLs render inline in the sticky
