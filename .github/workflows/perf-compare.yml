@@ -107,6 +107,12 @@ jobs:
           # built with.
           PERF_BASE_ENV: AETHER_LOCAL_MAIL_BUDGET=0
           PERF_CAND_ENV: AETHER_LOCAL_MAIL_BUDGET=64 AETHER_LOCAL_TIME_BUDGET_US=6
+          # Diagnostic: sweep 2 vs 1 worker. At 1 worker there is no sibling
+          # to steal a queued blob and no spill target, so every blob is
+          # owner-popped warm. If the tree's queued collapses at workers=1
+          # but stays ~6µs at workers=2, cross-worker handoff (work stealing /
+          # spill) is the cause of the Linux-runner tree floor.
+          AETHER_PERF_WORKERS: "2,1"
         run: scripts/perf-compare.sh
       # iamacoffeepot/aether#1155: render the candidate's per-cell
       # queued/drain/handler sample distributions (the shape the
