@@ -262,8 +262,12 @@ fn worker_loop(
     // on this worker can read the scheduler ready-queue depth
     // (`worker_deque::pending_depth`) for the latency harness.
     worker_deque::install_injector(Arc::clone(&injector));
+    // Whether this worker may raid siblings' deques, or is owner-only over
+    // its own (iamacoffeepot/aether#1174). A per-process constant — read once
+    // here, not per `acquire_slot`, and threaded into the steal scan.
+    let peer_steal = worker_deque::peer_steal_enabled();
     loop {
-        let Some(slot) = acquire_slot(idx, &stealers, &injector, &spin) else {
+        let Some(slot) = acquire_slot(idx, &stealers, &injector, &spin, peer_steal) else {
             // Shutdown signalled. Exit.
             return;
         };
@@ -325,7 +329,8 @@ fn worker_loop(
 /// next cascade (this worker's freshly-produced blobs, or work it's about
 /// to steal) starts a fresh keep-local budget — then steals into the deque
 /// from the injector (off-worker producers + spilled fan-out + requeued
-/// yields) and its siblings' tails. When that turns up nothing, the
+/// yields) and, when `peer_steal` is set, its siblings' tails (owner-only
+/// when off, iamacoffeepot/aether#1174). When that turns up nothing, the
 /// coordinator
 /// (iamacoffeepot/aether#1064) takes over: it keeps the worker spinning
 /// (re-running the steal scan) for a bounded window so a producer can
@@ -339,6 +344,7 @@ fn acquire_slot(
     stealers: &[Stealer<Arc<dyn Drainable>>],
     injector: &Injector<Arc<dyn Drainable>>,
     spin: &SpinPark,
+    peer_steal: bool,
 ) -> Option<Arc<dyn Drainable>> {
     if let Some(slot) = worker_deque::pop_local() {
         return Some(slot);
@@ -347,10 +353,10 @@ fn acquire_slot(
     // keep-local burst (iamacoffeepot/aether#1160) so stolen work, or this
     // worker's next cascade, starts under a fresh mail/time budget.
     worker_deque::burst_reset();
-    if let Some(slot) = worker_deque::steal_into_local(idx, stealers, injector) {
+    if let Some(slot) = worker_deque::steal_into_local(idx, stealers, injector, peer_steal) {
         return Some(slot);
     }
-    match spin.acquire(|| worker_deque::steal_into_local(idx, stealers, injector)) {
+    match spin.acquire(|| worker_deque::steal_into_local(idx, stealers, injector, peer_steal)) {
         Acquired::Slot(slot) => Some(slot),
         Acquired::Shutdown => None,
     }
