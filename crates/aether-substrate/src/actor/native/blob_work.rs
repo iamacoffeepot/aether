@@ -92,7 +92,7 @@
 //! of parallelism (a worker drains a whole group; groups can't split), so
 //! the blob is a parallel-machine makespan problem — optimal
 //! `K ≈ ceil(total_work / longest_pole)`, clamped to `[1, min(G, W)]` and
-//! gated by `total_work > C_WAKE_NANOS` (the wake break-even). [`recruit_k`]
+//! gated by `total_work > DEFAULT_WAKE_COST_NANOS` (the wake break-even). [`recruit_k`]
 //! is that closed form. A cheap narrow blob yields `K = 1` and stays local
 //! — preserving the #1116 win for the right reason (cheapness, not
 //! narrowness) — while a heavy narrow blob recruits its full group count.
@@ -175,15 +175,16 @@ fn recruit_cap() -> usize {
     })
 }
 
-/// Wake break-even in nanos: the measured injector pickup / park-wake
-/// floor (iamacoffeepot/aether#1174's ~7µs tree floor, attributed to the
+/// Default wake break-even in nanos, used when `AETHER_WAKE_COST_NANOS`
+/// is unset: the measured injector pickup / park-wake floor
+/// (iamacoffeepot/aether#1174's ~7µs tree floor, attributed to the
 /// injector handoff). A flush whose summed group work is below this can
 /// never amortize a sibling wakeup, so [`recruit_k`] returns `K = 1` and
 /// the blob stays producer-local — the cost-aware form of the prior
 /// narrow-local win (iamacoffeepot/aether#1116). A runtime-measured
-/// `C_wake` is a deferred upgrade (iamacoffeepot/aether#1127); for now it
-/// is this const, overridable via `AETHER_WAKE_COST_NANOS`.
-const C_WAKE_NANOS: u64 = 4_300;
+/// `C_wake` is a deferred upgrade (iamacoffeepot/aether#1127); for now
+/// it is this const.
+const DEFAULT_WAKE_COST_NANOS: u64 = 4_300;
 
 /// High-MAD confidence threshold: a handler whose mean-absolute-deviation
 /// exceeds this fraction of its mean is "bimodal / untrustworthy" — its
@@ -197,14 +198,14 @@ const MAD_CONFIDENCE_NUM: u64 = 1;
 const MAD_CONFIDENCE_DEN: u64 = 1;
 
 /// The wake break-even in nanos, honouring an `AETHER_WAKE_COST_NANOS`
-/// override (unparseable / empty falls back to [`C_WAKE_NANOS`]). Read once.
+/// override (unparseable / empty falls back to [`DEFAULT_WAKE_COST_NANOS`]). Read once.
 fn wake_cost_nanos() -> u64 {
     static WAKE: OnceLock<u64> = OnceLock::new();
     *WAKE.get_or_init(|| {
         env::var("AETHER_WAKE_COST_NANOS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(C_WAKE_NANOS)
+            .unwrap_or(DEFAULT_WAKE_COST_NANOS)
     })
 }
 
@@ -1290,7 +1291,7 @@ mod tests {
     // iamacoffeepot/aether#1178: the cost-aware recruiter. `recruit_k` is a
     // pure function over `(total_work, max_group_work, G, W)`; the canonical
     // cases below use work values well clear of the default
-    // `C_WAKE_NANOS = 4300` so they don't depend on an env override.
+    // `DEFAULT_WAKE_COST_NANOS = 4300` so they don't depend on an env override.
 
     /// Trivial-wide: many tiny groups whose total work is below the wake
     /// break-even → `K = 1` (stay local, no recruit). This is the cost-aware
@@ -1340,7 +1341,7 @@ mod tests {
         assert_eq!(recruit_k(100_000, 30_000, 11, 8), 3);
     }
 
-    /// The wake gate is exact at the boundary: `total_work <= C_WAKE_NANOS`
+    /// The wake gate is exact at the boundary: `total_work <= DEFAULT_WAKE_COST_NANOS`
     /// is local, one nano over recruits.
     #[test]
     fn recruit_k_wake_gate_boundary() {
