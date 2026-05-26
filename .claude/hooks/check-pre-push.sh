@@ -42,6 +42,21 @@ if ! command -v git >/dev/null 2>&1; then
     exit 0
 fi
 
+# iamacoffeepot/aether#1199: the gated command may target a worktree via a
+# leading `cd <path> &&` — the /implement and /delegate skills push from
+# `.claude/worktrees/<slug>` / `/tmp/aether-*`. Evaluate git state in that
+# directory rather than the hook's own cwd (the main checkout); otherwise
+# HEAD and the stamp gitdir resolve against the wrong tree and a clean
+# in-worktree preflight is false-blocked. No `cd` prefix (the main-checkout
+# push) leaves cwd untouched, so that path is unchanged.
+cd_prefix_re='^[[:space:]]*cd[[:space:]]+([^[:space:];&|]+)'
+if [[ "$command" =~ $cd_prefix_re ]]; then
+    target_dir="${BASH_REMATCH[1]}"
+    if [[ -n "$target_dir" && -d "$target_dir" ]]; then
+        cd "$target_dir" || true
+    fi
+fi
+
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
     exit 0
 fi
