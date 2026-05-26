@@ -5,7 +5,7 @@
 //! ADR-0079, the forcing function for issue 635) it isn't. The
 //! scheduler replaces 1:1 with M:N — a small set of pool workers
 //! cooperatively drains every actor. Blocking work (TCP `accept`,
-//! file-watch reads, a parking `wait_reply`-shaped request) never
+//! file-watch reads, a parking request/reply) never
 //! blocks a handler: it offloads to a `ctx.spawn`'d thread that feeds
 //! results back as mail (issue 635 Phase 3 made `Pooled` the default;
 //! issue 1187 removed the per-thread `Dedicated` opt-out entirely).

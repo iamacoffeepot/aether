@@ -131,7 +131,7 @@ pub struct LifecycleDriverCapability<C: 'static + Send + Sync> {
     /// chain root; consumed in `on_settled` when the matching
     /// `Settled` mail arrives. While `Some`, additional inbound
     /// `LifecycleAdvance` mails warn-and-drop — the chassis main loop
-    /// `wait_reply`s on `LifecycleAdvanceComplete` so duplicates only
+    /// blocks on `LifecycleAdvanceComplete` so duplicates only
     /// happen on broken cadence sources.
     pending: Option<PendingAdvance>,
     /// Deadline for a pending advance's `Settled` (ADR-0082 §6 couples
@@ -470,7 +470,7 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
             self.current_state = next_kind;
         }
         // Route the reply to whoever issued the LifecycleAdvance —
-        // chassis main loops `wait_reply` on it to gate the next frame.
+        // chassis main loops block on it to gate the next frame.
         ctx.reply_to(reply_to, &LifecycleAdvanceComplete { completed, next });
     }
 }

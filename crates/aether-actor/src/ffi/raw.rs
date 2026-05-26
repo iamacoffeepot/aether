@@ -31,25 +31,9 @@ unsafe extern "C" {
     pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
     #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
-    /// ADR-0042: block the component thread until a mail whose kind
-    /// id matches `expected_kind` (and, when `expected_correlation`
-    /// != 0, whose `ReplyTo.correlation_id` also matches) arrives,
-    /// then copy up to `out_cap` bytes of its payload to `out_ptr`.
-    /// Return codes: `>= 0` = bytes written, `-1` = timeout, `-2` =
-    /// payload larger than `out_cap` (mail re-parked for retry),
-    /// `-3` = substrate tore the component down mid-wait.
-    /// `timeout_ms` is clamped to 30s substrate-side.
-    #[link_name = "wait_reply_p32"]
-    pub fn wait_reply(
-        expected_kind: u64,
-        out_ptr: u32,
-        out_cap: u32,
-        timeout_ms: u32,
-        expected_correlation: u64,
-    ) -> i32;
     /// ADR-0042: return the correlation id the substrate minted for
     /// this component's most recent `send_mail`. `0` before any
-    /// send. Paired with `wait_reply` so sync wrappers can filter on
+    /// send. A handler filters its inbound reply on this so it picks
     /// "the reply I just sent a request for" rather than "any reply
     /// of this kind."
     #[link_name = "prev_correlation_p32"]
@@ -123,27 +107,6 @@ pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count:
 #[must_use]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
     panic!("aether-actor: save_state called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::wait_reply` import. Always
-/// panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_arch = "wasm32"))]
-#[must_use]
-pub unsafe fn wait_reply(
-    _expected_kind: u64,
-    _out_ptr: u32,
-    _out_cap: u32,
-    _timeout_ms: u32,
-    _expected_correlation: u64,
-) -> i32 {
-    panic!("aether-actor: wait_reply called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::prev_correlation` import.

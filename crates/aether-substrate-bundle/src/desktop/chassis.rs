@@ -254,8 +254,8 @@ impl DesktopChassis {
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
-        // ADR-0074 §Decision 5: production chassis configures the
-        // cross-class `wait_reply` aborter so the substrate exits via
+        // ADR-0063: production chassis configures the fatal-abort
+        // aborter so a wasm guest trap exits the substrate via
         // `lifecycle::fatal_abort` instead of unwinding. Built before
         // `boot` moves into the driver.
         let aborter: Arc<dyn FatalAborter> =

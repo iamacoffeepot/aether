@@ -14,7 +14,7 @@
 //! halves together — the cross-target abstraction is now the
 //! per-stage capability traits in [`actor::ctx`]; the per-target
 //! dispatch surfaces are [`ffi::bridge`] (FFI: [`ffi::MAIL_BRIDGE`],
-//! [`ffi::PERSIST_BRIDGE`], [`ffi::SYNC_WAIT_BRIDGE`]) and the inherent methods on
+//! [`ffi::PERSIST_BRIDGE`]) and the inherent methods on
 //! `aether_substrate::actor::native::binding::NativeBinding`.
 //!
 //! Public surface:
@@ -26,13 +26,10 @@
 //!     itself.
 //!   - [`actor::ctx`] — per-stage capability traits ([`MailSender`],
 //!     [`OutboundReply`], [`Resolver`], [`Persistence`],
-//!     [`LifecycleControl`], `SyncWaiter`). FFI ctxs in [`ffi::ctx`]
+//!     [`LifecycleControl`]). FFI ctxs in [`ffi::ctx`]
 //!     and substrate's `NativeCtx` family impl the relevant subset.
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     [`export!`] macro emits as a `static`.
-//!   - [`WaitError`] + [`decode_wait_reply`] — ADR-0042 sync
-//!     round-trip helpers; the per-target wait primitive plugs into
-//!     `actor::ctx::sync_waiter::wait_reply_via`.
 //!   - [`ffi`] — FFI binding layer: [`ffi::bridge`] dispatch ZSTs +
 //!     [`FfiActor`] trait + [`Replaceable`] hook trait +
 //!     [`FfiActorMailbox`] for the actor-typed sender chain +
@@ -80,7 +77,6 @@ pub use local::Local;
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
-pub use mail::sync::{WaitError, decode_wait_reply};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 
 // FFI surface promoted to the crate root so consumers see

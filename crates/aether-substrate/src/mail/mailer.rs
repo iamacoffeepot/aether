@@ -450,8 +450,8 @@ impl Mailer {
                     }
                 };
                 // ADR-0042: echo the caller's correlation_id onto the
-                // reply envelope so a `wait_reply_p32` parked on this
-                // correlation picks the right reply out of the mpsc.
+                // reply envelope so the originating handler can pick
+                // the right reply out of the mpsc by correlation.
                 // Reply target is None — nobody replies to a reply.
                 let reply_to = ReplyTo::with_correlation(ReplyTarget::None, sender.correlation_id);
                 self.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
@@ -726,7 +726,7 @@ fn route_mail(
                 };
                 // ADR-0042: carry the correlation through the bubble-
                 // up frame so a reply coming back via Phase-2 reply
-                // routing lands at the originator's `wait_reply_p32`.
+                // routing carries the id the originating handler matches on.
                 let correlation_id = mail.reply_to.correlation_id;
                 outbound.egress_unresolved_mail(
                     recipient,

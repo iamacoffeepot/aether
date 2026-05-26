@@ -87,23 +87,20 @@ pub struct ComponentCtx {
     /// `dispatch_load_component` reports it like any other
     /// instantiation error. None on the success path.
     pub init_failure: Option<String>,
-    /// Trampoline binding whose `wait_reply` the `wait_reply_p32` host
-    /// fn (in [`crate::actor::wasm::host_fns`]) delegates to.
-    /// `Some` for ctx instances built by `WasmTrampoline::init`
-    /// (in `aether-capabilities`; issue 634 Phase 4 PR 3 —
-    /// `binding.wait_reply` is now the single source of inbox /
-    /// overflow / correlation-filter truth); `None` for the test paths
-    /// that build `ComponentCtx` without a real trampoline (the host
-    /// fn returns [`crate::actor::wasm::host_fns::WAIT_CANCELLED`] in
-    /// that case, matching the pre-Phase-4 "no inbox installed"
-    /// disposition).
+    /// Trampoline binding the reply / outbound-mail host fns route
+    /// through (the binding owns the actor's inbox + reply machinery +
+    /// correlation counter). `Some` for ctx instances built by
+    /// `WasmTrampoline::init` (in `aether-capabilities`; issue 634
+    /// Phase 4 PR 3); `None` for the test paths that build
+    /// `ComponentCtx` without a real trampoline.
     pub binding: Option<Arc<NativeBinding>>,
     /// ADR-0042 correlation counter. Per-component (one
     /// `ComponentCtx` per component instance). Holds the *next* id
     /// to mint; `prev_correlation()` reads `counter - 1` to return
     /// the last one minted. Starts at `1` so that `0` always means
-    /// "no correlation" (backward-compat sentinel for waits that
-    /// don't filter, and for `prev_correlation` before any send).
+    /// "no correlation" (backward-compat sentinel for replies that
+    /// don't filter on correlation, and for `prev_correlation` before
+    /// any send).
     ///
     /// `Cell` instead of `AtomicU64`: the component is single-
     /// threaded (ADR-0038 actor-per-component), so the counter is
@@ -150,8 +147,9 @@ impl ComponentCtx {
     }
 
     /// Wire the trampoline's `NativeBinding` into the ctx so the
-    /// `wait_reply_p32` host fn (in [`crate::actor::wasm::host_fns`])
-    /// can route through it. Called by `WasmTrampoline::init` (in
+    /// reply / outbound-mail host fns (in
+    /// [`crate::actor::wasm::host_fns`]) can route through it. Called
+    /// by `WasmTrampoline::init` (in
     /// `aether-capabilities`) right after constructing the ctx and before
     /// `Component::instantiate` — the host-fn closure captures the ctx
     /// via the wasmtime `Store` data pointer at instantiation time,
@@ -174,8 +172,8 @@ impl ComponentCtx {
 
     /// Return the correlation id used by the most recent
     /// `ComponentCtx::send` call. The `prev_correlation_p32` host fn
-    /// surfaces this to the guest so sync wrappers know what to
-    /// filter on in `wait_reply_p32`. Returns `0` (the "no
+    /// surfaces this to the guest so a handler can match an inbound
+    /// reply to the request it sent. Returns `0` (the "no
     /// correlation" sentinel) before any send has been made.
     pub fn prev_correlation(&self) -> u64 {
         // counter holds the *next* id to mint; subtract to get the
@@ -194,8 +192,8 @@ impl ComponentCtx {
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
         // outgoing `ReplyTo.correlation_id`; the reply's echo
-        // (auto-routed by `Mailer::send_reply`) carries it back, and
-        // `wait_reply_p32` filters on it.
+        // (auto-routed by `Mailer::send_reply`) carries it back so a
+        // handler can match the reply to this send.
         let correlation = self.mint_correlation();
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Component(self.sender), correlation);
 

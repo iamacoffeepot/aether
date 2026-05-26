@@ -38,20 +38,6 @@ pub const SAVE_STATE_NO_MEMORY: u32 = 1;
 pub const SAVE_STATE_OOB: u32 = 2;
 pub const SAVE_STATE_TOO_LARGE: u32 = 3;
 
-/// Sentinel return values for `wait_reply_p32` (ADR-0042 §1). A
-/// non-negative result is the number of payload bytes written to the
-/// guest's out buffer; negatives are disjoint error codes.
-pub const WAIT_TIMEOUT: i32 = -1;
-pub const WAIT_BUFFER_TOO_SMALL: i32 = -2;
-pub const WAIT_CANCELLED: i32 = -3;
-
-/// Upper bound on the `timeout_ms` arg to `wait_reply_p32` (ADR-0042
-/// §3). Matches `capture_frame`'s ceiling so any substrate-side bug
-/// can't park a component thread indefinitely. Guests that want a
-/// genuine "wait forever" pass this constant and accept the eventual
-/// `WAIT_TIMEOUT`.
-pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
-
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
 /// function has been called on.
@@ -184,8 +170,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 return REPLY_UNKNOWN_HANDLE;
             };
             // ADR-0042: echo the inbound correlation on every reply
-            // path so a parked `wait_reply_p32` on the originator
-            // can filter its own reply out of a busy inbox.
+            // path so the originating actor's handler can match its
+            // own reply to the request it sent out of a busy inbox.
             let correlation = entry.correlation_id;
             let kind = KindId(kind);
             match entry.target {
@@ -245,82 +231,12 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // now a deterministic hash of the mailbox name, computed on the
     // guest side. The corresponding host fn is gone.
 
-    // ADR-0042: synchronous mail wait, delegating to the trampoline's
-    // `NativeBinding::wait_reply` (issue 634 Phase 4 PR 3). The
-    // transport already owns inbox + overflow + correlation-filter;
-    // the host fn just bridges between wasm linear memory and the
-    // transport's `&mut [u8]` buffer.
-    //
-    // The drain runs on the dispatcher thread because the guest's
-    // host call IS the dispatcher (ADR-0038 actor-per-component).
-    // Other senders keep pushing into the transport's mpsc during
-    // the wait; non-match accumulates in the transport's overflow
-    // until drain returns.
-    //
-    // Sentinel codes: timeout → `-1`, reply too big for `out_cap` →
-    // `-2` (envelope is parked back on overflow so a retry with a
-    // larger buffer can pick it up), inbox disconnected → `-3`,
-    // ctx without a wired transport → `-3` (test-path
-    // pathological — production trampolines always wire one).
-    linker.func_wrap(
-        "aether",
-        "wait_reply_p32",
-        |mut caller: Caller<'_, ComponentCtx>,
-         expected_kind: u64,
-         out_ptr: u32,
-         out_cap: u32,
-         timeout_ms: u32,
-         expected_correlation: u64|
-         -> i32 {
-            let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
-            let Some(transport) = caller.data().binding.clone() else {
-                // No trampoline transport wired — the ctx was built by
-                // a test path that doesn't exercise wait_reply.
-                // Surface as cancelled so the guest doesn't spin.
-                tracing::error!(
-                    target: "aether_substrate::host_fns",
-                    "wait_reply_p32 called on a ComponentCtx with no transport wired",
-                );
-                return WAIT_CANCELLED;
-            };
-
-            // Resolve wasm linear memory and bounds-check `out_ptr +
-            // out_cap` *before* calling into the transport so a bad
-            // pointer doesn't burn a real envelope. After this point,
-            // a `-2` from the transport means the payload exceeded
-            // `out_cap` and the transport already parked the envelope
-            // on its overflow for a retry.
-            let Some(memory) = caller
-                .get_export("memory")
-                .and_then(wasmtime::Extern::into_memory)
-            else {
-                return WAIT_BUFFER_TOO_SMALL;
-            };
-            let start = out_ptr as usize;
-            let Some(end) = start.checked_add(out_cap as usize) else {
-                return WAIT_BUFFER_TOO_SMALL;
-            };
-            let data = memory.data_mut(&mut caller);
-            if end > data.len() {
-                return WAIT_BUFFER_TOO_SMALL;
-            }
-            transport.wait_reply(
-                expected_kind,
-                &mut data[start..end],
-                clamped,
-                expected_correlation,
-            )
-        },
-    )?;
-
     // ADR-0042: read back the correlation id the substrate minted
-    // for this component's most recent `send_mail`. Sync SDK
-    // wrappers call this right after a send to capture the id,
-    // then pass it to `wait_reply_p32` so the drain loop picks out
-    // the matching reply among any prior async-request replies
-    // that share the same kind. Returns `0` (the
-    // `NO_CORRELATION` sentinel) before any send has been made;
-    // matches the "kind-only" fallback in `wait_reply_p32`.
+    // for this component's most recent `send_mail`. A guest handler
+    // captures the id right after a send, then matches it against the
+    // inbound reply's correlation to pick its own reply out of any
+    // prior async-request replies that share the same kind. Returns
+    // `0` (the `NO_CORRELATION` sentinel) before any send has been made.
     linker.func_wrap(
         "aether",
         "prev_correlation_p32",

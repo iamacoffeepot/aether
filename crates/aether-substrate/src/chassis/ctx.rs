@@ -375,8 +375,8 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Clone the chassis's [`FatalAborter`]. Read by
-    /// [`crate::NativeBinding::from_ctx`] so the cross-class
-    /// `wait_reply` guard has somewhere to abort to without each
+    /// [`crate::NativeBinding::from_ctx`] so the wasm-trap abort
+    /// path has somewhere to abort to without each
     /// transport plumbing [`crate::HubOutbound`] itself.
     #[must_use]
     pub fn fatal_aborter(&self) -> Arc<dyn FatalAborter> {

@@ -30,7 +30,7 @@
 //! `#[fallback]` to the wasm guest via `Component::deliver`. The
 //! framework dispatcher reads from the trampoline's `NativeBinding`;
 //! un-handled kinds reach `forward_to_wasm`; the guest's
-//! `wait_reply_p32` / `send_mail_p32` / `reply_mail_p32` host fns
+//! `send_mail_p32` / `reply_mail_p32` host fns
 //! route through the same binding.
 //!
 //! ## Handler-kind imports
@@ -168,10 +168,10 @@ mod native {
                 Arc::clone(&mailer),
                 Arc::clone(&config.outbound),
             );
-            // Wire the trampoline's binding so `wait_reply_p32` host fn
-            // can drain *this* trampoline's inbox + overflow (issue 634
-            // Phase 4 PR 3 — single source of inbox truth lives on
-            // `NativeBinding`, not on `ComponentCtx`).
+            // Wire the trampoline's binding so the guest's reply /
+            // outbound-mail host fns route through *this* trampoline's
+            // binding (issue 634 Phase 4 PR 3 — single source of inbox
+            // truth lives on `NativeBinding`, not on `ComponentCtx`).
             substrate_ctx.install_binding(Arc::clone(ctx.binding()));
             let component = Component::instantiate(
                 &config.engine,

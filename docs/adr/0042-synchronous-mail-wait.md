@@ -1,9 +1,10 @@
 # ADR-0042: Synchronous mail wait primitive
 
-- **Status:** Proposed
+- **Status:** Superseded — `wait_reply` retired by iamacoffeepot/aether#1190
 - **Date:** 2026-04-23
 - **Amended:** 2026-04-24 — retired the filter-slot + oneshot mechanism in §1 / §4 / §6 in favour of a drain-and-buffer loop over the component's mpsc inbox.
 - **Amended:** 2026-04-24 — added per-component correlation ids on `ReplyTo` + `prev_correlation_p32` host fn, so the drain loop can filter out stale replies of the same kind. See _Amendment history_ below.
+- **Retired:** 2026-05-26 (iamacoffeepot/aether#1190) — the `wait_reply` primitive this ADR introduced never accreted a handler call site. Once iamacoffeepot/aether#1187 removed the `Dedicated` dispatch opt-in (pool-only dispatch), an in-handler block on `wait_reply` could park a shared pool worker and deadlock if the awaited reply needed that worker — a latent footgun with no users. The `SyncWaiter` trait, the `wait_reply_p32` host fn + FFI bridge, and `NativeBinding::wait_reply` are removed. The correlation machinery this ADR added — `prev_correlation` / `prev_correlation_p32` and per-`ReplyTo` correlation ids — **survives**: it serves the sanctioned async pattern where a handler stashes `prev_correlation` after a send and matches it against the inbound reply's correlation across handler invocations (the FSM "send → return → handle the reply" shape). A future capability that genuinely must block in-handler would reintroduce a blocking primitive under a fresh ADR. The design below is retained as the historical record of the retired mechanism.
 
 ## Context
 

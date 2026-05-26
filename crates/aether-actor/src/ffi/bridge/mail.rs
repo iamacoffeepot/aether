@@ -11,10 +11,9 @@
 //! the mail currently being dispatched; `prev_correlation` reads the
 //! correlation id the host minted for the most-recent `send_mail`.
 //!
-//! Correlation is universal — every send mints a correlation id
-//! regardless of whether the caller sync-waits or async-handles the
-//! reply. It's a property of the outbound mail, not of any waiting
-//! strategy, so it lives here rather than on [`SyncWaitBridge`](super::sync_wait::SyncWaitBridge).
+//! Correlation is universal — every send mints a correlation id so a
+//! handler can match the reply to the request it sent. It's a property
+//! of the outbound mail, so it lives on the mail bridge.
 
 use crate::ffi::raw;
 
@@ -98,9 +97,9 @@ impl MailBridge {
 
     /// Correlation id the host minted for this actor's most recent
     /// `send_mail` call (ADR-0042). `0` before any send. Universal —
-    /// every send mints a correlation; sync wrappers filter
-    /// `wait_reply` against it, async handlers stash it and match on
-    /// the inbound's reply correlation.
+    /// every send mints a correlation; a handler stashes it and
+    /// matches it against the inbound reply's correlation to pair a
+    /// reply with the request it sent.
     #[must_use]
     pub fn prev_correlation(&self) -> u64 {
         // SAFETY: `raw::prev_correlation` takes no arguments and reads

@@ -24,7 +24,7 @@ audio = ["dep:cpal"]
 [dependencies]
 # ADR-0074 Phase 2: target-agnostic actor SDK. Capabilities own a
 # `NativeBinding` instance (in `crate::native_transport`) and pass
-# `&self.transport` into the SDK's `Sink<K, T>` / `wait_reply` /
+# `&self.transport` into the SDK's `Sink<K, T>` /
 # `Ctx<'_, T>` machinery — same shape the wasm guest path uses
 # through `WasmTransport`. The trait takes `&self` so per-actor
 # state lives in struct fields, not a thread-local.
