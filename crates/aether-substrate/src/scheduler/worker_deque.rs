@@ -15,12 +15,17 @@
 //! every blob a running handler produces is a descendant of the cascade
 //! already on this worker, so keeping it warm costs no cross-worker handoff
 //! at *any* generation. Inlining holds until the per-burst **time valve**
-//! ([`time_budget`], `AETHER_LOCAL_TIME_BUDGET_US`, default 12µs) trips —
-//! then the backlog spills so a *heavy* cascade parallelises across idle
-//! workers. Duration is the discriminator: a cheap cascade's whole burst runs
-//! ~6µs and stays fully inlined (no bimodal), while a heavy one trips the
-//! valve and spills (iamacoffeepot/aether#1174 matrix: heavy −15% end-to-end,
-//! trivial flat). **mail-count** budgeting (`AETHER_LOCAL_MAIL_BUDGET`,
+//! ([`time_budget`]) trips — then the backlog spills so a *heavy* cascade
+//! parallelises across idle workers. The budget is **adaptive**
+//! (iamacoffeepot/aether#1182): a small multiple of the measured
+//! cross-worker handoff cost ([`super::calibrate::handoff_cost`]) — the
+//! thing the valve out-amortises — so it tracks the hardware instead of a
+//! one-box constant (the prior fixed 12µs sat at `≈ 6 ×` this box's ~2µs
+//! handoff). `AETHER_LOCAL_TIME_BUDGET_US` still overrides. Duration is the
+//! discriminator: a cheap cascade's whole burst stays fully inlined (no
+//! bimodal), while a heavy one trips the valve and spills
+//! (iamacoffeepot/aether#1174 matrix: heavy −15% end-to-end, trivial flat).
+//! **mail-count** budgeting (`AETHER_LOCAL_MAIL_BUDGET`,
 //! [`mail_budget`]) is **off** by default — it can't separate a cheap cascade
 //! from a heavy one of the same width, so it only re-introduces the
 //! generational bimodal; opt it in for a deque-growth bound by count.
@@ -43,6 +48,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
+use crate::scheduler::calibrate::handoff_cost;
 use crate::scheduler::slot::Drainable;
 
 /// The unit on the deques: a chassis-registered dispatcher slot. (Phase
@@ -156,32 +162,74 @@ pub fn mail_budget() -> Option<u32> {
     })
 }
 
-/// Keep-local **time** budget per burst — the spill valve, **on by default**
-/// (iamacoffeepot/aether#1160, re-tuned #1174). Read once from
-/// `AETHER_LOCAL_TIME_BUDGET_US` (microseconds); default **12**. A worker
-/// inlines its whole cascade until the burst has run this long, then spills
-/// the backlog so a heavy cascade parallelises across idle workers. Duration
-/// is the right lever (it separates a cheap cascade from a heavy one where
-/// mail-count can't): a trivial tree's whole burst runs ~6µs, so 12µs leaves
-/// it fully inlined (no bimodal), while a heavy cascade trips it after its
-/// first ~12µs+ handler and spills.
+/// Adaptive keep-local budget: spend up to this many measured cross-worker
+/// **handoffs**' worth of time inlining a cascade before the valve spills
+/// (iamacoffeepot/aether#1182). The valve out-amortises the cost of *not*
+/// inlining — handing a blob to a parked sibling — so the budget should be
+/// a small multiple of that handoff cost, not a fixed wall-clock figure.
 ///
-/// Re-tuned from #1160's **6µs**, which the #1174 matrix found *too tight* —
-/// it tripped on the trivial tree's own ~6µs burst (instrumented on a faulty
-/// substrate: strided clock #1163, peer-steal #1177, generational bias). The
-/// 10µs knee + margin keeps trivial inlined and still trips heavy. Set **0**
-/// to disable the valve entirely (pure inline-cascade, bounded only by
-/// `hard_cap`). Sampled at decision time, not per mail (#1163).
+/// `6` reproduces the #1174-tuned default on the box it was tuned on: that
+/// 12µs sits at `≈ 6 ×` this box's measured ~2µs handoff
+/// ([`super::calibrate::handoff_cost`]). On a slower box (a more expensive
+/// handoff) the budget scales up — more inlining is worth it before paying
+/// the steeper handoff — and on a faster box it scales down, so the
+/// trivial-vs-heavy discrimination tracks the hardware instead of a
+/// one-box constant.
+const BUDGET_HANDOFF_MULTIPLIER: u32 = 6;
+
+/// Safety rails on the adaptive budget. These guard a *pathological*
+/// handoff measurement (a sub-µs read on a quiet probe, or an absurd
+/// outlier) from producing a nonsensical valve — they are not the
+/// operating point, which `BUDGET_HANDOFF_MULTIPLIER × handoff_cost` sets
+/// and which lands comfortably inside the rails on every real box measured
+/// so far. The floor stays at the lowest budget the #1174 matrix ever
+/// exercised; the ceiling caps a very slow box at a still-reasonable burst.
+const MIN_ADAPTIVE_BUDGET: Duration = Duration::from_micros(6);
+const MAX_ADAPTIVE_BUDGET: Duration = Duration::from_micros(60);
+
+/// Keep-local **time** budget per burst — the spill valve, **on by
+/// default** (iamacoffeepot/aether#1160, #1174; made adaptive in #1182). A
+/// worker inlines its whole cascade until the burst has run this long, then
+/// spills the backlog so a heavy cascade parallelises across idle workers.
+/// Duration is the discriminator (it separates a cheap cascade from a heavy
+/// one where mail-count can't): a trivial tree's whole burst stays inlined,
+/// while a heavy cascade trips the valve and spills.
+///
+/// `AETHER_LOCAL_TIME_BUDGET_US` (microseconds) overrides — an explicit
+/// value pins the budget and `0` disables the valve (pure inline-cascade,
+/// bounded only by `hard_cap`). Unset (the default), the budget is
+/// **derived from the measured handoff cost**: `derive_budget` of
+/// [`super::calibrate::handoff_cost`] — `BUDGET_HANDOFF_MULTIPLIER ×` the
+/// boot-probed, live-refined cross-worker handoff on this box, clamped to
+/// the safety rails. Reading the live estimate (rather than a boot
+/// snapshot) keeps the budget tracking the *operating* handoff cost the
+/// valve actually has to out-amortise; the read is a couple of relaxed
+/// atomic loads, negligible against the dispatch it gates. The wall clock
+/// is still sampled at decision time, not per mail (#1163).
 #[must_use]
 pub fn time_budget() -> Duration {
-    static B: OnceLock<u64> = OnceLock::new();
-    let us = *B.get_or_init(|| {
+    // An explicit env budget wins and is fixed within a run — pin or
+    // disable (0) the valve regardless of the measured handoff cost. Cached
+    // because the override never changes.
+    static OVERRIDE_US: OnceLock<Option<u64>> = OnceLock::new();
+    if let Some(us) = *OVERRIDE_US.get_or_init(|| {
         env::var("AETHER_LOCAL_TIME_BUDGET_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(12)
-    });
-    Duration::from_micros(us)
+    }) {
+        return Duration::from_micros(us);
+    }
+    derive_budget(handoff_cost())
+}
+
+/// The adaptive budget for a given handoff cost: `BUDGET_HANDOFF_MULTIPLIER
+/// ×` it, clamped to the safety rails. Split out from the env read so the
+/// derivation is unit-testable without touching the process-global
+/// estimate.
+fn derive_budget(handoff: Duration) -> Duration {
+    handoff
+        .saturating_mul(BUDGET_HANDOFF_MULTIPLIER)
+        .clamp(MIN_ADAPTIVE_BUDGET, MAX_ADAPTIVE_BUDGET)
 }
 
 /// Whether idle workers may raid siblings' deques (peer-deque stealing),
@@ -412,6 +460,45 @@ mod tests {
     /// of test scheduling order on a shared thread.
     fn drain_local() {
         while pop_local().is_some() {}
+    }
+
+    #[test]
+    fn derive_budget_reproduces_the_tuned_default_on_this_box() {
+        // The whole point of k = 6: a ~2µs handoff (this box's measured
+        // cost) derives the #1174-tuned 12µs budget, so wiring the valve to
+        // the measurement is behaviour-preserving where it was tuned.
+        assert_eq!(
+            derive_budget(Duration::from_micros(2)),
+            Duration::from_micros(12),
+        );
+    }
+
+    #[test]
+    fn derive_budget_scales_with_handoff_cost() {
+        // A slower box (more expensive handoff) gets a larger budget — more
+        // inlining is worth it before paying the steeper handoff.
+        assert_eq!(
+            derive_budget(Duration::from_micros(5)),
+            Duration::from_micros(30),
+        );
+    }
+
+    #[test]
+    fn derive_budget_clamps_to_safety_rails() {
+        // A pathologically small measurement floors at the rail rather than
+        // producing a sub-µs valve that spills everything…
+        assert_eq!(
+            derive_budget(Duration::from_nanos(100)),
+            MIN_ADAPTIVE_BUDGET,
+            "6 × 100ns = 600ns clamps up to the floor",
+        );
+        // …and an absurd outlier caps at the ceiling rather than inlining
+        // for a wildly long burst.
+        assert_eq!(
+            derive_budget(Duration::from_micros(50)),
+            MAX_ADAPTIVE_BUDGET,
+            "6 × 50µs = 300µs clamps down to the ceiling",
+        );
     }
 
     #[test]
