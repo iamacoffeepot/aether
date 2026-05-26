@@ -20,6 +20,29 @@
 //! uniform run-order drift (δ ≈ 0 after pairing) and one-off tail
 //! outliers (median is robust) read as stable rather than false
 //! regressions.
+//!
+//! # Two-level versioning (iamacoffeepot/aether#1206)
+//!
+//! The report is versioned at two independent levels so a metric-set
+//! change no longer blinds the whole comparison:
+//!
+//! - The envelope [`TrialReport::schema`] tag ([`TRIAL_SCHEMA`]) guards
+//!   only the *container* shape — "a report is a list of named,
+//!   versioned sections". It bumps rarely (and a pre-sections report on
+//!   the wrong envelope still can't be sectioned, so the comparator
+//!   keeps its whole-container skip for that case alone).
+//! - Each [`RawSection`] carries its own `version`. Adding or changing a
+//!   metric bumps only *that* section's version; every other section
+//!   still pairs and gets a verdict. A section new or version-mismatched
+//!   on one side renders "new this run — no baseline" without blinding
+//!   the sections that *are* comparable.
+//!
+//! A section's `body` is kept as an opaque [`serde_json::Value`] until
+//! the comparator has confirmed both sides agree on its name and
+//! version. That generalises the old probe-before-parse: an unknown or
+//! mismatched section stays opaque (and renders as uncompared) rather
+//! than serde-hard-failing the decode of the sections that *can* be
+//! read.
 
 use serde::{Deserialize, Serialize};
 
@@ -92,11 +115,43 @@ impl CellJson {
     }
 }
 
+/// One versioned, opaque slice of a [`TrialReport`]. The comparator
+/// pairs sections by `name`, decodes `body` to a typed payload only when
+/// both sides agree on `name` *and* `version`, and otherwise leaves the
+/// section uncompared (iamacoffeepot/aether#1206). Keeping `body` as a
+/// [`serde_json::Value`] is load-bearing: a section the comparator can't
+/// read stays opaque instead of failing the whole decode.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RawSection {
+    pub name: String,
+    pub version: String,
+    pub body: serde_json::Value,
+}
+
+/// The per-cell latency section: today's only section, carrying the
+/// (worker × topology × metric) percentile grid. Its `version` bumps
+/// whenever the metric set changes, leaving sibling sections comparable.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LatencySection {
+    pub cells: Vec<CellJson>,
+}
+
+impl LatencySection {
+    /// The section name the comparator dispatches on.
+    pub const NAME: &str = "latency";
+    /// The section version. Bumped when the metric set changes; sibling
+    /// sections stay comparable across the bump.
+    pub const VERSION: &str = "v1";
+}
+
 /// One fresh-process sweep run. The `perf-trial` bin emits this as JSON
 /// on stdout; the `perf-compare` bin collects K of each side.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TrialReport {
-    /// Schema tag for forward-compat decode checks.
+    /// Envelope schema tag (iamacoffeepot/aether#1206): guards only the
+    /// *container* shape — "a report is a list of named, versioned
+    /// sections". Per-metric evolution rides each section's own
+    /// `version`, not this tag.
     pub schema: String,
     /// Commit the trial binary was built from, if the bin could resolve
     /// it (best-effort; `None` outside a git checkout).
@@ -105,22 +160,28 @@ pub struct TrialReport {
     pub pace_hz: Option<u64>,
     /// Frames advanced per cell.
     pub frames: u32,
-    pub cells: Vec<CellJson>,
+    /// The independently-versioned sections of this run.
+    pub sections: Vec<RawSection>,
 }
 
-/// Current trial schema tag. Bumped to `v2` by iamacoffeepot/aether#1150
-/// when `hop` / `send_enqueue` / `residence` gave way to the
-/// `queued` / `drain` / `handler` span model; to `v3` by
+/// Current envelope schema tag. Bumped to `v2` by
+/// iamacoffeepot/aether#1150 when `hop` / `send_enqueue` / `residence`
+/// gave way to the `queued` / `drain` / `handler` span model; to `v3` by
 /// iamacoffeepot/aether#1158 when `construct` joined as the producer-side
-/// first leg, completing the four-stage lifecycle.
-pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v3";
+/// first leg; and to `v4` by iamacoffeepot/aether#1206 when the flat
+/// top-level `cells` array became a list of named, independently-versioned
+/// sections (so a metric-set change bumps a section's `version`, not this
+/// envelope tag).
+pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v4";
 
 impl TrialReport {
     /// Build a trial report from a sweep's [`CellResult`]s — each cell
     /// expands to four `CellJson` rows (`construct` + `queued` + `drain` +
     /// `handler`, in lifecycle order; iamacoffeepot/aether#1158). `depth`
     /// is a count, not a latency, so it is omitted from the latency compare
-    /// (it lives only in the on-demand observe table).
+    /// (it lives only in the on-demand observe table). The rows are wrapped
+    /// in a single [`LatencySection`] — the lone section today
+    /// (iamacoffeepot/aether#1206).
     ///
     /// [`CellResult`]: super::harness::CellResult
     #[must_use]
@@ -150,22 +211,33 @@ impl TrialReport {
                 });
             }
         }
+        let latency = LatencySection { cells: out };
+        let body = serde_json::to_value(&latency).unwrap_or(serde_json::Value::Null);
         Self {
             schema: TRIAL_SCHEMA.to_owned(),
             git_sha,
             pace_hz,
             frames,
-            cells: out,
+            sections: vec![RawSection {
+                name: LatencySection::NAME.to_owned(),
+                version: LatencySection::VERSION.to_owned(),
+                body,
+            }],
         }
+    }
+
+    /// The section with the given name, if present.
+    fn section(&self, name: &str) -> Option<&RawSection> {
+        self.sections.iter().find(|s| s.name == name)
     }
 }
 
-/// Read just the `schema` tag from a trial's JSON, ignoring the rest.
-/// The comparator uses this to detect a base-vs-candidate schema
-/// transition (a changed metric set) *before* the full [`TrialReport`]
-/// parse — which would otherwise hard-fail on serde's
-/// unknown-`Metric`-variant error when an older base trial still carries
-/// the retired `hop` / `send_enqueue` / `residence` names
+/// Read just the `schema` (envelope) tag from a trial's JSON, ignoring
+/// the rest. The comparator uses this to detect an unreadable envelope
+/// — a pre-sections report on the wrong envelope tag can't be sectioned
+/// — *before* the full [`TrialReport`] parse. Probing first also dodges
+/// serde's unknown-`Metric`-variant hard-fail when an older base trial
+/// still carries the retired `hop` / `send_enqueue` / `residence` names
 /// (iamacoffeepot/aether#1151). `None` if the bytes aren't a JSON object
 /// carrying a string `schema` field.
 #[must_use]
@@ -204,10 +276,11 @@ struct CellKey {
     metric: Metric,
 }
 
-/// Find the cell matching `key` in one trial (a free fn, not a closure,
-/// so the borrow of the returned `&CellJson` ties to `t`'s lifetime).
-fn find_cell<'a>(t: &'a TrialReport, key: &CellKey) -> Option<&'a CellJson> {
-    t.cells
+/// Find the cell matching `key` in one trial's latency cells (a free fn,
+/// not a closure, so the borrow of the returned `&CellJson` ties to the
+/// slice's lifetime).
+fn find_cell<'a>(cells: &'a [CellJson], key: &CellKey) -> Option<&'a CellJson> {
+    cells
         .iter()
         .find(|c| c.workers == key.workers && c.topo == key.topo && c.metric == key.metric)
 }
@@ -239,14 +312,49 @@ pub struct CellComparison {
     pub verdict: Verdict,
 }
 
-/// Full comparison output — headline counts + per-cell rows.
+/// Why a section couldn't be paired into a verdict
+/// (iamacoffeepot/aether#1206). Picked per case so the markdown note and
+/// the JSON report both spell out the reason rather than a bare "skipped".
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UncomparedReason {
+    /// Present on the candidate but absent from the base — new this run,
+    /// no baseline to compare against.
+    NewThisRun,
+    /// Present on both sides but the versions differ — the section's own
+    /// shape changed, so a paired comparison isn't meaningful this run.
+    VersionChanged { base: String, cand: String },
+    /// Present on the base but absent from the candidate — the section
+    /// was dropped this run.
+    OnlyBase,
+    /// Present on both sides at an agreed version, but the comparator has
+    /// no typed compare for this section name.
+    UnknownName,
+}
+
+/// One section's outcome in a [`ComparisonReport`]: either a typed
+/// verdict grid (`Compared`) or a reasoned skip (`Uncompared`).
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SectionReport {
+    Compared {
+        name: String,
+        improved: usize,
+        stable: usize,
+        regressed: usize,
+        cells: Vec<CellComparison>,
+    },
+    Uncompared {
+        name: String,
+        reason: UncomparedReason,
+    },
+}
+
+/// Full comparison output — the trial count plus one entry per section.
 #[derive(Serialize, Clone, Debug)]
 pub struct ComparisonReport {
     pub trials: usize,
-    pub improved: usize,
-    pub stable: usize,
-    pub regressed: usize,
-    pub cells: Vec<CellComparison>,
+    pub sections: Vec<SectionReport>,
 }
 
 /// Tunables for the verdict rule. Defaults are conservative —
@@ -307,36 +415,138 @@ fn iqr_sorted(s: &[f64]) -> f64 {
     quantile_sorted(s, 0.75) - quantile_sorted(s, 0.25)
 }
 
-/// Compare K interleaved base/candidate trials. Trials pair by index:
-/// `base[t]` against `cand[t]`. Cells present in every trial of both
-/// sides are compared; a cell missing from any trial (a skipped boot)
-/// is dropped.
+/// Compare K interleaved base/candidate trials, section by section.
+/// Trials pair by index: `base[t]` against `cand[t]`. A section is
+/// dispatched on its `name`: present on both sides at an agreed version
+/// with a known name decodes both bodies and runs that section's typed
+/// compare; otherwise it lands in the report as an `Uncompared` block
+/// with the reason (new this run / version changed / only base / unknown
+/// name) so the comparable sections still get verdicts
+/// (iamacoffeepot/aether#1206).
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
 pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -> ComparisonReport {
     let k = base.len().min(cand.len());
+
+    // Section names present on either side, base-first then any
+    // candidate-only names, de-duplicated while preserving order.
+    let mut names: Vec<String> = Vec::new();
+    for t in base.iter().chain(cand.iter()) {
+        for sec in &t.sections {
+            if !names.contains(&sec.name) {
+                names.push(sec.name.clone());
+            }
+        }
+    }
+
+    let base_sec = |name: &str| base.first().and_then(|t| t.section(name));
+    let cand_sec = |name: &str| cand.first().and_then(|t| t.section(name));
+
+    let mut sections: Vec<SectionReport> = Vec::with_capacity(names.len());
+    for name in &names {
+        let on_base = base_sec(name);
+        let on_cand = cand_sec(name);
+        let (bsec, csec) = match (on_base, on_cand) {
+            (Some(b), Some(c)) => (b, c),
+            (None, Some(_)) => {
+                sections.push(SectionReport::Uncompared {
+                    name: name.clone(),
+                    reason: UncomparedReason::NewThisRun,
+                });
+                continue;
+            }
+            (Some(_), None) => {
+                sections.push(SectionReport::Uncompared {
+                    name: name.clone(),
+                    reason: UncomparedReason::OnlyBase,
+                });
+                continue;
+            }
+            (None, None) => continue,
+        };
+        if bsec.version != csec.version {
+            sections.push(SectionReport::Uncompared {
+                name: name.clone(),
+                reason: UncomparedReason::VersionChanged {
+                    base: bsec.version.clone(),
+                    cand: csec.version.clone(),
+                },
+            });
+            continue;
+        }
+
+        match name.as_str() {
+            LatencySection::NAME => {
+                let base_cells = decode_latency_cells(&base[..k]);
+                let cand_cells = decode_latency_cells(&cand[..k]);
+                sections.push(compare_latency(name, &base_cells, &cand_cells, k, cfg));
+            }
+            _ => sections.push(SectionReport::Uncompared {
+                name: name.clone(),
+                reason: UncomparedReason::UnknownName,
+            }),
+        }
+    }
+
+    ComparisonReport {
+        trials: k,
+        sections,
+    }
+}
+
+/// Per-trial latency cells: decode each trial's `latency` section body,
+/// dropping any trial whose body doesn't decode (it then can't satisfy
+/// the present-in-every-trial gate below, exactly as a missing cell did).
+fn decode_latency_cells(trials: &[TrialReport]) -> Vec<Vec<CellJson>> {
+    trials
+        .iter()
+        .map(|t| {
+            t.section(LatencySection::NAME)
+                .and_then(|s| serde_json::from_value::<LatencySection>(s.body.clone()).ok())
+                .map(|l| l.cells)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Today's per-cell paired-delta compare, extracted for the `latency`
+/// section. `base_cells[t]` / `cand_cells[t]` are trial `t`'s cells;
+/// cells are keyed by (workers, topo, metric) across the K trials and a
+/// cell missing from any trial of either side is dropped — preserving
+/// the pre-sections semantics exactly.
+#[allow(clippy::cast_precision_loss)]
+fn compare_latency(
+    name: &str,
+    base_cells: &[Vec<CellJson>],
+    cand_cells: &[Vec<CellJson>],
+    k: usize,
+    cfg: CompareConfig,
+) -> SectionReport {
     let mut cells: Vec<CellComparison> = Vec::new();
 
     // Key set = cells in the first base trial; verified present across
     // all trials of both sides before comparing.
-    let keys: Vec<CellKey> = base
+    let keys: Vec<CellKey> = base_cells
         .first()
-        .map(|t| t.cells.iter().map(CellJson::key).collect())
+        .map(|c| c.iter().map(CellJson::key).collect())
         .unwrap_or_default();
 
     for key in &keys {
         // Per-trial lookup of this cell on each side.
-        let base_cells: Vec<&CellJson> =
-            base[..k].iter().filter_map(|t| find_cell(t, key)).collect();
-        let cand_cells: Vec<&CellJson> =
-            cand[..k].iter().filter_map(|t| find_cell(t, key)).collect();
-        if base_cells.len() != k || cand_cells.len() != k || k == 0 {
+        let base_hits: Vec<&CellJson> = base_cells[..k.min(base_cells.len())]
+            .iter()
+            .filter_map(|c| find_cell(c, key))
+            .collect();
+        let cand_hits: Vec<&CellJson> = cand_cells[..k.min(cand_cells.len())]
+            .iter()
+            .filter_map(|c| find_cell(c, key))
+            .collect();
+        if base_hits.len() != k || cand_hits.len() != k || k == 0 {
             continue; // cell not present in every trial — skip
         }
 
         for p in Pct::ALL {
-            let base_vals: Vec<f64> = base_cells.iter().map(|c| c.percentile(p)).collect();
-            let cand_vals: Vec<f64> = cand_cells.iter().map(|c| c.percentile(p)).collect();
+            let base_vals: Vec<f64> = base_hits.iter().map(|c| c.percentile(p)).collect();
+            let cand_vals: Vec<f64> = cand_hits.iter().map(|c| c.percentile(p)).collect();
             let deltas: Vec<f64> = (0..k).map(|t| cand_vals[t] - base_vals[t]).collect();
 
             let base_sorted = sorted(base_vals.clone());
@@ -380,8 +590,8 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
         .filter(|c| c.verdict == Verdict::Regressed)
         .count();
     let stable = cells.len() - improved - regressed;
-    ComparisonReport {
-        trials: k,
+    SectionReport::Compared {
+        name: name.to_owned(),
         improved,
         stable,
         regressed,
@@ -432,7 +642,10 @@ fn us(ns: f64) -> String {
 pub const STICKY_MARKER: &str = "<!-- aether-perf-report -->";
 
 /// Render the comparison as a sticky PR-comment markdown body: headline
-/// counts, the non-stable rows up top, and the full grid collapsed.
+/// counts (summed across the compared sections), then per section — a
+/// `latency` verdict (non-stable rows up top, full grid collapsed) or a
+/// one-line "new this run" note for an uncompared section
+/// (iamacoffeepot/aether#1206).
 #[must_use]
 #[allow(clippy::format_push_string)]
 pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> String {
@@ -441,11 +654,43 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
     s.push('\n');
     s.push_str(&format!("## dispatch perf — {title}\n"));
     s.push_str(&format!("{subtitle}\n\n"));
+
+    let (mut improved, mut stable, mut regressed) = (0usize, 0usize, 0usize);
+    for sec in &report.sections {
+        if let SectionReport::Compared {
+            improved: i,
+            stable: st,
+            regressed: r,
+            ..
+        } = sec
+        {
+            improved += i;
+            stable += st;
+            regressed += r;
+        }
+    }
     s.push_str(&format!(
-        "**{} improved · {} stable · {} regressed** ({} trials/config, paired)\n\n",
-        report.improved, report.stable, report.regressed, report.trials
+        "**{improved} improved · {stable} stable · {regressed} regressed** ({} trials/config, paired)\n\n",
+        report.trials
     ));
 
+    for sec in &report.sections {
+        match sec {
+            SectionReport::Compared { name, cells, .. } => {
+                push_latency_section(&mut s, name, cells);
+            }
+            SectionReport::Uncompared { name, .. } => {
+                s.push_str(&format!(
+                    "_{name}: new this run — no baseline to compare_\n\n"
+                ));
+            }
+        }
+    }
+    s
+}
+
+#[allow(clippy::format_push_string)]
+fn push_latency_section(s: &mut String, name: &str, cells: &[CellComparison]) {
     let header = "| topology | w | metric | pct | base µs | this µs | Δ | verdict |\n|---|--:|---|---|--:|--:|--:|---|\n";
     let row = |c: &CellComparison| -> String {
         let verdict = match c.verdict {
@@ -468,13 +713,14 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
         )
     };
 
-    let non_stable: Vec<&CellComparison> = report
-        .cells
+    let non_stable: Vec<&CellComparison> = cells
         .iter()
         .filter(|c| c.verdict != Verdict::Stable)
         .collect();
     if non_stable.is_empty() {
-        s.push_str("_No cells moved beyond the noise band._\n\n");
+        s.push_str(&format!(
+            "_{name}: no cells moved beyond the noise band._\n\n"
+        ));
     } else {
         s.push_str(header);
         for c in non_stable {
@@ -484,15 +730,14 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
     }
 
     s.push_str(&format!(
-        "<details><summary>full grid — {} cells</summary>\n\n",
-        report.cells.len()
+        "<details><summary>{name} full grid — {} cells</summary>\n\n",
+        cells.len()
     ));
     s.push_str(header);
-    for c in &report.cells {
+    for c in cells {
         s.push_str(&row(c));
     }
-    s.push_str("\n</details>\n");
-    s
+    s.push_str("\n</details>\n\n");
 }
 
 #[cfg(test)]
@@ -501,7 +746,8 @@ mod tests {
 
     /// Build a K-trial side from a per-trial `p50` series for one cell
     /// (`fanout-8 @ 11w`, drain). Other percentiles track p50 ×1.2 / ×1.5
-    /// so the cell is well-formed; tests assert on p50.
+    /// so the cell is well-formed; tests assert on p50. The cell rides in
+    /// a single `latency` section (iamacoffeepot/aether#1206).
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -509,12 +755,8 @@ mod tests {
     )]
     fn side(p50s: &[u64]) -> Vec<TrialReport> {
         p50s.iter()
-            .map(|&p50| TrialReport {
-                schema: TRIAL_SCHEMA.to_owned(),
-                git_sha: None,
-                pace_hz: None,
-                frames: 200,
-                cells: vec![CellJson {
+            .map(|&p50| {
+                let cells = vec![CellJson {
                     workers: 11,
                     topo: "fanout-8".to_owned(),
                     metric: Metric::Drain,
@@ -523,13 +765,37 @@ mod tests {
                     p99: (p50 as f64 * 1.5) as u64,
                     max: p50 * 4,
                     n: 1800,
-                }],
+                }];
+                let body =
+                    serde_json::to_value(LatencySection { cells }).expect("encode latency body");
+                TrialReport {
+                    schema: TRIAL_SCHEMA.to_owned(),
+                    git_sha: None,
+                    pace_hz: None,
+                    frames: 200,
+                    sections: vec![RawSection {
+                        name: LatencySection::NAME.to_owned(),
+                        version: LatencySection::VERSION.to_owned(),
+                        body,
+                    }],
+                }
             })
             .collect()
     }
 
+    /// Pull the compared `latency` section out of a comparison report.
+    fn latency_section(rep: &ComparisonReport) -> &SectionReport {
+        rep.sections
+            .iter()
+            .find(|s| matches!(s, SectionReport::Compared { name, .. } if name == LatencySection::NAME))
+            .expect("compared latency section present")
+    }
+
     fn p50_verdict(rep: &ComparisonReport) -> Verdict {
-        rep.cells
+        let SectionReport::Compared { cells, .. } = latency_section(rep) else {
+            panic!("latency section not compared");
+        };
+        cells
             .iter()
             .find(|c| c.percentile == "p50")
             .expect("p50 cell present")
@@ -623,5 +889,152 @@ mod tests {
         assert!(md.contains(STICKY_MARKER));
         assert!(md.contains("improved"));
         assert!(md.contains("full grid"));
+    }
+
+    #[test]
+    fn report_json_round_trip_preserves_latency_section() {
+        let trials = side(&[1000, 1100, 1200]);
+        let report = &trials[0];
+        let json = serde_json::to_string(report).expect("serialize trial");
+        let back: TrialReport = serde_json::from_str(&json).expect("deserialize trial");
+        assert_eq!(back.schema, TRIAL_SCHEMA);
+        assert_eq!(back.sections.len(), 1);
+        let sec = &back.sections[0];
+        assert_eq!(sec.name, LatencySection::NAME);
+        assert_eq!(sec.version, LatencySection::VERSION);
+        let latency: LatencySection =
+            serde_json::from_value(sec.body.clone()).expect("decode latency body");
+        assert_eq!(latency.cells.len(), 1);
+        assert_eq!(latency.cells[0].metric, Metric::Drain);
+        assert_eq!(latency.cells[0].p50, 1000);
+    }
+
+    /// Attach an extra raw section to every trial in a side.
+    fn with_extra_section(
+        mut side: Vec<TrialReport>,
+        name: &str,
+        version: &str,
+    ) -> Vec<TrialReport> {
+        for t in &mut side {
+            t.sections.push(RawSection {
+                name: name.to_owned(),
+                version: version.to_owned(),
+                body: serde_json::json!({"opaque": true}),
+            });
+        }
+        side
+    }
+
+    #[test]
+    fn unknown_section_on_candidate_does_not_blind_latency() {
+        // iamacoffeepot/aether#1205 core guard: a section the comparator
+        // doesn't recognise (here only on the candidate) survives decode
+        // and yields an Uncompared block, while the latency section
+        // present on both sides still produces a Compared verdict.
+        let base = side(&[167_000, 165_000, 169_000, 166_000]);
+        let cand = with_extra_section(side(&[33_000, 34_000, 32_000, 33_500]), "throughput", "v1");
+        let rep = compare(&base, &cand, CompareConfig::default());
+
+        // Latency still compared, and the win still reads.
+        assert_eq!(p50_verdict(&rep), Verdict::Improved);
+
+        // The unknown section is present and uncompared (new this run,
+        // since the base lacks it).
+        let unknown = rep
+            .sections
+            .iter()
+            .find(|s| matches!(s, SectionReport::Uncompared { name, .. } if name == "throughput"))
+            .expect("uncompared throughput section present");
+        match unknown {
+            SectionReport::Uncompared { reason, .. } => {
+                assert_eq!(*reason, UncomparedReason::NewThisRun);
+            }
+            SectionReport::Compared { .. } => panic!("throughput should not be compared"),
+        }
+    }
+
+    #[test]
+    fn unknown_section_on_both_sides_reads_unknown_name() {
+        // Present on both sides at an agreed version but with no typed
+        // compare — that's the UnknownName reason, distinct from
+        // NewThisRun.
+        let base = with_extra_section(side(&[1000, 1000, 1000]), "throughput", "v1");
+        let cand = with_extra_section(side(&[1000, 1000, 1000]), "throughput", "v1");
+        let rep = compare(&base, &cand, CompareConfig::default());
+        let unknown = rep
+            .sections
+            .iter()
+            .find(|s| matches!(s, SectionReport::Uncompared { name, .. } if name == "throughput"))
+            .expect("uncompared throughput section present");
+        match unknown {
+            SectionReport::Uncompared { reason, .. } => {
+                assert_eq!(*reason, UncomparedReason::UnknownName);
+            }
+            SectionReport::Compared { .. } => panic!("throughput should not be compared"),
+        }
+    }
+
+    #[test]
+    fn version_mismatch_does_not_blind_other_sections() {
+        // The latency section on the base is v1; on the candidate it is
+        // v2. That section reads VersionChanged; a second section present
+        // at an agreed version on both sides still compares.
+        let mut base = with_extra_section(side(&[1000, 1000, 1000]), "extra", "v1");
+        let mut cand = with_extra_section(side(&[1000, 1000, 1000]), "extra", "v1");
+        for t in &mut cand {
+            for sec in &mut t.sections {
+                if sec.name == LatencySection::NAME {
+                    sec.version = "v2".to_owned();
+                }
+            }
+        }
+        // Keep base's latency at v1 explicitly (it already is).
+        for t in &mut base {
+            for sec in &mut t.sections {
+                if sec.name == LatencySection::NAME {
+                    sec.version = "v1".to_owned();
+                }
+            }
+        }
+        let rep = compare(&base, &cand, CompareConfig::default());
+
+        let latency = rep
+            .sections
+            .iter()
+            .find(|s| matches!(s, SectionReport::Uncompared { name, .. } if name == LatencySection::NAME))
+            .expect("latency uncompared");
+        match latency {
+            SectionReport::Uncompared { reason, .. } => {
+                assert_eq!(
+                    *reason,
+                    UncomparedReason::VersionChanged {
+                        base: "v1".to_owned(),
+                        cand: "v2".to_owned(),
+                    }
+                );
+            }
+            SectionReport::Compared { .. } => panic!("latency should not compare across versions"),
+        }
+
+        // The `extra` section (v1 on both) still resolves — to UnknownName,
+        // proving the version mismatch on latency didn't abort the loop.
+        assert!(rep.sections.iter().any(|s| matches!(
+            s,
+            SectionReport::Uncompared { name, reason }
+                if name == "extra" && *reason == UncomparedReason::UnknownName
+        )));
+    }
+
+    #[test]
+    fn markdown_renders_both_compared_table_and_uncompared_note() {
+        let base = side(&[167_000, 165_000, 169_000, 166_000]);
+        let cand = with_extra_section(side(&[33_000, 34_000, 32_000, 33_500]), "throughput", "v1");
+        let rep = compare(&base, &cand, CompareConfig::default());
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+        // The latency table is present (not blinded) ...
+        assert!(md.contains("full grid"));
+        assert!(md.contains("| topology | w | metric |"));
+        // ... and the uncompared section's note rides alongside it.
+        assert!(md.contains("throughput: new this run"));
     }
 }
