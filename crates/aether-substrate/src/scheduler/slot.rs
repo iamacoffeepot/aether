@@ -413,6 +413,16 @@ impl WakeSink {
         }
     }
 
+    /// The pool's worker count `W` — the recruiter's `min(G, W)` clamp
+    /// (iamacoffeepot/aether#1178). [`Self::recruit`] independently caps
+    /// the injected clone count at `workers - 1` (the producer drains its
+    /// own copy), but the cost-aware sizing needs `W` up front to bound
+    /// `recruit_k` before subtracting the producer's own share.
+    #[must_use]
+    pub(crate) fn workers(&self) -> usize {
+        self.workers
+    }
+
     /// Recruit `count` workers to a shared cooperative blob
     /// (iamacoffeepot/aether#1137): push `count` clones of the same
     /// `Drainable` onto the shared injector, then wake up to `count` parked
