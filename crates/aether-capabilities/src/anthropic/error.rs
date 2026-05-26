@@ -8,7 +8,7 @@
 
 use aether_kinds::AnthropicError;
 
-use crate::anthropic::cli::CLI_NOT_FOUND;
+use crate::anthropic::cli::{CLI_NOT_FOUND, TIMEOUT_SENTINEL};
 use crate::contentgen::shared::{parse_status_prefix, snippet};
 
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
@@ -29,6 +29,13 @@ pub fn adapter_error_to_typed(raw: &str) -> AnthropicError {
     }
     if raw == UNAUTHORIZED_SENTINEL {
         return AnthropicError::Unauthorized;
+    }
+    if let Some(rest) = raw.strip_prefix(TIMEOUT_SENTINEL) {
+        // `timeout=<elapsed_ms>` — parse the trailing integer the way
+        // the `status=` prefix is parsed. A malformed tail falls back to
+        // 0 rather than dropping the timeout classification.
+        let elapsed_ms = rest.trim().parse::<u32>().unwrap_or(0);
+        return AnthropicError::Timeout { elapsed_ms };
     }
     if let Some(rest) = raw.strip_prefix("status=")
         && let Some((status, retry_after_ms)) = parse_status_prefix(rest)
@@ -61,8 +68,27 @@ pub fn status_to_error(status: u16, retry_after_ms: Option<u32>, body: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::status_to_error;
+    use super::{adapter_error_to_typed, status_to_error};
+    use crate::anthropic::cli::TIMEOUT_SENTINEL;
     use aether_kinds::AnthropicError;
+
+    #[test]
+    fn timeout_sentinel_maps_to_timeout() {
+        let raw = format!("{TIMEOUT_SENTINEL}1500");
+        assert_eq!(
+            adapter_error_to_typed(&raw),
+            AnthropicError::Timeout { elapsed_ms: 1500 }
+        );
+    }
+
+    #[test]
+    fn malformed_timeout_sentinel_still_classifies_as_timeout() {
+        let raw = format!("{TIMEOUT_SENTINEL}garbage");
+        assert_eq!(
+            adapter_error_to_typed(&raw),
+            AnthropicError::Timeout { elapsed_ms: 0 }
+        );
+    }
 
     #[test]
     fn unauthorized_statuses_map_to_unauthorized() {

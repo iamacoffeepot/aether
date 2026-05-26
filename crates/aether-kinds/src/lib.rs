@@ -2302,6 +2302,8 @@ mod control_plane {
     /// config issue, `ContentPolicyRefused` → surface to the user,
     /// `CliNotFound` → the `claude` binary isn't on PATH,
     /// `UnknownModel` → typo / unsupported id,
+    /// `Timeout` → a backend call (notably the `claude` subprocess)
+    /// exceeded the cap's per-request deadline and the child was killed.
     /// `ParamNotSupported` → the request set a knob the backend has no
     /// way to honor (e.g. `max_tokens` / `temperature` on the CLI path,
     /// which the `claude` binary exposes no flag for — reject rather than
@@ -2322,6 +2324,9 @@ mod control_plane {
         UnknownModel {
             model: String,
             supported: Vec<String>,
+        },
+        Timeout {
+            elapsed_ms: u32,
         },
         ParamNotSupported {
             param: String,

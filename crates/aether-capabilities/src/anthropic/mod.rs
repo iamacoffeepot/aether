@@ -64,6 +64,18 @@ pub struct DisabledAnthropicAdapter {
     cli: ClaudeCliAdapter,
 }
 
+impl DisabledAnthropicAdapter {
+    /// Build the disabled adapter with the CLI backend wired to the
+    /// cap's per-request `timeout`. The default impl uses
+    /// `DEFAULT_TIMEOUT_MS`; production threads `config.timeout`.
+    #[must_use]
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            cli: ClaudeCliAdapter::new(String::from("claude"), timeout),
+        }
+    }
+}
+
 impl AnthropicAdapter for DisabledAnthropicAdapter {
     fn messages_send(&self, _req: AnthropicRequest) -> Result<AnthropicResponse, String> {
         // The cap maps this sentinel onto `AnthropicError::Unauthorized`.
@@ -83,12 +95,14 @@ pub struct CombinedAnthropicAdapter {
 }
 
 impl CombinedAnthropicAdapter {
-    /// Build the combined adapter with a resolved API key + timeout.
+    /// Build the combined adapter with a resolved API key + timeout. The
+    /// `timeout` bounds both the Messages HTTPS call and the `claude`
+    /// subprocess deadline.
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
         Self {
             messages: UreqAnthropicAdapter::new(api_key, timeout),
-            cli: ClaudeCliAdapter::default(),
+            cli: ClaudeCliAdapter::new(String::from("claude"), timeout),
         }
     }
 }
@@ -253,7 +267,7 @@ mod native {
                 target: "aether_capabilities::anthropic",
                 "anthropic adapter disabled — messages reply Unauthorized; cli still routes",
             );
-            return Arc::new(DisabledAnthropicAdapter::default());
+            return Arc::new(DisabledAnthropicAdapter::new(config.timeout));
         }
         config.api_key.as_ref().map_or_else(
             || {
@@ -261,7 +275,7 @@ mod native {
                     target: "aether_capabilities::anthropic",
                     "ANTHROPIC_API_KEY unset — messages reply Unauthorized; cli still routes",
                 );
-                Arc::new(DisabledAnthropicAdapter::default()) as Arc<dyn AnthropicAdapter>
+                Arc::new(DisabledAnthropicAdapter::new(config.timeout)) as Arc<dyn AnthropicAdapter>
             },
             |key| {
                 tracing::info!(
@@ -892,6 +906,7 @@ mod native {
                 Arc::new(MissingCliAdapter {
                     cli: ClaudeCliAdapter::new(
                         "aether-nonexistent-claude-binary-xyzzy".to_string(),
+                        Duration::from_secs(30),
                     ),
                 }),
                 Arc::clone(&mailer),
