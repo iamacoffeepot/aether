@@ -505,9 +505,33 @@ mod native {
         /// # Agent
         /// Reply: `CliSendResult`. Replies `Err { CliNotFound }` when
         /// `claude` isn't on PATH. The CLI uses the user's subscription,
-        /// so it works even when `ANTHROPIC_API_KEY` is unset.
+        /// so it works even when `ANTHROPIC_API_KEY` is unset. The
+        /// `claude` binary exposes no `--max-tokens` / `--temperature`
+        /// flag, so setting either replies `Err { ParamNotSupported }`
+        /// synchronously (no dispatch) rather than silently dropping it —
+        /// route sampling knobs through `aether.anthropic.messages.send`.
         #[handler]
         fn on_cli_send(&mut self, ctx: &mut NativeCtx<'_>, mail: CliSend) {
+            // The `claude` CLI has no flag for either knob; reject when
+            // set instead of silently dropping (the outcome to avoid —
+            // `feedback_explicit_nulls_over_absent_fields`).
+            let mut unsupported = Vec::new();
+            if mail.max_tokens.is_some() {
+                unsupported.push("max_tokens");
+            }
+            if mail.temperature.is_some() {
+                unsupported.push("temperature");
+            }
+            if !unsupported.is_empty() {
+                let error = AnthropicError::ParamNotSupported {
+                    param: unsupported.join(", "),
+                    reason:
+                        "the claude CLI has no flag for this; use aether.anthropic.messages.send"
+                            .to_string(),
+                };
+                Self::reply_err(ctx, SendPath::Cli, mail.request_id, error);
+                return;
+            }
             let req = AnthropicRequest {
                 prompt: flatten_prompt(&mail.messages),
                 model: mail.model,
@@ -567,6 +591,7 @@ mod native {
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::EgressEvent;
         use serde::de::DeserializeOwned;
         use std::sync::Arc;
@@ -744,6 +769,99 @@ mod native {
             // No in-flight work was spawned — the synchronous error path
             // never touched the dispatch helper.
             assert_eq!(cap_in_flight(&cap), 0);
+        }
+
+        /// Boot a cap against the recording stub and fire a `CliSend`
+        /// carrying the given knobs at `on_cli_send`, returning the cap so
+        /// the caller can assert `test_in_flight()`. The reply lands on
+        /// the `mailer`'s loopback rx (held separately by the caller).
+        fn cli_send_with(
+            mailer: &Arc<Mailer>,
+            max_tokens: Option<u32>,
+            temperature: Option<f32>,
+        ) -> AnthropicCapability {
+            let cap_mailbox = MailboxId(0);
+            let mut cap = AnthropicCapability::from_parts(
+                Arc::new(RecordingStub {
+                    inner: StubAnthropicAdapter::default(),
+                }),
+                Arc::clone(mailer),
+                cap_mailbox,
+                4,
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), cap_mailbox));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_cli_send(
+                &mut ctx,
+                CliSend {
+                    request_id: 11,
+                    model: "claude-test".to_string(),
+                    messages: user_msg("hi"),
+                    max_tokens,
+                    temperature,
+                    system: None,
+                },
+            );
+            cap
+        }
+
+        /// `on_cli_send` with `max_tokens` set replies
+        /// `Err { ParamNotSupported }` synchronously and spawns no work —
+        /// the `claude` CLI has no flag to honor it.
+        #[test]
+        fn anthropic_cli_rejects_max_tokens() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap = cli_send_with(&mailer, Some(256), None);
+            match decode_reply::<CliSendResult>(&rx) {
+                CliSendResult::Err {
+                    request_id,
+                    error: AnthropicError::ParamNotSupported { param, reason },
+                } => {
+                    assert_eq!(request_id, 11);
+                    assert!(param.contains("max_tokens"), "param was {param:?}");
+                    assert!(reason.contains("messages.send"), "reason was {reason:?}");
+                }
+                other => panic!("expected ParamNotSupported, got {other:?}"),
+            }
+            // Synchronous error path never touched the dispatch helper.
+            assert_eq!(cap_in_flight(&cap), 0);
+        }
+
+        /// `on_cli_send` with `temperature` set replies
+        /// `Err { ParamNotSupported }` synchronously and spawns no work.
+        #[test]
+        fn anthropic_cli_rejects_temperature() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap = cli_send_with(&mailer, None, Some(0.7));
+            match decode_reply::<CliSendResult>(&rx) {
+                CliSendResult::Err {
+                    request_id,
+                    error: AnthropicError::ParamNotSupported { param, .. },
+                } => {
+                    assert_eq!(request_id, 11);
+                    assert!(param.contains("temperature"), "param was {param:?}");
+                }
+                other => panic!("expected ParamNotSupported, got {other:?}"),
+            }
+            assert_eq!(cap_in_flight(&cap), 0);
+        }
+
+        /// A `CliSend` with both knobs `None` dispatches normally — the
+        /// synchronous reject path is skipped and work is spawned.
+        #[test]
+        fn anthropic_cli_no_params_dispatches() {
+            let (mailer, _rx) = test_mailer_and_rx();
+            let cap = cli_send_with(&mailer, None, None);
+            assert_eq!(
+                cap_in_flight(&cap),
+                1,
+                "a param-free CliSend should dispatch one in-flight call"
+            );
         }
 
         /// CLI send with a missing `claude` binary replies
