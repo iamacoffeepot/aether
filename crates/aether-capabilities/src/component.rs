@@ -317,6 +317,14 @@ mod native {
                 MailboxCaps::from_component_capabilities(&capabilities),
             );
 
+            // iamacoffeepot/aether#1128: the per-handler cost cells are
+            // seeded inside `WasmTrampoline::init` (run just above, under
+            // the spawn path's `with_stamped`), from the same
+            // `capabilities` — both the global `CostTable` and the
+            // trampoline's per-actor cache, over one shared `Arc`. Nothing
+            // to seed cap-side here: `init` has the `ActorSlots` stamp this
+            // thread does not.
+
             // ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
             // mail. The freshly-spawned trampoline owns its own
             // `ActorLogRing` like every other actor; no drain

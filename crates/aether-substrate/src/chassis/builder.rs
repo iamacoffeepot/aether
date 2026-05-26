@@ -47,6 +47,7 @@ use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Actor;
 #[cfg(test)]
 use aether_actor::HandlesKind;
+use aether_actor::cost::CostCells;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use aether_data::mailbox_id_from_name;
@@ -544,10 +545,30 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // `NativeDispatch`, whose `__aether_capabilities` the `#[actor]`
         // macro overrides to enumerate the cap's handlers; the default
         // (empty) covers any cap the macro didn't touch.
+        let capabilities = A::__aether_capabilities();
         ctx.mail_send_handle().capability_registry().register(
             resources.mailbox_id,
-            MailboxCaps::from_component_capabilities(&A::__aether_capabilities()),
+            MailboxCaps::from_component_capabilities(&capabilities),
         );
+
+        // iamacoffeepot/aether#1128: seed this native cap's per-handler
+        // cost cells into the global `CostTable` (same hook as the
+        // cap-registry accept-set above), then stamp the same `Arc`s
+        // into the actor's per-actor `CostCells` cache. Unlike the wasm
+        // load path (cap-thread, can't reach the trampoline's slots), a
+        // native cap's `slots` are right here — wrap the cache seed in
+        // `with_stamped(&resources.slots, ...)` exactly like the `init`
+        // wrap above so both indexes share the same neutral cells.
+        let handler_kinds: Vec<aether_data::KindId> =
+            capabilities.handlers.iter().map(|h| h.id).collect();
+        let seeded = ctx
+            .mail_send_handle()
+            .cost_table()
+            .seed(resources.mailbox_id, &handler_kinds);
+        local::with_stamped(&resources.slots, || {
+            use aether_actor::Local as _;
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+        });
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
         self.state = BootState::Initialized {

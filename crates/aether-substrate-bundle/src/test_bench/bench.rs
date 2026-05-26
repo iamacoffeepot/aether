@@ -46,7 +46,7 @@ use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
     SubstrateBoot,
     capture::CaptureQueue,
-    mail::{CapabilityRegistry, Mail, MailId, MailboxId},
+    mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -412,6 +412,17 @@ impl TestBench {
     #[must_use]
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         self.queue.capability_registry()
+    }
+
+    /// Borrow the substrate's per-handler [`CostTable`]
+    /// (iamacoffeepot/aether#1128). Shares the same `Mailer` the dispatch
+    /// fold writes through, so `tail(MailboxId, …)` here reflects the
+    /// cells seeded at component construction (and any folded samples).
+    /// Surfaced for integration tests that exercise the cost table
+    /// through a real component-load lifecycle.
+    #[must_use]
+    pub fn cost_table(&self) -> &Arc<CostTable> {
+        self.queue.cost_table()
     }
 
     /// Bytes-level fire-and-settle send: resolve `recipient_name` in

@@ -38,12 +38,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use aether_actor::Local;
 use aether_actor::MailCtx;
+use aether_actor::cost::CostCells;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace_ring::ActorTraceRing;
 use aether_data::Kind;
-use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
-use aether_kinds::{LogTail, LogTailResult};
+use aether_kinds::trace::{Nanos, TraceEvent, TraceTail, TraceTailResult};
+use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -138,6 +139,71 @@ pub fn dispatch_trace_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) 
     true
 }
 
+/// iamacoffeepot/aether#1128 framework-built-in dispatch arm for
+/// `aether.cost.tail` — the cost-side sibling of
+/// [`dispatch_log_tail_if_matching`] / [`dispatch_trace_tail_if_matching`].
+/// Reads the receiving actor's per-handler execution-cost EWMA from the
+/// global [`CostTable`](crate::mail::cost::CostTable) (filtered to this
+/// actor's mailbox) and replies inline; the dispatcher then skips the
+/// user's typed/fallback dispatch for this envelope. Cold path — read
+/// lock fine (the per-dispatch fold runs lock-free through the per-actor
+/// `CostCells` cache, never here).
+pub fn dispatch_cost_tail_if_matching(
+    binding: &NativeBinding,
+    ctx: &mut NativeCtx<'_>,
+    env: &Envelope,
+) -> bool {
+    if env.kind.0 != <CostTail as Kind>::ID.0 {
+        return false;
+    }
+    let Some(request) = <CostTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+        ctx.reply(&CostTailResult::Err {
+            error: "aether.cost.tail: payload failed to decode".to_owned(),
+        });
+        return true;
+    };
+    // Read the global cost table filtered to this actor's mailbox (cold
+    // path, read lock fine) so the dump surfaces the load-time
+    // neutral-seed rows even before any dispatch has folded a sample.
+    let reply = binding
+        .mailer()
+        .cost_table()
+        .tail(binding.self_mailbox(), &request);
+    ctx.reply(&reply);
+    true
+}
+
+/// iamacoffeepot/aether#1128 dark-instrumentation fold. Folds one
+/// handler-execution sample — `finished − t_received`, the existing
+/// `(Finished.t − Received.t)` trace bracket with no new clock read on
+/// the fast path — into the per-handler [`aether_actor::cost::CostCell`]
+/// EWMA. Runs inside the dispatch `local::with_stamped` block, so it
+/// reaches its cell through the lock-free per-actor [`CostCells`] cache.
+/// A kind not in the cache (the framework arms `log.tail` / `trace.tail`
+/// / `cost.tail`, or a fallback dispatch) is skipped — the known-handler
+/// filter.
+///
+/// The cache is seeded once at actor construction — `WasmTrampoline::init`
+/// for components, the native-cap boot wrap for caps — both inside the
+/// same `with_stamped(&slots, …)` the spawn path opens around `init`
+/// (the stamp binds to the actor's `ActorSlots`, not to a thread, so the
+/// seed runs wherever construction does). Every declared handler's cell
+/// is therefore present before the first dispatch: no lazy first-dispatch
+/// pull, no per-fold lock — just a linear scan over a tiny `Vec`.
+///
+/// **No scheduling change** — this only writes the cell.
+pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
+    // Sample = handler execution time. `finished >= t_received` always
+    // (same monotonic clock, finished stamped after received); guard the
+    // subtraction anyway so a clock anomaly can't underflow.
+    let sample = finished.0.saturating_sub(t_received.0);
+    CostCells::try_with_mut(|cells| {
+        if let Some(cell) = cells.get(kind) {
+            cell.fold(sample);
+        }
+    });
+}
+
 /// Run one actor's dispatcher loop on the calling thread. Returns
 /// when the binding signals shutdown (self-shutdown flag set or
 /// inbox sender disconnected). See module doc-comment for the full
@@ -177,11 +243,15 @@ pub fn dispatch_loop_run<A>(
             // (recipient) actor's trace ring — only inside this
             // `with_stamped` is its `ActorSlots` stamped.
             let th = binding.mailer().trace_handle();
+            // iamacoffeepot/aether#1128: capture the `Received` instant
+            // so the cost fold below reuses the existing trace bracket —
+            // no new timestamp on the hot path.
+            let t_received = th.now_nanos();
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
-                    t: th.now_nanos(),
+                    t: t_received,
                     // iamacoffeepot/aether#1134: the producer-stamped
                     // deposit instant + scheduler backlog, splitting the
                     // hop into send→enqueue + queue residence.
@@ -191,12 +261,15 @@ pub fn dispatch_loop_run<A>(
                 },
             );
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
-            // ADR-0081 / ADR-0086: the framework intercepts
-            // `aether.log.tail` and `aether.trace.tail` before the
+            // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128: the
+            // framework intercepts `aether.log.tail`,
+            // `aether.trace.tail`, and `aether.cost.tail` before the
             // actor's typed/fallback dispatch. The actor never sees
-            // these; the framework reads its rings and replies inline.
+            // these; the framework reads its rings / cost table and
+            // replies inline.
             if !dispatch_log_tail_if_matching(&mut ctx, &env)
                 && !dispatch_trace_tail_if_matching(&mut ctx, &env)
+                && !dispatch_cost_tail_if_matching(binding, &mut ctx, &env)
             {
                 typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
@@ -207,13 +280,20 @@ pub fn dispatch_loop_run<A>(
             // trace walk expects. Otherwise the flush rides `ctx`'s
             // scope-end `Drop`, landing after this push.
             drop(ctx);
+            let t_finished = th.now_nanos();
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Finished {
                     mail_id: inbound_mail_id,
-                    t: th.now_nanos(),
+                    t: t_finished,
                 },
             );
+            // iamacoffeepot/aether#1128: fold this handler's execution
+            // time `(t_finished − t_received)` into its per-handler EWMA.
+            // Lock-free through the per-actor `CostCells` cache; a
+            // framework arm / fallback kind (not in the cache) is
+            // skipped. Measure-only — no scheduling change.
+            fold_handler_cost(env.kind, t_received, t_finished);
         });
         // ADR-0080 §2 settlement hook, outside `with_stamped` so the
         // `fire_settled` notification runs unstamped (it may resolve mail
@@ -234,11 +314,12 @@ pub fn dispatch_loop_run<A>(
         let thread_id = thread_name::current_thread_id();
         local::with_stamped(slots, || {
             let th = binding.mailer().trace_handle();
+            let t_received = th.now_nanos();
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
-                    t: th.now_nanos(),
+                    t: t_received,
                     // iamacoffeepot/aether#1134: the producer-stamped
                     // deposit instant + scheduler backlog, splitting the
                     // hop into send→enqueue + queue residence.
@@ -250,6 +331,7 @@ pub fn dispatch_loop_run<A>(
             let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
             if !dispatch_log_tail_if_matching(&mut ctx, &env)
                 && !dispatch_trace_tail_if_matching(&mut ctx, &env)
+                && !dispatch_cost_tail_if_matching(binding, &mut ctx, &env)
             {
                 let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, env.payload.bytes());
             }
@@ -257,13 +339,17 @@ pub fn dispatch_loop_run<A>(
             // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
             // its parent's `Finished`. See the main-loop arm above.
             drop(ctx);
+            let t_finished = th.now_nanos();
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Finished {
                     mail_id: inbound_mail_id,
-                    t: th.now_nanos(),
+                    t: t_finished,
                 },
             );
+            // iamacoffeepot/aether#1128: fold execution cost (see the
+            // main-loop arm above).
+            fold_handler_cost(env.kind, t_received, t_finished);
         });
         binding.mailer().record_finished(inbound_mail_id, env.root);
         if let Some(p) = pending {
@@ -292,5 +378,113 @@ pub fn dispatch_loop_run<A>(
         for watcher in watchers {
             mailer.push(Mail::new(watcher, kind, payload.clone(), 1));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
+)]
+mod cost_tests {
+    use super::*;
+    use crate::test_util::fresh_substrate;
+    use aether_actor::local::{ActorSlots, with_stamped};
+    use aether_kinds::{CostTail, CostTailResult};
+
+    /// iamacoffeepot/aether#1128 step 4: folding a known handler's
+    /// execution time moves its cell, and the global `cost.tail` dump
+    /// surfaces the moved row.
+    #[test]
+    fn fold_moves_seeded_handler_cell() {
+        let (_registry, mailer) = fresh_substrate();
+        let self_mbx = MailboxId(0x1128);
+        let handled = KindId(10);
+        // Construction seeds both indexes from the handler set — the
+        // global table and the actor's per-actor cache, over one shared
+        // `Arc<CostCell>`. Reproduce that: seed the table, stamp the
+        // returned Arcs into the cache under `with_stamped` (as `init` /
+        // the boot wrap do), then fold.
+        let slots = ActorSlots::new();
+        with_stamped(&slots, || {
+            let seeded = mailer.cost_table().seed(self_mbx, &[handled]);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+            fold_handler_cost(handled, Nanos(1_000), Nanos(6_000));
+        });
+
+        let CostTailResult::Ok { rows } =
+            mailer.cost_table().tail(self_mbx, &CostTail { kind: None })
+        else {
+            panic!("expected Ok");
+        };
+        let row = rows
+            .iter()
+            .find(|r| r.kind_id == handled)
+            .expect("handled kind's row present");
+        assert_eq!(row.samples, 1, "one sample folded");
+        assert_eq!(row.mean_nanos, 5_000, "(finished − received) = 5000ns");
+    }
+
+    /// iamacoffeepot/aether#1128 step 4: a kind NOT in the actor's
+    /// seeded handler set (a framework arm like `log.tail`, or fallback
+    /// dispatch) leaves no cell — the fold's known-handler filter.
+    #[test]
+    fn fold_skips_unseeded_kind() {
+        let (_registry, mailer) = fresh_substrate();
+        let self_mbx = MailboxId(0x1128);
+        let handled = KindId(10);
+
+        let slots = ActorSlots::new();
+        // Seed only `handled` into the cache (as construction does), then
+        // fold a kind the actor never declared (a framework / fallback
+        // kind) — it must not create a row.
+        let stranger = KindId(<LogTail as Kind>::ID.0);
+        with_stamped(&slots, || {
+            let seeded = mailer.cost_table().seed(self_mbx, &[handled]);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+            fold_handler_cost(stranger, Nanos(0), Nanos(9_999));
+        });
+
+        let CostTailResult::Ok { rows } =
+            mailer.cost_table().tail(self_mbx, &CostTail { kind: None })
+        else {
+            panic!("expected Ok");
+        };
+        assert!(
+            rows.iter().all(|r| r.kind_id != stranger),
+            "an unseeded kind folds into no cell",
+        );
+        // The seeded handler stays at its neutral seed (samples = 0).
+        let seeded_row = rows.iter().find(|r| r.kind_id == handled).unwrap();
+        assert_eq!(seeded_row.samples, 0);
+    }
+
+    /// iamacoffeepot/aether#1128 step 6: the `cost.tail` framework arm
+    /// returns the actor's rows (filtered to `CostTail::kind` when set)
+    /// from the global table. Exercised directly through the table the
+    /// arm reads — `dispatch_cost_tail_if_matching` is a thin wrapper
+    /// over `cost_table().tail(self_mailbox, &request)`.
+    #[test]
+    fn cost_tail_arm_reports_seeded_rows() {
+        let (_registry, mailer) = fresh_substrate();
+        let self_mbx = MailboxId(0x1128);
+        mailer
+            .cost_table()
+            .seed(self_mbx, &[KindId(10), KindId(20)]);
+
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail(
+            self_mbx,
+            &CostTail {
+                kind: Some(KindId(20)),
+            },
+        ) else {
+            panic!("expected Ok");
+        };
+        assert_eq!(rows.len(), 1, "kind filter narrows the dump");
+        assert_eq!(rows[0].kind_id, KindId(20));
+        assert_eq!(
+            rows[0].samples, 0,
+            "neutral seed surfaces before any dispatch"
+        );
     }
 }

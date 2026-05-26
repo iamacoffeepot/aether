@@ -2110,6 +2110,63 @@ mod control_plane {
         },
     }
 
+    // iamacoffeepot/aether#1128 per-handler execution-cost EWMA dump.
+    // Each actor folds `(Finished.t − Received.t)` from the dispatch
+    // trace bracket into a per-handler `CostCell` (in `aether-actor`);
+    // one wire kind pair drives the read-only diagnostic dump, the
+    // sibling of `LogTail` / `trace::TraceTail`. Measure-only — Phase 0
+    // of iamacoffeepot/aether#1127's cost-aware recruiter, no scheduling
+    // change.
+
+    /// One handler's folded execution-cost row as it appears on the
+    /// wire when a caller dumps an actor's cost table via [`CostTail`] /
+    /// [`CostTailResult`]. `mean_nanos` / `mad_nanos` are the
+    /// fixed-point-nanos EWMA mean and mean-absolute-deviation;
+    /// `samples` is the folded-sample count (`0` is the neutral seed —
+    /// a handler the actor declares but hasn't run yet). `kind_name` is
+    /// the substrate-resolved kind name when known, else `None` (a
+    /// component-defined kind the dumping engine can't name).
+    ///
+    /// Not a `Kind` — only addressable as an element of
+    /// [`CostTailResult::Ok::rows`].
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct CostRow {
+        pub kind_id: aether_data::KindId,
+        pub kind_name: Option<String>,
+        pub mean_nanos: u64,
+        pub mad_nanos: u64,
+        pub samples: u64,
+    }
+
+    /// `aether.cost.tail` — dump one actor's per-handler execution-cost
+    /// EWMA table (iamacoffeepot/aether#1128). Routed to a specific
+    /// actor by `MailboxId`; the framework dispatch loop services it
+    /// directly (every native actor and every wasm trampoline answers
+    /// without the author writing a handler), the same surface
+    /// [`LogTail`] / [`crate::trace::TraceTail`] established. Reply:
+    /// [`CostTailResult`].
+    ///
+    /// - `kind: None` returns every handler row the actor declares;
+    ///   `Some(id)` returns only that one handler's row (or an empty
+    ///   `rows` if the actor has no such handler).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.cost.tail")]
+    pub struct CostTail {
+        pub kind: Option<aether_data::KindId>,
+    }
+
+    /// Reply to [`CostTail`]. `Ok::rows` is one [`CostRow`] per handler
+    /// the responding actor declares (filtered to `CostTail::kind` when
+    /// set), in unspecified order. `Err` carries a free-form reason
+    /// (the actor had no stamped slots / cost cache — a substrate
+    /// invariant violation in practice).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.cost.tail_result")]
+    pub enum CostTailResult {
+        Ok { rows: Vec<CostRow> },
+        Err { error: String },
+    }
+
     // ADR-0066: camera control kinds (`aether.camera.{create, destroy,
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
     // `TopdownParams` / `ModeInit`) moved to the `aether-camera` trunk
@@ -2698,6 +2755,8 @@ mod tests {
         assert_eq!(MonitorNotice::NAME, "aether.actor.monitor_notice");
         assert_eq!(LogTail::NAME, "aether.log.tail");
         assert_eq!(LogTailResult::NAME, "aether.log.tail_result");
+        assert_eq!(CostTail::NAME, "aether.cost.tail");
+        assert_eq!(CostTailResult::NAME, "aether.cost.tail_result");
         assert_eq!(Read::NAME, "aether.fs.read");
         assert_eq!(ReadResult::NAME, "aether.fs.read_result");
         assert_eq!(Write::NAME, "aether.fs.write");
@@ -2941,6 +3000,81 @@ mod tests {
                     assert_eq!(error, FsError::NotFound);
                 }
                 DeleteResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+    }
+
+    // iamacoffeepot/aether#1128 cost-table dump roundtrips. `CostTail`
+    // carries an optional kind filter; `CostTailResult::Ok` carries one
+    // `CostRow` per handler. Both go through the derived
+    // Serialize/Deserialize (postcard wire) — pin that the optional
+    // filter and the per-row fields survive the round trip.
+    mod cost_roundtrips {
+        use super::*;
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        #[test]
+        fn cost_tail_request_roundtrips_filter() {
+            for kind in [None, Some(aether_data::KindId(0xABCD))] {
+                let r = CostTail { kind };
+                let bytes =
+                    postcard::to_allocvec(&r).expect("test setup: postcard encodes CostTail");
+                let back: CostTail =
+                    postcard::from_bytes(&bytes).expect("test setup: postcard decodes CostTail");
+                assert_eq!(back.kind, kind);
+            }
+        }
+
+        #[test]
+        fn cost_tail_result_ok_roundtrips_rows() {
+            let r = CostTailResult::Ok {
+                rows: vec![
+                    CostRow {
+                        kind_id: aether_data::KindId(10),
+                        kind_name: Some("test.kind.a".to_string()),
+                        mean_nanos: 1_234,
+                        mad_nanos: 56,
+                        samples: 9,
+                    },
+                    CostRow {
+                        kind_id: aether_data::KindId(20),
+                        kind_name: None,
+                        mean_nanos: 0,
+                        mad_nanos: 0,
+                        samples: 0,
+                    },
+                ],
+            };
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes CostTailResult::Ok");
+            let back: CostTailResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CostTailResult::Ok");
+            let CostTailResult::Ok { rows } = back else {
+                panic!("expected Ok");
+            };
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].kind_id, aether_data::KindId(10));
+            assert_eq!(rows[0].kind_name.as_deref(), Some("test.kind.a"));
+            assert_eq!(rows[0].mean_nanos, 1_234);
+            assert_eq!(rows[0].samples, 9);
+            // Neutral seed row survives with samples = 0 + no name.
+            assert_eq!(rows[1].samples, 0);
+            assert_eq!(rows[1].kind_name, None);
+        }
+
+        #[test]
+        fn cost_tail_result_err_roundtrips() {
+            let r = CostTailResult::Err {
+                error: "no stamped slots".to_string(),
+            };
+            let bytes = postcard::to_allocvec(&r)
+                .expect("test setup: postcard encodes CostTailResult::Err");
+            let back: CostTailResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CostTailResult::Err");
+            match back {
+                CostTailResult::Err { error } => assert_eq!(error, "no stamped slots"),
+                CostTailResult::Ok { .. } => panic!("expected Err"),
             }
         }
     }

@@ -242,11 +242,15 @@ where
             // `with_stamped` is its `ActorSlots` stamped. Mirrors
             // `dispatch::dispatch_loop_run`.
             let th = self.binding.mailer().trace_handle();
+            // iamacoffeepot/aether#1128: capture the `Received` instant
+            // so the cost fold below reuses the existing trace bracket —
+            // no new timestamp on the hot path.
+            let t_received = th.now_nanos();
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Received {
                     mail_id: inbound_mail_id,
-                    t: th.now_nanos(),
+                    t: t_received,
                     // iamacoffeepot/aether#1134: surface the deposit
                     // instant + scheduler backlog the producer stamped at
                     // `route_mail`, so the hop splits into send→enqueue +
@@ -257,11 +261,13 @@ where
                 },
             );
             let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
-            // ADR-0081 / ADR-0086 framework-built-in dispatch arms for
-            // `aether.log.tail` + `aether.trace.tail`. See
+            // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128
+            // framework-built-in dispatch arms for `aether.log.tail` +
+            // `aether.trace.tail` + `aether.cost.tail`. See
             // `dispatch::dispatch_loop_run`.
             if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &env)
                 && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, &env)
+                && !super::dispatch::dispatch_cost_tail_if_matching(&self.binding, &mut ctx, &env)
             {
                 super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
             }
@@ -269,13 +275,20 @@ where
             // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
             // its parent's `Finished`. See `dispatch::dispatch_loop_run`.
             drop(ctx);
+            let t_finished = th.now_nanos();
             th.push_trace_ring(
                 env.root,
                 TraceEvent::Finished {
                     mail_id: inbound_mail_id,
-                    t: th.now_nanos(),
+                    t: t_finished,
                 },
             );
+            // iamacoffeepot/aether#1128: fold this handler's execution
+            // time into its per-handler EWMA (lock-free through the
+            // per-actor cache; framework / fallback kinds skipped).
+            // Measure-only — no scheduling change. See
+            // `dispatch::fold_handler_cost`.
+            super::dispatch::fold_handler_cost(env.kind, t_received, t_finished);
         });
         self.binding
             .mailer()

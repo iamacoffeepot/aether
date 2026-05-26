@@ -92,8 +92,11 @@ mod native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::mail::{Mail, MailboxId};
+    use aether_substrate::mail::{KindId, Mail, MailboxId};
     use std::io;
+
+    use aether_actor::Local as _;
+    use aether_actor::cost::CostCells;
 
     /// Configuration handed to [`WasmTrampoline::init`] by the spawn
     /// path. Carries the wasmtime engine / linker plus the parsed
@@ -179,6 +182,24 @@ mod native {
             .map_err(|e| {
                 BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
             })?;
+
+            // iamacoffeepot/aether#1128: seed this component's per-handler
+            // cost cells from the guest's declared handler set
+            // (`config.capabilities`, parsed from the wasm's
+            // `aether.kinds.inputs` section). `init` runs inside the spawn
+            // path's `with_stamped(&slots, …)`, so the per-actor
+            // `CostCells` cache is stamped directly here — the cap's
+            // thread vs the trampoline's is irrelevant: the stamp binds to
+            // the actor's `ActorSlots`, not to a thread. The same
+            // `Arc<CostCell>`s seed the global `CostTable` for the cold
+            // `cost.tail` dump and the iamacoffeepot/aether#1178
+            // producer-side read. Replace re-seeds on the trampoline's own
+            // dispatch (`on_replace_component`); drop clears both indexes.
+            let handler_kinds: Vec<KindId> =
+                config.capabilities.handlers.iter().map(|h| h.id).collect();
+            let seeded = mailer.cost_table().seed(mailbox, &handler_kinds);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+
             Ok(Self {
                 component: Some(component),
                 engine: config.engine,
@@ -237,6 +258,12 @@ mod native {
             // trampoline (and its mailbox name) survives as an empty
             // slot, but it has no accept-set while empty.
             self.mailer.capability_registry().remove(self.mailbox);
+            // iamacoffeepot/aether#1128: drop this mailbox's per-handler
+            // cost cells from the global table and the per-actor cache.
+            // `on_drop_component` runs on the trampoline's own thread
+            // inside `with_stamped`, so both indexes clear together.
+            self.mailer.cost_table().drop_mailbox(self.mailbox);
+            CostCells::try_with_mut(|cells| cells.seed(Vec::new()));
             ctx.reply(&DropResult::Ok);
         }
 
@@ -398,6 +425,21 @@ mod native {
                 self.mailbox,
                 MailboxCaps::from_component_capabilities(&capabilities),
             );
+
+            // iamacoffeepot/aether#1128: re-seed the per-handler cost
+            // cells against the post-replace handler set, into BOTH
+            // indexes. The mailbox id is stable across replace
+            // (ADR-0022 §4), so the global `seed` reuses the prior cell
+            // for an unchanged kind (keeping its accumulated EWMA) and
+            // adds a neutral cell for a new one. `on_replace_component`
+            // runs on the trampoline's own dispatch thread inside
+            // `with_stamped`, so we can re-stamp the per-actor `CostCells`
+            // cache directly with the freshly-returned `Arc`s — keeping
+            // the cache exact across replace (a new kind's cell would
+            // otherwise miss until the cache happened to re-pull).
+            let handler_kinds: Vec<KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
+            let seeded = self.mailer.cost_table().seed(self.mailbox, &handler_kinds);
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
 
             ReplaceResult::Ok { capabilities }
         }
