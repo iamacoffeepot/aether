@@ -729,8 +729,8 @@ fn to_screaming_snake_case(s: &str) -> String {
 ///   `export!` shim's `receive_p32` calls.
 /// - The `aether.kinds.inputs` manifest consts (substrate reads them via
 ///   the wasm custom section the cdylib's `export!` pins in).
-/// - The `Actor`-trait const re-routing (NAMESPACE / `FRAME_BARRIER` from
-///   the impl block flow into a sibling `impl Actor`).
+/// - The `Actor`-trait const re-routing (`NAMESPACE` flows from the impl
+///   block into a sibling `impl Actor`).
 ///
 /// Renamed from `#[actor]` in PR A of issue 533. Same behavior; the
 /// new name reads as "decorate this actor's impl" — natural now that the
@@ -1541,8 +1541,8 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let mut handlers: Vec<HandlerFn> = Vec::new();
     let mut fallback: Option<FallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
-    // Issue 525 Phase 1B: pass-through trait consts (today: NAMESPACE,
-    // FRAME_BARRIER) so each component declares them inside its
+    // Issue 525 Phase 1B: pass-through trait consts (today just
+    // NAMESPACE) so each component declares them inside its
     // `#[actor] impl FfiActor for C` block alongside `init` /
     // `#[handler]` methods.
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
@@ -1653,7 +1653,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         build_inputs_manifest_consts(&handlers, fallback.as_ref(), component_doc.as_ref());
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
-    // Issue 525 Phase 4: trait consts (NAMESPACE, FRAME_BARRIER) live
+    // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
     // on the `Actor` super-trait, not `Component` / `FfiActor`. Route
     // any const items the user declared inside `#[actor] impl
     // Component for X` to a sibling `impl ::aether_actor::Actor`
@@ -1724,8 +1724,8 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 ///
 /// Emits, all rooted in the consumer crate's namespace:
 ///   - `impl Actor for X` carrying the user-declared `const NAMESPACE`
-///     / `const FRAME_BARRIER` (extracted from the impl block so the
-///     `NativeActor: Actor` supertrait bound is satisfied).
+///     (extracted from the impl block so the `NativeActor: Actor`
+///     supertrait bound is satisfied).
 ///   - `impl HandlesKind<K> for X` per `#[handler]` method — the
 ///     compile-time gate `Sender::send::<R, K>` consults.
 ///   - `impl NativeActor for X { type Config; fn init }` (the user's
@@ -1865,11 +1865,11 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         ));
     }
 
-    // `NAMESPACE` / `FRAME_BARRIER` are declared on the supertrait
-    // `Actor`, but the user wrote them inside `impl NativeActor for X`
-    // for the symmetric authoring shape. Route the consts onto a
-    // sibling `impl Actor for X` block so satisfying the supertrait
-    // bound works without making the user split the impl.
+    // `NAMESPACE` is declared on the supertrait `Actor`, but the user
+    // wrote it inside `impl NativeActor for X` for the symmetric
+    // authoring shape. Route the const onto a sibling `impl Actor for X`
+    // block so satisfying the supertrait bound works without making the
+    // user split the impl.
     //
     // `skip_markers` (issue 565): when `#[bridge]` wraps a cfg-gated
     // `mod native` containing the actor block, it emits the always-on
@@ -1892,8 +1892,8 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
              to a `ctx.spawn`'d thread that feeds results back as mail.",
         ));
     }
-    // NAMESPACE / FRAME_BARRIER pass through unchanged because their
-    // RHSes are primitives that don't require resolution.
+    // NAMESPACE passes through unchanged because its RHS is a
+    // primitive that doesn't require resolution.
     let const_tokens: Vec<TokenStream2> = consts.iter().map(|c| quote! { #c }).collect();
     let actor_impl = if opts.skip_markers || consts.is_empty() {
         quote! {}
