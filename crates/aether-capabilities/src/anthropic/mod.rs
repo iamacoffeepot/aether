@@ -591,6 +591,7 @@ mod native {
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::EgressEvent;
         use serde::de::DeserializeOwned;
         use std::sync::Arc;
@@ -775,7 +776,7 @@ mod native {
         /// the caller can assert `test_in_flight()`. The reply lands on
         /// the `mailer`'s loopback rx (held separately by the caller).
         fn cli_send_with(
-            mailer: &Arc<aether_substrate::mail::mailer::Mailer>,
+            mailer: &Arc<Mailer>,
             max_tokens: Option<u32>,
             temperature: Option<f32>,
         ) -> AnthropicCapability {
