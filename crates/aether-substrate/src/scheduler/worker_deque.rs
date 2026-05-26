@@ -432,30 +432,43 @@ pub fn steal_into_local(
         let worker = w.as_ref()?;
         // Retry the whole pass while any source reports transient
         // contention; return on the first success; `None` once all empty.
+        // Fold one source's `steal_batch_and_pop` outcome: a hit bumps the
+        // attributing counter (iamacoffeepot/aether#1129) and yields the slot;
+        // a transient-contention `Retry` sets the pass's retry flag; `Empty`
+        // yields nothing. Shared by the injector drain and each sibling raid.
+        let take =
+            |outcome: Steal<Slot>, note: fn(&SchedulerCounters), retry: &mut bool| match outcome {
+                Steal::Success(slot) => {
+                    with_counters(note);
+                    Some(slot)
+                }
+                Steal::Retry => {
+                    *retry = true;
+                    None
+                }
+                Steal::Empty => None,
+            };
         loop {
             let mut retry = false;
-            match injector.steal_batch_and_pop(worker) {
-                Steal::Success(slot) => {
-                    // iamacoffeepot/aether#1129: off-worker producers +
-                    // spilled fan-out + requeued yields.
-                    with_counters(SchedulerCounters::note_steal_injector);
-                    return Some(slot);
-                }
-                Steal::Retry => retry = true,
-                Steal::Empty => {}
+            // Injector drain (off-worker producers + spilled fan-out +
+            // requeued yields) — unconditional and load-bearing.
+            if let Some(slot) = take(
+                injector.steal_batch_and_pop(worker),
+                SchedulerCounters::note_steal_injector,
+                &mut retry,
+            ) {
+                return Some(slot);
             }
             if peer_steal {
                 for (i, stealer) in stealers.iter().enumerate() {
                     if i != my_idx {
-                        match stealer.steal_batch_and_pop(worker) {
-                            Steal::Success(slot) => {
-                                // iamacoffeepot/aether#1129: a sibling-tail
-                                // raid (only when `peer_steal` is opted in).
-                                with_counters(SchedulerCounters::note_steal_sibling);
-                                return Some(slot);
-                            }
-                            Steal::Retry => retry = true,
-                            Steal::Empty => {}
+                        // Sibling-tail raid (only when `peer_steal` is opted in).
+                        if let Some(slot) = take(
+                            stealer.steal_batch_and_pop(worker),
+                            SchedulerCounters::note_steal_sibling,
+                            &mut retry,
+                        ) {
+                            return Some(slot);
                         }
                     }
                 }

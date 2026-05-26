@@ -1126,7 +1126,7 @@ mod tests {
         let width = 4usize;
         for i in 1..=width {
             let cfg = RelayConfig {
-                downstreams: Arc::from([] as [MailboxId; 0]),
+                downstreams: Arc::<[MailboxId]>::from([]),
                 work_iters: 0,
             };
             tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), cfg)
