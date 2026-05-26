@@ -788,10 +788,7 @@ mod native {
                 cap_mailbox,
                 4,
             );
-            let transport = Arc::new(NativeBinding::new_for_test(
-                Arc::clone(mailer),
-                cap_mailbox,
-            ));
+            let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), cap_mailbox));
             let mut ctx = NativeCtx::new(
                 &transport,
                 session_sender(),
