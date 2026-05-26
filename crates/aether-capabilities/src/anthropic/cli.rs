@@ -206,11 +206,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn slow_binary_times_out_and_is_reaped() {
-        use std::fs;
         use std::os::unix::fs::PermissionsExt;
+        use std::{env, fs, process};
 
-        let mut script = std::env::temp_dir();
-        script.push(format!("aether-cli-timeout-{}.sh", std::process::id()));
+        let mut script = env::temp_dir();
+        script.push(format!("aether-cli-timeout-{}.sh", process::id()));
         // Ignore every arg, sleep 5s. A ~50ms deadline must fire first.
         fs::write(&script, "#!/bin/sh\nsleep 5\n").expect("write stand-in script");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
