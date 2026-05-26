@@ -114,11 +114,15 @@ impl ClaudeCliAdapter {
                 Ok(Some(status)) => break status,
                 Ok(None) => {
                     if started.elapsed() >= self.timeout {
-                        // Deadline overrun: kill + reap so no zombie is
-                        // left, join the reader, and surface the timeout.
+                        // Deadline overrun: kill + reap so no zombie is left,
+                        // then surface the timeout. We deliberately do NOT
+                        // join the stdout reader here — a killed `claude`/shell
+                        // can leave an orphaned grandchild holding the pipe's
+                        // write-end open, so `read_to_end` never sees EOF and
+                        // the join would block past the deadline. Dropping the
+                        // JoinHandle detaches the thread; its buffer is moot.
                         let _ = child.kill();
                         let _ = child.wait();
-                        let _ = stdout_reader.join();
                         let elapsed_ms =
                             u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
                         return Err(format!("{TIMEOUT_SENTINEL}{elapsed_ms}"));
