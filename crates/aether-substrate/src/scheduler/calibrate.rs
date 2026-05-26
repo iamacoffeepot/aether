@@ -181,6 +181,17 @@ pub fn handoff_cost() -> Duration {
     Duration::from_nanos(HANDOFF.mean().max(1))
 }
 
+/// [`handoff_cost`] as a flat `u64` of nanoseconds. Both nanos consumers
+/// — the boot-time keep-local calibration log and the recruit-K wake gate
+/// — read this so the `Duration → nanos` conversion lives in one place;
+/// the 1 ns floor stays in [`handoff_cost`]. Saturates to `u64::MAX` on
+/// overflow, which is unreachable: the estimate is a `u64` of nanos by
+/// construction, so the `Duration` can never exceed `u64::MAX` nanos.
+#[must_use]
+pub fn handoff_cost_nanos() -> u64 {
+    u64::try_from(handoff_cost().as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// Fold one live `notify → wake` latency (nanos) into the estimate —
 /// called from [`super::spin_park`] each time a parked worker resumes from
 /// a producer's `unpark`. A no-op when the estimate is pinned. Dark: drives
@@ -218,7 +229,7 @@ fn parse_cost_override(raw: Option<String>) -> Option<u64> {
 /// `actor_logs` on any box (especially the CI VM) to confirm the budget
 /// landed where intended. Called once at chassis boot.
 pub fn log_handoff_calibration() {
-    let cost_ns = u64::try_from(handoff_cost().as_nanos()).unwrap_or(u64::MAX);
+    let cost_ns = handoff_cost_nanos();
     let budget_ns =
         u64::try_from(super::worker_deque::time_budget().as_nanos()).unwrap_or(u64::MAX);
     // Realized handoffs-per-budget on this box: `BUDGET_HANDOFF_MULTIPLIER`
@@ -337,6 +348,20 @@ mod tests {
         let b = handoff_cost();
         assert_eq!(a, b, "cached handoff cost must be stable across calls");
         assert!(a >= Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn handoff_cost_nanos_matches_duration_view() {
+        let nanos = handoff_cost_nanos();
+        assert_eq!(
+            nanos,
+            u64::try_from(handoff_cost().as_nanos())
+                .expect("handoff_cost nanos fit u64 by construction")
+        );
+        assert!(
+            nanos >= 1,
+            "the 1 ns floor in handoff_cost must carry through"
+        );
     }
 
     #[test]

@@ -130,7 +130,9 @@ use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
 use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId};
-use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost};
+use crate::scheduler::{
+    BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos,
+};
 
 /// Floor for a fresh blob's group-array capacity — a little headroom so a
 /// couple of subsequent flushes to *new* recipients can accumulate before
@@ -175,20 +177,6 @@ fn recruit_cap() -> usize {
     })
 }
 
-/// Fallback wake break-even in nanos. The live gate ([`wake_cost_nanos`])
-/// now reads the box-calibrated cross-worker handoff cost
-/// ([`handoff_cost`], iamacoffeepot/aether#1182) — the runtime-measured
-/// `C_wake` that iamacoffeepot/aether#1127 deferred, landed by
-/// iamacoffeepot/aether#1192. This const survives only as the
-/// `u64`-overflow fallback for that `Duration → nanos` conversion (never
-/// hit in practice — a handoff is µs-scale). `4_300` was the prior baked
-/// default (iamacoffeepot/aether#1200 named it `DEFAULT_`): iamacoffeepot/
-/// aether#1174's ~7µs injector pickup / park-wake floor. Below the
-/// break-even a flush can't amortize a sibling wakeup, so [`recruit_k`]
-/// returns `K = 1` and the blob stays producer-local — the cost-aware form
-/// of the prior narrow-local win (iamacoffeepot/aether#1116).
-const FALLBACK_WAKE_COST_NANOS: u64 = 4_300;
-
 /// High-MAD confidence threshold: a handler whose mean-absolute-deviation
 /// exceeds this fraction of its mean is "bimodal / untrustworthy" — its
 /// EWMA mean is a poor predictor of the next dispatch, so the recruiter
@@ -202,13 +190,14 @@ const MAD_CONFIDENCE_DEN: u64 = 1;
 
 /// The wake break-even in nanos. An `AETHER_WAKE_COST_NANOS` override wins
 /// and is fixed for the run (cached); otherwise this is the box-calibrated
-/// cross-worker handoff cost ([`handoff_cost`], iamacoffeepot/aether#1182),
-/// read live so it tracks the EWMA as it refines — the runtime-measured
-/// `C_wake` that iamacoffeepot/aether#1127 deferred. Mirrors the keep-local
-/// valve's source ([`crate::scheduler::time_budget`]), so both consumers of
-/// the shared handoff-cost seam scale with the box. [`FALLBACK_WAKE_COST_NANOS`]
-/// is only used if the measured nanos overflow `u64` (never in practice — a
-/// handoff is µs-scale).
+/// cross-worker handoff cost ([`crate::scheduler::handoff_cost`],
+/// iamacoffeepot/aether#1182) as a flat `u64` via [`handoff_cost_nanos`],
+/// read live so it tracks the
+/// EWMA as it refines — the runtime-measured `C_wake` that
+/// iamacoffeepot/aether#1127 deferred. Mirrors the keep-local valve's
+/// source ([`crate::scheduler::time_budget`]), so both consumers of the
+/// shared handoff-cost seam scale with the box. The conversion's saturating
+/// floor now lives in `handoff_cost_nanos`.
 fn wake_cost_nanos() -> u64 {
     static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
     if let Some(ns) = *OVERRIDE.get_or_init(|| {
@@ -218,7 +207,7 @@ fn wake_cost_nanos() -> u64 {
     }) {
         return ns;
     }
-    u64::try_from(handoff_cost().as_nanos()).unwrap_or(FALLBACK_WAKE_COST_NANOS)
+    handoff_cost_nanos()
 }
 
 /// The cost-aware recruit target `K` (iamacoffeepot/aether#1178): how many
