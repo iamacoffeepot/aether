@@ -48,6 +48,24 @@ json_out="$ROOT/perf-report.json"
 md_out="$ROOT/perf-report.md"
 base_cache="${PERF_BASE_CACHE:-}"
 
+# Optional per-side scheduler-knob pins (iamacoffeepot/aether#1160 follow-up).
+# Space-separated KEY=VALUE list applied as env to only the base or only the
+# candidate trial process (via the comparator's `--base-env` / `--cand-env`),
+# so a run can pin a knob to a fixed value per side instead of relying on each
+# binary's compiled default — e.g. PERF_BASE_ENV="AETHER_LOCAL_MAIL_BUDGET=0"
+# forces the base side to the pre-flip cap=1 while the candidate keeps the
+# shipped keep-local default. Unset = no pins (the plain code-vs-merge-base
+# comparison). The `${arr[@]+...}` guard keeps an empty array safe under
+# `set -u`.
+base_env_args=()
+for kv in ${PERF_BASE_ENV:-}; do base_env_args+=(--base-env "$kv"); done
+cand_env_args=()
+for kv in ${PERF_CAND_ENV:-}; do cand_env_args+=(--cand-env "$kv"); done
+pin_note=""
+if [ -n "${PERF_BASE_ENV:-}${PERF_CAND_ENV:-}" ]; then
+    pin_note=" · pinned base[${PERF_BASE_ENV:-default}] cand[${PERF_CAND_ENV:-default}]"
+fi
+
 # Transient working dir for the built binaries, plus the worktree (created
 # only on a base-cache miss). Both cleaned up on exit.
 work="$(mktemp -d "${TMPDIR:-/tmp}/aether-perf.XXXXXX")"
@@ -123,10 +141,12 @@ echo "[perf-compare] running $K interleaved trials per side…"
 "$compare_bin" \
     --base "$base_trial" \
     --cand "$cand_trial" \
+    ${base_env_args[@]+"${base_env_args[@]}"} \
+    ${cand_env_args[@]+"${cand_env_args[@]}"} \
     -k "$K" \
     --out "$json_out" \
     --title "PR vs merge-base $base_short" \
-    --subtitle "baseline $base_short · $K trials/config, interleaved on one runner" \
+    --subtitle "baseline $base_short · $K trials/config, interleaved on one runner$pin_note" \
     > "$md_out"
 
 echo "[perf-compare] wrote $json_out and $md_out"

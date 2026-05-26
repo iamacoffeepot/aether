@@ -98,6 +98,15 @@ jobs:
       - name: Run perf comparison
         env:
           PERF_BASE_CACHE: ${{ github.workspace }}/.perf-cache/aether-perf-trial-base
+          # iamacoffeepot/aether#1160 follow-up: pin the scheduler budgets
+          # per-side instead of relying on each binary's compiled default, so
+          # the comparison is explicit and build-independent. Base is forced
+          # to the pre-flip cap=1 (MAIL_BUDGET=0); the candidate to the
+          # shipped keep-local default — reproducing the keep-local-vs-cap=1
+          # A/B on the CI runner regardless of which default each binary was
+          # built with.
+          PERF_BASE_ENV: AETHER_LOCAL_MAIL_BUDGET=0
+          PERF_CAND_ENV: AETHER_LOCAL_MAIL_BUDGET=64 AETHER_LOCAL_TIME_BUDGET_US=6
         run: scripts/perf-compare.sh
       # iamacoffeepot/aether#1155: render the candidate's per-cell
       # queued/drain/handler sample distributions (the shape the
