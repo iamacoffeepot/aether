@@ -393,8 +393,9 @@ impl WakeSink {
     /// coordinator (route-to-spinner / unpark-one). The keep-local-vs-spill
     /// decision is the per-burst mail + sampled-time budget
     /// ([`worker_deque::try_push_local_budgeted`], iamacoffeepot/aether#1160);
-    /// the default config reproduces the historical `cap == 1` spill-any-
-    /// fan-out-extra behaviour. This is the non-demux wake destination,
+    /// the Phase 3 default keeps a small cascade local
+    /// (`AETHER_LOCAL_MAIL_BUDGET=0` restores the historical `cap == 1`).
+    /// This is the non-demux wake destination,
     /// shared by [`WakeHandle::wake`], the producer-side blob push, and an
     /// inline recipient that yielded mid-drain (ADR-0087 Phase 3b). The
     /// injector push is infallible; shutdown is observed through the

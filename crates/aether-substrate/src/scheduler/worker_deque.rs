@@ -15,11 +15,13 @@
 //! budget** (iamacoffeepot/aether#1160, [`try_push_local_budgeted`]): a
 //! worker keeps draining its own cascade while under a per-burst mail +
 //! sampled-time budget, then spills the backlog once it has done enough
-//! cheap local work to justify waking a sibling. The default-preserving
-//! config (`AETHER_LOCAL_MAIL_BUDGET=0`) reproduces the historical
-//! `cap == 1` "spill any fan-out extra" behaviour; `AETHER_LOCAL_STICKY_MAX`
-//! is repurposed as the deque-length safety backstop ([`hard_cap`]). The
-//! tail an idle worker can `steal_batch_and_pop` is the pull path.
+//! cheap local work to justify waking a sibling. The Phase 3 default is
+//! keep-local (`AETHER_LOCAL_MAIL_BUDGET=64`, `AETHER_LOCAL_TIME_BUDGET_US=6`,
+//! iamacoffeepot/aether#1160); set `AETHER_LOCAL_MAIL_BUDGET=0` to restore
+//! the historical `cap == 1` "spill any fan-out extra" behaviour.
+//! `AETHER_LOCAL_STICKY_MAX` is the deque-length safety backstop
+//! ([`hard_cap`]). The tail an idle worker can `steal_batch_and_pop` is the
+//! pull path.
 //!
 //! Only pool-worker threads call [`install`]; on any other thread
 //! (chassis main, the hub, the trace drainer) [`try_push_local_budgeted`]
@@ -125,11 +127,12 @@ pub fn hard_cap() -> usize {
 }
 
 /// Keep-local mail budget per burst (iamacoffeepot/aether#1160). Read once
-/// from `AETHER_LOCAL_MAIL_BUDGET`; default **0**, which makes
-/// [`burst_over_budget`] always `true` so the decision collapses to "spill
-/// any fan-out extra" — the default-preserving Phase 1 config that
-/// reproduces the historical `cap == 1`. Set `> 0` to opt into keeping a
-/// small local cascade on the producing worker (the keep-local win).
+/// from `AETHER_LOCAL_MAIL_BUDGET`; default **64** (≈ `BATCH_MAX_MAILS`) —
+/// a worker keeps a produced blob local while its burst is under this many
+/// mail, the Phase 3 keep-local default (iamacoffeepot/aether#1160 §Phase 3:
+/// trivial cascade `queued` p50 −69%, others flat). Set **0** to make
+/// [`burst_over_budget`] always `true` and restore the historical `cap == 1`
+/// "spill any fan-out extra" behaviour.
 #[must_use]
 pub fn mail_budget() -> u32 {
     static B: OnceLock<u32> = OnceLock::new();
@@ -137,16 +140,18 @@ pub fn mail_budget() -> u32 {
         env::var("AETHER_LOCAL_MAIL_BUDGET")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0)
+            .unwrap_or(64)
     })
 }
 
 /// Keep-local time budget per burst (iamacoffeepot/aether#1160). Read once
-/// from `AETHER_LOCAL_TIME_BUDGET_US` (microseconds); default **0** =
-/// disabled, so no wall clock is ever read (the default-preserving config).
-/// When set this is roughly the parked-worker wakeup break-even (≈4–8µs, to
-/// be pinned by the Phase 2 sweep): a burst that runs longer spills its
-/// backlog even before the mail count trips.
+/// from `AETHER_LOCAL_TIME_BUDGET_US` (microseconds); default **6** — the
+/// safety valve that spills a burst once it has run roughly the parked-
+/// worker wakeup break-even, so a *uniform*-heavy cascade parallelises
+/// instead of serialising (Phase 3 validation: holds the uniform-heavy tree
+/// flat where mail-only regresses it +65%). Set **0** to disable the time
+/// path entirely (no wall clock read; mail-count budget only). Sampled at
+/// decision time, not per mail (#1163), so the trivial path stays clock-free.
 #[must_use]
 pub fn time_budget() -> Duration {
     static B: OnceLock<u64> = OnceLock::new();
@@ -154,7 +159,7 @@ pub fn time_budget() -> Duration {
         env::var("AETHER_LOCAL_TIME_BUDGET_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0)
+            .unwrap_or(6)
     });
     Duration::from_micros(us)
 }
@@ -536,18 +541,16 @@ mod tests {
     }
 
     #[test]
-    fn schedule_default_reproduces_cap_one_on_worker() {
+    fn schedule_default_keeps_local_on_worker() {
         // Drive the wired decision through `WakeSink::schedule` on a
-        // simulated pool worker (own deque installed on this thread). At the
-        // default config (mail_budget 0) the first schedule stays local
-        // (empty deque) and the second spills — the pre-#1160 `cap == 1`
-        // shape, now routed through the budget gate.
+        // simulated pool worker (own deque installed on this thread). Under
+        // the Phase 3 keep-local default a small cascade (burst well under
+        // budget) stays on the own deque — no spill, no sibling wakeup.
         //
-        // `schedule` reads the env-cached `mail_budget()`, so this asserts
-        // the *default* wiring; skip it when a keep-local budget is opted in
-        // (e.g. the Phase 2 sweep sets `AETHER_LOCAL_MAIL_BUDGET`), where the
-        // second schedule legitimately stays local instead of spilling.
-        if mail_budget() != 0 {
+        // `schedule` reads the env-cached `mail_budget()`; skip when `cap=1`
+        // is opted back in (`AETHER_LOCAL_MAIL_BUDGET=0`), where the second
+        // schedule legitimately spills its backlog instead.
+        if mail_budget() == 0 {
             return;
         }
         install(Worker::new_lifo());
@@ -558,14 +561,17 @@ mod tests {
         let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), 8);
 
         sink.schedule(noop()); // empty deque → kept local
-        sink.schedule(noop()); // depth 1 + always-over default → spills
+        sink.schedule(noop()); // depth 1, burst under budget → still kept local
 
         assert!(
-            matches!(injector.steal(), Steal::Success(_)),
-            "the second schedule must spill to the injector"
+            matches!(injector.steal(), Steal::Empty),
+            "under the keep-local default nothing spills to the injector"
         );
-        assert!(matches!(injector.steal(), Steal::Empty), "only one spills");
-        assert!(pop_local().is_some(), "the first stays on the local deque");
+        assert!(
+            pop_local().is_some(),
+            "both schedules stay on the local deque"
+        );
+        assert!(pop_local().is_some());
         assert!(pop_local().is_none());
     }
 
