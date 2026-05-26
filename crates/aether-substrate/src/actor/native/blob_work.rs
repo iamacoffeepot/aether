@@ -1316,7 +1316,7 @@ mod tests {
         assert_eq!(recruit_k(100_000, 50_000, 2, 8), 2);
     }
 
-    /// Balanced-wide: many equal groups → `K = min(G, W)`. Σw / w_max ≈ G,
+    /// Balanced-wide: many equal groups → `K = min(G, W)`. `Σw` / `w_max` ≈ G,
     /// clamped by the worker count.
     #[test]
     fn recruit_k_balanced_wide_recruits_to_worker_cap() {
