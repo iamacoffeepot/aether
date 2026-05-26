@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::dispatch;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeDispatch, NativeInitCtx};
 use crate::chassis::Chassis;
@@ -44,6 +43,7 @@ use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::log_handoff_calibration;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
+#[cfg(test)]
 use aether_actor::Actor;
 #[cfg(test)]
 use aether_actor::HandlesKind;
@@ -57,8 +57,6 @@ use std::any::TypeId;
 use std::io;
 use std::mem;
 use std::sync::Weak;
-use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Failure mode raised by [`DriverRunning::run`].
@@ -622,87 +620,54 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
             slots,
         } = resources;
 
-        match A::SCHEDULING {
-            aether_actor::Scheduling::Dedicated => {
-                // Today's path: spawn one OS thread per actor.
-                let mut actor = actor;
-                let transport_for_thread = Arc::clone(&transport);
-                let actor_registry_for_thread = Arc::clone(ctx.spawner_arc().actor_registry());
-                let mailer_for_thread = ctx.mail_send_handle();
-                let self_id_for_thread = mailbox_id;
-                let thread_name = alloc_native_actor_thread_name::<A>();
-                let thread = thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || {
-                        dispatch::dispatch_loop_run::<A>(
-                            &transport_for_thread,
-                            &mut actor,
-                            &slots,
-                            pending.as_ref(),
-                            &actor_registry_for_thread,
-                            &mailer_for_thread,
-                            self_id_for_thread,
-                        );
-                    })
-                    .map_err(|e| BootError::Other(Box::new(e)))?;
-
-                Ok(Box::new(NativeActorShutdown {
-                    thread: Some(thread),
-                    mailbox_sender: Some(mailbox_sender),
-                }) as Box<dyn DynShutdown>)
-            }
-            aether_actor::Scheduling::Pooled => {
-                // Issue 635 PR C path: register a `DispatcherSlot`
-                // with the chassis worker pool. No per-actor thread.
-                // The `wake_slot` in the mailbox closure fires the
-                // pool wake hook on every accepted send.
-                let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
-                let mailer_clone = ctx.mail_send_handle();
-                let slot = DispatcherSlot::<A>::new(
-                    actor,
-                    Arc::clone(&transport),
-                    slots,
-                    pending,
-                    actor_registry,
-                    mailer_clone,
-                    mailbox_id,
-                );
-                let slot_dyn: Arc<dyn Drainable> = slot.clone();
-                let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
-                // iamacoffeepot/aether#1135: surface the seize handle on
-                // this actor's `Inbox` entry so the blob demuxer can
-                // dispatch its fan-out in place rather than depositing +
-                // repop'ing through the inbox. Same `(state, weak)` pair
-                // the wake handle carries; the registry owns the strong
-                // slot ref, so the demuxer's `Weak` upgrade fails cleanly
-                // after teardown.
-                ctx.registry().install_seize_handle(
-                    mailbox_id,
-                    SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
-                );
-                drop(slot_dyn);
-                let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
-                // Issue 697 multi-pass: mail addressed at this actor
-                // during the wire pass landed in its inbox before the
-                // wake hook was installed, so the closure-side wake
-                // fired against an empty `wake_slot`. Fire one wake
-                // here so a populated inbox enters the ready queue.
-                // Mirrors the same fix `Spawner::spawn_actor`'s
-                // Pooled branch carries (issue 635 Phase 3).
-                let manual_wake = wake.clone();
-                wake_slot.set(Arc::new(move || {
-                    // Inbox-sender hook — same fire-and-forget shape
-                    // as the spawn.rs analogue: scheduler deduplicates
-                    // the CAS, so the bool is irrelevant here.
-                    let _ = wake.wake();
-                }));
-                let _ = manual_wake.wake();
-                Ok(Box::new(PooledActorShutdown::<A> {
-                    slot: Some(slot),
-                    mailbox_sender: Some(mailbox_sender),
-                }) as Box<dyn DynShutdown>)
-            }
-        }
+        // Register a `DispatcherSlot` with the chassis worker pool. No
+        // per-actor thread (issue 635 Phase 3 made `Pooled` the only
+        // path; issue 1187 removed the `Dedicated` opt-out). The
+        // `wake_slot` in the mailbox closure fires the pool wake hook on
+        // every accepted send.
+        let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
+        let mailer_clone = ctx.mail_send_handle();
+        let slot = DispatcherSlot::<A>::new(
+            actor,
+            Arc::clone(&transport),
+            slots,
+            pending,
+            actor_registry,
+            mailer_clone,
+            mailbox_id,
+        );
+        let slot_dyn: Arc<dyn Drainable> = slot.clone();
+        let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+        // iamacoffeepot/aether#1135: surface the seize handle on this
+        // actor's `Inbox` entry so the blob demuxer can dispatch its
+        // fan-out in place rather than depositing + repop'ing through the
+        // inbox. Same `(state, weak)` pair the wake handle carries; the
+        // registry owns the strong slot ref, so the demuxer's `Weak`
+        // upgrade fails cleanly after teardown.
+        ctx.registry().install_seize_handle(
+            mailbox_id,
+            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+        );
+        drop(slot_dyn);
+        let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
+        // Issue 697 multi-pass: mail addressed at this actor during the
+        // wire pass landed in its inbox before the wake hook was
+        // installed, so the closure-side wake fired against an empty
+        // `wake_slot`. Fire one wake here so a populated inbox enters the
+        // ready queue. Mirrors the same fix `Spawner::spawn_actor`'s
+        // Pooled branch carries (issue 635 Phase 3).
+        let manual_wake = wake.clone();
+        wake_slot.set(Arc::new(move || {
+            // Inbox-sender hook — same fire-and-forget shape as the
+            // spawn.rs analogue: scheduler deduplicates the CAS, so the
+            // bool is irrelevant here.
+            let _ = wake.wake();
+        }));
+        let _ = manual_wake.wake();
+        Ok(Box::new(PooledActorShutdown::<A> {
+            slot: Some(slot),
+            mailbox_sender: Some(mailbox_sender),
+        }) as Box<dyn DynShutdown>)
     }
 
     fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
@@ -739,10 +704,9 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
 ///    final cycle. The pool's `Drop` joins workers, so any in-flight
 ///    cycle finishes before chassis shutdown returns.
 ///
-/// `Pooled` is the `Actor::SCHEDULING` default (issue 635 Phase 3), so
-/// this is the runtime shutdown path for nearly every chassis cap; only
-/// the `Dedicated` opt-outs (today `ProcessCapability`) take the
-/// thread-join `NativeActorShutdown` arm instead.
+/// Every actor drains on the pool (issue 635 Phase 3 made `Pooled` the
+/// default; issue 1187 removed the `Dedicated` opt-out), so this is the
+/// runtime shutdown path for every chassis cap.
 struct PooledActorShutdown<A>
 where
     A: NativeActor + NativeDispatch,
@@ -763,38 +727,6 @@ where
         // silently no-op via WakeHandle's Weak failing to upgrade.
         self.mailbox_sender.take();
         drop(self.slot.take());
-    }
-}
-
-/// Build a stable `aether-actor-<namespace>` thread name for the
-/// dispatcher. Mirrors the legacy capability path's helper but lives
-/// in this module so `make_native_actor_boot` doesn't depend on a
-/// `pub(crate)` shim from `capability.rs`.
-fn alloc_native_actor_thread_name<A: Actor>() -> String {
-    let mut name = String::with_capacity("aether-actor-".len() + A::NAMESPACE.len());
-    name.push_str("aether-actor-");
-    name.push_str(A::NAMESPACE);
-    name
-}
-
-/// Shutdown adapter for a [`NativeActor`] booted through
-/// [`Builder::with_actor`]. Drops the [`MailboxSender`]
-/// to disconnect the channel (the dispatcher's `recv_blocking` returns
-/// `None` and the thread exits), then joins the thread.
-struct NativeActorShutdown {
-    thread: Option<JoinHandle<()>>,
-    mailbox_sender: Option<MailboxSender>,
-}
-
-impl DynShutdown for NativeActorShutdown {
-    fn shutdown_dyn(mut self: Box<Self>) {
-        // Sender first — disconnects the channel and lets the
-        // dispatcher's `recv_blocking` return None so the thread
-        // exits. Joining a still-attached sender would hang.
-        self.mailbox_sender.take();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
     }
 }
 
@@ -1049,11 +981,11 @@ struct BootedPassives {
     actor_registry: Arc<crate::ActorRegistry>,
     spawner: Arc<crate::Spawner>,
     /// Issue 635 PR C: chassis-owned worker pool. Boots empty in
-    /// [`boot_passives`] before any cap, then drains every `Pooled` actor
-    /// (the `Actor::SCHEDULING` default since issue 635 Phase 3 — nearly
-    /// every cap). Drops *after* `shutdowns` (per `BootedPassives::Drop` +
-    /// implicit field-drop ordering), so every Dedicated dispatcher
-    /// thread is gone before pool workers join.
+    /// [`boot_passives`] before any cap, then drains every actor (all
+    /// pool-dispatched since issue 635 Phase 3 / issue 1187). Drops
+    /// *after* `shutdowns` (per `BootedPassives::Drop` + implicit
+    /// field-drop ordering), so every dispatcher slot has signalled
+    /// shutdown before pool workers join.
     _pool: PoolHandle,
     /// ADR-0080 §6 settlement registry. Cloned into the Mailer's
     /// chassis-router closure (which decodes `Settled { root }`
@@ -1114,10 +1046,9 @@ fn boot_passives(
     let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
     // The pool's wake sink is cloned into the Spawner (for instanced
-    // Pooled actors) and into the ChassisCtx (for singleton Pooled
-    // caps). Today every cap is Dedicated so the pool sits idle, but
-    // booting it here means PR D / Phase 2 can flip a cap to Pooled
-    // without re-plumbing the boot order.
+    // actors) and into the ChassisCtx (for singleton caps). Every actor
+    // drains on this pool — issue 635 Phase 3 made `Pooled` the default
+    // and issue 1187 removed the per-actor-thread opt-out entirely.
     //
     // Issue 745: `workers` is the `AETHER_WORKERS` override threaded
     // through `Builder::with_workers`. `None` keeps `PoolConfig::default`

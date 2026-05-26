@@ -69,8 +69,8 @@ pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, R
 pub use actor::sender::{MailCtx, Sender};
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Scheduling,
-    Singleton, validate_namespace_segment,
+    Actor, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Singleton,
+    validate_namespace_segment,
 };
 pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the

@@ -235,8 +235,9 @@ mod native {
             // 2b: the handler buffers its forwarded envelopes into the
             // actor's send-side ring; they route on handler-end flush.
             // Driving the handler directly (no dispatch loop), we drop the
-            // ctx to trigger that flush — mirroring `dispatch_loop_run`
-            // dropping its per-envelope ctx — before inspecting the sink.
+            // ctx to trigger that flush — mirroring the per-envelope ctx
+            // drop in `DispatcherSlot::dispatch_one` — before inspecting
+            // the sink.
             drop(ctx);
 
             let snapshot = captured

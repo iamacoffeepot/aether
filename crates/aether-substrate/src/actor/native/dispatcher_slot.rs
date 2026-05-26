@@ -1,24 +1,21 @@
 //! [`DispatcherSlot<A>`] — the [`Drainable`] adapter that wraps a
 //! native actor for chassis worker-pool dispatch (issue 635 PR C).
 //!
-//! ## Relationship to `dispatch_loop_run`
+//! ## The dispatch cycle
 //!
-//! [`crate::actor::native::dispatch::dispatch_loop_run`] is the loop a
-//! `Dedicated` actor runs on its own thread. It owns the actor, blocks
-//! on `recv_blocking`, and runs the four-phase lifecycle
-//! (main loop → drain after shutdown → unwire → registry close).
-//!
-//! `DispatcherSlot::run_cycle` is the *budget-bounded* version of the
-//! same logic for the `Pooled` path. Each call to `run_cycle` does:
+//! `DispatcherSlot::run_cycle` is the *budget-bounded* dispatch body the
+//! chassis worker pool runs against this slot. Each call to `run_cycle`
+//! does:
 //!
 //! 1. CAS `Ready → Running` on the [`SlotState`] (caller invariant:
 //!    the slot was just popped from the ready queue).
 //! 2. Drains envelopes via [`NativeBinding::try_recv`] until
 //!    inbox is empty, the budget is exhausted, or shutdown fires.
 //!    Per-envelope wrapping is `local::with_stamped(slots, ...)` +
-//!    `log_install::with_actor_dispatch(binding, ...)` — same as
-//!    `dispatch_loop_run`'s body so traces / `Local<T>` lookups behave
-//!    identically.
+//!    `log_install::with_actor_dispatch(binding, ...)` so traces /
+//!    `Local<T>` lookups behave identically across every actor, and the
+//!    per-envelope dispatch reuses the shared helpers in
+//!    [`crate::actor::native::dispatch`].
 //! 3. Returns one of:
 //!    - [`CycleResult::Idle`] — inbox drained, post-empty recheck saw
 //!      no race; worker drops the slot Arc.
@@ -28,15 +25,14 @@
 //!      post-shutdown drain + `unwire` hook + registry finalize
 //!      sequence and is done forever.
 //!
-//! ## Scheduling default
+//! ## Sole dispatch path
 //!
-//! `Actor::SCHEDULING` defaults to `Pooled` (issue 635 Phase 3), so
-//! this slot is the runtime dispatch path for nearly every actor —
-//! chassis caps and loaded wasm trampolines alike. `Dedicated` is the
-//! opt-in escape hatch for actors that park their dispatcher (today only
-//! `ProcessCapability`, which `block_on`s a tokio runtime). The
-//! `Pooled` branch of `make_native_actor_boot` / `Spawner::spawn_actor`
-//! constructs the slot; the chassis worker pool drives it.
+//! Every actor drains on the chassis worker pool (issue 635 Phase 3 made
+//! `Pooled` the default; issue 1187 removed the per-thread opt-out), so
+//! this slot is the runtime dispatch path for every actor — chassis caps
+//! and loaded wasm trampolines alike. `make_native_actor_boot` /
+//! `Spawner::spawn_actor` construct the slot; the chassis worker pool
+//! drives it.
 //!
 //! ## In-place demux seed (iamacoffeepot/aether#1135)
 //!
@@ -207,12 +203,12 @@ where
         }
     }
 
-    /// Per-envelope dispatch matching
-    /// [`crate::actor::native::dispatch::dispatch_loop_run`]'s body.
-    /// Wraps the dispatch call in `local::with_stamped` so per-actor
-    /// `Local<T>` lookups (including the ADR-0081 `ActorLogRing`)
-    /// resolve to this actor's slots. ADR-0081 retired the prior
-    /// `log_install::with_actor_dispatch` wrap + per-handler flush hop.
+    /// Per-envelope dispatch over the shared helpers in
+    /// [`crate::actor::native::dispatch`]. Wraps the dispatch call in
+    /// `local::with_stamped` so per-actor `Local<T>` lookups (including
+    /// the ADR-0081 `ActorLogRing`) resolve to this actor's slots.
+    /// ADR-0081 retired the prior `log_install::with_actor_dispatch`
+    /// wrap + per-handler flush hop.
     // `env` is taken by value because dispatch may move fields out
     // (reply_to, payload) into the actor; the helper here doesn't
     // happen to, but the surface mirrors the owning dispatch loop.
@@ -231,16 +227,14 @@ where
         // event. Resolved once per worker thread via a thread-local
         // cache — no per-hop `str::to_owned`, no `thread::current()`
         // `Arc` bump. The display name is recovered on the cold render
-        // path through the reverse-lookup registry. With the `Pooled`
-        // default scheduler (issue 635) this is the worker's
-        // `aether-worker-N`; `Thread`-scheduled actors land on a
-        // per-actor name.
+        // path through the reverse-lookup registry. Every actor drains on
+        // the pool (issue 635 / issue 1187), so this is always the
+        // worker's `aether-worker-N`.
         let thread_id = thread_name::current_thread_id();
         local::with_stamped(&self.slots, || {
             // ADR-0086 Phase 3: `Received` / `Finished` land in this
             // (recipient) actor's trace ring — only inside this
-            // `with_stamped` is its `ActorSlots` stamped. Mirrors
-            // `dispatch::dispatch_loop_run`.
+            // `with_stamped` is its `ActorSlots` stamped.
             let th = self.binding.mailer().trace_handle();
             // iamacoffeepot/aether#1128: capture the `Received` instant
             // so the cost fold below reuses the existing trace bracket —
@@ -263,8 +257,8 @@ where
             let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
             // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128
             // framework-built-in dispatch arms for `aether.log.tail` +
-            // `aether.trace.tail` + `aether.cost.tail`. See
-            // `dispatch::dispatch_loop_run`.
+            // `aether.trace.tail` + `aether.cost.tail`. See the helper
+            // docs in `dispatch`.
             if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &env)
                 && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, &env)
                 && !super::dispatch::dispatch_cost_tail_if_matching(&self.binding, &mut ctx, &env)
@@ -273,7 +267,7 @@ where
             }
             // iamacoffeepot/aether#1150: flush before `Finished` so a
             // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
-            // its parent's `Finished`. See `dispatch::dispatch_loop_run`.
+            // its parent's `Finished`.
             drop(ctx);
             let t_finished = th.now_nanos();
             th.push_trace_ring(
@@ -298,7 +292,7 @@ where
         }
     }
 
-    /// Phase 3 of the `dispatch_loop_run` lifecycle. Wraps `actor.unwire`
+    /// The close hook in the slot teardown sequence. Wraps `actor.unwire`
     /// in `with_stamped` so any final tracing or `Local<T>` access from
     /// the close hook resolves to this actor's slots.
     fn run_close_hook(&self, actor: &mut Box<A>) {

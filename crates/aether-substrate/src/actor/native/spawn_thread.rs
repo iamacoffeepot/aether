@@ -390,7 +390,6 @@ mod tests {
 
     impl Actor for StubActor {
         const NAMESPACE: &'static str = "test.spawn_thread.stub";
-        const SCHEDULING: aether_actor::Scheduling = aether_actor::Scheduling::Dedicated;
     }
 
     impl Singleton for StubActor {}

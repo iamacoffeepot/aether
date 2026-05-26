@@ -27,7 +27,6 @@ use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::dispatch;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
@@ -46,7 +45,6 @@ use crate::scheduler::WakeSink;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use std::sync::Weak;
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -387,19 +385,18 @@ impl Spawner {
         let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
         let weak_for_handler = Arc::downgrade(&strong_sender);
         // Per-actor inbox-pending counter. Sink handler ++ on push;
-        // dispatcher loop -- after handling. Pre-PR-4 the test bench's
+        // dispatcher slot -- after handling. Pre-PR-4 the test bench's
         // `wait_instanced_quiesce` queried this through
         // `Spawner::instanced_pending`; ADR-0080 settlement gating
-        // retires that polling path. The counter survives because
-        // `dispatch_loop_run` still threads it as the optional
-        // `pending` arg, but nothing queries the value today —
-        // a future cleanup PR can drop it entirely.
+        // retires that polling path. The counter survives because the
+        // `DispatcherSlot` still threads it as the optional `pending`
+        // arg, but nothing queries the value today — a future cleanup
+        // PR can drop it entirely.
         let pending = Arc::new(AtomicU64::new(0));
         let pending_for_handler = Arc::clone(&pending);
-        // Issue 635 PR C: optional pool wake hook for `Pooled` actors.
-        // Populated post-init by the `Pooled` branch below; left empty
-        // for `Dedicated` (today's only path) so the closure's `get()`
-        // is a single relaxed atomic load.
+        // Issue 635 PR C: pool wake hook. Populated post-init below
+        // (every actor is pool-dispatched since issue 1187); empty until
+        // then so the closure's `get()` is a single relaxed atomic load.
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
         // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
@@ -516,110 +513,74 @@ impl Spawner {
             let _ = tx.send(env);
         }
 
-        // 8. Spawn dispatcher (or pool-register) per `A::SCHEDULING`.
+        // 8. Pool-register the dispatcher (every actor is pool-dispatched
+        // since issue 1187 removed the per-thread `Dedicated` opt-out).
         // The local strong Arc was the populator for the Weak handler
         // ref; the actor_registry now holds an `Arc::clone` of the
         // same Arc, so dropping the local doesn't break the weak.
         drop(strong_sender);
-        match A::SCHEDULING {
-            aether_actor::Scheduling::Dedicated => {
-                // Today's path: one OS thread per instanced actor.
-                let transport_for_thread = Arc::clone(&transport);
-                let actor_registry_for_thread = Arc::clone(&self.actor_registry);
-                let mailer_for_thread = Arc::clone(&self.mailer);
-                let pending_for_thread = Arc::clone(&pending);
-                let thread_name = alloc_instanced_thread_name(&full_name);
-                let _ = thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || {
-                        dispatch::dispatch_loop_run::<A>(
-                            &transport_for_thread,
-                            &mut actor,
-                            &slots,
-                            Some(&pending_for_thread),
-                            &actor_registry_for_thread,
-                            &mailer_for_thread,
-                            id,
-                        );
-                    })
-                    .expect("dispatcher thread spawn must succeed");
-            }
-            aether_actor::Scheduling::Pooled => {
-                // Issue 635 PR C + Phase 3: register a `DispatcherSlot`
-                // with the chassis worker pool. No per-actor thread.
-                // The wake hook on the closure pushes the slot to the
-                // ready queue when an envelope lands.
-                let slot = DispatcherSlot::<A>::new(
-                    actor,
-                    Arc::clone(&transport),
-                    slots,
-                    Some(Arc::clone(&pending)),
-                    Arc::clone(&self.actor_registry),
-                    Arc::clone(&self.mailer),
-                    id,
-                );
-                let slot_dyn: Arc<dyn Drainable> = slot.clone();
-                let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
-                // iamacoffeepot/aether#1135: surface the seize handle on
-                // this instanced actor's `Inbox` entry so the blob
-                // demuxer dispatches its fan-out in place (ADR-0087 §4).
-                // The registry holds the strong slot ref via
-                // `instanced_slots` below; the demuxer's `Weak` upgrade
-                // fails cleanly once the actor is torn down.
-                self.registry.install_seize_handle(
-                    id,
-                    SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
-                );
-                let wake = WakeHandle::new(Arc::clone(slot.state()), weak, self.wake_sink.clone());
-                // Stash the slot's strong Arc so wakes can upgrade their
-                // `Weak`. PR C dropped it here, which broke every wake
-                // after spawn (the registry only holds the inbox
-                // sender, not the slot — the comment claiming
-                // otherwise was wrong). Slots live until the Spawner
-                // itself drops at chassis teardown. Issue 685 also
-                // stashes a wake clone so chassis teardown can fire
-                // one wake per slot after signaling shutdown.
-                drop(slot);
-                let teardown_wake = wake.clone();
-                self.instanced_slots
-                    .lock()
-                    .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
-                    .insert(
-                        id,
-                        InstancedSlotEntry {
-                            slot: slot_dyn,
-                            wake: teardown_wake,
-                        },
-                    );
-                // Pre-loaded `after_init` mail (lines above) was sent
-                // straight to the inbox via `tx.send`, which bypasses
-                // the closure's wake hook. Fire one wake now so the
-                // slot enters the ready queue and the worker drains
-                // those envelopes; subsequent peer sends route through
-                // the closure and wake on their own.
-                let manual_wake = wake.clone();
-                wake_slot.set(Arc::new(move || {
-                    // Inbox-sender hook: the CAS-win bool would tell us
-                    // whether *this* sender owns the schedule push, but
-                    // the scheduler self-deduplicates so either outcome
-                    // is fine.
-                    let _ = wake.wake();
-                }));
-                // Manual catch-up wake for inbox mail that landed
-                // before the closure was installed (see comment above).
-                let _ = manual_wake.wake();
-            }
-        }
+        // Issue 635 PR C + Phase 3: register a `DispatcherSlot` with the
+        // chassis worker pool. No per-actor thread. The wake hook on the
+        // closure pushes the slot to the ready queue when an envelope
+        // lands.
+        let slot = DispatcherSlot::<A>::new(
+            actor,
+            Arc::clone(&transport),
+            slots,
+            Some(Arc::clone(&pending)),
+            Arc::clone(&self.actor_registry),
+            Arc::clone(&self.mailer),
+            id,
+        );
+        let slot_dyn: Arc<dyn Drainable> = slot.clone();
+        let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+        // iamacoffeepot/aether#1135: surface the seize handle on this
+        // instanced actor's `Inbox` entry so the blob demuxer dispatches
+        // its fan-out in place (ADR-0087 §4). The registry holds the
+        // strong slot ref via `instanced_slots` below; the demuxer's
+        // `Weak` upgrade fails cleanly once the actor is torn down.
+        self.registry.install_seize_handle(
+            id,
+            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+        );
+        let wake = WakeHandle::new(Arc::clone(slot.state()), weak, self.wake_sink.clone());
+        // Stash the slot's strong Arc so wakes can upgrade their `Weak`.
+        // PR C dropped it here, which broke every wake after spawn (the
+        // registry only holds the inbox sender, not the slot — the
+        // comment claiming otherwise was wrong). Slots live until the
+        // Spawner itself drops at chassis teardown. Issue 685 also
+        // stashes a wake clone so chassis teardown can fire one wake per
+        // slot after signaling shutdown.
+        drop(slot);
+        let teardown_wake = wake.clone();
+        self.instanced_slots
+            .lock()
+            .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
+            .insert(
+                id,
+                InstancedSlotEntry {
+                    slot: slot_dyn,
+                    wake: teardown_wake,
+                },
+            );
+        // Pre-loaded `after_init` mail (lines above) was sent straight to
+        // the inbox via `tx.send`, which bypasses the closure's wake
+        // hook. Fire one wake now so the slot enters the ready queue and
+        // the worker drains those envelopes; subsequent peer sends route
+        // through the closure and wake on their own.
+        let manual_wake = wake.clone();
+        wake_slot.set(Arc::new(move || {
+            // Inbox-sender hook: the CAS-win bool would tell us whether
+            // *this* sender owns the schedule push, but the scheduler
+            // self-deduplicates so either outcome is fine.
+            let _ = wake.wake();
+        }));
+        // Manual catch-up wake for inbox mail that landed before the
+        // closure was installed (see comment above).
+        let _ = manual_wake.wake();
 
         Ok(id)
     }
-}
-
-fn alloc_instanced_thread_name(full_name: &str) -> String {
-    let mut s = String::with_capacity("aether-instanced-".len() + full_name.len());
-    s.push_str("aether-instanced-");
-    s.push_str(full_name);
-    s
 }
 
 /// Builder returned from `NativeCtx::spawn_child` /

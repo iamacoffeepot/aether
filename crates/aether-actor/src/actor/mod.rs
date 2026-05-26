@@ -27,49 +27,26 @@ pub mod slot;
 
 use aether_data::Kind;
 
-/// The symmetric trait every actor implements: name + scheduling class.
-/// Lifecycle methods (`boot` for native chassis caps, `init` for wasm
-/// components) live on per-transport subtraits; this trait stays
-/// ctx-free so the same shape applies to both sides.
+/// The symmetric trait every actor implements: the recipient name it
+/// claims. Lifecycle methods (`boot` for native chassis caps, `init`
+/// for wasm components) live on per-transport subtraits; this trait
+/// stays ctx-free so the same shape applies to both sides.
+///
+/// Dispatch invariant: every actor drains cooperatively on the chassis
+/// worker pool. A handler must never block the dispatcher — offload
+/// blocking work (a `wait_reply`-shaped request/reply, sync disk I/O, a
+/// runloop on a non-mail external source like TCP `accept` or a
+/// file-watch source) to a `ctx.spawn`'d thread that blocks off-pool
+/// and feeds its results back as mail. A request/reply-shaped need is
+/// served by an FSM that carries state across handler invocations
+/// (send → return → handle the reply) rather than by parking a pool
+/// worker in-handler.
 pub trait Actor: Sized + Send + 'static {
     /// The recipient name this actor claims. For native capabilities
     /// it's the chassis-owned mailbox name (`aether.<name>`); for wasm
     /// components it's the default name `load_component` registers
     /// under when the load payload omits an explicit override.
     const NAMESPACE: &'static str;
-
-    /// Issue 635 dispatch placement. `Pooled` (the default) registers
-    /// a dispatcher slot with the chassis worker pool so many actors
-    /// share a small thread set. `Dedicated` is the opt-in escape
-    /// hatch: it keeps the actor on its own OS thread for actors
-    /// whose handlers can park the dispatcher (today: `wait_reply`,
-    /// `ureq.fetch`, sync disk I/O, blocking external sources the
-    /// chassis can't reify as mail — see `Scheduling::Dedicated`).
-    ///
-    /// Phase 3 flipped this default from `Dedicated` (Phase 1's
-    /// behavior-preserving choice) to `Pooled` after the entire cap
-    /// set was audited. Today only `ProcessCapability` (which uses
-    /// `tokio::Runtime::block_on` to coordinate child-process
-    /// lifecycle) opts back into `Dedicated`.
-    ///
-    const SCHEDULING: Scheduling = Scheduling::Pooled;
-}
-
-/// Issue 635 dispatch placement (see [`Actor::SCHEDULING`]). Equality
-/// is structural — the runtime does `match A::SCHEDULING { Pooled => …,
-/// Dedicated => … }` once at boot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scheduling {
-    /// Drain the actor's inbox cooperatively on the chassis worker
-    /// pool. Default. Suitable for actors whose handlers return
-    /// promptly — drain a mail, push state, return.
-    Pooled,
-    /// Drain the actor on its own OS thread. Required for actors that
-    /// call `wait_reply` from a handler or own a runloop blocking on a
-    /// non-mail external source the chassis can't reify (TCP `accept`,
-    /// file-watch event sources). Until the ladder of caps converts
-    /// to the pool path, every shipped actor is `Dedicated`.
-    Dedicated,
 }
 
 /// Cardinality marker: only one instance of this actor can be live per
