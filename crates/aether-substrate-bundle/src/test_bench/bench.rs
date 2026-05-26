@@ -47,6 +47,7 @@ use aether_substrate::{
     SubstrateBoot,
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
+    scheduler::SchedulerCountersSnapshot,
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -423,6 +424,18 @@ impl TestBench {
     #[must_use]
     pub fn cost_table(&self) -> &Arc<CostTable> {
         self.queue.cost_table()
+    }
+
+    /// Snapshot the worker pool's mechanism counters
+    /// (iamacoffeepot/aether#1129): notify slow-path unparks, recruiter-
+    /// suppressed wakeups, injector / sibling steals, and inline-runs. The
+    /// perf harness brackets each cell's `advance` with two snapshots and
+    /// records the field-wise delta as the cell's count-metrics. A plain
+    /// relaxed copy — near-deterministic for a fixed workload, so the
+    /// comparator gives it a deterministic (non-noise-banded) verdict.
+    #[must_use]
+    pub fn scheduler_counters(&self) -> SchedulerCountersSnapshot {
+        self.passive.scheduler_counters()
     }
 
     /// Bytes-level fire-and-settle send: resolve `recipient_name` in
@@ -1082,6 +1095,84 @@ mod tests {
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "captured bytes are not a PNG: first 8 bytes={:?}",
             &png.iter().take(8).copied().collect::<Vec<u8>>(),
+        );
+    }
+
+    /// iamacoffeepot/aether#1129: `TestBench::scheduler_counters` reads a
+    /// live snapshot, and a fan-out advance moves the mechanism counters
+    /// off zero. A relay fan-out (one root → N leaves) drives the
+    /// substrate's real lifecycle through the worker pool, so at least one
+    /// dispatch mechanism (inline-run on the producing worker, or an
+    /// injector steal of spilled work) fires. The delta over the advance
+    /// must therefore be non-zero on some counter — the harvest the perf
+    /// harness relies on.
+    #[test]
+    fn scheduler_counters_move_after_fanout_advance() {
+        use crate::perf::harness::{Relay, RelayConfig, TickSource, relay_id, ticksrc_id};
+        use aether_data::{Kind as DataKind, MailboxId};
+        use aether_kinds::{SubscribeInput, SubscribeInputResult};
+        use aether_substrate::Subname;
+        use std::sync::Arc;
+
+        let mut tb = match TestBench::start_with_size(16, 16) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+
+        // Fan-out: relay 0 -> {1, 2, 3, 4}. Spawn leaves then the entry.
+        let width = 4usize;
+        for i in 1..=width {
+            let cfg = RelayConfig {
+                downstreams: Arc::from([] as [MailboxId; 0]),
+                work_iters: 0,
+            };
+            tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), cfg)
+                .finish()
+                .expect("leaf relay spawns");
+        }
+        let entry_downstreams: Arc<[MailboxId]> = (1..=width).map(relay_id).collect();
+        tb.spawn_actor::<Relay>(
+            Subname::Named("0"),
+            RelayConfig {
+                downstreams: entry_downstreams,
+                work_iters: 0,
+            },
+        )
+        .finish()
+        .expect("entry relay spawns");
+        tb.spawn_actor::<TickSource>(Subname::Named("src"), relay_id(0))
+            .finish()
+            .expect("tick source spawns");
+
+        // Subscribe the source to the Tick stream so `advance` drives it.
+        let sub = SubscribeInput {
+            kind: Tick::ID,
+            mailbox: ticksrc_id(),
+        };
+        let reply = tb
+            .send_bytes_and_await("aether.input", SubscribeInput::ID, sub.encode_into_bytes())
+            .expect("subscribe send");
+        assert!(
+            matches!(
+                SubscribeInputResult::decode_from_bytes(&reply),
+                Some(SubscribeInputResult::Ok)
+            ),
+            "Tick subscribe should succeed"
+        );
+
+        let before = tb.scheduler_counters();
+        tb.advance(20).expect("advance");
+        let delta = tb.scheduler_counters().delta_since(&before);
+
+        // Some dispatch mechanism must have fired over 20 fan-out frames —
+        // the counters are no longer all-zero.
+        assert_ne!(
+            delta,
+            SchedulerCountersSnapshot::default(),
+            "a fan-out advance should move at least one mechanism counter, got {delta:?}"
         );
     }
 

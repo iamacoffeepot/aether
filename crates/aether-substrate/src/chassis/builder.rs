@@ -42,7 +42,7 @@ use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
 use crate::scheduler::log_handoff_calibration;
-use crate::scheduler::{Pool, PoolConfig, PoolHandle};
+use crate::scheduler::{Pool, PoolConfig, PoolHandle, SchedulerCountersSnapshot};
 #[cfg(test)]
 use aether_actor::Actor;
 #[cfg(test)]
@@ -985,8 +985,10 @@ struct BootedPassives {
     /// pool-dispatched since issue 635 Phase 3 / issue 1187). Drops
     /// *after* `shutdowns` (per `BootedPassives::Drop` + implicit
     /// field-drop ordering), so every dispatcher slot has signalled
-    /// shutdown before pool workers join.
-    _pool: PoolHandle,
+    /// shutdown before pool workers join. Held (not `_pool`) since
+    /// iamacoffeepot/aether#1129 reads its mechanism counters via
+    /// [`Self::scheduler_counters`].
+    pool: PoolHandle,
     /// ADR-0080 §6 settlement registry. Cloned into the Mailer's
     /// chassis-router closure (which decodes `Settled { root }`
     /// mail addressed to `CHASSIS_MAILBOX_ID` and signals
@@ -1003,6 +1005,13 @@ impl BootedPassives {
     /// `subscribe_settlement(root)` and wait on the returned receiver.
     pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         &self.settlement_registry
+    }
+
+    /// iamacoffeepot/aether#1129: snapshot the worker pool's mechanism
+    /// counters. The perf harness brackets a quiesced `advance` with two
+    /// of these and records the field-wise delta.
+    pub fn scheduler_counters(&self) -> SchedulerCountersSnapshot {
+        self.pool.scheduler_counters()
     }
 
     fn shutdown_in_place(&mut self) {
@@ -1266,7 +1275,7 @@ fn boot_passives(
         claimed_actor_mailboxes,
         actor_registry,
         spawner,
-        _pool: pool,
+        pool,
         settlement_registry,
     })
 }
@@ -1441,6 +1450,15 @@ impl<C: Chassis> PassiveChassis<C> {
     #[must_use]
     pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         self.booted.settlement_registry()
+    }
+
+    /// iamacoffeepot/aether#1129: snapshot the worker pool's mechanism
+    /// counters. The in-process [`TestBench`](crate) surfaces this to the
+    /// perf harness, which brackets each cell's `advance` with two
+    /// snapshots and records the field-wise delta.
+    #[must_use]
+    pub fn scheduler_counters(&self) -> SchedulerCountersSnapshot {
+        self.booted.scheduler_counters()
     }
 
     /// Issue 607 Phase 5 (ADR-0079): mirror of

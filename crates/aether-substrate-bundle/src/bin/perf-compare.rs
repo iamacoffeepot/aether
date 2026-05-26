@@ -210,8 +210,9 @@ fn main() -> ExitCode {
     }
 
     eprintln!(
-        "perf-compare: {} improved, {} stable, {} regressed (informational)",
-        report.improved, report.stable, report.regressed
+        "perf-compare: {} improved, {} stable, {} regressed; {} counter cells changed \
+         (informational)",
+        report.improved, report.stable, report.regressed, report.counters_changed
     );
     ExitCode::SUCCESS
 }

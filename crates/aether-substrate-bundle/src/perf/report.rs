@@ -21,6 +21,7 @@
 //! outliers (median is robust) read as stable rather than false
 //! regressions.
 
+use aether_substrate::scheduler::SchedulerCountersSnapshot;
 use serde::{Deserialize, Serialize};
 
 /// Which per-mail span a cell reports (iamacoffeepot/aether#1150). Each
@@ -54,6 +55,67 @@ impl Metric {
             Self::Queued => "queued",
             Self::Drain => "drain",
             Self::Handler => "handler",
+        }
+    }
+}
+
+/// Which scheduler mechanism counter a count-cell reports
+/// (iamacoffeepot/aether#1129). Each is a per-cell delta — a count, not a
+/// latency — and near-deterministic for a fixed workload, so the
+/// comparator gives them a deterministic (non-noise-banded) verdict
+/// rather than the latency [`Metric`]'s paired IQR test.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum CounterMetric {
+    /// `SpinPark::notify` slow-path futex unparks — a producer woke a
+    /// parked worker (no spinner was available to route to). The ~4.3µs
+    /// handoff events the route-to-spinner fast path exists to avoid.
+    NotifySlowUnparks,
+    /// Recruiter-suppressed wakeups — a recruit asked for more siblings
+    /// than the pool could field (`workers − 1`); the clamped difference
+    /// is the suppressed count.
+    RecruitSuppressed,
+    /// Steals that pulled work from the shared injector (off-worker
+    /// producers, spilled fan-out, requeued yields).
+    StealsInjector,
+    /// Steals that raided a sibling worker's deque tail (only when
+    /// `AETHER_PEER_STEAL` is opted in).
+    StealsSibling,
+    /// Inline-runs — a wake kept its slot on the producing worker's own
+    /// deque (the affinity warm path), so it ran without a futex wakeup.
+    InlineRuns,
+}
+
+impl CounterMetric {
+    /// The four-plus counters in report order.
+    pub const ALL: [Self; 5] = [
+        Self::NotifySlowUnparks,
+        Self::RecruitSuppressed,
+        Self::StealsInjector,
+        Self::StealsSibling,
+        Self::InlineRuns,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotifySlowUnparks => "notify_slow_unparks",
+            Self::RecruitSuppressed => "recruit_suppressed",
+            Self::StealsInjector => "steals_injector",
+            Self::StealsSibling => "steals_sibling",
+            Self::InlineRuns => "inline_runs",
+        }
+    }
+
+    /// Read this counter's field out of a snapshot delta.
+    #[must_use]
+    pub fn read(self, snap: &SchedulerCountersSnapshot) -> u64 {
+        match self {
+            Self::NotifySlowUnparks => snap.notify_slow_unparks,
+            Self::RecruitSuppressed => snap.recruit_suppressed,
+            Self::StealsInjector => snap.steals_injector,
+            Self::StealsSibling => snap.steals_sibling,
+            Self::InlineRuns => snap.inline_runs,
         }
     }
 }
@@ -92,6 +154,28 @@ impl CellJson {
     }
 }
 
+/// One scheduler mechanism counter's per-cell delta in a single trial
+/// (iamacoffeepot/aether#1129). `count` is a count, not a latency — the
+/// number of events of `counter` kind the worker pool produced over this
+/// cell's `advance`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CounterCellJson {
+    pub workers: usize,
+    pub topo: String,
+    pub counter: CounterMetric,
+    pub count: u64,
+}
+
+impl CounterCellJson {
+    fn key(&self) -> CounterCellKey {
+        CounterCellKey {
+            workers: self.workers,
+            topo: self.topo.clone(),
+            counter: self.counter,
+        }
+    }
+}
+
 /// One fresh-process sweep run. The `perf-trial` bin emits this as JSON
 /// on stdout; the `perf-compare` bin collects K of each side.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -106,14 +190,21 @@ pub struct TrialReport {
     /// Frames advanced per cell.
     pub frames: u32,
     pub cells: Vec<CellJson>,
+    /// iamacoffeepot/aether#1129: the scheduler mechanism-counter cells,
+    /// one row per (workers × topology × counter). A count class, separate
+    /// from the latency `cells` because counts get a deterministic verdict,
+    /// not the noise-aware paired test.
+    pub counters: Vec<CounterCellJson>,
 }
 
 /// Current trial schema tag. Bumped to `v2` by iamacoffeepot/aether#1150
 /// when `hop` / `send_enqueue` / `residence` gave way to the
 /// `queued` / `drain` / `handler` span model; to `v3` by
 /// iamacoffeepot/aether#1158 when `construct` joined as the producer-side
-/// first leg, completing the four-stage lifecycle.
-pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v3";
+/// first leg, completing the four-stage lifecycle; to `v4` by
+/// iamacoffeepot/aether#1129 when the scheduler mechanism counters joined
+/// as the `counters` count-cell list.
+pub const TRIAL_SCHEMA: &str = "aether.perf.trial.v4";
 
 impl TrialReport {
     /// Build a trial report from a sweep's [`CellResult`]s — each cell
@@ -131,6 +222,7 @@ impl TrialReport {
         git_sha: Option<String>,
     ) -> Self {
         let mut out = Vec::with_capacity(cells.len() * 4);
+        let mut counter_rows = Vec::with_capacity(cells.len() * CounterMetric::ALL.len());
         for c in cells {
             for (metric, s) in [
                 (Metric::Construct, &c.construct),
@@ -149,6 +241,15 @@ impl TrialReport {
                     n: s.n,
                 });
             }
+            // iamacoffeepot/aether#1129: one count-cell per mechanism counter.
+            for counter in CounterMetric::ALL {
+                counter_rows.push(CounterCellJson {
+                    workers: c.workers,
+                    topo: c.topo.clone(),
+                    counter,
+                    count: counter.read(&c.counters),
+                });
+            }
         }
         Self {
             schema: TRIAL_SCHEMA.to_owned(),
@@ -156,6 +257,7 @@ impl TrialReport {
             pace_hz,
             frames,
             cells: out,
+            counters: counter_rows,
         }
     }
 }
@@ -204,6 +306,13 @@ struct CellKey {
     metric: Metric,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CounterCellKey {
+    workers: usize,
+    topo: String,
+    counter: CounterMetric,
+}
+
 /// Find the cell matching `key` in one trial (a free fn, not a closure,
 /// so the borrow of the returned `&CellJson` ties to `t`'s lifetime).
 fn find_cell<'a>(t: &'a TrialReport, key: &CellKey) -> Option<&'a CellJson> {
@@ -219,6 +328,33 @@ pub enum Verdict {
     Improved,
     Stable,
     Regressed,
+}
+
+/// changed / stable verdict for one counter cell (iamacoffeepot/aether#1129).
+/// Deterministic — the counts are near-deterministic for a fixed workload,
+/// so a change above a small absolute tolerance is real, not noise. No
+/// improved/regressed direction: whether more steals or fewer unparks is
+/// "better" is mechanism-dependent and the reader's call; the verdict only
+/// asserts *whether the mechanism behaviour moved*.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum CounterVerdict {
+    Stable,
+    Changed,
+}
+
+/// One compared counter cell — the median count per side (across the K
+/// trials) plus the deterministic [`CounterVerdict`].
+#[derive(Serialize, Clone, Debug)]
+pub struct CounterComparison {
+    pub workers: usize,
+    pub topo: String,
+    pub counter: CounterMetric,
+    pub base_count: u64,
+    pub cand_count: u64,
+    /// `cand_count − base_count` (signed).
+    pub delta: i64,
+    pub verdict: CounterVerdict,
 }
 
 /// One compared cell — display bands per side (IQR across trials) plus
@@ -247,6 +383,11 @@ pub struct ComparisonReport {
     pub stable: usize,
     pub regressed: usize,
     pub cells: Vec<CellComparison>,
+    /// iamacoffeepot/aether#1129: how many counter cells moved past the
+    /// absolute tolerance (deterministic verdict, not noise-banded).
+    pub counters_changed: usize,
+    /// The per-counter-cell comparison rows.
+    pub counters: Vec<CounterComparison>,
 }
 
 /// Tunables for the verdict rule. Defaults are conservative —
@@ -268,6 +409,17 @@ pub struct CompareConfig {
     pub abs_floor_ns: f64,
     /// Fraction of trials whose delta must share the effect's sign.
     pub consistency: f64,
+    /// iamacoffeepot/aether#1129: absolute tolerance (in events) for the
+    /// mechanism counters' deterministic verdict. A counter cell flags
+    /// `Changed` only when the median-count delta strictly exceeds this.
+    /// Small but non-zero: the counts are near-deterministic, but a lost
+    /// relaxed increment or a racing wakeup can jitter a count by one or
+    /// two across trials, and the median across K trials already absorbs
+    /// most of that — the tolerance is the final guard against a 1-event
+    /// wobble reading as a behaviour change. No IQR / noise band, by
+    /// design: the whole point of the counters is that they are stable
+    /// where latency is not.
+    pub counter_abs_tolerance: u64,
 }
 
 impl Default for CompareConfig {
@@ -277,6 +429,7 @@ impl Default for CompareConfig {
             rel_floor: 0.10,
             abs_floor_ns: 300.0,
             consistency: 0.75,
+            counter_abs_tolerance: 2,
         }
     }
 }
@@ -380,13 +533,98 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
         .filter(|c| c.verdict == Verdict::Regressed)
         .count();
     let stable = cells.len() - improved - regressed;
+
+    let counters = compare_counters(base, cand, k, cfg);
+    let counters_changed = counters
+        .iter()
+        .filter(|c| c.verdict == CounterVerdict::Changed)
+        .count();
+
     ComparisonReport {
         trials: k,
         improved,
         stable,
         regressed,
         cells,
+        counters_changed,
+        counters,
     }
+}
+
+/// Find the counter cell matching `key` in one trial.
+fn find_counter<'a>(t: &'a TrialReport, key: &CounterCellKey) -> Option<&'a CounterCellJson> {
+    t.counters
+        .iter()
+        .find(|c| c.workers == key.workers && c.topo == key.topo && c.counter == key.counter)
+}
+
+/// Median of an unsorted `u64` slice (nearest-rank, like the latency
+/// percentiles). `0` on an empty slice.
+fn median_counts(counts: &[u64]) -> u64 {
+    if counts.is_empty() {
+        return 0;
+    }
+    let mut s = counts.to_vec();
+    s.sort_unstable();
+    s[(s.len() - 1) / 2]
+}
+
+/// Deterministic counter comparison (iamacoffeepot/aether#1129). Per
+/// counter cell present in every trial of both sides, take the median
+/// count per side across the K trials and flag `Changed` when their
+/// absolute difference exceeds [`CompareConfig::counter_abs_tolerance`].
+/// No IQR / noise band — the counts are near-deterministic, so a change
+/// past the (tiny) tolerance is real.
+fn compare_counters(
+    base: &[TrialReport],
+    cand: &[TrialReport],
+    k: usize,
+    cfg: CompareConfig,
+) -> Vec<CounterComparison> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let keys: Vec<CounterCellKey> = base
+        .first()
+        .map(|t| t.counters.iter().map(CounterCellJson::key).collect())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for key in &keys {
+        let base_counts: Vec<u64> = base[..k]
+            .iter()
+            .filter_map(|t| find_counter(t, key))
+            .map(|c| c.count)
+            .collect();
+        let cand_counts: Vec<u64> = cand[..k]
+            .iter()
+            .filter_map(|t| find_counter(t, key))
+            .map(|c| c.count)
+            .collect();
+        if base_counts.len() != k || cand_counts.len() != k {
+            continue; // cell not present in every trial — skip
+        }
+
+        let base_count = median_counts(&base_counts);
+        let cand_count = median_counts(&cand_counts);
+        let delta = i64::try_from(cand_count).unwrap_or(i64::MAX)
+            - i64::try_from(base_count).unwrap_or(i64::MAX);
+        let verdict = if delta.unsigned_abs() > cfg.counter_abs_tolerance {
+            CounterVerdict::Changed
+        } else {
+            CounterVerdict::Stable
+        };
+        out.push(CounterComparison {
+            workers: key.workers,
+            topo: key.topo.clone(),
+            counter: key.counter,
+            base_count,
+            cand_count,
+            delta,
+            verdict,
+        });
+    }
+    out
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -492,6 +730,70 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
         s.push_str(&row(c));
     }
     s.push_str("\n</details>\n");
+
+    s.push_str(&counters_markdown(report));
+    s
+}
+
+/// Render the mechanism-counter (iamacoffeepot/aether#1129) section: a
+/// headline change count, the changed rows up top, and the full counter
+/// grid collapsed. Counts are deterministic, so a non-zero delta past the
+/// tolerance is a real behaviour change (no noise band).
+#[allow(clippy::format_push_string)]
+fn counters_markdown(report: &ComparisonReport) -> String {
+    if report.counters.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    s.push_str(&format!(
+        "\n### scheduler mechanism counters\n\n**{} of {} counter cells changed** (deterministic, abs-tolerance verdict)\n\n",
+        report.counters_changed,
+        report.counters.len()
+    ));
+
+    let header =
+        "| topology | w | counter | base | this | Δ | verdict |\n|---|--:|---|--:|--:|--:|---|\n";
+    let row = |c: &CounterComparison| -> String {
+        let verdict = match c.verdict {
+            CounterVerdict::Stable => "stable",
+            CounterVerdict::Changed => "changed",
+        };
+        format!(
+            "| {} | {} | {} | {} | {} | {:+} | {} |\n",
+            c.topo,
+            c.workers,
+            c.counter.label(),
+            c.base_count,
+            c.cand_count,
+            c.delta,
+            verdict,
+        )
+    };
+
+    let changed: Vec<&CounterComparison> = report
+        .counters
+        .iter()
+        .filter(|c| c.verdict == CounterVerdict::Changed)
+        .collect();
+    if changed.is_empty() {
+        s.push_str("_No counter cell moved past the tolerance._\n\n");
+    } else {
+        s.push_str(header);
+        for c in changed {
+            s.push_str(&row(c));
+        }
+        s.push('\n');
+    }
+
+    s.push_str(&format!(
+        "<details><summary>full counter grid — {} cells</summary>\n\n",
+        report.counters.len()
+    ));
+    s.push_str(header);
+    for c in &report.counters {
+        s.push_str(&row(c));
+    }
+    s.push_str("\n</details>\n");
     s
 }
 
@@ -524,8 +826,40 @@ mod tests {
                     max: p50 * 4,
                     n: 1800,
                 }],
+                counters: Vec::new(),
             })
             .collect()
+    }
+
+    /// Build a K-trial side carrying one counter cell (`fanout-8 @ 11w`,
+    /// `inline_runs`) with the per-trial counts in `series`. The latency
+    /// `cells` are left empty — the counter-verdict tests assert only on
+    /// the counter comparison.
+    fn counter_side(series: &[u64]) -> Vec<TrialReport> {
+        series
+            .iter()
+            .map(|&count| TrialReport {
+                schema: TRIAL_SCHEMA.to_owned(),
+                git_sha: None,
+                pace_hz: None,
+                frames: 200,
+                cells: Vec::new(),
+                counters: vec![CounterCellJson {
+                    workers: 11,
+                    topo: "fanout-8".to_owned(),
+                    counter: CounterMetric::InlineRuns,
+                    count,
+                }],
+            })
+            .collect()
+    }
+
+    fn inline_runs_verdict(rep: &ComparisonReport) -> CounterVerdict {
+        rep.counters
+            .iter()
+            .find(|c| c.counter == CounterMetric::InlineRuns)
+            .expect("inline_runs counter cell present")
+            .verdict
     }
 
     fn p50_verdict(rep: &ComparisonReport) -> Verdict {
@@ -623,5 +957,89 @@ mod tests {
         assert!(md.contains(STICKY_MARKER));
         assert!(md.contains("improved"));
         assert!(md.contains("full grid"));
+    }
+
+    #[test]
+    fn schema_tag_is_v4() {
+        // iamacoffeepot/aether#1129: the count-cell list bumped the schema.
+        assert_eq!(TRIAL_SCHEMA, "aether.perf.trial.v4");
+    }
+
+    #[test]
+    fn trial_report_round_trips_with_counter_cells() {
+        // iamacoffeepot/aether#1129: a v4 report carries both latency cells
+        // and counter cells; both survive a JSON round-trip, and the schema
+        // probe reads the v4 tag.
+        let mut t = side(&[1000]).remove(0);
+        t.counters = CounterMetric::ALL
+            .iter()
+            .map(|&counter| CounterCellJson {
+                workers: 11,
+                topo: "fanout-8".to_owned(),
+                counter,
+                count: 42,
+            })
+            .collect();
+        let json = serde_json::to_vec(&t).expect("serialize v4 trial");
+        assert_eq!(probe_schema(&json).as_deref(), Some(TRIAL_SCHEMA));
+        let back: TrialReport = serde_json::from_slice(&json).expect("round-trip v4 trial");
+        assert_eq!(back.counters.len(), CounterMetric::ALL.len());
+        assert!(back.counters.iter().all(|c| c.count == 42));
+        // The snake_case counter labels survive the enum serde round-trip.
+        assert!(
+            back.counters
+                .iter()
+                .any(|c| c.counter == CounterMetric::NotifySlowUnparks)
+        );
+    }
+
+    #[test]
+    fn equal_counts_read_stable() {
+        // Identical counts both sides — deterministic stable.
+        let base = counter_side(&[500, 500, 500, 500]);
+        let cand = counter_side(&[500, 500, 500, 500]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(inline_runs_verdict(&rep), CounterVerdict::Stable);
+        assert_eq!(rep.counters_changed, 0);
+    }
+
+    #[test]
+    fn one_event_jitter_is_within_tolerance() {
+        // A 1-event wobble (a lost relaxed increment / racing wakeup) is
+        // inside the default abs-tolerance of 2 — must read stable.
+        let base = counter_side(&[500, 500, 501, 500]);
+        let cand = counter_side(&[501, 500, 500, 502]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(inline_runs_verdict(&rep), CounterVerdict::Stable);
+    }
+
+    #[test]
+    fn clear_count_delta_reads_changed() {
+        // A workload-level shift (500 -> 50 inline-runs) is far past the
+        // tolerance — deterministically flagged, no noise band.
+        let base = counter_side(&[500, 500, 500, 500]);
+        let cand = counter_side(&[50, 48, 52, 50]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(inline_runs_verdict(&rep), CounterVerdict::Changed);
+        assert_eq!(rep.counters_changed, 1);
+        let cell = rep
+            .counters
+            .iter()
+            .find(|c| c.counter == CounterMetric::InlineRuns)
+            .expect("inline_runs cell");
+        assert_eq!(cell.base_count, 500);
+        assert_eq!(cell.cand_count, 50);
+        assert_eq!(cell.delta, -450);
+    }
+
+    #[test]
+    fn markdown_renders_counter_section() {
+        let base = counter_side(&[500, 500, 500, 500]);
+        let cand = counter_side(&[50, 48, 52, 50]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+        assert!(md.contains("scheduler mechanism counters"));
+        assert!(md.contains("inline_runs"));
+        assert!(md.contains("changed"));
     }
 }

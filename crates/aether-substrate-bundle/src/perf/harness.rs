@@ -26,6 +26,7 @@ use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{SubscribeInput, SubscribeInputResult, Tick};
+use aether_substrate::scheduler::SchedulerCountersSnapshot;
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
 use crate::test_bench::TestBench;
@@ -383,6 +384,12 @@ pub struct CellSamples {
     pub drain: Vec<u64>,
     pub handler: Vec<u64>,
     pub depth: Vec<u64>,
+    /// iamacoffeepot/aether#1129: the scheduler mechanism-counter delta
+    /// over this cell's `advance` (notify slow-path unparks, recruiter-
+    /// suppressed wakeups, injector / sibling steals, inline-runs). A
+    /// single per-cell count delta, not a sample distribution — it passes
+    /// through [`Self::summarize`] unchanged.
+    pub counters: SchedulerCountersSnapshot,
 }
 
 impl CellSamples {
@@ -397,6 +404,7 @@ impl CellSamples {
             drain: summarize(self.drain),
             handler: summarize(self.handler),
             depth: summarize(self.depth),
+            counters: self.counters,
         }
     }
 }
@@ -429,6 +437,12 @@ pub struct CellResult {
     /// nanoseconds*. p50 ≈ 0 means `queued` is wakeup-dominated (empty
     /// queue); a rising tail means wait-behind-N (offered load).
     pub depth: Stats,
+    /// iamacoffeepot/aether#1129: the scheduler mechanism-counter delta
+    /// over this cell's `advance` — near-deterministic for a fixed
+    /// workload (a wakeup is a wakeup), so the trial report carries the
+    /// raw counts and the comparator gives them a deterministic verdict
+    /// rather than the noise-aware paired test the latency spans use.
+    pub counters: SchedulerCountersSnapshot,
 }
 
 /// Inputs to one sweep. `workers` is the outer axis (pool sizes);
@@ -658,6 +672,12 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             // long wide fan-out and self-reports it (handled at harvest).
             let frames = cfg.frames;
 
+            // iamacoffeepot/aether#1129: bracket the advance with two
+            // mechanism-counter snapshots so the delta attributes only the
+            // measured frames — not the boot / spawn / subscribe traffic
+            // before, nor the trace-ring harvest mail after.
+            let counters_before = tb.scheduler_counters();
+
             // Drive via the real lifecycle.
             match cfg.pace_hz {
                 Some(hz) => {
@@ -674,6 +694,8 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                     let _ = tb.advance(frames);
                 }
             }
+
+            let counters = tb.scheduler_counters().delta_since(&counters_before);
 
             // Harvest each participating actor's trace ring directly
             // (ADR-0086 Phase 3, decentralized trace): we built the
@@ -780,6 +802,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 drain,
                 handler,
                 depth,
+                counters,
             });
         }
     }

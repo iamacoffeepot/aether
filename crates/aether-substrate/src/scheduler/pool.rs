@@ -36,6 +36,7 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 
+use crate::scheduler::counters::{SchedulerCounters, SchedulerCountersSnapshot};
 use crate::scheduler::spin_park::{Acquired, DEFAULT_SPIN_WINDOW_USEC, SpinPark};
 use crate::scheduler::worker_deque;
 
@@ -109,6 +110,13 @@ pub struct PoolHandle {
     /// own deque is at the local bound). Cloned into every [`WakeSink`].
     injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
+    /// Shared per-pool mechanism counters (iamacoffeepot/aether#1129).
+    /// One Arc, built at [`Pool::start`] and threaded into the
+    /// [`SpinPark`] (which the [`WakeSink`] reaches for the inline-run /
+    /// recruit-suppressed bumps) and every worker thread-local (the
+    /// steal bumps). [`Self::scheduler_counters`] snapshots it for the
+    /// perf harness.
+    counters: Arc<SchedulerCounters>,
     workers: Vec<PoolWorkerJoin>,
 }
 
@@ -160,6 +168,15 @@ impl PoolHandle {
     pub fn worker_count(&self) -> usize {
         self.workers.len()
     }
+
+    /// Snapshot the per-pool mechanism counters
+    /// (iamacoffeepot/aether#1129). A plain relaxed copy from any thread;
+    /// the perf harness brackets a quiesced `advance` with two of these
+    /// and records the field-wise delta.
+    #[must_use]
+    pub fn scheduler_counters(&self) -> SchedulerCountersSnapshot {
+        self.counters.snapshot()
+    }
 }
 
 impl Drop for PoolHandle {
@@ -198,7 +215,15 @@ impl Pool {
     #[allow(clippy::needless_pass_by_value)]
     pub fn start(config: PoolConfig, aborter: Arc<dyn FatalAborter>) -> PoolHandle {
         assert!(config.workers >= 1, "pool needs at least one worker");
-        let spin = Arc::new(SpinPark::with_spin_window(spin_window_from_env()));
+        // iamacoffeepot/aether#1129: one per-pool counter block, shared into
+        // the spin-park (and through it the wake sink) and every worker's
+        // thread-local. Pure instrumentation — built before any worker runs
+        // so the harness's first snapshot reads a live block.
+        let counters = Arc::new(SchedulerCounters::new());
+        let spin = Arc::new(SpinPark::with_spin_window_and_counters(
+            spin_window_from_env(),
+            Arc::clone(&counters),
+        ));
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         // One LIFO deque per worker; collect every stealer so each worker
         // can steal from its siblings' tails when its own deque runs dry.
@@ -213,17 +238,23 @@ impl Pool {
             let injector = Arc::clone(&injector);
             let spin = Arc::clone(&spin);
             let aborter = Arc::clone(&aborter);
+            let counters = Arc::clone(&counters);
             let template = config.budget_template;
             let thread_name = name.clone();
             let handle = thread::Builder::new()
                 .name(thread_name)
-                .spawn(move || worker_loop(idx, deque, stealers, injector, spin, aborter, template))
+                .spawn(move || {
+                    worker_loop(
+                        idx, deque, stealers, injector, spin, aborter, counters, template,
+                    );
+                })
                 .expect("spawn pool worker thread");
             workers.push(PoolWorkerJoin { handle, name });
         }
         PoolHandle {
             injector,
             spin,
+            counters,
             workers,
         }
     }
@@ -242,8 +273,12 @@ fn spin_window_from_env() -> Duration {
 }
 
 // All arguments are taken by value so the spawned thread owns them
-// for its lifetime — the function is the worker thread's body.
-#[allow(clippy::needless_pass_by_value)]
+// for its lifetime — the function is the worker thread's body. The
+// per-worker shared handles (deques, stealers, injector, spin/park
+// coordinator, aborter, counters) are each independent and read once at
+// boot; bundling them into a struct would obscure the worker boot, so the
+// thread body carries them as positional params.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn worker_loop(
     idx: usize,
     deque: Worker<Arc<dyn Drainable>>,
@@ -251,6 +286,7 @@ fn worker_loop(
     injector: Arc<Injector<Arc<dyn Drainable>>>,
     spin: Arc<SpinPark>,
     aborter: Arc<dyn FatalAborter>,
+    counters: Arc<SchedulerCounters>,
     template: BudgetTemplate,
 ) {
     // Hand this worker's deque to the thread-local so a handler's wake of
@@ -262,6 +298,10 @@ fn worker_loop(
     // on this worker can read the scheduler ready-queue depth
     // (`worker_deque::pending_depth`) for the latency harness.
     worker_deque::install_injector(Arc::clone(&injector));
+    // iamacoffeepot/aether#1129: register the per-pool counters so this
+    // worker's steal scan can attribute its injector / sibling steals
+    // without threading the Arc through the scan. Pure instrumentation.
+    worker_deque::install_counters(counters);
     // Whether this worker may raid siblings' deques, or is owner-only over
     // its own (iamacoffeepot/aether#1174). A per-process constant — read once
     // here, not per `acquire_slot`, and threaded into the steal scan.
@@ -680,4 +720,87 @@ mod tests {
     // is enough for the test harness to dispatch a handful of
     // counters before yielding.
     const BATCH_MAX_USEC_TEST: u64 = BATCH_MAX_USEC;
+
+    /// iamacoffeepot/aether#1129: the per-pool mechanism counters move in
+    /// the expected direction for a known topology. A relay chain on a
+    /// **single** worker keeps every forwarded hop on that worker's own
+    /// deque (the affinity warm path), so each forwarding wake is an
+    /// inline-run, never a futex unpark. Drives the inline-run counter
+    /// (the `WakeSink::schedule` `Ok` arm) and the injector-steal counter
+    /// (the entry wake spills from the test thread, which is off-worker).
+    #[test]
+    fn counters_track_inline_runs_on_single_worker_relay() {
+        let handle = standard_handle(1);
+        // Fresh pool — counters start at zero.
+        assert_eq!(
+            handle.scheduler_counters(),
+            SchedulerCountersSnapshot::default()
+        );
+
+        let depth = 8;
+        let slots = relay_chain(&handle, depth);
+        let entry = slots[0].clone();
+        let entry_dyn: Arc<dyn Drainable> = entry.clone();
+        let weak: Weak<dyn Drainable> = Arc::downgrade(&entry_dyn);
+        drop(entry_dyn);
+        let entry_wake = WakeHandle::new(entry.state.clone(), weak, handle.wake_sink());
+
+        let before = handle.scheduler_counters();
+        entry.push(1);
+        // The entry wake fires from the test thread (off-worker), so it
+        // spills to the injector and the lone worker steals it.
+        assert!(entry_wake.wake());
+
+        assert!(
+            wait_until(Duration::from_secs(5), || slots
+                .iter()
+                .all(|s| s.dispatched() >= 1)),
+            "every slot in the relay chain should dispatch its forwarded env"
+        );
+
+        let after = handle.scheduler_counters();
+        let delta = after.delta_since(&before);
+
+        // Each of the `depth - 1` forwarding hops runs on the single
+        // worker, which keeps the woken downstream slot on its own deque —
+        // an inline run, not a wakeup. At least one such hop must have
+        // inlined (the chain ran end-to-end on one worker).
+        assert!(
+            delta.inline_runs >= 1,
+            "single-worker relay should inline its forwarded hops, got {delta:?}"
+        );
+        // The entry slot was woken off-worker, so it spilled to the
+        // injector and the worker pulled it from there.
+        assert!(
+            delta.steals_injector >= 1,
+            "the off-worker entry wake should produce an injector steal, got {delta:?}"
+        );
+
+        drop(entry_wake);
+        let _ = handle.shutdown_with_results();
+    }
+
+    /// iamacoffeepot/aether#1129: `WakeSink::recruit` bumps the
+    /// recruiter-suppressed counter by exactly `requested − granted` when a
+    /// recruit asks for more siblings than the pool can field (the producer
+    /// drains its own copy, so the ceiling is `workers − 1`). A 2-worker
+    /// pool can grant only one sibling, so a request for three suppresses
+    /// two.
+    #[test]
+    fn counters_track_recruit_suppression() {
+        let handle = standard_handle(2);
+        let sink = handle.wake_sink();
+        let slot: Arc<dyn Drainable> = CounterSlot::new("recruit-target");
+
+        let before = handle.scheduler_counters();
+        // Ask for 3; the pool can field `workers - 1 == 1`, so 2 are suppressed.
+        sink.recruit(&slot, 3);
+        let delta = handle.scheduler_counters().delta_since(&before);
+        assert_eq!(
+            delta.recruit_suppressed, 2,
+            "recruit(3) on a 2-worker pool suppresses requested - (workers - 1) = 2"
+        );
+
+        let _ = handle.shutdown_with_results();
+    }
 }

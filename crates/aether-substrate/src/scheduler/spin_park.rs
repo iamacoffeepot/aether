@@ -60,6 +60,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, Thread, ThreadId};
 use std::time::{Duration, Instant};
 
+use crate::scheduler::counters::SchedulerCounters;
+
 /// Default spin-window length. The issue calls for "tens of µs": long
 /// enough to absorb a fan-out spill or a back-to-back relay hop without
 /// a futex wake, short enough that the idle tail between frames parks
@@ -133,26 +135,53 @@ pub struct SpinPark {
     /// it, so their difference is the live handoff latency
     /// (iamacoffeepot/aether#1182 Part 2).
     base: Instant,
+    /// Shared per-pool mechanism counters (iamacoffeepot/aether#1129). The
+    /// `notify` slow path bumps `notify_slow_unparks` here; the same Arc is
+    /// reached by [`crate::scheduler::WakeSink`] (via [`Self::counters`]) and
+    /// the worker-deque thread-local. Pure instrumentation — never gates a
+    /// wakeup decision, so it cannot affect lost-wakeup safety.
+    counters: Arc<SchedulerCounters>,
 }
 
 impl SpinPark {
-    /// Construct with the default spin window.
+    /// Construct with the default spin window and a fresh counter block.
     #[must_use]
     pub fn new() -> Self {
         Self::with_spin_window(Duration::from_micros(DEFAULT_SPIN_WINDOW_USEC))
     }
 
     /// Construct with an explicit spin window (chassis env override /
-    /// tests).
+    /// tests) and a fresh counter block.
     #[must_use]
     pub fn with_spin_window(spin_window: Duration) -> Self {
+        Self::with_spin_window_and_counters(spin_window, Arc::new(SchedulerCounters::new()))
+    }
+
+    /// Construct with an explicit spin window and a caller-supplied counter
+    /// block (iamacoffeepot/aether#1129). [`crate::scheduler::Pool::start`]
+    /// uses this so the spin-park, the worker deques, and the wake sink all
+    /// share one per-pool counter Arc.
+    #[must_use]
+    pub fn with_spin_window_and_counters(
+        spin_window: Duration,
+        counters: Arc<SchedulerCounters>,
+    ) -> Self {
         Self {
             spinning: AtomicUsize::new(0),
             idle: Mutex::new(Vec::new()),
             shutdown: AtomicBool::new(false),
             spin_window,
             base: Instant::now(),
+            counters,
         }
+    }
+
+    /// Borrow this coordinator's shared counter block — the
+    /// [`crate::scheduler::WakeSink`] reaches the per-pool counters through
+    /// it (iamacoffeepot/aether#1129).
+    #[must_use]
+    pub fn counters(&self) -> &Arc<SchedulerCounters> {
+        &self.counters
     }
 
     /// Nanos since [`Self::base`], saturating into `u64` — the stamp unit
@@ -199,6 +228,11 @@ impl SpinPark {
             // Diagnostic only — ordered after the lost-wakeup discipline,
             // never part of it.
             p.stamp.store(self.now_nanos(), Ordering::Relaxed);
+            // iamacoffeepot/aether#1129: count the slow-path futex unpark —
+            // the ~4.3µs handoff this coordinator routes away from. Bumped
+            // only on the genuine idle → first-event edge (no spinner); the
+            // route-to-spinner fast path above returned before reaching here.
+            self.counters.note_notify_slow_unpark();
             p.thread.unpark();
         }
     }

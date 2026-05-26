@@ -49,6 +49,7 @@ use std::time::{Duration, Instant};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
 use crate::scheduler::calibrate::handoff_cost;
+use crate::scheduler::counters::SchedulerCounters;
 use crate::scheduler::slot::Drainable;
 
 /// The unit on the deques: a chassis-registered dispatcher slot. (Phase
@@ -70,6 +71,13 @@ thread_local! {
     /// deposit path; `None` on non-worker threads (chassis main, hub,
     /// off-worker injects), where `pending_depth` reports `0`.
     static INJECTOR: RefCell<Option<Arc<Injector<Slot>>>> = const { RefCell::new(None) };
+
+    /// The shared per-pool mechanism counters (iamacoffeepot/aether#1129),
+    /// registered per worker by [`install_counters`] at the top of the
+    /// worker loop. [`steal_into_local`] bumps the injector / sibling steal
+    /// counts through it without threading a reference into the steal scan;
+    /// `None` on non-worker threads, where the steal-counting arms no-op.
+    static COUNTERS: RefCell<Option<Arc<SchedulerCounters>>> = const { RefCell::new(None) };
 
     /// Per-burst mail counter for the keep-local budget
     /// (iamacoffeepot/aether#1160). A *burst* is the run of local-deque work
@@ -101,6 +109,25 @@ pub fn install(worker: Worker<Slot>) {
 /// no-op effect on dispatch (depth is measurement-only).
 pub fn install_injector(injector: Arc<Injector<Slot>>) {
     INJECTOR.with(|i| *i.borrow_mut() = Some(injector));
+}
+
+/// Register the shared per-pool mechanism counters for this worker thread
+/// (iamacoffeepot/aether#1129) so [`steal_into_local`] can attribute its
+/// steals (injector vs sibling) without threading a reference into the
+/// scan. Called once alongside [`install`] at the top of the worker loop;
+/// pure instrumentation, no dispatch effect.
+pub fn install_counters(counters: Arc<SchedulerCounters>) {
+    COUNTERS.with(|c| *c.borrow_mut() = Some(counters));
+}
+
+/// Run `bump` against this worker's installed counter block, if any. A
+/// no-op off a pool worker (no counters installed).
+fn with_counters(bump: impl FnOnce(&SchedulerCounters)) {
+    COUNTERS.with(|c| {
+        if let Some(counters) = c.borrow().as_ref() {
+            bump(counters);
+        }
+    });
 }
 
 /// Scheduler ready-queue depth observed from this thread: this worker's
@@ -408,7 +435,12 @@ pub fn steal_into_local(
         loop {
             let mut retry = false;
             match injector.steal_batch_and_pop(worker) {
-                Steal::Success(slot) => return Some(slot),
+                Steal::Success(slot) => {
+                    // iamacoffeepot/aether#1129: off-worker producers +
+                    // spilled fan-out + requeued yields.
+                    with_counters(SchedulerCounters::note_steal_injector);
+                    return Some(slot);
+                }
                 Steal::Retry => retry = true,
                 Steal::Empty => {}
             }
@@ -416,7 +448,12 @@ pub fn steal_into_local(
                 for (i, stealer) in stealers.iter().enumerate() {
                     if i != my_idx {
                         match stealer.steal_batch_and_pop(worker) {
-                            Steal::Success(slot) => return Some(slot),
+                            Steal::Success(slot) => {
+                                // iamacoffeepot/aether#1129: a sibling-tail
+                                // raid (only when `peer_steal` is opted in).
+                                with_counters(SchedulerCounters::note_steal_sibling);
+                                return Some(slot);
+                            }
                             Steal::Retry => retry = true,
                             Steal::Empty => {}
                         }

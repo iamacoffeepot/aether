@@ -35,12 +35,14 @@
 //! the sole dispatch path.
 
 mod calibrate;
+mod counters;
 mod pool;
 mod slot;
 mod spin_park;
 mod worker_deque;
 
 pub use calibrate::{handoff_cost, log_handoff_calibration};
+pub use counters::{SchedulerCounters, SchedulerCountersSnapshot};
 pub use pool::{Pool, PoolConfig, PoolHandle, PoolWorkerJoin};
 pub use slot::{
     BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, DrainOutcome,

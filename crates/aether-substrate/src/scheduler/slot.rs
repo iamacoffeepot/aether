@@ -407,9 +407,17 @@ impl WakeSink {
             worker_deque::time_budget(),
             worker_deque::hard_cap(),
         );
-        if let Err(slot) = kept {
-            self.injector.push(slot);
-            self.spin.notify();
+        match kept {
+            Ok(()) => {
+                // iamacoffeepot/aether#1129: kept on the producing worker's
+                // own deque — it runs LIFO without a futex wake. The win this
+                // counter measures (vs the slow-path unpark below).
+                self.spin.counters().note_inline_run();
+            }
+            Err(slot) => {
+                self.injector.push(slot);
+                self.spin.notify();
+            }
         }
     }
 
@@ -448,11 +456,20 @@ impl WakeSink {
     /// injector — each excess clone is a push + steal + `Arc` clone/drop and
     /// a no-op `run_cycle` on an already-drained cursor.
     pub(crate) fn recruit(&self, slot: &Arc<dyn Drainable>, count: usize) {
-        let count = count.min(self.workers.saturating_sub(1));
-        for _ in 0..count {
+        let granted = count.min(self.workers.saturating_sub(1));
+        // iamacoffeepot/aether#1129: the recruiter asked for `count` siblings
+        // but the pool could only field `granted` (the producer drains its own
+        // copy, so the ceiling is `workers - 1`). The clamped difference is the
+        // suppressed wakeups — the cost-aware recruiter (iamacoffeepot/aether#1178)
+        // sizing `recruit_k` below the available group count surfaces here.
+        // Pure instrumentation; never alters the wake count below.
+        self.spin
+            .counters()
+            .note_recruit_suppressed(count.saturating_sub(granted));
+        for _ in 0..granted {
             self.injector.push(Arc::clone(slot));
         }
-        self.spin.wake_workers(count);
+        self.spin.wake_workers(granted);
     }
 }
 
