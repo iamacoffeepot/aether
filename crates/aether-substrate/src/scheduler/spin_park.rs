@@ -55,8 +55,8 @@
 
 use std::hint;
 use std::sync::PoisonError;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, Thread, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,30 @@ pub enum Acquired<T> {
     Shutdown,
 }
 
+/// A parked worker, plus the cell a waker stamps with its `unpark` time so
+/// the worker can fold the `notify → wake` latency on resume
+/// (iamacoffeepot/aether#1182 Part 2 — dark handoff-cost refinement). The
+/// stamp is nanos-since [`SpinPark::base`]; `0` means "no fresh stamp"
+/// (spurious wake, or the worker self-served before parking), which folds
+/// nothing. Diagnostic only — it rides alongside the `Thread` handle and
+/// never gates a wakeup decision, so it cannot affect lost-wakeup safety.
+#[derive(Debug)]
+struct Parked {
+    thread: Thread,
+    stamp: Arc<AtomicU64>,
+}
+
+thread_local! {
+    /// This worker thread's reusable `notify → wake` stamp cell
+    /// (iamacoffeepot/aether#1182 Part 2). [`SpinPark::acquire`] clones the
+    /// `Arc` into the idle list each park; the waker stamps it before
+    /// `unpark`; the worker folds the latency on resume. Thread-local so a
+    /// worker re-entering `acquire` pays an atomic refcount bump rather than
+    /// a heap allocation. Only the owning worker ever clones it; a waker
+    /// reaches it solely through the idle-list handoff.
+    static WAKE_STAMP: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+}
+
 /// Shared spin/park coordinator. One per [`crate::scheduler::Pool`],
 /// held in an `Arc` and shared by every worker (the wait side) and by
 /// every [`crate::scheduler::WakeHandle`] (the notify side).
@@ -93,15 +117,22 @@ pub struct SpinPark {
     /// gate reads this: a producer that observes `spinning > 0` skips
     /// the unpark.
     spinning: AtomicUsize,
-    /// Thread handles of currently-parked workers, available to unpark.
-    /// Only the notify slow path (no spinner) and the park path touch
-    /// it — the fast path never locks.
-    idle: Mutex<Vec<Thread>>,
+    /// Currently-parked workers, available to unpark. Only the notify slow
+    /// path (no spinner) and the park path touch it — the fast path never
+    /// locks. Each entry carries the worker's [`Parked::stamp`] so a waker
+    /// can record its `unpark` time for the live handoff measurement.
+    idle: Mutex<Vec<Parked>>,
     /// Set once at chassis teardown; observed by workers in both the
     /// spin loop and the park-commit recheck so they exit promptly.
     shutdown: AtomicBool,
     /// Bounded spin window — see [`DEFAULT_SPIN_WINDOW_USEC`].
     spin_window: Duration,
+    /// Monotonic origin for the `notify → wake` stamps. Both the waker
+    /// (`base.elapsed()` written into a [`Parked::stamp`] before `unpark`)
+    /// and the woken worker (`base.elapsed()` on resume) measure against
+    /// it, so their difference is the live handoff latency
+    /// (iamacoffeepot/aether#1182 Part 2).
+    base: Instant,
 }
 
 impl SpinPark {
@@ -120,10 +151,17 @@ impl SpinPark {
             idle: Mutex::new(Vec::new()),
             shutdown: AtomicBool::new(false),
             spin_window,
+            base: Instant::now(),
         }
     }
 
-    fn idle(&self) -> MutexGuard<'_, Vec<Thread>> {
+    /// Nanos since [`Self::base`], saturating into `u64` — the stamp unit
+    /// shared by the waker (at `unpark`) and the woken worker (at resume).
+    fn now_nanos(&self) -> u64 {
+        u64::try_from(self.base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn idle(&self) -> MutexGuard<'_, Vec<Parked>> {
         // A handler panic never unwinds while the idle lock is held
         // (the lock is only taken for the push/pop/remove book-keeping
         // here, never across a `run_cycle`), so poisoning shouldn't
@@ -155,8 +193,13 @@ impl SpinPark {
         // idle-list guard is released before the `unpark` (and isn't a
         // live temporary across the `if let`).
         let parked = self.idle().pop();
-        if let Some(t) = parked {
-            t.unpark();
+        if let Some(p) = parked {
+            // Stamp the worker's wake-latency cell just before the unpark
+            // so it can fold the `notify → wake` cost on resume (Part 2).
+            // Diagnostic only — ordered after the lost-wakeup discipline,
+            // never part of it.
+            p.stamp.store(self.now_nanos(), Ordering::Relaxed);
+            p.thread.unpark();
         }
     }
 
@@ -183,18 +226,21 @@ impl SpinPark {
         fence(Ordering::SeqCst);
         // Pop up to `n` parked handles under one lock, then unpark them all
         // after releasing the guard (no unpark while holding the lock).
-        let mut woken: Vec<Thread> = Vec::new();
+        let mut woken: Vec<Parked> = Vec::new();
         {
             let mut idle = self.idle();
             for _ in 0..n {
                 match idle.pop() {
-                    Some(t) => woken.push(t),
+                    Some(p) => woken.push(p),
                     None => break,
                 }
             }
         }
-        for t in woken {
-            t.unpark();
+        for p in woken {
+            // Stamp each recruit's wake-latency cell before its unpark (see
+            // `notify`); the woken worker folds the cost on resume (Part 2).
+            p.stamp.store(self.now_nanos(), Ordering::Relaxed);
+            p.thread.unpark();
         }
     }
 
@@ -209,6 +255,10 @@ impl SpinPark {
     /// park-commit recheck, which makes it the pre-park steal-rescan —
     /// so it must be cheap and must not block.
     pub fn acquire<T, F: Fn() -> Option<T>>(&self, scan: F) -> Acquired<T> {
+        // This worker's reusable wake-latency cell (Part 2). Cloned from a
+        // thread-local, so re-entering `acquire` is an atomic refcount bump,
+        // not a heap allocation, on the idle path.
+        let stamp = WAKE_STAMP.with(Arc::clone);
         loop {
             if self.shutdown.load(Ordering::Acquire) {
                 return Acquired::Shutdown;
@@ -228,9 +278,15 @@ impl SpinPark {
 
             // Park-commit: register in the idle list BEFORE decrementing
             // `spinning`, so the instant the count can read zero we are
-            // already reachable by a producer's `notify` pop.
+            // already reachable by a producer's `notify` pop. Clear any
+            // residue from a prior cycle's unconsumed stamp first, then
+            // publish our handle + stamp cell together.
             let me = thread::current();
-            self.idle().push(me.clone());
+            stamp.store(0, Ordering::Relaxed);
+            self.idle().push(Parked {
+                thread: me.clone(),
+                stamp: Arc::clone(&stamp),
+            });
             self.spinning.fetch_sub(1, Ordering::Relaxed);
             // StoreLoad barrier mirroring the producer's: our `spinning`
             // store is before this fence, the recheck scan is after it.
@@ -251,6 +307,17 @@ impl SpinPark {
             // is lost to a spurious return.
             thread::park();
             self.remove_idle(me.id());
+            // Part 2 (dark): if a waker stamped us before its `unpark`,
+            // fold the `notify → wake` latency into the live handoff
+            // estimate. `swap(0)` consumes the stamp so a later spurious
+            // wake on the sticky token folds nothing; a `0` (spurious wake,
+            // or we were popped but self-served via the rescan above) is
+            // skipped.
+            let stamped = stamp.swap(0, Ordering::Relaxed);
+            if stamped != 0 {
+                let latency = self.now_nanos().saturating_sub(stamped);
+                super::calibrate::fold_handoff_sample(latency);
+            }
         }
     }
 
@@ -275,7 +342,7 @@ impl SpinPark {
 
     fn remove_idle(&self, id: ThreadId) {
         let mut idle = self.idle();
-        if let Some(pos) = idle.iter().position(|t| t.id() == id) {
+        if let Some(pos) = idle.iter().position(|p| p.thread.id() == id) {
             idle.swap_remove(pos);
         }
     }
@@ -307,6 +374,29 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
+    /// A `Parked` entry for the current thread with a fresh (unstamped)
+    /// wake cell — what `acquire`'s park-commit pushes, minus the stamp
+    /// plumbing the unit tests don't exercise.
+    fn parked_self() -> Parked {
+        Parked {
+            thread: thread::current(),
+            stamp: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Poll `cond` up to `timeout`, sleeping between checks. Returns the
+    /// final value of `cond`.
+    fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if cond() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        cond()
+    }
+
     /// `notify` with a spinner present must not pop the idle list —
     /// the spinner is trusted to scan. With no spinner it pops and
     /// unparks a registered worker.
@@ -315,7 +405,7 @@ mod tests {
         let coord = SpinPark::new();
         // Pretend a worker is spinning and another is parked.
         coord.spinning.fetch_add(1, Ordering::Relaxed);
-        coord.idle().push(thread::current());
+        coord.idle().push(parked_self());
 
         coord.notify();
         // Spinner present → idle list untouched.
@@ -342,7 +432,7 @@ mod tests {
         // and three workers are parked.
         coord.spinning.fetch_add(1, Ordering::Relaxed);
         for _ in 0..3 {
-            coord.idle().push(thread::current());
+            coord.idle().push(parked_self());
         }
 
         coord.wake_workers(3);
@@ -374,6 +464,56 @@ mod tests {
         coord.set_shutdown();
         worker.thread().unpark();
         assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
+    }
+
+    /// Part 2 (iamacoffeepot/aether#1182): a genuine parked-worker wake
+    /// folds one live `notify → wake` sample into the handoff estimate. A
+    /// worker parks (scan always empty), the main thread waits for it to
+    /// register idle, then `notify`s — which stamps the worker and unparks
+    /// it, so on resume it folds the measured latency. The folded-sample
+    /// count must rise by at least one.
+    fn parked_worker_folds_a_handoff_sample() {
+        let before = super::super::calibrate::handoff_samples();
+        let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(20)));
+        let c2 = Arc::clone(&coord);
+        // The worker parks (scan never yields), folds on the notify wake,
+        // re-spins, and exits on shutdown.
+        let worker =
+            thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
+
+        // Wait until the worker has committed to the idle list — so the
+        // `notify` below hits the park path (stamp + unpark), not the
+        // route-to-spinner fast path (which folds nothing).
+        assert!(
+            wait_until(Duration::from_secs(2), || !coord.idle().is_empty()),
+            "worker should register as parked",
+        );
+        coord.notify(); // stamp + unpark → the worker folds notify→wake
+        // Give the woken worker time to fold before tearing down.
+        assert!(
+            wait_until(Duration::from_secs(2), || {
+                super::super::calibrate::handoff_samples() > before
+            }),
+            "a live parked-worker wake must fold a handoff sample",
+        );
+
+        coord.set_shutdown();
+        worker.thread().unpark();
+        assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
+    }
+
+    #[test]
+    fn parked_worker_folds_a_handoff_sample_once() {
+        parked_worker_folds_a_handoff_sample();
+    }
+
+    /// Flake-soak wrapper (iamacoffeepot/aether#1182 Part 2): the
+    /// park → notify → fold path is timing-sensitive (the worker must be
+    /// parked when `notify` fires), so `scripts/flake-soak.sh` re-runs it
+    /// in fresh processes.
+    #[test]
+    fn flaky_parked_worker_folds_a_handoff_sample() {
+        parked_worker_folds_a_handoff_sample();
     }
 
     /// Lost-wakeup stress: many producers push tokens onto a shared

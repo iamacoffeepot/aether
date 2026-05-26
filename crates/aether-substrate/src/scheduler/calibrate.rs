@@ -11,13 +11,25 @@
 //! and the slow CI VM this issue calls out — the handoff cost the valve
 //! is supposed to out-amortise is itself box-relative.
 //!
-//! This module measures that cost directly. At chassis boot a standalone
-//! two-thread ping-pong ([`measure_handoff_cost_nanos`]) exercises the
-//! real `park` / `unpark` mechanism the scheduler uses, takes the median
-//! over many trials (discarding warmup), and caches it process-global
-//! ([`handoff_cost`]). The probe models the handoff, not the whole
-//! dispatch: a round trip is two `unpark → wake` edges, so one handoff is
-//! half a round trip.
+//! This module measures that cost directly, in two stages that feed one
+//! process-global estimate ([`handoff_cost`]):
+//!
+//! 1. **Boot probe** (iamacoffeepot/aether#1182 Part 1). At chassis boot a
+//!    standalone two-thread ping-pong ([`measure_handoff_cost_nanos`])
+//!    exercises the real `park` / `unpark` mechanism, takes the median over
+//!    many trials (discarding warmup), and *seeds* the estimate. The probe
+//!    models the handoff, not the whole dispatch: a round trip is two
+//!    `unpark → wake` edges, so one handoff is half a round trip.
+//! 2. **Live refinement** (Part 2). Every genuine parked-worker wake folds
+//!    its measured `notify → wake` latency into the same estimate via a
+//!    constant-α EWMA ([`fold_handoff_sample`], called from
+//!    [`super::spin_park`]). The boot probe measures the handoff *idle* (a
+//!    clean 2-thread ping-pong); live samples capture it under the real
+//!    operating load (cache pressure, contention, the full worker set), so
+//!    the estimate converges on the handoff the valve actually has to
+//!    out-amortise rather than the best case. `AETHER_HANDOFF_COST_NS`
+//!    pins the estimate to a fixed value and freezes live refinement
+//!    (deterministic tests / a known-good number on a noisy box).
 //!
 //! **This stage is dark.** [`handoff_cost`] drives no scheduling decision
 //! yet — [`log_handoff_calibration`] logs the calibrated cost next to the
@@ -37,7 +49,7 @@
 use std::env;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,25 +63,143 @@ const TRIALS: usize = 64;
 /// steady-state handoff rather than a cold first wake.
 const WARMUP: usize = 16;
 
-/// The calibrated cross-worker handoff cost for this process, measured
-/// once (lazily) and cached. The keep-local valve and
-/// iamacoffeepot/aether#1127's recruiter read this as the box-relative
-/// "what does a handoff cost here" reference. `AETHER_HANDOFF_COST_NS`
-/// overrides the probe with a fixed nanosecond value (deterministic tests
-/// / pinning a known-good number on a noisy box).
+/// Constant EWMA shift `k`: `mean += (x − mean) >> k`. `k = 4` is α = 1/16,
+/// matching `aether_actor::cost::EWMA_SHIFT` so the handoff estimate
+/// smooths over the same ~16-sample window the per-handler cost cell does.
+/// Power-of-two so the live fold is a shift, not a float multiply.
+const EWMA_SHIFT: u32 = 4;
+
+/// Process-global cross-worker handoff cost estimate (nanos): seeded by the
+/// boot probe ([`HandoffEwma::seed`]) and refined by live `notify → wake`
+/// samples ([`HandoffEwma::fold`]).
+///
+/// Unlike `aether_actor::cost::CostCell` — which a single actor folds under
+/// the actor lock, so a plain `load → compute → store` suffices — this cell
+/// is folded by **many woken workers concurrently** (each folds its own
+/// wake latency on resume), so the fold is a `compare_exchange` loop to
+/// avoid lost updates. Contention is low: a fold happens only on a genuine
+/// idle → busy wake (the route-to-spinner fast path folds nothing), so the
+/// CAS almost never spins.
+struct HandoffEwma {
+    /// EWMA of the per-wake `notify → wake` latency, nanos.
+    mean: AtomicU64,
+    /// Folded-sample count (boot seed counts as 1). Diagnostic / test
+    /// observability; never gates a decision.
+    samples: AtomicU64,
+}
+
+impl HandoffEwma {
+    const fn new() -> Self {
+        Self {
+            mean: AtomicU64::new(0),
+            samples: AtomicU64::new(0),
+        }
+    }
+
+    /// Seed the estimate from the boot probe (or the env override). Sets
+    /// the mean directly so the estimate is meaningful immediately, and
+    /// marks the cell seeded (`samples = 1`) so the first live fold updates
+    /// rather than ramps from zero. Called once, before any live fold (the
+    /// [`ensure_seeded`] `OnceLock` gates ordering).
+    fn seed(&self, nanos: u64) {
+        self.mean.store(nanos, Ordering::Relaxed);
+        self.samples.store(1, Ordering::Relaxed);
+    }
+
+    /// Fold one live `notify → wake` sample (nanos). CAS-serialized so
+    /// concurrent woken workers don't lose updates; the sample count uses
+    /// a `fetch_add` for the same reason.
+    fn fold(&self, sample: u64) {
+        let mut mean = self.mean.load(Ordering::Relaxed);
+        loop {
+            let next = ewma_step(mean, sample);
+            match self
+                .mean
+                .compare_exchange_weak(mean, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(observed) => mean = observed,
+            }
+        }
+        self.samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mean(&self) -> u64 {
+        self.mean.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn samples(&self) -> u64 {
+        self.samples.load(Ordering::Relaxed)
+    }
+}
+
+/// One constant-α EWMA step toward `sample`: `current + ((sample − current) >> k)`,
+/// computed on the signed difference so a falling cost converges as fast as
+/// a rising one. Integer-only — the `>> k` is the power-of-two α. Mirrors
+/// `aether_actor::cost`'s step.
+fn ewma_step(current: u64, sample: u64) -> u64 {
+    if sample >= current {
+        current + ((sample - current) >> EWMA_SHIFT)
+    } else {
+        current - ((current - sample) >> EWMA_SHIFT)
+    }
+}
+
+/// The process-global handoff estimate. Const-constructed (atomics start
+/// at 0); seeded lazily on first access via [`ensure_seeded`].
+static HANDOFF: HandoffEwma = HandoffEwma::new();
+
+/// Guards the one-time boot seed of [`HANDOFF`].
+static SEEDED: OnceLock<()> = OnceLock::new();
+
+/// Set when the estimate is pinned via `AETHER_HANDOFF_COST_NS`; live folds
+/// are skipped so the pinned value can't drift.
+static PINNED: AtomicBool = AtomicBool::new(false);
+
+/// Seed [`HANDOFF`] exactly once: from `AETHER_HANDOFF_COST_NS` if set
+/// (and freeze live refinement), else from the boot probe.
+fn ensure_seeded() {
+    SEEDED.get_or_init(
+        || match parse_cost_override(env::var("AETHER_HANDOFF_COST_NS").ok()) {
+            Some(pinned) => {
+                HANDOFF.seed(pinned);
+                PINNED.store(true, Ordering::Relaxed);
+            }
+            None => HANDOFF.seed(measure_handoff_cost_nanos()),
+        },
+    );
+}
+
+/// The calibrated cross-worker handoff cost for this process: the boot
+/// probe's seed, refined by live `notify → wake` samples. The keep-local
+/// valve and iamacoffeepot/aether#1127's recruiter read this as the
+/// box-relative "what does a handoff cost here" reference. Floored to 1ns.
 #[must_use]
 pub fn handoff_cost() -> Duration {
-    Duration::from_nanos(handoff_cost_nanos())
+    ensure_seeded();
+    Duration::from_nanos(HANDOFF.mean().max(1))
 }
 
-fn handoff_cost_nanos() -> u64 {
-    static COST: OnceLock<u64> = OnceLock::new();
-    *COST.get_or_init(resolve_handoff_cost_nanos)
+/// Fold one live `notify → wake` latency (nanos) into the estimate —
+/// called from [`super::spin_park`] each time a parked worker resumes from
+/// a producer's `unpark`. A no-op when the estimate is pinned. Dark: drives
+/// nothing. Floored to 1ns (a handoff is never truly free; a 0 from clock
+/// granularity would only drag the EWMA down).
+pub fn fold_handoff_sample(nanos: u64) {
+    ensure_seeded();
+    if PINNED.load(Ordering::Relaxed) {
+        return;
+    }
+    HANDOFF.fold(nanos.max(1));
 }
 
-fn resolve_handoff_cost_nanos() -> u64 {
-    parse_cost_override(env::var("AETHER_HANDOFF_COST_NS").ok())
-        .unwrap_or_else(measure_handoff_cost_nanos)
+/// Folded-sample count of the live estimate (boot seed counts as 1).
+/// Test / diagnostic observability for the dark refinement path.
+#[cfg(test)]
+pub fn handoff_samples() -> u64 {
+    ensure_seeded();
+    HANDOFF.samples()
 }
 
 /// Parse the `AETHER_HANDOFF_COST_NS` override: a positive integer
@@ -231,5 +361,79 @@ mod tests {
         assert_eq!(median_nanos(&mut [9, 1, 5]), 5);
         // Even: average of the two central elements after sort.
         assert_eq!(median_nanos(&mut [10, 2, 8, 4]), 6);
+    }
+
+    #[test]
+    fn handoff_ewma_seed_then_live_samples_track() {
+        // Boot seeds the estimate; live samples pull it toward the
+        // operating cost. The seed is reported immediately (no ramp from
+        // zero), then a sustained higher latency converges the mean within
+        // the shift granularity of the new level.
+        let granularity = 1u64 << EWMA_SHIFT;
+        let cell = HandoffEwma::new();
+        cell.seed(2_000);
+        assert_eq!(cell.mean(), 2_000, "seed is reported directly");
+        assert_eq!(cell.samples(), 1, "boot seed counts as one sample");
+
+        for _ in 0..200 {
+            cell.fold(5_000);
+        }
+        assert!(
+            5_000 - cell.mean() < granularity,
+            "live folds converge toward the operating cost: {}",
+            cell.mean(),
+        );
+        assert_eq!(cell.samples(), 201, "every live fold counted");
+    }
+
+    /// Many workers fold the same cell concurrently (the real wake
+    /// pattern): the CAS fold + `fetch_add` count must lose no update.
+    /// Folding the seed value keeps the mean fixed, so the final mean and
+    /// the exact sample count are both deterministic regardless of
+    /// interleaving — a lost CAS or a lost increment would show up.
+    fn handoff_ewma_concurrent_folds_lose_nothing() {
+        const THREADS: usize = 8;
+        const PER_THREAD: u64 = 2_000;
+        let cell = Arc::new(HandoffEwma::new());
+        cell.seed(1_000);
+
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                thread::spawn(move || {
+                    for _ in 0..PER_THREAD {
+                        cell.fold(1_000);
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().expect("fold worker panicked");
+        }
+
+        assert_eq!(
+            cell.mean(),
+            1_000,
+            "folding the seed value leaves the mean fixed under any interleaving",
+        );
+        assert_eq!(
+            cell.samples(),
+            1 + THREADS as u64 * PER_THREAD,
+            "every concurrent fold's count survives (no lost fetch_add)",
+        );
+    }
+
+    #[test]
+    fn handoff_ewma_concurrent_folds_lose_nothing_once() {
+        handoff_ewma_concurrent_folds_lose_nothing();
+    }
+
+    /// Flake-soak wrapper (iamacoffeepot/aether#1182 Part 2): the
+    /// multi-writer fold is concurrency-sensitive, so `scripts/flake-soak.sh`
+    /// re-runs it in fresh processes to catch a lost-update race a single
+    /// green run can mask.
+    #[test]
+    fn flaky_handoff_ewma_concurrent_folds_lose_nothing() {
+        handoff_ewma_concurrent_folds_lose_nothing();
     }
 }
