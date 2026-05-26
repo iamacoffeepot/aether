@@ -307,7 +307,6 @@ struct DeniedPath {
 /// - host-fn imports (`aether::send_mail_p32`, `reply_mail_p32`,
 ///   `resolve_*_p32`, and the other SDK host fns),
 /// - handler-context types (`aether_actor::Ctx`, `MailCtx`),
-/// - the sync request/reply primitive (`aether_actor::wait_reply`),
 /// - compile-time-catchable nondeterminism (`std::env::*`,
 ///   `std::time::*`, `core::time::*`).
 const DENY_LIST: &[DeniedPath] = &[
@@ -330,9 +329,6 @@ const DENY_LIST: &[DeniedPath] = &[
     },
     DeniedPath {
         tail: &["resolve_kind_p32"],
-    },
-    DeniedPath {
-        tail: &["wait_reply"],
     },
     // Handler-context types.
     DeniedPath {

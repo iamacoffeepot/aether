@@ -21,8 +21,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply, SyncWaiter};
-use aether_actor::mail::sync::WaitError;
+use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
 use aether_actor::{Actor, HandlesKind, MailCtx, Sender, Singleton};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
@@ -39,8 +38,6 @@ use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
 use crate::actor::native::spawn_thread;
 use crate::mail::ReplyTarget;
-use aether_actor::actor::ctx::sync_waiter;
-use serde::de::DeserializeOwned;
 use std::thread::JoinHandle;
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
@@ -445,10 +442,8 @@ impl Drop for NativeCtx<'_> {
     /// outbound buffer here forms the handler's buffered sends into one
     /// ring blob and routes them, covering the main dispatch loop, the
     /// shutdown-drain loop, and `unwire` with a single hook (no
-    /// per-call-site flush to forget and silently drop mail). A
-    /// mid-handler `wait_reply` flushes eagerly
-    /// ([`NativeBinding::wait_reply`]); this catches everything sent
-    /// after the last such flush. Idempotent — an empty buffer no-ops.
+    /// per-call-site flush to forget and silently drop mail).
+    /// Idempotent — an empty buffer no-ops.
     fn drop(&mut self) {
         self.binding.flush_outbound();
     }
@@ -559,7 +554,7 @@ impl<'a> NativeInitCtx<'a> {
     /// Borrow the Arc'd cap-bound [`NativeBinding`]. Used by the wasm
     /// trampoline at init to install itself on the
     /// [`crate::actor::wasm::component::ComponentCtx`] so the
-    /// `wait_reply_p32` host fn can route through this binding.
+    /// reply / outbound-mail host fns can route through this binding.
     /// Promoted from `pub(crate)` to `pub` by issue 654 when the
     /// trampoline moved to `aether-capabilities` next to its consumer;
     /// no other external caller is intended.
@@ -720,26 +715,6 @@ impl OutboundReply for NativeCtx<'_> {
 
     fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload);
-    }
-}
-
-impl SyncWaiter for NativeCtx<'_> {
-    fn wait_reply<K, E>(
-        &self,
-        timeout_ms: u32,
-        capacity: usize,
-        expected_correlation: u64,
-    ) -> Result<K, E>
-    where
-        K: Kind + DeserializeOwned,
-        E: WaitError,
-    {
-        sync_waiter::wait_reply_via::<K, E>(
-            |kind, out, timeout, corr| self.binding.wait_reply(kind, out, timeout, corr),
-            timeout_ms,
-            capacity,
-            expected_correlation,
-        )
     }
 }
 

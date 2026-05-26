@@ -8,7 +8,7 @@ edition.workspace = true
 # 0) and, eventually, native capabilities (via
 # `aether-substrate::NativeBinding`). Holds the `MailTransport`
 # trait, the typed mail/ctx/sink machinery generic over `T:
-# MailTransport`, the `wait_reply` helper, and the wasm-guest impl
+# MailTransport`, and the wasm-guest impl
 # (`WasmTransport`, `WasmActor`, `Replaceable`, `export!` macro plus
 # the `aether.kinds.inputs` / `aether.namespace` custom-section pins).
 # Native-target stubs in `wasm::raw` panic if invoked, so the crate
@@ -24,8 +24,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", default-features = false }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
-# `wait_reply` decodes typed reply payloads via postcard, which is
-# serde-driven. The crate stays `no_std`-friendly with `default-features = false`.
+# Postcard-decoding typed payloads (e.g. `PriorState::as_kind`,
+# `Mail::decode_kind`) is serde-driven. The crate stays
+# `no_std`-friendly with `default-features = false`.
 serde = { version = "1", default-features = false, features = ["alloc"] }
 # ADR-0060: the wasm shim installs a `tracing::Subscriber`
 # (`MailSubscriber`) at component boot that turns `tracing::warn!` /

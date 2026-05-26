@@ -18,8 +18,8 @@
 //! anyway.
 //!
 //! [`FatalAborter`] is the indirection that lets call sites that
-//! don't naturally hold a [`HubOutbound`] (the cross-class `wait_reply`
-//! guard in [`crate::actor::native::binding`], future ADR-0074 §Decision-7
+//! don't naturally hold a [`HubOutbound`] (the wasm-trap abort path in
+//! [`crate::actor::native::binding`], future ADR-0074 §Decision-7
 //! checks) request an abort without plumbing outbound through every
 //! layer. Production chassis construct an [`OutboundFatalAborter`];
 //! tests use [`PanicAborter`] so a misuse panics the test thread
@@ -68,8 +68,8 @@ pub fn fatal_abort(_outbound: &HubOutbound, reason: String) -> ! {
 /// Indirection over [`fatal_abort`] for call sites that don't
 /// naturally hold a [`HubOutbound`]. The chassis injects one of these
 /// into [`crate::ChassisCtx`]; capabilities thread it into their
-/// [`crate::NativeBinding`] so the cross-class `wait_reply` guard
-/// (ADR-0074 §Decision 5) can abort without each capability needing
+/// [`crate::NativeBinding`] so the wasm-trap abort path
+/// (ADR-0063) can abort without each capability needing
 /// to plumb outbound itself.
 ///
 /// Implementors must be `Send + Sync` so the aborter can be cloned

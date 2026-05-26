@@ -1,5 +1,5 @@
 //! Process-level invariants set up at boot: the fatal-abort plumbing
-//! the cross-class `wait_reply` guard reaches for, the `tracing`
+//! the wasm-trap abort path reaches for, the `tracing`
 //! subscriber installed once per process, and the panic hook that
 //! routes panic backtraces through the same logging machinery actor
 //! `tracing::*` calls flow through.

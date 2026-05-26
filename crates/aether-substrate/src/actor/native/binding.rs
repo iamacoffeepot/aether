@@ -1,8 +1,7 @@
-// Wire-encode: the FFI-mirror `wait_reply` ABI returns `i32` with
-// `-1`/`-2`/`-3` reserved for timeout/buffer/cancelled and non-negative
-// values returning the byte length; the `len → i32` cast (and matching
-// `i32 → u64 → Duration` widening on `timeout_ms`) preserve the wire
-// shape `aether-actor`'s sync wrapper expects.
+// Wire-encode / test-fixture casts: the `as` narrowings in this module
+// (today: the stress-test payload fixtures below) are bounded by
+// construction, so the cast lints are blanket-allowed module-wide
+// rather than annotated per site.
 #![allow(
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
@@ -19,7 +18,7 @@
 //!
 //! [`NativeBinding`] is a regular struct each capability owns. It
 //! holds the per-actor state — mailer + self mailbox + inbox +
-//! correlation counter + wait-overflow queue — directly as fields,
+//! correlation counter — directly as fields,
 //! reached via `&self` on every inherent method. No thread-locals,
 //! no install/uninstall ceremony, no `RefCell` runtime borrow checks.
 //! The actor binding is type-system-tracked through the
@@ -37,12 +36,10 @@
 //! traits in `aether_actor::actor::ctx` are the only cross-target
 //! abstraction.
 
-use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
 
 use aether_kinds::trace::Nanos;
 
@@ -143,11 +140,6 @@ impl OutboundBuffer {
 ///   `ReplyTarget::Component(self.self_mailbox)` so any reply
 ///   routes back here, and pushes through the shared
 ///   `Arc<Mailer>`.
-/// - [`Self::wait_reply`] — pulls from `self.inbox` with timeout,
-///   filters by `(kind, correlation)`, parks non-matching envelopes
-///   into `self.overflow` for a future `wait_reply` to find,
-///   mirrors the wasm side's [`super::ctx::NativeCtx`] sync-wait
-///   semantics.
 /// - [`Self::prev_correlation`] — reads the atomic counter.
 ///
 /// Reply (the typed `K` shape) goes through
@@ -157,18 +149,14 @@ impl OutboundBuffer {
 pub struct NativeBinding {
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
-    /// Owned by `wait_reply`; held in a `Mutex` so the `&self`
-    /// receiver can take exclusive access. Wrapped in `OnceLock`
-    /// so the inbox can be installed lazily after construction
-    /// (capabilities sometimes have to thread the receiver through
-    /// a builder before the transport sees it). `OnceLock::get()`
-    /// returns `None` until [`NativeBinding::install_inbox`] runs;
-    /// `wait_reply` returns the `ERR_NO_INBOX` sentinel in that
-    /// case.
+    /// The actor's inbox receiver, drained by the dispatcher via
+    /// [`Self::recv_blocking`] / [`Self::try_recv`]. Held in a `Mutex`
+    /// so the `&self` receiver can take exclusive access. Wrapped in
+    /// `OnceLock` so the inbox can be installed lazily after
+    /// construction (capabilities sometimes have to thread the receiver
+    /// through a builder before the transport sees it). `OnceLock::get()`
+    /// returns `None` until [`NativeBinding::install_inbox`] runs.
     inbox: OnceLock<Mutex<Receiver<Envelope>>>,
-    /// Mismatched envelopes a previous `wait_reply` pulled but
-    /// didn't return; consulted before the next `recv_timeout`.
-    overflow: Mutex<VecDeque<Envelope>>,
     /// Monotonic correlation counter — atomic so `&self` can mint
     /// new ids without `&mut`.
     correlation: AtomicU64,
@@ -195,8 +183,8 @@ pub struct NativeBinding {
     /// blob buffer. The per-handler [`super::ctx::NativeCtx`] /
     /// [`super::mailbox::NativeActorMailbox`] send path buffers into
     /// this (via [`Self::push_envelope_buffered`]); the handler-end
-    /// flush ([`Self::flush_outbound`], driven by `NativeCtx`'s `Drop`
-    /// and `wait_reply`) forms one ring blob and routes a
+    /// flush ([`Self::flush_outbound`], driven by `NativeCtx`'s `Drop`)
+    /// forms one ring blob and routes a
     /// [`MailRef::InRing`] per mail.
     ///
     /// `Mutex` only for the `&self` interior-mutability + `Sync`
@@ -242,7 +230,6 @@ impl NativeBinding {
             mailer,
             self_mailbox,
             inbox: OnceLock::new(),
-            overflow: Mutex::new(VecDeque::new()),
             correlation: AtomicU64::new(0),
             aborter,
             spawner,
@@ -278,10 +265,11 @@ impl NativeBinding {
         Self::new(mailer, self_mailbox, Arc::new(PanicAborter), None)
     }
 
-    /// Install the receiver half of the actor's inbox so
-    /// `wait_reply` has somewhere to pull from. Called once per
-    /// transport, before any `wait_reply` invocation. Subsequent
-    /// calls panic — the slot is single-claim by construction.
+    /// Install the receiver half of the actor's inbox so the
+    /// dispatcher's [`Self::recv_blocking`] / [`Self::try_recv`] have
+    /// somewhere to pull from. Called once per transport, before the
+    /// dispatcher starts draining. Subsequent calls panic — the slot
+    /// is single-claim by construction.
     ///
     /// # Panics
     /// Panics if called more than once — fail-fast per ADR-0063: the
@@ -366,11 +354,6 @@ impl NativeBinding {
     /// }
     /// ```
     ///
-    /// Distinct from [`Self::wait_reply`], which filters by
-    /// `(kind, correlation)` and returns when a *specific* reply
-    /// arrives — `recv_blocking` is for the dispatcher's "next
-    /// thing, whatever it is" main loop.
-    ///
     /// # Panics
     /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063:
     /// a poisoned mutex means a prior holder panicked inside the
@@ -421,13 +404,7 @@ impl NativeBinding {
     }
 }
 
-/// Negative sentinel for `wait_reply` when no inbox is installed.
-/// Picked outside the documented `-1`/`-2`/`-3` range so the SDK's
-/// `decode_wait_reply` falls into the unknown-rc branch and surfaces
-/// "no inbox installed" by name in the error.
-const ERR_NO_INBOX_I32: i32 = 100;
-
-/// Inherent send / `wait_reply` / `prev_correlation` entry points the
+/// Inherent send / `prev_correlation` entry points the
 /// per-handler [`super::ctx::NativeCtx`] / [`super::ctx::NativeInitCtx`]
 /// route through. Issue 665 retired the prior `MailTransport` trait
 /// impl; the FFI-shaped wrapper served no purpose for native (Mailer
@@ -539,7 +516,7 @@ impl NativeBinding {
     /// owned `Vec` and routing immediately, it copies the bytes into the
     /// reused per-actor scratch arena and records the route
     /// metadata; [`Self::flush_outbound`] forms the blob and routes at
-    /// handler end (or before a blocking `wait_reply`).
+    /// handler end.
     ///
     /// The settlement-counter increment stays **eager** (fired here, at
     /// send time, not at flush) so the chain's `in_flight` is exact and
@@ -623,8 +600,7 @@ impl NativeBinding {
 
     /// ADR-0087 / 2c: seal the open ring blob and route the buffered
     /// mail. Called at handler end (via [`super::ctx::NativeCtx`]'s
-    /// `Drop`) and before a blocking [`Self::wait_reply`] (else the
-    /// awaited mail never goes out). A no-op when nothing is buffered.
+    /// `Drop`). A no-op when nothing is buffered.
     ///
     /// The payloads are already in the ring (written by
     /// `push_envelope_buffered` as each send happened) or copied out to
@@ -656,23 +632,13 @@ impl NativeBinding {
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub fn flush_outbound(&self) {
-        self.flush_outbound_inner(true);
-    }
-
-    /// `wait_reply`-side flush: routes the buffered blob **eagerly**
-    /// (per-mail, never as a deferred `BlobWork`). A send-then-`wait_reply`
-    /// handler blocks this thread on the reply, which depends on the sent
-    /// mail being delivered first — deferring it to a `BlobWork` that
-    /// only a worker drains could wedge the wait (e.g. if this binding's
-    /// own worker is the one now parked in the wait). Eager routing
-    /// matches the pre-3b delivery point exactly.
-    fn flush_outbound_eager(&self) {
-        self.flush_outbound_inner(false);
+        self.flush_outbound_inner();
     }
 
     /// Seal the open blob, mint a [`MailRef`] per buffered mail, and
-    /// route. `allow_blob` picks the deferred [`BlobWork`] path (handler
-    /// end) vs eager per-mail routing (`wait_reply`); both are no-ops
+    /// route. Folds the blob into this actor's cursor-shared
+    /// [`BlobWork`] when a pool [`Spawner`](crate::Spawner) is wired,
+    /// else routes per mail (test bindings without a spawner); a no-op
     /// when nothing is buffered.
     ///
     /// iamacoffeepot/aether#1150: this is the frame's flush-begin
@@ -684,7 +650,7 @@ impl NativeBinding {
     /// handler that ran after the send" from the producer-side span. The
     /// clock read sits behind the emptiness check so a no-send handler
     /// return stays free.
-    fn flush_outbound_inner(&self, allow_blob: bool) {
+    fn flush_outbound_inner(&self) {
         let flush_begin;
         // iamacoffeepot/aether#1158: the construct-start anchor stamped
         // when this window's blob opened (`push_envelope_buffered`). Read
@@ -753,10 +719,9 @@ impl NativeBinding {
         // ADR-0087 / iamacoffeepot/aether#1137: fold the blob into this
         // actor's single active cursor-shared blob (recipient-grouped,
         // cooperatively drained, broadcast-recruited for wide fan-outs)
-        // when a pool sink is wired and the caller allows deferral.
-        // Otherwise route per mail (eager `wait_reply` flush, or a test
+        // when a pool sink is wired. Otherwise route per mail (a test
         // binding with no `Spawner`).
-        if allow_blob && self.spawner.is_some() {
+        if self.spawner.is_some() {
             let mut guard = self
                 .blob_producer
                 .lock()
@@ -778,140 +743,14 @@ impl NativeBinding {
         }
     }
 
-    /// Block this actor's thread until a mail of `expected_kind`
-    /// (and, when `expected_correlation != 0`, also matching that
-    /// correlation id) arrives, then copy up to `out.len()` bytes of
-    /// its payload into `out` (ADR-0042). `timeout_ms` is clamped
-    /// substrate-side to 30s.
-    ///
-    /// Returns `>= 0` = bytes written, `-1` = timeout, `-2` = payload
-    /// larger than `out` (mail re-parked for retry), `-3` = the host
-    /// tore the actor down mid-wait. Any other negative is a
-    /// transport-specific sentinel (e.g. `-100` no-inbox).
-    ///
-    /// # Panics
-    /// Panics if the overflow mutex is poisoned — fail-fast per
-    /// ADR-0063.
-    pub fn wait_reply(
-        &self,
-        expected_kind: u64,
-        out: &mut [u8],
-        timeout_ms: u32,
-        expected_correlation: u64,
-    ) -> i32 {
-        // ADR-0087 / 2b: flush buffered outbound mail before blocking —
-        // a send-then-wait_reply in the same handler would otherwise
-        // deadlock, since the awaited reply depends on a mail still
-        // sitting unsent in the blob buffer. Route eagerly (3b): the
-        // reply depends on delivery happening before we park, so this
-        // flush must not defer the blob to a worker that might be us.
-        self.flush_outbound_eager();
-        let Some(inbox_mutex) = self.inbox.get() else {
-            tracing::error!(
-                target: "aether_substrate::native_transport",
-                "wait_reply called without an installed inbox — install_inbox must run first"
-            );
-            return -ERR_NO_INBOX_I32;
-        };
-
-        let timeout = Duration::from_millis(timeout_ms as u64);
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            // Drain overflow first — a previous `wait_reply` may
-            // have parked envelopes that match this kind /
-            // correlation.
-            let from_overflow = {
-                let mut overflow = self
-                    .overflow
-                    .lock()
-                    .expect("overflow mutex poisoned; fail-fast per ADR-0063");
-                let pos = overflow
-                    .iter()
-                    .position(|env| matches_filter(env, expected_kind, expected_correlation));
-                pos.and_then(|i| overflow.remove(i))
-            };
-            if let Some(env) = from_overflow {
-                let rc = write_payload(&env, out);
-                if rc == -2 {
-                    // Buffer too small: park back at the front so a
-                    // retry with a larger buffer picks it up before
-                    // anything newer.
-                    self.overflow
-                        .lock()
-                        .expect("overflow mutex poisoned; fail-fast per ADR-0063")
-                        .push_front(env);
-                }
-                break rc;
-            }
-
-            // No overflow match — pull from the inbox with whatever
-            // time is left on the deadline. The mutex guard stays
-            // held across `recv_timeout`; the dispatcher thread is
-            // single-tasked while parked here, so no other code on
-            // this thread contends with the lock.
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let recv_outcome = inbox_mutex
-                .lock()
-                .expect("inbox mutex poisoned; fail-fast per ADR-0063")
-                .recv_timeout(remaining);
-
-            match recv_outcome {
-                Ok(env) => {
-                    if matches_filter(&env, expected_kind, expected_correlation) {
-                        let rc = write_payload(&env, out);
-                        if rc == -2 {
-                            // Same retry-friendly disposition as
-                            // overflow-matched: park at the front.
-                            self.overflow
-                                .lock()
-                                .expect("overflow mutex poisoned; fail-fast per ADR-0063")
-                                .push_front(env);
-                        }
-                        break rc;
-                    }
-                    self.overflow
-                        .lock()
-                        .expect("overflow mutex poisoned; fail-fast per ADR-0063")
-                        .push_back(env);
-                    // Loop continues — try again with whatever time
-                    // is left on the deadline.
-                }
-                Err(RecvTimeoutError::Timeout) => break -1,
-                Err(RecvTimeoutError::Disconnected) => break -3,
-            }
-        }
-    }
-
     /// Correlation id the substrate minted for this actor's most
     /// recent `send_mail` (ADR-0042). `0` before any send. Universal
-    /// — every send mints a correlation; sync wrappers filter
-    /// `wait_reply` against it, async handlers stash it and match on
-    /// the inbound's reply correlation.
+    /// — every send mints a correlation; a handler stashes it and
+    /// matches it against the inbound reply's correlation to pair a
+    /// reply with the request it sent.
     pub fn prev_correlation(&self) -> u64 {
         self.correlation.load(Ordering::Acquire)
     }
-}
-
-fn matches_filter(env: &Envelope, expected_kind: u64, expected_correlation: u64) -> bool {
-    env.kind.0 == expected_kind
-        && (expected_correlation == ReplyTo::NO_CORRELATION
-            || env.sender.correlation_id == expected_correlation)
-}
-
-/// Copy `env.payload` into `out` and return the number of bytes
-/// written, matching the wasm `wait_reply_p32` ABI:
-/// `>= 0` = bytes written, `-2` = payload too large for the buffer.
-/// Caller is responsible for parking the envelope back on overflow
-/// when -2 is returned so a retry with a bigger buffer can pick it up
-/// (the helper is byte-only so it can also be used for peek-style
-/// callers that don't have an overflow to park on).
-fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
-    if env.payload.len() > out.len() {
-        return -2;
-    }
-    out[..env.payload.len()].copy_from_slice(env.payload.bytes());
-    env.payload.len() as i32
 }
 
 #[cfg(test)]
@@ -921,11 +760,10 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 )]
 mod tests {
     use super::*;
-    use crate::mail::MailRef;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::test_util::fresh_substrate;
-    use aether_kinds::trace::Nanos;
     use std::sync::mpsc;
+    use std::time::Duration;
 
     /// Build a registry handler that forwards every [`MailDispatch`]
     /// it receives onto `tx` as an owned [`Envelope`]. Used by tests
@@ -964,17 +802,6 @@ mod tests {
         assert_eq!(transport.prev_correlation(), 2);
     }
 
-    /// `wait_reply` with no inbox installed returns the no-inbox
-    /// negative sentinel.
-    #[test]
-    fn wait_reply_without_inbox_returns_no_inbox_sentinel() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let mut buf = [0u8; 16];
-        let rc = transport.wait_reply(0, &mut buf, 1, 0);
-        assert_eq!(rc, -ERR_NO_INBOX_I32);
-    }
-
     /// `install_inbox` is single-claim — a second install panics.
     #[test]
     #[should_panic(expected = "install_inbox called twice")]
@@ -985,154 +812,6 @@ mod tests {
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx1);
         transport.install_inbox(rx2);
-    }
-
-    /// `wait_reply` returns the `-1` timeout sentinel when no
-    /// envelope arrives within the deadline.
-    #[test]
-    fn wait_reply_times_out_when_inbox_quiet() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (_tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-        let mut buf = [0u8; 16];
-        // 1ms is enough — no sender ever pushes.
-        let rc = transport.wait_reply(0, &mut buf, 1, 0);
-        assert_eq!(rc, -1);
-    }
-
-    fn make_envelope(kind: u64, payload: Vec<u8>, correlation: u64) -> Envelope {
-        Envelope {
-            kind: KindId(kind),
-            kind_name: String::new(),
-            origin: None,
-            sender: ReplyTo::with_correlation(ReplyTarget::None, correlation),
-            payload: MailRef::from(payload),
-            count: 1,
-            mail_id: MailId::NONE,
-            root: MailId::NONE,
-            parent_mail: None,
-            t_enqueue: Nanos(0),
-            enqueue_depth: 0,
-        }
-    }
-
-    /// `wait_reply` returns the matched envelope when it arrives via
-    /// the inbox while the wait is parked.
-    #[test]
-    fn wait_reply_returns_payload_when_match_arrives() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-
-        tx.send(make_envelope(0xABCD, vec![1, 2, 3, 4, 5], 0))
-            .unwrap();
-
-        let mut buf = [0u8; 16];
-        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
-        assert_eq!(rc, 5);
-        assert_eq!(&buf[..5], &[1, 2, 3, 4, 5]);
-    }
-
-    /// `wait_reply` parks non-matching envelopes onto overflow so the
-    /// dispatcher's next `recv` (or a follow-up wait) sees them.
-    #[test]
-    fn wait_reply_parks_non_matching_into_overflow() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-
-        tx.send(make_envelope(0x1111, vec![9], 0)).unwrap();
-        tx.send(make_envelope(0xABCD, vec![1], 0)).unwrap();
-
-        let mut buf = [0u8; 16];
-        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
-        assert_eq!(rc, 1);
-        assert_eq!(transport.overflow.lock().unwrap().len(), 1);
-    }
-
-    /// `wait_reply` filters by correlation when one is supplied — a
-    /// matching kind with a different correlation parks; only the
-    /// correlation-matched envelope returns.
-    #[test]
-    fn wait_reply_filters_by_correlation_not_just_kind() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-
-        tx.send(make_envelope(0xABCD, vec![0xFF], 11)).unwrap();
-        tx.send(make_envelope(0xABCD, vec![0x42], 22)).unwrap();
-
-        let mut buf = [0u8; 16];
-        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 22);
-        assert_eq!(rc, 1);
-        assert_eq!(buf[0], 0x42);
-        assert_eq!(transport.overflow.lock().unwrap().len(), 1);
-    }
-
-    /// `wait_reply` checks overflow before recv — a matching envelope
-    /// already on overflow returns without touching the inbox.
-    #[test]
-    fn wait_reply_pulls_match_from_overflow_before_recv() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-
-        transport
-            .overflow
-            .lock()
-            .unwrap()
-            .push_back(make_envelope(0xABCD, vec![7], 0));
-        drop(tx);
-
-        let mut buf = [0u8; 16];
-        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
-        assert_eq!(rc, 1);
-        assert_eq!(buf[0], 7);
-    }
-
-    /// `wait_reply` returns -2 when payload exceeds the buffer and
-    /// parks the envelope back on overflow with `push_front` so a
-    /// retry with a larger buffer rediscovers it.
-    #[test]
-    fn wait_reply_parks_on_buffer_too_small_for_retry() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-
-        let big_payload = vec![0xAA; 10];
-        tx.send(make_envelope(0xABCD, big_payload.clone(), 0))
-            .unwrap();
-
-        let mut small = [0u8; 4];
-        let rc = transport.wait_reply(0xABCD, &mut small, 100, 0);
-        assert_eq!(rc, -2);
-        assert_eq!(transport.overflow.lock().unwrap().len(), 1);
-
-        let mut big = [0u8; 16];
-        let rc = transport.wait_reply(0xABCD, &mut big, 100, 0);
-        assert_eq!(rc, big_payload.len() as i32);
-        assert_eq!(&big[..big_payload.len()], &big_payload[..]);
-    }
-
-    /// `wait_reply` returns -3 cancelled when the inbox sender drops
-    /// (the receiver disconnects) before any matching mail arrives.
-    #[test]
-    fn wait_reply_returns_cancelled_when_sender_drops() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx);
-        drop(tx);
-
-        let mut buf = [0u8; 16];
-        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
-        assert_eq!(rc, -3);
     }
 
     /// 2b: the buffered send path holds mail until flush, then forms one

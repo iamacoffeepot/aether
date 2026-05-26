@@ -34,13 +34,12 @@ use aether_data::Kind;
 ///
 /// Dispatch invariant: every actor drains cooperatively on the chassis
 /// worker pool. A handler must never block the dispatcher — offload
-/// blocking work (a `wait_reply`-shaped request/reply, sync disk I/O, a
-/// runloop on a non-mail external source like TCP `accept` or a
-/// file-watch source) to a `ctx.spawn`'d thread that blocks off-pool
-/// and feeds its results back as mail. A request/reply-shaped need is
-/// served by an FSM that carries state across handler invocations
-/// (send → return → handle the reply) rather than by parking a pool
-/// worker in-handler.
+/// blocking work (sync disk I/O, a runloop on a non-mail external
+/// source like TCP `accept` or a file-watch source) to a `ctx.spawn`'d
+/// thread that blocks off-pool and feeds its results back as mail. A
+/// request/reply-shaped need is served by an FSM that carries state
+/// across handler invocations (send → return → handle the reply) rather
+/// than by parking a pool worker in-handler.
 pub trait Actor: Sized + Send + 'static {
     /// The recipient name this actor claims. For native capabilities
     /// it's the chassis-owned mailbox name (`aether.<name>`); for wasm

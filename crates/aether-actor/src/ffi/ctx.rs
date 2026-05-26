@@ -9,7 +9,7 @@
 //! per-stage capability traits in [`crate::actor::ctx`]; these structs
 //! are concrete impls that route outbound calls through the
 //! per-concern bridge ZSTs in [`crate::ffi::bridge`] ([`MAIL_BRIDGE`] /
-//! [`PERSIST_BRIDGE`] / [`SYNC_WAIT_BRIDGE`]).
+//! [`PERSIST_BRIDGE`]).
 //!
 //! Issue 665 retired the `transport: &'a FfiTransport` field along
 //! with the `FfiTransport` ZST and `MailTransport` trait — ctxs hold
@@ -24,17 +24,13 @@ use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::resolver::Resolver;
-use crate::actor::ctx::sync_waiter;
-use crate::actor::ctx::sync_waiter::SyncWaiter;
 use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{Actor, HandlesKind, Singleton};
-use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE, SYNC_WAIT_BRIDGE};
+use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
 use crate::ffi::mailbox::FfiActorMailbox;
 use crate::mail::ReplyTo;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
-use crate::mail::sync::WaitError;
 use alloc::string::String;
-use serde::de::DeserializeOwned;
 
 /// Init-only capability handle for FFI guests. Resolved during
 /// `FfiActor::init`; not available at runtime (the type split fences
@@ -261,26 +257,6 @@ impl OutboundReply for FfiCtx<'_> {
     fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
-    }
-}
-
-impl SyncWaiter for FfiCtx<'_> {
-    fn wait_reply<K, E>(
-        &self,
-        timeout_ms: u32,
-        capacity: usize,
-        expected_correlation: u64,
-    ) -> Result<K, E>
-    where
-        K: Kind + DeserializeOwned,
-        E: WaitError,
-    {
-        sync_waiter::wait_reply_via::<K, E>(
-            |kind, out, timeout, corr| SYNC_WAIT_BRIDGE.wait_reply(kind, out, timeout, corr),
-            timeout_ms,
-            capacity,
-            expected_correlation,
-        )
     }
 }
 

@@ -53,13 +53,10 @@ pub trait MailSender {
     /// Correlation id the host minted for this actor's most recent
     /// outbound `send_mail` (ADR-0042). `0` before any send.
     /// Universal mail-level metadata — every send mints a
-    /// correlation regardless of whether the caller sync-waits or
-    /// async-handles the reply, so the accessor lives on the
-    /// outbound-mail trait rather than behind the sync-wait surface.
-    /// Async correlation tracking (send → stash id → match against
-    /// inbound's reply correlation in the normal handler) reads from
-    /// here; sync wrappers thread the value into
-    /// [`crate::actor::ctx::SyncWaiter::wait_reply`].
+    /// correlation, so the accessor lives on the outbound-mail trait.
+    /// A handler tracks a request/reply round trip by stashing this id
+    /// after the send and matching it against the inbound reply's
+    /// correlation when the reply arrives in a later handler invocation.
     fn prev_correlation(&self) -> u64;
 
     /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`

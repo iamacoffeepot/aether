@@ -8,12 +8,11 @@
 //!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
 //!     stubs (the only place the `_p32` symbols are named).
 //!   - [`bridge`] — per-concern ZST dispatch surfaces ([`MAIL_BRIDGE`],
-//!     [`PERSIST_BRIDGE`], [`SYNC_WAIT_BRIDGE`]). Each ZST owns one FFI op family
+//!     [`PERSIST_BRIDGE`]). Each ZST owns one FFI op family
 //!     and forwards inherent methods to the matching `raw::*`
 //!     host fn. Issue 665 split the prior monolithic
 //!     `MailTransport`-impl ZST into these per-concern bridges so
-//!     persistence isn't mixed with mail and sync-wait isn't mixed
-//!     with either.
+//!     persistence isn't mixed with mail.
 //!   - [`FfiInitCtx`] / [`FfiCtx`] / [`FfiDropCtx`] — concrete per-stage
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::actor::ctx`].
@@ -49,7 +48,7 @@
 //! to-sender), ADR-0014 (Component trait + Mail), ADR-0015 (lifecycle
 //! hooks), ADR-0016 (state-across-replace), ADR-0024 (`_p32` FFI),
 //! ADR-0030 (compile-time kind ids), ADR-0033 (`#[actor]`), ADR-0040
-//! (kind-typed state), ADR-0041 (file I/O), ADR-0042 (sync `wait_reply`),
+//! (kind-typed state), ADR-0041 (file I/O),
 //! ADR-0043 (HTTP egress), ADR-0045 (typed handles), ADR-0058
 //! (`aether.sink.*` namespace), ADR-0060 (tracing→mail bridge),
 //! ADR-0074 (unified actor model).
@@ -65,9 +64,7 @@ pub mod ctx;
 pub mod mailbox;
 pub mod raw;
 
-pub use bridge::{
-    MAIL_BRIDGE, MailBridge, PERSIST_BRIDGE, PersistBridge, SYNC_WAIT_BRIDGE, SyncWaitBridge,
-};
+pub use bridge::{MAIL_BRIDGE, MailBridge, PERSIST_BRIDGE, PersistBridge};
 pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx};
 pub use mailbox::FfiActorMailbox;
 

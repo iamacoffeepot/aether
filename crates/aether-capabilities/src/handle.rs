@@ -1,8 +1,9 @@
 //! `aether.handle` cap. Owns the substrate's `HandleStore` and routes
 //! ADR-0045 publish/release/pin/unpin requests via `ctx.reply(&result)`.
 //! Decode failure on a malformed payload goes through the macro miss
-//! path (warn-log, no reply, sender's `wait_reply` times out) —
-//! substrate-level invariant violation, not user-recoverable input.
+//! path (warn-log, no reply, so the sender's correlated reply handler
+//! never fires) — substrate-level invariant violation, not
+//! user-recoverable input.
 //!
 //! The handle store flows in through `NativeInitCtx::mailer().handle_store()`
 //! at boot; the chassis builder's `with_actor::<HandleCapability>(())`

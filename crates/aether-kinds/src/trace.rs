@@ -76,8 +76,8 @@ pub enum TraceEvent {
         /// outbound blob **opened** — the first buffered send of the
         /// flush window (stamped once when the handler's outbound buffer
         /// transitions empty→non-empty, shared by every mail in the
-        /// frame). Eager paths (`wait_reply`-free direct routes,
-        /// chassis-root pushes, wasm trampoline) route immediately, so
+        /// frame). Eager paths (chassis-root pushes, wasm trampoline,
+        /// spawner-less test bindings) route immediately, so
         /// their construct-start *is* `t` (construct ≈ 0). `t −
         /// t_construct_start` is the **construct** span (the producer
         /// building the blob), the producer-side leg ahead of `queued`.
@@ -85,8 +85,8 @@ pub enum TraceEvent {
         /// iamacoffeepot/aether#1150: for buffered sends this is the
         /// frame's **flush-begin** instant (stamped once when the handler's
         /// outbound buffer flushes, shared by every mail in the frame), not
-        /// the per-send call site. Eager paths (`wait_reply`-free direct
-        /// routes, chassis-root pushes) route immediately, so their call
+        /// the per-send call site. Eager paths (chassis-root pushes,
+        /// wasm trampoline) route immediately, so their call
         /// site *is* the flush instant. Anchoring here drops the smear of
         /// "the rest of the handler that ran after the send" that the
         /// call-site stamp folded into the producer-side span.

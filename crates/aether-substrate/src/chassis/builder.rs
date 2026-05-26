@@ -761,7 +761,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
 
 impl<C: Chassis> Builder<C, NoDriver> {
     /// Construct a fresh builder against the given substrate handles.
-    /// Defaults the cross-class `wait_reply` aborter to
+    /// Defaults the fatal-abort aborter to
     /// [`PanicAborter`]; production drivers swap in
     /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via
     /// [`Self::with_aborter`] before `build()` / `build_passive()`.
@@ -780,8 +780,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
 
     /// Override the default [`PanicAborter`] with a chassis-supplied
     /// [`FatalAborter`]. Production drivers (desktop, headless) call
-    /// this before `build()` so a cross-class `wait_reply` violation
-    /// broadcasts `SubstrateDying` before process exit. Single-call: a
+    /// this before `build()` so a fatal abort (e.g. a wasm guest trap)
+    /// exits the process cleanly. Single-call: a
     /// second invocation overwrites the prior aborter.
     #[must_use]
     pub fn with_aborter(mut self, aborter: Arc<dyn FatalAborter>) -> Self {
