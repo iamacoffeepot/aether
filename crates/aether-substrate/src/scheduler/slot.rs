@@ -390,16 +390,16 @@ impl WakeSink {
     /// when this runs on a pool worker and the keep-local budget says to
     /// keep it (the affinity warm path — no notify, the same worker drains
     /// it LIFO), else spill to the shared injector and notify the
-    /// coordinator (route-to-spinner / unpark-one). The keep-local-vs-spill
-    /// decision is the per-burst mail + sampled-time budget
-    /// ([`worker_deque::try_push_local_budgeted`], iamacoffeepot/aether#1160);
-    /// the Phase 3 default keeps a small cascade local
-    /// (`AETHER_LOCAL_MAIL_BUDGET=0` restores the historical `cap == 1`).
-    /// This is the non-demux wake destination,
-    /// shared by [`WakeHandle::wake`], the producer-side blob push, and an
-    /// inline recipient that yielded mid-drain (ADR-0087 Phase 3b). The
-    /// injector push is infallible; shutdown is observed through the
-    /// coordinator's flag.
+    /// coordinator (route-to-spinner / unpark-one). The default inlines the
+    /// **whole local cascade** warm ([`worker_deque::try_push_local_budgeted`],
+    /// iamacoffeepot/aether#1174) — a produced blob is a descendant of the
+    /// cascade already on this worker — until the per-burst **time valve**
+    /// (`worker_deque::time_budget`, default 12µs) trips and spills a heavy
+    /// cascade to parallelise; mail-count budgeting is off by default. This is
+    /// the non-demux wake destination, shared by [`WakeHandle::wake`], the
+    /// producer-side blob push, and an inline recipient that yielded mid-drain
+    /// (ADR-0087 Phase 3b). The injector push is infallible; shutdown is
+    /// observed through the coordinator's flag.
     pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
         let kept = worker_deque::try_push_local_budgeted(
             slot,

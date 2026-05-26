@@ -317,12 +317,13 @@ fn worker_loop(
 /// `Worker`) is the affinity lever: a handler running on this worker
 /// pushes a woken downstream slot there, so a relay chain stays on the
 /// same warm worker and never pays the ~4.3µs parked-worker wakeup. Its
-/// LIFO pop keeps the freshest hop warmest. Whether a fan-out's extra blobs
-/// stay local or spill is the keep-local budget
-/// (`WakeSink::schedule` → `worker_deque::try_push_local_budgeted`,
-/// iamacoffeepot/aether#1160); the Phase 3 default keeps a small cascade
-/// local (`AETHER_LOCAL_MAIL_BUDGET=0` restores the historical `cap == 1`).
-/// The own deque is checked first so a pushed slot is never stranded.
+/// LIFO pop keeps the freshest hop warmest. By default the **local cascade**
+/// inlines on the own deque (`WakeSink::schedule` →
+/// `worker_deque::try_push_local_budgeted`, iamacoffeepot/aether#1174) —
+/// produced blobs are cascade descendants kept warm — until the per-burst
+/// **time valve** (`worker_deque::time_budget`, default 12µs) trips and spills
+/// a heavy cascade to parallelise; mail-count budgeting (#1160) is off by
+/// default. The own deque is checked first so a pushed slot is never stranded.
 ///
 /// When the own deque is empty, this resets the local-drain burst
 /// (iamacoffeepot/aether#1160) — one local cascade is one burst, so the
