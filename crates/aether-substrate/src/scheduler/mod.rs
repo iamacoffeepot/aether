@@ -33,11 +33,13 @@
 //! actually run on the pool. Phase 2 flips one cap to `Pooled`; Phase
 //! 3 sweeps the rest. Until PR C the pool is unused infrastructure.
 
+mod calibrate;
 mod pool;
 mod slot;
 mod spin_park;
 mod worker_deque;
 
+pub use calibrate::{handoff_cost, log_handoff_calibration};
 pub use pool::{Pool, PoolConfig, PoolHandle, PoolWorkerJoin};
 pub use slot::{
     BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, DrainOutcome,
