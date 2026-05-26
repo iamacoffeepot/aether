@@ -20,8 +20,10 @@
 //! iamacoffeepot/aether#1160); set `AETHER_LOCAL_MAIL_BUDGET=0` to restore
 //! the historical `cap == 1` "spill any fan-out extra" behaviour.
 //! `AETHER_LOCAL_STICKY_MAX` is the deque-length safety backstop
-//! ([`hard_cap`]). The tail an idle worker can `steal_batch_and_pop` is the
-//! pull path.
+//! ([`hard_cap`]). A worker is **owner-only** over its own deque by default
+//! ([`peer_steal_enabled`], iamacoffeepot/aether#1174): it pulls only the
+//! shared injector, never a sibling's keep-local cascade. Set
+//! `AETHER_PEER_STEAL=1` to opt the sibling-tail raid back in.
 //!
 //! Only pool-worker threads call [`install`]; on any other thread
 //! (chassis main, the hub, the trace drainer) [`try_push_local_budgeted`]
@@ -164,6 +166,35 @@ pub fn time_budget() -> Duration {
     Duration::from_micros(us)
 }
 
+/// Whether idle workers may raid siblings' deques (peer-deque stealing),
+/// read once from `AETHER_PEER_STEAL`; default **off** — each worker is
+/// **owner-only** over its own deque (iamacoffeepot/aether#1174). Set
+/// **1** (or `true`) to opt the sibling raid back in.
+///
+/// The default flipped to owner-only because peer-deque stealing stopped
+/// being load-bearing after seize-direct (iamacoffeepot/aether#1135),
+/// cursor-shared cooperative blob (iamacoffeepot/aether#1141), and the
+/// keep-local budget (iamacoffeepot/aether#1160): a blob on a worker's own
+/// deque is there *because the budget judged it cheap* — it didn't spill.
+/// Raiding it pays a cache-cold cross-worker handoff for sub-threshold work,
+/// so the steal can cost more than the work is worth, and it contradicts the
+/// decision that kept the blob local. Worthwhile (wide / heavy) work
+/// parallelises through the injector via spill + recruit, which the
+/// unconditional injector drain still serves. The cost of owner-only is the
+/// loss of the budget-misclassification safety net — heavy work the budget
+/// *wrongly* keeps local strands on its owner with no idle-sibling rescue,
+/// raising the stakes on the iamacoffeepot/aether#1128 cost classification;
+/// `AETHER_PEER_STEAL=1` restores the rescue.
+#[must_use]
+pub fn peer_steal_enabled() -> bool {
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| {
+        env::var("AETHER_PEER_STEAL")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
+}
+
 /// Note one dispatched envelope against the current local-drain burst
 /// (iamacoffeepot/aether#1160). Increments the burst mail counter and, when
 /// time budgeting is on (`time_budget > 0`), anchors the burst start on the
@@ -281,14 +312,22 @@ pub fn pop_local() -> Option<Slot> {
 /// Steal work into this worker's own deque and return one slot to run.
 /// Prefers the [`Injector`] (off-worker producers + spilled fan-out +
 /// requeued yields, so external work isn't starved by sibling stealing),
-/// then each sibling's [`Stealer`] (skipping our own `my_idx`). Returns
-/// `None` when every source is empty. Non-blocking — safe as the
-/// `SpinPark::acquire` scan closure (its spin loop + park-commit recheck
-/// call it repeatedly).
+/// then — only when `peer_steal` is set — each sibling's [`Stealer`]
+/// (skipping our own `my_idx`). Returns `None` when every consulted source
+/// is empty. Non-blocking — safe as the `SpinPark::acquire` scan closure
+/// (its spin loop + park-commit recheck call it repeatedly).
+///
+/// `peer_steal` (read once per worker from [`peer_steal_enabled`]) gates the
+/// sibling raid only — the injector drain is unconditional and load-bearing.
+/// With it off, this worker is **owner-only** over its deque
+/// (iamacoffeepot/aether#1174): it never pulls a sibling's keep-local
+/// cascade, so a cheap blob the budget kept local isn't dragged
+/// cross-worker.
 pub fn steal_into_local(
     my_idx: usize,
     stealers: &[Stealer<Slot>],
     injector: &Injector<Slot>,
+    peer_steal: bool,
 ) -> Option<Slot> {
     LOCAL.with(|w| {
         let w = w.borrow();
@@ -302,12 +341,14 @@ pub fn steal_into_local(
                 Steal::Retry => retry = true,
                 Steal::Empty => {}
             }
-            for (i, stealer) in stealers.iter().enumerate() {
-                if i != my_idx {
-                    match stealer.steal_batch_and_pop(worker) {
-                        Steal::Success(slot) => return Some(slot),
-                        Steal::Retry => retry = true,
-                        Steal::Empty => {}
+            if peer_steal {
+                for (i, stealer) in stealers.iter().enumerate() {
+                    if i != my_idx {
+                        match stealer.steal_batch_and_pop(worker) {
+                            Steal::Success(slot) => return Some(slot),
+                            Steal::Retry => retry = true,
+                            Steal::Empty => {}
+                        }
                     }
                 }
             }
@@ -583,7 +624,7 @@ mod tests {
         // Injector work is pulled.
         let injector: Injector<Slot> = Injector::new();
         injector.push(noop());
-        assert!(steal_into_local(0, &[], &injector).is_some());
+        assert!(steal_into_local(0, &[], &injector, true).is_some());
 
         // A sibling's deque is stolen from (own index 0 is skipped).
         let sibling: Worker<Slot> = Worker::new_lifo();
@@ -591,12 +632,46 @@ mod tests {
         sibling.push(noop());
         let stealers = [Worker::<Slot>::new_lifo().stealer(), sibling.stealer()];
         assert!(
-            steal_into_local(0, &stealers, &Injector::new()).is_some(),
+            steal_into_local(0, &stealers, &Injector::new(), true).is_some(),
             "should steal from sibling index 1"
         );
 
         // Nothing anywhere → None.
         drain_local();
-        assert!(steal_into_local(0, &[], &Injector::new()).is_none());
+        assert!(steal_into_local(0, &[], &Injector::new(), true).is_none());
+    }
+
+    #[test]
+    fn steal_owner_only_skips_siblings() {
+        // With `peer_steal == false` the injector drain stays load-bearing
+        // but a sibling's deque is left untouched — owner-only
+        // (iamacoffeepot/aether#1174).
+        install(Worker::new_lifo());
+        drain_local();
+
+        // Injector is still drained regardless of peer_steal.
+        let injector: Injector<Slot> = Injector::new();
+        injector.push(noop());
+        assert!(
+            steal_into_local(0, &[], &injector, false).is_some(),
+            "injector drain is load-bearing — unaffected by peer_steal"
+        );
+
+        // A sibling holds work; owner-only must NOT raid it.
+        let sibling: Worker<Slot> = Worker::new_lifo();
+        sibling.push(noop());
+        let stealers = [Worker::<Slot>::new_lifo().stealer(), sibling.stealer()];
+        assert!(
+            steal_into_local(0, &stealers, &Injector::new(), false).is_none(),
+            "owner-only leaves the sibling's keep-local cascade alone"
+        );
+        // The same sibling IS raided once peer steal is back on — proving the
+        // flag is the only thing that changed (the work was there all along).
+        assert!(
+            steal_into_local(0, &stealers, &Injector::new(), true).is_some(),
+            "peer_steal on raids the untouched sibling"
+        );
+
+        drain_local();
     }
 }
