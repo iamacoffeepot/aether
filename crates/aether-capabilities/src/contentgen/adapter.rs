@@ -60,6 +60,12 @@ pub struct GeminiResponse {
     /// NB2-only opaque signature the caller passes back unchanged for a
     /// multi-turn image edit. `None` for Lyria and older image models.
     pub thought_signature: Option<String>,
+    /// Grounding metadata (search queries + source URLs) parsed from the
+    /// response when `use_grounding` produced a `groundingMetadata`
+    /// block. `(Vec<search_queries>, Vec<source_urls>)`; `None` when the
+    /// block was absent. Kept as inline tuples so the shared adapter
+    /// types don't depend on the provider kinds in `aether-kinds`.
+    pub grounding: Option<(Vec<String>, Vec<String>)>,
 }
 
 /// Adapter-layer usage accounting. Carries the same four fields as the
@@ -137,12 +143,22 @@ pub trait GeminiAdapter: Send + Sync {
 /// validation before constructing this; the adapter just dispatches the
 /// HTTP call. `aspect_ratio` rides as the provider's `W:H` string;
 /// `reference_images` are the already-read reference bytes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct GeminiImageRequest {
     pub model: String,
     pub prompt: String,
     /// Provider `W:H` aspect-ratio string (e.g. `"16:9"`).
     pub aspect_ratio: String,
+    /// Provider image-size string (`"512"` / `"1K"` / `"2K"` / `"4K"`),
+    /// `None` when the caller left `image_size` unset.
+    pub image_size: Option<String>,
+    /// Provider `thinkingLevel` string (`"minimal"` / `"high"`), `None`
+    /// when the caller left `thinking_level` unset.
+    pub thinking_level: Option<String>,
+    /// `thinkingConfig.includeThoughts`, `None` when unset.
+    pub include_thoughts: Option<bool>,
+    /// Whether to add the `google_search` grounding tool.
+    pub use_grounding: bool,
     /// Reference-image bytes the cap read from the supplied paths.
     pub reference_images: Vec<Vec<u8>>,
 }
@@ -269,6 +285,7 @@ impl GeminiAdapter for StubGeminiAdapter {
             model_used: req.model,
             usage: AdapterUsage::default(),
             thought_signature: None,
+            grounding: None,
         })
     }
 
@@ -285,6 +302,7 @@ impl GeminiAdapter for StubGeminiAdapter {
             model_used: req.model,
             usage: AdapterUsage::default(),
             thought_signature: None,
+            grounding: None,
         })
     }
 }
@@ -334,6 +352,7 @@ mod tests {
                 prompt: String::from("a cat"),
                 aspect_ratio: String::from("1:1"),
                 reference_images: Vec::new(),
+                ..Default::default()
             })
             .expect("stub nanobanana is infallible");
         assert_eq!(resp.artifacts.len(), 1);

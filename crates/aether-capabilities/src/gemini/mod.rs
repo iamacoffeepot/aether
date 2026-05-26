@@ -169,26 +169,69 @@ impl UreqGeminiAdapter {
     }
 }
 
+/// Build the `generateContent` request body for a Nano Banana image
+/// request: the prompt plus any reference images as inline-data parts,
+/// and the per-request knobs in `generationConfig`. Each optional field
+/// is emitted only when its source `Option` is `Some(..)` so an unset
+/// knob leaves no key in the body. Factored out so a unit test can lock
+/// the JSON shape without an HTTP call.
+fn build_nanobanana_body(req: &GeminiImageRequest) -> Value {
+    use serde_json::{Map, json};
+
+    let mut parts = vec![json!({ "text": req.prompt })];
+    for img in &req.reference_images {
+        parts.push(json!({
+            "inlineData": {
+                "mimeType": "image/png",
+                "data": base64_encode(img),
+            }
+        }));
+    }
+
+    // `imageConfig` always carries the aspect ratio; `imageSize` rides
+    // alongside it under the same object when set (issue 1167 — do not
+    // switch to `responseFormat.image`).
+    let mut image_config = Map::new();
+    image_config.insert("aspectRatio".to_string(), json!(req.aspect_ratio));
+    if let Some(size) = &req.image_size {
+        image_config.insert("imageSize".to_string(), json!(size));
+    }
+
+    let mut generation_config = Map::new();
+    generation_config.insert("imageConfig".to_string(), Value::Object(image_config));
+
+    // `thinkingConfig` only appears when at least one of its fields is
+    // set; each field is emitted independently.
+    let mut thinking_config = Map::new();
+    if let Some(level) = &req.thinking_level {
+        thinking_config.insert("thinkingLevel".to_string(), json!(level));
+    }
+    if let Some(include) = req.include_thoughts {
+        thinking_config.insert("includeThoughts".to_string(), json!(include));
+    }
+    if !thinking_config.is_empty() {
+        generation_config.insert("thinkingConfig".to_string(), Value::Object(thinking_config));
+    }
+
+    let mut body = Map::new();
+    body.insert(
+        "contents".to_string(),
+        json!([{ "role": "user", "parts": parts }]),
+    );
+    body.insert(
+        "generationConfig".to_string(),
+        Value::Object(generation_config),
+    );
+    if req.use_grounding {
+        body.insert("tools".to_string(), json!([{ "google_search": {} }]));
+    }
+
+    Value::Object(body)
+}
+
 impl GeminiAdapter for UreqGeminiAdapter {
     fn nanobanana_generate(&self, req: GeminiImageRequest) -> Result<GeminiResponse, String> {
-        use serde_json::json;
-
-        // Build the generateContent body: the prompt plus any reference
-        // images as inline-data parts, and the aspect ratio in the
-        // image-generation config.
-        let mut parts = vec![json!({ "text": req.prompt })];
-        for img in &req.reference_images {
-            parts.push(json!({
-                "inlineData": {
-                    "mimeType": "image/png",
-                    "data": base64_encode(img),
-                }
-            }));
-        }
-        let body = json!({
-            "contents": [{ "role": "user", "parts": parts }],
-            "generationConfig": { "imageConfig": { "aspectRatio": req.aspect_ratio } },
-        });
+        let body = build_nanobanana_body(&req);
         let text = self.post_json(&req.model, "generateContent", &body)?;
 
         let parsed = nanobanana::parse_image_response(&text)?;
@@ -200,6 +243,7 @@ impl GeminiAdapter for UreqGeminiAdapter {
             model_used: req.model,
             usage: AdapterUsage::default(),
             thought_signature: parsed.thought_signature,
+            grounding: parsed.grounding,
         })
     }
 
@@ -225,6 +269,7 @@ impl GeminiAdapter for UreqGeminiAdapter {
             model_used: req.model,
             usage: AdapterUsage::default(),
             thought_signature: None,
+            grounding: None,
         })
     }
 }
@@ -276,6 +321,28 @@ fn aspect_ratio_str(ar: aether_kinds::AspectRatio) -> &'static str {
     }
 }
 
+/// Map the wire `ImageSize` to the provider's `imageConfig.imageSize`
+/// string. Uppercase `K`; `"512"` has no `K`.
+fn image_size_str(size: aether_kinds::ImageSize) -> &'static str {
+    use aether_kinds::ImageSize as S;
+    match size {
+        S::S512 => "512",
+        S::K1 => "1K",
+        S::K2 => "2K",
+        S::K4 => "4K",
+    }
+}
+
+/// Map the wire `ThinkingLevel` to the provider's
+/// `thinkingConfig.thinkingLevel` string.
+fn thinking_level_str(level: aether_kinds::ThinkingLevel) -> &'static str {
+    use aether_kinds::ThinkingLevel as T;
+    match level {
+        T::Minimal => "minimal",
+        T::High => "high",
+    }
+}
+
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod.
@@ -295,7 +362,8 @@ mod native {
     use super::{
         DisabledGeminiAdapter, GeminiAdapter, GeminiConfig, GeminiImageRequest, GeminiMusicRequest,
         LyriaGenerate, LyriaGenerateResult, NanobananaGenerate, NanobananaGenerateResult,
-        UreqGeminiAdapter, aspect_ratio_str, lyria, map_adapter_error, nanobanana,
+        UreqGeminiAdapter, aspect_ratio_str, image_size_str, lyria, map_adapter_error, nanobanana,
+        thinking_level_str,
     };
     use crate::contentgen::adapter::{AdapterUsage, GeminiResponse};
     use crate::contentgen::dispatch::{BlockingCall, InFlightDispatch};
@@ -303,7 +371,7 @@ mod native {
     use crate::fs::{FileAdapter, LocalFileAdapter};
     use aether_actor::{OutboundReply, actor};
     use aether_data::{Kind, KindId, MailboxId, ReplyTo};
-    use aether_kinds::{GeminiError, Usage};
+    use aether_kinds::{GeminiError, GroundingMetadata, Usage};
     use aether_substrate::Mailer;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -472,6 +540,12 @@ mod native {
                 let model_used = resp.model_used;
                 let usage = to_usage(resp.usage);
                 let thought_signature = resp.thought_signature;
+                let grounding =
+                    resp.grounding
+                        .map(|(search_queries, source_urls)| GroundingMetadata {
+                            search_queries,
+                            source_urls,
+                        });
                 let Some(artifact) = resp.artifacts.into_iter().next() else {
                     return NanobananaGenerateResult::Err {
                         request_id,
@@ -485,7 +559,7 @@ mod native {
                         model_used,
                         usage,
                         thought_signature,
-                        grounding: None,
+                        grounding,
                     },
                     Err(e) => NanobananaGenerateResult::Err {
                         request_id,
@@ -599,6 +673,12 @@ mod native {
                 model: mail.model,
                 prompt: mail.prompt,
                 aspect_ratio: aspect_ratio_str(mail.aspect_ratio).to_string(),
+                image_size: mail.image_size.map(|s| image_size_str(s).to_string()),
+                thinking_level: mail
+                    .thinking_level
+                    .map(|l| thinking_level_str(l).to_string()),
+                include_thoughts: mail.include_thoughts,
+                use_grounding: mail.use_grounding.unwrap_or(false),
                 reference_images,
             };
             let reply_to = OutboundReply::reply_target(ctx).unwrap_or(ReplyTo::NONE);
@@ -1064,6 +1144,7 @@ mod native {
                     prompt: "a single red dot on white".to_string(),
                     aspect_ratio: "1:1".to_string(),
                     reference_images: Vec::new(),
+                    ..Default::default()
                 })
                 .expect("live nanobanana request succeeds");
             assert!(!resp.artifacts.is_empty());
@@ -1093,6 +1174,50 @@ mod native {
                 let n = d.as_nanos() as u64;
                 n
             })
+        }
+
+        /// With every knob set, the request body carries
+        /// `imageConfig.imageSize`, `thinkingConfig.thinkingLevel` /
+        /// `includeThoughts`, and `tools[0].google_search` (issue 1167).
+        #[test]
+        fn nanobanana_body_carries_set_params() {
+            use crate::contentgen::adapter::GeminiImageRequest;
+            let body = super::super::build_nanobanana_body(&GeminiImageRequest {
+                model: "gemini-3.1-flash-image-preview".to_string(),
+                prompt: "a cat".to_string(),
+                aspect_ratio: "16:9".to_string(),
+                image_size: Some("2K".to_string()),
+                thinking_level: Some("high".to_string()),
+                include_thoughts: Some(true),
+                use_grounding: true,
+                reference_images: Vec::new(),
+            });
+            let gcfg = &body["generationConfig"];
+            assert_eq!(gcfg["imageConfig"]["aspectRatio"], "16:9");
+            assert_eq!(gcfg["imageConfig"]["imageSize"], "2K");
+            assert_eq!(gcfg["thinkingConfig"]["thinkingLevel"], "high");
+            assert_eq!(gcfg["thinkingConfig"]["includeThoughts"], true);
+            assert_eq!(body["tools"][0]["google_search"], serde_json::json!({}));
+        }
+
+        /// With the optional knobs unset, the body has no `imageSize`,
+        /// no `thinkingConfig`, and no `tools` key — only the always-on
+        /// `aspectRatio` survives under `imageConfig`.
+        #[test]
+        fn nanobanana_body_omits_unset_params() {
+            use crate::contentgen::adapter::GeminiImageRequest;
+            let body = super::super::build_nanobanana_body(&GeminiImageRequest {
+                model: "gemini-3.1-flash-image-preview".to_string(),
+                prompt: "a cat".to_string(),
+                aspect_ratio: "1:1".to_string(),
+                reference_images: Vec::new(),
+                ..Default::default()
+            });
+            let gcfg = &body["generationConfig"];
+            assert_eq!(gcfg["imageConfig"]["aspectRatio"], "1:1");
+            assert!(gcfg["imageConfig"].get("imageSize").is_none());
+            assert!(gcfg.get("thinkingConfig").is_none());
+            assert!(body.get("tools").is_none());
         }
     }
 }

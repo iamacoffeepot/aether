@@ -182,20 +182,23 @@ pub fn validate(shape: &ModelShape, inputs: &ValidationInputs) -> Result<(), Gem
 }
 
 /// Parse the base64 image payload + grounding/thought metadata out of a
-/// Nano Banana response. Returns `(image_bytes, thought_signature,
-/// grounding)`. Factored out so a fixture-replay test locks the shape.
+/// Nano Banana response. Factored out so a fixture-replay test locks the
+/// shape.
 pub fn parse_image_response(json: &str) -> Result<ParsedImage, String> {
     use serde_json::Value;
 
     let parsed: Value = serde_json::from_str(json).map_err(|e| format!("parse response: {e}"))?;
 
-    // The image rides as an inline-data part inside the first
-    // candidate's content parts.
-    let parts = parsed
+    let candidate = parsed
         .get("candidates")
         .and_then(Value::as_array)
         .and_then(|c| c.first())
-        .and_then(|c| c.get("content"))
+        .ok_or_else(|| "response missing candidates[0]".to_string())?;
+
+    // The image rides as an inline-data part inside the first
+    // candidate's content parts.
+    let parts = candidate
+        .get("content")
         .and_then(|c| c.get("parts"))
         .and_then(Value::as_array)
         .ok_or_else(|| "response missing candidates[0].content.parts".to_string())?;
@@ -213,16 +216,63 @@ pub fn parse_image_response(json: &str) -> Result<ParsedImage, String> {
         .find_map(|p| p.get("thoughtSignature").and_then(Value::as_str))
         .map(ToString::to_string);
 
+    let grounding = parse_grounding(candidate);
+
     Ok(ParsedImage {
         bytes,
         thought_signature,
+        grounding,
     })
+}
+
+/// Pull the `groundingMetadata` block off a candidate, mapping
+/// `webSearchQueries` to search queries and `groundingChunks[].uri` to
+/// source URLs. Returns `None` when the block is absent. The grounding
+/// is carried as inline `(search_queries, source_urls)` so the adapter
+/// layer doesn't depend on the provider kinds in `aether-kinds`.
+fn parse_grounding(candidate: &serde_json::Value) -> Option<(Vec<String>, Vec<String>)> {
+    use serde_json::Value;
+
+    let meta = candidate.get("groundingMetadata")?;
+
+    let search_queries = meta
+        .get("webSearchQueries")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let source_urls = meta
+        .get("groundingChunks")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|chunk| {
+                    chunk
+                        .get("web")
+                        .and_then(|w| w.get("uri"))
+                        .or_else(|| chunk.get("uri"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some((search_queries, source_urls))
 }
 
 /// Result of [`parse_image_response`].
 pub struct ParsedImage {
     pub bytes: Vec<u8>,
     pub thought_signature: Option<String>,
+    /// Grounding `(search_queries, source_urls)` parsed from
+    /// `candidates[0].groundingMetadata`; `None` when absent.
+    pub grounding: Option<(Vec<String>, Vec<String>)>,
 }
 
 /// Shared base64 decode for the media backends (the image path here and
@@ -368,6 +418,33 @@ mod tests {
         // The fixture embeds the base64 of "Man" as a stand-in image.
         assert_eq!(parsed.bytes, b"Man");
         assert_eq!(parsed.thought_signature.as_deref(), Some("sig-abc"));
+        // No `groundingMetadata` block in the v2 fixture.
+        assert!(parsed.grounding.is_none());
+    }
+
+    #[test]
+    fn parses_grounded_fixture_response() {
+        const FIXTURE: &str = include_str!("fixtures/nanobanana_grounded_response.json");
+        let parsed =
+            parse_image_response(FIXTURE).expect("grounded fixture is a valid NB response");
+        assert_eq!(parsed.bytes, b"Man");
+        let (search_queries, source_urls) = parsed
+            .grounding
+            .expect("groundingMetadata block is present");
+        assert_eq!(
+            search_queries,
+            vec![
+                "current eiffel tower height".to_string(),
+                "eiffel tower color 2026".to_string(),
+            ]
+        );
+        assert_eq!(
+            source_urls,
+            vec![
+                "https://en.wikipedia.org/wiki/Eiffel_Tower".to_string(),
+                "https://www.toureiffel.paris/en".to_string(),
+            ]
+        );
     }
 
     #[test]
