@@ -46,12 +46,12 @@ pub const DEFAULT_TIMEOUT_MS: u32 = 120_000;
 /// Models the Messages-API backend accepts. The cap validates a
 /// request's `model` against this before any dispatch; the CLI backend
 /// passes the model through to `claude` and doesn't gate (the CLI
-/// validates). Pinned per the 2026-05 model lineup; bump as new models
+/// validates). Pinned to the 2026-05 model lineup; bump as new models
 /// ship.
 const SUPPORTED_MESSAGES_MODELS: &[&str] = &[
-    "claude-opus-4-20250514",
-    "claude-sonnet-4-20250514",
-    "claude-3-5-haiku-20241022",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
 ];
 
 /// Adapter returned when `ANTHROPIC_API_KEY` is unset (or
@@ -893,7 +893,7 @@ mod native {
             let adapter = UreqAnthropicAdapter::new(key, Duration::from_secs(30));
             let resp = adapter
                 .messages_send(&AnthropicRequest {
-                    model: "claude-3-5-haiku-20241022".to_string(),
+                    model: "claude-haiku-4-5-20251001".to_string(),
                     prompt: "say hi".to_string(),
                     system: None,
                     max_tokens: Some(5),

@@ -178,7 +178,7 @@ mod tests {
         let resp = parse_messages_response(FIXTURE, "fallback-model", 42)
             .expect("fixture is a valid Messages-API response");
         assert_eq!(resp.text, "Hello! How can I help you today?");
-        assert_eq!(resp.model_used, "claude-opus-4-20250514");
+        assert_eq!(resp.model_used, "claude-opus-4-7");
         assert_eq!(resp.usage.input_tokens, 12);
         assert_eq!(resp.usage.output_tokens, 9);
         assert_eq!(resp.usage.wall_clock_ms, 42);
