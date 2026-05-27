@@ -23,17 +23,47 @@
 #     reuses the already-compiled release deps and only the changed
 #     workspace crates recompile.
 #
+# Workload tiers (ADR-0085 amendment, iamacoffeepot/aether#1222). The
+# comparator uses ONE drive + ONE tier-selection per process, so the per-tier
+# fidelity cap (fewer trials for the slow tiers) is expressed as separate
+# comparator passes, all merged into the ONE sticky comment:
+#
+#   1. light latency   — AETHER_PERF_TIER=light, full K → the `latency`
+#                        section. The verdict / gate signal (low variance).
+#   2. heavy+real lat. — AETHER_PERF_TIER=heavy,real, reduced K → the
+#                        `latency.heavy` + `latency.real` sections (trend, no
+#                        verdict). The expensive pass: heavy nodes burn CPU and
+#                        the real tier is always paced (60 Hz) regardless of
+#                        drive, so each real cell sleeps ~frames/pace_hz. Fewer
+#                        trials (the fidelity cap) keep it inside the budget.
+#   3. saturate        — AETHER_PERF_TIER=light,heavy, reduced K → the
+#                        `throughput` section. `real` is omitted: it is always
+#                        paced-latency, so running it under saturate would only
+#                        re-emit `latency.real` redundantly (ADR-0085).
+#
+# Each pass renders its own markdown body (only its sections are present), and
+# the merge below strips the duplicate sticky marker so the workflow still
+# upserts a single comment. Both release builds are shared across all three
+# passes; only the K interleaved trials repeat per pass.
+#
 # Env knobs (defaults tuned for the CI preset — warm, a fan-out + chain
-# subset, ~1 min of measurement):
-#   PERF_K               trials per side (default 12)
+# subset, ~1 min of measurement for the light pass):
+#   PERF_K               light-pass trials per side (default 12). The
+#                        verdict tier runs at full K.
+#   PERF_K_TREND         heavy/real-latency + saturate trials per side
+#                        (default 6 — the per-tier fidelity cap, ~half the
+#                        light K). These tiers are no-verdict characterisation
+#                        (ADR-0085 amendment), so trend-quality K is all they
+#                        need, and the slow tiers (CPU burn + paced reals)
+#                        dominate the budget — fewer trials hold the 30-min cap.
 #   AETHER_PERF_WORKERS  pool sizes (default "max,2")
 #   AETHER_PERF_FRAMES   frames per cell (default 200)
 #   AETHER_PERF_TOPOS    "ci" | "full" (default "ci")
 #   AETHER_PERF_BACKLOG  per-tick Ping burst for the saturate pass
 #                        (default 512; iamacoffeepot/aether#1202). Set
-#                        per pass internally — AETHER_PERF_DRIVE is NOT a
-#                        caller knob here; the script always runs both a
-#                        latency and a saturate pass and merges them.
+#                        per pass internally — AETHER_PERF_DRIVE and
+#                        AETHER_PERF_TIER are NOT caller knobs here; the script
+#                        drives the three tiered passes itself and merges them.
 #   PERF_BASE_CACHE      file path for the cross-run base-binary cache
 #                        (set by the workflow; unset locally = always build)
 #   PERF_BASE_ENV        space-separated KEY=VALUE list applied as env to
@@ -54,6 +84,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 K="${PERF_K:-12}"
+K_trend="${PERF_K_TREND:-6}"
 export AETHER_PERF_WORKERS="${AETHER_PERF_WORKERS:-max,2}"
 export AETHER_PERF_FRAMES="${AETHER_PERF_FRAMES:-200}"
 export AETHER_PERF_TOPOS="${AETHER_PERF_TOPOS:-ci}"
@@ -97,7 +128,7 @@ compare_bin="$work/aether-perf-compare"
 git fetch --no-tags --quiet origin main
 base_sha="$(git merge-base HEAD FETCH_HEAD)"
 base_short="$(git rev-parse --short "$base_sha")"
-echo "[perf-compare] baseline = merge-base $base_short; K=$K, workers=$AETHER_PERF_WORKERS, frames=$AETHER_PERF_FRAMES, topos=$AETHER_PERF_TOPOS"
+echo "[perf-compare] baseline = merge-base $base_short; K=$K (light) / $K_trend (trend), workers=$AETHER_PERF_WORKERS, frames=$AETHER_PERF_FRAMES, topos=$AETHER_PERF_TOPOS"
 
 # Build the candidate (PR) binaries into the shared target, then copy them
 # aside. The base build below reuses this same target dir, and both crates
@@ -154,23 +185,26 @@ EOF
     fi
 fi
 
-# A single comparator run is single-mode: AETHER_PERF_DRIVE applies to
-# *both* the base and candidate trial subprocesses, so one run yields
-# either the latency section or the throughput section, never both
-# (iamacoffeepot/aether#1202). Run the comparator twice — a latency pass
-# and a saturate pass — then concatenate the two rendered bodies into one
-# perf-report.md, stripping the second body's duplicate STICKY_MARKER (its
-# first line) so the workflow's marker-based upsert still matches a single
-# sticky comment. Each metric is then measured in its proper regime and
-# both land in the same comment. The release builds above are shared
-# across both passes; only the K interleaved trials repeat.
+# A single comparator run is single-mode: AETHER_PERF_DRIVE *and*
+# AETHER_PERF_TIER apply to *both* the base and candidate trial subprocesses,
+# so one run yields one regime over one tier-selection (iamacoffeepot/aether#1202
+# + ADR-0085 amendment). Run the comparator THREE times — a light-latency pass
+# (the verdict), a heavy+real-latency pass (trend, reduced K), and a saturate
+# pass (light+heavy throughput, reduced K) — then concatenate the rendered
+# bodies into one perf-report.md, stripping each later body's duplicate
+# STICKY_MARKER (its first line) so the workflow's marker-based upsert still
+# matches a single sticky comment. Each tier is then measured in its proper
+# regime at its own fidelity, and all land in the same comment. The release
+# builds above are shared across all three passes; only the K interleaved
+# trials repeat.
 sticky_marker='<!-- aether-perf-report -->'
 backlog="${AETHER_PERF_BACKLOG:-512}"
 
-# Pass 1: latency (today's behaviour). Writes the JSON report + the
-# primary markdown body (the STICKY_MARKER rides on its first line).
-echo "[perf-compare] pass 1/2: latency — $K interleaved trials per side…"
-AETHER_PERF_DRIVE=latency "$compare_bin" \
+# Pass 1: light-tier latency — the verdict / gate signal, at full K. Writes
+# the JSON report + the primary markdown body (the STICKY_MARKER rides on its
+# first line). Emits only the `latency` section (light tier).
+echo "[perf-compare] pass 1/3: light latency — $K interleaved trials per side…"
+AETHER_PERF_DRIVE=latency AETHER_PERF_TIER=light "$compare_bin" \
     --base "$base_trial" \
     --cand "$cand_trial" \
     ${base_env_args[@]+"${base_env_args[@]}"} \
@@ -181,26 +215,50 @@ AETHER_PERF_DRIVE=latency "$compare_bin" \
     --subtitle "baseline $base_short · $K trials/config, interleaved on one runner$pin_note" \
     > "$md_out"
 
-# Pass 2: throughput under saturation. Drive both subprocesses in
-# saturate mode with the same backlog. Append its body to perf-report.md
-# with the leading STICKY_MARKER line dropped (tail -n +2), keeping a
-# single marker in the merged comment.
-echo "[perf-compare] pass 2/2: saturate (backlog=$backlog) — $K interleaved trials per side…"
-sat_md="$work/perf-report-saturate.md"
-AETHER_PERF_DRIVE=saturate AETHER_PERF_BACKLOG="$backlog" "$compare_bin" \
+# A later pass's body is appended with its leading STICKY_MARKER line dropped
+# (tail -n +2), keeping a single marker in the merged comment.
+append_pass() {
+    local pass_md="$1"
+    {
+        printf '\n'
+        tail -n +2 "$pass_md"
+    } >> "$md_out"
+}
+
+# Pass 2: heavy+real latency — characterisation (no verdict), at the reduced
+# trend K (the per-tier fidelity cap). The real tier is always driven paced
+# (60 Hz) regardless of AETHER_PERF_DRIVE, so this pass emits both the
+# `latency.heavy` and `latency.real` sections. The slow pass: heavy CPU burn +
+# paced reals, which is why K is reduced here.
+echo "[perf-compare] pass 2/3: heavy+real latency — $K_trend interleaved trials per side…"
+trend_md="$work/perf-report-trend.md"
+AETHER_PERF_DRIVE=latency AETHER_PERF_TIER=heavy,real "$compare_bin" \
     --base "$base_trial" \
     --cand "$cand_trial" \
     ${base_env_args[@]+"${base_env_args[@]}"} \
     ${cand_env_args[@]+"${cand_env_args[@]}"} \
-    -k "$K" \
-    --title "throughput (saturation, backlog $backlog) — PR vs merge-base $base_short" \
-    --subtitle "baseline $base_short · $K trials/config, interleaved on one runner$pin_note" \
-    > "$sat_md"
+    -k "$K_trend" \
+    --title "heavy + real latency (trend) — PR vs merge-base $base_short" \
+    --subtitle "baseline $base_short · $K_trend trials/config (fidelity-capped), interleaved on one runner$pin_note" \
+    > "$trend_md"
+append_pass "$trend_md"
 
-{
-    printf '\n'
-    tail -n +2 "$sat_md"
-} >> "$md_out"
+# Pass 3: throughput under saturation — light + heavy only (real is always
+# paced-latency, so it has no saturate regime; ADR-0085). Drive both
+# subprocesses in saturate mode with the same backlog, at the reduced trend K.
+# Emits the `throughput` section.
+echo "[perf-compare] pass 3/3: saturate (backlog=$backlog) — $K_trend interleaved trials per side…"
+sat_md="$work/perf-report-saturate.md"
+AETHER_PERF_DRIVE=saturate AETHER_PERF_TIER=light,heavy AETHER_PERF_BACKLOG="$backlog" "$compare_bin" \
+    --base "$base_trial" \
+    --cand "$cand_trial" \
+    ${base_env_args[@]+"${base_env_args[@]}"} \
+    ${cand_env_args[@]+"${cand_env_args[@]}"} \
+    -k "$K_trend" \
+    --title "throughput (saturation, backlog $backlog) — PR vs merge-base $base_short" \
+    --subtitle "baseline $base_short · $K_trend trials/config (fidelity-capped), interleaved on one runner$pin_note" \
+    > "$sat_md"
+append_pass "$sat_md"
 
 # Belt-and-braces: the merged body must carry exactly one sticky marker so
 # the workflow's upsert edits a single comment in place.

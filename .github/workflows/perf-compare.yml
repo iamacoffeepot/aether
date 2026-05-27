@@ -62,10 +62,14 @@ jobs:
       pull-requests: write
     # Candidate build + interleaved trials. The base build is skipped on a
     # cache hit (iamacoffeepot/aether#1084) and shares the candidate's
-    # target dir when cold. The comparator runs twice — a latency pass and
-    # a saturate pass (iamacoffeepot/aether#1202) — so the *measurement*
-    # roughly doubles (the two release builds are shared across both
-    # passes; only the K interleaved trials repeat), still inside this cap.
+    # target dir when cold. The comparator runs three times — a light-latency
+    # pass (verdict, full K), a heavy+real-latency pass (trend, reduced K), and
+    # a saturate pass (light+heavy throughput, reduced K) (ADR-0085 amendment,
+    # iamacoffeepot/aether#1222) — so the *measurement* is ~light + 2 capped
+    # passes. The two release builds are shared across all three passes; only
+    # the K interleaved trials repeat, and the slow tiers (heavy CPU burn +
+    # paced reals) run at the reduced trend K to hold this cap. The real
+    # validation is the perf-compare run on this PR itself.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -114,6 +118,13 @@ jobs:
         env:
           AETHER_PERF_WORKERS: max,2
           AETHER_PERF_TOPOS: ci
+          # All three workload tiers (ADR-0085 amendment,
+          # iamacoffeepot/aether#1222): aether-perf-plot reuses the tier parser
+          # (parse_topologies), so this makes it render per-cell PNGs for the
+          # heavy + real cells too, not just light. The real tier is always
+          # driven paced internally regardless of AETHER_PERF_DRIVE, so the
+          # default (latency) drive here is correct for it.
+          AETHER_PERF_TIER: light,heavy,real
           AETHER_PERF_FRAMES: "200"
           AETHER_PERF_PLOT_DIR: perf-plots
         run: |
