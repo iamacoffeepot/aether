@@ -385,11 +385,166 @@ impl RpcSession {
         }
     }
 
-    /// [`Self::call`], discarding any reply events — for mail whose
-    /// only interesting outcome is "did the call reach the substrate
-    /// and settle". The terminal `ReplyEnd` still gates the result.
-    pub async fn call_settled(&self, envelope: MailEnvelope) -> anyhow::Result<()> {
-        self.call(envelope).await.map(|_events| ())
+    /// Like [`Self::call`], but bounded by `timeout` and **partial-aware**:
+    /// on timeout it returns the `ReplyEvent`s collected *so far* plus a
+    /// `timed_out: true` flag, rather than discarding the in-flight
+    /// future's buffered events (issue 1242).
+    ///
+    /// The collection loop runs *inside* the timeout scope — a plain
+    /// `tokio::time::timeout(call(...))` would drop the `call` future on
+    /// the timeout arm, losing both the partial `Vec` and the `cid`
+    /// de-registration. Here the `select!` between `rx.recv()` and a
+    /// `sleep(timeout)` writes into a buffer this fn owns, and the `cid`
+    /// is removed from `pending` on every exit (settle, timeout, or
+    /// transport error), so a timed-out call leaks no `pending` entry.
+    ///
+    /// Self-healing on a dead socket is the same single re-dial + retry
+    /// as [`Self::call`]; the `timed_out` flag is `false` on every
+    /// non-timeout terminal (settle / error).
+    pub async fn call_collecting(
+        &self,
+        envelope: MailEnvelope,
+        timeout: Duration,
+    ) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
+        match self.call_collecting_once(&envelope, timeout).await {
+            Ok(outcome) => Ok(outcome),
+            Err(CallError::Transport { generation, source }) => {
+                tracing::warn!(
+                    target: "aether_mcp::rpc",
+                    error = %source,
+                    "rpc call_collecting hit a dead socket; re-dialing the hub",
+                );
+                self.reconnect(generation).await?;
+                self.call_collecting_once(&envelope, timeout)
+                    .await
+                    .map_err(CallError::into_anyhow)
+            }
+            Err(other) => Err(other.into_anyhow()),
+        }
+    }
+
+    /// One attempt of [`Self::call_collecting`] against the live
+    /// connection. Mirrors [`Self::call_once`]'s register / write /
+    /// drain / deregister bracket, adding the timeout arm.
+    async fn call_collecting_once(
+        &self,
+        envelope: &MailEnvelope,
+        timeout: Duration,
+    ) -> Result<(Vec<MailEnvelope>, bool), CallError> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let conn = self.live();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cid = {
+            let mut pending = conn
+                .pending
+                .lock()
+                .expect("rpc pending mutex is never poisoned");
+            if conn.dead.load(Ordering::Acquire) {
+                return Err(CallError::Transport {
+                    generation,
+                    source: anyhow::anyhow!("rpc connection is closed"),
+                });
+            }
+            let write = conn
+                .client
+                .lock()
+                .expect("rpc client mutex is never poisoned")
+                .call(envelope.clone());
+            let cid = match write {
+                Ok(cid) => cid,
+                Err(e) => {
+                    return Err(CallError::Transport {
+                        generation,
+                        source: anyhow::anyhow!("rpc call write failed: {e}"),
+                    });
+                }
+            };
+            pending.insert(cid, tx);
+            cid
+        };
+
+        let mut events = Vec::new();
+        // `sleep` is created once, outside the loop, so its deadline is
+        // the wall-clock cap on the *whole* collection — not reset on
+        // each `ReplyEvent`.
+        let sleep = time::sleep(timeout);
+        tokio::pin!(sleep);
+        let outcome = loop {
+            tokio::select! {
+                frame = rx.recv() => match frame {
+                    Some(WireFrame::ReplyEvent { envelope, .. }) => events.push(envelope),
+                    Some(WireFrame::ReplyEnd { result, .. }) => {
+                        break result
+                            .map(|()| false)
+                            .map_err(|e| {
+                                CallError::Call(anyhow::anyhow!("rpc call failed: {e:?}"))
+                            });
+                    }
+                    Some(_) => {}
+                    None => {
+                        break Err(CallError::Transport {
+                            generation,
+                            source: anyhow::anyhow!(
+                                "rpc connection closed before the call ended"
+                            ),
+                        });
+                    }
+                },
+                () = &mut sleep => break Ok(true),
+            }
+        };
+        conn.pending
+            .lock()
+            .expect("rpc pending mutex is never poisoned")
+            .remove(&cid);
+        outcome.map(|timed_out| (events, timed_out))
+    }
+
+    /// Write a `Call` carrying `envelope` and return *without* awaiting
+    /// any reply — the fire-and-forget path (issue 1242). The server
+    /// still answers with `ReplyEnd` server-side, but no `pending` entry
+    /// is registered for the `cid`, so the router drops the inbound
+    /// `ReplyEvent` / `ReplyEnd` as unrouted (its `get(&cid)` misses) and
+    /// no state accumulates. A dead socket re-dials once, mirroring
+    /// [`Self::call`], so a poke against a just-bounced hub still lands.
+    pub async fn fire(&self, envelope: MailEnvelope) -> anyhow::Result<()> {
+        match self.fire_once(&envelope) {
+            Ok(()) => Ok(()),
+            Err(CallError::Transport { generation, source }) => {
+                tracing::warn!(
+                    target: "aether_mcp::rpc",
+                    error = %source,
+                    "rpc fire hit a dead socket; re-dialing the hub",
+                );
+                self.reconnect(generation).await?;
+                self.fire_once(&envelope).map_err(CallError::into_anyhow)
+            }
+            Err(other) => Err(other.into_anyhow()),
+        }
+    }
+
+    /// One attempt of [`Self::fire`]: write the `Call` on the live
+    /// connection without registering a `pending` entry. Synchronous —
+    /// there's nothing to await.
+    fn fire_once(&self, envelope: &MailEnvelope) -> Result<(), CallError> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let conn = self.live();
+        if conn.dead.load(Ordering::Acquire) {
+            return Err(CallError::Transport {
+                generation,
+                source: anyhow::anyhow!("rpc connection is closed"),
+            });
+        }
+        conn.client
+            .lock()
+            .expect("rpc client mutex is never poisoned")
+            .call(envelope.clone())
+            .map(|_cid| ())
+            .map_err(|e| CallError::Transport {
+                generation,
+                source: anyhow::anyhow!("rpc call write failed: {e}"),
+            })
     }
 }
 
@@ -450,10 +605,42 @@ mod tests {
         thread: Option<JoinHandle<()>>,
     }
 
+    /// How a [`FakeHub`] session answers each `Call` (issue 1242 tests).
+    /// The default echo (`reply_events: 1`, `send_end: true`) is the
+    /// pre-1242 behaviour the older re-dial tests depend on.
+    #[derive(Clone, Copy)]
+    struct ServeMode {
+        /// How many `ReplyEvent`s (each echoing the call's envelope) to
+        /// emit before the terminal. `>1` exercises multi-reply
+        /// collection.
+        reply_events: usize,
+        /// Whether to write the terminal `ReplyEnd { Ok }`. `false`
+        /// withholds it so a `call_collecting` hits its timeout with the
+        /// chain still "open" — the partial-on-timeout path.
+        send_end: bool,
+    }
+
+    impl ServeMode {
+        /// One `ReplyEvent` + `ReplyEnd` — the original echo behaviour.
+        fn echo() -> Self {
+            Self {
+                reply_events: 1,
+                send_end: true,
+            }
+        }
+    }
+
     impl FakeHub {
         /// Bind, accept, handshake, and echo `Call`s on `port`. `port`
         /// 0 lets the OS pick; the chosen port is returned alongside.
         fn serve(port: u16) -> (Self, u16) {
+            Self::serve_with(port, ServeMode::echo())
+        }
+
+        /// [`Self::serve`] with an explicit [`ServeMode`] — lets a test
+        /// drive multi-reply collection or withhold the terminal
+        /// `ReplyEnd` to force a timeout.
+        fn serve_with(port: u16, mode: ServeMode) -> (Self, u16) {
             let listener = TcpListener::bind(("127.0.0.1", port)).expect("fake hub bind");
             let bound_port = listener.local_addr().expect("local_addr").port();
             // Non-blocking accept so the loop can observe the shutdown
@@ -485,7 +672,7 @@ mod tests {
                                 sessions.push(
                                     thread::Builder::new()
                                         .name("fake-hub-session".into())
-                                        .spawn(move || Self::run_session(&stream, &shutdown))
+                                        .spawn(move || Self::run_session(&stream, &shutdown, mode))
                                         .expect("spawn session"),
                                 );
                             }
@@ -513,9 +700,12 @@ mod tests {
         }
 
         /// Handshake + blocking echo loop for one accepted connection.
-        /// Returns when the connection closes (`stop` shuts it down, or
-        /// the client drops) — `read_frame` then errors.
-        fn run_session(stream: &TcpStream, shutdown: &AtomicBool) {
+        /// Per [`ServeMode`] it emits `mode.reply_events` `ReplyEvent`s
+        /// (each echoing the call's envelope) and, when `mode.send_end`,
+        /// the terminal `ReplyEnd { Ok }`. Returns when the connection
+        /// closes (`stop` shuts it down, or the client drops) —
+        /// `read_frame` then errors.
+        fn run_session(stream: &TcpStream, shutdown: &AtomicBool, mode: ServeMode) {
             let mut write_half = stream.try_clone().expect("clone write half");
             let mut reader = BufReader::new(stream.try_clone().expect("clone read half"));
 
@@ -550,22 +740,26 @@ mod tests {
                     envelope,
                 } = frame
                 {
-                    write_frame(
-                        &mut write_half,
-                        &WireFrame::ReplyEvent {
-                            cid,
-                            envelope: envelope.clone(),
-                        },
-                    )
-                    .expect("write ReplyEvent");
-                    write_frame(
-                        &mut write_half,
-                        &WireFrame::ReplyEnd {
-                            cid,
-                            result: Ok(()),
-                        },
-                    )
-                    .expect("write ReplyEnd");
+                    for _ in 0..mode.reply_events {
+                        write_frame(
+                            &mut write_half,
+                            &WireFrame::ReplyEvent {
+                                cid,
+                                envelope: envelope.clone(),
+                            },
+                        )
+                        .expect("write ReplyEvent");
+                    }
+                    if mode.send_end {
+                        write_frame(
+                            &mut write_half,
+                            &WireFrame::ReplyEnd {
+                                cid,
+                                result: Ok(()),
+                            },
+                        )
+                        .expect("write ReplyEnd");
+                    }
                 }
             }
         }
@@ -715,5 +909,125 @@ mod tests {
         );
 
         hub2.stop();
+    }
+
+    /// The count of registered `pending` entries on the live connection
+    /// — a timed-out / fired call must leave this at zero, proving no
+    /// `cid` leaks (issue 1242).
+    fn pending_count(session: &RpcSession) -> usize {
+        session.live().pending.lock().expect("pending mutex").len()
+    }
+
+    /// Issue 1242: `call_collecting` surfaces every `ReplyEvent` the hub
+    /// emitted before the terminal, in arrival order, with
+    /// `timed_out == false` — and de-registers the `cid` so `pending` is
+    /// clean afterward. Two reply events per call exercises the
+    /// multi-reply collection the single-event `call_one` discarded.
+    #[tokio::test]
+    async fn call_collecting_returns_events_in_order() {
+        let (hub, port) = FakeHub::serve_with(
+            0,
+            ServeMode {
+                reply_events: 2,
+                send_end: true,
+            },
+        );
+        let session =
+            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+                .await
+                .expect("connect task")
+                .expect("connect");
+
+        let (events, timed_out) = session
+            .call_collecting(probe_envelope(), Duration::from_secs(5))
+            .await
+            .expect("call_collecting succeeds against the live hub");
+
+        assert!(!timed_out, "a settled call is not a timeout");
+        assert_eq!(events.len(), 2, "both echoed reply events are surfaced");
+        for event in &events {
+            assert_eq!(
+                event.payload,
+                probe_envelope().payload,
+                "each reply echoes the probe envelope",
+            );
+        }
+        assert_eq!(
+            pending_count(&session),
+            0,
+            "a settled call de-registers its cid",
+        );
+
+        hub.stop();
+    }
+
+    /// Issue 1242: when the hub withholds the terminal `ReplyEnd`,
+    /// `call_collecting` returns the events collected before the short
+    /// timeout with `timed_out == true`, and leaves no `cid` in
+    /// `pending` — the partial-on-timeout path the new logic must get
+    /// right (the buffer is owned outside the `select!`, so it survives
+    /// the timeout arm, and the `cid` is removed on every exit).
+    #[tokio::test]
+    async fn call_collecting_times_out_with_partial_and_clean_pending() {
+        let (hub, port) = FakeHub::serve_with(
+            0,
+            ServeMode {
+                reply_events: 1,
+                // No terminal — the call can only end via the timeout.
+                send_end: false,
+            },
+        );
+        let session =
+            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+                .await
+                .expect("connect task")
+                .expect("connect");
+
+        let (events, timed_out) = session
+            .call_collecting(probe_envelope(), Duration::from_millis(250))
+            .await
+            .expect("a timeout is not a transport error");
+
+        assert!(timed_out, "withholding ReplyEnd forces the timeout arm");
+        assert_eq!(
+            events.len(),
+            1,
+            "the reply that arrived before the timeout is still returned",
+        );
+        assert_eq!(
+            pending_count(&session),
+            0,
+            "a timed-out call must not leak its cid in pending",
+        );
+
+        hub.stop();
+    }
+
+    /// Issue 1242: `fire` writes the `Call` and returns without awaiting
+    /// any reply, registering no `pending` entry — the fire-and-forget
+    /// path. The hub's eventual `ReplyEnd` is dropped as an unrouted
+    /// frame (its `cid` has no `pending` sender), so no state
+    /// accumulates.
+    #[tokio::test]
+    async fn fire_does_not_register_pending() {
+        let (hub, port) = FakeHub::serve(0);
+        let session =
+            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+                .await
+                .expect("connect task")
+                .expect("connect");
+
+        session
+            .fire(probe_envelope())
+            .await
+            .expect("fire writes the call");
+
+        assert_eq!(
+            pending_count(&session),
+            0,
+            "fire registers nothing in pending",
+        );
+
+        hub.stop();
     }
 }
