@@ -357,8 +357,8 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_rejected_on_nb1() {
-        let err =
-            validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_8_1, None)).expect_err("ASPECT_RATIO_8_1 is NB2-only");
+        let err = validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_8_1, None))
+            .expect_err("ASPECT_RATIO_8_1 is NB2-only");
         let GeminiError::AspectRatioNotSupportedByModel { supported, .. } = err else {
             panic!("expected AspectRatioNotSupportedByModel, got {err:?}");
         };
@@ -367,14 +367,20 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_accepted_on_nb2() {
-        validate(nb2(), &inputs(AspectRatio::ASPECT_RATIO_8_1, Some(ImageSize::S512)))
-            .expect("ASPECT_RATIO_8_1 + S512 is valid on NB2");
+        validate(
+            nb2(),
+            &inputs(AspectRatio::ASPECT_RATIO_8_1, Some(ImageSize::S512)),
+        )
+        .expect("ASPECT_RATIO_8_1 + S512 is valid on NB2");
     }
 
     #[test]
     fn image_size_rejected_when_unsupported_by_model() {
-        let err = validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::S512)))
-            .expect_err("S512 is NB2-only");
+        let err = validate(
+            nb1(),
+            &inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::S512)),
+        )
+        .expect_err("S512 is NB2-only");
         assert!(matches!(
             err,
             GeminiError::ImageSizeNotSupportedByModel { .. }

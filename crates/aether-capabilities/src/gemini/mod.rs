@@ -890,7 +890,10 @@ mod native {
             );
             cap.on_nanobanana_generate(
                 &mut ctx,
-                nb_request("gemini-3.1-flash-image-preview", AspectRatio::ASPECT_RATIO_1_1),
+                nb_request(
+                    "gemini-3.1-flash-image-preview",
+                    AspectRatio::ASPECT_RATIO_1_1,
+                ),
             );
             let mut landing_ctx = NativeCtx::new(
                 &transport,
@@ -997,7 +1000,10 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            cap.on_nanobanana_generate(&mut ctx, nb_request("gemini-bogus", AspectRatio::ASPECT_RATIO_1_1));
+            cap.on_nanobanana_generate(
+                &mut ctx,
+                nb_request("gemini-bogus", AspectRatio::ASPECT_RATIO_1_1),
+            );
             match decode_reply::<NanobananaGenerateResult>(&rx) {
                 NanobananaGenerateResult::Err {
                     error: GeminiError::UnknownModel { model, supported },
@@ -1104,7 +1110,10 @@ mod native {
             );
             cap.on_nanobanana_generate(
                 &mut ctx,
-                nb_request("gemini-3.1-flash-image-preview", AspectRatio::ASPECT_RATIO_1_1),
+                nb_request(
+                    "gemini-3.1-flash-image-preview",
+                    AspectRatio::ASPECT_RATIO_1_1,
+                ),
             );
             let mut landing_ctx = NativeCtx::new(
                 &transport,
