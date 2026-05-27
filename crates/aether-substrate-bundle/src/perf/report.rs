@@ -1086,7 +1086,26 @@ fn push_latency_section(s: &mut String, name: &str, cells: &[CellComparison]) {
     } else {
         push_latency_trend_section(s, name, cells);
     }
+    push_plot_anchor(s, name);
 }
+
+/// Emit the per-section plot anchor (iamacoffeepot/aether#1228): an HTML
+/// comment `perf-publish-plots.sh` find-replaces with this section's
+/// candidate span-distribution plots (grouped by the matching `{tier}__`
+/// filename prefix). Only latency sections get plots — `perf-plot` renders
+/// one PNG per latency cell and nothing for the throughput section — so this
+/// is the only place an anchor is emitted. The marker carries the section
+/// name verbatim (`latency` / `latency.heavy` / `latency.real`) so the script
+/// matches a plot's tier prefix to its anchor exactly.
+#[allow(clippy::format_push_string)]
+fn push_plot_anchor(s: &mut String, name: &str) {
+    s.push_str(&format!("<!-- aether-perf-plots: {name} -->\n\n"));
+}
+
+/// Marker prefix the plot publisher (iamacoffeepot/aether#1228) scans for to
+/// co-locate each section's plots. One `<!-- aether-perf-plots: TIER -->`
+/// comment is emitted after each latency section by `push_plot_anchor`.
+pub const PLOT_ANCHOR_PREFIX: &str = "<!-- aether-perf-plots:";
 
 #[allow(clippy::format_push_string)]
 fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellComparison]) {
@@ -1128,8 +1147,12 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
 fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellComparison]) {
     let header =
         "| topology | w | metric | pct | base µs | this µs | Δ |\n|---|--:|---|---|--:|--:|--:|\n";
+    // A plain trend label — cell count + an explicit "no verdict"
+    // (iamacoffeepot/aether#1228). The improved/stable/regressed tally is
+    // reserved for the verdict-carrying sections (light latency + throughput);
+    // a no-verdict tier showing one would read as a misleading gate signal.
     s.push_str(&format!(
-        "<details><summary>{name} trend (no verdict — characterisation) — {} cells</summary>\n\n",
+        "<details><summary>{name} — {} cells, trend (no verdict)</summary>\n\n",
         cells.len()
     ));
     s.push_str(header);
@@ -1196,41 +1219,57 @@ fn kps(mps: f64) -> String {
 mod tests {
     use super::*;
 
-    /// Build a K-trial side from a per-trial `p50` series for one cell
-    /// (`fanout-8 @ 11w`, drain). Other percentiles track p50 ×1.2 / ×1.5
-    /// so the cell is well-formed; tests assert on p50. The cell rides in
-    /// a single `latency` section (iamacoffeepot/aether#1206).
+    /// One drain cell at `topo @ 11w` with the given `p50` (p90 / p99 / max
+    /// derived ×1.2 / ×1.5 / ×4 so the cell is well-formed; tests assert on
+    /// p50). Shared by the `fanout-8` (light) and `fanout-8-heavy` fixtures so
+    /// the derive lives in one place (`DuplicatedCode` guard).
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
+    fn cell_json(topo: &str, p50: u64) -> CellJson {
+        CellJson {
+            workers: 11,
+            topo: topo.to_owned(),
+            metric: Metric::Drain,
+            p50,
+            p90: (p50 as f64 * 1.2) as u64,
+            p99: (p50 as f64 * 1.5) as u64,
+            max: p50 * 4,
+            n: 1800,
+        }
+    }
+
+    /// Build a single-section [`TrialReport`] envelope (`DuplicatedCode` guard).
+    /// Every fixture trial here carries exactly one section; the envelope
+    /// fields (`schema` / `git_sha` / `pace_hz` / `frames`) are identical
+    /// across them, so factoring this stops the `TrialReport { .. }` block
+    /// from repeating in each builder.
+    fn single_section_trial(name: &str, version: &str, body: serde_json::Value) -> TrialReport {
+        TrialReport {
+            schema: TRIAL_SCHEMA.to_owned(),
+            git_sha: None,
+            pace_hz: None,
+            frames: 200,
+            sections: vec![RawSection {
+                name: name.to_owned(),
+                version: version.to_owned(),
+                body,
+            }],
+        }
+    }
+
+    /// Build a K-trial side from a per-trial `p50` series for one cell
+    /// (`fanout-8 @ 11w`, drain). The cell rides in a single `latency` section
+    /// (iamacoffeepot/aether#1206).
     fn side(p50s: &[u64]) -> Vec<TrialReport> {
         p50s.iter()
             .map(|&p50| {
-                let cells = vec![CellJson {
-                    workers: 11,
-                    topo: "fanout-8".to_owned(),
-                    metric: Metric::Drain,
-                    p50,
-                    p90: (p50 as f64 * 1.2) as u64,
-                    p99: (p50 as f64 * 1.5) as u64,
-                    max: p50 * 4,
-                    n: 1800,
-                }];
+                let cells = vec![cell_json("fanout-8", p50)];
                 let body =
                     serde_json::to_value(LatencySection { cells }).expect("encode latency body");
-                TrialReport {
-                    schema: TRIAL_SCHEMA.to_owned(),
-                    git_sha: None,
-                    pace_hz: None,
-                    frames: 200,
-                    sections: vec![RawSection {
-                        name: LatencySection::NAME.to_owned(),
-                        version: LatencySection::VERSION.to_owned(),
-                        body,
-                    }],
-                }
+                single_section_trial(LatencySection::NAME, LatencySection::VERSION, body)
             })
             .collect()
     }
@@ -1506,17 +1545,7 @@ mod tests {
                 }];
                 let body = serde_json::to_value(ThroughputSection { cells })
                     .expect("encode throughput body");
-                TrialReport {
-                    schema: TRIAL_SCHEMA.to_owned(),
-                    git_sha: None,
-                    pace_hz: None,
-                    frames: 200,
-                    sections: vec![RawSection {
-                        name: ThroughputSection::NAME.to_owned(),
-                        version: ThroughputSection::VERSION.to_owned(),
-                        body,
-                    }],
-                }
+                single_section_trial(ThroughputSection::NAME, ThroughputSection::VERSION, body)
             })
             .collect()
     }
@@ -1609,47 +1638,17 @@ mod tests {
         assert!(md.contains("throughput full grid"));
     }
 
-    /// One `fanout-8-heavy @ 11w` drain cell at the given `p50` (p90/p99/max
-    /// derived ×1.2 / ×1.5 / ×4) — the shared fixture cell for the tier tests.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    fn heavy_cell(p50: u64) -> CellJson {
-        CellJson {
-            workers: 11,
-            topo: "fanout-8-heavy".to_owned(),
-            metric: Metric::Drain,
-            p50,
-            p90: (p50 as f64 * 1.2) as u64,
-            p99: (p50 as f64 * 1.5) as u64,
-            max: p50 * 4,
-            n: 1800,
-        }
-    }
-
     /// Build a K-trial side carrying a single latency cell under the named
     /// tier section (ADR-0085 amendment) — the tier analog of [`side`]. The
     /// section name selects the tier (`latency` light, `latency.heavy`,
-    /// `latency.real`).
+    /// `latency.real`); the cell topology is `fanout-8-heavy` throughout.
     fn tier_side(section_name: &str, p50s: &[u64]) -> Vec<TrialReport> {
         p50s.iter()
             .map(|&p50| {
-                let cells = vec![heavy_cell(p50)];
+                let cells = vec![cell_json("fanout-8-heavy", p50)];
                 let body = serde_json::to_value(LatencySection { cells })
                     .expect("encode tier latency body");
-                TrialReport {
-                    schema: TRIAL_SCHEMA.to_owned(),
-                    git_sha: None,
-                    pace_hz: None,
-                    frames: 200,
-                    sections: vec![RawSection {
-                        name: section_name.to_owned(),
-                        version: LatencySection::VERSION.to_owned(),
-                        body,
-                    }],
-                }
+                single_section_trial(section_name, LatencySection::VERSION, body)
             })
             .collect()
     }
@@ -1659,7 +1658,7 @@ mod tests {
     /// realistic `AETHER_PERF_TIER=light,heavy` shape).
     fn with_heavy_section(mut side: Vec<TrialReport>, p50s: &[u64]) -> Vec<TrialReport> {
         for (t, &p50) in side.iter_mut().zip(p50s.iter()) {
-            let cells = vec![heavy_cell(p50)];
+            let cells = vec![cell_json("fanout-8-heavy", p50)];
             let body =
                 serde_json::to_value(LatencySection { cells }).expect("encode heavy latency body");
             t.sections.push(RawSection {
@@ -1732,8 +1731,8 @@ mod tests {
         // noise-band note for the heavy section — only the trend grid.
         let md = markdown(&rep, "PR 9999 vs main", "test");
         assert!(
-            md.contains("latency.heavy trend (no verdict"),
-            "heavy section renders as a no-verdict trend grid"
+            md.contains("latency.heavy — 3 cells, trend (no verdict)"),
+            "heavy section renders as a plain no-verdict trend grid"
         );
         assert!(
             !md.contains("latency.heavy: no cells moved beyond the noise band"),
@@ -1795,5 +1794,87 @@ mod tests {
             (0, 0),
             "the real tier's verdict is excluded from the headline too"
         );
+    }
+
+    #[test]
+    fn latency_sections_emit_plot_anchors_throughput_does_not() {
+        // iamacoffeepot/aether#1228: each latency section (any tier) emits a
+        // per-section plot anchor `perf-publish-plots.sh` find-replaces; the
+        // throughput section emits none (perf-plot renders no throughput PNGs).
+        // Build a report carrying light + heavy latency sections *and* a
+        // throughput section so all three render in one body.
+        let light_base = with_heavy_section(
+            side(&[167_000, 165_000, 169_000, 166_000]),
+            &[167_000, 165_000, 169_000, 166_000],
+        );
+        let light_cand = with_heavy_section(
+            side(&[33_000, 34_000, 32_000, 33_500]),
+            &[33_000, 34_000, 32_000, 33_500],
+        );
+        // Splice a throughput section onto each side.
+        let base = with_throughput(light_base, &[100_000.0, 98_000.0, 102_000.0, 99_000.0]);
+        let cand = with_throughput(light_cand, &[200_000.0, 198_000.0, 202_000.0, 199_000.0]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+
+        assert!(
+            md.contains("<!-- aether-perf-plots: latency -->"),
+            "light latency section emits its plot anchor"
+        );
+        assert!(
+            md.contains("<!-- aether-perf-plots: latency.heavy -->"),
+            "heavy latency section emits its plot anchor"
+        );
+        // The throughput section renders a verdict table but no plot anchor.
+        assert!(
+            md.contains("| topology | w | base k/s |"),
+            "throughput table is present"
+        );
+        assert!(
+            !md.contains("<!-- aether-perf-plots: throughput -->"),
+            "throughput section emits no plot anchor (perf-plot is latency-only)"
+        );
+    }
+
+    #[test]
+    fn trend_section_carries_no_verdict_tally() {
+        // iamacoffeepot/aether#1228 secondary: a non-light latency section's
+        // summary is a plain trend label (cell count + "no verdict"), never an
+        // improved/stable/regressed tally — the tally would read as a gate
+        // signal for a section that carries none.
+        let base = tier_side("latency.heavy", &[167_000, 165_000, 169_000, 166_000]);
+        let cand = tier_side("latency.heavy", &[33_000, 34_000, 32_000, 33_500]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+        assert!(
+            md.contains("latency.heavy — 3 cells, trend (no verdict)"),
+            "the trend summary is a plain cell-count + no-verdict label"
+        );
+        assert!(
+            !md.contains("latency.heavy: improved") && !md.contains("latency.heavy improved"),
+            "no verdict tally leaks into the trend section header"
+        );
+    }
+
+    /// Attach a `throughput` section (one `fanout-8 @ 11w` cell per trial,
+    /// rate from `rates`) to an existing side, so a trial carries both its
+    /// latency section(s) and the throughput one — the realistic saturate +
+    /// latency shape used by the anchor test.
+    fn with_throughput(mut side: Vec<TrialReport>, rates: &[f64]) -> Vec<TrialReport> {
+        for (t, &mails_per_sec) in side.iter_mut().zip(rates.iter()) {
+            let cells = vec![ThroughputCell {
+                workers: 11,
+                topo: "fanout-8".to_owned(),
+                mails_per_sec,
+            }];
+            let body =
+                serde_json::to_value(ThroughputSection { cells }).expect("encode throughput body");
+            t.sections.push(RawSection {
+                name: ThroughputSection::NAME.to_owned(),
+                version: ThroughputSection::VERSION.to_owned(),
+                body,
+            });
+        }
+        side
     }
 }

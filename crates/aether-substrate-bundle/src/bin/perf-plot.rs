@@ -78,12 +78,18 @@ fn main() -> ExitCode {
 
     let mut rendered = 0usize;
     for c in &cells {
-        let hist = format!("{dir}/{}-{}w.png", c.topo, c.workers);
+        // Prefix each filename with the cell's tier section name
+        // (iamacoffeepot/aether#1228) — `latency` / `latency.heavy` /
+        // `latency.real`, the same string `report.rs` anchors against — so
+        // `perf-publish-plots.sh` can group the PNGs under their report
+        // section by reading the `{tier}__` prefix, no topo-name matching.
+        let tier = c.tier.section_name();
+        let hist = format!("{dir}/{tier}__{}-{}w.png", c.topo, c.workers);
         match render_cell(Path::new(&hist), c) {
             Ok(()) => rendered += 1,
             Err(e) => eprintln!("perf-plot: render {hist} failed: {e}"),
         }
-        let pct = format!("{dir}/{}-{}w-percentiles.png", c.topo, c.workers);
+        let pct = format!("{dir}/{tier}__{}-{}w-percentiles.png", c.topo, c.workers);
         match render_cell_percentiles(Path::new(&pct), c) {
             Ok(()) => rendered += 1,
             Err(e) => eprintln!("perf-plot: render {pct} failed: {e}"),
