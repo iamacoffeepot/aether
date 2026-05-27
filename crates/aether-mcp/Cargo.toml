@@ -17,6 +17,13 @@ edition.workspace = true
 name = "aether-mcp"
 path = "src/main.rs"
 
+# The lifecycle tunnel (iamacoffeepot/aether#1212 PR 2): the stable MCP
+# front Claude connects to on `:8890`. It reverse-proxies `/mcp` to the
+# `aether-mcp` child on `:8891` and supervises the hub + `aether-mcp`.
+[[bin]]
+name = "aether-tunnel"
+path = "src/bin/aether-tunnel.rs"
+
 [dependencies]
 # Wire vocabulary + the RPC client primitive. `aether-capabilities`
 # with default features pulls `aether-substrate`; we only need the
@@ -30,6 +37,13 @@ aether-kinds = { path = "../aether-kinds" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
+futures-util = "0.3"
+libc = "0.2"
+# The tunnel's upstream HTTP client. `stream` gives us
+# `Response::bytes_stream()` so the long-lived SSE GET channel is piped
+# through incrementally rather than buffered to EOF. Default features
+# (TLS, etc.) are off — the upstream is plain-HTTP localhost.
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 rmcp = { version = "1.7", features = [
     "server",
     "macros",
@@ -38,12 +52,16 @@ rmcp = { version = "1.7", features = [
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "time", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 aether-substrate = { path = "../aether-substrate" }
+# `StreamReader` bridges reqwest's byte stream into an `AsyncRead` so the
+# tunnel's SSE integration test can read events line-by-line as they
+# arrive (the back-pressure / no-buffering guard).
+tokio-util = { version = "0.7", features = ["io"] }
 
 [lints]
 workspace = true
