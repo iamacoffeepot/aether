@@ -1104,7 +1104,7 @@ fn push_plot_anchor(s: &mut String, name: &str) {
 
 /// Marker prefix the plot publisher (iamacoffeepot/aether#1228) scans for to
 /// co-locate each section's plots. One `<!-- aether-perf-plots: TIER -->`
-/// comment is emitted after each latency section by [`push_plot_anchor`].
+/// comment is emitted after each latency section by `push_plot_anchor`.
 pub const PLOT_ANCHOR_PREFIX: &str = "<!-- aether-perf-plots:";
 
 #[allow(clippy::format_push_string)]
