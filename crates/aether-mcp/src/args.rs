@@ -33,6 +33,16 @@ pub struct SendMailArgs {
     /// failure doesn't abort the batch; the response carries a
     /// per-item status.
     pub mails: Vec<MailSpec>,
+    /// When `true`, dispatch every item without awaiting its reply
+    /// (today's pre-issue-1242 behaviour): each `status` is
+    /// `"dispatched"` and `replies` is empty. Default `false` — `send_mail`
+    /// now blocks per item until the dispatch chain settles and surfaces
+    /// the correlated reply payloads. Set this for a fire-and-poke item
+    /// (e.g. a `DrawTriangle` before a `capture_frame`) or a cap that
+    /// never replies, so the call returns immediately instead of waiting
+    /// out the await timeout.
+    #[serde(default)]
+    pub fire_and_forget: bool,
 }
 
 /// One item in a `send_mail` batch.
@@ -65,9 +75,44 @@ pub struct EngineInfo {
 pub struct MailStatus {
     /// Index into the `mails` array the caller supplied.
     pub index: usize,
-    /// `"delivered"` once the call reached the substrate and its
-    /// dispatch chain settled, or `"error: <reason>"` on failure.
+    /// `"delivered"` once the call reached the substrate, its dispatch
+    /// chain settled, and any correlated replies are in `replies`;
+    /// `"dispatched"` when `fire_and_forget` was set (no await);
+    /// `"timeout"` when the await hit the cap before settlement (any
+    /// replies collected so far are still in `replies`, and `timed_out`
+    /// is `true`); or `"error: <reason>"` on a transport / encode
+    /// failure.
     pub status: String,
+    /// Correlated reply payloads the substrate emitted for this item, in
+    /// arrival order. Empty for a fire-and-forget item, an item that
+    /// produced no reply, or an error item.
+    #[serde(default)]
+    pub replies: Vec<ReplyEventJson>,
+    /// `true` when the await hit the timeout before the chain settled.
+    /// `replies` still carries whatever arrived before the cap.
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+/// One correlated reply the substrate emitted in response to a
+/// `send_mail` / `send_mail_traced` item (issue 1242). `params` is the
+/// best-effort schema-decode of `payload_bytes`; the raw bytes are
+/// always present as the fallback for a reply kind the static
+/// vocabulary can't name or decode.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReplyEventJson {
+    /// Tagged kind id (`knd-…`, ADR-0064) of the reply payload.
+    pub kind_id: String,
+    /// Substrate kind name resolved from the static vocabulary, or
+    /// `null` for a component-defined kind `aether-mcp` can't name.
+    pub kind_name: Option<String>,
+    /// Best-effort `decode_schema` of `payload_bytes` against the kind's
+    /// descriptor, or `null` when the kind is unknown or the decode
+    /// failed. Pair with `payload_bytes` (the raw fallback).
+    pub params: Option<serde_json::Value>,
+    /// The reply's raw wire payload, always present — the fallback when
+    /// `params` is `null`.
+    pub payload_bytes: Vec<u8>,
 }
 
 /// `load_component` arguments.
@@ -301,9 +346,18 @@ pub struct SendMailTracedArgs {
     /// moves (mirrors `capture_frame`'s bundle semantics).
     pub mails: Vec<TracedMailSpec>,
     /// Cap on wall-clock wait for the batch's chain to settle, in
-    /// milliseconds. Defaults to 5000; clamped to 30000.
+    /// milliseconds. Defaults to 300000 (300s); clamped to 600000
+    /// (600s) — sized to clear a provider cap's API timeout (e.g. the
+    /// gemini cap's 180s) with margin, not the old 30s ceiling.
     #[serde(default)]
     pub settlement_timeout_ms: Option<u32>,
+    /// When `true`, return the synchronous ack (the shared `root`)
+    /// without awaiting chain settlement: `status` is `"dispatched"`,
+    /// and `mails` / `in_flight` / `replies` are `null`. Default
+    /// `false` — the call now blocks until the batch settles and
+    /// returns the trace tree plus the correlated replies.
+    #[serde(default)]
+    pub fire_and_forget: bool,
 }
 
 /// One mail in a `send_mail_traced` batch. Like [`CaptureMailSpec`] but
@@ -328,18 +382,26 @@ pub struct TracedMailSpec {
 pub struct SendMailTracedResponse {
     /// `"settled"` once the batch's chain settled and the tree is
     /// populated, `"timeout"` when the substrate didn't reply within
-    /// the `settlement_timeout_ms` window.
+    /// the `settlement_timeout_ms` window, or `"dispatched"` when
+    /// `fire_and_forget` was set (ack only, no settlement wait).
     pub status: String,
     /// Chassis-root `MailId` every spec inherited. Populated on
-    /// `settled`, `null` on `timeout`.
+    /// `settled` and `dispatched`, `null` on `timeout`.
     pub root: Option<MailIdJson>,
     /// Mail nodes in the settled tree. Order is unspecified — agents
-    /// reconstruct chains via `parent` edges.
+    /// reconstruct chains via `parent` edges. `null` on `dispatched` /
+    /// `timeout`.
     pub mails: Option<Vec<MailNodeJson>>,
     /// Root's `in_flight` count at describe time. `0` for a fully-
     /// settled batch; non-zero indicates the chain re-armed after the
     /// initial settle (rare; reflects late-arriving descendants).
     pub in_flight: Option<u32>,
+    /// Correlated reply payloads the batch's shared `cid` collected, in
+    /// arrival order — one flat list for the whole atomic batch (the
+    /// batch is one wire `Call`, so there is no per-item correlation to
+    /// group by). `null` on `dispatched`; an empty list on `settled`
+    /// when no reply was emitted.
+    pub replies: Option<Vec<ReplyEventJson>>,
 }
 
 /// `MailId` rendered for MCP: the sender mailbox as a tagged-id

@@ -49,7 +49,7 @@ use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagDescriptorArg, DagStatusArgs,
     DescribeComponentArgs, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
     HandleSummaryJson, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NodeArg,
-    ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
+    ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
     SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::reverse::EngineNames;
@@ -60,6 +60,16 @@ use base64::engine::general_purpose::STANDARD;
 use std::time::Duration;
 use tokio::fs;
 use tokio::time;
+
+/// Default wall-clock cap on `send_mail` / `send_mail_traced` awaiting a
+/// chain to settle (issue 1242). 300s — clears a provider cap's API
+/// timeout (the gemini cap's 180s, anthropic's 120s) with margin for
+/// queue / dispatch / staging overhead.
+const AWAIT_TIMEOUT_DEFAULT_MS: u32 = 300_000;
+/// Hard ceiling on the caller-supplied await timeout (issue 1242). A
+/// `settlement_timeout_ms` above this is clamped down. 600s — twice the
+/// default, the locked upper bound for a legitimately-long provider call.
+const AWAIT_TIMEOUT_CAP_MS: u32 = 600_000;
 
 /// Mailbox name of the hub's engines cap — the `engine = None` target
 /// for the engine-management tools.
@@ -209,7 +219,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. 'delivered' means the call reached the substrate and its dispatch chain settled."
+        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles and the item's correlated reply payloads are returned in `replies` (status 'delivered'); each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes}. The await cap is 600s (gated by the batch-level settlement against a slow provider cap); on timeout the item reports status 'timeout' with timed_out:true and any replies collected so far. Set fire_and_forget:true to restore non-blocking dispatch (status 'dispatched', empty replies) — use it for a fire-and-poke (e.g. a DrawTriangle before a capture_frame) or a cap that never replies."
     )]
     pub async fn send_mail(
         &self,
@@ -218,19 +228,38 @@ impl Mcp {
         // Snapshot the substrate descriptor inventory once for the
         // whole batch rather than per item.
         let descriptors = descriptors::all();
+        let fire_and_forget = args.fire_and_forget;
         let mut statuses = Vec::with_capacity(args.mails.len());
         for (index, spec) in args.mails.into_iter().enumerate() {
-            let status = match self.deliver_one(&descriptors, spec).await {
-                Ok(()) => "delivered".to_owned(),
-                Err(e) => format!("error: {e}"),
+            let mut replies = Vec::new();
+            let mut timed_out = false;
+            let status = if fire_and_forget {
+                match self.deliver_one_fire(&descriptors, spec).await {
+                    Ok(()) => "dispatched".to_owned(),
+                    Err(e) => format!("error: {e}"),
+                }
+            } else {
+                match self.deliver_one(&descriptors, spec).await {
+                    Ok((events, hit_timeout)) => {
+                        replies = decode_reply_events(&events);
+                        timed_out = hit_timeout;
+                        if hit_timeout { "timeout" } else { "delivered" }.to_owned()
+                    }
+                    Err(e) => format!("error: {e}"),
+                }
             };
-            statuses.push(MailStatus { index, status });
+            statuses.push(MailStatus {
+                index,
+                status,
+                replies,
+                timed_out,
+            });
         }
         json(&statuses)
     }
 
     #[tool(
-        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 5000, max 30000); on timeout the response carries status:timeout with no root or tree."
+        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. By default it BLOCKS until settlement and also returns the batch's correlated reply payloads as a flat arrival-ordered `replies` list (the batch is one wire Call, so replies aren't per-item) alongside the tree; each reply is {kind_id, kind_name, params, payload_bytes}. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire collecting reply events, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); on timeout the response carries status:timeout with no root, tree, or replies. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null) without awaiting settlement."
     )]
     pub async fn send_mail_traced(
         &self,
@@ -245,39 +274,77 @@ impl Mcp {
         // time via `resolve_bundle`.
         let mails = encode_traced_bundle(&descriptors, &args.mails)
             .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
-        let timeout_ms = args.settlement_timeout_ms.unwrap_or(5000).min(30000);
+        let timeout_ms = args
+            .settlement_timeout_ms
+            .unwrap_or(AWAIT_TIMEOUT_DEFAULT_MS)
+            .min(AWAIT_TIMEOUT_CAP_MS);
         let dispatch_envelope =
             engine_envelope(engine, TRACE_MAILBOX_NAME, &DispatchTraced { mails });
 
-        // Round 1: ack carries the chassis-root MailId; ReplyEnd
-        // closes when the chain settles substrate-side.
-        let ack_reply = match time::timeout(
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.session.call_one(dispatch_envelope),
-        )
-        .await
-        {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(e)) => return Err(internal(e)),
-            Err(_) => {
+        // Fire-and-forget: write the dispatch without awaiting the chain
+        // to settle. We still need the synchronous ack's `root`, so this
+        // path isn't a bare `fire` — issue the call, read the ack from
+        // the (immediately-available) first reply, and skip the tree
+        // walk. Bound it by the same timeout so a wedged ack doesn't hang.
+        if args.fire_and_forget {
+            let (events, ack_timed_out) = self
+                .session
+                .call_collecting(
+                    dispatch_envelope,
+                    Duration::from_millis(u64::from(timeout_ms)),
+                )
+                .await
+                .map_err(internal)?;
+            if ack_timed_out {
                 return json(&SendMailTracedResponse {
                     status: "timeout".into(),
                     root: None,
                     mails: None,
                     in_flight: None,
+                    replies: None,
                 });
             }
-        };
-        let ack = DispatchTracedAck::decode_from_bytes(&ack_reply.payload)
-            .ok_or_else(|| internal_msg("undecodable DispatchTracedAck"))?;
-        let root = match ack {
-            DispatchTracedAck::Ok { root } => root,
-            DispatchTracedAck::Err { error } => {
-                return Err(internal_msg(&format!(
-                    "send_mail_traced dispatch failed: {error}"
-                )));
-            }
-        };
+            let root = decode_traced_ack(&events)?;
+            let root_json = {
+                self.ensure_names(engine).await;
+                let cache = self
+                    .names
+                    .lock()
+                    .expect("reverse-name cache mutex is never poisoned");
+                mail_id_to_json(root, cache.get(&engine))
+            };
+            return json(&SendMailTracedResponse {
+                status: "dispatched".into(),
+                root: Some(root_json),
+                mails: None,
+                in_flight: None,
+                replies: None,
+            });
+        }
+
+        // Round 1: ack carries the chassis-root MailId; ReplyEnd
+        // closes when the chain settles substrate-side. `call_collecting`
+        // keeps every correlated `ReplyEvent` (the ack plus any cap
+        // replies) instead of `call_one`'s single-event discard.
+        let (events, ack_timed_out) = self
+            .session
+            .call_collecting(
+                dispatch_envelope,
+                Duration::from_millis(u64::from(timeout_ms)),
+            )
+            .await
+            .map_err(internal)?;
+        if ack_timed_out {
+            return json(&SendMailTracedResponse {
+                status: "timeout".into(),
+                root: None,
+                mails: None,
+                in_flight: None,
+                replies: None,
+            });
+        }
+        let replies = decode_reply_events(strip_ack(&events));
+        let root = decode_traced_ack(&events)?;
 
         // Round 2: reconstruct the tree by a guided walk over the
         // per-actor trace rings (ADR-0086 Phase 3b). Seed at
@@ -333,6 +400,7 @@ impl Mcp {
                     root: Some(root),
                     mails: Some(mails),
                     in_flight: Some(in_flight),
+                    replies: Some(replies),
                 })
             }
             DescribeTreeResult::Err { not_found } => Err(internal_msg(&format!(
@@ -827,19 +895,45 @@ impl Mcp {
 
 impl Mcp {
     /// Build one `MailSpec` into an `engine = Some` envelope and route
-    /// it through the hub, awaiting the substrate's terminal settle.
+    /// it through the hub, awaiting the substrate's terminal settle and
+    /// surfacing the correlated reply events (issue 1242). Returns the
+    /// collected reply envelopes plus a `timed_out` flag — the await is
+    /// bounded by [`AWAIT_TIMEOUT_DEFAULT_MS`] so a cap that never
+    /// replies returns at the cap rather than hanging.
     async fn deliver_one(
         &self,
         descriptors: &[KindDescriptor],
         spec: MailSpec,
+    ) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
+        let envelope = Self::build_mail_envelope(descriptors, spec)?;
+        let timeout = Duration::from_millis(u64::from(AWAIT_TIMEOUT_DEFAULT_MS));
+        self.session.call_collecting(envelope, timeout).await
+    }
+
+    /// [`Self::deliver_one`]'s fire-and-forget twin: build the envelope
+    /// and write the `Call` without awaiting any reply (issue 1242).
+    async fn deliver_one_fire(
+        &self,
+        descriptors: &[KindDescriptor],
+        spec: MailSpec,
     ) -> anyhow::Result<()> {
+        let envelope = Self::build_mail_envelope(descriptors, spec)?;
+        self.session.fire(envelope).await
+    }
+
+    /// Resolve a `MailSpec` against the substrate vocabulary baked into
+    /// `aether-kinds` and build the `engine = Some` wire envelope — the
+    /// shared front half of [`Self::deliver_one`] /
+    /// [`Self::deliver_one_fire`]. The same descriptor set the scenario
+    /// runner and the embedded hub encode `send_mail` params against.
+    fn build_mail_envelope(
+        descriptors: &[KindDescriptor],
+        spec: MailSpec,
+    ) -> anyhow::Result<MailEnvelope> {
         let engine = EngineId(
             Uuid::parse_str(&spec.engine_id)
                 .map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
         );
-        // Resolve the kind against the substrate vocabulary baked into
-        // `aether-kinds` — the same descriptor set the scenario runner
-        // and the embedded hub encode `send_mail` params against.
         let desc = descriptors
             .iter()
             .find(|d| d.name == spec.kind_name)
@@ -847,7 +941,7 @@ impl Mcp {
         let params = spec.params.unwrap_or(serde_json::Value::Null);
         let payload = aether_codec::encode_schema(&params, &desc.schema)
             .map_err(|e| anyhow::anyhow!("param encode failed: {e}"))?;
-        let envelope = MailEnvelope {
+        Ok(MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
                 mailbox: mailbox_id_from_name(&spec.recipient_name),
@@ -856,8 +950,7 @@ impl Mcp {
             kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
             correlation_id: None,
             payload,
-        };
-        self.session.call_settled(envelope).await
+        })
     }
 
     /// Ensure `engine`'s reverse-name map is built (ADR-0088 §8). On the
@@ -1104,6 +1197,61 @@ fn static_kind_name(id: KindId) -> Option<String> {
         .into_iter()
         .find(|d| kind_id_from_parts(&d.name, &d.schema) == id.0)
         .map(|d| d.name)
+}
+
+/// Transcode the correlated reply envelopes a `call_collecting` returned
+/// into the MCP wire shape (issue 1242). Per envelope: the tagged kind
+/// id, the best-effort static kind name, the best-effort `decode_schema`
+/// of the payload against the matching descriptor (`None` on an unknown
+/// kind or a decode miss), and the raw bytes as the always-present
+/// fallback. Order is preserved — arrival order.
+fn decode_reply_events(envelopes: &[MailEnvelope]) -> Vec<ReplyEventJson> {
+    let descriptors = descriptors::all();
+    envelopes
+        .iter()
+        .map(|env| {
+            let params = descriptors
+                .iter()
+                .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
+                .and_then(|d| aether_codec::decode_schema(&env.payload, &d.schema).ok());
+            ReplyEventJson {
+                // Render the kind id as the ADR-0064 tagged string the
+                // rest of the MCP wire uses, falling back to a hex
+                // literal on an unencodable (non-kind-domain) id.
+                kind_id: tagged_id::encode(env.kind.0)
+                    .unwrap_or_else(|| format!("{:#x}", env.kind.0)),
+                kind_name: static_kind_name(env.kind),
+                params,
+                payload_bytes: env.payload.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Decode the `DispatchTracedAck` from a `send_mail_traced` ack call's
+/// collected events (issue 1242). The synchronous ack is the *first*
+/// reply event the trace cap emits on the dispatch cid; later events are
+/// downstream cap replies handled separately. An absent or undecodable
+/// ack, or an `Err` ack, is a tool error.
+fn decode_traced_ack(events: &[MailEnvelope]) -> Result<MailId, McpError> {
+    let ack_env = events
+        .first()
+        .ok_or_else(|| internal_msg("send_mail_traced: no ack reply from the trace cap"))?;
+    let ack = DispatchTracedAck::decode_from_bytes(&ack_env.payload)
+        .ok_or_else(|| internal_msg("undecodable DispatchTracedAck"))?;
+    match ack {
+        DispatchTracedAck::Ok { root } => Ok(root),
+        DispatchTracedAck::Err { error } => Err(internal_msg(&format!(
+            "send_mail_traced dispatch failed: {error}"
+        ))),
+    }
+}
+
+/// The collected `send_mail_traced` events minus the leading ack (the
+/// `DispatchTracedAck` [`decode_traced_ack`] consumes), leaving the flat
+/// list of downstream cap replies to surface as `replies` (issue 1242).
+fn strip_ack(events: &[MailEnvelope]) -> &[MailEnvelope] {
+    events.get(1..).unwrap_or(&[])
 }
 
 /// Build the wire [`DagDescriptor`] from the typed tool arg, reading each
@@ -1511,6 +1659,7 @@ mod tests {
                         params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
                     },
                 ],
+                fire_and_forget: false,
             }))
             .await
             .expect("send_mail returns a status array, not a tool error");
@@ -1593,6 +1742,7 @@ mod tests {
                     params: None,
                 }],
                 settlement_timeout_ms: None,
+                fire_and_forget: false,
             }))
             .await;
         assert!(
@@ -2043,5 +2193,124 @@ mod tests {
             }))
             .await;
         assert!(status.is_err(), "malformed engine_id is a tool error");
+    }
+
+    /// Issue 1242: `decode_reply_events` transcodes a correlated reply
+    /// into the MCP wire shape — a known substrate kind decodes to its
+    /// name + params, and the raw bytes are always present as the
+    /// fallback. This is the surfacing the await-by-default change adds;
+    /// the decode is the reusable core both tools share.
+    #[test]
+    fn decode_reply_events_decodes_known_substrate_kind() {
+        // Pick a real substrate kind out of the static inventory and
+        // round-trip a params object through `encode_schema` into the
+        // reply envelope the substrate would have produced.
+        let descriptors = descriptors::all();
+        let desc = descriptors
+            .iter()
+            .find(|d| d.name == "aether.fs.list")
+            .expect("aether.fs.list is in the static vocabulary");
+        let params = serde_json::json!({ "namespace": "save", "prefix": "" });
+        let payload =
+            aether_codec::encode_schema(&params, &desc.schema).expect("encode list params");
+        let kind = KindId(kind_id_from_parts(&desc.name, &desc.schema));
+        let reply = MailEnvelope {
+            to: MailboxAddress::local(mailbox_id_from_name("aether.fs")),
+            from: None,
+            kind,
+            correlation_id: Some(7),
+            payload: payload.clone(),
+        };
+
+        let decoded = decode_reply_events(&[reply]);
+        assert_eq!(decoded.len(), 1, "one reply in, one out");
+        let only = &decoded[0];
+        assert_eq!(
+            only.kind_name.as_deref(),
+            Some("aether.fs.list"),
+            "the known kind resolves to its name",
+        );
+        assert_eq!(
+            only.params.as_ref(),
+            Some(&params),
+            "params decode back to the original JSON",
+        );
+        assert_eq!(
+            only.payload_bytes, payload,
+            "the raw payload is always present as the fallback",
+        );
+        assert!(
+            only.kind_id.starts_with("knd-"),
+            "the kind id renders as the ADR-0064 tagged string: {}",
+            only.kind_id,
+        );
+    }
+
+    /// Issue 1242: an unknown / undecodable reply kind never fails the
+    /// surfacing — `params` is `null`, `kind_name` is `null`, and the
+    /// raw bytes are still returned (the disconnected-engine fallback
+    /// contract).
+    #[test]
+    fn decode_reply_events_falls_back_on_unknown_kind() {
+        let reply = MailEnvelope {
+            to: MailboxAddress::local(MailboxId(1)),
+            from: None,
+            kind: KindId(0xDEAD_BEEF_DEAD_BEEF),
+            correlation_id: None,
+            payload: vec![1, 2, 3],
+        };
+        let decoded = decode_reply_events(&[reply]);
+        assert_eq!(decoded.len(), 1);
+        let only = &decoded[0];
+        assert_eq!(only.kind_name, None, "an unknown kind has no name");
+        assert_eq!(only.params, None, "an unknown kind doesn't decode");
+        assert_eq!(only.payload_bytes, vec![1, 2, 3], "raw bytes survive");
+    }
+
+    /// Issue 1242: `fire_and_forget: true` is non-blocking — a
+    /// well-formed item is dispatched without awaiting any reply, so the
+    /// call returns `status: "dispatched"` with empty `replies` well
+    /// under the await timeout, even against an unknown engine (the
+    /// server's eventual error `ReplyEnd` is dropped as an unrouted
+    /// frame, never awaited). Contrast `delivered`, which blocks on
+    /// settlement.
+    #[tokio::test]
+    async fn send_mail_fire_and_forget_is_non_blocking() {
+        use std::time::Instant;
+
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let started = Instant::now();
+        let out = mcp
+            .send_mail(Parameters(SendMailArgs {
+                mails: vec![MailSpec {
+                    // A well-formed item to an engine the hub doesn't
+                    // supervise: the dispatch chain never settles with a
+                    // reply, so a blocking call would wait — fire-and-
+                    // forget returns at once.
+                    engine_id: "00000000-0000-0000-0000-000000000099".to_owned(),
+                    recipient_name: "aether.fs".to_owned(),
+                    kind_name: "aether.fs.list".to_owned(),
+                    params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                }],
+                fire_and_forget: true,
+            }))
+            .await
+            .expect("send_mail returns a status array");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "fire-and-forget must not block on settlement",
+        );
+        let statuses: Vec<MailStatus> = serde_json::from_str(&out).expect("status array");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(
+            statuses[0].status, "dispatched",
+            "fire-and-forget reports dispatched, not delivered",
+        );
+        assert!(
+            statuses[0].replies.is_empty(),
+            "fire-and-forget carries no replies",
+        );
+        assert!(!statuses[0].timed_out, "dispatch is not a timeout");
     }
 }
