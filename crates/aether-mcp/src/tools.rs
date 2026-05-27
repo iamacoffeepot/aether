@@ -219,7 +219,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles and the item's correlated reply payloads are returned in `replies` (status 'delivered'); each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes}. The await cap is 600s (gated by the batch-level settlement against a slow provider cap); on timeout the item reports status 'timeout' with timed_out:true and any replies collected so far. Set fire_and_forget:true to restore non-blocking dispatch (status 'dispatched', empty replies) — use it for a fire-and-poke (e.g. a DrawTriangle before a capture_frame) or a cap that never replies."
+        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles and the item's correlated reply payloads are returned in `replies` (status 'delivered'); each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is 600s (gated by the batch-level settlement against a slow provider cap); on timeout the item reports status 'timeout' with timed_out:true and any replies collected so far. Set fire_and_forget:true to restore non-blocking dispatch (status 'dispatched', empty replies) — use it for a fire-and-poke (e.g. a DrawTriangle before a capture_frame) or a cap that never replies."
     )]
     pub async fn send_mail(
         &self,
@@ -259,7 +259,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. By default it BLOCKS until settlement and also returns the batch's correlated reply payloads as a flat arrival-ordered `replies` list (the batch is one wire Call, so replies aren't per-item) alongside the tree; each reply is {kind_id, kind_name, params, payload_bytes}. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire collecting reply events, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); on timeout the response carries status:timeout with no root, tree, or replies. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null) without awaiting settlement."
+        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. By default it BLOCKS until settlement and also returns the batch's correlated reply payloads as a flat arrival-ordered `replies` list (the batch is one wire Call, so replies aren't per-item) alongside the tree; each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire collecting reply events, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); on timeout the response carries status:timeout with no root, tree, or replies. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null) without awaiting settlement."
     )]
     pub async fn send_mail_traced(
         &self,
@@ -1201,19 +1201,29 @@ fn static_kind_name(id: KindId) -> Option<String> {
 
 /// Transcode the correlated reply envelopes a `call_collecting` returned
 /// into the MCP wire shape (issue 1242). Per envelope: the tagged kind
-/// id, the best-effort static kind name, the best-effort `decode_schema`
-/// of the payload against the matching descriptor (`None` on an unknown
-/// kind or a decode miss), and the raw bytes as the always-present
-/// fallback. Order is preserved — arrival order.
+/// id, the best-effort static kind name, and the best-effort
+/// `decode_schema` of the payload against the matching descriptor
+/// (`None` on an unknown kind or a decode miss). On a clean decode the
+/// raw bytes are omitted (issue 1246) — `params` already carries them;
+/// on a decode miss they are surfaced as base64 in `payload_bytes`.
+/// Order is preserved — arrival order.
 fn decode_reply_events(envelopes: &[MailEnvelope]) -> Vec<ReplyEventJson> {
     let descriptors = descriptors::all();
     envelopes
         .iter()
         .map(|env| {
-            let params = descriptors
+            let (params, payload_bytes) = descriptors
                 .iter()
                 .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
-                .and_then(|d| aether_codec::decode_schema(&env.payload, &d.schema).ok());
+                .and_then(|d| aether_codec::decode_schema(&env.payload, &d.schema).ok())
+                .map_or_else(
+                    // Decode miss: base64 the raw payload as the fallback
+                    // (the only signal when `params` is `null`).
+                    || (None, Some(STANDARD.encode(&env.payload))),
+                    // Clean decode: `params` is the surfacing; omit the
+                    // raw bytes so they aren't duplicated as an int-array.
+                    |v| (Some(v), None),
+                );
             ReplyEventJson {
                 // Render the kind id as the ADR-0064 tagged string the
                 // rest of the MCP wire uses, falling back to a hex
@@ -1222,7 +1232,7 @@ fn decode_reply_events(envelopes: &[MailEnvelope]) -> Vec<ReplyEventJson> {
                     .unwrap_or_else(|| format!("{:#x}", env.kind.0)),
                 kind_name: static_kind_name(env.kind),
                 params,
-                payload_bytes: env.payload.clone(),
+                payload_bytes,
             }
         })
         .collect()
@@ -2195,11 +2205,12 @@ mod tests {
         assert!(status.is_err(), "malformed engine_id is a tool error");
     }
 
-    /// Issue 1242: `decode_reply_events` transcodes a correlated reply
-    /// into the MCP wire shape — a known substrate kind decodes to its
-    /// name + params, and the raw bytes are always present as the
-    /// fallback. This is the surfacing the await-by-default change adds;
-    /// the decode is the reusable core both tools share.
+    /// Issue 1242 / 1246: `decode_reply_events` transcodes a correlated
+    /// reply into the MCP wire shape — a known substrate kind decodes to
+    /// its name + params, and on a clean decode the raw bytes are
+    /// omitted (issue 1246, no int-array duplicate). This is the
+    /// surfacing the await-by-default change adds; the decode is the
+    /// reusable core both tools share.
     #[test]
     fn decode_reply_events_decodes_known_substrate_kind() {
         // Pick a real substrate kind out of the static inventory and
@@ -2219,7 +2230,7 @@ mod tests {
             from: None,
             kind,
             correlation_id: Some(7),
-            payload: payload.clone(),
+            payload,
         };
 
         let decoded = decode_reply_events(&[reply]);
@@ -2235,9 +2246,9 @@ mod tests {
             Some(&params),
             "params decode back to the original JSON",
         );
-        assert_eq!(
-            only.payload_bytes, payload,
-            "the raw payload is always present as the fallback",
+        assert!(
+            only.payload_bytes.is_none(),
+            "a clean decode omits the raw bytes (issue 1246)",
         );
         assert!(
             only.kind_id.starts_with("knd-"),
@@ -2246,10 +2257,10 @@ mod tests {
         );
     }
 
-    /// Issue 1242: an unknown / undecodable reply kind never fails the
-    /// surfacing — `params` is `null`, `kind_name` is `null`, and the
-    /// raw bytes are still returned (the disconnected-engine fallback
-    /// contract).
+    /// Issue 1242 / 1246: an unknown / undecodable reply kind never
+    /// fails the surfacing — `params` is `null`, `kind_name` is `null`,
+    /// and the raw bytes are still returned, now base64-encoded (the
+    /// disconnected-engine fallback contract).
     #[test]
     fn decode_reply_events_falls_back_on_unknown_kind() {
         let reply = MailEnvelope {
@@ -2264,7 +2275,43 @@ mod tests {
         let only = &decoded[0];
         assert_eq!(only.kind_name, None, "an unknown kind has no name");
         assert_eq!(only.params, None, "an unknown kind doesn't decode");
-        assert_eq!(only.payload_bytes, vec![1, 2, 3], "raw bytes survive");
+        assert_eq!(
+            only.payload_bytes.as_deref(),
+            Some("AQID"),
+            "raw bytes survive as base64 (issue 1246)",
+        );
+    }
+
+    /// Issue 1246: a clean-decode reply serializes to JSON with no
+    /// `payload_bytes` key at all — the `skip_serializing_if` guard
+    /// against the redundant-int-array regression this issue fixes.
+    #[test]
+    fn clean_decode_reply_omits_payload_bytes_key_in_json() {
+        let descriptors = descriptors::all();
+        let desc = descriptors
+            .iter()
+            .find(|d| d.name == "aether.fs.list")
+            .expect("aether.fs.list is in the static vocabulary");
+        let params = serde_json::json!({ "namespace": "save", "prefix": "" });
+        let payload =
+            aether_codec::encode_schema(&params, &desc.schema).expect("encode list params");
+        let kind = KindId(kind_id_from_parts(&desc.name, &desc.schema));
+        let reply = MailEnvelope {
+            to: MailboxAddress::local(mailbox_id_from_name("aether.fs")),
+            from: None,
+            kind,
+            correlation_id: Some(7),
+            payload,
+        };
+
+        let decoded = decode_reply_events(&[reply]);
+        let json = serde_json::to_value(&decoded[0]).expect("reply serializes");
+        let obj = json.as_object().expect("reply is a JSON object");
+        assert!(
+            !obj.contains_key("payload_bytes"),
+            "a clean decode omits the payload_bytes key entirely: {json}",
+        );
+        assert!(obj.contains_key("params"), "params is still present");
     }
 
     /// Issue 1242: `fire_and_forget: true` is non-blocking — a

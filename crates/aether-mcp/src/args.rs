@@ -96,9 +96,9 @@ pub struct MailStatus {
 
 /// One correlated reply the substrate emitted in response to a
 /// `send_mail` / `send_mail_traced` item (issue 1242). `params` is the
-/// best-effort schema-decode of `payload_bytes`; the raw bytes are
-/// always present as the fallback for a reply kind the static
-/// vocabulary can't name or decode.
+/// best-effort schema-decode of the raw payload; `payload_bytes` is the
+/// base64 fallback surfaced only when the static vocabulary can't name
+/// or decode the kind (issue 1246 — a clean decode omits it).
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReplyEventJson {
     /// Tagged kind id (`knd-…`, ADR-0064) of the reply payload.
@@ -106,13 +106,17 @@ pub struct ReplyEventJson {
     /// Substrate kind name resolved from the static vocabulary, or
     /// `null` for a component-defined kind `aether-mcp` can't name.
     pub kind_name: Option<String>,
-    /// Best-effort `decode_schema` of `payload_bytes` against the kind's
+    /// Best-effort `decode_schema` of the raw payload against the kind's
     /// descriptor, or `null` when the kind is unknown or the decode
-    /// failed. Pair with `payload_bytes` (the raw fallback).
+    /// failed. On a clean decode this is the only surfacing of the
+    /// payload — `payload_bytes` is omitted to avoid the duplicate.
     pub params: Option<serde_json::Value>,
-    /// The reply's raw wire payload, always present — the fallback when
-    /// `params` is `null`.
-    pub payload_bytes: Vec<u8>,
+    /// Base64 of the raw wire payload, present **only** on a decode miss
+    /// (the sole signal when `params` is `null`) — absent on a clean
+    /// decode (issue 1246). Avoids re-surfacing decoded bytes as a
+    /// 4×-inflated JSON int-array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_bytes: Option<String>,
 }
 
 /// `load_component` arguments.
