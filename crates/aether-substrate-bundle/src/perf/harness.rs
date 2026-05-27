@@ -493,12 +493,12 @@ pub struct SweepConfig {
     pub drive: Drive,
 }
 
-/// Read the optional `AETHER_LAT_PACE_HZ` pacing override (frames/sec;
+/// Read the optional `AETHER_LATENCY_PACE_HZ` pacing override (frames/sec;
 /// `None` = flat-out / warm). Shared by the on-demand harness test and
 /// the `perf-trial` bin so the parse lives in one place.
 #[must_use]
 pub fn pace_hz_from_env() -> Option<u64> {
-    env::var("AETHER_LAT_PACE_HZ")
+    env::var("AETHER_LATENCY_PACE_HZ")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&h| h > 0)
@@ -545,7 +545,7 @@ pub fn drive_from_env() -> Drive {
     }
 }
 
-/// Read the optional heavy-leaf CPU work knob `AETHER_LAT_HEAVY_WORK` (a
+/// Read the optional heavy-leaf CPU work knob `AETHER_LATENCY_HEAVY_WORK` (a
 /// raw `busy_spin` iteration count per heavy leaf handler; see
 /// [`fanout_heavy`]). Unset, unparseable, or `0` means no heavy work —
 /// callers omit the heavy topology entirely, so the trivial sweep is
@@ -559,13 +559,13 @@ pub fn drive_from_env() -> Drive {
 /// measures `t_finished - t_received`), then adjust.
 #[must_use]
 pub fn heavy_work_iters_from_env() -> u64 {
-    env::var("AETHER_LAT_HEAVY_WORK")
+    env::var("AETHER_LATENCY_HEAVY_WORK")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
 }
 
-/// Parse the optional `AETHER_LAT_WIDE_FANOUT` knob — a comma list of
+/// Parse the optional `AETHER_LATENCY_WIDE_FANOUT` knob — a comma list of
 /// *extra* trivial fan-out widths to append to the sweep, e.g.
 /// `"16,32,64,128"`. Unset or empty appends nothing, so the default
 /// sweep is unchanged (iamacoffeepot/aether#1075). Widths should exceed
@@ -580,7 +580,7 @@ pub fn heavy_work_iters_from_env() -> u64 {
 /// and the win should invert somewhere past `W* ≈ handoff / per-child`.
 #[must_use]
 pub fn wide_fanout_widths_from_env() -> Vec<usize> {
-    let Ok(spec) = env::var("AETHER_LAT_WIDE_FANOUT") else {
+    let Ok(spec) = env::var("AETHER_LATENCY_WIDE_FANOUT") else {
         return Vec::new();
     };
     let mut out: Vec<usize> = spec
@@ -634,8 +634,8 @@ pub fn parse_workers() -> Vec<usize> {
 }
 
 /// Parse `AETHER_PERF_TOPOS` (`ci` — a chain/fan-out/tree subset — or
-/// `full`), then append the opt-in heavy (`AETHER_LAT_HEAVY_WORK`) and
-/// wide (`AETHER_LAT_WIDE_FANOUT`) fan-outs. Default `ci`. Shared by the
+/// `full`), then append the opt-in heavy (`AETHER_LATENCY_HEAVY_WORK`) and
+/// wide (`AETHER_LATENCY_WIDE_FANOUT`) fan-outs. Default `ci`. Shared by the
 /// `perf-trial` and `perf-plot` bins.
 #[must_use]
 pub fn parse_topologies() -> Vec<Topology> {

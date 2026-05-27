@@ -16,11 +16,11 @@
 //!   iamacoffeepot/aether#1202).
 //! - `AETHER_PERF_BACKLOG` — per-tick `Ping` burst in `saturate` mode
 //!   (default `512`, clamped to the trace ring capacity).
-//! - `AETHER_LAT_PACE_HZ` — `latency` mode only: pace one frame per
+//! - `AETHER_LATENCY_PACE_HZ` — `latency` mode only: pace one frame per
 //!   period (else flat-out).
-//! - `AETHER_LAT_HEAVY_WORK` — when set, append CPU-heavy fan-outs
+//! - `AETHER_LATENCY_HEAVY_WORK` — when set, append CPU-heavy fan-outs
 //!   (iamacoffeepot/aether#1074); unset, the topology set is unchanged.
-//! - `AETHER_LAT_WIDE_FANOUT` — comma list of extra trivial fan-out
+//! - `AETHER_LATENCY_WIDE_FANOUT` — comma list of extra trivial fan-out
 //!   widths to append (iamacoffeepot/aether#1075); unset, unchanged.
 //! - `AETHER_PERF_GIT_SHA` — stamped into the report; falls back to
 //!   `git rev-parse HEAD`.
