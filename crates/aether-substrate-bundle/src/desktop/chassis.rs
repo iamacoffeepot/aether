@@ -81,7 +81,7 @@ pub struct DesktopEnv {
     /// from `ANTHROPIC_API_KEY` + `AETHER_ANTHROPIC_*`.
     pub anthropic: AnthropicConfig,
     /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
-    /// `GOOGLE_API_KEY` + `AETHER_GEMINI_*`.
+    /// `GEMINI_API_KEY` + `AETHER_GEMINI_*`.
     pub gemini: GeminiConfig,
     pub audio: AudioConf,
     pub boot_mode: WindowMode,
