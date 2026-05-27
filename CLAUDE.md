@@ -42,14 +42,17 @@ The guest/actor SDK is **`aether-actor`** — the `Actor` / `FfiActor` traits, `
 
 ## MCP harness
 
-Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. The harness is the out-of-process **`aether-mcp`** crate: an RPC client that dials the hub's `RpcServerCapability` and relays each tool call as a wire `Call`. Dev workflow is two processes:
+Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. The harness is the out-of-process **`aether-mcp`** crate: an RPC client that dials the hub's `RpcServerCapability` and relays each tool call as a wire `Call`. The whole stack is fronted by a long-lived **tunnel** (`aether-tunnel`, ADR-0089) so Claude can restart the volatile backends without losing its MCP connection. Three processes, one nested under the other:
 
 ```
-cargo run -p aether-substrate-bundle --bin aether-substrate-hub   # RPC server on 127.0.0.1:8901
-cargo run -p aether-mcp                                           # serves MCP HTTP on 127.0.0.1:8890
+:8890  aether-tunnel  — stable MCP front; reverse-proxies /mcp, supervises the two below
+:8891  aether-mcp     — forked by the tunnel; dials + re-dials the hub
+:8901  aether-substrate-hub — forked by the tunnel; the RPC server the fleet talks to
 ```
 
-`.mcp.json` points Claude Code at `:8890`. Env overrides: `AETHER_RPC_PORT` (hub, default 8901), `AETHER_HUB_RPC_ADDR` (aether-mcp's dial target), `AETHER_MCP_PORT` (default 8890). Get a substrate with `spawn_substrate`; the hub forks it, assigns its RPC port, and tracks the fleet via its `aether.engine` cap.
+The tunnel binds `:8890` (the port `.mcp.json` targets) and forks `aether-mcp` (`AETHER_MCP_PORT=8891`) and the hub (`AETHER_RPC_PORT=8901`, reached via `AETHER_HUB_RPC_ADDR`) itself. You don't start these by hand — the `SessionStart` hook runs `scripts/ensure-tunnel.sh`, which is a no-op if `:8890` is already bound and otherwise launches the tunnel detached. Env overrides: `AETHER_TUNNEL_PORT` (default 8890), `AETHER_MCP_PORT` (default 8891), `AETHER_RPC_PORT` / `AETHER_HUB_RPC_PORT` (hub, default 8901). Get a substrate with `spawn_substrate`; the hub forks it, assigns its RPC port, and tracks the fleet via its `aether.engine` cap.
+
+To restart the hub after a rebuild **without dropping the MCP session**, hit the tunnel's out-of-band admin endpoint from a shell — `curl -fsS -X POST http://127.0.0.1:8890/admin/restart-hub`. The tunnel SIGTERMs + re-forks the hub child; `aether-mcp` (and Claude's MCP session) stay up and re-dial the fresh hub on the next tool call. `GET http://127.0.0.1:8890/admin/status` reports child liveness + the resolved ports. Restarting `aether-mcp` itself is rare and *does* invalidate the MCP session (Claude re-initialises) — prefer `restart-hub`.
 
 Tools (`mcp__aether-hub__*`):
 
