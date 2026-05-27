@@ -2473,30 +2473,31 @@ mod control_plane {
     // a 2026-05 API survey; per-model validation absorbs vendor drift.
 
     /// Aspect ratio for a Nano Banana image. The cross-model set covers
-    /// `AR_1_1` … `AR_21_9`; the `AR_1_4` / `AR_1_8` / `AR_4_1` /
-    /// `AR_8_1` extreme ratios are NB2-only and rejected on older
-    /// models by the adapter's per-model validation.
+    /// `ASPECT_RATIO_1_1` … `ASPECT_RATIO_21_9`; the `ASPECT_RATIO_1_4` /
+    /// `ASPECT_RATIO_1_8` / `ASPECT_RATIO_4_1` / `ASPECT_RATIO_8_1`
+    /// extreme ratios are NB2-only and rejected on older models by the
+    /// adapter's per-model validation.
     // Variant names mirror the provider's `W:H` aspect-ratio labels
-    // verbatim (`AR_16_9` = 16:9) so the wire vocabulary reads the same
-    // as the API survey; the `WxH`-camel form (`Ar16x9`) would obscure
-    // the mapping for the LLM caller building these.
+    // verbatim (`ASPECT_RATIO_16_9` = 16:9) so the wire vocabulary reads
+    // the same as the API survey; the `WxH`-camel form (`Ar16x9`) would
+    // obscure the mapping for the LLM caller building these.
     #[allow(non_camel_case_types)]
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub enum AspectRatio {
-        AR_1_1,
-        AR_2_3,
-        AR_3_2,
-        AR_3_4,
-        AR_4_3,
-        AR_4_5,
-        AR_5_4,
-        AR_9_16,
-        AR_16_9,
-        AR_21_9,
-        AR_1_4,
-        AR_1_8,
-        AR_4_1,
-        AR_8_1,
+        ASPECT_RATIO_1_1,
+        ASPECT_RATIO_2_3,
+        ASPECT_RATIO_3_2,
+        ASPECT_RATIO_3_4,
+        ASPECT_RATIO_4_3,
+        ASPECT_RATIO_4_5,
+        ASPECT_RATIO_5_4,
+        ASPECT_RATIO_9_16,
+        ASPECT_RATIO_16_9,
+        ASPECT_RATIO_21_9,
+        ASPECT_RATIO_1_4,
+        ASPECT_RATIO_1_8,
+        ASPECT_RATIO_4_1,
+        ASPECT_RATIO_8_1,
     }
 
     /// Output image size for a Nano Banana image. `S512` is NB2; `K1`

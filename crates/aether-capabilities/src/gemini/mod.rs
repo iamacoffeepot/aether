@@ -304,20 +304,20 @@ fn base64_encode(bytes: &[u8]) -> String {
 fn aspect_ratio_str(ar: aether_kinds::AspectRatio) -> &'static str {
     use aether_kinds::AspectRatio as A;
     match ar {
-        A::AR_1_1 => "1:1",
-        A::AR_2_3 => "2:3",
-        A::AR_3_2 => "3:2",
-        A::AR_3_4 => "3:4",
-        A::AR_4_3 => "4:3",
-        A::AR_4_5 => "4:5",
-        A::AR_5_4 => "5:4",
-        A::AR_9_16 => "9:16",
-        A::AR_16_9 => "16:9",
-        A::AR_21_9 => "21:9",
-        A::AR_1_4 => "1:4",
-        A::AR_1_8 => "1:8",
-        A::AR_4_1 => "4:1",
-        A::AR_8_1 => "8:1",
+        A::ASPECT_RATIO_1_1 => "1:1",
+        A::ASPECT_RATIO_2_3 => "2:3",
+        A::ASPECT_RATIO_3_2 => "3:2",
+        A::ASPECT_RATIO_3_4 => "3:4",
+        A::ASPECT_RATIO_4_3 => "4:3",
+        A::ASPECT_RATIO_4_5 => "4:5",
+        A::ASPECT_RATIO_5_4 => "5:4",
+        A::ASPECT_RATIO_9_16 => "9:16",
+        A::ASPECT_RATIO_16_9 => "16:9",
+        A::ASPECT_RATIO_21_9 => "21:9",
+        A::ASPECT_RATIO_1_4 => "1:4",
+        A::ASPECT_RATIO_1_8 => "1:8",
+        A::ASPECT_RATIO_4_1 => "4:1",
+        A::ASPECT_RATIO_8_1 => "8:1",
     }
 }
 
@@ -890,7 +890,7 @@ mod native {
             );
             cap.on_nanobanana_generate(
                 &mut ctx,
-                nb_request("gemini-3.1-flash-image-preview", AspectRatio::AR_1_1),
+                nb_request("gemini-3.1-flash-image-preview", AspectRatio::ASPECT_RATIO_1_1),
             );
             let mut landing_ctx = NativeCtx::new(
                 &transport,
@@ -951,7 +951,7 @@ mod native {
             // NB1 + the NB2-only extreme aspect ratio -> rejected.
             cap.on_nanobanana_generate(
                 &mut ctx,
-                nb_request("gemini-2.5-flash-image", AspectRatio::AR_8_1),
+                nb_request("gemini-2.5-flash-image", AspectRatio::ASPECT_RATIO_8_1),
             );
             match decode_reply::<NanobananaGenerateResult>(&rx) {
                 NanobananaGenerateResult::Err {
@@ -965,7 +965,7 @@ mod native {
             assert_eq!(cap.test_in_flight(), 0);
 
             // NB1 + an unsupported image size -> rejected.
-            let mut req = nb_request("gemini-2.5-flash-image", AspectRatio::AR_1_1);
+            let mut req = nb_request("gemini-2.5-flash-image", AspectRatio::ASPECT_RATIO_1_1);
             req.image_size = Some(ImageSize::S512);
             cap.on_nanobanana_generate(&mut ctx, req);
             match decode_reply::<NanobananaGenerateResult>(&rx) {
@@ -997,7 +997,7 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            cap.on_nanobanana_generate(&mut ctx, nb_request("gemini-bogus", AspectRatio::AR_1_1));
+            cap.on_nanobanana_generate(&mut ctx, nb_request("gemini-bogus", AspectRatio::ASPECT_RATIO_1_1));
             match decode_reply::<NanobananaGenerateResult>(&rx) {
                 NanobananaGenerateResult::Err {
                     error: GeminiError::UnknownModel { model, supported },
@@ -1104,7 +1104,7 @@ mod native {
             );
             cap.on_nanobanana_generate(
                 &mut ctx,
-                nb_request("gemini-3.1-flash-image-preview", AspectRatio::AR_1_1),
+                nb_request("gemini-3.1-flash-image-preview", AspectRatio::ASPECT_RATIO_1_1),
             );
             let mut landing_ctx = NativeCtx::new(
                 &transport,
