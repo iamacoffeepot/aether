@@ -1609,28 +1609,34 @@ mod tests {
         assert!(md.contains("throughput full grid"));
     }
 
-    /// Build a K-trial side carrying a single latency cell under the named
-    /// tier section (ADR-0085 amendment) — the tier analog of [`side`]. The
-    /// section name selects the tier (`latency` light, `latency.heavy`,
-    /// `latency.real`).
+    /// One `fanout-8-heavy @ 11w` drain cell at the given `p50` (p90/p99/max
+    /// derived ×1.2 / ×1.5 / ×4) — the shared fixture cell for the tier tests.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
+    fn heavy_cell(p50: u64) -> CellJson {
+        CellJson {
+            workers: 11,
+            topo: "fanout-8-heavy".to_owned(),
+            metric: Metric::Drain,
+            p50,
+            p90: (p50 as f64 * 1.2) as u64,
+            p99: (p50 as f64 * 1.5) as u64,
+            max: p50 * 4,
+            n: 1800,
+        }
+    }
+
+    /// Build a K-trial side carrying a single latency cell under the named
+    /// tier section (ADR-0085 amendment) — the tier analog of [`side`]. The
+    /// section name selects the tier (`latency` light, `latency.heavy`,
+    /// `latency.real`).
     fn tier_side(section_name: &str, p50s: &[u64]) -> Vec<TrialReport> {
         p50s.iter()
             .map(|&p50| {
-                let cells = vec![CellJson {
-                    workers: 11,
-                    topo: "fanout-8-heavy".to_owned(),
-                    metric: Metric::Drain,
-                    p50,
-                    p90: (p50 as f64 * 1.2) as u64,
-                    p99: (p50 as f64 * 1.5) as u64,
-                    max: p50 * 4,
-                    n: 1800,
-                }];
+                let cells = vec![heavy_cell(p50)];
                 let body = serde_json::to_value(LatencySection { cells })
                     .expect("encode tier latency body");
                 TrialReport {
@@ -1651,23 +1657,9 @@ mod tests {
     /// Attach a `latency.heavy` section's cells to an existing side, so a
     /// trial carries both the light `latency` section and the heavy one (the
     /// realistic `AETHER_PERF_TIER=light,heavy` shape).
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     fn with_heavy_section(mut side: Vec<TrialReport>, p50s: &[u64]) -> Vec<TrialReport> {
         for (t, &p50) in side.iter_mut().zip(p50s.iter()) {
-            let cells = vec![CellJson {
-                workers: 11,
-                topo: "fanout-8-heavy".to_owned(),
-                metric: Metric::Drain,
-                p50,
-                p90: (p50 as f64 * 1.2) as u64,
-                p99: (p50 as f64 * 1.5) as u64,
-                max: p50 * 4,
-                n: 1800,
-            }];
+            let cells = vec![heavy_cell(p50)];
             let body =
                 serde_json::to_value(LatencySection { cells }).expect("encode heavy latency body");
             t.sections.push(RawSection {
