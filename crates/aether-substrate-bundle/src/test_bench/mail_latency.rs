@@ -628,7 +628,7 @@ const OBSERVE_FRAMES: u32 = 1000;
 /// tables.
 ///
 /// Default is **flat-out** `advance` (warm — isolates per-hop dispatch
-/// cost). `AETHER_LAT_PACE_HZ=60` paces one frame per period instead
+/// cost). `AETHER_LATENCY_PACE_HZ=60` paces one frame per period instead
 /// (workers park in the gaps → realistic frame-loop latency).
 ///
 /// `#[ignore]` — a measurement run, not a correctness gate. Skips
@@ -646,7 +646,7 @@ fn lifecycle_latency_observe() {
 
     let pace_hz = pace_hz_from_env();
 
-    // The trivial default set always runs. When AETHER_LAT_HEAVY_WORK is
+    // The trivial default set always runs. When AETHER_LATENCY_HEAVY_WORK is
     // set, append CPU-heavy fan-outs so the sweep can also exhibit the
     // parallelism-wins regime (iamacoffeepot/aether#1074) — unset, the
     // grid is byte-for-byte the historical one.
@@ -658,7 +658,7 @@ fn lifecycle_latency_observe() {
         }
     }
     // Wide trivial fan-outs to locate the stickiness width-crossover
-    // (iamacoffeepot/aether#1075); empty unless AETHER_LAT_WIDE_FANOUT is
+    // (iamacoffeepot/aether#1075); empty unless AETHER_LATENCY_WIDE_FANOUT is
     // set, so the default grid is unchanged.
     for w in wide_fanout_widths_from_env() {
         topologies.push(fanout(w));
