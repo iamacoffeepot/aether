@@ -511,37 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn split_points_lie_on_partitioner_within_snap_tolerance() {
-        // The snap step in `compute_intersection` may shift each split
-        // point by up to one fixed-point ULP per axis off the partitioner
-        // plane. For an axis-aligned partitioner that means |side| of a
-        // split point is bounded by `|n_z|` at most — actually 0 in
-        // happy axis-aligned cases. Pin the bound.
-        let poly = Polygon::from_triangle(
-            pt(-1.0, 0.0, -1.0),
-            pt(1.0, 0.0, -1.0),
-            pt(0.0, 0.0, 1.0),
-            0,
-        )
-        .expect("test setup: non-degenerate triangle");
-        let partitioner = xy_partitioner();
-        let (_cof, _cob, f, b) = split_into_buckets(&poly, &partitioner);
-        let threshold = partitioner.coplanar_threshold();
-        for poly in f.iter().chain(b.iter()) {
-            for v in &poly.vertices {
-                let s = partitioner.side(*v).unsigned_abs();
-                // Every fragment vertex must be inside the coplanar
-                // threshold (either on the original side, or a snapped
-                // intersection point on the plane).
-                assert!(
-                    s <= threshold as u128 || s >= threshold as u128,
-                    "fragment vertex side {s} unexpectedly far from partitioner"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn coplanar_plus_back_vertices_route_to_back() {
         // 0 | BACK | BACK == BACK. Untested-before case where polygon
         // has one COPLANAR + two BACK vertices; should route entirely

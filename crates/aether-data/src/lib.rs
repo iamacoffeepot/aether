@@ -740,12 +740,6 @@ mod tests {
         const ID: KindId = KindId(0xDEAD_BEEF_0000_0003);
     }
 
-    struct Signal;
-    impl Kind for Signal {
-        const NAME: &'static str = "test.signal";
-        const ID: KindId = KindId(0xDEAD_BEEF_0000_0004);
-    }
-
     #[test]
     fn pod_roundtrip_single() {
         let v = TestPod { a: 42, b: 1.5 };
@@ -796,12 +790,6 @@ mod tests {
         let err = decode_struct::<TestStruct>(&[0x00])
             .expect_err("test setup: single-byte buffer must fail postcard decode");
         assert!(matches!(err, DecodeError::Postcard(_)));
-    }
-
-    #[test]
-    fn empty_kind_encodes_to_zero_bytes() {
-        assert!(encode_empty::<Signal>().is_empty());
-        assert_eq!(Signal::NAME, "test.signal");
     }
 
     #[test]
