@@ -27,7 +27,7 @@ Introduce a thin, long-lived **tunnel** process that Claude connects to and that
 - The tunnel **forks and supervises** the hub (`AETHER_RPC_PORT=8901`) and `aether-mcp` (`AETHER_HUB_RPC_ADDR` pointed at the hub), restarting either on crash with backoff.
 - `aether-mcp` is changed to **re-dial the hub on a dead session**. This — not the proxy — is what makes the common case (hub restart) seamless: the hub goes away and comes back, `aether-mcp` and its MCP session stay up, and the next tool call reconnects.
 - Claude triggers a hub restart through an **out-of-band admin endpoint** on the tunnel (`POST :8890/admin/restart-hub`, `/status`), hit via a shell call. The `/mcp` proxy stays a dumb pass-through; management traffic does not ride the MCP channel.
-- A `SessionStart` hook **ensures the tunnel is up** (idempotent — a no-op when `:8890` is already bound), so neither Claude nor the maintainer hand-runs cargo.
+- The tunnel is launched **on demand**: Claude runs the idempotent `scripts/ensure-tunnel.sh` (a no-op when `:8890` is already bound) at the point it needs the MCP harness. *(Originally auto-run by a `SessionStart` hook so neither Claude nor the maintainer hand-ran cargo; the hook was removed because a cold `cargo` build of the tunnel blocked session start long enough to look like a frozen session. The launch script stays — only the auto-trigger is gone.)*
 
 `.mcp.json` is unchanged: `:8890` is the tunnel now instead of `aether-mcp` directly.
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Ensure the aether MCP tunnel is up. Registered as a `SessionStart` hook
-# (.claude/settings.json), so it runs on every Claude session start.
+# Ensure the aether MCP tunnel is up. Claude runs this on demand when it
+# needs the MCP harness — it is NOT auto-started on session start (a cold
+# `cargo` build of the tunnel can take long enough to look like a frozen
+# session, so the launch is left to the point of use).
 #
 # The tunnel (`aether-tunnel`, iamacoffeepot/aether#1212 PR 2) binds :8890 —
 # the port `.mcp.json` targets — and forks + supervises `aether-mcp` (:8891)
@@ -10,11 +12,10 @@
 #   - Otherwise it launches the tunnel detached and waits, bounded, for the
 #     port to come up.
 #
-# A SessionStart hook MUST NOT block the session or return non-zero, so this
-# script is non-blocking (bounded wait) and never-fatal (always exits 0 on
-# the best-effort path). `set -e` is on inside the work, but the launch /
-# probe path is guarded so a failed probe or launch can't propagate a
-# non-zero exit.
+# Bounded wait (so a cold build can't hang the caller indefinitely) and
+# never-fatal (always exits 0 on the best-effort path): `set -e` is on
+# inside the work, but the launch / probe path is guarded so a failed probe
+# or launch can't propagate a non-zero exit.
 
 set -euo pipefail
 
