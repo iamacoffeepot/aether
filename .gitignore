@@ -53,3 +53,8 @@ spikes/*/target/
 # (iamacoffeepot/aether#1084) — populated by scripts/perf-compare.sh,
 # persisted by the workflow's actions/cache, never committed.
 /.perf-cache/
+# Environment files — may hold secrets (API keys, etc.); never commit.
+# Covers any directory and every variant: .env, .env.local, .env.production, etc.
+.env
+.env.*
+*.env
