@@ -10,7 +10,7 @@ ADR-0046's content-generation pipeline pattern depends on a missing primitive: c
 
 The original framing of this ADR (2026-04-25) was a single `"llm"` sink with a model-prefix adapter registry routing both text and image generation through one `aether.llm.complete` kind whose reply was `Ok { text, ... }`. Three things made that shape wrong:
 
-- **Provider APIs are products, not interchangeable backends behind a model string.** Auth is per-provider (`ANTHROPIC_API_KEY` vs `GOOGLE_API_KEY`), rate limits are sometimes per-provider, and each surface has quirks — Anthropic's `system` field is meaningless to a Gemini image request; Nano Banana's `aspect_ratio` is meaningless to an Anthropic messages request. Squeezing them through one kind forces `Option<everything>` schemas, the smell that says you're abstracting at the wrong layer.
+- **Provider APIs are products, not interchangeable backends behind a model string.** Auth is per-provider (`ANTHROPIC_API_KEY` vs `GEMINI_API_KEY`), rate limits are sometimes per-provider, and each surface has quirks — Anthropic's `system` field is meaningless to a Gemini image request; Nano Banana's `aspect_ratio` is meaningless to an Anthropic messages request. Squeezing them through one kind forces `Option<everything>` schemas, the smell that says you're abstracting at the wrong layer.
 - **Image generation can't be a text-completion reply.** Routing image gen through an `Ok { text }` reply is a real modeling bug — the reply shape can't carry a PNG. Media outputs are file paths, not text.
 - **The original cost-telemetry surface no longer exists.** ADR-0050 published `aether.observation.llm_cost` to the broadcast sink every 30s. The broadcast sink and the entire `aether.observation.*` family retired in issue #775. That telemetry path is gone.
 
@@ -75,7 +75,7 @@ enum AnthropicError {
 
 #### `aether.gemini`
 
-Media-generation only. Two request kinds, each modeled on the actual Gemini API request/response shape for that endpoint (no `Option<everything>` at the cross-modality level). Auth for both: `GOOGLE_API_KEY` env var. Reference images come in as file paths; the cap reads bytes before dispatching.
+Media-generation only. Two request kinds, each modeled on the actual Gemini API request/response shape for that endpoint (no `Option<everything>` at the cross-modality level). Auth for both: `GEMINI_API_KEY` env var. Reference images come in as file paths; the cap reads bytes before dispatching.
 
 ```rust
 aether.gemini.nanobanana.generate {
@@ -166,7 +166,7 @@ There is **no `Semaphore` and no `Mutex`.** Because the actor is single-threaded
 
 Both kinds share the cap's rate-limit budget tracker when the user is on one Anthropic account — at the provider level they aren't separate buckets, though today CLI uses subscription quota and Messages uses per-token billing, so the two paths don't actually interact.
 
-**`aether.gemini`** — two backend kinds under one cap, both HTTPS to `generativelanguage.googleapis.com`, auth `GOOGLE_API_KEY`:
+**`aether.gemini`** — two backend kinds under one cap, both HTTPS to `generativelanguage.googleapis.com`, auth `GEMINI_API_KEY`:
 
 - **Nano Banana** (`aether.gemini.nanobanana.generate`) — image generation. The spike's `src/gemini.rs` validated this against `gemini-3.1-flash-image-preview`. Output PNG bytes stage to `save://gen/<uuid>.png`.
 - **Lyria** (`aether.gemini.lyria.generate`) — music generation. Output audio bytes stage to `save://gen/<uuid>.wav`. Request/response surface surveyed at implementation.
@@ -197,7 +197,7 @@ Each adapter has fixture-replay unit tests (`tests/fixtures/nanobanana_v2_respon
 Per-provider env vars (v1 — same precedence-stack-deferred posture as ADR-0041's TOML/CLI):
 
 - **`ANTHROPIC_API_KEY`** — auth for `aether.anthropic.messages.send`. Read once at startup. Absent in the user's default workflow (subscription / CLI only).
-- **`GOOGLE_API_KEY`** — auth for both `aether.gemini` kinds. Read once at startup.
+- **`GEMINI_API_KEY`** — auth for both `aether.gemini` kinds. Read once at startup.
 - **`AETHER_GEN_DIR`** — overrides the `save://gen/` binary-output namespace.
 
 The `aether.anthropic.cli.send` path needs no key — it relies on the `claude` binary being on PATH. The startup log emits which caps and backends initialized at INFO level; a cap whose required key is unset still loads but replies `Err { error: Unauthorized }` to API-mode requests (CLI-mode requests are unaffected).
@@ -223,7 +223,7 @@ Per-request entries land in the per-actor log ring (ADR-0081):
 
 Both caps are **chassis-owned**, like `aether.fs` (ADR-0041), net (ADR-0043), and audio (ADR-0039):
 
-- **Desktop** — both caps. `aether.anthropic` with the CLI path by default; API paths active when keys are set. `aether.gemini` active when `GOOGLE_API_KEY` is set.
+- **Desktop** — both caps. `aether.anthropic` with the CLI path by default; API paths active when keys are set. `aether.gemini` active when `GEMINI_API_KEY` is set.
 - **Headless** — both caps, identical semantics. Headless content-gen workloads (CI runners, batch sculpting) are a primary target.
 - **Hub** — neither cap. Mail to `aether.anthropic` / `aether.gemini` warn-drops as unknown mailbox, identical to the `aether.fs` behaviour on hub chassis. The hub coordinates substrate children; it hosts no workload components in v1.
 
@@ -238,7 +238,7 @@ Provider calls are not auto-persisted as content-addressed handles. The reply la
 Provider integration tests are the only place in the DAG-handles tree that touches paid external services; the test posture keeps CI cost at zero:
 
 - **Stub adapters by default.** `StubAnthropicAdapter` and `StubGeminiAdapter` return canned responses without hitting the network. CI runs these smokes by default — send a kind, assert the reply (stub Nano Banana returns a fixed PNG path that exists and decodes; stub Lyria a fixed WAV path).
-- **Real-API tests are `#[ignore]`.** `#[ignore = "needs ANTHROPIC_API_KEY"]` / `#[ignore = "needs GOOGLE_API_KEY"]` tests call the live APIs with tiny requests when keys are present; not run in CI. Devs validate locally.
+- **Real-API tests are `#[ignore]`.** `#[ignore = "needs ANTHROPIC_API_KEY"]` / `#[ignore = "needs GEMINI_API_KEY"]` tests call the live APIs with tiny requests when keys are present; not run in CI. Devs validate locally.
 - **CLI path test.** A test that spawns the `claude` binary if it's on PATH, asserting a graceful `Err { error: CliNotFound }` skip otherwise — the user's "no API budget" rail.
 - **Per-model validation tests.** For each known `model`, send an unsupported field combo and assert the adapter returns the right `GeminiError` variant *before* any HTTP dispatch. Plus an unknown-model test asserting `UnknownModel { model, supported }`.
 - **Fixture-replay tests** lock the vendor wire shape (see §4).

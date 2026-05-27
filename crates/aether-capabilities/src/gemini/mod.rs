@@ -42,7 +42,7 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = 2;
 /// Media generation can run a couple minutes.
 pub const DEFAULT_TIMEOUT_MS: u32 = 180_000;
 
-/// Adapter returned when `GOOGLE_API_KEY` is unset (or
+/// Adapter returned when `GEMINI_API_KEY` is unset (or
 /// `AETHER_GEMINI_DISABLE=1`). Every request replies
 /// `Err { Unauthorized }` so a key-absent boot still loads rather than
 /// warn-dropping.
@@ -64,7 +64,7 @@ mod config {
     use std::time::Duration;
 
     /// Resolved configuration for the `aether.gemini` cap. Chassis mains
-    /// read env (`GOOGLE_API_KEY`, `AETHER_GEMINI_DISABLE`,
+    /// read env (`GEMINI_API_KEY`, `AETHER_GEMINI_DISABLE`,
     /// `AETHER_GEMINI_MAX_IN_FLIGHT`, `AETHER_GEMINI_TIMEOUT_MS`); the
     /// staging root reads `AETHER_GEN_DIR` at stage time (shared with
     /// issue 1013 / 1014). Tests build it directly.
@@ -96,7 +96,7 @@ mod config {
         /// Resolve every field from env. Chassis-main edge only.
         #[must_use]
         pub fn from_env() -> Self {
-            let api_key = env::var("GOOGLE_API_KEY").ok().filter(|s| !s.is_empty());
+            let api_key = env::var("GEMINI_API_KEY").ok().filter(|s| !s.is_empty());
             let disabled = env::var("AETHER_GEMINI_DISABLE")
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
             let max_in_flight = env::var("AETHER_GEMINI_MAX_IN_FLIGHT")
@@ -427,7 +427,7 @@ mod native {
             || {
                 tracing::info!(
                     target: "aether_capabilities::gemini",
-                    "GOOGLE_API_KEY unset — every request replies Unauthorized",
+                    "GEMINI_API_KEY unset — every request replies Unauthorized",
                 );
                 Arc::new(DisabledGeminiAdapter) as Arc<dyn GeminiAdapter>
             },
@@ -1130,13 +1130,13 @@ mod native {
 
         /// Real-API smoke. Hits the live Nano Banana endpoint with a
         /// tiny request — ignored by default so CI stays zero-cost; run
-        /// with `GOOGLE_API_KEY` set.
+        /// with `GEMINI_API_KEY` set.
         #[test]
-        #[ignore = "needs GOOGLE_API_KEY"]
+        #[ignore = "needs GEMINI_API_KEY"]
         fn gemini_nanobanana_smoke() {
             use super::super::UreqGeminiAdapter;
             use crate::contentgen::adapter::{GeminiAdapter, GeminiImageRequest};
-            let key = env::var("GOOGLE_API_KEY").expect("GOOGLE_API_KEY set for smoke");
+            let key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY set for smoke");
             let adapter = UreqGeminiAdapter::new(key, Duration::from_mins(1));
             let resp = adapter
                 .nanobanana_generate(GeminiImageRequest {
@@ -1152,11 +1152,11 @@ mod native {
 
         /// Real-API smoke for Lyria. Ignored by default.
         #[test]
-        #[ignore = "needs GOOGLE_API_KEY"]
+        #[ignore = "needs GEMINI_API_KEY"]
         fn gemini_lyria_smoke() {
             use super::super::UreqGeminiAdapter;
             use crate::contentgen::adapter::{GeminiAdapter, GeminiMusicRequest};
-            let key = env::var("GOOGLE_API_KEY").expect("GOOGLE_API_KEY set for smoke");
+            let key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY set for smoke");
             let adapter = UreqGeminiAdapter::new(key, Duration::from_mins(2));
             let resp = adapter
                 .lyria_generate(GeminiMusicRequest {

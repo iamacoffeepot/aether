@@ -1,6 +1,6 @@
 //! Nano Banana image-generation backend for the `aether.gemini` cap
 //! (ADR-0050). `POST` to `generativelanguage.googleapis.com` with
-//! `GOOGLE_API_KEY`. Per-model validation of `aspect_ratio` /
+//! `GEMINI_API_KEY`. Per-model validation of `aspect_ratio` /
 //! `image_size` / reference-path counts runs *before* any HTTP dispatch
 //! (the `ModelShape` table below), returning the matching `GeminiError`
 //! variant. Response parsing is factored into

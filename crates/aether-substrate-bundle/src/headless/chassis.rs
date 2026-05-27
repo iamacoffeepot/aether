@@ -64,7 +64,7 @@ pub struct HeadlessEnv {
     /// from `ANTHROPIC_API_KEY` + `AETHER_ANTHROPIC_*`.
     pub anthropic: AnthropicConfig,
     /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
-    /// `GOOGLE_API_KEY` + `AETHER_GEMINI_*`.
+    /// `GEMINI_API_KEY` + `AETHER_GEMINI_*`.
     pub gemini: GeminiConfig,
     pub tick_period: Duration,
     /// Issue 763 P2: optional `aether.rpc.server` bind address.
