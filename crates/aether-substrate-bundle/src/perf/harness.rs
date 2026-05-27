@@ -272,13 +272,21 @@ pub struct Topology {
     pub tier: Tier,
 }
 
+/// The downstream adjacency of a `d`-node forward chain `0 -> 1 -> ... ->
+/// d-1`: each node forwards to its successor; the last is a leaf. Shared by
+/// the [`depth_chain`] (light) and [`ui_roundtrip`] (real) factories so the
+/// chain-build lives in one place.
+fn forward_chain_edges(d: usize) -> Vec<Vec<usize>> {
+    (0..d)
+        .map(|i| if i + 1 < d { vec![i + 1] } else { vec![] })
+        .collect()
+}
+
 /// `0 -> 1 -> ... -> d-1`. Each relay forwards to the next; the last is
 /// a leaf.
 #[must_use]
 pub fn depth_chain(d: usize) -> Topology {
-    let downstreams: Vec<Vec<usize>> = (0..d)
-        .map(|i| if i + 1 < d { vec![i + 1] } else { vec![] })
-        .collect();
+    let downstreams = forward_chain_edges(d);
     Topology {
         name: format!("depth-{d}"),
         work_iters: vec![0; downstreams.len()],
@@ -384,6 +392,142 @@ pub fn two_level_tree_router_heavy(work_iters: u64) -> Topology {
         t.work_iters[leaf] = work_iters;
     }
     t
+}
+
+/// Starting fan-out width for the real tier's `socket-server` /
+/// `tick-broadcast` shapes (ADR-0085 amendment). A modest value so local
+/// `cargo test` cells stay fast; the empirically-settled per-shape `N` and
+/// the per-PR fidelity cap (~64–128) land in PR 3 (iamacoffeepot/aether#1222).
+pub const REAL_FANOUT_N: usize = 32;
+
+/// Starting per-codec `busy_spin` budget for the real tier's heavy
+/// decode/encode nodes (ADR-0085 amendment) — sized for a tens-of-µs
+/// per-node cost at the harness's measured rate (read the HANDLER DUR column
+/// to convert to wall-clock). A starting point, tuned + capped in PR 3.
+pub const REAL_CODEC_WORK_ITERS: u64 = 20_000;
+
+/// Starting per-node `busy_spin` budget for a real-tier *medium*-cost logic /
+/// sim node (the join / broadcast hub) — lighter than a codec, heavier than a
+/// trivial router. A starting point, tuned in PR 3.
+pub const REAL_LOGIC_WORK_ITERS: u64 = 5_000;
+
+/// The depth of the `ui-roundtrip` follow-up chain — the bounded, **unrolled**
+/// sequence of post-response steps (ADR-0085 amendment: bounded UI loops are
+/// unrolled to a finite depth, never introduced as cycles, so the trace stays
+/// a DAG). A small fixed count; the real magnitude is tuned in PR 3.
+pub const REAL_UI_FOLLOWUP_STEPS: usize = 4;
+
+/// `socket-server-N` (ADR-0085 amendment): a single-entry DAG modelling an
+/// N-connection server. The entry source forwards each paced request to `N`
+/// **decoder** nodes (heavy codec cost); every decoder forwards to **one
+/// logic** node (the join — `N` parents, medium cost); the logic node
+/// broadcasts to `N` **encoder** nodes (heavy codec cost); each encoder
+/// forwards to **one writer** leaf (the server replying, trivial). The input
+/// chain (source→decode→logic) and the writer chain (logic→encode→write-leaf)
+/// join at the logic node. Pure fan/join — every node forwards the *same*
+/// payload to *all* its downstreams, so [`Relay`]'s broadcast-to-all
+/// forwarding fits unchanged (no conditional routing).
+///
+/// Node layout (indices): `0` = source; `1..=N` = decoders; `N+1` = logic;
+/// `N+2..=2N+1` = encoders; `2N+2..=3N+1` = writers. Total `3N + 2` nodes.
+#[must_use]
+pub fn socket_server(n: usize, codec_work: u64, logic_work: u64) -> Topology {
+    let logic = n + 1;
+    let total = 3 * n + 2;
+    let mut downstreams = vec![vec![]; total];
+    let mut work_iters = vec![0u64; total];
+
+    // 0: source → all N decoders.
+    downstreams[0] = (1..=n).collect();
+    // 1..=N: decoders (heavy) → the single logic node (the join).
+    for dec in 1..=n {
+        downstreams[dec] = vec![logic];
+        work_iters[dec] = codec_work;
+    }
+    // N+1: logic (medium) → all N encoders.
+    work_iters[logic] = logic_work;
+    let first_enc = logic + 1; // N+2
+    downstreams[logic] = (first_enc..first_enc + n).collect();
+    // encoders (heavy) → one writer each.
+    let first_writer = first_enc + n; // 2N+2
+    for k in 0..n {
+        let enc = first_enc + k;
+        let writer = first_writer + k;
+        downstreams[enc] = vec![writer];
+        work_iters[enc] = codec_work;
+        // writers stay trivial leaves (downstreams empty, work 0).
+    }
+
+    Topology {
+        name: format!("socket-server-{n}"),
+        downstreams,
+        work_iters,
+        tier: Tier::Real,
+    }
+}
+
+/// `tick-broadcast-N` (ADR-0085 amendment): a tick-paced source feeding a
+/// single **sim** node (medium cost) that broadcasts to `N` **encoder** nodes
+/// (heavy codec cost), each forwarding to **one writer** leaf. Models a
+/// per-frame simulation step fanning state out to `N` connected clients. Pure
+/// fan — broadcast-to-all fits [`Relay`] unchanged.
+///
+/// Node layout (indices): `0` = source; `1` = sim; `2..=N+1` = encoders;
+/// `N+2..=2N+1` = writers. Total `2N + 2` nodes.
+#[must_use]
+pub fn tick_broadcast(n: usize, codec_work: u64, sim_work: u64) -> Topology {
+    let total = 2 * n + 2;
+    let mut downstreams = vec![vec![]; total];
+    let mut work_iters = vec![0u64; total];
+
+    // 0: source → sim.
+    downstreams[0] = vec![1];
+    // 1: sim (medium) → all N encoders.
+    work_iters[1] = sim_work;
+    let first_enc = 2;
+    downstreams[1] = (first_enc..first_enc + n).collect();
+    // encoders (heavy) → one writer each.
+    let first_writer = first_enc + n; // N+2
+    for k in 0..n {
+        let enc = first_enc + k;
+        let writer = first_writer + k;
+        downstreams[enc] = vec![writer];
+        work_iters[enc] = codec_work;
+    }
+
+    Topology {
+        name: format!("tick-broadcast-{n}"),
+        downstreams,
+        work_iters,
+        tier: Tier::Real,
+    }
+}
+
+/// `ui-roundtrip` (ADR-0085 amendment): request → handler → response → a
+/// **bounded, unrolled** follow-up chain of `followup_steps` nodes. The whole
+/// shape is a finite-depth chain (NOT a cycle — the DAG stays acyclic), each
+/// node forwarding the same payload to its single successor, so [`Relay`]'s
+/// broadcast-to-(one) fits unchanged. Models a UI request/response with a
+/// finite settle of follow-up work.
+///
+/// Node layout (indices): `0` = request (entry); `1` = handler (medium cost);
+/// `2` = response; `3..` = the unrolled follow-up steps; the last is a leaf.
+/// Total `3 + followup_steps` nodes.
+#[must_use]
+pub fn ui_roundtrip(followup_steps: usize, handler_work: u64) -> Topology {
+    let total = 3 + followup_steps;
+    // A straight chain: each node forwards to the next; the last is a leaf.
+    let downstreams = forward_chain_edges(total);
+    // 1: handler does the medium-cost work; everything else is trivial.
+    let mut work_iters = vec![0u64; total];
+    work_iters[1] = handler_work;
+
+    Topology {
+        name: "ui-roundtrip".to_owned(),
+        downstreams,
+        work_iters,
+        tier: Tier::Real,
+    }
 }
 
 /// The full default topology set (depth chains 1/2/4/8, fan-outs 2/4/8,
@@ -572,6 +716,35 @@ pub fn pace_hz_from_env() -> Option<u64> {
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&h| h > 0)
+}
+
+/// Default pacing for the real tier when `AETHER_LATENCY_PACE_HZ` is unset
+/// (ADR-0085 amendment). The real tier is *defined* as paced — interval-fired
+/// input and writer chains modelling a client talking to a server and the
+/// server replying, not a saturating flood — so it never runs flat-out
+/// regardless of `cfg.drive`. 60 Hz is the engine's reference frame rate. A
+/// starting point, tuned per-shape in PR 3 (iamacoffeepot/aether#1222).
+pub const DEFAULT_REAL_PACE_HZ: u64 = 60;
+
+/// The [`Drive`] a cell of `tier` actually runs under, given the sweep's
+/// configured `drive` (ADR-0085 amendment). This is the per-tier-drive valve:
+/// the **real** tier is always driven *paced* (`Drive::Latency { pace_hz:
+/// Some(..) }`) — its model is a client/server round-trip, not a flood — using
+/// `AETHER_LATENCY_PACE_HZ` or [`DEFAULT_REAL_PACE_HZ`]; **light** and
+/// **heavy** keep the sweep's configured `drive` verbatim (their existing flat
+/// or saturate behaviour). Selecting per-tier inside [`run_sweep_samples`]
+/// (mechanism (b)) — rather than running a separate sweep per tier — keeps the
+/// single-`SweepConfig`, single-`run_sweep` call path that `perf-trial` and
+/// the observe test already use, and leaves the emitted report shape (one
+/// section per tier) untouched.
+#[must_use]
+pub fn drive_for_tier(drive: Drive, tier: Tier) -> Drive {
+    match tier {
+        Tier::Real => Drive::Latency {
+            pace_hz: Some(pace_hz_from_env().unwrap_or(DEFAULT_REAL_PACE_HZ)),
+        },
+        Tier::Light | Tier::Heavy => drive,
+    }
 }
 
 /// Default per-tick `Ping` burst for a `Saturate` cell when
@@ -788,13 +961,20 @@ fn heavy_topologies(work_iters: u64) -> Vec<Topology> {
     topos
 }
 
-/// The real tier's shapes — empty in PR 1 (the `socket-server` /
-/// `tick-broadcast` / `ui-roundtrip` factories land in PR 2, ADR-0085
-/// amendment). The tier still parses and sections, so the enum stays stable
-/// for PR 2.
+/// The real tier's shapes (ADR-0085 amendment): application graphs at a
+/// representative — modest, local-test-fast — scale, driven **paced** by the
+/// sweep (see [`drive_for_tier`]). All carry [`Tier::Real`] from their
+/// factories. `N` / `work_iters` / `pace_hz` are starting points
+/// ([`REAL_FANOUT_N`] / [`REAL_CODEC_WORK_ITERS`] / [`REAL_LOGIC_WORK_ITERS`]);
+/// they are tuned + fidelity-capped in PR 3 (iamacoffeepot/aether#1222), which
+/// also wires the env so the tier runs in CI.
 #[must_use]
 fn real_topologies() -> Vec<Topology> {
-    Vec::new()
+    vec![
+        socket_server(REAL_FANOUT_N, REAL_CODEC_WORK_ITERS, REAL_LOGIC_WORK_ITERS),
+        tick_broadcast(REAL_FANOUT_N, REAL_CODEC_WORK_ITERS, REAL_LOGIC_WORK_ITERS),
+        ui_roundtrip(REAL_UI_FOLLOWUP_STEPS, REAL_LOGIC_WORK_ITERS),
+    ]
 }
 
 /// Build the sweep's topology set from the selected tiers
@@ -893,10 +1073,13 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             if !spawned_ok {
                 continue;
             }
+            // The real tier is always driven paced regardless of `cfg.drive`
+            // (ADR-0085 amendment); light / heavy keep the configured drive.
+            let drive = drive_for_tier(cfg.drive, topo.tier);
             // `burst` is the per-tick `Ping` count: 1 in `Latency` (one
             // root per frame), `backlog` in `Saturate` (a deep ready queue
             // drained in one frame, iamacoffeepot/aether#1202).
-            let burst = match cfg.drive {
+            let burst = match drive {
                 Drive::Latency { .. } => 1,
                 Drive::Saturate { backlog } => backlog,
             };
@@ -935,8 +1118,8 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             // long wide fan-out and self-reports it (handled at harvest).
             let frames = cfg.frames;
 
-            // Drive via the real lifecycle.
-            match cfg.drive {
+            // Drive via the real lifecycle (per-tier drive resolved above).
+            match drive {
                 Drive::Latency {
                     pace_hz: Some(hz), ..
                 } => {
@@ -1075,7 +1258,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             // harvest is complete: a lapped ring drops finished nodes, so a
             // truncated cell would report a low rate — refuse it rather than
             // mislead.
-            let throughput_mps = match cfg.drive {
+            let throughput_mps = match drive {
                 Drive::Saturate { .. } if !truncated => throughput_from_nodes(&mails),
                 _ => None,
             };
@@ -1296,5 +1479,151 @@ mod tests {
     fn throughput_from_nodes_handles_degenerate_windows() {
         // No completed nodes → no rate (rather than a divide-by-zero).
         assert!(throughput_from_nodes(&[]).is_none());
+    }
+
+    /// A `Topology`'s structural invariants hold for any factory: the two
+    /// per-node vectors are the same length, every downstream index is in
+    /// range, and the DAG is acyclic (every edge points forward — all our
+    /// real shapes wire strictly increasing indices). Factored so each
+    /// real-shape test asserts the same invariants without copy-pasting the
+    /// checks (keeps Qodana's `DuplicatedCode` quiet).
+    fn assert_well_formed_real(topo: &Topology, expected_nodes: usize) {
+        assert_eq!(topo.tier, Tier::Real, "real factory must tag Tier::Real");
+        assert_eq!(
+            topo.downstreams.len(),
+            expected_nodes,
+            "node count for {}",
+            topo.name
+        );
+        assert_eq!(
+            topo.work_iters.len(),
+            topo.downstreams.len(),
+            "work_iters must be one-per-node for {}",
+            topo.name
+        );
+        for (i, downs) in topo.downstreams.iter().enumerate() {
+            for &j in downs {
+                assert!(
+                    j < topo.downstreams.len(),
+                    "{} edge {i}->{j} out of range",
+                    topo.name
+                );
+                assert!(
+                    j > i,
+                    "{} edge {i}->{j} is not forward — the DAG must stay acyclic",
+                    topo.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn socket_server_has_expected_node_count_and_shape() {
+        let n = 8;
+        let t = socket_server(n, 1_000, 500);
+        // source + N decoders + logic + N encoders + N writers = 3N + 2.
+        assert_well_formed_real(&t, 3 * n + 2);
+        // Source fans to all N decoders; the logic node (index N+1) joins
+        // them and broadcasts to all N encoders.
+        assert_eq!(t.downstreams[0].len(), n, "source fans to N decoders");
+        let logic = n + 1;
+        assert_eq!(
+            t.downstreams[logic].len(),
+            n,
+            "logic broadcasts to N encoders"
+        );
+        let decoder_parents = (1..=n).filter(|&d| t.downstreams[d] == vec![logic]).count();
+        assert_eq!(decoder_parents, n, "every decoder joins at the logic node");
+    }
+
+    #[test]
+    fn tick_broadcast_has_expected_node_count_and_shape() {
+        let n = 8;
+        let t = tick_broadcast(n, 1_000, 500);
+        // source + sim + N encoders + N writers = 2N + 2.
+        assert_well_formed_real(&t, 2 * n + 2);
+        assert_eq!(t.downstreams[0], vec![1], "source feeds the sim node");
+        assert_eq!(t.downstreams[1].len(), n, "sim broadcasts to N encoders");
+    }
+
+    #[test]
+    fn ui_roundtrip_is_a_finite_acyclic_chain() {
+        let steps = REAL_UI_FOLLOWUP_STEPS;
+        let t = ui_roundtrip(steps, 500);
+        // request + handler + response + followup steps = 3 + steps.
+        assert_well_formed_real(&t, 3 + steps);
+        // A pure chain: every non-leaf node has exactly one downstream, the
+        // last is a leaf — bounded, unrolled, never a cycle.
+        let leaves = t.downstreams.iter().filter(|d| d.is_empty()).count();
+        assert_eq!(leaves, 1, "a chain has a single leaf");
+    }
+
+    #[test]
+    fn real_topologies_carry_the_real_tier() {
+        let topos = real_topologies();
+        assert_eq!(topos.len(), 3, "three real shapes");
+        assert!(
+            topos.iter().all(|t| t.tier == Tier::Real),
+            "every real shape must be tagged Tier::Real"
+        );
+    }
+
+    #[test]
+    fn drive_for_tier_paces_real_and_passes_others_through() {
+        // Real is always paced, even when the sweep was configured saturate.
+        let sat = Drive::Saturate { backlog: 64 };
+        assert!(
+            matches!(
+                drive_for_tier(sat, Tier::Real),
+                Drive::Latency { pace_hz: Some(_) }
+            ),
+            "real tier must be driven paced regardless of cfg.drive"
+        );
+        // Light / heavy keep the configured drive verbatim.
+        for tier in [Tier::Light, Tier::Heavy] {
+            assert!(
+                matches!(drive_for_tier(sat, tier), Drive::Saturate { backlog: 64 }),
+                "{tier:?} must keep the configured drive"
+            );
+        }
+    }
+
+    /// Run a single (workers × topology) cell under the cell's *per-tier*
+    /// drive ([`drive_for_tier`]) — so a real topology runs paced — and return
+    /// its samples, or `None` when no wgpu adapter is available (the driverless
+    /// box skips cleanly). Mirrors [`saturate_cell`] but lets the tier select
+    /// the drive, so a real cell exercises the paced path the same way the
+    /// `perf-trial` bin will.
+    fn real_cell(workers: usize, topo: Topology) -> Option<CellSamples> {
+        let cfg = SweepConfig {
+            workers: vec![workers],
+            // A small frame count: paced cells sleep per frame, so keep the
+            // local test fast while still settling several round-trips.
+            frames: 4,
+            // cfg.drive is overridden to paced for the real tier inside the
+            // sweep; the value here is the light/heavy fallback, unused.
+            drive: Drive::Latency { pace_hz: None },
+            topologies: vec![topo],
+        };
+        run_sweep_samples(&cfg).into_iter().next()
+    }
+
+    #[test]
+    fn paced_real_cell_yields_latency_samples_and_no_throughput() {
+        // A small `ui-roundtrip` settles quickly; the larger fan shapes work
+        // too but cost more per local run.
+        let Some(cell) = real_cell(2, ui_roundtrip(REAL_UI_FOLLOWUP_STEPS, 500)) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        assert_eq!(cell.tier, Tier::Real, "the cell carries the real tier");
+        assert!(
+            !cell.handler.is_empty(),
+            "a paced real cell must produce per-hop latency samples"
+        );
+        assert!(
+            cell.throughput_mps.is_none(),
+            "a paced (latency) real cell reports no throughput rate"
+        );
     }
 }

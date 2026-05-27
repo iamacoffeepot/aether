@@ -12,7 +12,10 @@
 //!   `heavy`, `real` (e.g. `light,heavy`). Default `light` (ADR-0085
 //!   amendment). The *tier* axis — which classes of shape run, and which
 //!   carry a verdict (only `light`; heavy / real are characterisation).
-//!   `real` parses but is empty until PR 2.
+//!   The `real` tier (`socket-server` / `tick-broadcast` / `ui-roundtrip`) is
+//!   always driven **paced** — `AETHER_LATENCY_PACE_HZ` or a 60 Hz default —
+//!   regardless of `AETHER_PERF_DRIVE`, modelling a client/server round-trip
+//!   rather than a flood; light / heavy keep the `AETHER_PERF_DRIVE` mode.
 //! - `AETHER_PERF_TOPOS` — the breadth knob *within* a tier: `ci`
 //!   (depth-1/8 + fanout-4/8 + tree) or `full` (the whole default set).
 //!   Default `ci`. Orthogonal to `AETHER_PERF_TIER`.
