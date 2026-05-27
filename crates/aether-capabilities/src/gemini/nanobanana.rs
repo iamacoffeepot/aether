@@ -59,24 +59,24 @@ pub const MODELS: &[ModelShape] = &[
 
 /// Aspect ratios every model accepts.
 const CROSS_MODEL_RATIOS: &[AspectRatio] = &[
-    AspectRatio::AR_1_1,
-    AspectRatio::AR_2_3,
-    AspectRatio::AR_3_2,
-    AspectRatio::AR_3_4,
-    AspectRatio::AR_4_3,
-    AspectRatio::AR_4_5,
-    AspectRatio::AR_5_4,
-    AspectRatio::AR_9_16,
-    AspectRatio::AR_16_9,
-    AspectRatio::AR_21_9,
+    AspectRatio::ASPECT_RATIO_1_1,
+    AspectRatio::ASPECT_RATIO_2_3,
+    AspectRatio::ASPECT_RATIO_3_2,
+    AspectRatio::ASPECT_RATIO_3_4,
+    AspectRatio::ASPECT_RATIO_4_3,
+    AspectRatio::ASPECT_RATIO_4_5,
+    AspectRatio::ASPECT_RATIO_5_4,
+    AspectRatio::ASPECT_RATIO_9_16,
+    AspectRatio::ASPECT_RATIO_16_9,
+    AspectRatio::ASPECT_RATIO_21_9,
 ];
 
 /// Extreme aspect ratios only NB2 accepts.
 const NB2_ONLY_RATIOS: &[AspectRatio] = &[
-    AspectRatio::AR_1_4,
-    AspectRatio::AR_1_8,
-    AspectRatio::AR_4_1,
-    AspectRatio::AR_8_1,
+    AspectRatio::ASPECT_RATIO_1_4,
+    AspectRatio::ASPECT_RATIO_1_8,
+    AspectRatio::ASPECT_RATIO_4_1,
+    AspectRatio::ASPECT_RATIO_8_1,
 ];
 
 /// Look up a model's shape, or `None` if unsupported.
@@ -357,24 +357,30 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_rejected_on_nb1() {
-        let err =
-            validate(nb1(), &inputs(AspectRatio::AR_8_1, None)).expect_err("AR_8_1 is NB2-only");
+        let err = validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_8_1, None))
+            .expect_err("ASPECT_RATIO_8_1 is NB2-only");
         let GeminiError::AspectRatioNotSupportedByModel { supported, .. } = err else {
             panic!("expected AspectRatioNotSupportedByModel, got {err:?}");
         };
-        assert!(!supported.contains(&AspectRatio::AR_8_1));
+        assert!(!supported.contains(&AspectRatio::ASPECT_RATIO_8_1));
     }
 
     #[test]
     fn extreme_aspect_ratio_accepted_on_nb2() {
-        validate(nb2(), &inputs(AspectRatio::AR_8_1, Some(ImageSize::S512)))
-            .expect("AR_8_1 + S512 is valid on NB2");
+        validate(
+            nb2(),
+            &inputs(AspectRatio::ASPECT_RATIO_8_1, Some(ImageSize::S512)),
+        )
+        .expect("ASPECT_RATIO_8_1 + S512 is valid on NB2");
     }
 
     #[test]
     fn image_size_rejected_when_unsupported_by_model() {
-        let err = validate(nb1(), &inputs(AspectRatio::AR_1_1, Some(ImageSize::S512)))
-            .expect_err("S512 is NB2-only");
+        let err = validate(
+            nb1(),
+            &inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::S512)),
+        )
+        .expect_err("S512 is NB2-only");
         assert!(matches!(
             err,
             GeminiError::ImageSizeNotSupportedByModel { .. }
@@ -383,7 +389,7 @@ mod tests {
 
     #[test]
     fn over_count_object_refs_rejected() {
-        let mut i = inputs(AspectRatio::AR_1_1, Some(ImageSize::K1));
+        let mut i = inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::K1));
         i.object_ref_count = 1;
         let err = validate(nb1(), &i).expect_err("NB1 accepts zero reference images");
         let GeminiError::MissingRequiredField { field, .. } = err else {
@@ -394,7 +400,7 @@ mod tests {
 
     #[test]
     fn nb2_only_knob_rejected_on_older_model() {
-        let mut i = inputs(AspectRatio::AR_1_1, Some(ImageSize::K1));
+        let mut i = inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::K1));
         i.thinking_level_set = true;
         let err = validate(nb1(), &i).expect_err("thinking_level is NB2-only");
         let GeminiError::MissingRequiredField { field, .. } = err else {
