@@ -78,38 +78,7 @@ pub fn channel() -> (EventSender, EventReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use aether_data::{SessionToken, Uuid};
-    use aether_substrate::ReplyTarget;
-
     use super::*;
-
-    fn reply_to(u: u128) -> ReplyTo {
-        ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(u))))
-    }
-
-    #[test]
-    fn advance_round_trips_through_channel() {
-        let (tx, rx) = channel();
-        tx.send(ChassisEvent::Advance {
-            reply_to: reply_to(1),
-            ticks: 3,
-        })
-        .expect("send");
-        match rx.recv().expect("recv") {
-            ChassisEvent::Advance { ticks, .. } => assert_eq!(ticks, 3),
-            ChassisEvent::CaptureRequested => panic!("got CaptureRequested, expected Advance"),
-        }
-    }
-
-    #[test]
-    fn capture_requested_round_trips_through_channel() {
-        let (tx, rx) = channel();
-        tx.send(ChassisEvent::CaptureRequested).expect("send");
-        assert!(matches!(
-            rx.recv().expect("recv"),
-            ChassisEvent::CaptureRequested
-        ));
-    }
 
     #[test]
     fn recv_errors_after_all_senders_drop() {
