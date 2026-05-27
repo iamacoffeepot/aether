@@ -623,52 +623,39 @@ mod tests {
         assert_eq!(e1.sequence, 2);
     }
 
-    /// With no ring stamped (out-of-actor panic), the header is
-    /// still written and `ring_entries` is 0 — the dump file
-    /// exists, just with no per-actor history.
+    /// Header-only output for the two no-history inputs: `None` (no
+    /// ring stamped — an out-of-actor panic) and `Some(&[])` (an actor
+    /// stamped but no events emitted). They drive different arms of
+    /// `write_jsonl` — `None` skips the entry loop and the `map_or`
+    /// default supplies `ring_entries`; `Some(&[])` enters the `if let
+    /// Some` arm for a zero-iteration loop and `len()` supplies the 0 —
+    /// but both must land on the same single header line with
+    /// `ring_entries == 0` and no entry lines.
     #[test]
-    fn write_jsonl_with_no_ring_emits_header_only() {
-        let dir = tempdir("write_jsonl_no_ring");
-        let path = dir.join("scheduler-thread.jsonl");
-        write_jsonl(
-            &path,
-            1_700_000_002_000,
-            "scheduler-thread",
-            "src/scheduler.rs:1:1",
-            "host-thread panic",
-            None,
-            None,
-        )
-        .expect("write succeeds");
-        let contents = fs::read_to_string(&path).expect("readback");
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 1, "header only");
-        let header: serde_json::Value = serde_json::from_str(lines[0]).expect("header is json");
-        assert_eq!(header["ring_entries"], 0);
-        assert!(
-            header["backtrace"].is_null(),
-            "no backtrace → null in the JSON",
-        );
-    }
-
-    /// Empty ring (actor stamped but no events emitted) round-trips
-    /// the same way as a missing ring — header only, no entries.
-    /// Confirms the empty-slice branch in `write_jsonl`.
-    #[test]
-    fn write_jsonl_with_empty_ring_emits_header_only() {
-        let dir = tempdir("write_jsonl_empty_ring");
-        let path = dir.join("aether.idle.jsonl");
-        write_jsonl(
-            &path,
-            0,
-            "aether.idle",
-            "<unknown>",
-            "boom",
-            None,
-            Some(&[]),
-        )
-        .expect("write succeeds");
-        let contents = fs::read_to_string(&path).expect("readback");
-        assert_eq!(contents.lines().count(), 1);
+    fn write_jsonl_with_no_or_empty_ring_emits_header_only() {
+        let empty: [LogEntry; 0] = [];
+        for (label, ring) in [("none", None), ("empty", Some(&empty[..]))] {
+            let dir = tempdir(&format!("write_jsonl_{label}_ring"));
+            let path = dir.join("scheduler-thread.jsonl");
+            write_jsonl(
+                &path,
+                1_700_000_002_000,
+                "scheduler-thread",
+                "src/scheduler.rs:1:1",
+                "host-thread panic",
+                None,
+                ring,
+            )
+            .expect("write succeeds");
+            let contents = fs::read_to_string(&path).expect("readback");
+            let lines: Vec<&str> = contents.lines().collect();
+            assert_eq!(lines.len(), 1, "{label}: header only");
+            let header: serde_json::Value = serde_json::from_str(lines[0]).expect("header is json");
+            assert_eq!(header["ring_entries"], 0, "{label}: ring_entries 0");
+            assert!(
+                header["backtrace"].is_null(),
+                "{label}: no backtrace → null in the JSON",
+            );
+        }
     }
 }

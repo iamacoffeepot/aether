@@ -121,12 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn request_into_empty_slot_succeeds() {
-        let q = CaptureQueue::new();
-        assert!(q.request(pending(1)));
-    }
-
-    #[test]
     fn second_request_rejected_while_pending() {
         let q = CaptureQueue::new();
         assert!(q.request(pending(1)));

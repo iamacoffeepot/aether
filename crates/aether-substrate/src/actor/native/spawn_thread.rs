@@ -374,7 +374,6 @@ where
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     use aether_actor::Singleton;
     use aether_data::{KindId, MailboxId};
@@ -565,57 +564,6 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 3, "three distinct correlation ids");
-    }
-
-    /// Settlement contract gap (issue iamacoffeepot/aether#716): this
-    /// test documents the known limitation. The parent chain may
-    /// settle before the spawned thread sends — that's the gap.
-    /// Today, the test asserts the spawned send DOES eventually
-    /// happen and DOES carry the right lineage; tomorrow's
-    /// settlement-anchor work flips the test to also assert the
-    /// parent root's `in_flight` stays > 0 for the thread's
-    /// lifetime.
-    #[test]
-    fn inherit_ctx_send_lineage_survives_thread_pause() {
-        use std::time::Duration;
-
-        let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, "test.spawn_thread.recipient");
-
-        let producer_mailbox = MailboxId(0xDD);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            producer_mailbox,
-        ));
-
-        let inherited_root = MailId::new(MailboxId(0xFEED), 99);
-        let inherited_mail_id = MailId::new(MailboxId(0xCAFE), 100);
-
-        let pause_done = Arc::new(AtomicBool::new(false));
-        let pause_done_clone = Arc::clone(&pause_done);
-
-        let join = spawn_inherit::<StubActor, _>(
-            Arc::clone(&binding),
-            inherited_mail_id,
-            inherited_root,
-            move |mut inherit| {
-                thread::sleep(Duration::from_millis(50));
-                pause_done_clone.store(true, Ordering::SeqCst);
-                <InheritCtx<StubActor> as Sender>::send_to_named(
-                    &mut inherit,
-                    "test.spawn_thread.recipient",
-                    &aether_kinds::Tick,
-                );
-            },
-        );
-        join.join().expect("worker joins");
-        assert!(pause_done.load(Ordering::SeqCst));
-
-        let captured = captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        let dispatch = &captured[0];
-        assert_eq!(dispatch.root, inherited_root);
-        assert_eq!(dispatch.parent_mail, Some(inherited_mail_id));
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: `spawn_inherit`
