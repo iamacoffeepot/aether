@@ -38,6 +38,15 @@ if [[ -z "$PROJECT_DIR" ]]; then
     PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+# Load a developer-local .env if present (gitignored — never committed). Auto-export
+# so the tunnel and everything it forks inherit it. No-op when the file is absent.
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$PROJECT_DIR/.env"
+    set +a
+fi
+
 # Probe :8890 — true if the tunnel is answering. Prefers the /admin/status
 # HTTP probe (curl), falls back to a bare TCP connect (nc). Both swallow
 # their own failure so the caller controls the exit.
