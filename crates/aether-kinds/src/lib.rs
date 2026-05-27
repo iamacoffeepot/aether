@@ -2585,6 +2585,12 @@ mod control_plane {
         pub object_reference_paths: Vec<String>,
         pub character_reference_paths: Vec<String>,
         pub use_grounding: Option<bool>,
+        /// Opt-in / default-off. `None` / `Some(false)` clears the
+        /// `thought_signature` from the reply (a signature can run to
+        /// multiple MB and dominate the result); `Some(true)` retains it
+        /// for a multi-turn continuation. Cross-model (Pro emits a
+        /// signature too); gates only the reply populate, not validation.
+        pub include_thought_signature: Option<bool>,
     }
 
     /// Reply to [`NanobananaGenerate`]. Both arms echo `request_id`.

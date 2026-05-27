@@ -502,17 +502,20 @@ mod native {
     fn build_result_mail(
         media: MediaKind,
         request_id: u64,
+        include_sig: bool,
         result: Result<GeminiResponse, String>,
     ) -> (KindId, Vec<u8>) {
         match media {
             MediaKind::Nanobanana => {
-                let reply = nanobanana_reply(request_id, result);
+                let reply = nanobanana_reply(request_id, include_sig, result);
                 (
                     KindId(<NanobananaGenerateResult as Kind>::ID.0),
                     reply.encode_into_bytes(),
                 )
             }
             MediaKind::Lyria => {
+                // Lyria never produces a thought signature, so `include_sig`
+                // is a no-op here.
                 let reply = lyria_reply(request_id, result);
                 (
                     KindId(<LyriaGenerateResult as Kind>::ID.0),
@@ -533,13 +536,22 @@ mod native {
 
     fn nanobanana_reply(
         request_id: u64,
+        include_sig: bool,
         result: Result<GeminiResponse, String>,
     ) -> NanobananaGenerateResult {
         match result {
             Ok(resp) => {
                 let model_used = resp.model_used;
                 let usage = to_usage(resp.usage);
-                let thought_signature = resp.thought_signature;
+                // Opt-in / default-off: clear the signature unless the
+                // caller asked to retain it for a multi-turn continuation
+                // (a signature can run to multiple MB and dominate the
+                // reply). Parse stays unconditional; the gate is here.
+                let thought_signature = if include_sig {
+                    resp.thought_signature
+                } else {
+                    None
+                };
                 let grounding =
                     resp.grounding
                         .map(|(search_queries, source_urls)| GroundingMetadata {
@@ -630,6 +642,8 @@ mod native {
         #[handler]
         fn on_nanobanana_generate(&mut self, ctx: &mut NativeCtx<'_>, mail: NanobananaGenerate) {
             let request_id = mail.request_id;
+            // Opt-in / default-off; cross-model, so never validated.
+            let include_sig = mail.include_thought_signature.unwrap_or(false);
             let Some(shape) = nanobanana::lookup_model(&mail.model) else {
                 OutboundReply::reply(
                     ctx,
@@ -686,7 +700,7 @@ mod native {
             let adapter = Arc::clone(&self.adapter);
             let call: BlockingCall = Box::new(move || {
                 let result = adapter.nanobanana_generate(req);
-                build_result_mail(MediaKind::Nanobanana, request_id, result)
+                build_result_mail(MediaKind::Nanobanana, request_id, include_sig, result)
             });
             self.dispatch.submit(
                 &self.mailer,
@@ -740,7 +754,8 @@ mod native {
             let adapter = Arc::clone(&self.adapter);
             let call: BlockingCall = Box::new(move || {
                 let result = adapter.lyria_generate(req);
-                build_result_mail(MediaKind::Lyria, request_id, result)
+                // Lyria never emits a signature, so `include_sig` is unused.
+                build_result_mail(MediaKind::Lyria, request_id, false, result)
             });
             self.dispatch.submit(
                 &self.mailer,
@@ -785,6 +800,7 @@ mod native {
         use super::GeminiCapability;
         use crate::contentgen::adapter::STUB_PNG;
         use crate::contentgen::adapter::StubGeminiAdapter;
+        use crate::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
         use crate::contentgen::staging::stage_gen_output_under;
         use crate::test_chassis::{
             TestChassis, decode_session_reply, fresh_substrate, test_mailer_and_rx,
@@ -800,8 +816,8 @@ mod native {
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::mail::outbound::EgressEvent;
         use serde::de::DeserializeOwned;
-        use std::sync::Arc;
         use std::sync::mpsc::Receiver;
+        use std::sync::{Arc, Mutex, PoisonError};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
         use std::{env, fs, process};
 
@@ -826,6 +842,7 @@ mod native {
                 object_reference_paths: Vec::new(),
                 character_reference_paths: Vec::new(),
                 use_grounding: None,
+                include_thought_signature: None,
             }
         }
 
@@ -1227,6 +1244,138 @@ mod native {
             assert!(gcfg["imageConfig"].get("imageSize").is_none());
             assert!(gcfg.get("thinkingConfig").is_none());
             assert!(body.get("tools").is_none());
+        }
+
+        /// Serializes the two seam tests that pin `AETHER_GEN_DIR` so
+        /// their process-env mutation can't race nextest's other threads.
+        static GEN_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        /// Build a single-artifact `GeminiResponse` whose parse carried a
+        /// `thought_signature`, the shape the cap's reply assembly sees.
+        fn nb_response_with_signature(sig: &str) -> GeminiResponse {
+            GeminiResponse {
+                artifacts: vec![GeminiArtifact {
+                    bytes: STUB_PNG.to_vec(),
+                    ext: "png".to_string(),
+                }],
+                model_used: "gemini-3-pro-image-preview".to_string(),
+                usage: AdapterUsage::default(),
+                thought_signature: Some(sig.to_string()),
+                grounding: None,
+            }
+        }
+
+        /// Stage `nanobanana_reply` under a scratch `AETHER_GEN_DIR` so
+        /// the seam tests never touch the user's real save dir. Holds the
+        /// env lock across the set/reply/clear window.
+        fn reply_under_scratch_gen_dir(
+            include_sig: bool,
+            resp: GeminiResponse,
+        ) -> NanobananaGenerateResult {
+            let _guard = GEN_DIR_ENV_LOCK
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let scratch = env::temp_dir().join(format!(
+                "aether-gemini-sig-{}-{}",
+                process::id(),
+                request_nonce()
+            ));
+            fs::create_dir_all(&scratch).expect("scratch dir creates");
+            // SAFETY: serialized by GEN_DIR_ENV_LOCK against the other
+            // seam test; no other test reads this var.
+            unsafe {
+                env::set_var("AETHER_GEN_DIR", &scratch);
+            }
+            let reply = super::nanobanana_reply(1, include_sig, Ok(resp));
+            // SAFETY: same lock-guarded window as the set above.
+            unsafe {
+                env::remove_var("AETHER_GEN_DIR");
+            }
+            let _ = fs::remove_dir_all(&scratch);
+            reply
+        }
+
+        /// Default-off: a response carrying a `thought_signature` is
+        /// cleared from the reply when the flag is unset/false — the
+        /// fix for the multi-MB signature dominating the result.
+        #[test]
+        fn thought_signature_cleared_when_flag_off() {
+            let reply = reply_under_scratch_gen_dir(false, nb_response_with_signature("sig-abc"));
+            match reply {
+                NanobananaGenerateResult::Ok {
+                    thought_signature, ..
+                } => {
+                    assert_eq!(
+                        thought_signature, None,
+                        "flag off clears the signature from the reply"
+                    );
+                }
+                other @ NanobananaGenerateResult::Err { .. } => {
+                    panic!("expected Ok, got {other:?}")
+                }
+            }
+        }
+
+        /// Opt-in: the multi-turn continuation path is unaffected — with
+        /// the flag true the signature is retained exactly as parsed.
+        #[test]
+        fn thought_signature_retained_when_flag_on() {
+            let reply = reply_under_scratch_gen_dir(true, nb_response_with_signature("sig-abc"));
+            match reply {
+                NanobananaGenerateResult::Ok {
+                    thought_signature, ..
+                } => {
+                    assert_eq!(
+                        thought_signature.as_deref(),
+                        Some("sig-abc"),
+                        "flag on retains the signature for a multi-turn continuation"
+                    );
+                }
+                other @ NanobananaGenerateResult::Err { .. } => {
+                    panic!("expected Ok, got {other:?}")
+                }
+            }
+        }
+
+        /// The flag is cross-model, not an NB2-only knob: Pro accepts
+        /// `include_thought_signature: Some(true)` and dispatches rather
+        /// than rejecting with `MissingRequiredField`. Mirror of
+        /// `nb2_only_knob_rejected_on_older_model`, asserting acceptance.
+        #[test]
+        fn thought_signature_flag_accepted_on_pro() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap_mailbox = MailboxId(0);
+            let mut cap = GeminiCapability::from_parts(
+                Arc::new(StubGeminiAdapter),
+                Arc::clone(&mailer),
+                cap_mailbox,
+                4,
+            );
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                cap_mailbox,
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            let mut req = nb_request("gemini-3-pro-image-preview", AspectRatio::ASPECT_RATIO_1_1);
+            req.image_size = Some(ImageSize::K1);
+            req.include_thought_signature = Some(true);
+            cap.on_nanobanana_generate(&mut ctx, req);
+            // No synchronous validation error reply: the flag passed
+            // validation and the request dispatched off-thread.
+            assert!(
+                rx.try_recv().is_err(),
+                "Pro must not reject the cross-model signature flag"
+            );
+            assert_eq!(
+                cap.test_in_flight(),
+                1,
+                "the request dispatched rather than erroring synchronously"
+            );
         }
     }
 }
