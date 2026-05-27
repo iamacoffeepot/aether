@@ -49,8 +49,8 @@ use std::fs;
 use std::process::{Command, ExitCode};
 
 use aether_substrate_bundle::perf::report::{
-    CompareConfig, ComparisonReport, LatencySection, RawSection, STICKY_MARKER, SectionReport,
-    TRIAL_SCHEMA, TrialReport, compare, markdown, probe_schema,
+    CompareConfig, LatencySection, RawSection, STICKY_MARKER, TRIAL_SCHEMA, TrialReport, compare,
+    headline_counts, markdown, probe_schema,
 };
 
 /// The envelope tag of the last pre-sections report shape: a flat
@@ -297,43 +297,23 @@ fn main() -> ExitCode {
         }
     }
 
-    let (improved, stable, regressed) = roll_up(&report);
+    // The stderr summary uses the same gate-signal rollup the headline
+    // does — the light `latency` section + throughput, excluding the
+    // suppressed-verdict heavy / real tiers (ADR-0085 amendment), so the two
+    // never report different counts.
+    let (improved, stable, regressed) = headline_counts(&report);
     eprintln!(
         "perf-compare: {improved} improved, {stable} stable, {regressed} regressed (informational)"
     );
     ExitCode::SUCCESS
 }
 
-/// Sum improved / stable / regressed across the compared sections of a
-/// report — latency and throughput alike (iamacoffeepot/aether#1202).
-/// Uncompared sections contribute nothing.
-fn roll_up(report: &ComparisonReport) -> (usize, usize, usize) {
-    report
-        .sections
-        .iter()
-        .fold((0, 0, 0), |(i, s, r), sec| match sec {
-            SectionReport::Compared {
-                improved,
-                stable,
-                regressed,
-                ..
-            }
-            | SectionReport::ThroughputCompared {
-                improved,
-                stable,
-                regressed,
-                ..
-            } => (i + improved, s + stable, r + regressed),
-            SectionReport::Uncompared { .. } => (i, s, r),
-        })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ComparisonReport, ingest_trial};
+    use super::ingest_trial;
     use aether_substrate_bundle::perf::report::{
-        CellJson, CompareConfig, LatencySection, Metric, RawSection, SectionReport, TRIAL_SCHEMA,
-        TrialReport, Verdict, compare,
+        CellJson, CompareConfig, ComparisonReport, LatencySection, Metric, RawSection,
+        SectionReport, TRIAL_SCHEMA, TrialReport, Verdict, compare,
     };
 
     /// Build a `v4` candidate side with a single `latency` cell whose p50

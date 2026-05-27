@@ -29,6 +29,7 @@ use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResu
 use aether_kinds::{SubscribeInput, SubscribeInputResult, Tick};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
+use crate::perf::report::LatencySection;
 use crate::test_bench::TestBench;
 
 /// Fire-and-forward payload the relay actors pass along. The `seq`
@@ -206,17 +207,69 @@ pub fn ticksrc_id() -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{TICKSRC_NS}:src")).0)
 }
 
+/// A workload tier (ADR-0085 amendment 2026-05-27): the three classes of
+/// shape the dispatch perf comparison measures, distinguished by what each
+/// isolates and how much its run-to-run variance lets the report *claim*.
+/// Verdict treatment follows the variance, not the tier's importance — only
+/// [`Tier::Light`] is classified pass/improved/regressed; [`Tier::Heavy`]
+/// and [`Tier::Real`] are characterisation (numbers + direction + graphs, no
+/// verdict). The tier rides on each [`Topology`] (and is threaded through
+/// [`CellSamples`] / [`CellResult`] to the report builder), so the renderer
+/// can suppress the verdict for a non-`light` section.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    /// Trivial micro-shapes (`work_iters = 0`) — isolates dispatch/routing
+    /// mechanics; low variance. The regression gate.
+    Light,
+    /// The same shapes with a `busy_spin` CPU budget per node — exposes the
+    /// parallelism-vs-locality crossover. Medium variance.
+    Heavy,
+    /// Application graphs at representative scale, driven paced. High,
+    /// machine-dependent variance. In PR 1 this parses but yields an empty
+    /// topology set — the `real` factories land in PR 2.
+    Real,
+}
+
+impl Tier {
+    /// The report-section name prefix for this tier. `light` reuses the
+    /// historical `latency` name verbatim (preserving the v3 back-compat
+    /// shim and the existing fixtures); the others are tier-suffixed.
+    #[must_use]
+    pub fn section_name(self) -> &'static str {
+        match self {
+            Self::Light => LatencySection::NAME,
+            Self::Heavy => "latency.heavy",
+            Self::Real => "latency.real",
+        }
+    }
+
+    /// Parse one tier token (case-insensitive); `None` for an unknown token.
+    #[must_use]
+    pub fn parse_token(tok: &str) -> Option<Self> {
+        match tok.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Light),
+            "heavy" => Some(Self::Heavy),
+            "real" => Some(Self::Real),
+            _ => None,
+        }
+    }
+}
+
 /// A topology is a DAG over relay indices: `downstreams[i]` lists the
 /// relays that relay `i` forwards to. Relay 0 is always the entry. The
 /// number of relays is `downstreams.len()`. `work_iters[i]` is the CPU
 /// spin budget relay `i` burns per inbound `Ping` (see `busy_spin`) —
 /// all-zero for the trivial topologies, non-zero on the heavy ones
 /// (iamacoffeepot/aether#1074). `work_iters.len() == downstreams.len()`.
+/// `tier` carries the workload tier (ADR-0085 amendment) through the sweep
+/// to the report builder, so the renderer can suppress the verdict for a
+/// non-`light` tier.
 #[derive(Clone)]
 pub struct Topology {
     pub name: String,
     pub downstreams: Vec<Vec<usize>>,
     pub work_iters: Vec<u64>,
+    pub tier: Tier,
 }
 
 /// `0 -> 1 -> ... -> d-1`. Each relay forwards to the next; the last is
@@ -229,6 +282,7 @@ pub fn depth_chain(d: usize) -> Topology {
     Topology {
         name: format!("depth-{d}"),
         work_iters: vec![0; downstreams.len()],
+        tier: Tier::Light,
         downstreams,
     }
 }
@@ -241,6 +295,7 @@ pub fn fanout(b: usize) -> Topology {
     Topology {
         name: format!("fanout-{b}"),
         work_iters: vec![0; downstreams.len()],
+        tier: Tier::Light,
         downstreams,
     }
 }
@@ -260,6 +315,7 @@ pub fn fanout(b: usize) -> Topology {
 pub fn fanout_heavy(b: usize, work_iters: u64) -> Topology {
     let mut t = fanout(b);
     t.name = format!("fanout-{b}-heavy");
+    t.tier = Tier::Heavy;
     for leaf in 1..=b {
         t.work_iters[leaf] = work_iters;
     }
@@ -281,6 +337,7 @@ pub fn two_level_tree() -> Topology {
     Topology {
         name: "tree-A-BC-DEEF".to_owned(),
         work_iters: vec![0; downstreams.len()],
+        tier: Tier::Light,
         downstreams,
     }
 }
@@ -301,6 +358,7 @@ pub fn two_level_tree() -> Topology {
 pub fn two_level_tree_heavy(work_iters: u64) -> Topology {
     let mut t = two_level_tree();
     "tree-A-BC-DEEF-heavy".clone_into(&mut t.name);
+    t.tier = Tier::Heavy;
     for w in &mut t.work_iters {
         *w = work_iters;
     }
@@ -321,6 +379,7 @@ pub fn two_level_tree_heavy(work_iters: u64) -> Topology {
 pub fn two_level_tree_router_heavy(work_iters: u64) -> Topology {
     let mut t = two_level_tree();
     "tree-A-BC-DEEF-routed".clone_into(&mut t.name);
+    t.tier = Tier::Heavy;
     for leaf in [3usize, 4, 5] {
         t.work_iters[leaf] = work_iters;
     }
@@ -393,6 +452,10 @@ pub fn summarize(mut samples: Vec<u64>) -> Stats {
 pub struct CellSamples {
     pub workers: usize,
     pub topo: String,
+    /// The workload tier this cell's topology belongs to (ADR-0085
+    /// amendment), threaded to the report builder so the renderer can
+    /// suppress the verdict for a non-`light` tier.
+    pub tier: Tier,
     /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (flush-begin
     /// → blob open) — the producer building the blob.
     pub construct: Vec<u64>,
@@ -414,6 +477,7 @@ impl CellSamples {
         CellResult {
             workers: self.workers,
             topo: self.topo,
+            tier: self.tier,
             construct: summarize(self.construct),
             queued: summarize(self.queued),
             drain: summarize(self.drain),
@@ -429,6 +493,12 @@ impl CellSamples {
 pub struct CellResult {
     pub workers: usize,
     pub topo: String,
+    /// The workload tier this cell's topology belongs to (ADR-0085
+    /// amendment). [`TrialReport::from_cells`] splits the cell list by this
+    /// field into one report section per tier.
+    ///
+    /// [`TrialReport::from_cells`]: super::report::TrialReport::from_cells
+    pub tier: Tier,
     /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (blob open →
     /// flush-begin) — the producer-side time spent building the blob, the
     /// first leg of the four-stage lifecycle. ~0 on eager (non-buffered)
@@ -545,24 +615,61 @@ pub fn drive_from_env() -> Drive {
     }
 }
 
-/// Read the optional heavy-leaf CPU work knob `AETHER_LATENCY_HEAVY_WORK` (a
-/// raw `busy_spin` iteration count per heavy leaf handler; see
-/// [`fanout_heavy`]). Unset, unparseable, or `0` means no heavy work —
-/// callers omit the heavy topology entirely, so the trivial sweep is
-/// byte-for-byte unchanged (iamacoffeepot/aether#1074).
+/// Default per-leaf `busy_spin` iteration count for the heavy tier when
+/// `AETHER_LATENCY_HEAVY_WORK` is unset (ADR-0085 amendment). The tier
+/// selector ([`tiers_from_env`]) now gates *whether* heavy shapes run; this
+/// var supplies only the spin magnitude, so an active heavy tier needs a
+/// sensible non-zero default rather than silently degenerating to the
+/// trivial shapes. Sized to give a heavy leaf a clearly-non-trivial
+/// per-handler cost (tens of µs at the harness's measured rate) so the
+/// parallelism-vs-locality crossover the heavy tier exists to expose is
+/// actually present — read the HANDLER DUR column to convert to wall-clock.
+pub const DEFAULT_HEAVY_WORK_ITERS: u64 = 50_000;
+
+/// The heavy-leaf CPU work *magnitude* — a raw `busy_spin` iteration count
+/// per heavy node (see [`fanout_heavy`]). Read from
+/// `AETHER_LATENCY_HEAVY_WORK`; unset / unparseable / `0` falls back to
+/// [`DEFAULT_HEAVY_WORK_ITERS`].
 ///
-/// A raw iteration count, not a microsecond budget, keeps the work
-/// *identical* across processes so a paired base-vs-candidate comparison
-/// (ADR-0085) isn't confounded by per-run calibration drift. To target a
-/// wall-clock budget, set a count and read the actual per-leaf
-/// microseconds off the harness's HANDLER DUR column (it already
-/// measures `t_finished - t_received`), then adjust.
+/// This var no longer *gates* the heavy shapes — that is the tier selector's
+/// job ([`tiers_from_env`]) since the ADR-0085 amendment. It now carries
+/// only the spin count, so the calibration workflow still works: set a count
+/// and read the actual per-leaf microseconds off the harness's HANDLER DUR
+/// column (it measures `t_finished - t_received`), then adjust. A raw
+/// iteration count, not a microsecond budget, keeps the work *identical*
+/// across processes so a paired base-vs-candidate comparison (ADR-0085)
+/// isn't confounded by per-run calibration drift.
 #[must_use]
 pub fn heavy_work_iters_from_env() -> u64 {
     env::var("AETHER_LATENCY_HEAVY_WORK")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(DEFAULT_HEAVY_WORK_ITERS)
+}
+
+/// Parse `AETHER_PERF_TIER` — a comma list of workload tiers (`light`,
+/// `heavy`, `real`; e.g. `"light,heavy"`), default `light` when unset /
+/// empty / all-unparseable (ADR-0085 amendment). This is the *tier* axis,
+/// orthogonal to `AETHER_PERF_TOPOS` (`ci` / `full`), which selects the
+/// shape *breadth* within each tier. Unknown tokens are dropped; the result
+/// is order-preserving and de-duplicated. Shared by the `perf-trial` and
+/// `perf-plot` bins and the on-demand observe test.
+#[must_use]
+pub fn tiers_from_env() -> Vec<Tier> {
+    let spec = env::var("AETHER_PERF_TIER").unwrap_or_default();
+    let mut out: Vec<Tier> = Vec::new();
+    for tok in spec.split(',') {
+        if let Some(tier) = Tier::parse_token(tok)
+            && !out.contains(&tier)
+        {
+            out.push(tier);
+        }
+    }
+    if out.is_empty() {
+        out.push(Tier::Light);
+    }
+    out
 }
 
 /// Parse the optional `AETHER_LATENCY_WIDE_FANOUT` knob — a comma list of
@@ -633,35 +740,76 @@ pub fn parse_workers() -> Vec<usize> {
     out
 }
 
-/// Parse `AETHER_PERF_TOPOS` (`ci` — a chain/fan-out/tree subset — or
-/// `full`), then append the opt-in heavy (`AETHER_LATENCY_HEAVY_WORK`) and
-/// wide (`AETHER_LATENCY_WIDE_FANOUT`) fan-outs. Default `ci`. Shared by the
-/// `perf-trial` and `perf-plot` bins.
+/// Read `AETHER_PERF_TOPOS` (`full` → the whole [`default_topologies`] set;
+/// anything else → the `ci` chain/fan-out/tree subset). This is the breadth
+/// knob *within* a tier — the shape set the light tier sweeps and the heavy
+/// tier mirrors with CPU burn — orthogonal to the [`tiers_from_env`] tier
+/// axis.
 #[must_use]
-pub fn parse_topologies() -> Vec<Topology> {
-    let mut topos = match env::var("AETHER_PERF_TOPOS").as_deref() {
-        Ok("full") => default_topologies(),
-        _ => vec![
+fn topos_full() -> bool {
+    matches!(env::var("AETHER_PERF_TOPOS").as_deref(), Ok("full"))
+}
+
+/// The light tier's shapes: the trivial micro-topologies the breadth knob
+/// selects, plus any opt-in wide fan-outs (`AETHER_LATENCY_WIDE_FANOUT`).
+/// All carry [`Tier::Light`] from their factories.
+#[must_use]
+fn light_topologies() -> Vec<Topology> {
+    let mut topos = if topos_full() {
+        default_topologies()
+    } else {
+        vec![
             depth_chain(1),
             depth_chain(8),
             fanout(4),
             fanout(8),
             two_level_tree(),
-        ],
+        ]
     };
-    let heavy = heavy_work_iters_from_env();
-    if heavy > 0 {
-        for b in [4usize, 8] {
-            topos.push(fanout_heavy(b, heavy));
-        }
-        // The narrow-heavy multi-blob cascades that stress the keep-local
-        // time budget (iamacoffeepot/aether#1160): uniform-heavy (the valve
-        // fires) and trivial-router→heavy-leaf (the valve's blind spot).
-        topos.push(two_level_tree_heavy(heavy));
-        topos.push(two_level_tree_router_heavy(heavy));
-    }
     for w in wide_fanout_widths_from_env() {
         topos.push(fanout(w));
+    }
+    topos
+}
+
+/// The heavy tier's shapes: the light fan-outs / two-level trees, each node
+/// burning `work_iters` of `busy_spin` CPU. The narrow-heavy cascades stress
+/// the keep-local time budget (iamacoffeepot/aether#1160): uniform-heavy (the
+/// valve fires) and trivial-router→heavy-leaf (the valve's blind spot). All
+/// carry [`Tier::Heavy`].
+#[must_use]
+fn heavy_topologies(work_iters: u64) -> Vec<Topology> {
+    let mut topos = Vec::new();
+    for b in [4usize, 8] {
+        topos.push(fanout_heavy(b, work_iters));
+    }
+    topos.push(two_level_tree_heavy(work_iters));
+    topos.push(two_level_tree_router_heavy(work_iters));
+    topos
+}
+
+/// The real tier's shapes — empty in PR 1 (the `socket-server` /
+/// `tick-broadcast` / `ui-roundtrip` factories land in PR 2, ADR-0085
+/// amendment). The tier still parses and sections, so the enum stays stable
+/// for PR 2.
+#[must_use]
+fn real_topologies() -> Vec<Topology> {
+    Vec::new()
+}
+
+/// Build the sweep's topology set from the selected tiers
+/// ([`tiers_from_env`]) and the breadth knob (`AETHER_PERF_TOPOS`). Each tier
+/// contributes its own shapes, tagged with its [`Tier`] so the report
+/// sections by tier. Shared by the `perf-trial` and `perf-plot` bins.
+#[must_use]
+pub fn parse_topologies() -> Vec<Topology> {
+    let mut topos = Vec::new();
+    for tier in tiers_from_env() {
+        match tier {
+            Tier::Light => topos.extend(light_topologies()),
+            Tier::Heavy => topos.extend(heavy_topologies(heavy_work_iters_from_env())),
+            Tier::Real => topos.extend(real_topologies()),
+        }
     }
     topos
 }
@@ -935,6 +1083,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             rows.push(CellSamples {
                 workers,
                 topo: topo.name.clone(),
+                tier: topo.tier,
                 construct,
                 queued,
                 drain,
