@@ -137,11 +137,35 @@ pub struct LatencySection {
 }
 
 impl LatencySection {
-    /// The section name the comparator dispatches on.
+    /// The light tier's section name — the historical `latency`, kept
+    /// verbatim so the v3 back-compat shim and the existing fixtures don't
+    /// churn. The heavy / real tiers use tier-suffixed names
+    /// ([`super::harness::Tier::section_name`]).
     pub const NAME: &str = "latency";
     /// The section version. Bumped when the metric set changes; sibling
     /// sections stay comparable across the bump.
     pub const VERSION: &str = "v1";
+}
+
+/// Is `name` a latency section of *any* tier (ADR-0085 amendment)? The
+/// light tier reuses the bare `latency` name; heavy / real are tier-suffixed
+/// (`latency.heavy`, `latency.real`). The comparator routes all of them to
+/// the same per-cell paired compare — the verdict numbers are wanted for
+/// every tier; suppression is a render-time concern, not a compare-time one.
+#[must_use]
+pub fn is_latency_section(name: &str) -> bool {
+    name == LatencySection::NAME || name == "latency.heavy" || name == "latency.real"
+}
+
+/// Whether a latency section's verdict is *rendered* (ADR-0085 amendment).
+/// Only the light tier (`latency`) carries a verdict; heavy / real are
+/// characterisation — numbers + direction only, no verdict column, no
+/// lifted "rows that moved", no "nothing moved" note. The comparator still
+/// computes the real verdict for every tier (`classify` is untouched); this
+/// gates only the renderer.
+#[must_use]
+fn latency_section_renders_verdict(name: &str) -> bool {
+    name == LatencySection::NAME
 }
 
 /// One cell's measured throughput in a single trial
@@ -215,11 +239,18 @@ impl TrialReport {
     /// expands to four `CellJson` rows (`construct` + `queued` + `drain` +
     /// `handler`, in lifecycle order; iamacoffeepot/aether#1158). `depth`
     /// is a count, not a latency, so it is omitted from the latency compare
-    /// (it lives only in the on-demand observe table). The rows are wrapped
-    /// in a single [`LatencySection`] — the lone section today
-    /// (iamacoffeepot/aether#1206).
+    /// (it lives only in the on-demand observe table).
+    ///
+    /// The cells are split **by workload tier** (ADR-0085 amendment) into
+    /// one [`LatencySection`]-bodied [`RawSection`] per tier present: the
+    /// light tier reuses the historical `latency` name, heavy / real are
+    /// tier-suffixed ([`Tier::section_name`]). Tiers are emitted in
+    /// `light → heavy → real` order so the report reads gate-first. When the
+    /// sweep ran only the light tier (the historical default) the output is
+    /// the single `latency` section, byte-for-byte as before.
     ///
     /// [`CellResult`]: super::harness::CellResult
+    /// [`Tier::section_name`]: super::harness::Tier::section_name
     #[must_use]
     pub fn from_cells(
         cells: &[super::harness::CellResult],
@@ -227,38 +258,47 @@ impl TrialReport {
         pace_hz: Option<u64>,
         git_sha: Option<String>,
     ) -> Self {
-        let mut out = Vec::with_capacity(cells.len() * 4);
-        for c in cells {
-            for (metric, s) in [
-                (Metric::Construct, &c.construct),
-                (Metric::Queued, &c.queued),
-                (Metric::Drain, &c.drain),
-                (Metric::Handler, &c.handler),
-            ] {
-                out.push(CellJson {
-                    workers: c.workers,
-                    topo: c.topo.clone(),
-                    metric,
-                    p50: s.p50,
-                    p90: s.p90,
-                    p99: s.p99,
-                    max: s.max,
-                    n: s.n,
-                });
+        use super::harness::Tier;
+
+        let mut sections = Vec::new();
+        for tier in [Tier::Light, Tier::Heavy, Tier::Real] {
+            let mut rows = Vec::new();
+            for c in cells.iter().filter(|c| c.tier == tier) {
+                for (metric, s) in [
+                    (Metric::Construct, &c.construct),
+                    (Metric::Queued, &c.queued),
+                    (Metric::Drain, &c.drain),
+                    (Metric::Handler, &c.handler),
+                ] {
+                    rows.push(CellJson {
+                        workers: c.workers,
+                        topo: c.topo.clone(),
+                        metric,
+                        p50: s.p50,
+                        p90: s.p90,
+                        p99: s.p99,
+                        max: s.max,
+                        n: s.n,
+                    });
+                }
             }
+            if rows.is_empty() {
+                continue;
+            }
+            let body = serde_json::to_value(LatencySection { cells: rows })
+                .unwrap_or(serde_json::Value::Null);
+            sections.push(RawSection {
+                name: tier.section_name().to_owned(),
+                version: LatencySection::VERSION.to_owned(),
+                body,
+            });
         }
-        let latency = LatencySection { cells: out };
-        let body = serde_json::to_value(&latency).unwrap_or(serde_json::Value::Null);
         Self {
             schema: TRIAL_SCHEMA.to_owned(),
             git_sha,
             pace_hz,
             frames,
-            sections: vec![RawSection {
-                name: LatencySection::NAME.to_owned(),
-                version: LatencySection::VERSION.to_owned(),
-                body,
-            }],
+            sections,
         }
     }
 
@@ -601,21 +641,24 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
             continue;
         }
 
-        match name.as_str() {
-            LatencySection::NAME => {
-                let base_cells = decode_latency_cells(&base[..k]);
-                let cand_cells = decode_latency_cells(&cand[..k]);
-                sections.push(compare_latency(name, &base_cells, &cand_cells, k, cfg));
-            }
-            ThroughputSection::NAME => {
-                let base_cells = decode_throughput_cells(&base[..k]);
-                let cand_cells = decode_throughput_cells(&cand[..k]);
-                sections.push(compare_throughput(name, &base_cells, &cand_cells, k, cfg));
-            }
-            _ => sections.push(SectionReport::Uncompared {
+        // A latency section of any tier (light = `latency`, heavy / real
+        // tier-suffixed; ADR-0085 amendment) routes to the same per-cell
+        // paired compare — the verdict numbers are computed identically for
+        // every tier. Verdict *suppression* for non-light tiers is a
+        // render-time concern (see `push_latency_section`), not here.
+        if is_latency_section(name) {
+            let base_cells = decode_latency_cells(name, &base[..k]);
+            let cand_cells = decode_latency_cells(name, &cand[..k]);
+            sections.push(compare_latency(name, &base_cells, &cand_cells, k, cfg));
+        } else if name == ThroughputSection::NAME {
+            let base_cells = decode_throughput_cells(&base[..k]);
+            let cand_cells = decode_throughput_cells(&cand[..k]);
+            sections.push(compare_throughput(name, &base_cells, &cand_cells, k, cfg));
+        } else {
+            sections.push(SectionReport::Uncompared {
                 name: name.clone(),
                 reason: UncomparedReason::UnknownName,
-            }),
+            });
         }
     }
 
@@ -625,14 +668,16 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
     }
 }
 
-/// Per-trial latency cells: decode each trial's `latency` section body,
-/// dropping any trial whose body doesn't decode (it then can't satisfy
-/// the present-in-every-trial gate below, exactly as a missing cell did).
-fn decode_latency_cells(trials: &[TrialReport]) -> Vec<Vec<CellJson>> {
+/// Per-trial latency cells for the named tier section (`latency`,
+/// `latency.heavy`, or `latency.real`; ADR-0085 amendment), decoding each
+/// trial's body and dropping any trial whose body doesn't decode (it then
+/// can't satisfy the present-in-every-trial gate below, exactly as a missing
+/// cell did).
+fn decode_latency_cells(name: &str, trials: &[TrialReport]) -> Vec<Vec<CellJson>> {
     trials
         .iter()
         .map(|t| {
-            t.section(LatencySection::NAME)
+            t.section(name)
                 .and_then(|s| serde_json::from_value::<LatencySection>(s.body.clone()).ok())
                 .map(|l| l.cells)
                 .unwrap_or_default()
@@ -916,11 +961,46 @@ fn us(ns: f64) -> String {
 /// comment in place rather than spamming new ones.
 pub const STICKY_MARKER: &str = "<!-- aether-perf-report -->";
 
+/// The headline `N improved · N stable · N regressed` rollup — the
+/// **gate-signal** count, so it sums **only** the verdict-carrying sections
+/// (ADR-0085 amendment): the light tier's `latency` section and the
+/// throughput section. Heavy / real latency sections are characterisation —
+/// `compare_latency` still populates their improved/regressed counts (the
+/// numbers are wanted), but their verdict is suppressed at render time, so
+/// summing them into the headline would leak a no-verdict tier into the
+/// signal a reviewer reads as "did this change regress". Shared by
+/// [`markdown`] here and `perf-compare`'s `roll_up` so the two never drift.
+#[must_use]
+pub fn headline_counts(report: &ComparisonReport) -> (usize, usize, usize) {
+    report
+        .sections
+        .iter()
+        .fold((0, 0, 0), |(i, s, r), sec| match sec {
+            SectionReport::Compared {
+                name,
+                improved,
+                stable,
+                regressed,
+                ..
+            } if latency_section_renders_verdict(name) => (i + improved, s + stable, r + regressed),
+            SectionReport::ThroughputCompared {
+                improved,
+                stable,
+                regressed,
+                ..
+            } => (i + improved, s + stable, r + regressed),
+            // A non-light latency section is compared (it carries counts)
+            // but its verdict is suppressed — it must not reach the headline.
+            SectionReport::Compared { .. } | SectionReport::Uncompared { .. } => (i, s, r),
+        })
+}
+
 /// Render the comparison as a sticky PR-comment markdown body: headline
-/// counts (summed across the compared sections), then per section — a
-/// `latency` verdict (non-stable rows up top, full grid collapsed) or a
-/// one-line "new this run" note for an uncompared section
-/// (iamacoffeepot/aether#1206).
+/// counts (the verdict-carrying sections only — see [`headline_counts`]),
+/// then per section — a light `latency` verdict (non-stable rows up top,
+/// full grid collapsed), a heavy / real latency *trend grid* (no verdict,
+/// ADR-0085 amendment), or a one-line "new this run" note for an uncompared
+/// section (iamacoffeepot/aether#1206).
 #[must_use]
 #[allow(clippy::format_push_string)]
 pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> String {
@@ -930,28 +1010,7 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
     s.push_str(&format!("## dispatch perf — {title}\n"));
     s.push_str(&format!("{subtitle}\n\n"));
 
-    let (mut improved, mut stable, mut regressed) = (0usize, 0usize, 0usize);
-    for sec in &report.sections {
-        match sec {
-            SectionReport::Compared {
-                improved: i,
-                stable: st,
-                regressed: r,
-                ..
-            }
-            | SectionReport::ThroughputCompared {
-                improved: i,
-                stable: st,
-                regressed: r,
-                ..
-            } => {
-                improved += i;
-                stable += st;
-                regressed += r;
-            }
-            SectionReport::Uncompared { .. } => {}
-        }
-    }
+    let (improved, stable, regressed) = headline_counts(report);
     s.push_str(&format!(
         "**{improved} improved · {stable} stable · {regressed} regressed** ({} trials/config, paired)\n\n",
         report.trials
@@ -1011,8 +1070,26 @@ fn push_section_tables(
     s.push_str("\n</details>\n\n");
 }
 
+/// Render a latency section. The renderer learns its tier from the section
+/// name (ADR-0085 amendment): the light tier (`latency`) renders the full
+/// verdict treatment — non-stable rows lifted up top, the verdict column,
+/// the "nothing moved" note. A non-light tier (`latency.heavy` /
+/// `latency.real`) renders a **no-verdict trend grid**: every cell in one
+/// table, no verdict column, no lifted rows, no noise-band note. `classify`
+/// still produced a verdict for these cells (the numbers + direction are
+/// wanted); this just declines to *display* it, since the tier's variance
+/// sits below the band a verdict needs.
 #[allow(clippy::format_push_string)]
 fn push_latency_section(s: &mut String, name: &str, cells: &[CellComparison]) {
+    if latency_section_renders_verdict(name) {
+        push_latency_verdict_section(s, name, cells);
+    } else {
+        push_latency_trend_section(s, name, cells);
+    }
+}
+
+#[allow(clippy::format_push_string)]
+fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellComparison]) {
     let header = "| topology | w | metric | pct | base µs | this µs | Δ | verdict |\n|---|--:|---|---|--:|--:|--:|---|\n";
     let row = |c: &CellComparison| -> String {
         let verdict = match c.verdict {
@@ -1042,6 +1119,35 @@ fn push_latency_section(s: &mut String, name: &str, cells: &[CellComparison]) {
         .map(&row)
         .collect();
     push_section_tables(s, name, header, &non_stable, &all);
+}
+
+/// The no-verdict trend grid for a heavy / real latency section: one table,
+/// every cell, no verdict column, base/this/Δ only — characterisation, not
+/// classification (ADR-0085 amendment).
+#[allow(clippy::format_push_string)]
+fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellComparison]) {
+    let header =
+        "| topology | w | metric | pct | base µs | this µs | Δ |\n|---|--:|---|---|--:|--:|--:|\n";
+    s.push_str(&format!(
+        "<details><summary>{name} trend (no verdict — characterisation) — {} cells</summary>\n\n",
+        cells.len()
+    ));
+    s.push_str(header);
+    for c in cells {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} ±{} | {} ±{} | {:+.0}% |\n",
+            c.topo,
+            c.workers,
+            c.metric.label(),
+            c.percentile,
+            us(c.base_median),
+            us(c.base_iqr),
+            us(c.cand_median),
+            us(c.cand_iqr),
+            c.delta_pct,
+        ));
+    }
+    s.push_str("\n</details>\n\n");
 }
 
 /// Render the throughput section (iamacoffeepot/aether#1202) — the
@@ -1501,5 +1607,201 @@ mod tests {
         assert!(md.contains("| topology | w | base k/s |"));
         assert!(md.contains("improved"));
         assert!(md.contains("throughput full grid"));
+    }
+
+    /// Build a K-trial side carrying a single latency cell under the named
+    /// tier section (ADR-0085 amendment) — the tier analog of [`side`]. The
+    /// section name selects the tier (`latency` light, `latency.heavy`,
+    /// `latency.real`).
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn tier_side(section_name: &str, p50s: &[u64]) -> Vec<TrialReport> {
+        p50s.iter()
+            .map(|&p50| {
+                let cells = vec![CellJson {
+                    workers: 11,
+                    topo: "fanout-8-heavy".to_owned(),
+                    metric: Metric::Drain,
+                    p50,
+                    p90: (p50 as f64 * 1.2) as u64,
+                    p99: (p50 as f64 * 1.5) as u64,
+                    max: p50 * 4,
+                    n: 1800,
+                }];
+                let body = serde_json::to_value(LatencySection { cells })
+                    .expect("encode tier latency body");
+                TrialReport {
+                    schema: TRIAL_SCHEMA.to_owned(),
+                    git_sha: None,
+                    pace_hz: None,
+                    frames: 200,
+                    sections: vec![RawSection {
+                        name: section_name.to_owned(),
+                        version: LatencySection::VERSION.to_owned(),
+                        body,
+                    }],
+                }
+            })
+            .collect()
+    }
+
+    /// Attach a `latency.heavy` section's cells to an existing side, so a
+    /// trial carries both the light `latency` section and the heavy one (the
+    /// realistic `AETHER_PERF_TIER=light,heavy` shape).
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn with_heavy_section(mut side: Vec<TrialReport>, p50s: &[u64]) -> Vec<TrialReport> {
+        for (t, &p50) in side.iter_mut().zip(p50s.iter()) {
+            let cells = vec![CellJson {
+                workers: 11,
+                topo: "fanout-8-heavy".to_owned(),
+                metric: Metric::Drain,
+                p50,
+                p90: (p50 as f64 * 1.2) as u64,
+                p99: (p50 as f64 * 1.5) as u64,
+                max: p50 * 4,
+                n: 1800,
+            }];
+            let body =
+                serde_json::to_value(LatencySection { cells }).expect("encode heavy latency body");
+            t.sections.push(RawSection {
+                name: "latency.heavy".to_owned(),
+                version: LatencySection::VERSION.to_owned(),
+                body,
+            });
+        }
+        side
+    }
+
+    #[test]
+    fn from_cells_sections_by_tier() {
+        use crate::perf::harness::{CellResult, Stats, Tier};
+
+        let cell = |topo: &str, tier: Tier| CellResult {
+            workers: 4,
+            topo: topo.to_owned(),
+            tier,
+            construct: Stats::default(),
+            queued: Stats::default(),
+            drain: Stats::default(),
+            handler: Stats::default(),
+            depth: Stats::default(),
+            throughput_mps: None,
+        };
+        let cells = vec![
+            cell("fanout-8", Tier::Light),
+            cell("fanout-8-heavy", Tier::Heavy),
+        ];
+        let report = TrialReport::from_cells(&cells, 200, None, None);
+        // One section per tier present, light named `latency` (back-compat),
+        // heavy named `latency.heavy`. No empty real section.
+        let names: Vec<&str> = report.sections.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec![LatencySection::NAME, "latency.heavy"]);
+    }
+
+    #[test]
+    fn heavy_section_renders_no_verdict() {
+        // A `latency.heavy` section is compared (it carries counts), but the
+        // renderer must suppress the verdict: a no-verdict trend grid, no
+        // verdict column, no "no cells moved" note (ADR-0085 amendment). Use
+        // a base/cand that *would* flag a verdict for the light tier so the
+        // suppression is the thing under test, not a coincidentally-stable
+        // cell.
+        let base = tier_side("latency.heavy", &[167_000, 165_000, 169_000, 166_000]);
+        let cand = tier_side("latency.heavy", &[33_000, 34_000, 32_000, 33_500]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+
+        // The heavy section is Compared (the numbers/direction are wanted) ...
+        let heavy = rep
+            .sections
+            .iter()
+            .find(|s| matches!(s, SectionReport::Compared { name, .. } if name == "latency.heavy"))
+            .expect("heavy latency section compared");
+        // ... and it did compute a non-stable verdict internally.
+        let SectionReport::Compared {
+            improved, cells, ..
+        } = heavy
+        else {
+            panic!("heavy section should be compared");
+        };
+        assert!(*improved > 0, "heavy compare still computes the verdict");
+        assert!(
+            cells.iter().any(|c| c.verdict == Verdict::Improved),
+            "the per-cell verdict is still computed (just not rendered)"
+        );
+
+        // But the rendered markdown carries no verdict column / value and no
+        // noise-band note for the heavy section — only the trend grid.
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+        assert!(
+            md.contains("latency.heavy trend (no verdict"),
+            "heavy section renders as a no-verdict trend grid"
+        );
+        assert!(
+            !md.contains("latency.heavy: no cells moved beyond the noise band"),
+            "the noise-band note is suppressed for a no-verdict tier"
+        );
+        // The trend grid's header omits the verdict column the light table has.
+        assert!(md.contains("| topology | w | metric | pct | base µs | this µs | Δ |\n"));
+    }
+
+    #[test]
+    fn headline_rollup_excludes_heavy_and_real() {
+        // CRITICAL guard (ADR-0085 amendment, #1222): the headline rollup is
+        // the gate signal, so a suppressed-verdict heavy / real tier must not
+        // leak into it. Build a light tier that's all-stable and a heavy tier
+        // with a big swing that classify *would* call improved/regressed; the
+        // headline must reflect the light tier only.
+        let light_base = side(&[1000, 1000, 1000, 1000]);
+        let light_cand = side(&[1010, 990, 1005, 995]); // δ ≈ 0 → stable
+        let base = with_heavy_section(light_base, &[167_000, 165_000, 169_000, 166_000]);
+        let cand = with_heavy_section(light_cand, &[33_000, 34_000, 32_000, 33_500]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+
+        // Sanity: the heavy section *did* compute a non-stable verdict.
+        let heavy_improved = rep.sections.iter().any(|s| {
+            matches!(s, SectionReport::Compared { name, improved, .. }
+                if name == "latency.heavy" && *improved > 0)
+        });
+        assert!(heavy_improved, "heavy section computed an improvement");
+
+        // The headline counts the light tier only — its three p50/p90/p99
+        // cells are all stable, so zero improved / regressed from the heavy
+        // swing leaks in.
+        let (improved, _stable, regressed) = headline_counts(&rep);
+        assert_eq!(
+            (improved, regressed),
+            (0, 0),
+            "the heavy tier's verdict must not reach the gate-signal headline"
+        );
+    }
+
+    #[test]
+    fn real_tier_section_compares_and_is_suppressed() {
+        // The real tier parses and sections in PR 1 (its factories are empty
+        // until PR 2), so a `latency.real` section — if present — routes to
+        // the same compare and is verdict-suppressed at render, exactly like
+        // heavy.
+        let base = tier_side("latency.real", &[167_000, 165_000, 169_000, 166_000]);
+        let cand = tier_side("latency.real", &[33_000, 34_000, 32_000, 33_500]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert!(
+            rep.sections.iter().any(
+                |s| matches!(s, SectionReport::Compared { name, .. } if name == "latency.real")
+            ),
+            "real latency section routes to the per-cell compare"
+        );
+        let (improved, _stable, regressed) = headline_counts(&rep);
+        assert_eq!(
+            (improved, regressed),
+            (0, 0),
+            "the real tier's verdict is excluded from the headline too"
+        );
     }
 }

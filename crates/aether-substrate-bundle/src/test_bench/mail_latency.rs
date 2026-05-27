@@ -31,9 +31,10 @@ use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, Native
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Topology, default_topologies,
-    depth_chain, fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id,
-    run_sweep, summarize, two_level_tree, wide_fanout_widths_from_env,
+    CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Tier, Topology,
+    default_topologies, depth_chain, fanout, fanout_heavy, heavy_work_iters_from_env,
+    pace_hz_from_env, relay_id, run_sweep, summarize, tiers_from_env, two_level_tree,
+    wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -646,13 +647,15 @@ fn lifecycle_latency_observe() {
 
     let pace_hz = pace_hz_from_env();
 
-    // The trivial default set always runs. When AETHER_LATENCY_HEAVY_WORK is
-    // set, append CPU-heavy fan-outs so the sweep can also exhibit the
-    // parallelism-wins regime (iamacoffeepot/aether#1074) — unset, the
-    // grid is byte-for-byte the historical one.
+    // The trivial (light-tier) default set always runs. With the heavy tier
+    // selected (AETHER_PERF_TIER=light,heavy; ADR-0085 amendment), append
+    // CPU-heavy fan-outs so the sweep can also exhibit the parallelism-wins
+    // regime (iamacoffeepot/aether#1074); the heavy spin magnitude comes from
+    // AETHER_LATENCY_HEAVY_WORK (now magnitude-only, with a non-zero
+    // default). Without the heavy tier the grid is the historical light one.
     let mut topologies = default_topologies();
-    let heavy = heavy_work_iters_from_env();
-    if heavy > 0 {
+    if tiers_from_env().contains(&Tier::Heavy) {
+        let heavy = heavy_work_iters_from_env();
         for b in [2usize, 4, 8] {
             topologies.push(fanout_heavy(b, heavy));
         }
@@ -804,8 +807,8 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     } else {
         println!("flat-out advance — workers stay warm (isolates per-hop dispatch cost)");
     }
-    let heavy = heavy_work_iters_from_env();
-    if heavy > 0 {
+    if tiers_from_env().contains(&Tier::Heavy) {
+        let heavy = heavy_work_iters_from_env();
         println!(
             "heavy leaves: {heavy} spin-iters/handler (*-heavy rows; read HANDLER DUR for actual µs)"
         );

@@ -8,8 +8,14 @@
 //!
 //! - `AETHER_PERF_WORKERS` — comma list of pool sizes; the token `max`
 //!   resolves to `available_parallelism() - 1`. Default `max`.
-//! - `AETHER_PERF_TOPOS` — `ci` (depth-1/8 + fanout-4/8 + tree) or
-//!   `full` (the whole default set). Default `ci`.
+//! - `AETHER_PERF_TIER` — comma list of workload tiers to sweep: `light`,
+//!   `heavy`, `real` (e.g. `light,heavy`). Default `light` (ADR-0085
+//!   amendment). The *tier* axis — which classes of shape run, and which
+//!   carry a verdict (only `light`; heavy / real are characterisation).
+//!   `real` parses but is empty until PR 2.
+//! - `AETHER_PERF_TOPOS` — the breadth knob *within* a tier: `ci`
+//!   (depth-1/8 + fanout-4/8 + tree) or `full` (the whole default set).
+//!   Default `ci`. Orthogonal to `AETHER_PERF_TIER`.
 //! - `AETHER_PERF_FRAMES` — frames advanced per cell. Default `200`.
 //! - `AETHER_PERF_DRIVE` — `latency` (per-hop spans; default) or
 //!   `saturate` (completed mails/sec under a backlog flood,
@@ -18,10 +24,14 @@
 //!   (default `512`, clamped to the trace ring capacity).
 //! - `AETHER_LATENCY_PACE_HZ` — `latency` mode only: pace one frame per
 //!   period (else flat-out).
-//! - `AETHER_LATENCY_HEAVY_WORK` — when set, append CPU-heavy fan-outs
-//!   (iamacoffeepot/aether#1074); unset, the topology set is unchanged.
-//! - `AETHER_LATENCY_WIDE_FANOUT` — comma list of extra trivial fan-out
-//!   widths to append (iamacoffeepot/aether#1075); unset, unchanged.
+//! - `AETHER_LATENCY_HEAVY_WORK` — the heavy-tier per-node `busy_spin`
+//!   *magnitude* (iamacoffeepot/aether#1074). Now magnitude-only: the tier
+//!   selector (`AETHER_PERF_TIER`) gates *whether* heavy shapes run, so
+//!   this just sizes the CPU burn, defaulting to a non-zero count when the
+//!   heavy tier is active and the var is unset. Calibrate as before — set a
+//!   count, read the per-leaf µs off the HANDLER DUR column, adjust.
+//! - `AETHER_LATENCY_WIDE_FANOUT` — comma list of extra trivial (light)
+//!   fan-out widths to append (iamacoffeepot/aether#1075); unset, unchanged.
 //! - `AETHER_PERF_GIT_SHA` — stamped into the report; falls back to
 //!   `git rev-parse HEAD`.
 
