@@ -170,12 +170,20 @@ fn latency_section_renders_verdict(name: &str) -> bool {
 
 /// One cell's measured throughput in a single trial
 /// (iamacoffeepot/aether#1202): completed mails/sec for a (worker ×
-/// topology) cell under saturation.
+/// topology) cell under saturation. `mails_per_sec` is `None` when the
+/// cell **truncated** — the entry relay's trace ring lapped during the run,
+/// so the completed-count is undercounted and any rate computed from it
+/// would be wrong. Such a cell is emitted flagged-not-dropped
+/// (iamacoffeepot/aether#1226) so a missing measurement is visible in the
+/// section rather than silently absent; the comparator treats it as "no
+/// measurement" (`find_throughput_cell` filters `None`-rate cells out of
+/// the hit set).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThroughputCell {
     pub workers: usize,
     pub topo: String,
-    pub mails_per_sec: f64,
+    /// `Some(rate)` for a measured cell; `None` when the cell truncated.
+    pub mails_per_sec: Option<f64>,
 }
 
 impl ThroughputCell {
@@ -201,7 +209,11 @@ impl ThroughputSection {
     /// new section iamacoffeepot/aether#1206's fixtures already named.
     pub const NAME: &str = "throughput";
     /// The section version. Bumped when the throughput cell shape changes.
-    pub const VERSION: &str = "v1";
+    /// `v2` (iamacoffeepot/aether#1226): `mails_per_sec` became
+    /// `Option<f64>` so a truncated cell is emitted flagged
+    /// (`mails_per_sec: null`) instead of dropped — an older `v1` base
+    /// trial (rate always present) sections cleanly against the bump.
+    pub const VERSION: &str = "v2";
 }
 
 /// One fresh-process sweep run. The `perf-trial` bin emits this as JSON
@@ -305,10 +317,13 @@ impl TrialReport {
     /// Build a *saturation* trial report from a sweep's [`CellResult`]s
     /// (iamacoffeepot/aether#1202). A saturate run reports **throughput
     /// only** — per-hop latency under saturation is contended and
-    /// high-variance, so pairing it would compare noise. Each cell with a
-    /// measured `throughput_mps` (a truncated cell carries `None` and is
-    /// skipped) contributes one [`ThroughputCell`]; the rows ride in a
-    /// single [`ThroughputSection`].
+    /// high-variance, so pairing it would compare noise. Every cell
+    /// contributes one [`ThroughputCell`]: a measured cell carries its
+    /// `throughput_mps` and a truncated cell carries `None`
+    /// (iamacoffeepot/aether#1226) — emitted flagged-not-dropped so a
+    /// missing measurement is visible in the section rather than silently
+    /// filtered away (the comparator still treats a `None`-rate cell as "no
+    /// measurement"). The rows ride in a single [`ThroughputSection`].
     ///
     /// [`CellResult`]: super::harness::CellResult
     #[must_use]
@@ -319,12 +334,10 @@ impl TrialReport {
     ) -> Self {
         let rows: Vec<ThroughputCell> = cells
             .iter()
-            .filter_map(|c| {
-                c.throughput_mps.map(|mps| ThroughputCell {
-                    workers: c.workers,
-                    topo: c.topo.clone(),
-                    mails_per_sec: mps,
-                })
+            .map(|c| ThroughputCell {
+                workers: c.workers,
+                topo: c.topo.clone(),
+                mails_per_sec: c.throughput_mps,
             })
             .collect();
         let throughput = ThroughputSection { cells: rows };
@@ -799,16 +812,21 @@ fn decode_throughput_cells(trials: &[TrialReport]) -> Vec<Vec<ThroughputCell>> {
         .collect()
 }
 
-/// Find the throughput cell matching `key` in one trial's cells (a free
-/// fn so the returned borrow ties to the slice's lifetime, mirroring
-/// [`find_cell`]).
+/// Find the *measured* throughput cell matching `key` in one trial's cells
+/// (a free fn so the returned borrow ties to the slice's lifetime, mirroring
+/// [`find_cell`]). A truncated cell (`mails_per_sec == None`,
+/// iamacoffeepot/aether#1226) is present in the section but is **not** a
+/// measurement, so it is filtered out here: [`compare_throughput`]'s
+/// "present in every trial" gate then treats the cell as absent (no
+/// measurement, not a regression to zero) without any further comparator
+/// branch.
 fn find_throughput_cell<'a>(
     cells: &'a [ThroughputCell],
     key: &ThroughputKey,
 ) -> Option<&'a ThroughputCell> {
     cells
         .iter()
-        .find(|c| c.workers == key.workers && c.topo == key.topo)
+        .find(|c| c.workers == key.workers && c.topo == key.topo && c.mails_per_sec.is_some())
 }
 
 /// The throughput section's per-cell paired-delta compare
@@ -845,8 +863,10 @@ fn compare_throughput(
             continue; // cell not present in every trial — skip
         }
 
-        let base_vals: Vec<f64> = base_hits.iter().map(|c| c.mails_per_sec).collect();
-        let cand_vals: Vec<f64> = cand_hits.iter().map(|c| c.mails_per_sec).collect();
+        // `find_throughput_cell` only returns measured cells, so every hit
+        // carries `Some` here (iamacoffeepot/aether#1226).
+        let base_vals: Vec<f64> = base_hits.iter().filter_map(|c| c.mails_per_sec).collect();
+        let cand_vals: Vec<f64> = cand_hits.iter().filter_map(|c| c.mails_per_sec).collect();
         let deltas: Vec<f64> = (0..k).map(|t| cand_vals[t] - base_vals[t]).collect();
 
         let base_sorted = sorted(base_vals.clone());
@@ -1541,7 +1561,7 @@ mod tests {
                 let cells = vec![ThroughputCell {
                     workers: 11,
                     topo: "fanout-8".to_owned(),
-                    mails_per_sec,
+                    mails_per_sec: Some(mails_per_sec),
                 }];
                 let body = serde_json::to_value(ThroughputSection { cells })
                     .expect("encode throughput body");
@@ -1617,7 +1637,104 @@ mod tests {
         let tp: ThroughputSection =
             serde_json::from_value(sec.body.clone()).expect("decode throughput body");
         assert_eq!(tp.cells.len(), 1);
-        assert!((tp.cells[0].mails_per_sec - 100_000.0).abs() < f64::EPSILON);
+        let rate = tp.cells[0]
+            .mails_per_sec
+            .expect("a measured cell round-trips its rate");
+        assert!((rate - 100_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn truncated_cell_is_flagged_not_dropped() {
+        // Steps 3 + 4 (iamacoffeepot/aether#1226): a cell whose ring lapped
+        // carries `throughput_mps == None`. `from_throughput_cells` used to
+        // `filter_map` that `None` away, so the cell vanished from the
+        // section and from any base-vs-candidate comparison — the only trace
+        // was a stderr warn. It must now appear flagged (`mails_per_sec ==
+        // None`) so a missing measurement is visible in the report. (This is
+        // the relocated truncation contract that
+        // `over_capacity_backlog_flags_truncation_not_a_wrong_rate` once
+        // tested via the sweep path, now unreachable after the per-cell
+        // burst clamp.)
+        use crate::perf::harness::{CellResult, Stats, Tier};
+
+        let cell = |topo: &str, throughput_mps: Option<f64>| CellResult {
+            workers: 2,
+            topo: topo.to_owned(),
+            tier: Tier::Light,
+            construct: Stats::default(),
+            queued: Stats::default(),
+            drain: Stats::default(),
+            handler: Stats::default(),
+            depth: Stats::default(),
+            throughput_mps,
+        };
+        let cells = vec![
+            cell("depth-1", Some(123_456.0)),
+            cell("fanout-8", None), // truncated — ring lapped
+        ];
+
+        let report = TrialReport::from_throughput_cells(&cells, 1, None);
+        let sec = &report.sections[0];
+        assert_eq!(sec.name, ThroughputSection::NAME);
+        assert_eq!(sec.version, ThroughputSection::VERSION); // v2
+        let tp: ThroughputSection =
+            serde_json::from_value(sec.body.clone()).expect("decode throughput body");
+
+        // Both cells are present — the truncated one is flagged, not dropped.
+        assert_eq!(tp.cells.len(), 2, "truncated cell must not be filtered out");
+        let flagged = tp
+            .cells
+            .iter()
+            .find(|c| c.topo == "fanout-8")
+            .expect("the truncated fanout-8 cell is present in the section");
+        assert!(
+            flagged.mails_per_sec.is_none(),
+            "a truncated cell carries no rate (flagged), got {:?}",
+            flagged.mails_per_sec
+        );
+        let measured = tp
+            .cells
+            .iter()
+            .find(|c| c.topo == "depth-1")
+            .expect("the measured depth-1 cell is present");
+        assert_eq!(measured.mails_per_sec, Some(123_456.0));
+    }
+
+    #[test]
+    fn truncated_cell_reads_as_no_measurement_in_compare() {
+        // Step 4 (iamacoffeepot/aether#1226): a flagged-not-dropped truncated
+        // cell must read as "no measurement" in the comparator — skipped by
+        // the existing "present in every trial" gate, not scored as a rate of
+        // zero. `find_throughput_cell` filters out `None`-rate cells, so the
+        // cell is absent from the hit set on both sides and the gate drops it.
+        let truncated_side = |k: usize| -> Vec<Vec<ThroughputCell>> {
+            (0..k)
+                .map(|_| {
+                    vec![ThroughputCell {
+                        workers: 11,
+                        topo: "fanout-8".to_owned(),
+                        mails_per_sec: None,
+                    }]
+                })
+                .collect()
+        };
+        let k = 4;
+        let report = compare_throughput(
+            ThroughputSection::NAME,
+            &truncated_side(k),
+            &truncated_side(k),
+            k,
+            CompareConfig::default(),
+        );
+        // The only cell present is truncated on both sides, so the section
+        // compares with zero scored cells (no regression-to-zero verdict).
+        match report {
+            SectionReport::ThroughputCompared { cells, .. } => assert!(
+                cells.is_empty(),
+                "a truncated cell must produce no scored comparison cell, got {cells:?}"
+            ),
+            other => panic!("expected a compared throughput section, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1865,7 +1982,7 @@ mod tests {
             let cells = vec![ThroughputCell {
                 workers: 11,
                 topo: "fanout-8".to_owned(),
-                mails_per_sec,
+                mails_per_sec: Some(mails_per_sec),
             }];
             let body =
                 serde_json::to_value(ThroughputSection { cells }).expect("encode throughput body");
