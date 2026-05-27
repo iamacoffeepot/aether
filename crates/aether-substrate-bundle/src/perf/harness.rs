@@ -272,6 +272,18 @@ pub struct Topology {
     pub tier: Tier,
 }
 
+/// The widest fan-out in `topo` — the largest `downstreams[i].len()` over
+/// all relays (0 for a topology with no edges). A relay records
+/// `2 + out_degree` trace-ring slots per inbound mail (`Received` +
+/// `Finished` on dispatch, plus one `Sent` per downstream), so this is the
+/// fan-out multiplier in the per-actor ring-budget bound
+/// `backlog * (2 + max_out_degree) <= ring_cap` that the `Saturate` burst
+/// clamp in [`run_sweep_samples`] enforces (iamacoffeepot/aether#1226).
+#[must_use]
+pub fn max_out_degree(topo: &Topology) -> usize {
+    topo.downstreams.iter().map(Vec::len).max().unwrap_or(0)
+}
+
 /// The downstream adjacency of a `d`-node forward chain `0 -> 1 -> ... ->
 /// d-1`: each node forwards to its successor; the last is a leaf. Shared by
 /// the [`depth_chain`] (light) and [`ui_roundtrip`] (real) factories so the
@@ -748,18 +760,30 @@ pub fn drive_for_tier(drive: Drive, tier: Tier) -> Drive {
 }
 
 /// Default per-tick `Ping` burst for a `Saturate` cell when
-/// `AETHER_PERF_BACKLOG` is unset. Sized comfortably under the per-actor
-/// trace ring capacity ([`DEFAULT_TRACE_RING_CAP`]) so a default-backlog
-/// run never laps the ring (see [`saturate_backlog_from_env`]).
+/// `AETHER_PERF_BACKLOG` is unset. This is the *requested* depth, not the
+/// effective one: a relay writes `2 + out_degree` trace-ring slots per
+/// inbound mail (`Received` + `Finished` on dispatch, plus one `Sent` per
+/// downstream), so the binding constraint on the entry relay's per-actor
+/// ring ([`DEFAULT_TRACE_RING_CAP`]) is `backlog * (2 + out_degree) <=
+/// ring_cap`, not `backlog <= ring_cap`. At 512 a low-fan-out cell stays
+/// well under cap, but a wide fan-out laps it (`fanout-8`:
+/// `512 * (2 + 8) = 5120 > 4096`). [`run_sweep_samples`] therefore clamps
+/// each `Saturate` cell's burst to `ring_cap / (2 + max_out_degree(topo))`
+/// so every cell stays measurable regardless of fan-out
+/// (iamacoffeepot/aether#1226).
 pub const DEFAULT_SATURATE_BACKLOG: u32 = 512;
 
 /// Read the per-tick saturation backlog from `AETHER_PERF_BACKLOG`
 /// (iamacoffeepot/aether#1202), defaulting to [`DEFAULT_SATURATE_BACKLOG`]
-/// when unset / unparseable / `0`. Clamped to the per-actor trace ring
-/// capacity ([`DEFAULT_TRACE_RING_CAP`]): a burst larger than the ring
-/// laps the entry relay's ring, which the harvest detects as `truncated`
-/// and the cell then reports no rate for. Clamping up front keeps a
-/// merely-large backlog measurable instead of silently truncated.
+/// when unset / unparseable / `0`. The `min(cap)` here is the *env ceiling*
+/// only — it bounds the parsed value against the per-actor trace ring
+/// capacity ([`DEFAULT_TRACE_RING_CAP`]) so a wildly-large
+/// `AETHER_PERF_BACKLOG` can't request a depth no topology could ever fit.
+/// It does **not** account for fan-out: a relay records `2 + out_degree`
+/// ring slots per inbound mail, so the tighter per-topology bound
+/// (`backlog * (2 + out_degree) <= ring_cap`) lives at the cell in
+/// [`run_sweep_samples`], which clamps each `Saturate` burst to
+/// `ring_cap / (2 + max_out_degree(topo))` (iamacoffeepot/aether#1226).
 #[must_use]
 pub fn saturate_backlog_from_env() -> u32 {
     let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
@@ -1078,10 +1102,27 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             let drive = drive_for_tier(cfg.drive, topo.tier);
             // `burst` is the per-tick `Ping` count: 1 in `Latency` (one
             // root per frame), `backlog` in `Saturate` (a deep ready queue
-            // drained in one frame, iamacoffeepot/aether#1202).
+            // drained in one frame, iamacoffeepot/aether#1202). The
+            // `Saturate` arm is reached only by Light / Heavy cells — the
+            // real tier is forced paced by `drive_for_tier` above — so the
+            // clamp below governs only flooding bursts. A relay writes
+            // `2 + out_degree` trace-ring slots per inbound mail, so a
+            // backlog that fans out wide laps the entry relay's per-actor
+            // ring once `backlog * (2 + max_out_degree) > ring_cap`; clamp
+            // each cell's burst to the deepest backlog its ring allows so
+            // every cell stays measurable instead of silently truncating
+            // (iamacoffeepot/aether#1226). Low-fan-out cells keep full
+            // depth; a wide fan-out (e.g. `fanout-8`: `4096 / 10 = 409`)
+            // drops to fit, and any future wider fan-out stays measurable
+            // automatically.
             let burst = match drive {
                 Drive::Latency { .. } => 1,
-                Drive::Saturate { backlog } => backlog,
+                Drive::Saturate { backlog } => {
+                    let ring_cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
+                    let out_degree = u32::try_from(max_out_degree(topo)).unwrap_or(u32::MAX);
+                    let fanout_divisor = out_degree.saturating_add(2);
+                    backlog.min(ring_cap / fanout_divisor)
+                }
             };
             if let Err(e) = tb
                 .spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst))
@@ -1344,6 +1385,32 @@ mod tests {
     }
 
     #[test]
+    fn fanout_8_at_default_backlog_reports_finite_rate() {
+        // Regression (iamacoffeepot/aether#1226): the entry relay of
+        // `fanout(8)` forwards each inbound root to 8 leaves, so it records
+        // `2 + 8 = 10` trace-ring slots per root. At the default backlog
+        // (512) that is `512 * 10 = 5120 > 4096` (the per-actor ring cap),
+        // which lapped the ring, tripped the truncation gate, and dropped
+        // `fanout-8`'s throughput cell entirely. `fanout(8)` is `Tier::Light`
+        // (the default tier), so the `Saturate` arm survives `drive_for_tier`
+        // and this is the exact reproduction at the default depth. The
+        // per-cell burst clamp (`4096 / 10 = 409`) must keep the cell
+        // measurable: a finite, positive, non-truncated rate.
+        let Some(cell) = saturate_cell(2, fanout(8), DEFAULT_SATURATE_BACKLOG) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let mps = cell.throughput_mps.expect(
+            "fanout-8 at the default backlog must report a rate, not truncate to None \
+             (iamacoffeepot/aether#1226)",
+        );
+        assert!(
+            mps.is_finite() && mps > 0.0,
+            "throughput must be positive and finite, got {mps}"
+        );
+    }
+
+    #[test]
     fn throughput_rises_with_backlog_on_fixed_topology() {
         // Latency mode never reports a rate; the historical path is intact.
         let topo = fanout(4);
@@ -1426,26 +1493,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn over_capacity_backlog_flags_truncation_not_a_wrong_rate() {
-        // A backlog past the per-actor ring capacity laps the entry
-        // source's ring (it holds one `Sent` per root). The harvest detects
-        // the lap and the cell reports no rate, rather than dividing an
-        // undercounted completed-count by the wall window
-        // (iamacoffeepot/aether#1202). depth-1 is the cheapest topology, so
-        // the lap is on the source ring's root count, not a busy relay's
-        // fan-out. The normal env path clamps below the cap, so this
-        // over-cap value is fed straight to the sweep.
-        let cap = u32::try_from(DEFAULT_TRACE_RING_CAP).unwrap_or(u32::MAX);
-        let Some(cell) = saturate_cell(2, depth_chain(1), cap + 1) else {
-            eprintln!("skipping: no wgpu adapter");
-            return;
-        };
-        assert!(
-            cell.throughput_mps.is_none(),
-            "an over-capacity backlog must flag truncation (no rate), not report a wrong one"
-        );
-    }
+    // The former `over_capacity_backlog_flags_truncation_not_a_wrong_rate`
+    // lived here and fed an over-capacity backlog straight to the sweep to
+    // force a lap. The per-cell burst clamp (iamacoffeepot/aether#1226) now
+    // bounds every `Saturate` cell to `ring_cap / (2 + max_out_degree)`, so
+    // the sweep path can no longer lap a ring — its premise is unreachable.
+    // The truncation contract (a `None`-rate cell is surfaced flagged, not
+    // dropped) is now report-side; the assertion moved to
+    // `report::tests::truncated_cell_is_flagged_not_dropped`.
 
     #[test]
     fn over_capacity_backlog_is_clamped_by_env_parse() {
