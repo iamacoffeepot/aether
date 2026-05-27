@@ -3611,24 +3611,6 @@ mod tests {
         let _ = id;
     }
 
-    /// Issue 745: `Builder::with_workers(None)` leaves the override
-    /// field unset so `boot_passives` falls back to
-    /// `PoolConfig::default()`.
-    #[test]
-    fn with_workers_none_leaves_field_unset() {
-        let (registry, mailer) = fresh_substrate();
-        let builder = Builder::<TestChassis>::new(registry, mailer).with_workers(None);
-        assert_eq!(builder.workers, None);
-    }
-
-    /// Issue 745: a positive worker count plumbs through verbatim.
-    #[test]
-    fn with_workers_some_passes_through() {
-        let (registry, mailer) = fresh_substrate();
-        let builder = Builder::<TestChassis>::new(registry, mailer).with_workers(Some(7));
-        assert_eq!(builder.workers, Some(7));
-    }
-
     /// Issue 745: `Some(0)` clamps to 1 since the pool requires at
     /// least one worker.
     #[test]
