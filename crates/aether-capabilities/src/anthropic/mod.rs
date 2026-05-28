@@ -33,7 +33,7 @@ use crate::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicRe
 use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 pub use api::UreqAnthropicAdapter;
 pub use cli::ClaudeCliAdapter;
-pub use config::AnthropicConfig;
+pub use config::{AnthropicConfig, AnthropicConfigLayer};
 
 /// Default per-cap concurrency bound when `AETHER_ANTHROPIC_MAX_IN_FLIGHT`
 /// is unset. Conservative — paid-endpoint throttling matters more than
@@ -196,6 +196,30 @@ mod config {
                 .env()
                 .load()
                 .expect("AnthropicConfigLayer defaults are well-formed");
+            Self::from_layer(layer)
+        }
+
+        /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
+        /// unit d, issue 1258). Argv-set fields win; unset (`None`) fall
+        /// through to `ANTHROPIC_API_KEY` / `AETHER_ANTHROPIC_*` env,
+        /// then literal defaults.
+        ///
+        /// # Panics
+        ///
+        /// Same as [`Self::from_env`].
+        #[must_use]
+        pub fn from_argv_then_env(argv: <AnthropicConfigLayer as confique::Config>::Layer) -> Self {
+            use confique::Config as _;
+
+            let layer = AnthropicConfigLayer::builder()
+                .preloaded(argv)
+                .env()
+                .load()
+                .expect("AnthropicConfigLayer defaults are well-formed");
+            Self::from_layer(layer)
+        }
+
+        fn from_layer(layer: AnthropicConfigLayer) -> Self {
             Self {
                 api_key: layer.api_key.filter(|s| !s.is_empty()),
                 disabled: layer.disabled,
@@ -208,18 +232,20 @@ mod config {
     /// Env-shaped confique layer behind `AnthropicConfig` (ADR-0090). Each
     /// field is the primitive its env var carries; `AnthropicConfig::from_env`
     /// maps them onto the domain types (ms → `Duration`, empty key →
-    /// `None`). Kept private — the public consumed shape stays
-    /// `AnthropicConfig`.
+    /// `None`). Public so chassis CLI overlays (ADR-0090 unit d,
+    /// issue 1258) can preload a `<AnthropicConfigLayer as
+    /// confique::Config>::Layer` before `.env()`; the consumed shape
+    /// stays `AnthropicConfig`.
     #[cfg(feature = "native")]
     #[derive(confique::Config)]
-    struct AnthropicConfigLayer {
+    pub struct AnthropicConfigLayer {
         /// `ANTHROPIC_API_KEY` (bare, un-prefixed). Empty/unset → `None`
         /// after the `from_env` filter.
         #[config(env = "ANTHROPIC_API_KEY")]
-        api_key: Option<String>,
+        pub api_key: Option<String>,
         /// `AETHER_ANTHROPIC_DISABLE=1`/`true` forces the disabled adapter.
         #[config(env = "AETHER_ANTHROPIC_DISABLE", parse_env = parse_flag, default = false)]
-        disabled: bool,
+        pub disabled: bool,
         /// Per-cap concurrency bound. A non-positive / unparseable value
         /// falls back to the default (`> 0` filter preserved).
         #[config(
@@ -227,7 +253,7 @@ mod config {
             parse_env = parse_provider_max_in_flight,
             default = 2
         )]
-        max_in_flight: usize,
+        pub max_in_flight: usize,
         /// Per-request timeout in milliseconds. Literal default mirrors
         /// `DEFAULT_TIMEOUT_MS` (120 s).
         #[config(
@@ -235,7 +261,7 @@ mod config {
             parse_env = parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>,
             default = 120_000
         )]
-        timeout_ms: u32,
+        pub timeout_ms: u32,
     }
 
     #[cfg(all(test, feature = "native"))]

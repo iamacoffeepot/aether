@@ -32,7 +32,7 @@ use crate::contentgen::adapter::{
 use crate::contentgen::shared;
 
 use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
-pub use config::GeminiConfig;
+pub use config::{GeminiConfig, GeminiConfigLayer};
 
 /// Default per-cap concurrency bound when `AETHER_GEMINI_MAX_IN_FLIGHT`
 /// is unset. Conservative — image / music generation is multi-second
@@ -130,6 +130,30 @@ mod config {
                 .env()
                 .load()
                 .expect("GeminiConfigLayer defaults are well-formed");
+            Self::from_layer(layer)
+        }
+
+        /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
+        /// unit d, issue 1258). Argv-set fields win; unset (`None`) fall
+        /// through to `GEMINI_API_KEY` / `AETHER_GEMINI_*` env, then
+        /// literal defaults.
+        ///
+        /// # Panics
+        ///
+        /// Same as [`Self::from_env`].
+        #[must_use]
+        pub fn from_argv_then_env(argv: <GeminiConfigLayer as confique::Config>::Layer) -> Self {
+            use confique::Config as _;
+
+            let layer = GeminiConfigLayer::builder()
+                .preloaded(argv)
+                .env()
+                .load()
+                .expect("GeminiConfigLayer defaults are well-formed");
+            Self::from_layer(layer)
+        }
+
+        fn from_layer(layer: GeminiConfigLayer) -> Self {
             Self {
                 api_key: layer.api_key.filter(|s| !s.is_empty()),
                 disabled: layer.disabled,
@@ -142,18 +166,20 @@ mod config {
     /// Env-shaped confique layer behind `GeminiConfig` (ADR-0090). Each
     /// field is the primitive its env var carries; `GeminiConfig::from_env`
     /// maps them onto the domain types (ms → `Duration`, empty key →
-    /// `None`). Kept private — the public consumed shape stays
-    /// `GeminiConfig`.
+    /// `None`). Public so chassis CLI overlays (ADR-0090 unit d,
+    /// issue 1258) can preload a `<GeminiConfigLayer as
+    /// confique::Config>::Layer` before `.env()`; the consumed shape
+    /// stays `GeminiConfig`.
     #[cfg(feature = "native")]
     #[derive(confique::Config)]
-    struct GeminiConfigLayer {
+    pub struct GeminiConfigLayer {
         /// `GEMINI_API_KEY` (bare, un-prefixed). Empty/unset → `None`
         /// after the `from_env` filter.
         #[config(env = "GEMINI_API_KEY")]
-        api_key: Option<String>,
+        pub api_key: Option<String>,
         /// `AETHER_GEMINI_DISABLE=1`/`true` forces the disabled adapter.
         #[config(env = "AETHER_GEMINI_DISABLE", parse_env = parse_flag, default = false)]
-        disabled: bool,
+        pub disabled: bool,
         /// Per-cap concurrency bound. A non-positive / unparseable value
         /// falls back to the default (`> 0` filter preserved).
         #[config(
@@ -161,7 +187,7 @@ mod config {
             parse_env = parse_provider_max_in_flight,
             default = 2
         )]
-        max_in_flight: usize,
+        pub max_in_flight: usize,
         /// Per-request timeout in milliseconds. Literal default mirrors
         /// `DEFAULT_TIMEOUT_MS` (180 s).
         #[config(
@@ -169,7 +195,7 @@ mod config {
             parse_env = parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>,
             default = 180_000
         )]
-        timeout_ms: u32,
+        pub timeout_ms: u32,
     }
 
     // confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,

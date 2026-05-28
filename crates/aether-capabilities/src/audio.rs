@@ -60,7 +60,7 @@ use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
 // the config struct (sends are typed; config is the chassis's
 // concern).
 #[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-pub use native::AudioConfig;
+pub use native::{AudioConfig, AudioConfigLayer};
 
 #[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {
@@ -141,6 +141,29 @@ mod native {
                 .env()
                 .load()
                 .expect("AudioConfigLayer defaults are well-formed");
+            Self::from_layer(layer)
+        }
+
+        /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
+        /// unit d, issue 1258). Argv-set fields win; unset (`None`) fall
+        /// through to `AETHER_AUDIO_*` env and then literal defaults.
+        ///
+        /// # Panics
+        ///
+        /// Same as [`Self::from_env`].
+        #[must_use]
+        pub fn from_argv_then_env(argv: <AudioConfigLayer as confique::Config>::Layer) -> Self {
+            use confique::Config as _;
+
+            let layer = AudioConfigLayer::builder()
+                .preloaded(argv)
+                .env()
+                .load()
+                .expect("AudioConfigLayer defaults are well-formed");
+            Self::from_layer(layer)
+        }
+
+        fn from_layer(layer: AudioConfigLayer) -> Self {
             Self {
                 disabled: layer.disabled,
                 // Prior behaviour: `.parse::<u32>().ok()` — an unparseable
@@ -156,21 +179,23 @@ mod native {
         }
     }
 
-    /// Env-shaped confique layer behind `AudioConfig` (ADR-0090). Kept
-    /// private — the public consumed shape stays `AudioConfig`. Lives
-    /// inside the `audio-native` bridge mod (which implies the `native`
-    /// feature), so confique is always available here.
+    /// Env-shaped confique layer behind `AudioConfig` (ADR-0090). Public
+    /// so chassis CLI overlays (ADR-0090 unit d, issue 1258) can preload
+    /// a `<AudioConfigLayer as confique::Config>::Layer` before
+    /// `.env()`; the consumed shape stays `AudioConfig`. Lives inside the
+    /// `audio-native` bridge mod (which implies the `native` feature), so
+    /// confique is always available here.
     #[derive(confique::Config)]
-    struct AudioConfigLayer {
+    pub struct AudioConfigLayer {
         /// `AETHER_AUDIO_DISABLE=1`/`true` skips cpal init entirely.
         #[config(env = "AETHER_AUDIO_DISABLE", parse_env = parse_flag, default = false)]
-        disabled: bool,
+        pub disabled: bool,
         /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. Held
         /// as the raw string so `AudioConfig::from_env` can apply the
         /// soft `.parse().ok()` (an unparseable value → `None`); a
         /// confique numeric field would hard-error on bad input instead.
         #[config(env = "AETHER_AUDIO_SAMPLE_RATE")]
-        requested_sample_rate: Option<String>,
+        pub requested_sample_rate: Option<String>,
     }
 
     /// Event a handler pushes into the audio callback's queue. The

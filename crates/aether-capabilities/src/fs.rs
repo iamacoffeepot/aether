@@ -377,6 +377,14 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     }
 }
 
+/// Re-export the env-shaped confique layer for chassis CLI overlays
+/// (ADR-0090 unit d, issue 1258). The layer lives inside the bridge
+/// `mod native` (cfg-gated); the file-root re-export gives chassis
+/// bins a stable path (`aether_capabilities::fs::NamespaceRootsLayer`)
+/// without reaching into the bridge module.
+#[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
+pub use native::NamespaceRootsLayer;
+
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::path::{Path, PathBuf};
@@ -441,6 +449,36 @@ mod native {
                 .env()
                 .load()
                 .expect("NamespaceRootsLayer has no literal defaults to malform");
+            Self::from_layer(layer)
+        }
+
+        /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
+        /// unit d, issue 1258). Argv-set roots win; unset (`None`) fall
+        /// through to `AETHER_SAVE_DIR` / `AETHER_ASSETS_DIR` /
+        /// `AETHER_CONFIG_DIR` env, then platform-default fallbacks.
+        ///
+        /// # Panics
+        ///
+        /// Same as [`Self::from_env`]: only on a future confique
+        /// misconfiguration (the layer has no literal defaults today).
+        #[cfg(feature = "native")]
+        #[must_use]
+        pub fn from_argv_then_env(argv: <NamespaceRootsLayer as confique::Config>::Layer) -> Self {
+            use confique::Config as _;
+
+            let layer = NamespaceRootsLayer::builder()
+                .preloaded(argv)
+                .env()
+                .load()
+                .expect("NamespaceRootsLayer has no literal defaults to malform");
+            Self::from_layer(layer)
+        }
+
+        /// Shared platform-default fallback mapping. Kept private so the
+        /// layer shape stays an implementation detail of
+        /// [`Self::from_env`] / [`Self::from_argv_then_env`].
+        #[cfg(feature = "native")]
+        fn from_layer(layer: NamespaceRootsLayer) -> Self {
             Self {
                 save: layer.save.unwrap_or_else(|| {
                     dirs::data_dir()
@@ -473,18 +511,21 @@ mod native {
     /// `NamespaceRoots::from_env` applies the platform fallback. The
     /// `parse_dir` parser errors on an empty string so confique treats an
     /// empty value as unset (matching the prior `env_or_default`).
+    /// Public so chassis CLI overlays (ADR-0090 unit d, issue 1258) can
+    /// preload a `<NamespaceRootsLayer as confique::Config>::Layer`
+    /// before `.env()`; the consumed shape stays `NamespaceRoots`.
     /// Gated on `feature = "native"`: the enclosing `mod native` is only
     /// `not(target_arch = "wasm32")`-gated, but confique is a
     /// `native`-feature dep.
     #[cfg(feature = "native")]
     #[derive(confique::Config)]
-    struct NamespaceRootsLayer {
+    pub struct NamespaceRootsLayer {
         #[config(env = "AETHER_SAVE_DIR", parse_env = parse_dir)]
-        save: Option<PathBuf>,
+        pub save: Option<PathBuf>,
         #[config(env = "AETHER_ASSETS_DIR", parse_env = parse_dir)]
-        assets: Option<PathBuf>,
+        pub assets: Option<PathBuf>,
         #[config(env = "AETHER_CONFIG_DIR", parse_env = parse_dir)]
-        config: Option<PathBuf>,
+        pub config: Option<PathBuf>,
     }
 
     /// Parse a directory override. An empty string errors so confique
