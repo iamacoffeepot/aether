@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::Receiver;
 
 use crate::mail::{Mail, ReplyTo};
+use crate::runtime::trace::SettlementHold;
 
 /// One pending capture request. Carries the reply handle so the
 /// render thread can reply once it has bytes, plus a resolved list
@@ -50,6 +51,23 @@ pub struct PendingCapture {
     pub reply_to: ReplyTo,
     pub after_mails: Vec<Mail>,
     pub pre_settlements: Vec<Receiver<()>>,
+    /// ADR-0086 §12 settlement hold: held from `on_capture_frame` accept
+    /// until the render thread's `send_reply` returns; drops with
+    /// `PendingCapture` at end of the reply scope, firing `Release` so
+    /// `Settled{root}` becomes exact post-reply. Without this guard the
+    /// cap handler's `Finished` lands before the readback reply, the
+    /// trace observer settles the chain, and the wire `Call` ends with
+    /// zero reply events (iamacoffeepot/aether#1273). The pattern
+    /// mirrors `contentgen::dispatch` (acquired before queue handoff so
+    /// `HoldOpen` is visible to the settlement counter ahead of
+    /// `Finished`).
+    ///
+    /// The field is never read — its sole job is to keep the
+    /// [`SettlementHold`]'s `Drop` impl tied to the lifetime of this
+    /// `PendingCapture`. `SettlementHold` carries `#[must_use]`, so
+    /// stashing it on a named field (rather than `_`) is the only way
+    /// to keep it alive across the queue handoff.
+    pub hold: SettlementHold,
 }
 
 /// Single-slot queue. Cheaply cloneable (wraps an `Arc`), shared
@@ -106,17 +124,24 @@ impl CaptureQueue {
 mod tests {
     use super::*;
     use crate::ReplyTarget;
-    use aether_data::{SessionToken, Uuid};
+    use crate::runtime::trace::TraceHandle;
+    use aether_data::{MailId, SessionToken, Uuid};
 
     fn reply_to(u: u128) -> ReplyTo {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(u))))
     }
 
     fn pending(u: u128) -> PendingCapture {
+        // Sentinel `MailId::NONE` keeps the acquire/release pair a no-op
+        // in the settlement counter — the test exercises queue mechanics,
+        // not the trace pipeline. `TraceHandle::new()` builds a stand-
+        // alone handle with no installed registry.
+        let hold = TraceHandle::new().acquire_settlement_hold(MailId::NONE);
         PendingCapture {
             reply_to: reply_to(u),
             after_mails: Vec::new(),
             pre_settlements: Vec::new(),
+            hold,
         }
     }
 

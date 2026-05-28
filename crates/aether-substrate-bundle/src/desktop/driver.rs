@@ -566,6 +566,13 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.queue.push(mail);
                             }
                             self.outbound.send_reply(req.reply_to, &result);
+                            // iamacoffeepot/aether#1273: `req` still owns
+                            // `PendingCapture._hold` after the partial moves
+                            // above; the field drops at end of this scope —
+                            // *after* `send_reply` returns — firing
+                            // `Release` on the trace root so `Settled{root}`
+                            // is exact at post-reply. Don't restructure to
+                            // move the reply below other work in this arm.
                         }
                         None => {
                             gpu.render();
