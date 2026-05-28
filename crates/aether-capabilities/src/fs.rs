@@ -390,6 +390,10 @@ mod native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use std::env;
+    #[cfg(feature = "native")]
+    use std::error::Error;
+    #[cfg(feature = "native")]
+    use std::fmt;
 
     impl NamespaceRoots {
         /// Resolve each root from its env-var override, falling back to
@@ -413,42 +417,103 @@ mod native {
         /// `NamespaceRoots` directly so tests and chassis-as-library
         /// embedders can supply their own roots without process-env
         /// mutation.
+        ///
+        /// Resolution runs through confique (ADR-0090): the private
+        /// `NamespaceRootsLayer` declares each root's env key. The
+        /// defaults are *computed at runtime* (via the `dirs` crate /
+        /// `current_exe`), not literals, so the layer fields are
+        /// `Option<PathBuf>` (unset / empty env → `None`) and the
+        /// platform fallbacks are applied here — byte-identical to the
+        /// prior `env_or_default` reader.
+        ///
+        /// # Panics
+        ///
+        /// Never in practice: the layer has no literal defaults to
+        /// malform and the only parser (`parse_dir`) errors only on the
+        /// empty string (folded to the runtime fallback). The `.expect`
+        /// guards against a future confique misconfiguration.
+        #[cfg(feature = "native")]
         #[must_use]
         pub fn from_env() -> Self {
-            let save = env_or_default("AETHER_SAVE_DIR", || {
-                dirs::data_dir()
-                    .unwrap_or_else(env::temp_dir)
-                    .join("aether")
-                    .join("save")
-            });
-            let assets = env_or_default("AETHER_ASSETS_DIR", || {
-                env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(Path::to_path_buf))
-                    .map_or_else(
-                        || env::temp_dir().join("aether").join("assets"),
-                        |p| p.join("assets"),
-                    )
-            });
-            let config = env_or_default("AETHER_CONFIG_DIR", || {
-                dirs::config_dir()
-                    .unwrap_or_else(env::temp_dir)
-                    .join("aether")
-            });
+            use confique::Config as _;
+
+            let layer = NamespaceRootsLayer::builder()
+                .env()
+                .load()
+                .expect("NamespaceRootsLayer has no literal defaults to malform");
             Self {
-                save,
-                assets,
-                config,
+                save: layer.save.unwrap_or_else(|| {
+                    dirs::data_dir()
+                        .unwrap_or_else(env::temp_dir)
+                        .join("aether")
+                        .join("save")
+                }),
+                assets: layer.assets.unwrap_or_else(|| {
+                    env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(Path::to_path_buf))
+                        .map_or_else(
+                            || env::temp_dir().join("aether").join("assets"),
+                            |p| p.join("assets"),
+                        )
+                }),
+                config: layer.config.unwrap_or_else(|| {
+                    dirs::config_dir()
+                        .unwrap_or_else(env::temp_dir)
+                        .join("aether")
+                }),
             }
         }
     }
 
-    fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
-        match env::var(var) {
-            Ok(s) if !s.is_empty() => PathBuf::from(s),
-            _ => default(),
+    /// Env-shaped confique layer behind `NamespaceRoots` (ADR-0090). Each
+    /// root is `Option<PathBuf>` because the defaults are runtime-computed
+    /// (`dirs` / `current_exe`), not literals confique can hold — an
+    /// unset *or empty* env var resolves to `None` and
+    /// `NamespaceRoots::from_env` applies the platform fallback. The
+    /// `parse_dir` parser errors on an empty string so confique treats an
+    /// empty value as unset (matching the prior `env_or_default`).
+    /// Gated on `feature = "native"`: the enclosing `mod native` is only
+    /// `not(target_arch = "wasm32")`-gated, but confique is a
+    /// `native`-feature dep.
+    #[cfg(feature = "native")]
+    #[derive(confique::Config)]
+    struct NamespaceRootsLayer {
+        #[config(env = "AETHER_SAVE_DIR", parse_env = parse_dir)]
+        save: Option<PathBuf>,
+        #[config(env = "AETHER_ASSETS_DIR", parse_env = parse_dir)]
+        assets: Option<PathBuf>,
+        #[config(env = "AETHER_CONFIG_DIR", parse_env = parse_dir)]
+        config: Option<PathBuf>,
+    }
+
+    /// Parse a directory override. An empty string errors so confique
+    /// treats it as unset (preserving the prior `env_or_default`'s
+    /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
+    #[cfg(feature = "native")]
+    fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
+        if s.is_empty() {
+            Err(EmptyDir)
+        } else {
+            Ok(PathBuf::from(s))
         }
     }
+
+    /// Sentinel error: an empty `AETHER_*_DIR` value, treated as unset by
+    /// confique's parse path (`Err` + empty → `None`).
+    #[cfg(feature = "native")]
+    #[derive(Debug)]
+    struct EmptyDir;
+
+    #[cfg(feature = "native")]
+    impl fmt::Display for EmptyDir {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("empty directory override")
+        }
+    }
+
+    #[cfg(feature = "native")]
+    impl Error for EmptyDir {}
 
     /// `aether.fs` mailbox cap. Owns the resolved adapter registry +
     /// namespace roots. The dispatcher thread holds an `Arc<Self>` and
@@ -642,6 +707,36 @@ mod native {
         use std::time::Duration;
         use std::time::SystemTime;
         use std::time::UNIX_EPOCH;
+
+        // ADR-0090: the confique migration is byte-identical to the prior
+        // `env_or_default` reader. These exercise resolution without
+        // touching process env (issue 464) — the parser is pure, and the
+        // defaults check loads the layer with no `.env()` source.
+
+        #[test]
+        fn parse_dir_treats_empty_as_unset() {
+            use super::parse_dir;
+            assert!(parse_dir("").is_err(), "empty → unset (Err → None)");
+            assert_eq!(
+                parse_dir("/tmp/aether-save").expect("non-empty parses to a path"),
+                PathBuf::from("/tmp/aether-save")
+            );
+        }
+
+        #[test]
+        fn namespace_roots_layer_defaults_are_none() {
+            use super::NamespaceRootsLayer;
+            use confique::Config as _;
+            // No `.env()` source: each root has no literal default, so it
+            // resolves to `None` and `from_env` applies the runtime
+            // platform fallback. Env-free.
+            let layer = NamespaceRootsLayer::builder()
+                .load()
+                .expect("defaults load");
+            assert_eq!(layer.save, None);
+            assert_eq!(layer.assets, None);
+            assert_eq!(layer.config, None);
+        }
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.

@@ -40,6 +40,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
@@ -123,8 +124,26 @@ impl PersistConfig {
     /// `enabled` is the chassis's verdict: desktop + headless pass
     /// `true`; the hub passes `false` (ADR-0049 §9). A `false` chassis
     /// vote short-circuits to `None` regardless of env.
+    /// Resolution runs through confique (ADR-0090) for the two numeric
+    /// budget / tick knobs via the private `PersistConfigLayer`; the
+    /// `enabled` chassis vote, the `ENV_PERSIST_DISABLE` short-circuit,
+    /// and the root-or-`None` resolution stay hand-written because their
+    /// outcome is structural (a missing data dir disables persistence
+    /// entirely, not a literal default confique could hold). Behaviour is
+    /// byte-identical to the prior hand-rolled reader — an unparseable
+    /// budget / tick still falls back to its default. The hard-error
+    /// stance (ADR-0090 §4) lands with the chassis-env validation pass.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the layer's literal defaults are themselves
+    /// malformed — a programmer error caught by the
+    /// `persist_config_layer_defaults_match` test, never a runtime config
+    /// fault (the env values flow through total parsers).
     #[must_use]
     pub fn from_env(enabled: bool) -> Option<Self> {
+        use confique::Config as _;
+
         if !enabled {
             return None;
         }
@@ -144,13 +163,17 @@ impl PersistConfig {
                 data.join("aether").join("handles")
             }
         };
+        // Every layer field has a literal default and a total parser, so
+        // the layer always resolves; a failure here would be a malformed
+        // default literal (caught by `persist_config_layer_defaults_match`).
+        let layer = PersistConfigLayer::builder()
+            .env()
+            .load()
+            .expect("PersistConfigLayer defaults are well-formed");
         Some(Self {
             root: base.join(LAYOUT_VERSION_DIR),
-            disk_budget_bytes: parse_env_u64(ENV_DISK_BUDGET_BYTES, DEFAULT_DISK_BUDGET_BYTES),
-            eviction_tick_secs: parse_env_u64(
-                ENV_DISK_EVICTION_TICK_SECS,
-                DEFAULT_DISK_EVICTION_TICK_SECS,
-            ),
+            disk_budget_bytes: layer.disk_budget_bytes,
+            eviction_tick_secs: layer.eviction_tick_secs,
         })
     }
 
@@ -350,28 +373,52 @@ pub fn entry_paths(root: &Path, id: HandleId) -> (PathBuf, PathBuf) {
     )
 }
 
-/// Parse a `u64` env var, falling back to `default` on absence or a
-/// parse failure (with a warn for the malformed case).
-// Nested match keeps the warn-log path readable (same shape as `from_env`).
-#[allow(clippy::option_if_let_else)]
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    match env::var(name) {
-        Ok(raw) => match raw.parse::<u64>() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    target: TARGET,
-                    env = name,
-                    value = %raw,
-                    error = %e,
-                    default,
-                    "ignoring unparseable env var; using default",
-                );
-                default
-            }
-        },
-        Err(_) => default,
-    }
+/// Env-shaped confique layer behind the numeric knobs of
+/// [`PersistConfig`] (ADR-0090). `disk_budget_bytes` and
+/// `eviction_tick_secs` carry their `AETHER_HANDLE_STORE_*` values; the
+/// `root` resolution stays hand-written in [`PersistConfig::from_env`]
+/// (its default is structural — a missing data dir disables persistence,
+/// not a literal). Kept private; the consumed shape stays `PersistConfig`.
+#[derive(confique::Config)]
+struct PersistConfigLayer {
+    /// On-disk byte budget. Literal default mirrors
+    /// [`DEFAULT_DISK_BUDGET_BYTES`] (16 GiB); the
+    /// `persist_config_layer_defaults_match` test guards the match.
+    #[config(
+        env = "AETHER_HANDLE_STORE_DISK_BUDGET_BYTES",
+        parse_env = parse_disk_budget_bytes,
+        default = 17_179_869_184u64
+    )]
+    disk_budget_bytes: u64,
+    /// Eviction tick interval in seconds. Literal default mirrors
+    /// [`DEFAULT_DISK_EVICTION_TICK_SECS`] (60 s).
+    #[config(
+        env = "AETHER_HANDLE_STORE_DISK_EVICTION_TICK_SECS",
+        parse_env = parse_eviction_tick_secs,
+        default = 60u64
+    )]
+    eviction_tick_secs: u64,
+}
+
+// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
+// so these total helpers carry a `Result` they never fill with `Err` — an
+// unparseable value folds back to the same default as the prior
+// `parse_env_u64` (the warn-on-malformed log is dropped, the disposition is
+// byte-identical). The strict (erroring) variant lands with the ADR-0090 §4
+// validation pass; hence the per-fn `unnecessary_wraps` allow.
+
+/// Parse the disk byte budget; unparseable falls back to
+/// [`DEFAULT_DISK_BUDGET_BYTES`]. Total — never errors.
+#[allow(clippy::unnecessary_wraps)]
+fn parse_disk_budget_bytes(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_DISK_BUDGET_BYTES))
+}
+
+/// Parse the eviction tick seconds; unparseable falls back to
+/// [`DEFAULT_DISK_EVICTION_TICK_SECS`]. Total — never errors.
+#[allow(clippy::unnecessary_wraps)]
+fn parse_eviction_tick_secs(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_DISK_EVICTION_TICK_SECS))
 }
 
 /// Millis since the unix epoch, saturating to 0 if the clock is before
@@ -2035,6 +2082,35 @@ mod tests {
 
     use super::*;
     use aether_data::tagged_id;
+
+    // ADR-0090: the confique migration is byte-identical to the prior
+    // hand-rolled `parse_env_u64` reader. These exercise resolution
+    // without touching process env (issue 464) — the parsers are pure,
+    // and the defaults check loads the layer with no `.env()` source.
+
+    #[test]
+    fn parse_persist_numbers_soft_fall_back_to_defaults() {
+        assert_eq!(parse_disk_budget_bytes("1024").unwrap(), 1024);
+        assert_eq!(
+            parse_disk_budget_bytes("nope").unwrap(),
+            DEFAULT_DISK_BUDGET_BYTES
+        );
+        assert_eq!(parse_eviction_tick_secs("30").unwrap(), 30);
+        assert_eq!(
+            parse_eviction_tick_secs("nope").unwrap(),
+            DEFAULT_DISK_EVICTION_TICK_SECS
+        );
+    }
+
+    #[test]
+    fn persist_config_layer_defaults_match() {
+        use confique::Config as _;
+        // No `.env()` source: literal defaults only, env-free. Guards the
+        // layer defaults against the named consts.
+        let layer = PersistConfigLayer::builder().load().expect("defaults load");
+        assert_eq!(layer.disk_budget_bytes, DEFAULT_DISK_BUDGET_BYTES);
+        assert_eq!(layer.eviction_tick_secs, DEFAULT_DISK_EVICTION_TICK_SECS);
+    }
 
     // ------------------------------------------------------------
     // HandleStore unit tests

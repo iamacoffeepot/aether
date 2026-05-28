@@ -22,7 +22,7 @@
 //! reply-kind resolution anywhere in this validator.
 
 use std::collections::{BTreeSet, HashMap};
-use std::env;
+use std::convert::Infallible;
 
 use aether_data::canonical::canonical_kind_bytes;
 use aether_data::{Kind, Schema, SchemaType};
@@ -30,8 +30,6 @@ use aether_kinds::{Bundle, DagDescriptor, DagError, Edge, Node, NodeId};
 
 use crate::dag::transform_registry::TransformRegistry;
 use crate::mail::{CapabilityRegistry, KindId, MailboxEntry, MailboxId, Registry};
-
-const TARGET: &str = "aether::dag::validator";
 
 /// Env override for the node-count cap (ADR-0047 §3). Default
 /// [`DEFAULT_MAX_NODES`].
@@ -530,6 +528,13 @@ fn mailbox_label(mailboxes: &Registry, id: MailboxId) -> String {
 
 /// Resolved structural caps (ADR-0047 §3), read once per validation from
 /// the environment with the documented defaults.
+///
+/// Resolution runs through confique (ADR-0090): the private `CapsLayer`
+/// declares each cap's `AETHER_DAG_MAX_*` env key + default in one place.
+/// Behaviour is byte-identical to the prior hand-rolled `parse_env_u64`
+/// reader — an unparseable value still falls back to its default. The
+/// hard-error stance (ADR-0090 §4) lands with the chassis-env validation
+/// pass.
 struct Caps {
     nodes: u64,
     edges: u64,
@@ -538,33 +543,103 @@ struct Caps {
 
 impl Caps {
     fn from_env() -> Self {
+        use confique::Config as _;
+
+        // Every field has a literal default and a total parser, so the
+        // layer always resolves; a failure would be a malformed default
+        // literal (caught by `caps_layer_defaults_match`).
+        let layer = CapsLayer::builder()
+            .env()
+            .load()
+            .expect("CapsLayer defaults are well-formed");
         Self {
-            nodes: parse_env_u64(ENV_MAX_NODES, DEFAULT_MAX_NODES),
-            edges: parse_env_u64(ENV_MAX_EDGES, DEFAULT_MAX_EDGES),
-            descriptor_bytes: parse_env_u64(ENV_MAX_DESCRIPTOR_BYTES, DEFAULT_MAX_DESCRIPTOR_BYTES),
+            nodes: layer.nodes,
+            edges: layer.edges,
+            descriptor_bytes: layer.descriptor_bytes,
         }
     }
 }
 
-/// Parse a `u64` env var, warning and falling back to `default` on a
-/// malformed value (same shape as the handle-store cap parser).
-#[allow(clippy::option_if_let_else)]
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    match env::var(name) {
-        Ok(raw) => match raw.parse::<u64>() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    target: TARGET,
-                    env = name,
-                    value = %raw,
-                    error = %e,
-                    default,
-                    "ignoring unparseable DAG cap env var; using default",
-                );
-                default
-            }
-        },
-        Err(_) => default,
+/// Env-shaped confique layer behind the structural `Caps` (ADR-0090).
+/// Kept private — the consumed shape stays `Caps`.
+#[derive(confique::Config)]
+struct CapsLayer {
+    /// Max node count. Literal default mirrors [`DEFAULT_MAX_NODES`]
+    /// (256); `caps_layer_defaults_match` guards the match.
+    #[config(env = "AETHER_DAG_MAX_NODES", parse_env = parse_max_nodes, default = 256u64)]
+    nodes: u64,
+    /// Max edge count. Literal default mirrors [`DEFAULT_MAX_EDGES`] (1024).
+    #[config(env = "AETHER_DAG_MAX_EDGES", parse_env = parse_max_edges, default = 1024u64)]
+    edges: u64,
+    /// Max descriptor bytes. Literal default mirrors
+    /// [`DEFAULT_MAX_DESCRIPTOR_BYTES`] (1 MiB).
+    #[config(
+        env = "AETHER_DAG_MAX_DESCRIPTOR_BYTES",
+        parse_env = parse_max_descriptor_bytes,
+        default = 1_048_576u64
+    )]
+    descriptor_bytes: u64,
+}
+
+// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
+// so these total helpers carry a `Result` they never fill with `Err` — an
+// unparseable value folds back to the same default as the prior
+// `parse_env_u64` (the warn-on-malformed log is dropped, the disposition is
+// byte-identical). The strict (erroring) variant lands with the ADR-0090 §4
+// validation pass; hence the per-fn `unnecessary_wraps` allow.
+
+/// Parse the node cap; unparseable falls back to [`DEFAULT_MAX_NODES`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_max_nodes(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_MAX_NODES))
+}
+
+/// Parse the edge cap; unparseable falls back to [`DEFAULT_MAX_EDGES`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_max_edges(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_MAX_EDGES))
+}
+
+/// Parse the descriptor-bytes cap; unparseable falls back to
+/// [`DEFAULT_MAX_DESCRIPTOR_BYTES`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_max_descriptor_bytes(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_MAX_DESCRIPTOR_BYTES))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CapsLayer, DEFAULT_MAX_DESCRIPTOR_BYTES, DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES,
+        parse_max_descriptor_bytes, parse_max_edges, parse_max_nodes,
+    };
+
+    // ADR-0090: the confique migration is byte-identical to the prior
+    // hand-rolled `parse_env_u64` reader. These exercise resolution
+    // without touching process env (issue 464) — the parsers are pure,
+    // and the defaults check loads the layer with no `.env()` source.
+
+    #[test]
+    fn parse_caps_soft_fall_back_to_defaults() {
+        assert_eq!(parse_max_nodes("8").unwrap(), 8);
+        assert_eq!(parse_max_nodes("nope").unwrap(), DEFAULT_MAX_NODES);
+        assert_eq!(parse_max_edges("16").unwrap(), 16);
+        assert_eq!(parse_max_edges("nope").unwrap(), DEFAULT_MAX_EDGES);
+        assert_eq!(parse_max_descriptor_bytes("2048").unwrap(), 2048);
+        assert_eq!(
+            parse_max_descriptor_bytes("nope").unwrap(),
+            DEFAULT_MAX_DESCRIPTOR_BYTES
+        );
+    }
+
+    #[test]
+    fn caps_layer_defaults_match() {
+        use confique::Config as _;
+        // No `.env()` source: literal defaults only, env-free. Guards the
+        // layer defaults against the named consts.
+        let layer = CapsLayer::builder().load().expect("defaults load");
+        assert_eq!(layer.nodes, DEFAULT_MAX_NODES);
+        assert_eq!(layer.edges, DEFAULT_MAX_EDGES);
+        assert_eq!(layer.descriptor_bytes, DEFAULT_MAX_DESCRIPTOR_BYTES);
     }
 }

@@ -233,6 +233,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "bytemuck",
+ "confique",
  "cpal",
  "crossbeam-channel",
  "crossbeam-deque",

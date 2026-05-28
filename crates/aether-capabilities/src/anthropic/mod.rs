@@ -126,7 +126,8 @@ impl AnthropicAdapter for CombinedAnthropicAdapter {
 
 mod config {
     use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS};
-    use std::env;
+    #[cfg(feature = "native")]
+    use std::convert::Infallible;
     use std::time::Duration;
 
     /// Resolved configuration for the `aether.anthropic` cap. Chassis
@@ -160,29 +161,167 @@ mod config {
         }
     }
 
+    // confique is a `native`-feature dep (ADR-0090), so env resolution —
+    // the layer struct, its parsers, and `from_env` — is gated to match.
+    // The wasm-marker build carries only the `AnthropicConfig` type. (The
+    // `anthropic` module is itself `not(target_arch = "wasm32")`, so the
+    // wasm cross-build never sees this; the `feature = "native"` gate
+    // guards the non-wasm `default-features = false` build.)
+    #[cfg(feature = "native")]
     impl AnthropicConfig {
         /// Resolve every field from env. Chassis-main edge only — the
         /// cap itself never reads env.
+        ///
+        /// Resolution runs through confique (ADR-0090): the private
+        /// `AnthropicConfigLayer` declares each knob's env key + default
+        /// in one place, and this maps the env-shaped layer onto the
+        /// domain-shaped `AnthropicConfig` (ms → `Duration`). Behaviour is
+        /// byte-identical to the prior hand-rolled reader. The hard-error
+        /// stance (ADR-0090 §4) lands with the chassis-env validation pass.
+        ///
+        /// # Panics
+        ///
+        /// Panics only if the layer's literal defaults are themselves
+        /// malformed — a programmer error caught by the
+        /// `anthropic_from_env_defaults_match` test, never a runtime config
+        /// fault (the env values flow through total parsers).
         #[must_use]
         pub fn from_env() -> Self {
-            let api_key = env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty());
-            let disabled = env::var("AETHER_ANTHROPIC_DISABLE")
-                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-            let max_in_flight = env::var("AETHER_ANTHROPIC_MAX_IN_FLIGHT")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|n| *n > 0)
-                .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
-            let timeout_ms = env::var("AETHER_ANTHROPIC_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(DEFAULT_TIMEOUT_MS);
+            use confique::Config as _;
+
+            let layer = AnthropicConfigLayer::builder()
+                .env()
+                .load()
+                .expect("AnthropicConfigLayer defaults are well-formed");
             Self {
-                api_key,
-                disabled,
-                max_in_flight,
-                timeout: Duration::from_millis(u64::from(timeout_ms)),
+                api_key: layer.api_key.filter(|s| !s.is_empty()),
+                disabled: layer.disabled,
+                max_in_flight: layer.max_in_flight,
+                timeout: Duration::from_millis(u64::from(layer.timeout_ms)),
             }
+        }
+    }
+
+    /// Env-shaped confique layer behind `AnthropicConfig` (ADR-0090). Each
+    /// field is the primitive its env var carries; `AnthropicConfig::from_env`
+    /// maps them onto the domain types (ms → `Duration`, empty key →
+    /// `None`). Kept private — the public consumed shape stays
+    /// `AnthropicConfig`.
+    #[cfg(feature = "native")]
+    #[derive(confique::Config)]
+    struct AnthropicConfigLayer {
+        /// `ANTHROPIC_API_KEY` (bare, un-prefixed). Empty/unset → `None`
+        /// after the `from_env` filter.
+        #[config(env = "ANTHROPIC_API_KEY")]
+        api_key: Option<String>,
+        /// `AETHER_ANTHROPIC_DISABLE=1`/`true` forces the disabled adapter.
+        #[config(env = "AETHER_ANTHROPIC_DISABLE", parse_env = parse_flag, default = false)]
+        disabled: bool,
+        /// Per-cap concurrency bound. A non-positive / unparseable value
+        /// falls back to the default (`> 0` filter preserved).
+        #[config(
+            env = "AETHER_ANTHROPIC_MAX_IN_FLIGHT",
+            parse_env = parse_max_in_flight,
+            default = 2
+        )]
+        max_in_flight: usize,
+        /// Per-request timeout in milliseconds. Literal default mirrors
+        /// `DEFAULT_TIMEOUT_MS` (120 s).
+        #[config(
+            env = "AETHER_ANTHROPIC_TIMEOUT_MS",
+            parse_env = parse_timeout_ms,
+            default = 120_000
+        )]
+        timeout_ms: u32,
+    }
+
+    // confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
+    // so these total helpers carry a `Result` they never fill with `Err`.
+    // The strict (erroring) variants land with the ADR-0090 §4 validation
+    // pass; hence the per-fn `unnecessary_wraps` allow.
+
+    /// `"1"` or `"true"` (case-insensitive) → `true`, else `false`.
+    /// Total — never errors.
+    #[cfg(feature = "native")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_flag(s: &str) -> Result<bool, Infallible> {
+        Ok(s == "1" || s.eq_ignore_ascii_case("true"))
+    }
+
+    /// Parse the concurrency bound; a non-positive or unparseable value
+    /// falls back to `DEFAULT_MAX_IN_FLIGHT` (the prior `> 0` filter +
+    /// soft-fail). Total — never errors.
+    #[cfg(feature = "native")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_max_in_flight(s: &str) -> Result<usize, Infallible> {
+        Ok(s.parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MAX_IN_FLIGHT))
+    }
+
+    /// Parse a timeout in milliseconds; unparseable falls back to
+    /// `DEFAULT_TIMEOUT_MS`. Total — never errors.
+    #[cfg(feature = "native")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_timeout_ms(s: &str) -> Result<u32, Infallible> {
+        Ok(s.parse().unwrap_or(DEFAULT_TIMEOUT_MS))
+    }
+
+    #[cfg(all(test, feature = "native"))]
+    mod tests {
+        use super::{
+            AnthropicConfig, AnthropicConfigLayer, DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS,
+            parse_flag, parse_max_in_flight, parse_timeout_ms,
+        };
+        use confique::Config as _;
+        use std::time::Duration;
+
+        // ADR-0090: byte-identical to the prior hand-rolled reader,
+        // exercised without touching process env (issue 464).
+
+        #[test]
+        fn parse_flag_matches_legacy_bool_reader() {
+            for truthy in ["1", "true", "TRUE", "True"] {
+                assert!(parse_flag(truthy).unwrap(), "{truthy} should be truthy");
+            }
+            for falsy in ["0", "", "yes", "false", "garbage"] {
+                assert!(!parse_flag(falsy).unwrap(), "{falsy} should be falsy");
+            }
+        }
+
+        #[test]
+        fn parse_max_in_flight_filters_non_positive_and_unparseable() {
+            assert_eq!(parse_max_in_flight("4").unwrap(), 4);
+            assert_eq!(parse_max_in_flight("0").unwrap(), DEFAULT_MAX_IN_FLIGHT);
+            assert_eq!(
+                parse_max_in_flight("garbage").unwrap(),
+                DEFAULT_MAX_IN_FLIGHT
+            );
+        }
+
+        #[test]
+        fn parse_timeout_ms_soft_falls_back() {
+            assert_eq!(parse_timeout_ms("5000").unwrap(), 5000);
+            assert_eq!(parse_timeout_ms("garbage").unwrap(), DEFAULT_TIMEOUT_MS);
+        }
+
+        #[test]
+        fn anthropic_from_env_defaults_match() {
+            // No `.env()` source: loads literal defaults only — env-free,
+            // guards the layer defaults against the consts + default().
+            let layer = AnthropicConfigLayer::builder()
+                .load()
+                .expect("defaults load");
+            let default = AnthropicConfig::default();
+            assert_eq!(layer.api_key, None);
+            assert!(!layer.disabled);
+            assert_eq!(layer.max_in_flight, DEFAULT_MAX_IN_FLIGHT);
+            assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MS);
+            assert_eq!(
+                Duration::from_millis(u64::from(layer.timeout_ms)),
+                default.timeout
+            );
         }
     }
 }
