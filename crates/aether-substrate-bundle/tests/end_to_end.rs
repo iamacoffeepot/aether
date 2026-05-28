@@ -1,5 +1,5 @@
 //! Post-issue-634-Phase-4 end-to-end smoke for the trampoline-as-actor
-//! routing path. Boots a [`TestBench`], loads `aether-test-fixture-probe`
+//! routing path. Boots a [`TestBench`], loads `aether-test-fixtures`'s `probe`
 //! into it via the same `aether.component` mail surface a hub-driven
 //! session uses, and asserts the wasm host-fn call chain
 //! (`ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved)`)
@@ -22,7 +22,7 @@ use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixture_probe::TickObserved;
+use aether_test_fixtures::TickObserved;
 use std::fs;
 
 const PROBE_NAME: &str = "probe";
@@ -58,7 +58,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 /// outbound mail routing.
 #[test]
 fn tick_roundtrip_component_to_sink() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -88,7 +88,7 @@ fn tick_roundtrip_component_to_sink() {
 fn batched_ticks_preserve_per_mailbox_count() {
     const N: u32 = 200;
 
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

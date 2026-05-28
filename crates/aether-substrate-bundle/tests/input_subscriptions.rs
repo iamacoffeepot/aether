@@ -1,5 +1,5 @@
 //! ADR-0021 publish/subscribe round-trip via [`TestBench`]. Loads
-//! `aether-test-fixture-probe` into a real chassis and exercises
+//! `aether-test-fixtures`'s `probe` cdylib into a real chassis and exercises
 //! `aether.input.subscribe` / `aether.input.unsubscribe` and the
 //! `aether.component.drop` lifecycle's effect on the input subscriber
 //! set. Replaces the pre-issue-634-Phase-4 harness which drove the
@@ -17,7 +17,7 @@ use aether_kinds::{
     UnsubscribeInput,
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_test_fixture_probe::TickObserved;
+use aether_test_fixtures::TickObserved;
 use std::fs;
 
 fn load_probe_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId {
@@ -86,7 +86,7 @@ fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
 /// the subscriber set rather than firing unconditionally.
 #[test]
 fn empty_subscribers_means_no_delivery() {
-    if require_runtime("aether_test_fixture_probe").is_none() {
+    if require_runtime("probe").is_none() {
         return;
     }
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -104,7 +104,7 @@ fn empty_subscribers_means_no_delivery() {
 /// One subscribed probe broadcasts once per tick.
 #[test]
 fn subscribed_component_receives_published_ticks() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -128,7 +128,7 @@ fn subscribed_component_receives_published_ticks() {
 /// 4 broadcasts.
 #[test]
 fn two_subscribers_each_receive_every_tick() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -153,7 +153,7 @@ fn two_subscribers_each_receive_every_tick() {
 /// from that probe.
 #[test]
 fn unsubscribe_stops_delivery() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -189,7 +189,7 @@ fn unsubscribe_stops_delivery() {
 /// the dropped probe.
 #[test]
 fn drop_clears_subscriptions() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

@@ -1,7 +1,7 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
 //! a `TestBench` and exercises one substrate primitive — input
 //! subscription, drop, `capture_frame` round-trip, `replace_component`
-//! (all via `aether-test-fixture-probe`), or the chassis `aether.fs`
+//! (all via `aether-test-fixtures`'s `probe` cdylib), or the chassis `aether.fs`
 //! adapter's read/write/delete/list round trips — driving every step
 //! through `TestBench::execute` (issue 868).
 //!
@@ -9,7 +9,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The fixture's wasm hasn't been built — fixture-loading tests
-//!   read `target/wasm32-unknown-unknown/{debug,release}/aether_test_fixture_probe.wasm`
+//!   read `target/wasm32-unknown-unknown/{debug,release}/examples/probe.wasm`
 //!   and skip with an `eprintln!` when it's absent. fs scenarios
 //!   don't load the fixture, so they only need wgpu. CI builds the
 //!   fixture wasm before invoking `cargo test`; setting
@@ -40,14 +40,14 @@ use aether_substrate_bundle::test_bench::{
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
     visual::{decode_png, differs_from_background},
 };
-use aether_test_fixture_probe::SetRender;
+use aether_test_fixtures::SetRender;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the
 // host-target rlib's descriptor symbols can be stripped by the linker
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
 #[allow(unused_imports)]
-use aether_test_fixture_probe as _;
+use aether_test_fixtures as _;
 use std::env;
 use std::fs;
 
@@ -118,7 +118,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 /// `subscribe_input` → tick fanout path end-to-end.
 #[test]
 fn input_subscription_yields_one_tick_observed_per_advance() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -142,7 +142,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
 /// reach it (ADR-0021 + ADR-0038 actor lifecycle).
 #[test]
 fn drop_component_silences_tick_echoes() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -203,7 +203,7 @@ fn drop_component_silences_tick_echoes() {
 /// the after-mail cleanup ran.
 #[test]
 fn capture_frame_round_trip_runs_pre_and_after_mails() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -283,7 +283,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
 /// mailbox.
 #[test]
 fn replace_component_preserves_mailbox_identity() {
-    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
+    let Some(wasm_path) = require_runtime("probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");

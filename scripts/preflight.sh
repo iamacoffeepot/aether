@@ -168,6 +168,16 @@ else
     echo "     (no component crates discovered)"
 fi
 
+# ADR-0090 c1 (issue 1256): `aether-test-fixtures` carries cdylib
+# component artifacts as `[[example]]`s rather than at the package
+# level (so a typed-config fixture can live next to the original
+# probe without a per-fixture member crate). The cdylib-discovery
+# query above looks at `targets[].kind`, which is `["example"]` for
+# example targets — even with `crate-type = ["cdylib"]` — so the
+# crate is invisible to the structural sweep. Build it explicitly.
+echo "     . aether-test-fixtures (examples)"
+cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples --quiet
+
 # Final, slowest step. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a
 # missing wasm artifact fails loudly rather than skipping silently.
 run_step "cargo nextest run --workspace --all-features --profile ci" \
