@@ -64,6 +64,7 @@ pub use actor::native::{NativeActor, NativeDispatch};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::Actor;
+pub use aether_derive::Config;
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::Chassis;
 pub use chassis::builder::{

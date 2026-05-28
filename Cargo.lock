@@ -245,6 +245,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
+ "aether-derive",
  "aether-kinds",
  "bytemuck",
  "confique",
