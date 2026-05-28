@@ -26,8 +26,10 @@ trybuild = "1"
 # every fixture needs aether-substrate (which itself re-exports the
 # derive). `confique` and `clap` are reached for by the macro's emitted
 # Layer + Overlay structs. Each fixture brings the deps it needs from
-# this set.
-aether-substrate = { path = "../aether-substrate" }
+# this set. `default-features = false` strips the `wasm` feature
+# (iamacoffeepot/aether#1275) so trybuild fixtures don't cold-compile
+# wasmtime per fixture binary — the speedup this issue tracks.
+aether-substrate = { path = "../aether-substrate", default-features = false }
 aether-derive = { path = "." }
 confique = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }

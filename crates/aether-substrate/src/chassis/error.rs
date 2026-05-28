@@ -6,9 +6,10 @@
 
 use std::error::Error as StdError;
 use std::fmt;
+#[cfg(feature = "wasm")]
+use std::io;
 
 use crate::mail::registry::NameConflict;
-use std::io;
 
 /// Failure modes capability boot can raise. Per ADR-0063, any boot
 /// error aborts the chassis before user code runs — no partial boots.
@@ -61,6 +62,7 @@ impl From<NameConflict> for BootError {
 /// boot-path that bubbles a wasmtime fault: `Engine::new` / `Module::new`
 /// in `SubstrateBoot::build`, etc. Chassis trait impls can `?` such
 /// errors directly without per-call `.map_err` glue.
+#[cfg(feature = "wasm")]
 impl From<wasmtime::Error> for BootError {
     fn from(e: wasmtime::Error) -> Self {
         Self::Other(Box::new(io::Error::other(format!("{e}"))))
