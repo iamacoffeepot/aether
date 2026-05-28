@@ -40,6 +40,10 @@
 extern crate self as aether_substrate;
 
 pub mod actor;
+// iamacoffeepot/aether#1275: `boot` builds a wasmtime `Engine` + `Linker`,
+// so it rides the `wasm` feature. Default-on; only `aether-derive`'s
+// trybuild fixtures opt out (they don't reach the boot path).
+#[cfg(feature = "wasm")]
 pub mod boot;
 pub mod capture;
 pub mod chassis;
@@ -62,9 +66,11 @@ pub use actor::native::envelope::Envelope;
 pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use actor::native::{NativeActor, NativeDispatch};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
+#[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::Actor;
 pub use aether_derive::Config;
+#[cfg(feature = "wasm")]
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::Chassis;
 pub use chassis::builder::{

@@ -6,12 +6,13 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
-# Trybuild fixtures (aether-data-derive, aether-derive) spawn a nested
-# `cargo` build per `.rs` fixture. Local runs finish under 30s; CI
-# runners are slower and contended, and running both crates' UI tests
-# in parallel can push each past 60s. Both crates' test binaries
-# exclusively host trybuild-style fixtures, so widening the cap is
-# scoped — no fast unit tests hide behind the longer window.
+# Trybuild fixtures spawn a nested `cargo` build per `.rs` fixture.
+# iamacoffeepot/aether#1275 feature-gated wasmtime out of the
+# `aether-derive` fixture dep graph (local wall-clock 240s → 18s on
+# our dev boxes); CI's 2-core runners still push it past 60s under
+# parallel contention with `aether-data-derive`'s ui binary, so both
+# crates keep the wider cap. The bigger speedup for both is its own
+# follow-up.
 [[profile.ci.overrides]]
 filter = "package(=aether-data-derive) | package(=aether-derive)"
 slow-timeout = { period = "300s", terminate-after = 1 }

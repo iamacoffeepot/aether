@@ -12,6 +12,13 @@ edition.workspace = true
 # compile entirely.
 
 [features]
+default = ["wasm"]
+# iamacoffeepot/aether#1275: `wasm` pulls in the wasmtime host + the
+# wasm-component module surface. Default-on so every existing consumer
+# keeps the same compile graph; the only opt-out is `aether-derive`'s
+# trybuild dev-dep, which sets `default-features = false` so its UI
+# fixtures don't cold-compile wasmtime per fixture binary.
+wasm = ["dep:wasmtime", "dep:wasmparser"]
 # Issue 421: chassis that draw enable `render` to pull in the shared
 # offscreen pipeline + capture path. Headless and hub leave it off
 # and never link wgpu.
@@ -42,8 +49,9 @@ bytemuck = "1.19"
 # that resolve each chassis-resolved config's `from_env`.
 # `default-features = false` keeps it env-only — no TOML/YAML file
 # parsers until ADR-0090's config-file step. aether-substrate is a
-# native-only crate (wasmtime always on), so this is a plain dep, not
-# feature-gated like the capabilities crate's confique.
+# native-only crate (wasmtime feature-gated since iamacoffeepot/aether#1275
+# but default-on), so this is a plain dep, not feature-gated like the
+# capabilities crate's confique.
 confique = { version = "0.4", default-features = false }
 # ADR-0049 on-disk handle store: resolve the default persistence root
 # (`dirs::data_dir()/aether/handles`). Same crate the fs cap uses.
@@ -56,7 +64,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wasmtime = "44"
+wasmtime = { version = "44", optional = true }
 # Render-only deps; gated by the `render` feature. Headless + hub
 # don't enable the feature, so wgpu's transitive graph stays out of
 # their builds.
@@ -80,7 +88,7 @@ crossbeam-deque = "0.8"
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
 # `aether.kinds` section. Pin to the version wasmtime re-exports
 # transitively so we stay on a single compiled copy.
-wasmparser = "0.249"
+wasmparser = { version = "0.249", optional = true }
 # Registry hot-path maps (#1067): FxHashMap on the id-keyed `mailboxes`
 # and `kinds` tables. Keys are pre-hashed 64-bit ids (ADR-0029/0030), so
 # SipHash's DoS resistance buys nothing here — Fx is faster per lookup and

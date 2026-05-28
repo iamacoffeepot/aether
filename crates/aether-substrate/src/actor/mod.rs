@@ -13,6 +13,7 @@
 pub mod monitor;
 pub mod native;
 pub mod registry;
+#[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use monitor::MonitorHandle;
