@@ -142,31 +142,77 @@ impl PersistConfig {
     /// fault (the env values flow through total parsers).
     #[must_use]
     pub fn from_env(enabled: bool) -> Option<Self> {
+        Self::resolve(enabled, None, None, None)
+    }
+
+    /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
+    /// unit d, issue 1258). `dir` / `disable` win against
+    /// `AETHER_HANDLE_STORE_DIR` / `AETHER_HANDLE_STORE_PERSIST_DISABLE`
+    /// when `Some`; the numeric-knob overlay is preloaded into the
+    /// confique builder so argv-set budget / tick win against
+    /// `AETHER_HANDLE_STORE_*` env. `enabled` is the chassis's vote (a
+    /// `false` short-circuits to `None` regardless of argv).
+    ///
+    /// # Panics
+    ///
+    /// Same as [`Self::from_env`]: only on a malformed literal default
+    /// (programmer error caught by
+    /// `persist_config_layer_defaults_match`).
+    #[must_use]
+    pub fn from_argv_then_env(
+        enabled: bool,
+        dir: Option<PathBuf>,
+        disable: Option<bool>,
+        numeric: <PersistConfigLayer as confique::Config>::Layer,
+    ) -> Option<Self> {
+        Self::resolve(enabled, dir, disable, Some(numeric))
+    }
+
+    /// Shared resolution path. Argv overrides (when `Some`) win against
+    /// the env variable; absent argv falls through to env, then to the
+    /// platform default.
+    fn resolve(
+        enabled: bool,
+        dir_argv: Option<PathBuf>,
+        disable_argv: Option<bool>,
+        numeric_argv: Option<<PersistConfigLayer as confique::Config>::Layer>,
+    ) -> Option<Self> {
         use confique::Config as _;
 
         if !enabled {
             return None;
         }
-        if env::var(ENV_PERSIST_DISABLE).is_ok_and(|v| v == "1") {
+        // disable: argv wins; absent falls through to env (=`1` ⇒ true).
+        let disabled =
+            disable_argv.unwrap_or_else(|| env::var(ENV_PERSIST_DISABLE).is_ok_and(|v| v == "1"));
+        if disabled {
             return None;
         }
-        let base = match env::var(ENV_PERSIST_DIR) {
-            Ok(raw) if !raw.is_empty() => PathBuf::from(raw),
-            _ => {
-                let Some(data) = dirs::data_dir() else {
-                    tracing::warn!(
-                        target: TARGET,
-                        "no data dir and no AETHER_HANDLE_STORE_DIR; persistence disabled",
-                    );
-                    return None;
-                };
-                data.join("aether").join("handles")
+        let base = if let Some(d) = dir_argv {
+            d
+        } else {
+            match env::var(ENV_PERSIST_DIR) {
+                Ok(raw) if !raw.is_empty() => PathBuf::from(raw),
+                _ => {
+                    let Some(data) = dirs::data_dir() else {
+                        tracing::warn!(
+                            target: TARGET,
+                            "no data dir and no AETHER_HANDLE_STORE_DIR; persistence disabled",
+                        );
+                        return None;
+                    };
+                    data.join("aether").join("handles")
+                }
             }
         };
         // Every layer field has a literal default and a total parser, so
         // the layer always resolves; a failure here would be a malformed
         // default literal (caught by `persist_config_layer_defaults_match`).
-        let layer = PersistConfigLayer::builder()
+        let mut builder = PersistConfigLayer::builder();
+        if let Some(argv) = numeric_argv {
+            builder = builder.preloaded(argv);
+        }
+        let layer = builder
             .env()
             .load()
             .expect("PersistConfigLayer defaults are well-formed");
@@ -378,9 +424,12 @@ pub fn entry_paths(root: &Path, id: HandleId) -> (PathBuf, PathBuf) {
 /// `eviction_tick_secs` carry their `AETHER_HANDLE_STORE_*` values; the
 /// `root` resolution stays hand-written in [`PersistConfig::from_env`]
 /// (its default is structural — a missing data dir disables persistence,
-/// not a literal). Kept private; the consumed shape stays `PersistConfig`.
+/// not a literal). Public so chassis CLI overlays (ADR-0090 unit d,
+/// issue 1258) can preload a `<PersistConfigLayer as
+/// confique::Config>::Layer` before `.env()`; the consumed shape stays
+/// `PersistConfig`.
 #[derive(confique::Config)]
-struct PersistConfigLayer {
+pub struct PersistConfigLayer {
     /// On-disk byte budget. Literal default mirrors
     /// [`DEFAULT_DISK_BUDGET_BYTES`] (16 GiB); the
     /// `persist_config_layer_defaults_match` test guards the match.
@@ -389,7 +438,7 @@ struct PersistConfigLayer {
         parse_env = parse_disk_budget_bytes,
         default = 17_179_869_184u64
     )]
-    disk_budget_bytes: u64,
+    pub disk_budget_bytes: u64,
     /// Eviction tick interval in seconds. Literal default mirrors
     /// [`DEFAULT_DISK_EVICTION_TICK_SECS`] (60 s).
     #[config(
@@ -397,7 +446,7 @@ struct PersistConfigLayer {
         parse_env = parse_eviction_tick_secs,
         default = 60u64
     )]
-    eviction_tick_secs: u64,
+    pub eviction_tick_secs: u64,
 }
 
 // confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
