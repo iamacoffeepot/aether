@@ -21,25 +21,78 @@
 //! than parameterising the existing helpers — most callers know which
 //! format their protocol speaks at compile time.
 
+use std::env;
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::sync::OnceLock;
 
 use serde::{Serialize, de::DeserializeOwned};
 use std::error;
 
-/// Maximum accepted frame body size. Bounded so a malformed length
-/// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
-/// larger than any expected mail payload on the hub wire (vertex
-/// streams travel through the render sink, not the hub).
-pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+/// Maximum accepted frame body size, default. Bounded so a malformed
+/// length prefix cannot drive a reader into an OOM. 64 MiB is large
+/// enough that routine debug wasm cross-builds (typically 15-25 MiB
+/// for the medium-size components in this repo) ride the framing
+/// without tripping the OOM guard, but still small enough to defang a
+/// 4 GiB malformed prefix.
+///
+/// Embedders shipping bigger payloads override this via the
+/// `AETHER_MAX_FRAME_SIZE` env var; see [`max_frame_size`].
+pub const MAX_FRAME_SIZE: usize = 64 * 1024 * 1024;
+
+/// Hard upper bound on the env-var override. Even with
+/// `AETHER_MAX_FRAME_SIZE` set, the accessor clamps at 1 GiB so a
+/// runaway override can't itself defeat the OOM guard.
+pub const MAX_FRAME_SIZE_CEILING: usize = 1024 * 1024 * 1024;
+
+/// Effective maximum frame body size for this process. Resolves once
+/// per process: reads the `AETHER_MAX_FRAME_SIZE` env var on the first
+/// call (parsed as bytes, clamped at [`MAX_FRAME_SIZE_CEILING`]) and
+/// caches the result; subsequent calls return the cache. A missing,
+/// empty, or unparseable env var falls back to [`MAX_FRAME_SIZE`].
+///
+/// The encode-side check ([`encode_frame`]) and the read-side check
+/// ([`read_frame`]) both go through this accessor, so changing
+/// `AETHER_MAX_FRAME_SIZE` at process start lifts the cap symmetrically
+/// for both sides.
+#[must_use]
+pub fn max_frame_size() -> usize {
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| resolve_max_frame_size(env::var("AETHER_MAX_FRAME_SIZE").ok()))
+}
+
+/// Pure-function half of [`max_frame_size`]: maps an optional env-var
+/// string to the resolved cap. Exposed for unit tests since the
+/// `OnceLock` cache in [`max_frame_size`] is process-global and can't
+/// be re-set across tests.
+fn resolve_max_frame_size(raw: Option<String>) -> usize {
+    raw.map_or(MAX_FRAME_SIZE, |raw| match raw.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n.min(MAX_FRAME_SIZE_CEILING),
+        _ => MAX_FRAME_SIZE,
+    })
+}
 
 /// Errors from the framing helpers. Wraps I/O and postcard decode
-/// errors; adds its own variant for an oversize length prefix.
+/// errors; adds its own variants for an oversize length prefix on
+/// inbound frames ([`FrameError::FrameTooLarge`]) and a pre-write
+/// oversize check on outbound bodies ([`FrameError::EncodeTooLarge`]).
 #[derive(Debug)]
 pub enum FrameError {
     Io(io::Error),
     Postcard(postcard::Error),
-    FrameTooLarge { size: usize, max: usize },
+    /// Inbound: length prefix exceeded [`max_frame_size`].
+    FrameTooLarge {
+        size: usize,
+        max: usize,
+    },
+    /// Outbound: the postcard-encoded body exceeded [`max_frame_size`].
+    /// Surfaced from [`encode_frame`] / [`write_frame`] so the sender
+    /// learns the rejection client-side instead of writing a frame
+    /// the peer will reject (or drop the connection over).
+    EncodeTooLarge {
+        size: usize,
+        max: usize,
+    },
 }
 
 impl fmt::Display for FrameError {
@@ -49,6 +102,9 @@ impl fmt::Display for FrameError {
             Self::Postcard(e) => write!(f, "frame decode: {e}"),
             Self::FrameTooLarge { size, max } => {
                 write!(f, "frame too large: {size} > {max}")
+            }
+            Self::EncodeTooLarge { size, max } => {
+                write!(f, "encoded frame too large: {size} > {max}")
             }
         }
     }
@@ -69,24 +125,36 @@ impl From<postcard::Error> for FrameError {
 }
 
 /// Encode a message into its framed wire representation (4-byte LE
-/// length prefix + postcard body). Infallible — postcard encoding
-/// of `alloc::Vec` is infallible for the types this is used with.
+/// length prefix + postcard body). Returns
+/// [`FrameError::EncodeTooLarge`] if the encoded body exceeds
+/// [`max_frame_size`], so the sender learns the rejection client-side
+/// instead of writing a frame the peer will reject. Postcard encoding
+/// of `alloc::Vec` is itself infallible for the types this is used
+/// with, so the postcard step is a `.expect` rather than an `Err`
+/// path per ADR-0063.
 ///
 /// # Panics
 /// Panics if postcard encoding of `msg` fails — fail-fast per ADR-0063:
 /// `postcard::to_allocvec` into a growable `Vec` cannot fail for the
 /// `Serialize` types this is used with, so a failure indicates the
 /// caller passed a type whose serializer is observably broken.
-pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
+pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
     let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
+    let max = max_frame_size();
+    if body.len() > max {
+        return Err(FrameError::EncodeTooLarge {
+            size: body.len(),
+            max,
+        });
+    }
     let mut out = Vec::with_capacity(4 + body.len());
     // 4-byte LE length prefix is the wire format; bodies above 4 GiB
-    // would overflow but no protocol that rides this framing emits
-    // anything close (worst case is a few MiB of MailFrame).
+    // would overflow but the cap above keeps us well clear of the u32
+    // ceiling.
     #[allow(clippy::cast_possible_truncation)]
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 /// Synchronous read of one framed message. Blocks until a complete
@@ -97,20 +165,20 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameErr
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_SIZE {
-        return Err(FrameError::FrameTooLarge {
-            size: len,
-            max: MAX_FRAME_SIZE,
-        });
+    let max = max_frame_size();
+    if len > max {
+        return Err(FrameError::FrameTooLarge { size: len, max });
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(postcard::from_bytes(&buf)?)
 }
 
-/// Synchronous write of one framed message.
+/// Synchronous write of one framed message. Returns
+/// [`FrameError::EncodeTooLarge`] if the encoded body exceeds
+/// [`max_frame_size`] (the encode-side cap check).
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), FrameError> {
-    let bytes = encode_frame(msg);
+    let bytes = encode_frame(msg)?;
     w.write_all(&bytes)?;
     Ok(())
 }
@@ -150,7 +218,12 @@ mod tests {
     #[test]
     fn unit_variant_is_five_bytes() {
         // 4 byte prefix + 1 byte postcard tag.
-        assert_eq!(encode_frame(&Msg::Tick).len(), 5);
+        assert_eq!(
+            encode_frame(&Msg::Tick)
+                .expect("test setup: encode unit variant")
+                .len(),
+            5,
+        );
     }
 
     #[test]
@@ -200,5 +273,77 @@ mod tests {
         let err = read_frame::<_, Msg>(&mut Cursor::new(buf))
             .expect_err("malformed body must surface postcard error");
         assert!(matches!(err, FrameError::Postcard(_)));
+    }
+
+    /// An oversize encode body trips `FrameError::EncodeTooLarge`
+    /// before any bytes hit the writer.
+    #[test]
+    fn encode_too_large_rejected_pre_write() {
+        // Build a `Note` whose text alone exceeds the resolved cap.
+        // The encode-side check sees the postcard-encoded body length
+        // and bails before allocating the framed `Vec`.
+        let oversize_text = "x".repeat(max_frame_size() + 16);
+        let msg = Msg::Note {
+            id: 1,
+            text: oversize_text,
+        };
+        let err = encode_frame(&msg).expect_err("oversize body must reject on encode");
+        let max = max_frame_size();
+        match err {
+            FrameError::EncodeTooLarge { size, max: cap } => {
+                assert!(size > max, "size {size} must exceed cap {max}");
+                assert_eq!(cap, max);
+            }
+            other => panic!("expected EncodeTooLarge, got {other:?}"),
+        }
+    }
+
+    /// `write_frame` propagates `EncodeTooLarge` without touching the
+    /// underlying writer.
+    #[test]
+    fn write_frame_propagates_encode_too_large() {
+        let oversize_text = "x".repeat(max_frame_size() + 16);
+        let msg = Msg::Note {
+            id: 1,
+            text: oversize_text,
+        };
+        let mut sink: Vec<u8> = Vec::new();
+        let err = write_frame(&mut sink, &msg).expect_err("oversize write must reject");
+        assert!(matches!(err, FrameError::EncodeTooLarge { .. }));
+        assert!(
+            sink.is_empty(),
+            "oversize encode must not write partial bytes; got {} bytes",
+            sink.len(),
+        );
+    }
+
+    /// The `AETHER_MAX_FRAME_SIZE` env-var override goes through
+    /// `resolve_max_frame_size`. The `OnceLock` cache in
+    /// `max_frame_size` is process-global and can't be re-set across
+    /// tests, so this exercises the parsing layer directly.
+    #[test]
+    fn env_override_parses_and_clamps() {
+        // Unset / empty / garbage → default.
+        assert_eq!(resolve_max_frame_size(None), MAX_FRAME_SIZE);
+        assert_eq!(resolve_max_frame_size(Some(String::new())), MAX_FRAME_SIZE);
+        assert_eq!(
+            resolve_max_frame_size(Some("not-a-number".into())),
+            MAX_FRAME_SIZE,
+        );
+        assert_eq!(resolve_max_frame_size(Some("0".into())), MAX_FRAME_SIZE);
+        // Valid override.
+        let override_val: usize = 32 * 1024 * 1024;
+        assert_eq!(
+            resolve_max_frame_size(Some(override_val.to_string())),
+            override_val,
+        );
+        // Whitespace tolerated.
+        assert_eq!(resolve_max_frame_size(Some("  4096  ".into())), 4096);
+        // Above ceiling → clamps.
+        let above_ceiling: usize = MAX_FRAME_SIZE_CEILING * 4;
+        assert_eq!(
+            resolve_max_frame_size(Some(above_ceiling.to_string())),
+            MAX_FRAME_SIZE_CEILING,
+        );
     }
 }

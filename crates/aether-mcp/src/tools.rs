@@ -451,7 +451,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section."
+        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section. Very large wasm payloads (typically target/wasm32-unknown-unknown/debug/*.wasm, which can run 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(
         &self,
@@ -464,6 +464,7 @@ impl Mcp {
                 None,
             )
         })?;
+        let binary_path = args.binary_path.clone();
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -475,7 +476,7 @@ impl Mcp {
                 },
             ))
             .await
-            .map_err(internal)?;
+            .map_err(|e| frame_size_aware_error(&format!("load_component {binary_path:?}"), e))?;
         match LoadResult::decode_from_bytes(&reply.payload) {
             Some(LoadResult::Ok {
                 mailbox_id,
@@ -498,7 +499,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 structural splice). aether-mcp reads the binary and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Returns the replaced component's advertised capabilities."
+        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 structural splice). aether-mcp reads the binary and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Returns the replaced component's advertised capabilities. Very large wasm payloads (typically debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn replace_component(
         &self,
@@ -512,6 +513,7 @@ impl Mcp {
                 None,
             )
         })?;
+        let binary_path = args.binary_path.clone();
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -524,7 +526,9 @@ impl Mcp {
                 },
             ))
             .await
-            .map_err(internal)?;
+            .map_err(|e| {
+                frame_size_aware_error(&format!("replace_component {binary_path:?}"), e)
+            })?;
         match ReplaceResult::decode_from_bytes(&reply.payload) {
             Some(ReplaceResult::Ok { capabilities }) => {
                 self.components
@@ -1662,6 +1666,42 @@ fn internal(e: anyhow::Error) -> McpError {
 
 fn internal_msg(msg: &str) -> McpError {
     McpError::internal_error(msg.to_owned(), None)
+}
+
+/// iamacoffeepot/aether#1271: tools that ship potentially-large
+/// payloads through the RPC framing (currently `load_component` /
+/// `replace_component`) surface a `FrameTooLarge` / `EncodeTooLarge`
+/// failure as `invalid_params` rather than `internal_error`. The
+/// payload is a client-controllable input (the user picked the wasm
+/// path), and the actionable remediation — build the release wasm,
+/// raise `AETHER_MAX_FRAME_SIZE` — is specific to the caller. Falls
+/// through to `internal` for every other shape.
+///
+/// Detection is by substring of the error chain because the structured
+/// `RpcError` rides under `anyhow::Error` (the session's `call_once`
+/// formats the wire error with `{e:?}` into a string; the encode-side
+/// classifier formats `RpcClientError::Frame(...)` with `{e}`). Both
+/// shapes embed the literal `frame too large` / `encoded frame too
+/// large` strings the codec / RPC error variants produce.
+#[allow(clippy::needless_pass_by_value)]
+fn frame_size_aware_error(context: &str, e: anyhow::Error) -> McpError {
+    let text = e.to_string();
+    if text.contains("frame too large")
+        || text.contains("encoded frame too large")
+        || text.contains("FrameTooLarge")
+        || text.contains("EncodeTooLarge")
+    {
+        return McpError::invalid_params(
+            format!(
+                "{context}: payload exceeds the RPC framing cap — typically because the supplied \
+                 wasm is a debug build. Build the release wasm (target/wasm32-unknown-unknown/\
+                 release/*.wasm) or raise the cap via the AETHER_MAX_FRAME_SIZE env var. \
+                 Underlying: {text}",
+            ),
+            None,
+        );
+    }
+    McpError::internal_error(text, None)
 }
 
 /// Issue 963: render an `actor_logs` `LogTailResult::Err` into a
