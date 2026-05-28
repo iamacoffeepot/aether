@@ -135,10 +135,7 @@ impl Connection {
                     // A `ReplyEnd { cid: 0, Ok }` is not a valid wire
                     // shape — only `Err` frames carry the sentinel.
                     if cid == 0 {
-                        if let WireFrame::ReplyEnd {
-                            result: Err(_), ..
-                        } = &frame
-                        {
+                        if let WireFrame::ReplyEnd { result: Err(_), .. } = &frame {
                             let pending = router_pending
                                 .lock()
                                 .expect("router pending mutex is never poisoned");
