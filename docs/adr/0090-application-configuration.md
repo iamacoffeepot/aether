@@ -267,6 +267,15 @@ stance.
   prioritized over discovery-now; reconsider at step 2.
 - **`conf`** — single derive over CLI + env + file. Viable; less mature
   discovery/template story than confique and a smaller ecosystem footprint.
+- **`config` (config-rs)** — the most popular Rust config crate, but the wrong
+  *shape* here: a runtime `ConfigBuilder` that merges sources and
+  serde-deserializes into a plain struct — no derive macro (so no per-field
+  env/default/doc/validate, the macro-driven parse the direction asks for) and
+  no introspection/metadata (so it can't drive the `--config` discovery dump,
+  the issue's #2 pain). Its env model is prefix+separator nesting
+  (`AETHER_DB__URL` → `db.url`), which fights the flat, inconsistent `AETHER_*`
+  names and the behaviour-identical step-1 env map. Same family as `figment`,
+  the more capable representative of the merge-into-serde shape.
 - **`figment`** (Rocket's) — most mature, provider/merge model. Rejected as the
   lead because it is imperative merge-chains rather than the per-struct derive the
   "distributed structs + macro" direction calls for; kept in reserve for its
