@@ -400,16 +400,20 @@ mod native {
             // bytes through (c2). Pass `&[]` so `Config = ()` guests
             // decode cleanly; typed-config replaces will surface once
             // the replace ABI carries config alongside the wasm bytes.
-            let mut new_component =
-                match Component::instantiate(&self.engine, &self.linker, &module, substrate_ctx, &[])
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return ReplaceResult::Err {
-                            error: format!("wasm instantiation failed: {e}"),
-                        };
-                    }
-                };
+            let mut new_component = match Component::instantiate(
+                &self.engine,
+                &self.linker,
+                &module,
+                substrate_ctx,
+                &[],
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    return ReplaceResult::Err {
+                        error: format!("wasm instantiation failed: {e}"),
+                    };
+                }
+            };
 
             // ADR-0016 §4: rehydrate the new instance if the old one
             // produced a bundle. A failed rehydrate still installs the

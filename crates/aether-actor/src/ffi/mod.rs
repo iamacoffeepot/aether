@@ -171,7 +171,7 @@ pub trait FfiActor: crate::Actor {
     /// trait.
     ///
     /// ADR-0090: the typed `Self::Config` arrives as the leading
-    /// parameter, symmetric with [`crate::actor::native::NativeActor::init`].
+    /// parameter, symmetric with `aether_substrate::NativeActor::init`.
     /// Actors that opt out of configuration leave `Config = ()` (or omit
     /// it entirely, taking the trait default) and the `#[actor]` macro
     /// synthesizes the unused `_config: ()` argument so user bodies stay

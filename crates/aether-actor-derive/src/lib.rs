@@ -1657,7 +1657,9 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         // Synthesize `type Config = ();` and inject a leading `_config: ()`
         // parameter into init's signature so the user's 1-arg body
         // still type-checks against the new trait shape.
-        let synth: syn::ImplItemType = syn::parse_quote!(type Config = (););
+        let synth: syn::ImplItemType = syn::parse_quote!(
+            type Config = ();
+        );
         let config_param: FnArg = syn::parse_quote!(_config: ());
         // Inject at the front of the typed inputs. The init signature
         // has no `self` receiver (FfiActor::init is associated, not a

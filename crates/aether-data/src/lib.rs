@@ -178,11 +178,7 @@ impl Kind for () {
     ));
 
     fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.is_empty() {
-            Some(())
-        } else {
-            None
-        }
+        if bytes.is_empty() { Some(()) } else { None }
     }
 
     fn encode_into_bytes(&self) -> Vec<u8> {
