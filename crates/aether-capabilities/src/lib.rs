@@ -39,6 +39,12 @@ pub mod component;
 // elides cleanly on the wasm-component build.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod contentgen;
+// Shared confique `parse_env` helpers + provider defaults (ADR-0090).
+// Kept ungated so the per-provider `DEFAULT_MAX_IN_FLIGHT` constants can
+// alias `DEFAULT_PROVIDER_MAX_IN_FLIGHT` at file top level; the parser
+// fns are tiny pure-Rust dead code on non-native builds.
+mod config_env;
+
 // `aether.dag` computation-DAG executor cap (ADR-0047, issue 976).
 pub mod dag;
 pub mod engine;

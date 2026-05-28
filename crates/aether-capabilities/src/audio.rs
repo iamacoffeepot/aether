@@ -80,8 +80,8 @@ mod native {
     use aether_substrate::chassis::error::BootError;
 
     use super::{NoteOff, NoteOn, SetMasterGain};
+    use crate::config_env::parse_flag;
     use core::fmt;
-    use std::convert::Infallible;
 
     /// Capacity of the event queue between the cap's handlers and the
     /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
@@ -167,18 +167,6 @@ mod native {
         /// confique numeric field would hard-error on bad input instead.
         #[config(env = "AETHER_AUDIO_SAMPLE_RATE")]
         requested_sample_rate: Option<String>,
-    }
-
-    // confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
-    // so this total helper carries a `Result` it never fills with `Err`.
-    // The strict (erroring) variant lands with the ADR-0090 §4 validation
-    // pass; hence the per-fn `unnecessary_wraps` allow.
-
-    /// `"1"` or `"true"` (case-insensitive) → `true`, else `false`.
-    /// Total — never errors.
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_flag(s: &str) -> Result<bool, Infallible> {
-        Ok(s == "1" || s.eq_ignore_ascii_case("true"))
     }
 
     /// Event a handler pushes into the audio callback's queue. The
@@ -955,16 +943,6 @@ mod native {
         // ADR-0090: the confique migration is byte-identical to the prior
         // hand-rolled reader. These exercise resolution without touching
         // process env (issue 464).
-
-        #[test]
-        fn parse_flag_matches_legacy_bool_reader() {
-            for truthy in ["1", "true", "TRUE", "True"] {
-                assert!(parse_flag(truthy).unwrap(), "{truthy} should be truthy");
-            }
-            for falsy in ["0", "", "yes", "false", "garbage"] {
-                assert!(!parse_flag(falsy).unwrap(), "{falsy} should be falsy");
-            }
-        }
 
         #[test]
         fn audio_from_env_defaults_match() {

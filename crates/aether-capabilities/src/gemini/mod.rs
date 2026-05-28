@@ -31,12 +31,13 @@ use crate::contentgen::adapter::{
 };
 use crate::contentgen::shared;
 
+use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 pub use config::GeminiConfig;
 
 /// Default per-cap concurrency bound when `AETHER_GEMINI_MAX_IN_FLIGHT`
 /// is unset. Conservative — image / music generation is multi-second
 /// and paid.
-pub const DEFAULT_MAX_IN_FLIGHT: usize = 2;
+pub const DEFAULT_MAX_IN_FLIGHT: usize = DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 
 /// Default per-request timeout when `AETHER_GEMINI_TIMEOUT_MS` is unset.
 /// Media generation can run a couple minutes.
@@ -60,6 +61,7 @@ impl GeminiAdapter for DisabledGeminiAdapter {
 
 mod config {
     use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS};
+    use crate::config_env::{parse_flag, parse_provider_max_in_flight};
     #[cfg(feature = "native")]
     use std::convert::Infallible;
     use std::time::Duration;
@@ -155,7 +157,7 @@ mod config {
         /// falls back to the default (`> 0` filter preserved).
         #[config(
             env = "AETHER_GEMINI_MAX_IN_FLIGHT",
-            parse_env = parse_max_in_flight,
+            parse_env = parse_provider_max_in_flight,
             default = 2
         )]
         max_in_flight: usize,
@@ -174,26 +176,6 @@ mod config {
     // The strict (erroring) variants land with the ADR-0090 §4 validation
     // pass; hence the per-fn `unnecessary_wraps` allow.
 
-    /// `"1"` or `"true"` (case-insensitive) → `true`, else `false`.
-    /// Total — never errors.
-    #[cfg(feature = "native")]
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_flag(s: &str) -> Result<bool, Infallible> {
-        Ok(s == "1" || s.eq_ignore_ascii_case("true"))
-    }
-
-    /// Parse the concurrency bound; a non-positive or unparseable value
-    /// falls back to `DEFAULT_MAX_IN_FLIGHT` (the prior `> 0` filter +
-    /// soft-fail). Total — never errors.
-    #[cfg(feature = "native")]
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_max_in_flight(s: &str) -> Result<usize, Infallible> {
-        Ok(s.parse::<usize>()
-            .ok()
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX_IN_FLIGHT))
-    }
-
     /// Parse a timeout in milliseconds; unparseable falls back to
     /// `DEFAULT_TIMEOUT_MS`. Total — never errors.
     #[cfg(feature = "native")]
@@ -205,8 +187,8 @@ mod config {
     #[cfg(all(test, feature = "native"))]
     mod tests {
         use super::{
-            DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS, GeminiConfig, GeminiConfigLayer, parse_flag,
-            parse_max_in_flight, parse_timeout_ms,
+            DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS, GeminiConfig, GeminiConfigLayer,
+            parse_timeout_ms,
         };
         use confique::Config as _;
         use std::time::Duration;
@@ -214,26 +196,6 @@ mod config {
         // ADR-0090: the confique migration is byte-identical to the prior
         // hand-rolled reader. These exercise the resolution logic without
         // touching process env (issue 464).
-
-        #[test]
-        fn parse_flag_matches_legacy_bool_reader() {
-            for truthy in ["1", "true", "TRUE", "True"] {
-                assert!(parse_flag(truthy).unwrap(), "{truthy} should be truthy");
-            }
-            for falsy in ["0", "", "yes", "false", "garbage"] {
-                assert!(!parse_flag(falsy).unwrap(), "{falsy} should be falsy");
-            }
-        }
-
-        #[test]
-        fn parse_max_in_flight_filters_non_positive_and_unparseable() {
-            assert_eq!(parse_max_in_flight("4").unwrap(), 4);
-            assert_eq!(parse_max_in_flight("0").unwrap(), DEFAULT_MAX_IN_FLIGHT);
-            assert_eq!(
-                parse_max_in_flight("garbage").unwrap(),
-                DEFAULT_MAX_IN_FLIGHT
-            );
-        }
 
         #[test]
         fn parse_timeout_ms_soft_falls_back() {

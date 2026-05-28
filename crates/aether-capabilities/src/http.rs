@@ -18,6 +18,8 @@ use std::time::Duration;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
+#[cfg(feature = "native")]
+use crate::config_env::parse_flag;
 use aether_actor::FfiActorMailbox;
 use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 #[cfg(not(target_arch = "wasm32"))]
@@ -199,14 +201,6 @@ struct HttpConfigLayer {
 // list, and a default-on-unparseable number are all total. Hence the per-fn
 // `unnecessary_wraps` allow; the strict (erroring) variants land with the
 // ADR-0090 §4 validation pass.
-
-/// `"1"` or `"true"` (case-insensitive) → `true`, anything else `false`,
-/// matching the prior hand-rolled flag reader. Total — never errors.
-#[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_flag(s: &str) -> Result<bool, Infallible> {
-    Ok(s == "1" || s.eq_ignore_ascii_case("true"))
-}
 
 /// Split a comma-separated host list, trimming and dropping empties.
 /// Total — never errors.
@@ -626,17 +620,6 @@ mod native {
         // hand-rolled reader. These exercise the resolution logic without
         // touching process env (issue 464) — the parsers are pure, and the
         // defaults check loads the layer with no `.env()` source.
-
-        #[test]
-        fn parse_flag_matches_legacy_bool_reader() {
-            use super::super::parse_flag;
-            for truthy in ["1", "true", "TRUE", "True"] {
-                assert!(parse_flag(truthy).unwrap(), "{truthy} should be truthy");
-            }
-            for falsy in ["0", "", "yes", "false", "garbage"] {
-                assert!(!parse_flag(falsy).unwrap(), "{falsy} should be falsy");
-            }
-        }
 
         #[test]
         fn parse_allowlist_splits_trims_and_drops_empties() {
