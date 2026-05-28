@@ -23,6 +23,16 @@ use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, ReplyTarget, ReplyTo};
 use crate::scheduler::pending_depth;
 
+// Scratch-region layout in the guest's linear memory. Disjoint by
+// design — the three regions are written from different lifecycle
+// hooks and the offset split keeps their bounds checks obvious:
+//
+//   MAIL_OFFSET   = 1024   — inbound mail payload (Component::deliver)
+//   STATE_OFFSET  = 8192   — ADR-0016 prior-state bytes (call_on_rehydrate)
+//   CONFIG_OFFSET = 16384  — ADR-0090 init config bytes (Component::instantiate)
+//
+// `Component` writes a region exactly once per call, so the regions
+// never need to coexist within the same wasm function activation.
 const MAIL_OFFSET: u32 = 1024;
 
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
@@ -341,6 +351,12 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// offset split keeps out-of-bounds checks obvious.
 const STATE_OFFSET: u32 = 8192;
 
+/// Offset the substrate writes config bytes to before calling
+/// `init_v2_p32` (ADR-0090). Sits after `STATE_OFFSET` so the three
+/// scratch regions (mail / state / config) never overlap. Config is
+/// written once at instantiate time, before any other host fn runs.
+const CONFIG_OFFSET: u32 = 16384;
+
 /// Contract with the guest: it exports a
 /// `receive(kind, ptr, byte_len, count, sender) -> u32` entrypoint
 /// and a `memory` named `memory`. ADR-0013 widened the receive ABI
@@ -389,11 +405,20 @@ impl Component {
     /// Instantiate a component from a compiled `Module`. `ctx` becomes
     /// the store data and is what every host function call against this
     /// component will see.
+    ///
+    /// ADR-0090 (issue 1256): `config_bytes` is the wire-encoded
+    /// `<FfiActor::Config as Kind>` payload threaded through to the
+    /// guest's `init_v2_p32` shim. Pass `&[]` for actors whose
+    /// `Config = ()` or for the back-compat path (legacy `init` does
+    /// not consume the bytes). The substrate writes the bytes at
+    /// `CONFIG_OFFSET` in the guest's linear memory and calls
+    /// `init_v2_p32(mailbox_id, CONFIG_OFFSET, config_bytes.len())`.
     pub fn instantiate(
         engine: &Engine,
         linker: &Linker<ComponentCtx>,
         module: &Module,
         ctx: ComponentCtx,
+        config_bytes: &[u8],
     ) -> wasmtime::Result<Self> {
         let mut store = Store::new(engine, ctx);
         let instance = linker.instantiate(&mut store, module)?;
@@ -410,6 +435,13 @@ impl Component {
         // so raw-FFI components predating the Phase 2 ABI still load —
         // they just don't get auto-subscribe, which they never did.
         //
+        // ADR-0090 (issue 1256): the substrate probes `init_v2_p32`
+        // first (the post-#1256 ABI that carries config bytes), then
+        // the `(u64) -> u32` shape (Phase 2), then the legacy `()` shape.
+        // The order is deliberate — a `#[actor]`-built guest exports
+        // both `init_v2_p32` and the legacy `init(u64)`, so a substrate
+        // that probes `init` first would silently skip the config path.
+        //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
         // means the guest's `FfiActor::init` returned `Err(BootError)`
         // and staged the message via `init_failed_p32`. Drain the
@@ -418,7 +450,26 @@ impl Component {
         // path reports it via `LoadResult::Err { error }` — same
         // shape as a wasm trap, just with a more informative message.
         let mailbox_id = store.data().sender.0;
-        let init_rc = if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
+        // Wasm32 ABI carries `u32` byte lengths; config bytes are
+        // bounded by guest memory size (well below `u32::MAX`).
+        #[allow(clippy::cast_possible_truncation)]
+        let config_len = config_bytes.len() as u32;
+        let init_rc = if let Ok(init_v2) = instance
+            .get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_v2_p32")
+        {
+            // Write config bytes (even an empty slice — the guest's
+            // shim still receives the `(ptr, 0)` pair and handles the
+            // empty-len short-circuit).
+            if !config_bytes.is_empty() {
+                memory.write(&mut store, CONFIG_OFFSET as usize, config_bytes)?;
+            }
+            Some(init_v2.call(&mut store, (mailbox_id, CONFIG_OFFSET, config_len))?)
+        } else if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
+            // Legacy Phase 2 fallback. Discards config bytes — only
+            // safe for `Config = ()`. A typed-config guest that lands
+            // on this branch was built against a post-#1256 SDK whose
+            // `export!` always emits both shims; the legacy path here
+            // is the back-compat for raw-FFI / pre-macro guests.
             Some(init.call(&mut store, mailbox_id)?)
         } else if let Ok(init) = instance.get_typed_func::<(), u32>(&mut store, "init") {
             Some(init.call(&mut store, ())?)
@@ -748,7 +799,7 @@ mod tests {
         host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
-        Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate")
+        Component::instantiate(&engine, &linker, &module, ctx(), &[]).expect("instantiate")
     }
 
     /// WAT where `on_replace` writes 0x11 to offset 200 — same pattern
@@ -1143,7 +1194,7 @@ mod tests {
         host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).unwrap();
         let module = Module::new(&engine, &wasm).unwrap();
-        Component::instantiate(&engine, &linker, &module, ctx).unwrap()
+        Component::instantiate(&engine, &linker, &module, ctx, &[]).unwrap()
     }
 
     #[test]
