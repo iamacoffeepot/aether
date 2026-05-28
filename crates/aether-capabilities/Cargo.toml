@@ -36,6 +36,7 @@ default = ["native"]
 native = [
     "dep:aether-substrate",
     "dep:bytemuck",
+    "dep:confique",
     "dep:dirs",
     "dep:postcard",
     "dep:rustc-hash",
@@ -77,6 +78,11 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
 bytemuck = { version = "1.19", optional = true }
+# ADR-0090: typed, layered config resolution. Used by the env-shaped
+# `*Layer` structs (e.g. `HttpConfigLayer`) that back each cap's
+# `*Config::from_env`. `default-features = false` keeps it env-only —
+# no TOML/YAML file parsers until ADR-0090's config-file step.
+confique = { version = "0.4", default-features = false, optional = true }
 dirs = { version = "6", optional = true }
 postcard = { version = "1.1", optional = true, features = ["alloc"] }
 # Fast non-cryptographic hasher for the trace observer's hot-path maps

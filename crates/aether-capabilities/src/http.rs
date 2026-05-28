@@ -22,7 +22,8 @@ use aether_actor::FfiActorMailbox;
 use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
-use std::env;
+#[cfg(feature = "native")]
+use std::convert::Infallible;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -110,56 +111,130 @@ impl Default for HttpConfig {
     }
 }
 
+// confique is a `native`-feature dep (ADR-0090), so env resolution — the
+// layer struct, its parsers, and `from_env` — is gated to match. The
+// wasm-marker build of this crate carries only the `HttpConfig` type.
+#[cfg(feature = "native")]
 impl HttpConfig {
     /// Resolve every field from the corresponding `AETHER_HTTP_*`
     /// environment variable. Used by chassis mains; tests build
     /// `HttpConfig` directly so they never read process env.
+    ///
+    /// Resolution runs through confique (ADR-0090): the private
+    /// `HttpConfigLayer` declares each knob's env key + default in one
+    /// place, and this maps
+    /// the env-shaped layer onto the domain-shaped `HttpConfig` (ms →
+    /// `Duration`, CSV → `HashSet`). Behaviour is byte-identical to the
+    /// prior hand-rolled reader — an unparseable number still falls back
+    /// to its default. The hard-error-on-unparseable stance (ADR-0090 §4)
+    /// lands with the chassis-env validation pass, not this migration.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the layer's literal defaults are themselves
+    /// malformed — a programmer error caught by the
+    /// `http_from_env_defaults_match` test, never a runtime config fault
+    /// (the env values flow through total parsers).
     #[must_use]
     pub fn from_env() -> Self {
+        use confique::Config as _;
+
+        // Every field has a literal default and a total `parse_env`, so the
+        // layer always resolves; a failure here is a malformed default
+        // literal (a programmer error the `http_from_env_defaults_match`
+        // test catches), not a runtime config fault.
+        let layer = HttpConfigLayer::builder()
+            .env()
+            .load()
+            .expect("HttpConfigLayer defaults are well-formed");
         Self {
-            disabled: disable_flag_env(),
-            allowlist: parse_allowlist_env(),
-            require_https: https_flag_env(),
-            max_body_bytes: parse_max_body_bytes_env(),
-            default_timeout: parse_default_timeout_env(),
+            disabled: layer.disabled,
+            allowlist: layer.allowlist,
+            require_https: layer.require_https,
+            max_body_bytes: layer.max_body_bytes,
+            default_timeout: Duration::from_millis(u64::from(layer.timeout_ms)),
         }
     }
 }
 
-fn disable_flag_env() -> bool {
-    env::var("AETHER_HTTP_DISABLE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+/// Env-shaped confique layer behind [`HttpConfig`] (ADR-0090). Each field
+/// is the primitive representation its `AETHER_HTTP_*` variable carries —
+/// notably the timeout as `u32` milliseconds and the allowlist as a
+/// comma-separated string parsed into a set — which [`HttpConfig::from_env`]
+/// maps onto the domain types. Kept private: the public, consumed shape
+/// stays [`HttpConfig`].
+#[cfg(feature = "native")]
+#[derive(confique::Config)]
+struct HttpConfigLayer {
+    /// `AETHER_HTTP_DISABLE=1`/`true` swaps in the disabled adapter.
+    #[config(env = "AETHER_HTTP_DISABLE", parse_env = parse_flag, default = false)]
+    disabled: bool,
+    /// Comma-separated hostnames; empty/unset = deny all (ADR-0043).
+    #[config(env = "AETHER_HTTP_ALLOWLIST", parse_env = parse_allowlist, default = [])]
+    allowlist: HashSet<String>,
+    /// `AETHER_HTTP_REQUIRE_HTTPS=1`/`true` rejects `http://` URLs.
+    #[config(env = "AETHER_HTTP_REQUIRE_HTTPS", parse_env = parse_flag, default = false)]
+    require_https: bool,
+    /// Body cap in bytes. The literal default mirrors
+    /// [`DEFAULT_MAX_BODY_BYTES`] (confique `default` takes a literal, not
+    /// the named const); `http_from_env_defaults_match` guards the match.
+    #[config(
+        env = "AETHER_HTTP_MAX_BODY_BYTES",
+        parse_env = parse_max_body_bytes,
+        default = 16_777_216
+    )]
+    max_body_bytes: usize,
+    /// Per-request timeout in milliseconds. Literal default mirrors
+    /// [`DEFAULT_TIMEOUT_MS`] (30 s).
+    #[config(
+        env = "AETHER_HTTP_TIMEOUT_MS",
+        parse_env = parse_timeout_ms,
+        default = 30_000
+    )]
+    timeout_ms: u32,
 }
 
-fn https_flag_env() -> bool {
-    env::var("AETHER_HTTP_REQUIRE_HTTPS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`, so
+// these helpers carry a `Result` they never fill with `Err` — a flag, a CSV
+// list, and a default-on-unparseable number are all total. Hence the per-fn
+// `unnecessary_wraps` allow; the strict (erroring) variants land with the
+// ADR-0090 §4 validation pass.
+
+/// `"1"` or `"true"` (case-insensitive) → `true`, anything else `false`,
+/// matching the prior hand-rolled flag reader. Total — never errors.
+#[cfg(feature = "native")]
+#[allow(clippy::unnecessary_wraps)]
+fn parse_flag(s: &str) -> Result<bool, Infallible> {
+    Ok(s == "1" || s.eq_ignore_ascii_case("true"))
 }
 
-fn parse_allowlist_env() -> HashSet<String> {
-    env::var("AETHER_HTTP_ALLOWLIST")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|h| !h.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+/// Split a comma-separated host list, trimming and dropping empties.
+/// Total — never errors.
+#[cfg(feature = "native")]
+#[allow(clippy::unnecessary_wraps)]
+fn parse_allowlist(s: &str) -> Result<HashSet<String>, Infallible> {
+    Ok(s.split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
-fn parse_max_body_bytes_env() -> usize {
-    env::var("AETHER_HTTP_MAX_BODY_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MAX_BODY_BYTES)
+/// Parse a byte cap; an unparseable value falls back to
+/// [`DEFAULT_MAX_BODY_BYTES`] (the prior soft-fail — ADR-0090 §4's
+/// hard-error lands in the validation pass, not this migration). Total.
+#[cfg(feature = "native")]
+#[allow(clippy::unnecessary_wraps)]
+fn parse_max_body_bytes(s: &str) -> Result<usize, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_MAX_BODY_BYTES))
 }
 
-fn parse_default_timeout_env() -> Duration {
-    let ms = env::var("AETHER_HTTP_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(DEFAULT_TIMEOUT_MS);
-    Duration::from_millis(u64::from(ms))
+/// Parse a timeout in milliseconds; unparseable falls back to
+/// [`DEFAULT_TIMEOUT_MS`]. Total — never errors.
+#[cfg(feature = "native")]
+#[allow(clippy::unnecessary_wraps)]
+fn parse_timeout_ms(s: &str) -> Result<u32, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_TIMEOUT_MS))
 }
 
 /// Sender-side facade for actors addressed via
@@ -546,6 +621,65 @@ mod native {
         use aether_substrate::mail::registry;
         use serde::de::DeserializeOwned;
         use std::sync::mpsc::Receiver;
+
+        // ADR-0090: the confique migration is byte-identical to the prior
+        // hand-rolled reader. These exercise the resolution logic without
+        // touching process env (issue 464) — the parsers are pure, and the
+        // defaults check loads the layer with no `.env()` source.
+
+        #[test]
+        fn parse_flag_matches_legacy_bool_reader() {
+            use super::super::parse_flag;
+            for truthy in ["1", "true", "TRUE", "True"] {
+                assert!(parse_flag(truthy).unwrap(), "{truthy} should be truthy");
+            }
+            for falsy in ["0", "", "yes", "false", "garbage"] {
+                assert!(!parse_flag(falsy).unwrap(), "{falsy} should be falsy");
+            }
+        }
+
+        #[test]
+        fn parse_allowlist_splits_trims_and_drops_empties() {
+            use super::super::parse_allowlist;
+            let got = parse_allowlist("a.com, b.com ,, c.com").unwrap();
+            let want: HashSet<String> = ["a.com", "b.com", "c.com"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            assert_eq!(got, want);
+            assert!(parse_allowlist("").unwrap().is_empty());
+        }
+
+        #[test]
+        fn parse_numbers_soft_fall_back_to_defaults() {
+            use super::super::{DEFAULT_TIMEOUT_MS, parse_max_body_bytes, parse_timeout_ms};
+            assert_eq!(parse_max_body_bytes("1024").unwrap(), 1024);
+            assert_eq!(
+                parse_max_body_bytes("not-a-number").unwrap(),
+                DEFAULT_MAX_BODY_BYTES
+            );
+            assert_eq!(parse_timeout_ms("5000").unwrap(), 5000);
+            assert_eq!(parse_timeout_ms("garbage").unwrap(), DEFAULT_TIMEOUT_MS);
+        }
+
+        #[test]
+        fn http_from_env_defaults_match() {
+            use super::super::HttpConfigLayer;
+            use confique::Config as _;
+            // No `.env()` source: loads literal defaults only, so this is
+            // env-free and guards the layer's literal defaults against the
+            // named consts + `HttpConfig::default()`.
+            let layer = HttpConfigLayer::builder().load().expect("defaults load");
+            let default = HttpConfig::default();
+            assert!(!layer.disabled);
+            assert!(layer.allowlist.is_empty());
+            assert!(!layer.require_https);
+            assert_eq!(layer.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+            assert_eq!(
+                Duration::from_millis(u64::from(layer.timeout_ms)),
+                default.default_timeout
+            );
+        }
 
         struct StubAdapter {
             response: Mutex<Option<Result<FetchResponse, HttpError>>>,
