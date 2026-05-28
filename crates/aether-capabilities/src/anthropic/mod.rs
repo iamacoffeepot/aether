@@ -33,7 +33,7 @@ use crate::contentgen::adapter::{AnthropicAdapter, AnthropicRequest, AnthropicRe
 use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 pub use api::UreqAnthropicAdapter;
 pub use cli::ClaudeCliAdapter;
-pub use config::{AnthropicConfig, AnthropicConfigLayer};
+pub use config::{AnthropicConfig, AnthropicConfigLayer, AnthropicOverlay};
 
 /// Default per-cap concurrency bound when `AETHER_ANTHROPIC_MAX_IN_FLIGHT`
 /// is unset. Conservative — paid-endpoint throttling matters more than

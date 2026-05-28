@@ -60,7 +60,7 @@ use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
 // the config struct (sends are typed; config is the chassis's
 // concern).
 #[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-pub use native::{AudioConfig, AudioConfigLayer};
+pub use native::{AudioConfig, AudioConfigLayer, AudioOverlay};
 
 #[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {

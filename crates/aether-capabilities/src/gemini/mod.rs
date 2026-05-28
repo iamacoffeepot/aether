@@ -32,7 +32,7 @@ use crate::contentgen::adapter::{
 use crate::contentgen::shared;
 
 use crate::config_env::DEFAULT_PROVIDER_MAX_IN_FLIGHT;
-pub use config::{GeminiConfig, GeminiConfigLayer};
+pub use config::{GeminiConfig, GeminiConfigLayer, GeminiOverlay};
 
 /// Default per-cap concurrency bound when `AETHER_GEMINI_MAX_IN_FLIGHT`
 /// is unset. Conservative — image / music generation is multi-second
