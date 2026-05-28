@@ -72,13 +72,18 @@ pub fn has_wgpu_adapter() -> bool {
 }
 
 /// Locate `<crate_name>.wasm` under the workspace target dir. Tries
-/// `release` first, then `debug` so either build profile works.
-/// Returns `None` if neither exists.
+/// `release` first, then `debug` so either build profile works. Also
+/// probes `examples/<crate_name>.wasm` so callers can name an
+/// `[[example]] crate-type = ["cdylib"]` artifact (ADR-0090 c1 moved
+/// the test-fixture probes to per-example cdylibs under
+/// `aether-test-fixtures`). Returns `None` if no candidate path
+/// exists.
 ///
-/// `crate_name` is the underscore-cased crate name as it appears in
-/// the wasm filename (e.g. `"aether_camera"`,
-/// `"aether_test_fixture_probe"`). The workspace target dir is
-/// resolved via `CARGO_MANIFEST_DIR` of the calling integration test
+/// `crate_name` is the underscore-cased crate name (for top-level
+/// cdylib crates, e.g. `"aether_camera"`) or the example name (for
+/// `[[example]]` cdylibs, e.g. `"probe"` /
+/// `"probe_with_config"`). The workspace target dir is resolved via
+/// `CARGO_MANIFEST_DIR` of the calling integration test
 /// (`crates/<crate>` → workspace root two levels up); helper's own
 /// `CARGO_MANIFEST_DIR` is irrelevant because the wasm artifacts live
 /// under the shared workspace target dir, which is the same for every
@@ -96,13 +101,20 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
         .and_then(|p| p.parent())
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
     for profile in ["release", "debug"] {
-        let path = workspace
+        let base = workspace
             .join("target")
             .join("wasm32-unknown-unknown")
-            .join(profile)
-            .join(format!("{crate_name}.wasm"));
-        if path.exists() {
-            return Some(path);
+            .join(profile);
+        // Top-level cdylib crates land directly under the profile dir.
+        let top_level = base.join(format!("{crate_name}.wasm"));
+        if top_level.exists() {
+            return Some(top_level);
+        }
+        // `[[example]] crate-type = ["cdylib"]` cdylibs land under
+        // `<profile>/examples/<example_name>.wasm` (ADR-0090 c1).
+        let example = base.join("examples").join(format!("{crate_name}.wasm"));
+        if example.exists() {
+            return Some(example);
         }
     }
     None

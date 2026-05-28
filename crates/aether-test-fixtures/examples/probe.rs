@@ -23,45 +23,19 @@
 //!   emits a colored `DrawTriangle` to the chassis render sink, so
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
+//!
+//! ADR-0090 c1: this fixture moved from `aether-test-fixture-probe`'s
+//! `src/lib.rs` to `aether-test-fixtures/examples/probe.rs`. The
+//! actor source is unchanged; the shared `TickObserved` / `SetRender`
+//! kinds moved to the sibling lib so integration tests can import
+//! them without reaching into a cdylib.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::{InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
-use bytemuck::{Pod, Zeroable};
-
-/// Mirror of `aether_substrate_bundle::test_bench::TEST_BENCH_OBSERVER_MAILBOX_NAME`.
-/// Inlined here so wasm guests don't pull the bundle (`std`-bound)
-/// into the FFI build.
-const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
-
-/// Broadcast payload emitted on each tick. Postcard-shaped — schema
-/// rides in the wasm's `aether.kinds` custom section, so the bench's
-/// loopback decoder can record the kind name without the test
-/// pre-registering anything.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
-#[kind(name = "aether.test_fixture.tick_observed")]
-pub struct TickObserved {
-    pub count: u64,
-}
-
-/// Driver kind: scenarios send this to flip the fixture's render
-/// state. `visible == 0` halts the per-tick draw; any other value
-/// enables it. Cast-shape so encoding is just a memcpy of four
-/// bytes — keeps the test-side `MailEnvelope.payload` construction
-/// trivial.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "aether.test_fixture.set_render")]
-pub struct SetRender {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub visible: u8,
-}
+use aether_test_fixtures::{SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
 
 pub struct Probe {
     tick_count: u64,

@@ -1546,6 +1546,11 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // `#[actor] impl FfiActor for C` block alongside `init` /
     // `#[handler]` methods.
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
+    // ADR-0090 (issue 1256): optional `type Config = …` declaration.
+    // When omitted, the macro synthesizes `type Config = ();` so the
+    // emitted `export!` shim can decode 0 config bytes via
+    // `impl Kind for ()` and the user's `init` body stays 1-param.
+    let mut config_type: Option<syn::ImplItemType> = None;
 
     for impl_item in item.items {
         match impl_item {
@@ -1554,6 +1559,9 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     it,
                     "#[actor] synthesizes `type Kinds` from the #[handler] methods; remove this declaration",
                 ));
+            }
+            ImplItem::Type(it) if it.ident == "Config" => {
+                config_type = Some(it);
             }
             ImplItem::Const(c) => {
                 consts.push(c);
@@ -1618,10 +1626,11 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
     }
 
-    let init_method = init_method.ok_or_else(|| {
+    let mut init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
-            "#[actor] requires `fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError>`",
+            "#[actor] requires `fn init<C: Resolver>(ctx: &mut C) -> Result<Self, BootError>` \
+             (or, with `type Config = T`, `fn init<C: Resolver>(config: T, ctx: &mut C) -> …`)",
         )
     })?;
 
@@ -1631,6 +1640,33 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             "#[actor] requires at least one #[handler] method or a #[fallback] method",
         ));
     }
+
+    // ADR-0090 (issue 1256): the trait now takes `init(config: Self::Config,
+    // ctx: &mut C)`. If the user declared `type Config = …`, leave their
+    // init alone — they're expected to spell out the `config` param. If
+    // they omitted it, the macro synthesizes `type Config = ();` AND
+    // injects a `_config: ()` leading param so the user's pre-#1256 body
+    // (`fn init<C>(ctx: &mut C) -> …`) keeps compiling. The emitted shim
+    // always decodes `<Self as FfiActor>::Config` from bytes, so the
+    // synthesized `_config: ()` path round-trips uniformly via
+    // `impl Kind for ()`.
+    let (synthesized_config_type, init_method_emitted) = if config_type.is_some() {
+        // User declared the config type; trust their init signature.
+        (None, init_method)
+    } else {
+        // Synthesize `type Config = ();` and inject a leading `_config: ()`
+        // parameter into init's signature so the user's 1-arg body
+        // still type-checks against the new trait shape.
+        let synth: syn::ImplItemType = syn::parse_quote!(
+            type Config = ();
+        );
+        let config_param: FnArg = syn::parse_quote!(_config: ());
+        // Inject at the front of the typed inputs. The init signature
+        // has no `self` receiver (FfiActor::init is associated, not a
+        // method), so index 0 is the right slot.
+        init_method.sig.inputs.insert(0, config_param);
+        (Some(synth), init_method)
+    };
 
     // Issue #403: the SDK no longer prepends `ctx.subscribe_input::<K>()`
     // calls to `init` for the substrate's six fixed input streams (Tick,
@@ -1642,7 +1678,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // post-register. The `Ctx::subscribe_input` runtime API is still
     // available for components that want to subscribe / unsubscribe at
     // runtime (e.g. conditional input streams).
-    let wrapped_init = init_method;
+    let wrapped_init = init_method_emitted;
     let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref());
 
     let handler_methods_tokens = handlers.iter().map(|h| &h.method);
@@ -1685,12 +1721,23 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
     });
 
+    // ADR-0090: emit the `type Config = …` line in the trait impl —
+    // either the user's declaration (passed through) or the macro's
+    // synthesized `type Config = ();`.
+    let config_type_tokens = match (config_type.as_ref(), synthesized_config_type.as_ref()) {
+        (Some(user), _) => quote! { #user },
+        (None, Some(synth)) => quote! { #synth },
+        (None, None) => unreachable!("synthesized_config_type is Some when user omitted"),
+    };
+
     Ok(quote! {
         #actor_impl
 
         #(#handles_kind_impls)*
 
         impl #impl_generics #trait_path for #self_ty #where_clause {
+            #config_type_tokens
+
             #wrapped_init
 
             #(#lifecycle_methods)*

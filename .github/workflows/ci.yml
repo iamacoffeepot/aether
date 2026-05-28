@@ -166,6 +166,15 @@ jobs:
             [ -z "$pkg" ] && continue
             cargo build --target wasm32-unknown-unknown -p "$pkg"
           done <<< "$pkgs"
+          # ADR-0090 c1 (issue 1256): aether-test-fixtures carries its
+          # component cdylibs as `[[example]] crate-type = ["cdylib"]`,
+          # not as the package's lib output. The metadata-driven
+          # discovery above filters by `targets[].kind = "cdylib"`,
+          # which doesn't match example targets (kind = "example"
+          # even with crate-type = cdylib), so the test-fixtures crate
+          # is invisible to the structural sweep — build its examples
+          # explicitly.
+          cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples
       # Run the full workspace test suite under nextest. The
       # changed-crate filter the prior step had is gone — nextest's
       # process-per-test isolation surfaces cross-test contamination

@@ -173,11 +173,16 @@ mod native {
             // binding (issue 634 Phase 4 PR 3 — single source of inbox
             // truth lives on `NativeBinding`, not on `ComponentCtx`).
             substrate_ctx.install_binding(Arc::clone(ctx.binding()));
+            // ADR-0090 (issue 1256): config bytes are not yet threaded
+            // from the load mail; c2 of the rollout wires them. For
+            // now pass `&[]` — guests whose `Config = ()` decode this
+            // uniformly via `impl Kind for ()`.
             let component = Component::instantiate(
                 &config.engine,
                 &config.linker,
                 &config.module,
                 substrate_ctx,
+                &[],
             )
             .map_err(|e| {
                 BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
@@ -391,15 +396,24 @@ mod native {
                 Arc::clone(&self.outbound),
             );
 
-            let mut new_component =
-                match Component::instantiate(&self.engine, &self.linker, &module, substrate_ctx) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return ReplaceResult::Err {
-                            error: format!("wasm instantiation failed: {e}"),
-                        };
-                    }
-                };
+            // ADR-0090 (issue 1256): replace does not yet thread config
+            // bytes through (c2). Pass `&[]` so `Config = ()` guests
+            // decode cleanly; typed-config replaces will surface once
+            // the replace ABI carries config alongside the wasm bytes.
+            let mut new_component = match Component::instantiate(
+                &self.engine,
+                &self.linker,
+                &module,
+                substrate_ctx,
+                &[],
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    return ReplaceResult::Err {
+                        error: format!("wasm instantiation failed: {e}"),
+                    };
+                }
+            };
 
             // ADR-0016 §4: rehydrate the new instance if the old one
             // produced a bundle. A failed rehydrate still installs the

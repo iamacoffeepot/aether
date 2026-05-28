@@ -264,7 +264,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
- "aether-test-fixture-probe",
+ "aether-test-fixtures",
  "anyhow",
  "bytemuck",
  "crossbeam-channel",
@@ -283,7 +283,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-test-fixture-probe"
+name = "aether-test-fixtures"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
