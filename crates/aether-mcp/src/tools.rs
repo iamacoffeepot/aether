@@ -23,12 +23,12 @@ use tokio::sync::Mutex as AsyncMutex;
 use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
 use aether_capabilities::trace_walk::TreeWalk;
 use aether_data::MailId;
+use aether_data::SchemaType;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
     DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name,
     tagged_id,
 };
-use aether_data::SchemaType;
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
@@ -1786,9 +1786,7 @@ mod tests {
     /// `descriptors::all()`. Used by ADR-0091's end-to-end check that
     /// the MCP encode path picks the registered kind up via
     /// `aether.inventory.kinds`.
-    fn boot_hub_with_inventory(
-        extras: &[KindDescriptor],
-    ) -> (PassiveChassis<TestChassis>, u16) {
+    fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChassis<TestChassis>, u16) {
         use aether_capabilities::InventoryCapability;
 
         let registry = Arc::new(Registry::new());
@@ -2578,8 +2576,7 @@ mod tests {
 
         let extras = vec![component_kind.clone()];
         let (_chassis, port) = boot_hub_with_inventory(&extras);
-        let session =
-            RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
+        let session = RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
         let mcp = Mcp::new(
             Arc::new(session),
             Arc::new(ComponentCache::default()),
@@ -2613,8 +2610,8 @@ mod tests {
             .call_one(local_envelope(INVENTORY_CAP, &ListKinds {}))
             .await
             .expect("aether.inventory.kinds reply");
-        let result = ListKindsResult::decode_from_bytes(&reply.payload)
-            .expect("ListKindsResult decodes");
+        let result =
+            ListKindsResult::decode_from_bytes(&reply.payload).expect("ListKindsResult decodes");
         // The reply must include the registered component kind with a
         // schema that decodes back to the originally registered shape
         // — the wire path the harness's cache reads from.
@@ -2629,8 +2626,8 @@ mod tests {
                     result.kinds.iter().map(|k| &k.name).collect::<Vec<_>>(),
                 )
             });
-        let decoded_schema: SchemaType = postcard::from_bytes(&entry.schema_postcard)
-            .expect("schema_postcard decodes");
+        let decoded_schema: SchemaType =
+            postcard::from_bytes(&entry.schema_postcard).expect("schema_postcard decodes");
         assert!(
             matches!(decoded_schema, SchemaType::String),
             "the registered schema round-trips through the wire",
@@ -2661,9 +2658,8 @@ mod tests {
         // The schema-encoded payload for a `SchemaType::String` is the
         // postcard string wire shape; decoding back via the same
         // schema must yield the original JSON value.
-        let decoded =
-            aether_codec::decode_schema(&envelope.payload, &component_kind.schema)
-                .expect("payload decodes against the cached schema");
+        let decoded = aether_codec::decode_schema(&envelope.payload, &component_kind.schema)
+            .expect("payload decodes against the cached schema");
         assert_eq!(
             decoded,
             serde_json::Value::String("hello".to_owned()),
