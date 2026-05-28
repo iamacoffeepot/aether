@@ -405,6 +405,46 @@ impl NativeCtx<'_> {
         )
     }
 
+    /// Re-dispatch variant of [`Self::send_envelope_traced`] that pins the
+    /// child mail's `reply_to` to the supplied [`ReplyTo`] instead of
+    /// stamping the default `(Component(self_mailbox), auto_correlation)`.
+    /// The minted [`MailId`] and the chain's `in_flight` accounting are
+    /// unchanged — only the recipient's
+    /// [`aether_actor::actor::ctx::OutboundReply::reply_target`]
+    /// view changes.
+    ///
+    /// Use this when a cap is **forwarding** another actor's call rather
+    /// than originating one: the trace cap servicing `DispatchTraced`
+    /// (issue 1265 — the `send_mail_traced` batched-dispatch path)
+    /// re-dispatches each child envelope but wants the child's deferred
+    /// reply to land at the **original** caller's `reply_to` (the RPC
+    /// server holding the wire `cid`'s in-flight entry), not stranded at
+    /// the trace cap's own mailbox where no handler exists for it.
+    ///
+    /// Pass `ctx.reply_target()` as `reply_to` to forward to whoever
+    /// invoked this cap. Single-Call paths (the RPC server's
+    /// `send_envelope_as_root` dispatching directly at the receiver)
+    /// never reach this method — the default `reply_to` lands at the
+    /// dispatcher which is also the call-correlation owner.
+    #[must_use]
+    pub fn send_envelope_traced_with_reply_to(
+        &self,
+        recipient: MailboxId,
+        kind: KindId,
+        bytes: &[u8],
+        reply_to: ReplyTo,
+    ) -> MailId {
+        self.binding.push_envelope_buffered_with_reply_to(
+            recipient.0,
+            kind.0,
+            bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+            Some(reply_to),
+        )
+    }
+
     /// Like [`Self::send_envelope_traced`] but always starts a fresh
     /// causal chain — ignores the ctx's in-flight lineage and passes
     /// `parent_mail = None, inherited_root = None` to the dispatch

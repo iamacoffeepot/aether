@@ -541,9 +541,57 @@ impl NativeBinding {
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
     ) -> MailId {
+        self.push_envelope_buffered_with_reply_to(
+            recipient,
+            kind,
+            bytes,
+            count,
+            parent_mail,
+            inherited_root,
+            None,
+        )
+    }
+
+    /// Re-dispatcher variant of [`Self::push_envelope_buffered`] that
+    /// accepts an explicit `reply_to` instead of stamping the default
+    /// `ReplyTo::with_correlation(ReplyTarget::Component(self_mailbox),
+    /// auto_correlation)`. The minted [`MailId`] and the `in_flight`
+    /// settlement increment are unaffected — they still use this
+    /// actor's correlation counter — only the recipient's
+    /// `OutboundReply::reply_target()` view changes.
+    ///
+    /// Used by re-dispatch caps (today: `TraceDispatchCapability`
+    /// servicing `DispatchTraced`) that forward someone else's call:
+    /// the children's deferred replies must bubble up to the original
+    /// caller (e.g. the RPC server holding the wire `cid`'s in-flight
+    /// entry), not get stranded at the re-dispatcher's mailbox where
+    /// no handler exists for them.
+    ///
+    /// `reply_to_override = None` is the same shape as
+    /// [`Self::push_envelope_buffered`].
+    ///
+    /// # Panics
+    /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "re-dispatch variant adds reply_to_override to the existing 6-arg shape; \
+                  splitting would force callers through two separate code paths"
+    )]
+    pub fn push_envelope_buffered_with_reply_to(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        parent_mail: Option<MailId>,
+        inherited_root: Option<MailId>,
+        reply_to_override: Option<ReplyTo>,
+    ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
-        let reply_to =
-            ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
+        let reply_to = reply_to_override.unwrap_or_else(|| {
+            ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation)
+        });
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // iamacoffeepot/aether#1150: only the settlement increment is
