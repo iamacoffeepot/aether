@@ -1,9 +1,10 @@
-//! `aether.inventory` cap (ADR-0088 §6). Serves the reverse-lookup
-//! inventory over mail so an out-of-process observer (the MCP harness)
-//! reads the running substrate's **own, per-build** inventory instead of
-//! a drift-prone compiled-in copy.
+//! `aether.inventory` cap (ADR-0088 §6, widened by ADR-0091 §5). Serves
+//! the per-build reverse-lookup inventory **and** the per-engine live
+//! kind-schema registry view over mail so an out-of-process observer
+//! (the MCP harness) reads the running substrate's **own, per-build**
+//! state instead of a drift-prone compiled-in copy.
 //!
-//! Two request kinds, both replying synchronously via `ctx.reply`:
+//! Three request kinds, each replying synchronously via `ctx.reply`:
 //!
 //! - [`Manifest`] → [`ManifestResult`]: the compile-time manifest —
 //!   every link-time [`NameEntry`](aether_data::name_inventory::NameEntry)
@@ -19,35 +20,58 @@
 //!   manifest alone (the runtime-registry arm of the ADR-0088 §2 chain,
 //!   `thread_name::resolve_runtime`). `None` on a miss so the client
 //!   falls back to rendering the ADR-0064 tagged-id string itself.
+//! - [`ListKinds`] → [`ListKindsResult`] (ADR-0091): every
+//!   [`KindId`](aether_data::KindId) currently registered in the
+//!   substrate's `Registry`, with its full
+//!   [`SchemaType`](aether_data::SchemaType). The harness folds the
+//!   reply into a per-engine encode cache so a `send_mail` against a
+//!   component-defined kind encodes correctly the moment the
+//!   `aether.component.load` returns — no per-kind hand-promotion into
+//!   `aether-kinds`.
 //!
-//! The cap holds no state — it reads the link-time inventories and the
-//! process-global runtime registry directly at request time, both of
-//! which are fixed (inventories) or write-rarely (registry) for the
-//! process lifetime. `#[bridge(singleton)]` auto-submits its own
+//! The cap holds a clone of the substrate's `Arc<Registry>` (taken in
+//! `init` via `NativeInitCtx::mailer().registry()` — the same `Arc` the
+//! component-host cap clones for `register_or_match_all`), so a
+//! `load_component`'s registrations are visible to `ListKinds` the
+//! moment they return; no event channel, no cache invalidation. The
+//! manifest / resolve arms remain stateless reads of process-global
+//! link-time tables. `#[bridge(singleton)]` auto-submits its own
 //! `NameEntry` for `NAMESPACE`, so `aether.inventory` reverses through
 //! the same static map it serves.
 
-use aether_kinds::{Manifest, ManifestResult, Resolve, ResolveResult};
+use aether_kinds::{ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve, ResolveResult};
 
 #[aether_actor::bridge(singleton)]
 mod native {
-    use super::{Manifest, ManifestResult, Resolve, ResolveResult};
+    use super::{ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve, ResolveResult};
 
     use aether_actor::{MailCtx, actor};
+    use aether_data::KindId;
+    use aether_data::canonical::kind_id_from_parts;
     use aether_data::name_inventory::{Cardinality, ParamKind, name_entries, template_entries};
     use aether_data::tagged_id;
     use aether_kinds::{
-        CardinalityWire, NameEntryWire, ParamKindWire, ResolvedName, TemplateEntryWire,
+        CardinalityWire, KindDescriptorWire, NameEntryWire, ParamKindWire, ResolvedName,
+        TemplateEntryWire,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::registry::Registry;
     use aether_substrate::runtime::thread_name::resolve_runtime;
+    use std::sync::Arc;
 
-    /// `aether.inventory` cap (ADR-0088 §6). Stateless — both handlers
-    /// read process-global tables (the link-time inventories, the
-    /// runtime registry) directly, so there is nothing to carry across
-    /// handler calls.
-    pub struct InventoryCapability;
+    /// `aether.inventory` cap (ADR-0088 §6, widened by ADR-0091 §5). The
+    /// `Manifest` and `Resolve` arms read process-global tables (the
+    /// link-time inventories, the runtime registry) directly with no
+    /// per-cap state. The `ListKinds` arm projects the substrate's
+    /// shared `Arc<Registry>`, captured in `init` from the bench /
+    /// chassis mailer — load-time registrations performed by
+    /// `ComponentHostCapability` mutate the same `Arc<Registry>`, so the
+    /// reply reflects whatever vocabulary the substrate currently holds
+    /// without any cross-cap event channel.
+    pub struct InventoryCapability {
+        registry: Arc<Registry>,
+    }
 
     /// Project one link-time `ParamKind` onto its wire mirror. `Bounded`
     /// / `Declared` carry their range / domain so the client expands the
@@ -83,8 +107,15 @@ mod native {
         /// headless chassis (via `with_common_caps`), matching `aether.fs`.
         const NAMESPACE: &'static str = "aether.inventory";
 
-        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self)
+        fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            // Clone the substrate's shared `Arc<Registry>` — the same
+            // `Arc` `ComponentHostCapability` clones for
+            // `register_or_match_all` at `component.rs:170`. The shared
+            // `Arc` is the propagation channel per ADR-0091 §2: a
+            // load-time registration is visible to `on_list_kinds` the
+            // moment it returns.
+            let registry = Arc::clone(ctx.mailer().registry());
+            Ok(Self { registry })
         }
 
         /// Reply with the per-build reverse-lookup manifest: every
@@ -97,9 +128,10 @@ mod native {
         /// shape). Fold `names` into a hash → name map and expand the
         /// `Bounded`/`Declared` templates locally; resolve `Dynamic`
         /// families per-id via `aether.inventory.resolve`.
-        // Stateless cap — the manifest is read from the process-global
-        // link-time inventories, not from `self`. `&mut self` is the
-        // `#[handler]` dispatch signature, not a state read.
+        // The manifest is read from the process-global link-time
+        // inventories — `self.registry` is only consulted by
+        // `on_list_kinds`. `&mut self` is the `#[handler]` dispatch
+        // signature, not a state read here.
         #[allow(clippy::unused_self)]
         #[handler]
         fn on_manifest(&mut self, ctx: &mut NativeCtx<'_>, _mail: Manifest) {
@@ -118,6 +150,47 @@ mod native {
                 })
                 .collect();
             ctx.reply(&ManifestResult { names, templates });
+        }
+
+        /// Reply with the substrate's live kind vocabulary: every
+        /// [`KindDescriptor`](aether_data::KindDescriptor) currently
+        /// registered in the engine's `Registry`, projected onto the
+        /// wire (id + name + postcard-encoded
+        /// [`SchemaType`](aether_data::SchemaType)). ADR-0091 §1–§2.
+        ///
+        /// # Agent
+        /// Reply: `ListKindsResult`. The harness folds this into a
+        /// per-engine encode cache so a `send_mail` against a
+        /// component-defined kind encodes correctly the moment the
+        /// `aether.component.load` returns. Lazy-on-miss: the harness
+        /// calls this on the first `send_mail` for an unknown kind
+        /// name, then reuses the cached vocabulary until the next miss
+        /// (no TTL, no background poll). The schema rides as opaque
+        /// postcard bytes (`schema_postcard`) because `SchemaType` has
+        /// no `Schema` impl of its own; decode it with
+        /// `postcard::from_bytes::<SchemaType>(&desc.schema_postcard)`.
+        #[handler]
+        fn on_list_kinds(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListKinds) {
+            let kinds = self
+                .registry
+                .list_kind_descriptors()
+                .into_iter()
+                .map(|desc| {
+                    // The schema rides as opaque postcard bytes — see
+                    // `KindDescriptorWire` for the rationale. The
+                    // serialization is infallible for `SchemaType`
+                    // (no `Map<String, _>` non-string-key edge cases
+                    // because every nested field is a derive output).
+                    let schema_postcard = postcard::to_allocvec(&desc.schema)
+                        .expect("SchemaType always postcard-encodes (ADR-0030 canonical form)");
+                    KindDescriptorWire {
+                        id: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
+                        name: desc.name,
+                        schema_postcard,
+                    }
+                })
+                .collect();
+            ctx.reply(&ListKindsResult { kinds });
         }
 
         /// Resolve each requested tagged-id string to its origin name via
@@ -193,7 +266,9 @@ mod native {
             Fixture {
                 rx,
                 transport,
-                cap: InventoryCapability,
+                cap: InventoryCapability {
+                    registry: Arc::clone(&registry),
+                },
             }
         }
 
@@ -297,6 +372,62 @@ mod native {
                 matches!(&trampoline.cardinality, CardinalityWire::OnePer { entity } if entity == "component"),
                 "trampoline cardinality should be OnePer(\"component\"); got {:?}",
                 trampoline.cardinality,
+            );
+        }
+
+        /// ADR-0091: `ListKinds` returns the substrate's authoritative
+        /// kind vocabulary. A kind registered in the bench's `Registry`
+        /// — emulating the `register_or_match_all` path
+        /// `ComponentHostCapability::handle_load` follows — shows up in
+        /// the reply with the matching `KindId`, name, and a
+        /// postcard-encoded `SchemaType` that decodes back to the
+        /// original schema. This is the live-projection ADR-0091
+        /// requires: the same `Arc<Registry>` `component.rs` mutates is
+        /// what the cap reads on every call.
+        #[test]
+        fn list_kinds_projects_a_registered_kind() {
+            use aether_data::{KindDescriptor, KindId, SchemaType, canonical::kind_id_from_parts};
+
+            let mut fix = fixture();
+
+            // Register a fresh kind directly on the registry — same
+            // entry point `register_or_match_all` walks per descriptor.
+            // A `String`-shaped param keeps the schema lookup distinct
+            // from any link-time entry the static vocabulary already
+            // submits.
+            let desc = KindDescriptor {
+                name: "aether.test.list_kinds_projection".to_owned(),
+                schema: SchemaType::String,
+            };
+            let expected_id = KindId(kind_id_from_parts(&desc.name, &desc.schema));
+            // Use the bench's registry (the one the cap also cloned in
+            // `fixture`) so the read sees what we just wrote.
+            fix.cap
+                .registry
+                .register_kind_with_descriptor(desc.clone())
+                .expect("register fresh kind");
+
+            let mut ctx = session_ctx(&fix.transport);
+            fix.cap.on_list_kinds(&mut ctx, ListKinds {});
+            drop(ctx);
+
+            let result = decode_reply::<ListKindsResult>(&fix.rx);
+            let entry = result
+                .kinds
+                .iter()
+                .find(|k| k.name == desc.name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ListKindsResult should carry the registered kind; names: {:?}",
+                        result.kinds.iter().map(|k| &k.name).collect::<Vec<_>>(),
+                    )
+                });
+            assert_eq!(entry.id, expected_id, "id matches kind_id_from_parts");
+            let schema: SchemaType = postcard::from_bytes(&entry.schema_postcard)
+                .expect("schema_postcard round-trips through postcard");
+            assert!(
+                matches!(schema, SchemaType::String),
+                "schema decodes back to the originally registered SchemaType",
             );
         }
 
