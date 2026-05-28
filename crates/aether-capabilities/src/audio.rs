@@ -135,6 +135,7 @@ mod native {
         /// fault (the env values flow through a total parser / raw capture).
         #[must_use]
         pub fn from_env() -> Self {
+            use aether_substrate::FromArgvThenEnv as _;
             use confique::Config as _;
 
             let layer = AudioConfigLayer::builder()
@@ -144,24 +145,12 @@ mod native {
             Self::from_layer(layer)
         }
 
-        /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
-        /// unit d, issue 1258). Argv-set fields win; unset (`None`) fall
-        /// through to `AETHER_AUDIO_*` env and then literal defaults.
-        ///
-        /// # Panics
-        ///
-        /// Same as [`Self::from_env`].
-        #[must_use]
-        pub fn from_argv_then_env(argv: <AudioConfigLayer as confique::Config>::Layer) -> Self {
-            use confique::Config as _;
+        // `from_argv_then_env` and `from_layer` come from the
+        // `FromArgvThenEnv` impl below (ADR-0090 unit d).
+    }
 
-            let layer = AudioConfigLayer::builder()
-                .preloaded(argv)
-                .env()
-                .load()
-                .expect("AudioConfigLayer defaults are well-formed");
-            Self::from_layer(layer)
-        }
+    impl aether_substrate::FromArgvThenEnv for AudioConfig {
+        type Layer = AudioConfigLayer;
 
         fn from_layer(layer: AudioConfigLayer) -> Self {
             Self {

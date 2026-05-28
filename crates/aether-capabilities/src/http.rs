@@ -143,6 +143,7 @@ impl HttpConfig {
     /// (the env values flow through total parsers).
     #[must_use]
     pub fn from_env() -> Self {
+        use aether_substrate::FromArgvThenEnv as _;
         use confique::Config as _;
 
         // Every field has a literal default and a total `parse_env`, so the
@@ -156,31 +157,17 @@ impl HttpConfig {
         Self::from_layer(layer)
     }
 
-    /// Resolve from a chassis-CLI argv overlay shadowing env (ADR-0090
-    /// unit d, issue 1258). Argv-set fields win; unset (`None`) fall
-    /// through to `AETHER_HTTP_*` env and then literal defaults. Used by
-    /// chassis bins after parsing the per-chassis [`crate::http::HttpConfigLayer`]
-    /// partial via clap; tests still build `HttpConfig` directly.
-    ///
-    /// # Panics
-    ///
-    /// Same as [`Self::from_env`]: only on a malformed literal default
-    /// (programmer error caught by `http_from_env_defaults_match`).
-    #[must_use]
-    pub fn from_argv_then_env(argv: <HttpConfigLayer as confique::Config>::Layer) -> Self {
-        use confique::Config as _;
+    // `from_argv_then_env` and `from_layer` come from the
+    // `FromArgvThenEnv` impl below (ADR-0090 unit d). Documentation
+    // for the per-cap argv-overlay behaviour lives on the trait method;
+    // call sites use the cap-namespaced form
+    // `HttpConfig::from_argv_then_env(argv)` with the trait imported.
+}
 
-        let layer = HttpConfigLayer::builder()
-            .preloaded(argv)
-            .env()
-            .load()
-            .expect("HttpConfigLayer defaults are well-formed");
-        Self::from_layer(layer)
-    }
+#[cfg(feature = "native")]
+impl aether_substrate::FromArgvThenEnv for HttpConfig {
+    type Layer = HttpConfigLayer;
 
-    /// Shared layer-to-domain mapping. Kept private so the layer shape
-    /// stays an implementation detail of [`Self::from_env`] /
-    /// [`Self::from_argv_then_env`].
     fn from_layer(layer: HttpConfigLayer) -> Self {
         Self {
             disabled: layer.disabled,

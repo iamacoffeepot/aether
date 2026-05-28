@@ -27,7 +27,7 @@ use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::handle_store::PersistConfig;
-use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot};
+use aether_substrate::{Chassis, FromArgvThenEnv, LifecycleDriverCapability, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 use crate::chassis_common::{
