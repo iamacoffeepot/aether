@@ -77,9 +77,24 @@ mod native {
         /// settled), then reconstructs the populated tree by walking the
         /// per-actor trace rings from this root (`aether.trace.tail`,
         /// stitched client-side — ADR-0086 Phase 3b). Issue 749.
+        ///
+        /// **Reply forwarding (issue 1265).** Each child is dispatched
+        /// with `reply_to = ctx.reply_target()` (the caller of this
+        /// `DispatchTraced` — typically the RPC server holding the wire
+        /// `cid`'s in-flight entry) rather than the default
+        /// `Component(self_mailbox)`. This trace cap is a re-dispatcher
+        /// with no handler for child reply kinds, so without the
+        /// forward each child's deferred reply (the `InFlightDispatch`
+        /// spawn-and-die pattern in content-gen caps) lands here and
+        /// silently drops, leaving the wire call with no `ReplyEvent`s.
+        /// Forwarding lets every child's reply (sync or deferred)
+        /// bubble straight to the original caller with the same
+        /// `correlation_id`, so the RPC server's `on_any` fallback wraps
+        /// each into a `ReplyEvent` on the wire.
         #[handler]
         fn on_dispatch_traced(&mut self, ctx: &mut NativeCtx<'_>, batch: DispatchTraced) {
             let root = ctx.in_flight_mail_id();
+            let forward_reply_to = ctx.reply_target();
             let DispatchTraced { mails } = batch;
             // Resolve every envelope's name addressing through the
             // substrate registry — same path `CaptureFrame`'s bundle
@@ -94,7 +109,12 @@ mod native {
                 }
             };
             for mail in resolved {
-                let _ = ctx.send_envelope_traced(mail.recipient, mail.kind, mail.payload.bytes());
+                let _ = ctx.send_envelope_traced_with_reply_to(
+                    mail.recipient,
+                    mail.kind,
+                    mail.payload.bytes(),
+                    forward_reply_to,
+                );
             }
             ctx.reply(&DispatchTracedAck::Ok { root });
         }

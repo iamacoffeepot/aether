@@ -968,6 +968,137 @@ mod tests {
         }
     }
 
+    /// A `Call` carrying a `DispatchTraced` batch with **two**
+    /// `DeferredEchoRequest` envelopes — the empirical `send_mail_traced`
+    /// failure shape: each child is itself a deferred-reply path
+    /// (spawn → loopback → re-reply), routed through the trace cap rather
+    /// than directly. Pre-fix the trace cap dispatched each child via
+    /// `ctx.send_envelope_traced` which stamps `reply_to` at the
+    /// dispatcher's own mailbox (the `push_envelope_buffered` default);
+    /// child deferred replies landed at the trace cap, which has no
+    /// handler for the reply kind and no `#[fallback]`, so they were
+    /// silently dropped. The wire call closed via the (still correct)
+    /// settlement signal with `replies: []`. The fix forwards each
+    /// child's `reply_to` to the trace cap's own inbound `reply_target`
+    /// (typically the RPC server holding the wire `cid`'s in-flight
+    /// entry), so child replies — sync or deferred — bubble through to
+    /// the wire as `ReplyEvent`s, and settlement still fires only after
+    /// each `InFlightDispatch` hold drops.
+    ///
+    /// Test asserts: TWO `ReplyEvent`s (one `DeferredEchoReply` per
+    /// request), then exactly ONE `ReplyEnd`. Order of the two events is
+    /// unspecified (the two deferred-echo handlers run in parallel
+    /// behind 50ms sleeps); the test pairs by `value`.
+    #[test]
+    fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
+        use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::trace::TraceDispatchCapability;
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+        use aether_kinds::MailEnvelope as TracedEnvelope;
+        use aether_kinds::trace::DispatchTraced;
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<DeferredEchoActor>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(10));
+        complete_handshake(&mut stream);
+
+        // Build a batched DispatchTraced with two DeferredEchoRequest
+        // envelopes, addressed at the deferred-echo actor by name (the
+        // trace cap resolves names through the registry).
+        let batch = DispatchTraced {
+            mails: vec![
+                TracedEnvelope {
+                    recipient_name: <DeferredEchoActor as Actor>::NAMESPACE.into(),
+                    kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
+                    payload: postcard::to_allocvec(&DeferredEchoRequest { value: 11 })
+                        .expect("encode req 11"),
+                    count: 1,
+                },
+                TracedEnvelope {
+                    recipient_name: <DeferredEchoActor as Actor>::NAMESPACE.into(),
+                    kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
+                    payload: postcard::to_allocvec(&DeferredEchoRequest { value: 22 })
+                        .expect("encode req 22"),
+                    count: 1,
+                },
+            ],
+        };
+        let trace_mailbox = mailbox_id_from_name(<TraceDispatchCapability as Actor>::NAMESPACE);
+        let payload = postcard::to_allocvec(&batch).expect("encode DispatchTraced");
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: Some(0xbeef),
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(trace_mailbox),
+                    from: None,
+                    kind: <DispatchTraced as Kind>::ID,
+                    correlation_id: None,
+                    payload,
+                },
+            },
+        )
+        .expect("test: write_frame Call DispatchTraced to rpc server");
+
+        // The trace cap's synchronous `DispatchTracedAck::Ok` reply
+        // arrives as a ReplyEvent. Drain it before scanning for the two
+        // deferred replies — its ordering is well-defined (the trace
+        // handler replies before the children run), so we can read it
+        // first without an unbound search.
+        let mut deferred_values: Vec<u64> = Vec::new();
+        let mut saw_ack = false;
+        // Drain up to 4 ReplyEvent frames (ack + 2 deferred + safety
+        // margin) before the ReplyEnd. Each iteration consumes one
+        // frame; the ReplyEnd breaks.
+        loop {
+            let frame: WireFrame = read_frame(&mut stream).expect("read frame");
+            match frame {
+                WireFrame::ReplyEvent { cid, envelope } => {
+                    assert_eq!(cid, 0xbeef);
+                    if envelope.kind == <DeferredEchoReply as Kind>::ID {
+                        let decoded: DeferredEchoReply =
+                            postcard::from_bytes(&envelope.payload).expect("decode deferred reply");
+                        deferred_values.push(decoded.value);
+                    } else {
+                        // Otherwise this is the DispatchTracedAck::Ok
+                        // reply; mark it observed but don't assert on
+                        // its payload here (the ack carries the root
+                        // MailId; the test's load-bearing assertions are
+                        // on the deferred-reply payloads).
+                        saw_ack = true;
+                    }
+                }
+                WireFrame::ReplyEnd { cid, result } => {
+                    assert_eq!(cid, 0xbeef);
+                    result.expect("ReplyEnd result Ok");
+                    break;
+                }
+                other => panic!("expected ReplyEvent / ReplyEnd, got {other:?}"),
+            }
+        }
+        assert!(
+            saw_ack,
+            "expected DispatchTracedAck reply event before ReplyEnd",
+        );
+        deferred_values.sort_unstable();
+        assert_eq!(
+            deferred_values,
+            vec![11, 22],
+            "expected one DeferredEchoReply per request, sorted by value",
+        );
+    }
+
     /// Fire-and-forget `Call { cid: None }` skips reply correlation
     /// entirely — no settlement subscription is created, no
     /// `ReplyEnd` is written. Verify by sending a Call with cid None
