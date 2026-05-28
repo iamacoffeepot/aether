@@ -26,6 +26,7 @@
 
 mod chassis_common;
 pub mod chassis_root;
+pub mod cli;
 pub mod desktop;
 pub mod headless;
 pub mod hub;
