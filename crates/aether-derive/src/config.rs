@@ -285,6 +285,10 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     // Layer field type:
     // - `ms_duration` → `u32`
     // - `Option<numeric>` → `Option<String>` (preserves soft-parse on bad input)
+    // - non-Option domain *without* a literal `default` → `Option<T>`
+    //   (confique requires either a default or `Option` — used by the
+    //   NamespaceRoots escape hatch where `dirs::data_dir()` defaults
+    //   are computed at runtime and the cap hand-writes `from_layer`).
     // - everything else → domain type
     //
     // The `Option<...>` shape is the bare identifier (not the
@@ -296,6 +300,9 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
         syn::parse_quote!(u32)
     } else if is_option_numeric {
         syn::parse_quote!(Option<String>)
+    } else if inner_option_ty.is_none() && attr.default.is_none() {
+        let inner = &domain_ty;
+        syn::parse_quote!(Option<#inner>)
     } else {
         domain_ty.clone()
     };
