@@ -6,14 +6,15 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
-# Trybuild fixtures spawn a nested `cargo` build per `.rs` fixture;
-# the `aether-data-derive` fixtures comfortably exceed 60s on CI even
-# without substrate's wasmtime in the graph (cargo subprocess + syn
-# monomorphization). iamacoffeepot/aether#1275 retired the
-# `aether-derive` half by feature-gating wasmtime, but data-derive
-# still needs the wider cap until it gets its own speedup pass.
+# Trybuild fixtures spawn a nested `cargo` build per `.rs` fixture.
+# iamacoffeepot/aether#1275 feature-gated wasmtime out of the
+# `aether-derive` fixture dep graph (local wall-clock 240s → 18s on
+# our dev boxes); CI's 2-core runners still push it past 60s under
+# parallel contention with `aether-data-derive`'s ui binary, so both
+# crates keep the wider cap. The bigger speedup for both is its own
+# follow-up.
 [[profile.ci.overrides]]
-filter = "package(=aether-data-derive)"
+filter = "package(=aether-data-derive) | package(=aether-derive)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Repeat-run ("soak") flake detection for concurrent tests, driven by
