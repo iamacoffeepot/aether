@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use aether_actor::Actor;
+use aether_actor::local::ActorSlots;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::error::BootError;
@@ -33,10 +34,86 @@ use std::sync::OnceLock;
 /// The capability owns the receiver afterward; the slot is consumed
 /// from the registry, so a second claim for the same name fails
 /// loud with [`BootError::MailboxAlreadyClaimed`].
-#[derive(Debug)]
+///
+/// `actor_slots` carries this claim's per-actor [`ActorSlots`] — the
+/// chassis [`crate::chassis::builder::Builder::with_actor`] path
+/// stamps this into TLS via [`aether_actor::local::with_stamped`]
+/// around `init` / `wire` / each dispatch so per-actor `Local<T>`
+/// lookups (notably the ADR-0081 `ActorLogRing`) resolve to the
+/// caller's storage. Driver-as-actor capabilities (issue 603 Phase 3,
+/// today only the desktop window driver) that bypass the standard
+/// dispatcher slot need to stamp the same slots around their bespoke
+/// drain so the framework-built-in `aether.log.tail` /
+/// `aether.trace.tail` / `aether.cost.tail` dispatch arms reach the
+/// expected ring (iamacoffeepot/aether#1272).
 pub struct MailboxClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
+    pub actor_slots: SharedActorSlots,
+}
+
+impl fmt::Debug for MailboxClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `ActorSlots` doesn't impl `Debug` (interior `RefCell<HashMap>`
+        // of type-erased boxes), so hand-roll Debug on `MailboxClaim`
+        // and finish non-exhaustively rather than deriving.
+        f.debug_struct("MailboxClaim")
+            .field("id", &self.id)
+            .field("receiver", &self.receiver)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Driver-as-actor's [`ActorSlots`] handle (iamacoffeepot/aether#1272).
+///
+/// `ActorSlots` uses interior `RefCell` (a single dispatcher thread is
+/// the sole owner per ADR-0038), so a bare `Arc<ActorSlots>` is neither
+/// `Send` nor `Sync`. Driver-as-actor capabilities access these slots
+/// only from their bespoke drain thread (the winit main thread for the
+/// desktop window driver), so the interior cell stays effectively
+/// single-threaded — mirrors the pooled dispatcher's `PooledSlots`
+/// wrapper, but here the access invariant is stricter (one fixed
+/// thread, not "at most one pool worker at a time"). The `unsafe impl
+/// Sync` / `Send` are the safety story.
+#[derive(Clone)]
+#[allow(
+    clippy::non_send_fields_in_send_ty,
+    reason = "driver-as-actor invariant: slots only touched on one fixed thread; see type docs"
+)]
+pub struct SharedActorSlots(Arc<ActorSlots>);
+
+// SAFETY: see the doc-comment on `SharedActorSlots`. The driver-as-actor
+// invariant is that the slots are only ever read inside
+// `local::with_stamped` on the driver's bespoke drain thread. No other
+// thread holds an `Arc` clone, so the interior `RefCell` accesses are
+// single-threaded by construction.
+unsafe impl Sync for SharedActorSlots {}
+// SAFETY: same justification — single-thread access.
+unsafe impl Send for SharedActorSlots {}
+
+impl SharedActorSlots {
+    /// Allocate a fresh per-actor slot map.
+    #[must_use]
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "SharedActorSlots's unsafe impl Send/Sync covers this Arc; see type docs"
+    )]
+    pub fn new() -> Self {
+        Self(Arc::new(ActorSlots::new()))
+    }
+
+    /// Borrow the inner [`ActorSlots`] for an
+    /// [`aether_actor::local::with_stamped`] call.
+    #[must_use]
+    pub fn slots(&self) -> &ActorSlots {
+        &self.0
+    }
+}
+
+impl Default for SharedActorSlots {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Result returned from [`ChassisCtx::claim_mailbox_drop_on_shutdown`].
@@ -249,7 +326,19 @@ impl<'a> ChassisCtx<'a> {
             }),
         )?;
         self.claimed_actor_mailboxes.push(id);
-        Ok(MailboxClaim { id, receiver: rx })
+        // iamacoffeepot/aether#1272: every claim returns its
+        // per-actor [`ActorSlots`] wrapped in [`SharedActorSlots`]. The
+        // `with_actor` boot path allocates its own [`ActorSlots`] (via
+        // `Box<ActorSlots>` in `ClaimResources`) and ignores this one;
+        // driver-as-actor capabilities that own the drain inline (the
+        // desktop window driver) wrap their bespoke drain in
+        // `local::with_stamped(slots.as_ref(), …)` so framework dispatch
+        // arms reach the actor's per-actor `Local<T>` rings.
+        Ok(MailboxClaim {
+            id,
+            receiver: rx,
+            actor_slots: SharedActorSlots::new(),
+        })
     }
 
     /// Variant of [`Self::claim_mailbox`] that returns a strong
@@ -417,5 +506,93 @@ impl<'a> ChassisCtx<'a> {
         }
         *self.fallback = Some(handler);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
+)]
+mod tests {
+    use super::*;
+
+    use aether_actor::Local;
+    use aether_actor::local::with_stamped;
+    use aether_kinds::descriptors;
+
+    use crate::actor::registry::ActorRegistry;
+    use crate::handle_store::HandleStore;
+    use crate::runtime::lifecycle::PanicAborter;
+    use crate::scheduler::{Pool, PoolConfig};
+
+    /// Per-actor scratch type for the iamacoffeepot/aether#1272 round-trip
+    /// test. Mirrors the `ActorLogRing` shape (`Default + Local`) at the
+    /// level the framework dispatch arm reaches it through.
+    #[derive(Default)]
+    struct Probe(u32);
+    impl Local for Probe {}
+
+    /// iamacoffeepot/aether#1272: a `MailboxClaim` returns its per-actor
+    /// `ActorSlots`. Driver-as-actor capabilities (today only the desktop
+    /// window driver) wrap their bespoke drain in
+    /// `local::with_stamped(&claim.actor_slots, …)` so framework dispatch
+    /// arms (`aether.log.tail` / `aether.trace.tail` / `aether.cost.tail`)
+    /// reach the actor's per-actor `Local<T>` rings.
+    #[test]
+    fn claim_mailbox_returns_stampable_actor_slots() {
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+        let actor_registry = Arc::new(ActorRegistry::new());
+        let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
+        let spawner = Arc::new(crate::Spawner::new(
+            Arc::clone(&registry),
+            actor_registry,
+            Arc::clone(&mailer),
+            Arc::clone(&aborter),
+            pool.wake_sink(),
+        ));
+        let mut fallback: Option<FallbackRouter> = None;
+        let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+        let mut ctx = ChassisCtx::new(
+            &registry,
+            &mailer,
+            &mut fallback,
+            &aborter,
+            &mut claimed_actor_mailboxes,
+            &spawner,
+        );
+
+        let claim = ctx
+            .claim_mailbox_with_override("test.iamacoffeepot.1272.driver")
+            .expect("first claim succeeds");
+
+        // Stamp the claim's slots into TLS and write through a `Local<T>`;
+        // a second `with_stamped` round-trips reads back through the same
+        // slot — the property the framework dispatch arm relies on when
+        // it calls `ActorLogRing::try_with(...)` inside the driver's
+        // bespoke drain.
+        with_stamped(claim.actor_slots.slots(), || {
+            Probe::with_mut(|p| p.0 = 0x1272);
+        });
+        let read_back = with_stamped(claim.actor_slots.slots(), || {
+            Probe::try_with(|p| p.0).expect("stamped slots carry Probe")
+        });
+        assert_eq!(read_back, 0x1272);
+
+        // A fresh `ActorSlots` (not the one carried on the claim) must
+        // see the Local at its default — confirms the round-trip above
+        // actually went through the claim's slots and not a stale TLS
+        // remnant.
+        let other = SharedActorSlots::new();
+        let other_read = with_stamped(other.slots(), || {
+            Probe::try_with(|p| p.0).expect("any stamped slots carry Probe")
+        });
+        assert_eq!(other_read, 0, "fresh slots see the Local at its default");
     }
 }

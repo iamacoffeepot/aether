@@ -79,6 +79,7 @@ pub use chassis::builder::{
 };
 pub use chassis::ctx::{
     ActorErased, ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender,
+    SharedActorSlots,
 };
 pub use chassis::error::BootError;
 pub use config::FromArgvThenEnv;
