@@ -158,6 +158,38 @@ pub trait Kind {
     }
 }
 
+/// `Kind` impl for the unit type. Lets `()` ride the same
+/// `Kind::decode_from_bytes` / `Kind::encode_into_bytes` shim path as
+/// real kinds, which is what makes the `FfiActor::Config = ()` default
+/// (ADR-0090) decode through a uniform macro body. A zero-length byte
+/// slice decodes to `Some(())`; any non-empty slice returns `None`.
+/// Encoding is the empty byte vector.
+///
+/// The `NAME` (`"aether.unit"`) gives the unit kind a stable wire name
+/// for the rare case it surfaces in diagnostics (`describe_kinds` does
+/// not enumerate it because it is not collected via inventory — the
+/// `#[cfg(not(target_arch = "wasm32"))]` inventory submission lives in
+/// the `Kind` derive, which this hand-rolled impl bypasses).
+impl Kind for () {
+    const NAME: &'static str = "aether.unit";
+    const ID: KindId = KindId(with_tag(
+        Tag::Kind,
+        fnv1a_64_prefixed(KIND_DOMAIN, Self::NAME.as_bytes()),
+    ));
+
+    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    fn encode_into_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
 /// Compile-time predicate: can this type's payload travel across the
 /// wire as raw `#[repr(C)]` bytes (and decode by `bytemuck::cast`)?
 ///
@@ -368,6 +400,16 @@ mod schema_impls {
 
     impl Schema for bool {
         const SCHEMA: SchemaType = SchemaType::Bool;
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+    }
+
+    // ADR-0090: the unit kind. Its schema is `SchemaType::Unit` and its
+    // label is anonymous. Pairs with the `impl Kind for ()` above so a
+    // 0-byte payload round-trips through `<() as Kind>::decode_from_bytes`
+    // — the macro's `Config = ()` default depends on it.
+    impl Schema for () {
+        const SCHEMA: SchemaType = SchemaType::Unit;
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
