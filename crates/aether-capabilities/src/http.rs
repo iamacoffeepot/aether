@@ -85,23 +85,70 @@ impl HttpAdapter for DisabledHttpAdapter {
 /// `AETHER_HTTP_TIMEOUT_MS`) into a `HttpConfig` and pass it to
 /// `HttpCapability::new`. Tests build a `HttpConfig` directly,
 /// never touching process env (issue 464).
+///
+/// ADR-0090 unit g (iamacoffeepot/aether#1264): the
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `HttpConfigLayer`, the clap-shaped `HttpOverlay`, the
+/// `FromArgvThenEnv` impl, and the inherent `from_env` /
+/// `from_argv_then_env` shims under `feature = "native"`. The
+/// wasm-marker build carries only the domain struct.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+#[cfg_attr(
+    feature = "native",
+    config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
+)]
 pub struct HttpConfig {
     /// `AETHER_HTTP_DISABLE=1` swaps the `UreqHttpAdapter` for a
     /// `DisabledHttpAdapter` that replies `HttpError::Disabled` to
-    /// every fetch.
+    /// every fetch. `env` + `cli_long` overrides pin the wire shape
+    /// (`AETHER_HTTP_DISABLE`, `--http-disable`) to the pre-derive
+    /// names while the domain field stays `disabled` for read-site
+    /// clarity.
+    #[cfg_attr(
+        feature = "native",
+        config(
+            env = "AETHER_HTTP_DISABLE",
+            cli_long = "http-disable",
+            default = false,
+            parse = parse_flag
+        )
+    )]
     pub disabled: bool,
     /// Hostnames the adapter will dial. Empty = deny all
     /// (deny-by-default per ADR-0043).
+    #[cfg_attr(
+        feature = "native",
+        config(default = [], parse = parse_allowlist, csv_set)
+    )]
     pub allowlist: HashSet<String>,
     /// `AETHER_HTTP_REQUIRE_HTTPS=1` rejects `http://` URLs with
     /// `HttpError::InvalidUrl`.
+    #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
     pub require_https: bool,
     /// Cap on inbound and outbound body bytes. Defaults to
     /// [`DEFAULT_MAX_BODY_BYTES`] (16 MB).
+    #[cfg_attr(
+        feature = "native",
+        config(default = 16_777_216, parse = parse_max_body_bytes)
+    )]
     pub max_body_bytes: usize,
     /// Default per-request timeout when `Fetch.timeout_ms` is
-    /// `None`. Defaults to [`DEFAULT_TIMEOUT_MS`] (30 s).
+    /// `None`. Defaults to [`DEFAULT_TIMEOUT_MS`] (30 s). The derive's
+    /// `ms_duration` hint stores the Layer field as `u32`-ms and
+    /// bridges via `Duration::from_millis(u64::from(...))`;
+    /// `layer_field = "timeout_ms"` pins the Layer / env / CLI shape to
+    /// the pre-derive name (`AETHER_HTTP_TIMEOUT_MS`,
+    /// `--http-timeout-ms`) for byte-identical compat.
+    #[cfg_attr(
+        feature = "native",
+        config(
+            default = 30_000,
+            parse = parse_timeout_ms,
+            ms_duration,
+            layer_field = "timeout_ms"
+        )
+    )]
     pub default_timeout: Duration,
 }
 
@@ -115,107 +162,6 @@ impl Default for HttpConfig {
             default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
         }
     }
-}
-
-// confique is a `native`-feature dep (ADR-0090), so env resolution — the
-// layer struct, its parsers, and `from_env` — is gated to match. The
-// wasm-marker build of this crate carries only the `HttpConfig` type.
-#[cfg(feature = "native")]
-impl HttpConfig {
-    /// Resolve every field from the corresponding `AETHER_HTTP_*`
-    /// environment variable. Used by chassis mains; tests build
-    /// `HttpConfig` directly so they never read process env.
-    ///
-    /// Resolution runs through confique (ADR-0090): the private
-    /// `HttpConfigLayer` declares each knob's env key + default in one
-    /// place, and this maps
-    /// the env-shaped layer onto the domain-shaped `HttpConfig` (ms →
-    /// `Duration`, CSV → `HashSet`). Behaviour is byte-identical to the
-    /// prior hand-rolled reader — an unparseable number still falls back
-    /// to its default. The hard-error-on-unparseable stance (ADR-0090 §4)
-    /// lands with the chassis-env validation pass, not this migration.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the layer's literal defaults are themselves
-    /// malformed — a programmer error caught by the
-    /// `http_from_env_defaults_match` test, never a runtime config fault
-    /// (the env values flow through total parsers).
-    #[must_use]
-    pub fn from_env() -> Self {
-        use aether_substrate::FromArgvThenEnv as _;
-        use confique::Config as _;
-
-        // Every field has a literal default and a total `parse_env`, so the
-        // layer always resolves; a failure here is a malformed default
-        // literal (a programmer error the `http_from_env_defaults_match`
-        // test catches), not a runtime config fault.
-        let layer = HttpConfigLayer::builder()
-            .env()
-            .load()
-            .expect("HttpConfigLayer defaults are well-formed");
-        Self::from_layer(layer)
-    }
-
-    // `from_argv_then_env` and `from_layer` come from the
-    // `FromArgvThenEnv` impl below (ADR-0090 unit d). Documentation
-    // for the per-cap argv-overlay behaviour lives on the trait method;
-    // call sites use the cap-namespaced form
-    // `HttpConfig::from_argv_then_env(argv)` with the trait imported.
-}
-
-#[cfg(feature = "native")]
-impl aether_substrate::FromArgvThenEnv for HttpConfig {
-    type Layer = HttpConfigLayer;
-
-    fn from_layer(layer: HttpConfigLayer) -> Self {
-        Self {
-            disabled: layer.disabled,
-            allowlist: layer.allowlist,
-            require_https: layer.require_https,
-            max_body_bytes: layer.max_body_bytes,
-            default_timeout: Duration::from_millis(u64::from(layer.timeout_ms)),
-        }
-    }
-}
-
-/// Env-shaped confique layer behind [`HttpConfig`] (ADR-0090). Each field
-/// is the primitive representation its `AETHER_HTTP_*` variable carries —
-/// notably the timeout as `u32` milliseconds and the allowlist as a
-/// comma-separated string parsed into a set — which [`HttpConfig::from_env`]
-/// maps onto the domain types. Public so chassis CLI overlays
-/// (ADR-0090 unit d, issue 1258) can preload a `<HttpConfigLayer as
-/// confique::Config>::Layer` before `.env()`; the consumed shape stays
-/// [`HttpConfig`].
-#[cfg(feature = "native")]
-#[derive(confique::Config)]
-pub struct HttpConfigLayer {
-    /// `AETHER_HTTP_DISABLE=1`/`true` swaps in the disabled adapter.
-    #[config(env = "AETHER_HTTP_DISABLE", parse_env = parse_flag, default = false)]
-    pub disabled: bool,
-    /// Comma-separated hostnames; empty/unset = deny all (ADR-0043).
-    #[config(env = "AETHER_HTTP_ALLOWLIST", parse_env = parse_allowlist, default = [])]
-    pub allowlist: HashSet<String>,
-    /// `AETHER_HTTP_REQUIRE_HTTPS=1`/`true` rejects `http://` URLs.
-    #[config(env = "AETHER_HTTP_REQUIRE_HTTPS", parse_env = parse_flag, default = false)]
-    pub require_https: bool,
-    /// Body cap in bytes. The literal default mirrors
-    /// [`DEFAULT_MAX_BODY_BYTES`] (confique `default` takes a literal, not
-    /// the named const); `http_from_env_defaults_match` guards the match.
-    #[config(
-        env = "AETHER_HTTP_MAX_BODY_BYTES",
-        parse_env = parse_max_body_bytes,
-        default = 16_777_216
-    )]
-    pub max_body_bytes: usize,
-    /// Per-request timeout in milliseconds. Literal default mirrors
-    /// [`DEFAULT_TIMEOUT_MS`] (30 s).
-    #[config(
-        env = "AETHER_HTTP_TIMEOUT_MS",
-        parse_env = parse_timeout_ms,
-        default = 30_000
-    )]
-    pub timeout_ms: u32,
 }
 
 // confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`, so

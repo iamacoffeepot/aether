@@ -86,6 +86,7 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "bytemuck",
+ "clap",
  "confique",
  "cpal",
  "crossbeam-queue",

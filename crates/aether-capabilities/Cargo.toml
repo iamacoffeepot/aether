@@ -36,6 +36,7 @@ default = ["native"]
 native = [
     "dep:aether-substrate",
     "dep:bytemuck",
+    "dep:clap",
     "dep:confique",
     "dep:dirs",
     "dep:postcard",
@@ -78,6 +79,12 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
 bytemuck = { version = "1.19", optional = true }
+# ADR-0090 unit g (iamacoffeepot/aether#1264): the `Config` derive
+# emits per-cap `*Overlay` structs (`#[derive(clap::Args)]`) next to
+# the domain struct, retiring the hand-rolled overlays that used to
+# live in `aether-substrate-bundle::cli`. clap rides the `native`
+# feature so wasm builds skip it.
+clap = { workspace = true, optional = true }
 # ADR-0090: typed, layered config resolution. Used by the env-shaped
 # `*Layer` structs (e.g. `HttpConfigLayer`) that back each cap's
 # `*Config::from_env`. `default-features = false` keeps it env-only —
