@@ -156,6 +156,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-derive",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trybuild",
+]
+
+[[package]]
 name = "aether-kinds"
 version = "0.3.0-alpha"
 dependencies = [

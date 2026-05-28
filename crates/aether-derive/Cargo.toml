@@ -1,0 +1,36 @@
+[package]
+name = "aether-derive"
+version.workspace = true
+edition.workspace = true
+
+# Engine-wide derive macros that don't fit the actor or data
+# categories. The `Config` derive (ADR-0090 unit g, issue 1264)
+# collapses a cap's domain struct + confique `*Layer` + clap
+# `*Overlay` + `from_layer` mapping into a single `#[derive]`.
+# Re-exported from `aether-substrate::Config` so consumers write
+# `#[derive(aether_substrate::Config)]`.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+# trybuild compile-pass / compile-fail fixtures under tests/ui/. Each
+# fixture is its own tiny crate; the dev-deps below ride into those.
+trybuild = "1"
+# The macro emits `::aether_substrate::FromArgvThenEnv`-typed impls, so
+# every fixture needs aether-substrate (which itself re-exports the
+# derive). `confique` and `clap` are reached for by the macro's emitted
+# Layer + Overlay structs. Each fixture brings the deps it needs from
+# this set.
+aether-substrate = { path = "../aether-substrate" }
+aether-derive = { path = "." }
+confique = { version = "0.4", default-features = false }
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true
