@@ -67,6 +67,28 @@ if tunnel_is_up; then
     exit 0
 fi
 
+# Pre-build every binary the tunnel will need to fork. `cargo run` below only
+# builds `aether-tunnel`; in a fresh worktree where `target/release/` is empty
+# the tunnel comes up and then fails to fork its children with
+# `No such file or directory`. Naming each binary explicitly here keeps the
+# fork chain build-complete on first invocation. Cargo no-ops when everything
+# is current, so warm-target runs stay fast.
+#
+# Fork chain (extend this list if a new forked binary is added):
+#   aether-tunnel        — the supervisor process itself (started below)
+#   aether-mcp           — forked by the tunnel; speaks MCP to Claude
+#   aether-substrate-hub — forked by the tunnel; the RPC server the fleet talks to
+#   aether-substrate-headless — forked by the hub for `spawn_substrate`
+echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)..."
+(
+    cd "$PROJECT_DIR" || exit 0
+    cargo build --release \
+        -p aether-mcp --bin aether-tunnel \
+        -p aether-mcp --bin aether-mcp \
+        -p aether-substrate-bundle --bin aether-substrate-hub \
+        -p aether-substrate-bundle --bin aether-substrate-headless
+) || true
+
 # Pick a launch command: prefer a pre-built binary (fast, clean reap), else
 # fall back to `cargo run` (rebuild-friendly).
 RELEASE_BIN="${PROJECT_DIR}/target/release/aether-tunnel"
