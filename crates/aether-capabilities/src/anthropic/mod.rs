@@ -138,18 +138,58 @@ mod config {
     /// `AETHER_ANTHROPIC_MAX_IN_FLIGHT`, `AETHER_ANTHROPIC_TIMEOUT_MS`)
     /// into this and pass it to `with_actor::<AnthropicCapability>(cfg)`.
     /// Tests build it directly so they never read process env.
+    ///
+    /// ADR-0090 unit g (iamacoffeepot/aether#1264): the
+    /// `#[derive(aether_substrate::Config)]` emits the env-shaped
+    /// `AnthropicConfigLayer`, the clap-shaped `AnthropicOverlay`, the
+    /// `FromArgvThenEnv` impl, and the inherent `from_env` shims under
+    /// `feature = "native"`. The wasm-marker build carries only the
+    /// domain struct.
     #[derive(Clone, Debug)]
+    #[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+    #[cfg_attr(
+        feature = "native",
+        config(env_prefix = "AETHER_ANTHROPIC", cli_prefix = "anthropic")
+    )]
     pub struct AnthropicConfig {
         /// The Messages-API key. `None` (or `disabled`) wires the
         /// `DisabledAnthropicAdapter` so Messages requests reply
-        /// `Unauthorized` while the CLI path still works.
+        /// `Unauthorized` while the CLI path still works. `env`
+        /// override pins the unprefixed `ANTHROPIC_API_KEY` key.
+        #[cfg_attr(feature = "native", config(env = "ANTHROPIC_API_KEY"))]
         pub api_key: Option<String>,
         /// `AETHER_ANTHROPIC_DISABLE=1` forces the disabled adapter
-        /// even when a key is present.
+        /// even when a key is present. `env` + `cli_long` overrides
+        /// pin the historical wire shape (no `D` suffix on `DISABLE`).
+        #[cfg_attr(
+            feature = "native",
+            config(
+                env = "AETHER_ANTHROPIC_DISABLE",
+                cli_long = "anthropic-disable",
+                default = false,
+                parse = parse_flag
+            )
+        )]
         pub disabled: bool,
         /// Per-cap concurrency bound (doubles as rate-limit throttling).
+        #[cfg_attr(
+            feature = "native",
+            config(default = 2, parse = parse_provider_max_in_flight)
+        )]
         pub max_in_flight: usize,
-        /// Per-request timeout for the Messages API.
+        /// Per-request timeout for the Messages API. The derive's
+        /// `ms_duration` hint + `layer_field = "timeout_ms"` pin the
+        /// Layer / env / CLI shape to the pre-derive name
+        /// (`AETHER_ANTHROPIC_TIMEOUT_MS`, `--anthropic-timeout-ms`).
+        #[cfg_attr(
+            feature = "native",
+            config(
+                default = 120_000,
+                parse = parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>,
+                ms_duration,
+                layer_field = "timeout_ms"
+            )
+        )]
         pub timeout: Duration,
     }
 
@@ -162,95 +202,6 @@ mod config {
                 timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
             }
         }
-    }
-
-    // confique is a `native`-feature dep (ADR-0090), so env resolution —
-    // the layer struct, its parsers, and `from_env` — is gated to match.
-    // The wasm-marker build carries only the `AnthropicConfig` type. (The
-    // `anthropic` module is itself `not(target_arch = "wasm32")`, so the
-    // wasm cross-build never sees this; the `feature = "native"` gate
-    // guards the non-wasm `default-features = false` build.)
-    #[cfg(feature = "native")]
-    impl AnthropicConfig {
-        /// Resolve every field from env. Chassis-main edge only — the
-        /// cap itself never reads env.
-        ///
-        /// Resolution runs through confique (ADR-0090): the private
-        /// `AnthropicConfigLayer` declares each knob's env key + default
-        /// in one place, and this maps the env-shaped layer onto the
-        /// domain-shaped `AnthropicConfig` (ms → `Duration`). Behaviour is
-        /// byte-identical to the prior hand-rolled reader. The hard-error
-        /// stance (ADR-0090 §4) lands with the chassis-env validation pass.
-        ///
-        /// # Panics
-        ///
-        /// Panics only if the layer's literal defaults are themselves
-        /// malformed — a programmer error caught by the
-        /// `anthropic_from_env_defaults_match` test, never a runtime config
-        /// fault (the env values flow through total parsers).
-        #[must_use]
-        pub fn from_env() -> Self {
-            use aether_substrate::FromArgvThenEnv as _;
-            use confique::Config as _;
-
-            let layer = AnthropicConfigLayer::builder()
-                .env()
-                .load()
-                .expect("AnthropicConfigLayer defaults are well-formed");
-            Self::from_layer(layer)
-        }
-
-        // `from_argv_then_env` and `from_layer` come from the
-        // `FromArgvThenEnv` impl below (ADR-0090 unit d).
-    }
-
-    #[cfg(feature = "native")]
-    impl aether_substrate::FromArgvThenEnv for AnthropicConfig {
-        type Layer = AnthropicConfigLayer;
-
-        fn from_layer(layer: AnthropicConfigLayer) -> Self {
-            Self {
-                api_key: layer.api_key.filter(|s| !s.is_empty()),
-                disabled: layer.disabled,
-                max_in_flight: layer.max_in_flight,
-                timeout: Duration::from_millis(u64::from(layer.timeout_ms)),
-            }
-        }
-    }
-
-    /// Env-shaped confique layer behind `AnthropicConfig` (ADR-0090). Each
-    /// field is the primitive its env var carries; `AnthropicConfig::from_env`
-    /// maps them onto the domain types (ms → `Duration`, empty key →
-    /// `None`). Public so chassis CLI overlays (ADR-0090 unit d,
-    /// issue 1258) can preload a `<AnthropicConfigLayer as
-    /// confique::Config>::Layer` before `.env()`; the consumed shape
-    /// stays `AnthropicConfig`.
-    #[cfg(feature = "native")]
-    #[derive(confique::Config)]
-    pub struct AnthropicConfigLayer {
-        /// `ANTHROPIC_API_KEY` (bare, un-prefixed). Empty/unset → `None`
-        /// after the `from_env` filter.
-        #[config(env = "ANTHROPIC_API_KEY")]
-        pub api_key: Option<String>,
-        /// `AETHER_ANTHROPIC_DISABLE=1`/`true` forces the disabled adapter.
-        #[config(env = "AETHER_ANTHROPIC_DISABLE", parse_env = parse_flag, default = false)]
-        pub disabled: bool,
-        /// Per-cap concurrency bound. A non-positive / unparseable value
-        /// falls back to the default (`> 0` filter preserved).
-        #[config(
-            env = "AETHER_ANTHROPIC_MAX_IN_FLIGHT",
-            parse_env = parse_provider_max_in_flight,
-            default = 2
-        )]
-        pub max_in_flight: usize,
-        /// Per-request timeout in milliseconds. Literal default mirrors
-        /// `DEFAULT_TIMEOUT_MS` (120 s).
-        #[config(
-            env = "AETHER_ANTHROPIC_TIMEOUT_MS",
-            parse_env = parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>,
-            default = 120_000
-        )]
-        pub timeout_ms: u32,
     }
 
     #[cfg(all(test, feature = "native"))]
