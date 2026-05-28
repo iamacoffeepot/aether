@@ -46,12 +46,12 @@ pub const MODELS: &[ModelShape] = &[
         max_object_refs: 6,
         max_character_refs: 5,
     },
-    // NB2 — flash image preview (default). S512; 10 object / 4 character
-    // refs; the NB2-only knobs + extreme aspect ratios.
+    // NB2 — flash image preview (default). S512/K1/K2/K4; 10 object / 4
+    // character refs; the NB2-only knobs + extreme aspect ratios.
     ModelShape {
         id: "gemini-3.1-flash-image-preview",
         is_nb2: true,
-        image_sizes: &[ImageSize::S512],
+        image_sizes: &[ImageSize::S512, ImageSize::K1, ImageSize::K2, ImageSize::K4],
         max_object_refs: 10,
         max_character_refs: 4,
     },
@@ -385,6 +385,16 @@ mod tests {
             err,
             GeminiError::ImageSizeNotSupportedByModel { .. }
         ));
+    }
+
+    #[test]
+    fn nb2_accepts_high_res_sizes() {
+        // NB2 (gemini-3.1-flash-image-preview) supports 512/1K/2K/4K — not
+        // S512-only. K1/K2/K4 must all validate.
+        for size in [ImageSize::K1, ImageSize::K2, ImageSize::K4] {
+            validate(nb2(), &inputs(AspectRatio::ASPECT_RATIO_1_1, Some(size)))
+                .unwrap_or_else(|e| panic!("NB2 should accept {size:?}: {e:?}"));
+        }
     }
 
     #[test]
