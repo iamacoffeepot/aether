@@ -35,6 +35,12 @@ exclude = [
 version = "0.3.0-alpha"
 edition = "2024"
 
+[workspace.dependencies]
+# Chassis-binary argv parsing (ADR-0090 unit d, issue 1258). One
+# consumer today (`aether-substrate-bundle`); workspaced so future CLI
+# surfaces reach for the same major.
+clap = { version = "4", features = ["derive"] }
+
 [workspace.lints.rust]
 # Phase 5 of iamacoffeepot/aether#913 swept ~244 RsUnnecessaryQualifications
 # findings across the workspace. Enabling rustc's matching lint here at

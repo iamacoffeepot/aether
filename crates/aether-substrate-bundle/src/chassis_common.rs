@@ -26,8 +26,24 @@ use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
+use aether_substrate::handle_store::PersistConfig;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::{LifecycleDriverConfig, LifecycleGraph};
+
+/// Chassis-bin verdict on the handle-store persistence config (ADR-0090
+/// unit d, issue 1258). [`EnvOnly`](Self::EnvOnly) keeps the pre-d
+/// `HandleStore::from_env_persistent` resolution; [`Argv`](Self::Argv)
+/// carries the argv-then-env-resolved `PersistConfig` (with the inner
+/// `None` meaning "argv said persistence is off"). The two-variant
+/// enum avoids `Option<Option<_>>` (`clippy::option_option`).
+#[derive(Clone, Debug, Default)]
+pub enum PersistOverride {
+    /// No argv overlay; resolve persistence from env at build time.
+    #[default]
+    EnvOnly,
+    /// Argv overlay resolved: use this verbatim.
+    Argv(Option<PersistConfig>),
+}
 
 /// Build the standard single-stage lifecycle config every Tick-driven
 /// chassis shares today (ADR-0082 PR 3b): a `Tick` self-loop with a

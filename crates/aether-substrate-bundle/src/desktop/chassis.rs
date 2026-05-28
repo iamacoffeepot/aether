@@ -22,15 +22,20 @@ use aether_capabilities::{
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{
+    Chassis, FromArgvThenEnv, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue,
+};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::chassis_common::{
-    CommonBoot, maybe_with_rpc_server, tick_only_lifecycle_config, with_common_caps,
+    CommonBoot, PersistOverride, maybe_with_rpc_server, tick_only_lifecycle_config,
+    with_common_caps,
 };
+use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
+use aether_substrate::handle_store::PersistConfig;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::env;
@@ -95,6 +100,14 @@ pub struct DesktopEnv {
     /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
     /// (`available_parallelism() - 1`, min 1).
     pub workers: Option<usize>,
+    /// ADR-0090 unit d (issue 1258): chassis-bin verdict on handle-
+    /// store persistence. See [`PersistOverride`] for variant
+    /// semantics.
+    pub persist: PersistOverride,
+    /// ADR-0090 unit d (issue 1258): argv overlay for the handle-store
+    /// in-memory byte budget. `None` falls through to env-only
+    /// `AETHER_HANDLE_STORE_MAX_BYTES`.
+    pub handle_store_max_bytes: Option<usize>,
 }
 
 impl DesktopEnv {
@@ -108,44 +121,106 @@ impl DesktopEnv {
     /// is infallible env reads. The signature names that fault rather
     /// than the historic catch-all `wasmtime::Result` (issue #571).
     pub fn from_env() -> Result<Self, EventLoopError> {
+        Self::from_env_with_argv(DesktopCli::default())
+    }
+
+    /// ADR-0090 unit d (issue 1258): resolve every cap config through
+    /// the argv-then-env overlay. `cli` carries `Option<T>` flags;
+    /// unset fields fall through to env-only resolution, so an empty
+    /// argv (the path the existing `from_env` callers exercise) is
+    /// byte-identical to the pre-d behaviour.
+    pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, EventLoopError> {
+        let DesktopCli {
+            common,
+            audio: audio_overlay,
+            window_mode: cli_window_mode,
+            window_title: cli_window_title,
+        } = cli;
+        let CommonOverlay {
+            http,
+            fs,
+            anthropic,
+            gemini,
+            persist,
+            workers: cli_workers,
+            rpc_port: cli_rpc_port,
+        } = common;
+
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
 
-        let http = HttpConf::from_env();
-        let anthropic = AnthropicConfig::from_env();
-        let gemini = GeminiConfig::from_env();
-        let namespace_roots = NamespaceRoots::from_env();
-        let audio = AudioConf::from_env();
+        let http = HttpConf::from_argv_then_env(http.into_layer());
+        let anthropic = AnthropicConfig::from_argv_then_env(anthropic.into_layer());
+        let gemini = GeminiConfig::from_argv_then_env(gemini.into_layer());
+        let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
+        let audio = AudioConf::from_argv_then_env(audio_overlay.into_layer());
 
-        // nested matches read clearer than `map_or_else` here because both
-        // arms have multi-line bodies (warn-log path on parse failure).
+        // Window mode: argv wins over `AETHER_WINDOW_MODE` env. The
+        // parser is shared (`parse_window_mode_env`); a bad argv string
+        // warn-logs and falls back to Windowed, matching the env path.
         #[allow(clippy::option_if_let_else)]
-        let (boot_mode, boot_size) = match env::var("AETHER_WINDOW_MODE") {
-            Ok(s) => match parse_window_mode_env(&s) {
+        let (boot_mode, boot_size) = if let Some(s) = cli_window_mode {
+            match parse_window_mode_env(&s) {
                 Ok(parsed) => parsed,
                 Err(e) => {
                     tracing::warn!(
                         target: "aether_substrate::boot",
                         value = %s,
                         error = %e,
-                        "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
+                        "--window-mode unparseable — falling back to Windowed",
                     );
                     (WindowMode::Windowed, None)
                 }
-            },
-            Err(_) => (WindowMode::Windowed, None),
+            }
+        } else {
+            match env::var("AETHER_WINDOW_MODE") {
+                Ok(s) => match parse_window_mode_env(&s) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "aether_substrate::boot",
+                            value = %s,
+                            error = %e,
+                            "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
+                        );
+                        (WindowMode::Windowed, None)
+                    }
+                },
+                Err(_) => (WindowMode::Windowed, None),
+            }
         };
-        let boot_title = env::var("AETHER_WINDOW_TITLE").unwrap_or_else(|_| "aether".to_owned());
+        let boot_title = cli_window_title
+            .or_else(|| env::var("AETHER_WINDOW_TITLE").ok())
+            .unwrap_or_else(|| "aether".to_owned());
 
-        // `AETHER_RPC_PORT` has no default — absent means RpcServer
-        // doesn't boot. Binds `127.0.0.1`, matching the hub chassis.
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
-            hub::rpc_port_from_env().map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
+            cli_rpc_port
+                .or_else(hub::rpc_port_from_env)
+                .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
-        let workers = parse_workers_env();
+        let workers = cli_workers.or_else(parse_workers_env);
+
+        // Persistence overlay: parallel to headless (issue 1258). The
+        // chassis-bin vote is `persist_enabled=true` (desktop opts into
+        // on-disk persistence per ADR-0049 §9).
+        let persist_argv_set = persist.dir.is_some()
+            || persist.persist_disable.is_some()
+            || persist.disk_budget_bytes.is_some()
+            || persist.eviction_tick_secs.is_some();
+        let persist_state = if persist_argv_set {
+            PersistOverride::Argv(PersistConfig::from_argv_then_env(
+                true,
+                persist.dir.clone(),
+                persist.persist_disable,
+                persist.numeric_layer(),
+            ))
+        } else {
+            PersistOverride::EnvOnly
+        };
+        let handle_store_max_bytes = persist.max_bytes;
 
         Ok(Self {
             event_loop,
@@ -160,6 +235,8 @@ impl DesktopEnv {
             boot_title,
             rpc_addr,
             workers,
+            persist: persist_state,
+            handle_store_max_bytes,
         })
     }
 }
@@ -216,12 +293,21 @@ impl DesktopChassis {
             boot_title,
             rpc_addr,
             workers,
+            persist,
+            handle_store_max_bytes,
         } = env;
 
         // ADR-0049 §9: desktop enables on-disk handle persistence.
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
+        // ADR-0090 unit d: when the chassis bin parsed an argv overlay
+        // for persist config / max_bytes, those override the env-only
+        // resolution `SubstrateBoot` would otherwise run.
+        let mut boot_builder = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
             .persist_enabled(true)
-            .build()?;
+            .handle_store_max_bytes(handle_store_max_bytes);
+        if let PersistOverride::Argv(p) = persist {
+            boot_builder = boot_builder.persist_config(p);
+        }
+        let boot = boot_builder.build()?;
 
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),

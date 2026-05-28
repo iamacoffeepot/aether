@@ -143,6 +143,7 @@ impl HttpConfig {
     /// (the env values flow through total parsers).
     #[must_use]
     pub fn from_env() -> Self {
+        use aether_substrate::FromArgvThenEnv as _;
         use confique::Config as _;
 
         // Every field has a literal default and a total `parse_env`, so the
@@ -153,6 +154,21 @@ impl HttpConfig {
             .env()
             .load()
             .expect("HttpConfigLayer defaults are well-formed");
+        Self::from_layer(layer)
+    }
+
+    // `from_argv_then_env` and `from_layer` come from the
+    // `FromArgvThenEnv` impl below (ADR-0090 unit d). Documentation
+    // for the per-cap argv-overlay behaviour lives on the trait method;
+    // call sites use the cap-namespaced form
+    // `HttpConfig::from_argv_then_env(argv)` with the trait imported.
+}
+
+#[cfg(feature = "native")]
+impl aether_substrate::FromArgvThenEnv for HttpConfig {
+    type Layer = HttpConfigLayer;
+
+    fn from_layer(layer: HttpConfigLayer) -> Self {
         Self {
             disabled: layer.disabled,
             allowlist: layer.allowlist,
@@ -167,20 +183,22 @@ impl HttpConfig {
 /// is the primitive representation its `AETHER_HTTP_*` variable carries —
 /// notably the timeout as `u32` milliseconds and the allowlist as a
 /// comma-separated string parsed into a set — which [`HttpConfig::from_env`]
-/// maps onto the domain types. Kept private: the public, consumed shape
-/// stays [`HttpConfig`].
+/// maps onto the domain types. Public so chassis CLI overlays
+/// (ADR-0090 unit d, issue 1258) can preload a `<HttpConfigLayer as
+/// confique::Config>::Layer` before `.env()`; the consumed shape stays
+/// [`HttpConfig`].
 #[cfg(feature = "native")]
 #[derive(confique::Config)]
-struct HttpConfigLayer {
+pub struct HttpConfigLayer {
     /// `AETHER_HTTP_DISABLE=1`/`true` swaps in the disabled adapter.
     #[config(env = "AETHER_HTTP_DISABLE", parse_env = parse_flag, default = false)]
-    disabled: bool,
+    pub disabled: bool,
     /// Comma-separated hostnames; empty/unset = deny all (ADR-0043).
     #[config(env = "AETHER_HTTP_ALLOWLIST", parse_env = parse_allowlist, default = [])]
-    allowlist: HashSet<String>,
+    pub allowlist: HashSet<String>,
     /// `AETHER_HTTP_REQUIRE_HTTPS=1`/`true` rejects `http://` URLs.
     #[config(env = "AETHER_HTTP_REQUIRE_HTTPS", parse_env = parse_flag, default = false)]
-    require_https: bool,
+    pub require_https: bool,
     /// Body cap in bytes. The literal default mirrors
     /// [`DEFAULT_MAX_BODY_BYTES`] (confique `default` takes a literal, not
     /// the named const); `http_from_env_defaults_match` guards the match.
@@ -189,7 +207,7 @@ struct HttpConfigLayer {
         parse_env = parse_max_body_bytes,
         default = 16_777_216
     )]
-    max_body_bytes: usize,
+    pub max_body_bytes: usize,
     /// Per-request timeout in milliseconds. Literal default mirrors
     /// [`DEFAULT_TIMEOUT_MS`] (30 s).
     #[config(
@@ -197,7 +215,7 @@ struct HttpConfigLayer {
         parse_env = parse_timeout_ms,
         default = 30_000
     )]
-    timeout_ms: u32,
+    pub timeout_ms: u32,
 }
 
 // confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`, so

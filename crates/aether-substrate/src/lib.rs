@@ -43,6 +43,7 @@ pub mod actor;
 pub mod boot;
 pub mod capture;
 pub mod chassis;
+pub mod config;
 pub mod dag;
 pub mod handle_store;
 pub mod lifecycle;
@@ -73,6 +74,7 @@ pub use chassis::ctx::{
     ActorErased, ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender,
 };
 pub use chassis::error::BootError;
+pub use config::FromArgvThenEnv;
 pub use lifecycle::{LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{
