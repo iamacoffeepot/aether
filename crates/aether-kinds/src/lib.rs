@@ -1689,10 +1689,10 @@ mod control_plane {
     /// `Schema` impl (it *is* the schema vocabulary, not a value in
     /// it); shipping it as `Bytes` keeps `KindDescriptorWire` and the
     /// whole reply derivable via [`aether_data::Schema`] without a
-    /// hand-roll, at the cost of one extra `postcard::from_bytes`
-    /// on the harness side. Cap encodes via [`postcard::to_allocvec`]
+    /// hand-roll, at the cost of one extra `postcard::from_bytes` on
+    /// the harness side. Cap encodes via `postcard::to_allocvec`
     /// against `descriptor.schema`; client decodes via
-    /// [`postcard::from_bytes`].
+    /// `postcard::from_bytes`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct KindDescriptorWire {
         pub id: aether_data::KindId,
@@ -1701,11 +1701,12 @@ mod control_plane {
     }
 
     /// `aether.inventory.kinds` — request the running substrate's
-    /// authoritative kind vocabulary (ADR-0091): every [`KindId`] the
-    /// engine's `Registry` currently holds, with its full
-    /// [`SchemaType`]. Empty payload; the request *is* the signal.
-    /// Mailed to the `"aether.inventory"` mailbox; reply:
-    /// [`ListKindsResult`].
+    /// authoritative kind vocabulary (ADR-0091): every
+    /// [`KindId`](aether_data::KindId) the engine's `Registry`
+    /// currently holds, with its full
+    /// [`SchemaType`](aether_data::SchemaType). Empty payload; the
+    /// request *is* the signal. Mailed to the `"aether.inventory"`
+    /// mailbox; reply: [`ListKindsResult`].
     ///
     /// The MCP harness uses this to refresh its per-engine encode-
     /// cache after a `load_component` registers a component's own
