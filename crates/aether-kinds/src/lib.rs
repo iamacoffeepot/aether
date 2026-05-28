@@ -2500,9 +2500,9 @@ mod control_plane {
         ASPECT_RATIO_8_1,
     }
 
-    /// Output image size for a Nano Banana image. `S512` is NB2; `K1`
-    /// is NB1 / NB Pro; `K2` / `K4` are NB Pro only. The adapter
-    /// enforces the per-model support matrix.
+    /// Output image size for a Nano Banana image. `S512` is NB2-only;
+    /// `K1` is supported by every model; `K2` / `K4` by NB Pro and NB2
+    /// (not the legacy NB1). The adapter enforces the per-model matrix.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ImageSize {
         S512,
