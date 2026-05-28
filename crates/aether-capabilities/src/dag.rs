@@ -49,7 +49,7 @@ mod native {
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::dag::executor::{Executor, SubmitOutcome};
+    use aether_substrate::dag::executor::{Executor, ExecutorConfig, SubmitOutcome};
     use aether_substrate::mail::mailer::Mailer;
 
     /// Reaping cadence (ADR-0047 §7) — the timer thread fires a
@@ -78,7 +78,7 @@ mod native {
         fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let mailer: Arc<Mailer> = ctx.mailer();
             let self_id: MailboxId = ctx.self_id();
-            let executor = Executor::new(Arc::clone(&mailer), self_id);
+            let executor = Executor::new(Arc::clone(&mailer), self_id, ExecutorConfig::from_env());
 
             // Detached timer thread: fire a `DagReapTick` wake mail at
             // the cap every `REAP_INTERVAL`. The mail wakes the

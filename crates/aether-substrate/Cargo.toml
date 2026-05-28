@@ -32,6 +32,14 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
+# ADR-0090: typed, layered config resolution. Backs the env-shaped
+# `*Layer` structs (`PersistConfig`, the DAG `Caps` + `ExecutorConfig`)
+# that resolve each chassis-resolved config's `from_env`.
+# `default-features = false` keeps it env-only — no TOML/YAML file
+# parsers until ADR-0090's config-file step. aether-substrate is a
+# native-only crate (wasmtime always on), so this is a plain dep, not
+# feature-gated like the capabilities crate's confique.
+confique = { version = "0.4", default-features = false }
 # ADR-0049 on-disk handle store: resolve the default persistence root
 # (`dirs::data_dir()/aether/handles`). Same crate the fs cap uses.
 dirs = "6"

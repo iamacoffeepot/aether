@@ -80,8 +80,12 @@ mod native {
     use aether_substrate::chassis::error::BootError;
 
     use super::{NoteOff, NoteOn, SetMasterGain};
+    // confique consumes `parse_flag` through `#[config(parse_env = …)]`;
+    // IntelliJ-Rust doesn't trace macro-attr path args (Qodana FP), but
+    // rustc + clippy do.
+    #[allow(unused_imports)]
+    use crate::config_env::parse_flag;
     use core::fmt;
-    use std::env;
 
     /// Capacity of the event queue between the cap's handlers and the
     /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
@@ -113,18 +117,60 @@ mod native {
     }
 
     impl AudioConfig {
+        /// Resolve every field from env. Chassis-main edge only.
+        ///
+        /// Resolution runs through confique (ADR-0090): the private
+        /// `AudioConfigLayer` declares each knob's env key + default in
+        /// one place, and this maps the env-shaped layer onto the
+        /// domain-shaped `AudioConfig`. Behaviour is byte-identical to the
+        /// prior hand-rolled reader — an unparseable sample rate resolves
+        /// to `None` (the field stays optional, so a bad value is
+        /// indistinguishable from unset, matching the prior `.ok()`).
+        ///
+        /// # Panics
+        ///
+        /// Panics only if the layer's literal defaults are themselves
+        /// malformed — a programmer error caught by the
+        /// `audio_from_env_defaults_match` test, never a runtime config
+        /// fault (the env values flow through a total parser / raw capture).
         #[must_use]
         pub fn from_env() -> Self {
-            let disabled = env::var("AETHER_AUDIO_DISABLE")
-                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-            let requested_sample_rate = env::var("AETHER_AUDIO_SAMPLE_RATE")
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok());
+            use confique::Config as _;
+
+            let layer = AudioConfigLayer::builder()
+                .env()
+                .load()
+                .expect("AudioConfigLayer defaults are well-formed");
             Self {
-                disabled,
-                requested_sample_rate,
+                disabled: layer.disabled,
+                // Prior behaviour: `.parse::<u32>().ok()` — an unparseable
+                // rate is silently `None`, indistinguishable from unset.
+                // Confique's parse path would *error* on a non-empty bad
+                // value (not byte-identical), so the layer captures the raw
+                // string and the soft `.ok()` parse stays here. The
+                // hard-error stance (ADR-0090 §4) lands later.
+                requested_sample_rate: layer
+                    .requested_sample_rate
+                    .and_then(|s| s.parse::<u32>().ok()),
             }
         }
+    }
+
+    /// Env-shaped confique layer behind `AudioConfig` (ADR-0090). Kept
+    /// private — the public consumed shape stays `AudioConfig`. Lives
+    /// inside the `audio-native` bridge mod (which implies the `native`
+    /// feature), so confique is always available here.
+    #[derive(confique::Config)]
+    struct AudioConfigLayer {
+        /// `AETHER_AUDIO_DISABLE=1`/`true` skips cpal init entirely.
+        #[config(env = "AETHER_AUDIO_DISABLE", parse_env = parse_flag, default = false)]
+        disabled: bool,
+        /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. Held
+        /// as the raw string so `AudioConfig::from_env` can apply the
+        /// soft `.parse().ok()` (an unparseable value → `None`); a
+        /// confique numeric field would hard-error on bad input instead.
+        #[config(env = "AETHER_AUDIO_SAMPLE_RATE")]
+        requested_sample_rate: Option<String>,
     }
 
     /// Event a handler pushes into the audio callback's queue. The
@@ -896,6 +942,21 @@ mod native {
             assert_eq!(builtin_count(), 5);
             assert_eq!(BUILTINS[0].name, "sine_lead");
             assert_eq!(BUILTINS[4].name, "pluck");
+        }
+
+        // ADR-0090: the confique migration is byte-identical to the prior
+        // hand-rolled reader. These exercise resolution without touching
+        // process env (issue 464).
+
+        #[test]
+        fn audio_from_env_defaults_match() {
+            use confique::Config as _;
+            // No `.env()` source: literal defaults only — env-free.
+            let layer = AudioConfigLayer::builder().load().expect("defaults load");
+            let default = AudioConfig::default();
+            assert_eq!(layer.disabled, default.disabled);
+            assert_eq!(layer.requested_sample_rate, None);
+            assert_eq!(default.requested_sample_rate, None);
         }
 
         #[test]

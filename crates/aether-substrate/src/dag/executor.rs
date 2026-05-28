@@ -60,7 +60,7 @@ use crate::handle_store::HandleStore;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 
-use std::env;
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread;
@@ -102,6 +102,179 @@ pub const DEFAULT_TRANSFORM_TIMEOUT_MS: u64 = 30_000;
 /// Default transform output-byte cap (ADR-0048 §6). Encoded output
 /// exceeding this hard-fails the node.
 pub const DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Resolved executor tuning knobs (ADR-0047 §4/§7, ADR-0048 §3/§6), read
+/// once at [`Executor::new`]. Extracted from the formerly-inline env reads
+/// (issue #1254) so the resolution lives in one named place. Chassis code
+/// builds it via [`ExecutorConfig::from_env`]; tests can build it directly
+/// without touching process env (issue 464).
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutorConfig {
+    /// Per-`Call` settlement timeout in ms (ADR-0047 §4).
+    pub call_timeout_ms: u64,
+    /// Default per-`Transform` wall-clock deadline in ms (ADR-0048 §3/§6).
+    pub transform_timeout_ms: u64,
+    /// Transform output-byte cap (ADR-0048 §6).
+    pub transform_max_output_bytes: u64,
+    /// Completed-DAG retention window in ms (ADR-0047 §7).
+    pub retention_complete_ms: u64,
+    /// Failed/cancelled-DAG retention window in ms (ADR-0047 §7).
+    pub retention_failed_ms: u64,
+    /// Transform compute-pool thread count (ADR-0048 §3). Resolved at
+    /// [`ExecutorConfig::from_env`] from available parallelism when unset.
+    pub pool_threads: usize,
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        Self {
+            call_timeout_ms: DEFAULT_CALL_TIMEOUT_MS,
+            transform_timeout_ms: DEFAULT_TRANSFORM_TIMEOUT_MS,
+            transform_max_output_bytes: DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES,
+            retention_complete_ms: DEFAULT_RETENTION_COMPLETE_MS,
+            retention_failed_ms: DEFAULT_RETENTION_FAILED_MS,
+            pool_threads: default_pool_threads(),
+        }
+    }
+}
+
+impl ExecutorConfig {
+    /// Resolve every knob from its `AETHER_*` env var. Chassis-internal
+    /// edge only.
+    ///
+    /// Resolution runs through confique (ADR-0090): the private
+    /// `ExecutorConfigLayer` declares each knob's env key + default in one
+    /// place. Behaviour is byte-identical to the prior inline reads — an
+    /// unparseable numeric value still falls back to its default, and the
+    /// pool-thread count still defaults to available parallelism (clamped
+    /// ≥ 1) when unset. The hard-error stance (ADR-0090 §4) lands with the
+    /// chassis-env validation pass.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the layer's literal defaults are themselves
+    /// malformed — a programmer error caught by the
+    /// `executor_config_layer_defaults_match` test, never a runtime config
+    /// fault (the env values flow through total parsers).
+    #[must_use]
+    pub fn from_env() -> Self {
+        use confique::Config as _;
+
+        let layer = ExecutorConfigLayer::builder()
+            .env()
+            .load()
+            .expect("ExecutorConfigLayer defaults are well-formed");
+        Self {
+            call_timeout_ms: layer.call_timeout_ms,
+            transform_timeout_ms: layer.transform_timeout_ms,
+            transform_max_output_bytes: layer.transform_max_output_bytes,
+            retention_complete_ms: layer.retention_complete_ms,
+            retention_failed_ms: layer.retention_failed_ms,
+            // Runtime-computed default (not a literal confique can hold):
+            // unset *or* unparseable → available parallelism (clamped ≥ 1).
+            // A parseable value (incl `0`) is honoured verbatim — the prior
+            // `parse_env_usize` disposition. Captured as a raw string so
+            // confique's parse path can't hard-error on bad input.
+            pool_threads: layer
+                .pool_threads
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or_else(default_pool_threads),
+        }
+    }
+}
+
+/// The transform compute-pool default: available parallelism, clamped to
+/// ≥ 1. Used when `AETHER_TRANSFORM_POOL_THREADS` is unset.
+fn default_pool_threads() -> usize {
+    thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// Env-shaped confique layer behind [`ExecutorConfig`] (ADR-0090). Each
+/// numeric knob carries a literal default; `pool_threads` is `Option`
+/// because its default is runtime-computed (available parallelism), not a
+/// literal. Kept private — the consumed shape stays `ExecutorConfig`.
+#[derive(confique::Config)]
+struct ExecutorConfigLayer {
+    #[config(
+        env = "AETHER_DAG_CALL_TIMEOUT_MS",
+        parse_env = parse_call_timeout_ms,
+        default = 30_000u64
+    )]
+    call_timeout_ms: u64,
+    #[config(
+        env = "AETHER_TRANSFORM_TIMEOUT_MS",
+        parse_env = parse_transform_timeout_ms,
+        default = 30_000u64
+    )]
+    transform_timeout_ms: u64,
+    #[config(
+        env = "AETHER_TRANSFORM_MAX_OUTPUT_BYTES",
+        parse_env = parse_transform_max_output_bytes,
+        default = 67_108_864u64
+    )]
+    transform_max_output_bytes: u64,
+    #[config(
+        env = "AETHER_DAG_RETENTION_COMPLETE_MS",
+        parse_env = parse_retention_complete_ms,
+        default = 60_000u64
+    )]
+    retention_complete_ms: u64,
+    #[config(
+        env = "AETHER_DAG_RETENTION_FAILED_MS",
+        parse_env = parse_retention_failed_ms,
+        default = 300_000u64
+    )]
+    retention_failed_ms: u64,
+    /// Held as the raw string so `ExecutorConfig::from_env` can apply the
+    /// soft `.parse().ok()` then fall back to available parallelism on an
+    /// unset *or* unparseable value (a confique numeric field would
+    /// hard-error on bad input). A parseable value (incl `0`) is honoured
+    /// verbatim, byte-identical to the prior `parse_env_usize` read.
+    #[config(env = "AETHER_TRANSFORM_POOL_THREADS")]
+    pool_threads: Option<String>,
+}
+
+// confique's `parse_env` contract is `fn(&str) -> Result<T, impl Error>`,
+// so these total helpers carry a `Result` they never fill with `Err` — an
+// unparseable value folds back to the same default as the prior inline
+// `parse_env_u64` / `parse_env_usize` reads (the warn-on-malformed log is
+// dropped, the disposition is byte-identical). The strict (erroring)
+// variants land with the ADR-0090 §4 validation pass; hence the per-fn
+// `unnecessary_wraps` allow.
+
+/// Parse the per-`Call` timeout; unparseable → [`DEFAULT_CALL_TIMEOUT_MS`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_call_timeout_ms(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_CALL_TIMEOUT_MS))
+}
+
+/// Parse the transform deadline; unparseable →
+/// [`DEFAULT_TRANSFORM_TIMEOUT_MS`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_transform_timeout_ms(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_TRANSFORM_TIMEOUT_MS))
+}
+
+/// Parse the transform output cap; unparseable →
+/// [`DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_transform_max_output_bytes(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES))
+}
+
+/// Parse the completed-DAG retention; unparseable →
+/// [`DEFAULT_RETENTION_COMPLETE_MS`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_retention_complete_ms(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_RETENTION_COMPLETE_MS))
+}
+
+/// Parse the failed-DAG retention; unparseable →
+/// [`DEFAULT_RETENTION_FAILED_MS`].
+#[allow(clippy::unnecessary_wraps)]
+fn parse_retention_failed_ms(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_RETENTION_FAILED_MS))
+}
 
 /// What a landed reply correlates to (ADR-0047 §4). Sources resolve a
 /// stored handle and flush downstream; `Call`s accumulate into a
@@ -184,17 +357,14 @@ pub struct Executor {
 
 impl Executor {
     /// Build a fresh executor bound to the cap's `Arc<Mailer>` + own
-    /// mailbox id. Reads the retention / timeout env knobs once, builds
+    /// mailbox id. Takes the resolved [`ExecutorConfig`] (chassis builds it
+    /// via [`ExecutorConfig::from_env`]; tests build it directly), builds
     /// the native-transform registry from the link-time inventory
     /// (ADR-0048 §2), and spins up the dedicated transform compute pool
     /// (ADR-0048 §3).
     #[must_use]
-    pub fn new(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
-        let pool_threads = parse_env_usize(
-            ENV_TRANSFORM_POOL_THREADS,
-            thread::available_parallelism().map_or(1, NonZeroUsize::get),
-        );
-        let transform_pool = TransformPool::new(pool_threads, &mailer);
+    pub fn new(mailer: Arc<Mailer>, self_mailbox: MailboxId, config: ExecutorConfig) -> Self {
+        let transform_pool = TransformPool::new(config.pool_threads, &mailer);
         Self {
             mailer,
             self_mailbox,
@@ -203,27 +373,12 @@ impl Executor {
             pending: HashMap::new(),
             in_flight_calls: HashMap::new(),
             in_flight_transforms: HashMap::new(),
-            call_timeout: Duration::from_millis(parse_env_u64(
-                ENV_CALL_TIMEOUT_MS,
-                DEFAULT_CALL_TIMEOUT_MS,
-            )),
-            transform_timeout: Duration::from_millis(parse_env_u64(
-                ENV_TRANSFORM_TIMEOUT_MS,
-                DEFAULT_TRANSFORM_TIMEOUT_MS,
-            )),
-            transform_max_output_bytes: usize::try_from(parse_env_u64(
-                ENV_TRANSFORM_MAX_OUTPUT_BYTES,
-                DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES,
-            ))
-            .unwrap_or(usize::MAX),
-            retention_complete: Duration::from_millis(parse_env_u64(
-                ENV_RETENTION_COMPLETE_MS,
-                DEFAULT_RETENTION_COMPLETE_MS,
-            )),
-            retention_failed: Duration::from_millis(parse_env_u64(
-                ENV_RETENTION_FAILED_MS,
-                DEFAULT_RETENTION_FAILED_MS,
-            )),
+            call_timeout: Duration::from_millis(config.call_timeout_ms),
+            transform_timeout: Duration::from_millis(config.transform_timeout_ms),
+            transform_max_output_bytes: usize::try_from(config.transform_max_output_bytes)
+                .unwrap_or(usize::MAX),
+            retention_complete: Duration::from_millis(config.retention_complete_ms),
+            retention_failed: Duration::from_millis(config.retention_failed_ms),
             transform_registry: Arc::new(TransformRegistry::from_inventory()),
             transform_pool,
         }
@@ -1220,48 +1375,72 @@ fn slot_inner_kind_id(registry: &Registry, cell: &aether_data::SchemaCell) -> Ki
         })
 }
 
-/// Parse a `u64` env var, warning + falling back on a malformed value
-/// (same shape as the validator's parser).
-#[allow(clippy::option_if_let_else)]
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    match env::var(name) {
-        Ok(raw) => match raw.parse::<u64>() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    target: TARGET,
-                    env = name,
-                    value = %raw,
-                    error = %e,
-                    default,
-                    "ignoring unparseable DAG env var; using default",
-                );
-                default
-            }
-        },
-        Err(_) => default,
-    }
-}
+#[cfg(test)]
+mod config_tests {
+    use super::{
+        DEFAULT_CALL_TIMEOUT_MS, DEFAULT_RETENTION_COMPLETE_MS, DEFAULT_RETENTION_FAILED_MS,
+        DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES, DEFAULT_TRANSFORM_TIMEOUT_MS, ExecutorConfig,
+        ExecutorConfigLayer, default_pool_threads, parse_call_timeout_ms,
+        parse_retention_complete_ms, parse_retention_failed_ms, parse_transform_max_output_bytes,
+        parse_transform_timeout_ms,
+    };
 
-/// Parse a `usize` env var, warning + falling back on a malformed value.
-/// Used for the transform compute-pool thread count (ADR-0048 §3).
-#[allow(clippy::option_if_let_else)]
-fn parse_env_usize(name: &str, default: usize) -> usize {
-    match env::var(name) {
-        Ok(raw) => match raw.parse::<usize>() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    target: TARGET,
-                    env = name,
-                    value = %raw,
-                    error = %e,
-                    default,
-                    "ignoring unparseable transform pool env var; using default",
-                );
-                default
-            }
-        },
-        Err(_) => default,
+    // ADR-0090: the confique migration is byte-identical to the prior
+    // inline env reads. These exercise resolution without touching process
+    // env (issue 464) — the parsers are pure, and the defaults check loads
+    // the layer with no `.env()` source.
+
+    #[test]
+    fn parse_numbers_soft_fall_back_to_defaults() {
+        assert_eq!(parse_call_timeout_ms("100").unwrap(), 100);
+        assert_eq!(
+            parse_call_timeout_ms("nope").unwrap(),
+            DEFAULT_CALL_TIMEOUT_MS
+        );
+        assert_eq!(parse_transform_timeout_ms("200").unwrap(), 200);
+        assert_eq!(
+            parse_transform_timeout_ms("nope").unwrap(),
+            DEFAULT_TRANSFORM_TIMEOUT_MS
+        );
+        assert_eq!(parse_transform_max_output_bytes("4096").unwrap(), 4096);
+        assert_eq!(
+            parse_transform_max_output_bytes("nope").unwrap(),
+            DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES
+        );
+        assert_eq!(parse_retention_complete_ms("300").unwrap(), 300);
+        assert_eq!(
+            parse_retention_complete_ms("nope").unwrap(),
+            DEFAULT_RETENTION_COMPLETE_MS
+        );
+        assert_eq!(parse_retention_failed_ms("400").unwrap(), 400);
+        assert_eq!(
+            parse_retention_failed_ms("nope").unwrap(),
+            DEFAULT_RETENTION_FAILED_MS
+        );
+    }
+
+    #[test]
+    fn executor_config_layer_defaults_match() {
+        use confique::Config as _;
+        // No `.env()` source: literal defaults only, env-free. Guards the
+        // layer defaults against the named consts + `ExecutorConfig::default`.
+        let layer = ExecutorConfigLayer::builder()
+            .load()
+            .expect("defaults load");
+        let default = ExecutorConfig::default();
+        assert_eq!(layer.call_timeout_ms, DEFAULT_CALL_TIMEOUT_MS);
+        assert_eq!(layer.call_timeout_ms, default.call_timeout_ms);
+        assert_eq!(layer.transform_timeout_ms, DEFAULT_TRANSFORM_TIMEOUT_MS);
+        assert_eq!(
+            layer.transform_max_output_bytes,
+            DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES
+        );
+        assert_eq!(layer.retention_complete_ms, DEFAULT_RETENTION_COMPLETE_MS);
+        assert_eq!(layer.retention_failed_ms, DEFAULT_RETENTION_FAILED_MS);
+        // Pool threads has no literal default — the layer field is `None`
+        // when unset, resolved to available parallelism in `from_env`.
+        assert_eq!(layer.pool_threads, None);
+        assert!(default.pool_threads >= 1);
+        assert_eq!(default.pool_threads, default_pool_threads());
     }
 }
