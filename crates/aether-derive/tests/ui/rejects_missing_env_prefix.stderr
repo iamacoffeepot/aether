@@ -1,0 +1,5 @@
+error: missing `#[config(env_prefix = "...")]` container attribute
+ --> tests/ui/rejects_missing_env_prefix.rs:6:1
+  |
+6 | #[config(cli_prefix = "missing")]
+  | ^

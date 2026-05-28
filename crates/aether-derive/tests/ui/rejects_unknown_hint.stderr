@@ -1,0 +1,5 @@
+error: unknown field attribute; expected one of `env = "..."`, `cli_long = "..."`, `default = <lit>`, `parse = <fn_path>`, `ms_duration`, `csv_set`, `layer_field = "..."`
+ --> tests/ui/rejects_unknown_hint.rs:7:14
+  |
+7 |     #[config(magic)]
+  |              ^^^^^
