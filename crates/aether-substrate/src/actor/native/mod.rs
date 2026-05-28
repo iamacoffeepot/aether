@@ -75,6 +75,15 @@ pub mod spawn_thread;
 
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
+// iamacoffeepot/aether#1272: driver-as-actor capabilities that own
+// their inbox drain inline (today only the desktop window driver)
+// reach for the `NativeCtx`-free variants of the framework dispatch
+// arms so `actor_logs aether.window` reaches the log/trace/cost rings
+// the same way every standard-dispatcher-slot actor does.
+pub use dispatch::{
+    dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free,
+    dispatch_trace_tail_if_matching_free,
+};
 pub use envelope::Envelope;
 pub use mailbox::NativeActorMailbox;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};

@@ -32,7 +32,8 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeDispatch};
-use crate::mail::KindId;
+use crate::mail::mailer::Mailer;
+use crate::mail::{KindId, MailboxId, ReplyTo};
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
@@ -147,6 +148,98 @@ pub fn dispatch_cost_tail_if_matching(
         .cost_table()
         .tail(binding.self_mailbox(), &request);
     ctx.reply(&reply);
+    true
+}
+
+/// iamacoffeepot/aether#1272: `NativeCtx`-free variant of
+/// `dispatch_log_tail_if_matching` for driver-as-actor capabilities
+/// that own their inbox drain inline (today only the desktop window
+/// driver). Reads the receiving actor's `ActorLogRing` through the
+/// currently-stamped `ActorSlots` and routes the reply via the supplied
+/// `Mailer::send_reply` — the same path `NativeCtx::reply` goes through.
+///
+/// Caller invariant: this must be called inside a
+/// `local::with_stamped(&actor_slots, …)` block so `ActorLogRing::try_with`
+/// resolves to the driver's per-actor ring.
+pub fn dispatch_log_tail_if_matching_free(
+    mailer: &Mailer,
+    reply_to: ReplyTo,
+    env: &Envelope,
+) -> bool {
+    if env.kind.0 != <LogTail as Kind>::ID.0 {
+        return false;
+    }
+    let Some(request) = <LogTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+        mailer.send_reply(
+            reply_to,
+            &LogTailResult::Err {
+                error: "aether.log.tail: payload failed to decode".to_owned(),
+            },
+        );
+        return true;
+    };
+    let reply =
+        ActorLogRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| LogTailResult::Err {
+            error: "aether.log.tail: actor has no stamped slots".to_owned(),
+        });
+    mailer.send_reply(reply_to, &reply);
+    true
+}
+
+/// iamacoffeepot/aether#1272: `NativeCtx`-free counterpart of
+/// `dispatch_trace_tail_if_matching`. See
+/// [`dispatch_log_tail_if_matching_free`] for the caller invariant.
+pub fn dispatch_trace_tail_if_matching_free(
+    mailer: &Mailer,
+    reply_to: ReplyTo,
+    env: &Envelope,
+) -> bool {
+    if env.kind.0 != <TraceTail as Kind>::ID.0 {
+        return false;
+    }
+    let Some(request) = <TraceTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+        mailer.send_reply(
+            reply_to,
+            &TraceTailResult::Err {
+                error: "aether.trace.tail: payload failed to decode".to_owned(),
+            },
+        );
+        return true;
+    };
+    let reply = ActorTraceRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| {
+        TraceTailResult::Err {
+            error: "aether.trace.tail: actor has no stamped slots".to_owned(),
+        }
+    });
+    mailer.send_reply(reply_to, &reply);
+    true
+}
+
+/// iamacoffeepot/aether#1272: `NativeCtx`-free counterpart of
+/// `dispatch_cost_tail_if_matching`. The cost table doesn't depend on
+/// stamped `ActorSlots` — it's read directly off the mailer — so the
+/// `self_mailbox` rides along explicitly (the standard variant pulls it
+/// from `binding.self_mailbox()`).
+pub fn dispatch_cost_tail_if_matching_free(
+    mailer: &Mailer,
+    reply_to: ReplyTo,
+    self_mailbox: MailboxId,
+    env: &Envelope,
+) -> bool {
+    if env.kind.0 != <CostTail as Kind>::ID.0 {
+        return false;
+    }
+    let Some(request) = <CostTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+        mailer.send_reply(
+            reply_to,
+            &CostTailResult::Err {
+                error: "aether.cost.tail: payload failed to decode".to_owned(),
+            },
+        );
+        return true;
+    };
+    let reply = mailer.cost_table().tail(self_mailbox, &request);
+    mailer.send_reply(reply_to, &reply);
     true
 }
 
@@ -287,5 +380,168 @@ mod cost_tests {
             rows[0].samples, 0,
             "neutral seed surfaces before any dispatch"
         );
+    }
+}
+
+/// iamacoffeepot/aether#1272: regression coverage for the `NativeCtx`-
+/// free framework dispatch arm variants the desktop window driver
+/// reaches for from its bespoke inbox drain.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
+)]
+mod free_dispatch_tests {
+    use super::*;
+    use crate::handle_store::HandleStore;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::outbound::{EgressEvent, HubOutbound};
+    use crate::mail::registry::Registry;
+    use crate::mail::{MailRef, ReplyTarget};
+    use aether_actor::local::{ActorSlots, with_stamped};
+    use aether_data::{MailId, SessionToken};
+    use aether_kinds::SetWindowTitle;
+    use aether_kinds::descriptors;
+    use aether_kinds::trace::Nanos;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+
+    fn fresh_substrate_with_outbound() -> (Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let (outbound, rx) = HubOutbound::attached_loopback();
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+        (mailer, rx)
+    }
+
+    fn build_envelope<K: Kind + serde::Serialize>(payload: &K, reply_to: ReplyTo) -> Envelope {
+        let bytes = postcard::to_allocvec(payload).expect("postcard encode");
+        Envelope {
+            kind: KindId(<K as Kind>::ID.0),
+            kind_name: <K as Kind>::NAME.to_owned(),
+            origin: None,
+            sender: reply_to,
+            payload: MailRef::from(bytes),
+            count: 1,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
+        }
+    }
+
+    /// The free-fn log-tail arm fires a `LogTailResult` reply to the
+    /// envelope's `sender` when the kind matches — the property the
+    /// desktop window driver (iamacoffeepot/aether#1272) relies on so
+    /// `actor_logs aether.window` resolves instead of hanging on a
+    /// never-arriving reply.
+    #[test]
+    fn dispatch_log_tail_free_replies_on_match() {
+        let (mailer, rx) = fresh_substrate_with_outbound();
+        let session = SessionToken::NIL;
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0x1272_4242);
+        let env = build_envelope(
+            &LogTail {
+                max: 10,
+                min_level: None,
+                since: None,
+            },
+            reply_to,
+        );
+
+        // The arm reads `ActorLogRing::try_with`, so it must run inside a
+        // `with_stamped` block. Stamping with a fresh slot map makes the
+        // ring resolve to its default (empty) — the reply lands as
+        // `LogTailResult::Ok { entries: [] }`.
+        let slots = ActorSlots::new();
+        let matched = with_stamped(&slots, || {
+            dispatch_log_tail_if_matching_free(&mailer, reply_to, &env)
+        });
+        assert!(matched, "log.tail kind matches");
+
+        let event = rx.try_recv().expect("reply egress recorded");
+        match event {
+            EgressEvent::ToSession {
+                session: got_session,
+                kind_name,
+                correlation_id,
+                ..
+            } => {
+                assert_eq!(got_session, session);
+                assert_eq!(kind_name, <LogTailResult as Kind>::NAME);
+                assert_eq!(correlation_id, 0x1272_4242);
+            }
+            other => panic!("expected ToSession egress, got {other:?}"),
+        }
+    }
+
+    /// Non-matching kinds fall through without replying — the driver's
+    /// existing `kind_set_window_mode` / `kind_set_window_title` arms
+    /// still get their chance after the framework arms return `false`.
+    #[test]
+    fn dispatch_log_tail_free_skips_non_match() {
+        let (mailer, rx) = fresh_substrate_with_outbound();
+        let session = SessionToken::NIL;
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0);
+        // Build an envelope of a different kind (`SetWindowTitle`); the
+        // arm must early-return `false` and emit nothing.
+        let env = build_envelope(
+            &SetWindowTitle {
+                title: "test".to_owned(),
+            },
+            reply_to,
+        );
+
+        let slots = ActorSlots::new();
+        let matched = with_stamped(&slots, || {
+            dispatch_log_tail_if_matching_free(&mailer, reply_to, &env)
+        });
+        assert!(!matched, "non-log.tail kind doesn't match");
+        assert!(rx.try_recv().is_err(), "skip path emits no reply egress");
+    }
+
+    /// The trace-tail and cost-tail free fns are siblings of the log-tail
+    /// arm; smoke-test both fire their reply on a matched envelope so a
+    /// future contract slip on either kind doesn't silently regress
+    /// `actor_logs`-style queries against the desktop driver.
+    #[test]
+    fn dispatch_trace_and_cost_tail_free_reply_on_match() {
+        let (mailer, rx) = fresh_substrate_with_outbound();
+        let self_mbx = MailboxId(0x1272_AAAA);
+        let session = SessionToken::NIL;
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0xCAFE);
+
+        let trace_env = build_envelope(
+            &TraceTail {
+                max: 16,
+                since: None,
+                root: None,
+            },
+            reply_to,
+        );
+        let cost_env = build_envelope(&CostTail { kind: None }, reply_to);
+
+        let slots = ActorSlots::new();
+        let (trace_match, cost_match) = with_stamped(&slots, || {
+            let trace = dispatch_trace_tail_if_matching_free(&mailer, reply_to, &trace_env);
+            let cost = dispatch_cost_tail_if_matching_free(&mailer, reply_to, self_mbx, &cost_env);
+            (trace, cost)
+        });
+        assert!(trace_match);
+        assert!(cost_match);
+
+        // Two replies must have been routed; both `ToSession`.
+        let names: Vec<String> = (0..2)
+            .map(|_| match rx.try_recv().expect("reply egress recorded") {
+                EgressEvent::ToSession { kind_name, .. } => kind_name,
+                other => panic!("expected ToSession egress, got {other:?}"),
+            })
+            .collect();
+        assert!(names.iter().any(|n| n == <TraceTailResult as Kind>::NAME));
+        assert!(names.iter().any(|n| n == <CostTailResult as Kind>::NAME));
     }
 }

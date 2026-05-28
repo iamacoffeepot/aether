@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use aether_actor::Actor;
+use aether_actor::local;
 use aether_capabilities::InputCapability;
 use aether_capabilities::RenderHandles;
 use aether_data::Kind;
@@ -31,11 +32,15 @@ use aether_kinds::{
     keycode,
 };
 use aether_substrate::actor::native::envelope::Envelope;
+use aether_substrate::actor::native::{
+    dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free,
+    dispatch_trace_tail_if_matching_free,
+};
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
-    HubOutbound, Mailer, SubstrateBoot,
+    HubOutbound, Mailer, SharedActorSlots, SubstrateBoot,
     chassis::frame_loop,
     mail::{MailId, MailboxId},
 };
@@ -117,6 +122,22 @@ pub struct App {
     /// window-kind mail can stall briefly until the user nudges the
     /// window — accepted limitation for v1.
     window_inbox: Receiver<Envelope>,
+    /// Per-actor [`aether_actor::local::ActorSlots`] carried out of the
+    /// [`aether_substrate::MailboxClaim`] this driver produced at boot.
+    /// Stamped into TLS via [`aether_actor::local::with_stamped`] around
+    /// the bespoke `aether.window` inbox drain so framework-built-in
+    /// dispatch arms (`aether.log.tail` / `aether.trace.tail` /
+    /// `aether.cost.tail`) reach the driver's per-actor `Local<T>`
+    /// rings — the same shape the standard
+    /// `DispatcherSlot::run_cycle` path opens for every other actor
+    /// (iamacoffeepot/aether#1272).
+    actor_slots: SharedActorSlots,
+    /// The driver's own mailbox id (`aether.window` claim). Threaded
+    /// through to the cost-tail dispatch arm, which filters the global
+    /// cost table by `self_mailbox` (the standard variant pulls this
+    /// from `NativeBinding::self_mailbox`; driver-as-actor has no
+    /// binding, so we cache the id directly).
+    window_mailbox: MailboxId,
     kind_set_window_mode: aether_data::KindId,
     kind_set_window_title: aether_data::KindId,
     /// ADR-0080 §6 chassis-root correlation counter (issue
@@ -287,6 +308,26 @@ fn resolve_fullscreen(
     }
 }
 
+/// iamacoffeepot/aether#1272: route an inbound `aether.window` envelope
+/// through the framework-built-in dispatch arms (`aether.log.tail` /
+/// `aether.trace.tail` / `aether.cost.tail`) before the driver-specific
+/// `SetWindowMode` / `SetWindowTitle` arms get their turn. Returns
+/// `true` when one of the framework arms matched (a reply has already
+/// been routed); `false` otherwise. ADR-0081 §1 promises every mailbox
+/// serves these kinds — see the issue body for the contract.
+///
+/// Caller invariant: must run inside a `local::with_stamped` block
+/// against the driver's [`aether_actor::local::ActorSlots`] so the
+/// log / trace arms reach the driver's per-actor ring. Factored out of
+/// [`App::dispatch_window_envelope`] so the unit test directly drives
+/// the routing shape without standing up a winit `App`.
+fn try_framework_dispatch(mailer: &Arc<Mailer>, self_mailbox: MailboxId, env: &Envelope) -> bool {
+    let m = mailer.as_ref();
+    dispatch_log_tail_if_matching_free(m, env.sender, env)
+        || dispatch_trace_tail_if_matching_free(m, env.sender, env)
+        || dispatch_cost_tail_if_matching_free(m, env.sender, self_mailbox, env)
+}
+
 impl App {
     /// ADR-0080 §6 chassis-source push helper (issue
     /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
@@ -353,16 +394,33 @@ impl App {
 
     /// Drain the `aether.window` inbox without blocking. Called from
     /// `about_to_wait` (per-frame cadence). Each envelope dispatches
-    /// inline against `kind_set_window_mode` / `kind_set_window_title`;
-    /// any other kind warns and drops.
+    /// inline against the framework-built-in arms first
+    /// (`aether.log.tail` / `aether.trace.tail` / `aether.cost.tail`,
+    /// iamacoffeepot/aether#1272) and only then the driver-specific
+    /// `kind_set_window_mode` / `kind_set_window_title` arms; anything
+    /// else warns and drops.
+    ///
+    /// The whole drain is wrapped in
+    /// [`aether_actor::local::with_stamped`] against
+    /// [`Self::actor_slots`] so the framework arms reach this driver's
+    /// per-actor `ActorLogRing` / `ActorTraceRing` (the same property
+    /// `DispatcherSlot::run_cycle` opens for every standard actor).
     fn drain_window_inbox(&mut self) {
         use std::sync::mpsc::TryRecvError;
-        loop {
-            match self.window_inbox.try_recv() {
-                Ok(env) => self.dispatch_window_envelope(env),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+        // Stamp once around the whole drain rather than per-envelope —
+        // the stamp is cheap (single TLS write + RAII guard) but keeping
+        // it open across the full burst means a handler that fires
+        // `tracing::*` (e.g. apply_window_mode's failure log) also lands
+        // in the driver's ring.
+        let slots = self.actor_slots.clone();
+        local::with_stamped(slots.slots(), || {
+            loop {
+                match self.window_inbox.try_recv() {
+                    Ok(env) => self.dispatch_window_envelope(env),
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+                }
             }
-        }
+        });
     }
 
     // `env` is owned because the dispatch borrows `env.sender`,
@@ -371,6 +429,14 @@ impl App {
     // owning-handoff symmetry with the rest of the dispatch surface.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_window_envelope(&mut self, env: Envelope) {
+        // iamacoffeepot/aether#1272: framework-built-in dispatch arms
+        // run BEFORE the driver-specific kinds, matching
+        // `DispatcherSlot::run_cycle`'s ordering. Factored into a free
+        // fn so the desktop-driver unit test exercises the routing
+        // shape directly without standing up a winit `App`.
+        if try_framework_dispatch(&self.queue, self.window_mailbox, &env) {
+            return;
+        }
         if env.kind == self.kind_set_window_mode {
             let payload: SetWindowMode = match postcard::from_bytes(env.payload.bytes()) {
                 Ok(p) => p,
@@ -769,6 +835,8 @@ impl DriverCapability for DesktopDriverCapability {
             boot_title,
             current_mode: boot_mode,
             window_inbox: window_claim.receiver,
+            actor_slots: window_claim.actor_slots,
+            window_mailbox: window_claim.id,
             kind_set_window_mode,
             kind_set_window_title,
             // 0 is the "no correlation" sentinel; mirror NativeBinding's
@@ -877,5 +945,130 @@ mod tests {
         let (m, _) = parse_window_mode_env("  windowed  ")
             .expect("test setup: surrounding whitespace is trimmed");
         assert!(matches!(m, WindowMode::Windowed));
+    }
+
+    /// iamacoffeepot/aether#1272: a `LogTail` envelope routed at the
+    /// driver's `aether.window` mailbox produces a `LogTailResult`
+    /// reply via the framework-built-in dispatch arm. Pre-fix the
+    /// driver's bespoke "unrecognised kind → warn-drop" tail ate the
+    /// envelope and `actor_logs aether.window` hung waiting for a
+    /// reply that never came; this test pins the fix at the
+    /// driver-dispatch layer without standing up wgpu/winit.
+    #[test]
+    fn try_framework_dispatch_replies_to_log_tail() {
+        use aether_actor::local::{ActorSlots, with_stamped};
+        use aether_data::KindId;
+        use aether_data::{MailId, SessionToken};
+        use aether_kinds::descriptors;
+        use aether_kinds::trace::Nanos;
+        use aether_kinds::{LogTail, LogTailResult};
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+        use aether_substrate::mail::registry::Registry;
+        use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
+
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let (outbound, rx) = HubOutbound::attached_loopback();
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+
+        let request = LogTail {
+            max: 8,
+            min_level: None,
+            since: None,
+        };
+        let bytes = postcard::to_allocvec(&request).expect("encode LogTail");
+        let session = SessionToken::NIL;
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0x99);
+        let env = Envelope {
+            kind: KindId(<LogTail as Kind>::ID.0),
+            kind_name: <LogTail as Kind>::NAME.to_owned(),
+            origin: None,
+            sender: reply_to,
+            payload: MailRef::from(bytes),
+            count: 1,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
+        };
+
+        let window_mailbox = mailbox_id_from_name("aether.window");
+        let slots = ActorSlots::new();
+        let matched = with_stamped(&slots, || {
+            try_framework_dispatch(&mailer, window_mailbox, &env)
+        });
+        assert!(
+            matched,
+            "framework dispatch arm must match a LogTail envelope at aether.window",
+        );
+
+        let event = rx.try_recv().expect("framework arm routed a reply");
+        match event {
+            EgressEvent::ToSession {
+                kind_name,
+                correlation_id,
+                ..
+            } => {
+                assert_eq!(kind_name, <LogTailResult as Kind>::NAME);
+                assert_eq!(correlation_id, 0x99);
+            }
+            other => panic!("expected ToSession reply, got {other:?}"),
+        }
+    }
+
+    /// A non-framework kind (here `SetWindowTitle`) does NOT trip the
+    /// framework arms — the driver-specific path keeps its turn so
+    /// `actor_logs`-style queries don't shadow the existing window
+    /// controls.
+    #[test]
+    fn try_framework_dispatch_skips_window_kinds() {
+        use aether_actor::local::{ActorSlots, with_stamped};
+        use aether_data::KindId;
+        use aether_data::MailId;
+        use aether_kinds::descriptors;
+        use aether_kinds::trace::Nanos;
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::outbound::HubOutbound;
+        use aether_substrate::mail::registry::Registry;
+        use aether_substrate::mail::{MailRef, ReplyTo};
+
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let (outbound, rx) = HubOutbound::attached_loopback();
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+
+        let payload = postcard::to_allocvec(&SetWindowTitle {
+            title: "ignored".to_owned(),
+        })
+        .expect("encode SetWindowTitle");
+        let env = Envelope {
+            kind: KindId(<SetWindowTitle as Kind>::ID.0),
+            kind_name: <SetWindowTitle as Kind>::NAME.to_owned(),
+            origin: None,
+            sender: ReplyTo::NONE,
+            payload: MailRef::from(payload),
+            count: 1,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+            t_enqueue: Nanos(0),
+            enqueue_depth: 0,
+        };
+
+        let window_mailbox = mailbox_id_from_name("aether.window");
+        let slots = ActorSlots::new();
+        let matched = with_stamped(&slots, || {
+            try_framework_dispatch(&mailer, window_mailbox, &env)
+        });
+        assert!(!matched, "SetWindowTitle is a driver-specific kind");
+        assert!(rx.try_recv().is_err(), "no reply emitted on skip path");
     }
 }
