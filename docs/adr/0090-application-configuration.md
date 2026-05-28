@@ -119,6 +119,42 @@ The alternatives (`twelf` with native `Layer::Clap`; `conf`; `figment`'s
 provider-merge) are weighed in Alternatives — the crate pick is the main item
 for review on this ADR.
 
+**Why `confique` over the merge-into-serde family (`config-rs`, `figment`).**
+The choice turns on one axis: a *declared, introspectable, compile-time* schema
+(confique) versus *runtime source-merging into a plain serde struct* (`config-rs`
+0.15, `figment` 0.10). The latter pair is one family — a builder/provider chain
+(`ConfigBuilder::add_source` / `Figment::merge`) that deserializes whatever keys
+exist into a `#[derive(Deserialize)]` struct. Both miss the two things this ADR
+buys:
+
+- **Discovery (the issue's #2 pain).** Neither can enumerate the keys the app
+  accepts. config-rs has no introspection at all; figment's `Metadata` is value
+  *provenance* (which source a value came from, for error messages), not a
+  schema — so neither generates the `--config` listing without a hand-maintained
+  second list, the exact drift we are removing. confique's `Config::META` +
+  `template()` *is* that listing, from the same declaration.
+- **Co-located declaration (decision 1's "distributed structs").** Both split a
+  knob's definition out of the field into a central builder — env keys, defaults
+  via `set_default` / `#[serde(default)]` / a defaults-provider. confique keeps
+  env-key + default + doc + validate *on the field*, in the owning crate.
+
+Their env model is also a global prefix + separator (`AETHER_DB__URL` →
+`db.url`) that fights our flat, inconsistent, partly un-prefixed names
+(`AETHER_PEER_STEAL`, bare `PERF_K`, `GEMINI_API_KEY`); confique's per-field key
+maps them 1:1, which is what makes the behaviour-identical step-1 env map a pure
+annotation.
+
+Between the two, **`figment` is the better member** — provenance-grade error
+messages (a partial answer to the validate pain), first-class profiles, and
+Rocket-grade maturity — so it, not config-rs, is the runner-up to swap to if
+confique's youth (v0.4, ~half-documented) is a concern. figment's profiles do
+not map to an aether need: per-application config is served by per-spawn `argv`
+(decision 3), not named profiles. Net ranking for these requirements:
+**confique > figment > config-rs** — confique wins on discovery + co-located
+declaration, the two requirements that motivated the ADR. The cost it carries is
+the maturity gap (younger, smaller surface) and errors less source-rich than
+figment's.
+
 ### 2. Where the layer lives — derive in place, no new `aether-config` crate (yet)
 
 Because the structs stay in their owning crates and derive the chosen macro
@@ -267,19 +303,13 @@ stance.
   prioritized over discovery-now; reconsider at step 2.
 - **`conf`** — single derive over CLI + env + file. Viable; less mature
   discovery/template story than confique and a smaller ecosystem footprint.
-- **`config` (config-rs)** — the most popular Rust config crate, but the wrong
-  *shape* here: a runtime `ConfigBuilder` that merges sources and
-  serde-deserializes into a plain struct — no derive macro (so no per-field
-  env/default/doc/validate, the macro-driven parse the direction asks for) and
-  no introspection/metadata (so it can't drive the `--config` discovery dump,
-  the issue's #2 pain). Its env model is prefix+separator nesting
-  (`AETHER_DB__URL` → `db.url`), which fights the flat, inconsistent `AETHER_*`
-  names and the behaviour-identical step-1 env map. Same family as `figment`,
-  the more capable representative of the merge-into-serde shape.
-- **`figment`** (Rocket's) — most mature, provider/merge model. Rejected as the
-  lead because it is imperative merge-chains rather than the per-struct derive the
-  "distributed structs + macro" direction calls for; kept in reserve for its
-  maturity if the derive crates disappoint.
+- **`config` (config-rs) / `figment`** — the merge-into-serde family (a runtime
+  provider/builder chain deserializing into a plain struct). Rejected as the lead
+  for the reasons spelled out in Decision §1: no schema introspection (so no
+  native `--config` discovery) and the knob definition splits out of the field.
+  `figment` is the stronger member — provenance errors, profiles, maturity — and
+  the runner-up to swap in if confique's youth is a concern; `config-rs` trails it
+  (no profiles, weaker errors).
 - **New `aether-config` crate up front** (fork 2) — rejected for now: with
   derive-in-place there is nothing central to house; promote a leaf crate only if
   the out-of-process bins need the glue without a substrate dep.
