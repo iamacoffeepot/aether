@@ -18,7 +18,11 @@ use std::time::Duration;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
+// confique consumes `parse_flag` through the `#[config(parse_env = …)]`
+// attribute path; IntelliJ-Rust doesn't trace macro-attr path args and
+// flags this as unused (Qodana FP), but rustc + clippy resolve it.
 #[cfg(feature = "native")]
+#[allow(unused_imports)]
 use crate::config_env::parse_flag;
 use aether_actor::FfiActorMailbox;
 use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};

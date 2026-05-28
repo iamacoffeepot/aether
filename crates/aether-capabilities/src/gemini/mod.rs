@@ -61,9 +61,10 @@ impl GeminiAdapter for DisabledGeminiAdapter {
 
 mod config {
     use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS};
-    use crate::config_env::{parse_flag, parse_provider_max_in_flight};
-    #[cfg(feature = "native")]
-    use std::convert::Infallible;
+    // confique consumes these through `#[config(parse_env = …)]`; IntelliJ-Rust
+    // doesn't trace macro-attr path args (Qodana FP), but rustc + clippy do.
+    #[allow(unused_imports)]
+    use crate::config_env::{parse_flag, parse_provider_max_in_flight, parse_u32_ms_or};
     use std::time::Duration;
 
     /// Resolved configuration for the `aether.gemini` cap. Chassis mains
@@ -165,7 +166,7 @@ mod config {
         /// `DEFAULT_TIMEOUT_MS` (180 s).
         #[config(
             env = "AETHER_GEMINI_TIMEOUT_MS",
-            parse_env = parse_timeout_ms,
+            parse_env = parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>,
             default = 180_000
         )]
         timeout_ms: u32,
@@ -176,32 +177,15 @@ mod config {
     // The strict (erroring) variants land with the ADR-0090 §4 validation
     // pass; hence the per-fn `unnecessary_wraps` allow.
 
-    /// Parse a timeout in milliseconds; unparseable falls back to
-    /// `DEFAULT_TIMEOUT_MS`. Total — never errors.
-    #[cfg(feature = "native")]
-    #[allow(clippy::unnecessary_wraps)]
-    fn parse_timeout_ms(s: &str) -> Result<u32, Infallible> {
-        Ok(s.parse().unwrap_or(DEFAULT_TIMEOUT_MS))
-    }
-
     #[cfg(all(test, feature = "native"))]
     mod tests {
-        use super::{
-            DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS, GeminiConfig, GeminiConfigLayer,
-            parse_timeout_ms,
-        };
+        use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS, GeminiConfig, GeminiConfigLayer};
         use confique::Config as _;
         use std::time::Duration;
 
         // ADR-0090: the confique migration is byte-identical to the prior
         // hand-rolled reader. These exercise the resolution logic without
         // touching process env (issue 464).
-
-        #[test]
-        fn parse_timeout_ms_soft_falls_back() {
-            assert_eq!(parse_timeout_ms("5000").unwrap(), 5000);
-            assert_eq!(parse_timeout_ms("garbage").unwrap(), DEFAULT_TIMEOUT_MS);
-        }
 
         #[test]
         fn gemini_from_env_defaults_match() {

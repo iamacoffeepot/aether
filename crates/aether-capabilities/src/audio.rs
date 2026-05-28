@@ -80,6 +80,10 @@ mod native {
     use aether_substrate::chassis::error::BootError;
 
     use super::{NoteOff, NoteOn, SetMasterGain};
+    // confique consumes `parse_flag` through `#[config(parse_env = …)]`;
+    // IntelliJ-Rust doesn't trace macro-attr path args (Qodana FP), but
+    // rustc + clippy do.
+    #[allow(unused_imports)]
     use crate::config_env::parse_flag;
     use core::fmt;
 
