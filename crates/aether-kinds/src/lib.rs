@@ -1678,6 +1678,57 @@ mod control_plane {
         pub resolved: Vec<ResolvedName>,
     }
 
+    /// One kind in a [`ListKindsResult`] (ADR-0091). `id` is the
+    /// substrate's authoritative [`KindId`](aether_data::KindId) for the
+    /// kind; `name` is its declared `Kind::NAME`; `schema_postcard` is
+    /// the kind's [`SchemaType`](aether_data::SchemaType) postcard-
+    /// serialized (the wire enum carries the full nominal shape).
+    ///
+    /// The schema rides as opaque postcard bytes rather than a directly
+    /// embedded `SchemaType` because `SchemaType` itself has no
+    /// `Schema` impl (it *is* the schema vocabulary, not a value in
+    /// it); shipping it as `Bytes` keeps `KindDescriptorWire` and the
+    /// whole reply derivable via [`aether_data::Schema`] without a
+    /// hand-roll, at the cost of one extra `postcard::from_bytes` on
+    /// the harness side. Cap encodes via `postcard::to_allocvec`
+    /// against `descriptor.schema`; client decodes via
+    /// `postcard::from_bytes`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct KindDescriptorWire {
+        pub id: aether_data::KindId,
+        pub name: String,
+        pub schema_postcard: Vec<u8>,
+    }
+
+    /// `aether.inventory.kinds` — request the running substrate's
+    /// authoritative kind vocabulary (ADR-0091): every
+    /// [`KindId`](aether_data::KindId) the engine's `Registry`
+    /// currently holds, with its full
+    /// [`SchemaType`](aether_data::SchemaType). Empty payload; the
+    /// request *is* the signal. Mailed to the `"aether.inventory"`
+    /// mailbox; reply: [`ListKindsResult`].
+    ///
+    /// The MCP harness uses this to refresh its per-engine encode-
+    /// cache after a `load_component` registers a component's own
+    /// kinds — the substrate's `Registry` is the single source of
+    /// truth, projected onto the wire by the inventory cap.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.inventory.kinds")]
+    pub struct ListKinds {}
+
+    /// Reply to [`ListKinds`] (ADR-0091). One [`KindDescriptorWire`] per
+    /// kind currently registered in the substrate's `Registry`, sorted
+    /// by name (the registry's `list_kind_descriptors` ordering). The
+    /// harness folds this into its per-engine encode cache; component-
+    /// defined kinds (loaded via `aether.component.load`) show up here
+    /// alongside the substrate's static vocabulary the moment the load
+    /// returns, no separate notification.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.inventory.kinds_result")]
+    pub struct ListKindsResult {
+        pub kinds: Vec<KindDescriptorWire>,
+    }
+
     // Mesh-viewer structured load replies (issue 964). The mesh-viewer
     // component's `aether.mesh.load` was fire-and-forget — failures
     // warn-logged and the prior cache stayed, with no wire signal a
@@ -2776,6 +2827,8 @@ mod tests {
         assert_eq!(ManifestResult::NAME, "aether.inventory.manifest_result");
         assert_eq!(Resolve::NAME, "aether.inventory.resolve");
         assert_eq!(ResolveResult::NAME, "aether.inventory.resolve_result");
+        assert_eq!(ListKinds::NAME, "aether.inventory.kinds");
+        assert_eq!(ListKindsResult::NAME, "aether.inventory.kinds_result");
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl

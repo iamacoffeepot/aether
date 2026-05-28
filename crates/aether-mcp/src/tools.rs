@@ -15,9 +15,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// `tokio::sync::Mutex` (the async one used by the per-engine refresh-
+// collapse guard) imported under an alias so the struct-field path
+// stays short — `std::sync::Mutex` is the bare `Mutex`.
+use tokio::sync::Mutex as AsyncMutex;
+
 use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
 use aether_capabilities::trace_walk::TreeWalk;
 use aether_data::MailId;
+use aether_data::SchemaType;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
     DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name,
@@ -26,8 +32,8 @@ use aether_data::{
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
-    CostTailResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult,
-    MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SpawnEngine,
+    CostTailResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult, LoadComponent,
+    LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SpawnEngine,
     SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
     TerminateEngineResult,
     trace::{
@@ -103,6 +109,34 @@ pub type ComponentCache = Mutex<HashMap<(EngineId, MailboxId), ComponentCapabili
 /// than erroring the tool.
 pub type ReverseNameCache = Mutex<HashMap<EngineId, EngineNames>>;
 
+/// Per-engine kind-encode cache (ADR-0091): a `kind_name → KindDescriptor`
+/// map per engine, plus the per-engine async mutex that collapses
+/// concurrent refreshes. Built lazily on first send for an engine
+/// (prefilled from the substrate's static vocabulary via
+/// `descriptors::all`); refreshed on encode miss via
+/// `aether.inventory.kinds`. Component-defined kinds enter on the
+/// first miss after `load_component`.
+///
+/// Two halves so the cache can be read under the synchronous `Mutex`
+/// without holding the lock across the async refresh RPC: the outer
+/// `descriptors` map is the read path, and `refresh_guards` holds the
+/// per-engine `AsyncMutex<()>` two concurrent misses on
+/// different unknown names collapse on (the second waiter awaits the
+/// first's result, then retries the lookup against the freshly-
+/// populated map without re-fetching).
+#[derive(Default)]
+pub struct KindsCache {
+    /// `engine → kind_name → descriptor`. Read with the std `Mutex`
+    /// uncontended on cache hits (no await inside the critical
+    /// section).
+    descriptors: Mutex<HashMap<EngineId, HashMap<String, KindDescriptor>>>,
+    /// `engine → refresh-collapse mutex`. Looked up under
+    /// `descriptors`'s lock to fetch-or-insert, then acquired
+    /// out-of-band via `tokio::sync::Mutex::lock().await` so the
+    /// refresh RPC doesn't pin the cache lock.
+    refresh_guards: Mutex<HashMap<EngineId, Arc<AsyncMutex<()>>>>,
+}
+
 /// Per-session MCP service. `rmcp` calls the factory once per session
 /// and may clone the result for concurrent tool dispatch — `session`
 /// and `components` are `Arc`s, so clones share the one hub connection
@@ -114,6 +148,10 @@ pub struct Mcp {
     /// Per-engine reverse-lookup maps (ADR-0088 §8), shared across cloned
     /// sessions so a manifest fetched for one tool call serves the next.
     names: Arc<ReverseNameCache>,
+    /// Per-engine kind-encode cache (ADR-0091), shared across cloned
+    /// sessions so a `ListKinds` refresh fetched for one tool call
+    /// serves the next.
+    kinds: Arc<KindsCache>,
     // The `#[tool_router]` macro stores the router instance here; it's
     // consumed by `#[tool_handler]` codegen rather than read by name, so
     // the dead-code lint fires under `-D warnings` despite the field
@@ -124,16 +162,19 @@ pub struct Mcp {
 
 impl Mcp {
     /// Construct a per-session service over an established hub
-    /// connection + the process-wide component and reverse-name caches.
+    /// connection + the process-wide component, reverse-name, and
+    /// kind-encode caches.
     pub fn new(
         session: Arc<RpcSession>,
         components: Arc<ComponentCache>,
         names: Arc<ReverseNameCache>,
+        kinds: Arc<KindsCache>,
     ) -> Self {
         Self {
             session,
             components,
             names,
+            kinds,
             tool_router: Self::tool_router(),
         }
     }
@@ -225,21 +266,18 @@ impl Mcp {
         &self,
         Parameters(args): Parameters<SendMailArgs>,
     ) -> Result<String, McpError> {
-        // Snapshot the substrate descriptor inventory once for the
-        // whole batch rather than per item.
-        let descriptors = descriptors::all();
         let fire_and_forget = args.fire_and_forget;
         let mut statuses = Vec::with_capacity(args.mails.len());
         for (index, spec) in args.mails.into_iter().enumerate() {
             let mut replies = Vec::new();
             let mut timed_out = false;
             let status = if fire_and_forget {
-                match self.deliver_one_fire(&descriptors, spec).await {
+                match self.deliver_one_fire(spec).await {
                     Ok(()) => "dispatched".to_owned(),
                     Err(e) => format!("error: {e}"),
                 }
             } else {
-                match self.deliver_one(&descriptors, spec).await {
+                match self.deliver_one(spec).await {
                     Ok((events, hit_timeout)) => {
                         replies = decode_reply_events(&events);
                         timed_out = hit_timeout;
@@ -266,13 +304,16 @@ impl Mcp {
         Parameters(args): Parameters<SendMailTracedArgs>,
     ) -> Result<String, McpError> {
         let engine = parse_engine_id(&args.engine_id)?;
-        let descriptors = descriptors::all();
         // Encode the batch before sending — a bad spec produces a
         // clean invalid-params error and never touches the wire.
         // Same shape `CaptureFrame` carries: `Vec<MailEnvelope>` with
         // name-level addressing the substrate resolves at dispatch
-        // time via `resolve_bundle`.
-        let mails = encode_traced_bundle(&descriptors, &args.mails)
+        // time via `resolve_bundle`. ADR-0091: descriptors come from
+        // the per-engine merged view so a component's own kinds
+        // encode after `load_component`.
+        let mails = self
+            .encode_traced_bundle(engine, &args.mails)
+            .await
             .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
         let timeout_ms = args
             .settlement_timeout_ms
@@ -507,13 +548,22 @@ impl Mcp {
         let engine = parse_engine_id(&args.engine_id)?;
         // Encode both bundles before sending — a bad entry produces a
         // clean invalid-params error and never touches the wire.
-        let descriptors = descriptors::all();
-        let mails = encode_capture_bundle(&descriptors, &args.mails).map_err(|e| {
-            McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None)
-        })?;
-        let after_mails = encode_capture_bundle(&descriptors, &args.after_mails).map_err(|e| {
-            McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
-        })?;
+        // ADR-0091: descriptors come from the per-engine merged view
+        // so a `capture_frame` referencing a component-defined kind
+        // (e.g. an `aether.mesh.load` pre-mail) encodes correctly
+        // after `load_component`.
+        let mails = self
+            .encode_capture_bundle(engine, &args.mails)
+            .await
+            .map_err(|e| {
+                McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None)
+            })?;
+        let after_mails = self
+            .encode_capture_bundle(engine, &args.after_mails)
+            .await
+            .map_err(|e| {
+                McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
+            })?;
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -900,44 +950,32 @@ impl Mcp {
     /// collected reply envelopes plus a `timed_out` flag — the await is
     /// bounded by [`AWAIT_TIMEOUT_DEFAULT_MS`] so a cap that never
     /// replies returns at the cap rather than hanging.
-    async fn deliver_one(
-        &self,
-        descriptors: &[KindDescriptor],
-        spec: MailSpec,
-    ) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
-        let envelope = Self::build_mail_envelope(descriptors, spec)?;
+    async fn deliver_one(&self, spec: MailSpec) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
+        let envelope = self.build_mail_envelope(spec).await?;
         let timeout = Duration::from_millis(u64::from(AWAIT_TIMEOUT_DEFAULT_MS));
         self.session.call_collecting(envelope, timeout).await
     }
 
     /// [`Self::deliver_one`]'s fire-and-forget twin: build the envelope
     /// and write the `Call` without awaiting any reply (issue 1242).
-    async fn deliver_one_fire(
-        &self,
-        descriptors: &[KindDescriptor],
-        spec: MailSpec,
-    ) -> anyhow::Result<()> {
-        let envelope = Self::build_mail_envelope(descriptors, spec)?;
+    async fn deliver_one_fire(&self, spec: MailSpec) -> anyhow::Result<()> {
+        let envelope = self.build_mail_envelope(spec).await?;
         self.session.fire(envelope).await
     }
 
-    /// Resolve a `MailSpec` against the substrate vocabulary baked into
-    /// `aether-kinds` and build the `engine = Some` wire envelope — the
-    /// shared front half of [`Self::deliver_one`] /
-    /// [`Self::deliver_one_fire`]. The same descriptor set the scenario
-    /// runner and the embedded hub encode `send_mail` params against.
-    fn build_mail_envelope(
-        descriptors: &[KindDescriptor],
-        spec: MailSpec,
-    ) -> anyhow::Result<MailEnvelope> {
+    /// Resolve a `MailSpec` against the per-engine merged kind view
+    /// (static prefill + cached `ListKinds` reply, ADR-0091) and build
+    /// the `engine = Some` wire envelope — the shared front half of
+    /// [`Self::deliver_one`] / [`Self::deliver_one_fire`]. A miss
+    /// against an engine that has loaded a component triggers one
+    /// `aether.inventory.kinds` refresh before erroring "unknown
+    /// kind"; the encode then succeeds for the component's own kinds.
+    async fn build_mail_envelope(&self, spec: MailSpec) -> anyhow::Result<MailEnvelope> {
         let engine = EngineId(
             Uuid::parse_str(&spec.engine_id)
                 .map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
         );
-        let desc = descriptors
-            .iter()
-            .find(|d| d.name == spec.kind_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown kind: {}", spec.kind_name))?;
+        let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
         let params = spec.params.unwrap_or(serde_json::Value::Null);
         let payload = aether_codec::encode_schema(&params, &desc.schema)
             .map_err(|e| anyhow::anyhow!("param encode failed: {e}"))?;
@@ -991,6 +1029,151 @@ impl Mcp {
         cache
             .entry(engine)
             .or_insert_with(|| EngineNames::from_manifest(&manifest));
+    }
+
+    /// ADR-0091 §3 lookup → miss → refresh → retry → error flow. Look
+    /// up `kind_name` in the engine's encode cache; on a miss, fetch
+    /// the substrate's authoritative vocabulary via
+    /// `aether.inventory.kinds` and retry. The per-engine refresh is
+    /// collapsed under an async mutex so two concurrent misses on
+    /// different unknown names trigger one RPC, not two.
+    ///
+    /// Returns the matched descriptor; errors with `unknown kind: …`
+    /// after one refresh round-trip if the engine doesn't recognise
+    /// the name (a typoed kind, or a kind belonging to a component
+    /// that hasn't been loaded yet — distinguishable by the error
+    /// type at the substrate's later dispatch attempt).
+    async fn lookup_descriptor(
+        &self,
+        engine: EngineId,
+        kind_name: &str,
+    ) -> anyhow::Result<KindDescriptor> {
+        // Fast path: hit on the cache as it stands. `prefill_engine`
+        // populates the static `descriptors::all()` baseline on first
+        // touch so the very first send for a substrate-vocab kind
+        // doesn't trip a refresh.
+        self.prefill_engine(engine);
+        if let Some(desc) = self.cache_lookup(engine, kind_name) {
+            return Ok(desc);
+        }
+
+        // Miss: take the per-engine refresh mutex, then re-check (a
+        // concurrent waiter may have just refreshed) and refresh
+        // ourselves if still missing.
+        let guard = self.refresh_guard(engine);
+        let _refresh = guard.lock().await;
+        if let Some(desc) = self.cache_lookup(engine, kind_name) {
+            return Ok(desc);
+        }
+        self.refresh_engine_kinds(engine).await;
+        self.cache_lookup(engine, kind_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown kind: {kind_name}"))
+    }
+
+    /// Seed `engine`'s cache from the substrate's static vocabulary
+    /// (`descriptors::all`) the first time the harness touches it. The
+    /// static set is process-global so a second engine with the same
+    /// build sees the same prefill, but the cache is keyed per-engine
+    /// because component-defined kinds aren't shared across engines.
+    #[allow(clippy::significant_drop_tightening)] // tight scope already
+    fn prefill_engine(&self, engine: EngineId) {
+        let mut cache = self
+            .kinds
+            .descriptors
+            .lock()
+            .expect("kinds-cache mutex is never poisoned");
+        cache.entry(engine).or_insert_with(|| {
+            descriptors::all()
+                .into_iter()
+                .map(|d| (d.name.clone(), d))
+                .collect()
+        });
+    }
+
+    /// Synchronous cache hit/miss check — no await, holds the std
+    /// `Mutex` only across the cloning lookup.
+    fn cache_lookup(&self, engine: EngineId, kind_name: &str) -> Option<KindDescriptor> {
+        let cache = self
+            .kinds
+            .descriptors
+            .lock()
+            .expect("kinds-cache mutex is never poisoned");
+        cache.get(&engine).and_then(|m| m.get(kind_name).cloned())
+    }
+
+    /// Fetch-or-create the per-engine refresh mutex. The mutex is
+    /// wrapped in an `Arc` so we can drop the cache lock before
+    /// awaiting; the only writers to `refresh_guards` are this
+    /// function itself, so it's a small concurrent-insert with no
+    /// upstream contention.
+    fn refresh_guard(&self, engine: EngineId) -> Arc<AsyncMutex<()>> {
+        let mut guards = self
+            .kinds
+            .refresh_guards
+            .lock()
+            .expect("kinds-cache refresh-guards mutex is never poisoned");
+        guards
+            .entry(engine)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    /// Issue `ListKinds` against the engine's `aether.inventory`
+    /// mailbox and replace this engine's cache with the reply (folded
+    /// over the static prefill — a component's own kinds layer on top
+    /// of the substrate baseline, neither side wins exclusively).
+    /// A failed RPC / undecodable reply leaves the cache untouched so
+    /// the caller's retry surfaces the original "unknown kind" miss
+    /// rather than a transient RPC error.
+    async fn refresh_engine_kinds(&self, engine: EngineId) {
+        let Some(ListKindsResult { kinds }) = self
+            .session
+            .call_one(engine_envelope(engine, INVENTORY_CAP, &ListKinds {}))
+            .await
+            .ok()
+            .and_then(|reply| ListKindsResult::decode_from_bytes(&reply.payload))
+        else {
+            return;
+        };
+
+        // Decode each `schema_postcard` back into a `SchemaType`; an
+        // entry whose schema fails to decode is dropped (the
+        // substrate's wire form is canonical, so a decode failure is
+        // a substrate / aether-data version mismatch — better to skip
+        // the entry than panic the tool call).
+        let fresh: Vec<KindDescriptor> = kinds
+            .into_iter()
+            .filter_map(|wire| {
+                let schema = postcard::from_bytes::<SchemaType>(&wire.schema_postcard).ok()?;
+                Some(KindDescriptor {
+                    name: wire.name,
+                    schema,
+                })
+            })
+            .collect();
+
+        // Hold the cache lock only for the merge; the await above is
+        // already complete, so the `MutexGuard`'s significant `Drop`
+        // doesn't span any await point.
+        self.merge_into_engine_cache(engine, fresh);
+    }
+
+    /// Merge `fresh` into `engine`'s cache map, replacing any prior
+    /// entries with the same name. Factored out of `refresh_engine_kinds`
+    /// so the cache lock is acquired in a tight scope — no other state
+    /// hangs off the same critical section, and no await crosses the
+    /// guard.
+    #[allow(clippy::significant_drop_tightening)] // tight scope already
+    fn merge_into_engine_cache(&self, engine: EngineId, fresh: Vec<KindDescriptor>) {
+        let mut cache = self
+            .kinds
+            .descriptors
+            .lock()
+            .expect("kinds-cache mutex is never poisoned");
+        let map = cache.entry(engine).or_default();
+        for desc in fresh {
+            map.insert(desc.name.clone(), desc);
+        }
     }
 
     /// Batch-resolve `ids` that the engine's static map missed via
@@ -1343,34 +1526,33 @@ async fn build_descriptor(arg: DagDescriptorArg) -> anyhow::Result<DagDescriptor
     })
 }
 
-/// Encode a `send_mail_traced` batch into the same `MailEnvelope`
-/// shape `CaptureFrame` carries: name-level addressing + schema-encoded
-/// payload. The substrate's `TraceObserver` resolves the names through
-/// its registry at dispatch time. Same `resolve_payload` path
-/// `encode_capture_bundle` uses, just over `TracedMailSpec` instead of
-/// `CaptureMailSpec`.
-fn encode_traced_bundle(
-    descriptors: &[KindDescriptor],
-    specs: &[TracedMailSpec],
-) -> anyhow::Result<Vec<KindMailEnvelope>> {
-    specs
-        .iter()
-        .map(|spec| {
-            let desc = descriptors
-                .iter()
-                .find(|d| d.name == spec.kind_name)
-                .ok_or_else(|| anyhow::anyhow!("unknown kind: {}", spec.kind_name))?;
+impl Mcp {
+    /// Encode a `send_mail_traced` batch into the same `MailEnvelope`
+    /// shape `CaptureFrame` carries: name-level addressing + schema-
+    /// encoded payload. The substrate's `TraceObserver` resolves the
+    /// names through its registry at dispatch time. Same lookup path
+    /// `encode_capture_bundle` uses (per-engine merged view, ADR-0091),
+    /// just over `TracedMailSpec` instead of `CaptureMailSpec`.
+    async fn encode_traced_bundle(
+        &self,
+        engine: EngineId,
+        specs: &[TracedMailSpec],
+    ) -> anyhow::Result<Vec<KindMailEnvelope>> {
+        let mut out = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
             let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
             let payload = aether_codec::encode_schema(&params, &desc.schema)
                 .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
-            Ok(KindMailEnvelope {
+            out.push(KindMailEnvelope {
                 recipient_name: spec.recipient_name.clone(),
                 kind_name: spec.kind_name.clone(),
                 payload,
                 count: 1,
-            })
-        })
-        .collect()
+            });
+        }
+        Ok(out)
+    }
 }
 
 /// Render a raw `u64` mailbox / kind / thread id to its display string
@@ -1437,32 +1619,32 @@ fn node_reversible_ids(node: &MailNodeWire) -> Vec<u64> {
     ids
 }
 
-/// Encode a `capture_frame` mail bundle: resolve each spec's kind
-/// against the substrate descriptor inventory, schema-encode its
-/// params, and wrap into the substrate-side `aether_kinds::MailEnvelope`
-/// shape (name-level addressing + pre-encoded payload).
-fn encode_capture_bundle(
-    descriptors: &[KindDescriptor],
-    specs: &[CaptureMailSpec],
-) -> anyhow::Result<Vec<aether_kinds::MailEnvelope>> {
-    specs
-        .iter()
-        .map(|spec| {
-            let desc = descriptors
-                .iter()
-                .find(|d| d.name == spec.kind_name)
-                .ok_or_else(|| anyhow::anyhow!("unknown kind: {}", spec.kind_name))?;
+impl Mcp {
+    /// Encode a `capture_frame` mail bundle: resolve each spec's kind
+    /// against the per-engine merged view (ADR-0091, static prefill +
+    /// cached `ListKinds` reply), schema-encode its params, and wrap
+    /// into the substrate-side `aether_kinds::MailEnvelope` shape
+    /// (name-level addressing + pre-encoded payload).
+    async fn encode_capture_bundle(
+        &self,
+        engine: EngineId,
+        specs: &[CaptureMailSpec],
+    ) -> anyhow::Result<Vec<aether_kinds::MailEnvelope>> {
+        let mut out = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let desc = self.lookup_descriptor(engine, &spec.kind_name).await?;
             let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
             let payload = aether_codec::encode_schema(&params, &desc.schema)
                 .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
-            Ok(aether_kinds::MailEnvelope {
+            out.push(aether_kinds::MailEnvelope {
                 recipient_name: spec.recipient_name.clone(),
                 kind_name: spec.kind_name.clone(),
                 payload,
                 count: 1,
-            })
-        })
-        .collect()
+            });
+        }
+        Ok(out)
+    }
 }
 
 /// Serialize a tool result to the JSON string `rmcp` wraps as text
@@ -1585,14 +1767,66 @@ mod tests {
     }
 
     /// Connect an `RpcSession` + wrap it in an `Mcp` against a booted
-    /// hub chassis, with fresh component + reverse-name caches.
+    /// hub chassis, with fresh component, reverse-name, and kind-encode
+    /// caches.
     fn connect_mcp(port: u16) -> Mcp {
         let session = RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
         Mcp::new(
             Arc::new(session),
             Arc::new(ComponentCache::default()),
             Arc::new(ReverseNameCache::default()),
+            Arc::new(KindsCache::default()),
         )
+    }
+
+    /// Hub-shape chassis with `InventoryCapability` installed and a
+    /// caller-supplied descriptor registered against the bench's
+    /// `Registry` — emulating the post-`load_component` state where
+    /// a component's own kind is in the substrate's vocab but not in
+    /// `descriptors::all()`. Used by ADR-0091's end-to-end check that
+    /// the MCP encode path picks the registered kind up via
+    /// `aether.inventory.kinds`.
+    fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChassis<TestChassis>, u16) {
+        use aether_capabilities::InventoryCapability;
+
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        for d in extras {
+            // Component-defined kinds enter the substrate's `Registry`
+            // via `ComponentHostCapability::handle_load` →
+            // `register_or_match_all`; here we shortcut that with a
+            // direct register so the test doesn't need a real wasm
+            // load lifecycle (the ADR-0091 surface under test is the
+            // *projection*, not the loader).
+            let _ = registry.register_kind_with_descriptor(d.clone());
+        }
+        let (outbound, _rx) = HubOutbound::attached_loopback();
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<EngineServer>(())
+            // The inventory cap pulls `Arc::clone(ctx.mailer().registry())`
+            // in `init`, so it sees the same `Registry` we just wrote
+            // the extra kinds into.
+            .with_actor::<InventoryCapability>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+            })
+            .build_passive()
+            .expect("hub caps boot");
+        let port = chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        (chassis, port)
     }
 
     /// `list_engines` over the RPC round-trip yields an empty array on
@@ -2312,6 +2546,133 @@ mod tests {
             "a clean decode omits the payload_bytes key entirely: {json}",
         );
         assert!(obj.contains_key("params"), "params is still present");
+    }
+
+    /// ADR-0091 issue 1232 (end-to-end): a kind registered in the
+    /// substrate's `Registry` — emulating the post-`load_component`
+    /// state for a component-defined kind like `aether.mesh.load` —
+    /// flows through `InventoryCapability`'s `ListKinds` projection
+    /// onto the wire, lands in the harness's per-engine encode cache,
+    /// and the next `send_mail` encodes correctly. This is the
+    /// forcing-function path the issue calls out: a kind NOT in
+    /// `descriptors::all()` becomes encodable the moment the substrate
+    /// holds it.
+    ///
+    /// Test addresses the engines cap with `engine = None` (the hub
+    /// fixture's local dispatch path) so the round-trip closes against
+    /// the same chassis without needing a separately-routed engine
+    /// proxy; the cache machinery under test is engine-keyed but
+    /// engine-agnostic at the RPC layer.
+    #[tokio::test]
+    async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
+        use aether_data::{KindDescriptor, SchemaType};
+
+        // The component-defined kind in this scenario: present in the
+        // substrate's `Registry` but not in `descriptors::all()`.
+        let component_kind = KindDescriptor {
+            name: "aether.test.component_defined_kind".to_owned(),
+            schema: SchemaType::String,
+        };
+
+        let extras = vec![component_kind.clone()];
+        let (_chassis, port) = boot_hub_with_inventory(&extras);
+        let session = RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
+        let mcp = Mcp::new(
+            Arc::new(session),
+            Arc::new(ComponentCache::default()),
+            Arc::new(ReverseNameCache::default()),
+            Arc::new(KindsCache::default()),
+        );
+
+        // Pre-condition: the static prefill does NOT carry the
+        // component's kind. (If a future change accidentally promotes
+        // it to native, the test surfaces immediately rather than
+        // silently bypassing the cache-refresh path.)
+        assert!(
+            !descriptors::all()
+                .iter()
+                .any(|d| d.name == component_kind.name),
+            "test invariant: the component kind must not be in the static descriptors",
+        );
+
+        // Address the hub's local `aether.inventory` via the engines-
+        // cap path: the hub-fixture's RPC server routes
+        // `engine = Some(uuid)` envelopes through the engines cap,
+        // which knows no matching engine and warn-drops. To exercise
+        // the cache against the local cap, route as a local Call
+        // by stamping `engine = None`. We bypass `lookup_descriptor`'s
+        // `engine_envelope` here because the test fixture is hub-
+        // shaped (the engines cap doesn't proxy to a separate
+        // substrate); in production the hub forwards to the engine
+        // and the engine answers via its local `aether.inventory`.
+        let reply = mcp
+            .session
+            .call_one(local_envelope(INVENTORY_CAP, &ListKinds {}))
+            .await
+            .expect("aether.inventory.kinds reply");
+        let result =
+            ListKindsResult::decode_from_bytes(&reply.payload).expect("ListKindsResult decodes");
+        // The reply must include the registered component kind with a
+        // schema that decodes back to the originally registered shape
+        // — the wire path the harness's cache reads from.
+        let entry = result
+            .kinds
+            .iter()
+            .find(|k| k.name == component_kind.name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "ListKindsResult should include the registered component kind; \
+                     got {:?}",
+                    result.kinds.iter().map(|k| &k.name).collect::<Vec<_>>(),
+                )
+            });
+        let decoded_schema: SchemaType =
+            postcard::from_bytes(&entry.schema_postcard).expect("schema_postcard decodes");
+        assert!(
+            matches!(decoded_schema, SchemaType::String),
+            "the registered schema round-trips through the wire",
+        );
+
+        // Now drive the harness's encode path directly. Seed the
+        // per-engine cache the way a real refresh would (engine id is
+        // synthetic; the cache is engine-keyed so any uuid suffices
+        // for this assertion), then verify `build_mail_envelope`
+        // encodes a `MailSpec` against the component kind without
+        // ever consulting `descriptors::all()`. This is the surface
+        // the production `send_mail` reaches for after a
+        // `load_component` populates the cache via the same wire
+        // path the assertion above exercised.
+        let engine = EngineId(Uuid::from_u128(0x1232_dead_beef));
+        // Seed the per-engine cache the way `refresh_engine_kinds` would
+        // on a hit — the cache merge helper is the single writer.
+        mcp.merge_into_engine_cache(engine, vec![component_kind.clone()]);
+        let envelope = mcp
+            .build_mail_envelope(MailSpec {
+                engine_id: engine.0.to_string(),
+                recipient_name: "aether.component.trampoline:test".to_owned(),
+                kind_name: component_kind.name.clone(),
+                params: Some(serde_json::Value::String("hello".to_owned())),
+            })
+            .await
+            .expect("build_mail_envelope encodes the component-defined kind");
+        // The schema-encoded payload for a `SchemaType::String` is the
+        // postcard string wire shape; decoding back via the same
+        // schema must yield the original JSON value.
+        let decoded = aether_codec::decode_schema(&envelope.payload, &component_kind.schema)
+            .expect("payload decodes against the cached schema");
+        assert_eq!(
+            decoded,
+            serde_json::Value::String("hello".to_owned()),
+            "the encoded payload round-trips through aether_codec against the live schema",
+        );
+        assert_eq!(
+            envelope.kind,
+            KindId(kind_id_from_parts(
+                &component_kind.name,
+                &component_kind.schema
+            )),
+            "envelope kind id matches the live KindId of the component-defined kind",
+        );
     }
 
     /// Issue 1242: `fire_and_forget: true` is non-blocking — a

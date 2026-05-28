@@ -187,6 +187,7 @@ dependencies = [
  "base64",
  "futures-util",
  "libc",
+ "postcard",
  "reqwest",
  "rmcp",
  "schemars",

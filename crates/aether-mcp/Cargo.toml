@@ -44,6 +44,11 @@ libc = "0.2"
 # through incrementally rather than buffered to EOF. Default features
 # (TLS, etc.) are off — the upstream is plain-HTTP localhost.
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+# Used by the per-engine kind cache (ADR-0091) to round-trip a
+# `SchemaType` through the `KindDescriptorWire.schema_postcard` field —
+# `SchemaType` has no `Schema` impl of its own, so it rides as opaque
+# bytes within the `aether.inventory.kinds_result` wire kind.
+postcard = "1"
 rmcp = { version = "1.7", features = [
     "server",
     "macros",

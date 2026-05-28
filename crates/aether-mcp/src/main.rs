@@ -26,7 +26,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use crate::rpc::RpcSession;
-use crate::tools::{ComponentCache, Mcp, ReverseNameCache};
+use crate::tools::{ComponentCache, KindsCache, Mcp, ReverseNameCache};
 
 /// Default port the MCP HTTP server binds. Distinct from the embedded
 /// hub MCP's 8888 so the two coexist until the P5d cutover.
@@ -79,15 +79,24 @@ async fn main() -> anyhow::Result<()> {
     // for that engine, then reused across tool calls and sessions.
     let names: Arc<ReverseNameCache> = Arc::new(ReverseNameCache::default());
 
+    // Process-wide per-engine kind-encode cache (ADR-0091), shared into
+    // every per-session `Mcp` — prefilled lazily from the substrate's
+    // static `descriptors::all()` baseline on first touch, refreshed
+    // on encode miss via `aether.inventory.kinds`, then reused across
+    // tool calls and sessions.
+    let kinds: Arc<KindsCache> = Arc::new(KindsCache::default());
+
     let factory_session = Arc::clone(&session);
     let factory_components = Arc::clone(&components);
     let factory_names = Arc::clone(&names);
+    let factory_kinds = Arc::clone(&kinds);
     let service = StreamableHttpService::new(
         move || {
             Ok(Mcp::new(
                 Arc::clone(&factory_session),
                 Arc::clone(&factory_components),
                 Arc::clone(&factory_names),
+                Arc::clone(&factory_kinds),
             ))
         },
         Arc::new(LocalSessionManager::default()),
