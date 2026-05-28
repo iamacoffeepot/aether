@@ -22,6 +22,7 @@ use aether_substrate::chassis::builder::{
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
+use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
 use std::thread;
 
@@ -56,8 +57,22 @@ impl HubEnv {
     /// development story.
     #[must_use]
     pub fn from_env() -> Self {
+        Self::from_env_with_argv(&HubCli::default())
+    }
+
+    /// ADR-0090 unit d (issue 1258): resolve from argv-then-env.
+    /// `cli.rpc_port` shadows `AETHER_RPC_PORT`; falling through still
+    /// lands on [`DEFAULT_RPC_PORT`] (the hub always binds an RPC
+    /// server, unlike desktop / headless). Takes `&HubCli` since the
+    /// only field today is a `Copy` `Option<u16>` — owned ownership
+    /// would be a needless move.
+    #[must_use]
+    pub fn from_env_with_argv(cli: &HubCli) -> Self {
         use std::net::{IpAddr, Ipv4Addr};
-        let rpc_port = super::rpc_port_from_env().unwrap_or(DEFAULT_RPC_PORT);
+        let rpc_port = cli
+            .rpc_port
+            .or_else(super::rpc_port_from_env)
+            .unwrap_or(DEFAULT_RPC_PORT);
         Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
         }
