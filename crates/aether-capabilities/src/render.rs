@@ -373,10 +373,25 @@ mod native {
                 }
             }
 
+            // ADR-0086 §12 / iamacoffeepot/aether#1273: capture is a
+            // deferred reply — the render thread sends the reply after
+            // the cap handler has returned. Acquire the settlement hold
+            // *before* the queue handoff so `HoldOpen` is visible to
+            // the settlement counter ahead of this handler's
+            // `Finished`; the hold rides on `PendingCapture` and drops
+            // with `req` after `outbound.send_reply` on the render
+            // thread (`desktop/driver.rs` line ~568, `test_bench/
+            // bench.rs` line ~1019). Mirrors the `contentgen::dispatch`
+            // submit path. The early-return branches above reply
+            // synchronously inside this handler's own dispatch window,
+            // so they're naturally covered by the handler's in-flight
+            // `Finished` bracket and don't need the hold.
+            let hold = ctx.mailer().acquire_settlement_hold(ctx.in_flight_root());
             let pending = PendingCapture {
                 reply_to: sender,
                 after_mails: after,
                 pre_settlements,
+                hold,
             };
             if !backend.queue.request(pending) {
                 backend.outbound.send_reply(

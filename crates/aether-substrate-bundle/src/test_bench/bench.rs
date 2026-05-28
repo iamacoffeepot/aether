@@ -1017,6 +1017,13 @@ impl TestBench {
                     self.queue.push(mail);
                 }
                 self.outbound.send_reply(req.reply_to, &result);
+                // iamacoffeepot/aether#1273: `req` still owns
+                // `PendingCapture._hold` after the partial moves above; the
+                // field drops at end of this match arm — *after*
+                // `send_reply` returns — firing `Release` on the trace
+                // root so `Settled{root}` is exact at post-reply. Don't
+                // restructure to move the reply below other work in this
+                // arm.
             }
             None => {
                 self.gpu.render();
@@ -1083,6 +1090,60 @@ mod tests {
             "captured bytes are not a PNG: first 8 bytes={:?}",
             &png.iter().take(8).copied().collect::<Vec<u8>>(),
         );
+    }
+
+    /// iamacoffeepot/aether#1273: `on_capture_frame` parks the request
+    /// on the capture queue and returns immediately — the reply happens
+    /// later on the chassis main thread. ADR-0086 §12 says deferred
+    /// replies MUST hold-open against the trace root; without that hold
+    /// `Settled{root}` fires before the reply lands and the wire `Call`
+    /// driving the MCP tool ends with zero collected reply events.
+    ///
+    /// This test sends `CaptureFrame` via `BenchOp::send_and_await` (the
+    /// shape the issue's regression test calls for) and asserts the
+    /// reply decodes to `CaptureFrameResult::Ok { png: <non-empty> }`.
+    /// The PNG comes back through the loopback's `EgressEvent::ToSession`
+    /// — same correlation-id round-trip the MCP harness uses, but
+    /// in-process.
+    #[test]
+    fn capture_frame_send_and_await_returns_png() {
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+        let result = tb
+            .execute(vec![
+                ("tick", BenchOp::advance(1)),
+                (
+                    "capture",
+                    BenchOp::send_and_await(
+                        RenderCapability::NAMESPACE,
+                        &CaptureFrame {
+                            mails: Vec::new(),
+                            after_mails: Vec::new(),
+                        },
+                    ),
+                ),
+            ])
+            .expect("advance + send_and_await(CaptureFrame)");
+        let reply: CaptureFrameResult = result
+            .reply("capture")
+            .expect("capture step replied with CaptureFrameResult");
+        match reply {
+            CaptureFrameResult::Ok { png } => {
+                assert!(
+                    png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+                    "captured bytes are not a PNG: first 8 bytes={:?}",
+                    &png.iter().take(8).copied().collect::<Vec<u8>>(),
+                );
+            }
+            CaptureFrameResult::Err { error } => {
+                panic!("capture_frame replied Err: {error}");
+            }
+        }
     }
 
     /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
