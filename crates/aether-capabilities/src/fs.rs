@@ -227,10 +227,49 @@ fn fs_error_from_std(err: io::Error) -> FsError {
 /// chassis reads this at boot, hands each path to a `LocalFileAdapter`,
 /// and registers the result in an `AdapterRegistry` keyed on the
 /// namespace short name (`"save"`, `"assets"`, `"config"`).
+///
+/// ADR-0090 unit g (iamacoffeepot/aether#1264) escape hatch: the
+/// `#[derive(aether_substrate::Config)]` emits the Layer +
+/// `NamespaceRootsOverlay` + inherent `from_env` / `from_argv_then_env`
+/// shims, but `#[config(skip_from_layer)]` opts the cap out of the
+/// auto-generated `FromArgvThenEnv::from_layer`. The hand-written impl
+/// (below, in the `native` bridge mod) applies the runtime-computed
+/// `dirs::data_dir()` / `current_exe()` / `dirs::config_dir()`
+/// fallbacks that confique cannot express as literals. Per-field
+/// `env = "..."` overrides pin the unprefixed `AETHER_*_DIR` env keys.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+#[cfg_attr(
+    feature = "native",
+    config(env_prefix = "AETHER", cli_prefix = "", skip_from_layer)
+)]
 pub struct NamespaceRoots {
+    #[cfg_attr(
+        feature = "native",
+        config(
+            env = "AETHER_SAVE_DIR",
+            cli_long = "save-dir",
+            parse = parse_dir
+        )
+    )]
     pub save: PathBuf,
+    #[cfg_attr(
+        feature = "native",
+        config(
+            env = "AETHER_ASSETS_DIR",
+            cli_long = "assets-dir",
+            parse = parse_dir
+        )
+    )]
     pub assets: PathBuf,
+    #[cfg_attr(
+        feature = "native",
+        config(
+            env = "AETHER_CONFIG_DIR",
+            cli_long = "config-dir",
+            parse = parse_dir
+        )
+    )]
     pub config: PathBuf,
 }
 
@@ -377,13 +416,20 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     }
 }
 
-/// Re-export the env-shaped confique layer for chassis CLI overlays
-/// (ADR-0090 unit d, issue 1258). The layer lives inside the bridge
-/// `mod native` (cfg-gated); the file-root re-export gives chassis
-/// bins a stable path (`aether_capabilities::fs::NamespaceRootsLayer`)
-/// without reaching into the bridge module.
+// The derive's emitted Layer + Overlay + `from_env` shims live at the
+// file root (same scope as the `NamespaceRoots` struct itself). The
+// `parse_dir` helper they reference must therefore also live at file
+// root; the legacy bridge-mod-local helper is re-exported via the
+// re-export below.
+//
+// The Layer type re-export is no longer needed — the derive emits
+// `NamespaceRootsLayer` at this very scope.
+
+// `parse_dir` is reachable from the derive-emitted Layer fields via
+// the file-root scope. The bridge mod re-exports its definitions
+// (`parse_dir`, `EmptyDir`) so the prior layout doesn't need to move.
 #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
-pub use native::NamespaceRootsLayer;
+use native::parse_dir;
 
 #[aether_actor::bridge(singleton)]
 mod native {
@@ -391,7 +437,8 @@ mod native {
     use std::sync::Arc;
 
     use super::{
-        AdapterRegistry, Delete, FsError, List, NamespaceRoots, Read, Write, build_registry,
+        AdapterRegistry, Delete, FsError, List, NamespaceRoots, NamespaceRootsLayer, Read, Write,
+        build_registry,
     };
     use aether_actor::{MailCtx, actor};
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
@@ -403,60 +450,22 @@ mod native {
     #[cfg(feature = "native")]
     use std::fmt;
 
-    impl NamespaceRoots {
-        /// Resolve each root from its env-var override, falling back to
-        /// the `dirs`-crate platform default. v1 ships the env layer;
-        /// ADR-0041's precedence order (CLI > env > TOML > defaults)
-        /// leaves room for TOML and CLI to sit in front of this without
-        /// changing the cap or adapter code.
-        ///
-        /// Defaults:
-        /// - `save` → `data_dir()/aether/save`
-        /// - `assets` → `{current_exe}/../assets`
-        /// - `config` → `config_dir()/aether`
-        ///
-        /// If a platform directory lookup fails (e.g. no HOME) or
-        /// `current_exe()` can't resolve, the fallback is `temp_dir()/aether/...`
-        /// so a boot always finishes even on headless CI.
-        ///
-        /// Per issue 464, this is the chassis-main edge — substrate-core
-        /// itself never reads env. The builder
-        /// (`SubstrateBootBuilder::namespace_roots`) accepts a resolved
-        /// `NamespaceRoots` directly so tests and chassis-as-library
-        /// embedders can supply their own roots without process-env
-        /// mutation.
-        ///
-        /// Resolution runs through confique (ADR-0090): the private
-        /// `NamespaceRootsLayer` declares each root's env key. The
-        /// defaults are *computed at runtime* (via the `dirs` crate /
-        /// `current_exe`), not literals, so the layer fields are
-        /// `Option<PathBuf>` (unset / empty env → `None`) and the
-        /// platform fallbacks are applied here — byte-identical to the
-        /// prior `env_or_default` reader.
-        ///
-        /// # Panics
-        ///
-        /// Never in practice: the layer has no literal defaults to
-        /// malform and the only parser (`parse_dir`) errors only on the
-        /// empty string (folded to the runtime fallback). The `.expect`
-        /// guards against a future confique misconfiguration.
-        #[cfg(feature = "native")]
-        #[must_use]
-        pub fn from_env() -> Self {
-            use aether_substrate::FromArgvThenEnv as _;
-            use confique::Config as _;
-
-            let layer = NamespaceRootsLayer::builder()
-                .env()
-                .load()
-                .expect("NamespaceRootsLayer has no literal defaults to malform");
-            Self::from_layer(layer)
-        }
-
-        // `from_argv_then_env` and `from_layer` come from the
-        // `FromArgvThenEnv` impl below (ADR-0090 unit d).
-    }
-
+    /// Hand-written `FromArgvThenEnv` impl for the `NamespaceRoots`
+    /// escape hatch (ADR-0090 unit g, iamacoffeepot/aether#1264). The
+    /// derive's `skip_from_layer` opt-out delegates `from_layer` here
+    /// because the defaults are *runtime-computed*
+    /// (`dirs::data_dir()` / `current_exe()` / `dirs::config_dir()`),
+    /// not literals confique can hold. Behaviour is byte-identical to
+    /// the prior `env_or_default` reader — an unset / empty
+    /// `AETHER_*_DIR` lands as `None` (the macro auto-promotes the
+    /// `PathBuf` domain to `Option<PathBuf>` on the Layer side when no
+    /// literal default is supplied), then the platform fallback
+    /// resolves it here.
+    ///
+    /// On a platform-directory lookup failure (e.g. no `HOME`) or
+    /// `current_exe()` resolution failure, the fallback is
+    /// `temp_dir()/aether/...` so a boot always finishes even on
+    /// headless CI.
     #[cfg(feature = "native")]
     impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
         type Layer = NamespaceRootsLayer;
@@ -487,35 +496,11 @@ mod native {
         }
     }
 
-    /// Env-shaped confique layer behind `NamespaceRoots` (ADR-0090). Each
-    /// root is `Option<PathBuf>` because the defaults are runtime-computed
-    /// (`dirs` / `current_exe`), not literals confique can hold — an
-    /// unset *or empty* env var resolves to `None` and
-    /// `NamespaceRoots::from_env` applies the platform fallback. The
-    /// `parse_dir` parser errors on an empty string so confique treats an
-    /// empty value as unset (matching the prior `env_or_default`).
-    /// Public so chassis CLI overlays (ADR-0090 unit d, issue 1258) can
-    /// preload a `<NamespaceRootsLayer as confique::Config>::Layer`
-    /// before `.env()`; the consumed shape stays `NamespaceRoots`.
-    /// Gated on `feature = "native"`: the enclosing `mod native` is only
-    /// `not(target_arch = "wasm32")`-gated, but confique is a
-    /// `native`-feature dep.
-    #[cfg(feature = "native")]
-    #[derive(confique::Config)]
-    pub struct NamespaceRootsLayer {
-        #[config(env = "AETHER_SAVE_DIR", parse_env = parse_dir)]
-        pub save: Option<PathBuf>,
-        #[config(env = "AETHER_ASSETS_DIR", parse_env = parse_dir)]
-        pub assets: Option<PathBuf>,
-        #[config(env = "AETHER_CONFIG_DIR", parse_env = parse_dir)]
-        pub config: Option<PathBuf>,
-    }
-
     /// Parse a directory override. An empty string errors so confique
     /// treats it as unset (preserving the prior `env_or_default`'s
     /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
     #[cfg(feature = "native")]
-    fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
+    pub(super) fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
         if s.is_empty() {
             Err(EmptyDir)
         } else {
@@ -527,7 +512,7 @@ mod native {
     /// confique's parse path (`Err` + empty → `None`).
     #[cfg(feature = "native")]
     #[derive(Debug)]
-    struct EmptyDir;
+    pub(super) struct EmptyDir;
 
     #[cfg(feature = "native")]
     impl fmt::Display for EmptyDir {

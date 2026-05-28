@@ -1,7 +1,7 @@
-//! Per-chassis clap CLI roots and per-cap argv overlays (ADR-0090 unit
-//! d, issue 1258). Each chassis bin calls `<Cli>::parse()` and threads
-//! the resolved overlays through `*Env::from_env_with_argv(cli)`; each
-//! overlay's `into_layer()` writes argv-set fields into a partial
+//! Per-chassis clap CLI roots (ADR-0090 unit d, issue 1258). Each
+//! chassis bin calls `<Cli>::parse()` and threads the resolved
+//! overlays through `*Env::from_env_with_argv(cli)`; each overlay's
+//! `into_layer()` writes argv-set fields into a partial
 //! `<*ConfigLayer as confique::Config>::Layer`, which the cap's
 //! `from_argv_then_env(...)` then preloads ahead of `.env()` so argv
 //! beats env beats literal defaults. Absent flags resolve `None` and
@@ -21,239 +21,33 @@
 //! root `CommonOverlay` / `DesktopCli` / `HeadlessCli` and are
 //! ad-hoc-shadowed in the bin (`cli.workers.or_else(parse_workers_env)`).
 //! Unit e1 will lift them into their own confique layers.
+//!
+//! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
+//! structs now ride the `#[derive(aether_substrate::Config)]` next to
+//! the domain struct in the cap crate. This file re-exports them so
+//! `cli.common.http.into_layer()` call sites stay unchanged; the
+//! `PersistOverlay` + chassis-root CLI structs stay hand-written
+//! because they cover chassis-shape (cross-cap) composition the
+//! derive deliberately doesn't try to model.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
-use aether_capabilities::anthropic::AnthropicConfigLayer;
-use aether_capabilities::audio::AudioConfigLayer;
-use aether_capabilities::fs::NamespaceRootsLayer;
-use aether_capabilities::gemini::GeminiConfigLayer;
-use aether_capabilities::http::HttpConfigLayer;
 use aether_substrate::handle_store::PersistConfigLayer;
 use clap::{Args, Parser};
 use confique::{Config, Layer};
 
-/// Argv overlay for the `aether.http` cap. One `Option<T>` per
-/// `HttpConfigLayer` field; [`Self::into_layer`] maps unset → partial
-/// `None`, set → partial `Some(v)`.
-#[derive(Args, Debug, Default, Clone)]
-pub struct HttpOverlay {
-    /// `AETHER_HTTP_DISABLE` — swap in the disabled adapter.
-    #[arg(id = "http_disable", long = "http-disable", num_args = 0..=1, default_missing_value = "true")]
-    pub disable: Option<bool>,
-    /// `AETHER_HTTP_ALLOWLIST` — comma-separated hostnames.
-    #[arg(id = "http_allowlist", long = "http-allowlist")]
-    pub allowlist: Option<String>,
-    /// `AETHER_HTTP_REQUIRE_HTTPS` — reject `http://` URLs.
-    #[arg(id = "http_require_https", long = "http-require-https", num_args = 0..=1, default_missing_value = "true")]
-    pub require_https: Option<bool>,
-    /// `AETHER_HTTP_MAX_BODY_BYTES` — response body cap.
-    #[arg(id = "http_max_body_bytes", long = "http-max-body-bytes")]
-    pub max_body_bytes: Option<usize>,
-    /// `AETHER_HTTP_TIMEOUT_MS` — default per-request timeout.
-    #[arg(id = "http_timeout_ms", long = "http-timeout-ms")]
-    pub timeout_ms: Option<u32>,
-}
-
-impl HttpOverlay {
-    /// Write argv-set fields into a fresh partial layer. `None` →
-    /// partial `None` (env / default takes over); `Some(v)` → partial
-    /// `Some(v)`.
-    #[must_use]
-    pub fn into_layer(self) -> <HttpConfigLayer as Config>::Layer {
-        let Self {
-            disable,
-            allowlist,
-            require_https,
-            max_body_bytes,
-            timeout_ms,
-        } = self;
-        let mut layer = <HttpConfigLayer as Config>::Layer::empty();
-        if let Some(v) = disable {
-            layer.disabled = Some(v);
-        }
-        if let Some(s) = allowlist {
-            // Same total parser the env side uses (CSV → HashSet, trim,
-            // drop empties). Mirrored inline to avoid making the
-            // parser pub on the cap.
-            let set: HashSet<String> = s
-                .split(',')
-                .map(str::trim)
-                .filter(|h| !h.is_empty())
-                .map(str::to_string)
-                .collect();
-            layer.allowlist = Some(set);
-        }
-        if let Some(v) = require_https {
-            layer.require_https = Some(v);
-        }
-        if let Some(v) = max_body_bytes {
-            layer.max_body_bytes = Some(v);
-        }
-        if let Some(v) = timeout_ms {
-            layer.timeout_ms = Some(v);
-        }
-        layer
-    }
-}
-
-/// Argv overlay for the `aether.audio` cap (desktop only). Headless
-/// runs without an audio device, so [`DesktopCli`] is the only chassis
-/// that flatten-includes this.
-#[derive(Args, Debug, Default, Clone)]
-pub struct AudioOverlay {
-    /// `AETHER_AUDIO_DISABLE` — skip cpal init entirely.
-    #[arg(id = "audio_disable", long = "audio-disable", num_args = 0..=1, default_missing_value = "true")]
-    pub disable: Option<bool>,
-    /// `AETHER_AUDIO_SAMPLE_RATE` — requested sample rate in Hz.
-    #[arg(id = "audio_sample_rate", long = "audio-sample-rate")]
-    pub sample_rate: Option<u32>,
-}
-
-impl AudioOverlay {
-    #[must_use]
-    pub fn into_layer(self) -> <AudioConfigLayer as Config>::Layer {
-        let Self {
-            disable,
-            sample_rate,
-        } = self;
-        let mut layer = <AudioConfigLayer as Config>::Layer::empty();
-        if let Some(v) = disable {
-            layer.disabled = Some(v);
-        }
-        if let Some(v) = sample_rate {
-            // The layer holds the raw string so the cap can apply the
-            // soft `.parse::<u32>().ok()` (an unparseable env value →
-            // `None`). On the argv path the value is already typed.
-            layer.requested_sample_rate = Some(v.to_string());
-        }
-        layer
-    }
-}
-
-/// Argv overlay for the `aether.fs` cap namespace roots.
-#[derive(Args, Debug, Default, Clone)]
-pub struct FsOverlay {
-    /// `AETHER_SAVE_DIR` — writable per-user persistent root.
-    #[arg(id = "save_dir", long = "save-dir")]
-    pub save_dir: Option<PathBuf>,
-    /// `AETHER_ASSETS_DIR` — read-only assets root.
-    #[arg(id = "assets_dir", long = "assets-dir")]
-    pub assets_dir: Option<PathBuf>,
-    /// `AETHER_CONFIG_DIR` — writable per-user config root.
-    #[arg(id = "config_dir", long = "config-dir")]
-    pub config_dir: Option<PathBuf>,
-}
-
-impl FsOverlay {
-    #[must_use]
-    pub fn into_layer(self) -> <NamespaceRootsLayer as Config>::Layer {
-        let Self {
-            save_dir,
-            assets_dir,
-            config_dir,
-        } = self;
-        let mut layer = <NamespaceRootsLayer as Config>::Layer::empty();
-        if let Some(p) = save_dir {
-            layer.save = Some(p);
-        }
-        if let Some(p) = assets_dir {
-            layer.assets = Some(p);
-        }
-        if let Some(p) = config_dir {
-            layer.config = Some(p);
-        }
-        layer
-    }
-}
-
-/// Argv overlay for the `aether.anthropic` cap (ADR-0050).
-#[derive(Args, Debug, Default, Clone)]
-pub struct AnthropicOverlay {
-    /// `ANTHROPIC_API_KEY` — Messages-API key. Empty → disabled
-    /// adapter.
-    #[arg(id = "anthropic_api_key", long = "anthropic-api-key")]
-    pub api_key: Option<String>,
-    /// `AETHER_ANTHROPIC_DISABLE` — force the disabled adapter.
-    #[arg(id = "anthropic_disable", long = "anthropic-disable", num_args = 0..=1, default_missing_value = "true")]
-    pub disable: Option<bool>,
-    /// `AETHER_ANTHROPIC_MAX_IN_FLIGHT` — per-cap concurrency bound.
-    #[arg(id = "anthropic_max_in_flight", long = "anthropic-max-in-flight")]
-    pub max_in_flight: Option<usize>,
-    /// `AETHER_ANTHROPIC_TIMEOUT_MS` — per-request timeout.
-    #[arg(id = "anthropic_timeout_ms", long = "anthropic-timeout-ms")]
-    pub timeout_ms: Option<u32>,
-}
-
-impl AnthropicOverlay {
-    #[must_use]
-    pub fn into_layer(self) -> <AnthropicConfigLayer as Config>::Layer {
-        let Self {
-            api_key,
-            disable,
-            max_in_flight,
-            timeout_ms,
-        } = self;
-        let mut layer = <AnthropicConfigLayer as Config>::Layer::empty();
-        if let Some(v) = api_key {
-            layer.api_key = Some(v);
-        }
-        if let Some(v) = disable {
-            layer.disabled = Some(v);
-        }
-        if let Some(v) = max_in_flight {
-            layer.max_in_flight = Some(v);
-        }
-        if let Some(v) = timeout_ms {
-            layer.timeout_ms = Some(v);
-        }
-        layer
-    }
-}
-
-/// Argv overlay for the `aether.gemini` cap (ADR-0050).
-#[derive(Args, Debug, Default, Clone)]
-pub struct GeminiOverlay {
-    /// `GEMINI_API_KEY` — Google API key. Empty → disabled adapter.
-    #[arg(id = "gemini_api_key", long = "gemini-api-key")]
-    pub api_key: Option<String>,
-    /// `AETHER_GEMINI_DISABLE` — force the disabled adapter.
-    #[arg(id = "gemini_disable", long = "gemini-disable", num_args = 0..=1, default_missing_value = "true")]
-    pub disable: Option<bool>,
-    /// `AETHER_GEMINI_MAX_IN_FLIGHT` — per-cap concurrency bound.
-    #[arg(id = "gemini_max_in_flight", long = "gemini-max-in-flight")]
-    pub max_in_flight: Option<usize>,
-    /// `AETHER_GEMINI_TIMEOUT_MS` — per-request timeout.
-    #[arg(id = "gemini_timeout_ms", long = "gemini-timeout-ms")]
-    pub timeout_ms: Option<u32>,
-}
-
-impl GeminiOverlay {
-    #[must_use]
-    pub fn into_layer(self) -> <GeminiConfigLayer as Config>::Layer {
-        let Self {
-            api_key,
-            disable,
-            max_in_flight,
-            timeout_ms,
-        } = self;
-        let mut layer = <GeminiConfigLayer as Config>::Layer::empty();
-        if let Some(v) = api_key {
-            layer.api_key = Some(v);
-        }
-        if let Some(v) = disable {
-            layer.disabled = Some(v);
-        }
-        if let Some(v) = max_in_flight {
-            layer.max_in_flight = Some(v);
-        }
-        if let Some(v) = timeout_ms {
-            layer.timeout_ms = Some(v);
-        }
-        layer
-    }
-}
+// Per-cap overlays are emitted by `#[derive(aether_substrate::Config)]`
+// next to the domain struct in `aether-capabilities`. Re-exporting them
+// here keeps the `cli.common.<cap>.into_layer()` call sites unchanged.
+// The `NamespaceRoots` overlay's name follows the domain struct
+// (`NamespaceRootsOverlay`), not the namespace prefix (`FsOverlay`) —
+// alias the historical name so the bundle's compose code keeps
+// reading.
+pub use aether_capabilities::anthropic::AnthropicOverlay;
+pub use aether_capabilities::audio::AudioOverlay;
+pub use aether_capabilities::fs::NamespaceRootsOverlay as FsOverlay;
+pub use aether_capabilities::gemini::GeminiOverlay;
+pub use aether_capabilities::http::HttpOverlay;
 
 /// Argv overlay for the ADR-0049 handle-store persistence knobs. The
 /// `dir` / `persist_disable` flags shadow `AETHER_HANDLE_STORE_DIR` /
@@ -262,6 +56,12 @@ impl GeminiOverlay {
 /// env via the confique builder. `max_bytes` is the in-memory soft
 /// budget (`AETHER_HANDLE_STORE_MAX_BYTES`), structurally separate
 /// from the on-disk persist config.
+///
+/// Stays hand-written (not derive-emitted) because `PersistConfig`'s
+/// `from_argv_then_env` takes four arguments (chassis vote + dir
+/// lookup + env short-circuit + numeric layer) that don't fit the
+/// derive's `Layer → Self` shape. The `aether-substrate::config`
+/// module docs hold the rationale verbatim.
 #[derive(Args, Debug, Default, Clone)]
 pub struct PersistOverlay {
     /// `AETHER_HANDLE_STORE_DIR` — on-disk persistence root.

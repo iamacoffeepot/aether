@@ -60,7 +60,7 @@ use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
 // the config struct (sends are typed; config is the chassis's
 // concern).
 #[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
-pub use native::{AudioConfig, AudioConfigLayer};
+pub use native::{AudioConfig, AudioConfigLayer, AudioOverlay};
 
 #[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {
@@ -104,87 +104,39 @@ mod native {
     /// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
     /// into an `AudioConfig` and pass it to `with_actor::<AudioCapability>(cfg)`
     /// (issue 464). Tests build an `AudioConfig` directly.
-    #[derive(Clone, Debug, Default)]
+    ///
+    /// ADR-0090 unit g (iamacoffeepot/aether#1264): the
+    /// `#[derive(aether_substrate::Config)]` emits the env-shaped
+    /// `AudioConfigLayer`, the clap-shaped `AudioOverlay`, the
+    /// `FromArgvThenEnv` impl, and the inherent `from_env` /
+    /// `from_argv_then_env` shims. `requested_sample_rate`'s type
+    /// `Option<u32>` triggers the macro's type-driven
+    /// `Option<numeric>` shape: the Layer holds `Option<String>` and
+    /// `from_layer` does the soft `.parse().ok()` so an unparseable
+    /// value lands as `None` (indistinguishable from unset, matching
+    /// the prior reader).
+    #[derive(Clone, Debug, Default, aether_substrate::Config)]
+    #[config(env_prefix = "AETHER_AUDIO", cli_prefix = "audio")]
     pub struct AudioConfig {
         /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The cap
         /// still claims its mailbox and replies `Err` to `SetMasterGain`
-        /// so agents fail fast instead of hanging.
+        /// so agents fail fast instead of hanging. `env` + `cli_long`
+        /// overrides pin the historical wire shape (no `D` suffix on
+        /// `DISABLE`; `--audio-disable` not `--audio-disabled`).
+        #[config(
+            env = "AETHER_AUDIO_DISABLE",
+            cli_long = "audio-disable",
+            default = false,
+            parse = parse_flag
+        )]
         pub disabled: bool,
         /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If
         /// the device doesn't support it, boot falls back to nop
-        /// (ADR-0039 — non-fatal).
+        /// (ADR-0039 — non-fatal). `layer_field = "sample_rate"` drops
+        /// the `requested_` prefix on the Layer / env / CLI side so the
+        /// historical names are unchanged.
+        #[config(layer_field = "sample_rate", env = "AETHER_AUDIO_SAMPLE_RATE")]
         pub requested_sample_rate: Option<u32>,
-    }
-
-    impl AudioConfig {
-        /// Resolve every field from env. Chassis-main edge only.
-        ///
-        /// Resolution runs through confique (ADR-0090): the private
-        /// `AudioConfigLayer` declares each knob's env key + default in
-        /// one place, and this maps the env-shaped layer onto the
-        /// domain-shaped `AudioConfig`. Behaviour is byte-identical to the
-        /// prior hand-rolled reader — an unparseable sample rate resolves
-        /// to `None` (the field stays optional, so a bad value is
-        /// indistinguishable from unset, matching the prior `.ok()`).
-        ///
-        /// # Panics
-        ///
-        /// Panics only if the layer's literal defaults are themselves
-        /// malformed — a programmer error caught by the
-        /// `audio_from_env_defaults_match` test, never a runtime config
-        /// fault (the env values flow through a total parser / raw capture).
-        #[must_use]
-        pub fn from_env() -> Self {
-            use aether_substrate::FromArgvThenEnv as _;
-            use confique::Config as _;
-
-            let layer = AudioConfigLayer::builder()
-                .env()
-                .load()
-                .expect("AudioConfigLayer defaults are well-formed");
-            Self::from_layer(layer)
-        }
-
-        // `from_argv_then_env` and `from_layer` come from the
-        // `FromArgvThenEnv` impl below (ADR-0090 unit d).
-    }
-
-    impl aether_substrate::FromArgvThenEnv for AudioConfig {
-        type Layer = AudioConfigLayer;
-
-        fn from_layer(layer: AudioConfigLayer) -> Self {
-            Self {
-                disabled: layer.disabled,
-                // Prior behaviour: `.parse::<u32>().ok()` — an unparseable
-                // rate is silently `None`, indistinguishable from unset.
-                // Confique's parse path would *error* on a non-empty bad
-                // value (not byte-identical), so the layer captures the raw
-                // string and the soft `.ok()` parse stays here. The
-                // hard-error stance (ADR-0090 §4) lands later.
-                requested_sample_rate: layer
-                    .requested_sample_rate
-                    .and_then(|s| s.parse::<u32>().ok()),
-            }
-        }
-    }
-
-    /// Env-shaped confique layer behind `AudioConfig` (ADR-0090). Public
-    /// so chassis CLI overlays (ADR-0090 unit d, issue 1258) can preload
-    /// a `<AudioConfigLayer as confique::Config>::Layer` before
-    /// `.env()`; the consumed shape stays `AudioConfig`. Lives inside the
-    /// `audio-native` bridge mod (which implies the `native` feature), so
-    /// confique is always available here.
-    #[derive(confique::Config)]
-    pub struct AudioConfigLayer {
-        /// `AETHER_AUDIO_DISABLE=1`/`true` skips cpal init entirely.
-        #[config(env = "AETHER_AUDIO_DISABLE", parse_env = parse_flag, default = false)]
-        pub disabled: bool,
-        /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. Held
-        /// as the raw string so `AudioConfig::from_env` can apply the
-        /// soft `.parse().ok()` (an unparseable value → `None`); a
-        /// confique numeric field would hard-error on bad input instead.
-        #[config(env = "AETHER_AUDIO_SAMPLE_RATE")]
-        pub requested_sample_rate: Option<String>,
     }
 
     /// Event a handler pushes into the audio callback's queue. The
@@ -966,10 +918,14 @@ mod native {
         fn audio_from_env_defaults_match() {
             use confique::Config as _;
             // No `.env()` source: literal defaults only — env-free.
+            // The Layer field is `sample_rate` (the derive's
+            // `layer_field = "sample_rate"` drops the `requested_`
+            // prefix on the wire shape); the domain field stays
+            // `requested_sample_rate`.
             let layer = AudioConfigLayer::builder().load().expect("defaults load");
             let default = AudioConfig::default();
             assert_eq!(layer.disabled, default.disabled);
-            assert_eq!(layer.requested_sample_rate, None);
+            assert_eq!(layer.sample_rate, None);
             assert_eq!(default.requested_sample_rate, None);
         }
 

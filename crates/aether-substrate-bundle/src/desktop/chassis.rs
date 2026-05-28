@@ -22,9 +22,7 @@ use aether_capabilities::{
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{
-    Chassis, FromArgvThenEnv, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue,
-};
+use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 

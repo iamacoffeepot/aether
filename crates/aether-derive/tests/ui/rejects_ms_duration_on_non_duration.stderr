@@ -1,0 +1,5 @@
+error: `ms_duration` hint requires field type `std::time::Duration`
+ --> tests/ui/rejects_ms_duration_on_non_duration.rs:7:5
+  |
+7 |     #[config(default = 30_000, ms_duration)]
+  |     ^

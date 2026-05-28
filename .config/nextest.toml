@@ -6,6 +6,16 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+# Trybuild fixtures (aether-data-derive, aether-derive) spawn a nested
+# `cargo` build per `.rs` fixture. Local runs finish under 30s; CI
+# runners are slower and contended, and running both crates' UI tests
+# in parallel can push each past 60s. Both crates' test binaries
+# exclusively host trybuild-style fixtures, so widening the cap is
+# scoped — no fast unit tests hide behind the longer window.
+[[profile.ci.overrides]]
+filter = "package(=aether-data-derive) | package(=aether-derive)"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 # Repeat-run ("soak") flake detection for concurrent tests, driven by
 # `scripts/flake-soak.sh` with nextest `--stress-count`. Each repeat is a
 # fresh process. `fail-fast = false` so one flaky test doesn't hide the

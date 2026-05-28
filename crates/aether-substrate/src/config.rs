@@ -1,18 +1,44 @@
 //! Shared confique-overlay glue for resolved cap configs (ADR-0090
-//! unit d).
+//! unit d), and the trait that ADR-0090 unit g
+//! (iamacoffeepot/aether#1264) plumbs the per-cap
+//! `#[derive(aether_substrate::Config)]` against.
 //!
-//! Every cap that opted into confique (`HttpConfig`, `AudioConfig`,
-//! `GeminiConfig`, `AnthropicConfig`, `NamespaceRoots`) ships a
-//! mechanical `from_argv_then_env(argv) -> Self`: build the
-//! cap's `*ConfigLayer` with the argv overlay preloaded, run
-//! `.env().load()`, hand the loaded layer to a per-cap `from_layer`
-//! mapping. Only `from_layer` actually differs across caps — the
-//! builder boilerplate is identical.
+//! # Preferred shape — `#[derive(aether_substrate::Config)]`
 //!
-//! [`FromArgvThenEnv`] hoists the boilerplate into a default method.
-//! Each cap impls just `from_layer` (and names its `Layer` associated
-//! type); the trait's default `from_argv_then_env` is inherited
-//! verbatim.
+//! Cap authors should reach for the derive on the resolved-config
+//! struct rather than hand-writing the trio + impl:
+//!
+//! ```ignore
+//! #[derive(Clone, Debug)]
+//! #[cfg_attr(feature = "native", derive(aether_substrate::Config))]
+//! #[cfg_attr(
+//!     feature = "native",
+//!     config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
+//! )]
+//! pub struct HttpConfig {
+//!     #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+//!     pub disabled: bool,
+//!     #[cfg_attr(
+//!         feature = "native",
+//!         config(default = 30_000, parse = parse_timeout_ms, ms_duration)
+//!     )]
+//!     pub default_timeout: Duration,
+//! }
+//! ```
+//!
+//! The derive emits the env-shaped `*Layer`, the clap-shaped
+//! `*Overlay` (next to the domain struct in the cap crate; the
+//! bundle's `cli.rs` `pub use`s them), the `FromArgvThenEnv` impl,
+//! and inherent `from_env()` / `from_argv_then_env(argv)` shims. Per-
+//! field hints (`default`, `parse`, `env`, `cli_long`, `ms_duration`,
+//! `csv_set`, `layer_field`) cover the d-era wire shapes; the
+//! container `skip_from_layer` opt-out lets a cap hand-write
+//! `from_layer` when its defaults are runtime-computed (the
+//! `NamespaceRoots` case).
+//!
+//! [`FromArgvThenEnv`] still exists as the underlying trait — the
+//! derive emits an impl of it. Hand-written impls remain valid where
+//! the derive doesn't fit.
 //!
 //! # Why not `PersistConfig` too?
 //!
@@ -27,7 +53,7 @@
 //! through a `Layer`. Forcing it into a `(Layer) -> Self` shape would
 //! mean re-deriving the structural inputs from environment reads inside
 //! the trait body, which is exactly the structure the cap deliberately
-//! kept hand-written. The five other caps still benefit from the trait;
+//! kept hand-written. The five other caps benefit from the derive;
 //! `PersistConfig` stays inherent.
 
 /// Build a cap config by overlaying an argv-derived partial confique

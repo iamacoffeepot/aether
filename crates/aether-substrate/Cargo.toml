@@ -30,6 +30,11 @@ audio = ["dep:cpal"]
 # state lives in struct fields, not a thread-local.
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
+# ADR-0090 unit g (iamacoffeepot/aether#1264): `#[derive(Config)]` lives
+# in `aether-derive` and is re-exported here as `aether_substrate::Config`,
+# the user-facing path callers write. Mirrors how `aether-data`
+# re-exports `aether-data-derive`'s `#[derive(Kind, Schema)]`.
+aether-derive = { path = "../aether-derive" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
 # ADR-0090: typed, layered config resolution. Backs the env-shaped
