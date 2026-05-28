@@ -94,9 +94,43 @@ mod server_native {
     /// `on_inbound_ready` handler drains the channel and dispatches
     /// per item.
     enum InboundEvent {
-        PeerAccepted { stream: TcpStream, peer: SocketAddr },
-        FrameReceived { conn_id: ConnId, frame: WireFrame },
-        ReaderClosed { conn_id: ConnId, reason: String },
+        PeerAccepted {
+            stream: TcpStream,
+            peer: SocketAddr,
+        },
+        FrameReceived {
+            conn_id: ConnId,
+            frame: WireFrame,
+        },
+        ReaderClosed {
+            conn_id: ConnId,
+            reason: String,
+        },
+        /// An inbound frame failed to decode but the reader managed to
+        /// keep frame-sync (issue 1271). Today this only fires for a
+        /// length-prefix that exceeded the framing cap and whose body
+        /// was small enough (`size <= 2 * max`) for the reader to drain
+        /// without itself becoming an OOM vector. The dispatcher writes
+        /// a `ReplyEnd { cid: 0, result: Err(RpcError::FrameTooLarge) }`
+        /// and the connection survives. `cid = 0` is the agreed
+        /// sentinel for "wire-level error, no in-flight call id to
+        /// match against" — the mcp-side router lifts it as an
+        /// out-of-band error against the most recently pending call.
+        FrameDecodeError {
+            conn_id: ConnId,
+            error: RpcError,
+        },
+        /// An inbound length prefix announced a body larger than
+        /// `2 * max_frame_size` (issue 1271). Draining it would
+        /// itself defeat the OOM guard the cap was written for, so the
+        /// dispatcher writes a structured `Bye` and closes the
+        /// connection — the OOM safety property holds, the wire error
+        /// is named, and the client gets a clean close instead of a
+        /// bare reset.
+        FrameDecodeAborted {
+            conn_id: ConnId,
+            error: RpcError,
+        },
     }
 
     /// Per-connection state owned by the cap dispatcher. The reader
@@ -271,6 +305,57 @@ mod server_native {
                     InboundEvent::ReaderClosed { conn_id, reason } => {
                         self.close_connection(conn_id, &reason);
                     }
+                    InboundEvent::FrameDecodeError { conn_id, error } => {
+                        // The reader kept frame-sync (body drained).
+                        // Write a structured `ReplyEnd { cid: 0, Err }`
+                        // and leave the connection up so further calls
+                        // on this socket still work (issue 1271).
+                        //
+                        // `cid = 0` is the sentinel: the wire couldn't
+                        // be decoded far enough to learn the real cid,
+                        // so we report against id 0 and the mcp router
+                        // surfaces it as a wire-level out-of-band
+                        // failure rather than a per-call settled-Err.
+                        tracing::warn!(
+                            target: "aether_substrate::rpc",
+                            conn = conn_id,
+                            error = ?error,
+                            "rpc inbound frame decode error; keeping connection alive",
+                        );
+                        self.write_frame_to(
+                            conn_id,
+                            &WireFrame::ReplyEnd {
+                                cid: 0,
+                                result: Err(error),
+                            },
+                        );
+                    }
+                    InboundEvent::FrameDecodeAborted { conn_id, error } => {
+                        // The announced body was big enough to be its
+                        // own OOM vector (size > 2 * max). Write a
+                        // structured `Bye` so the peer sees a named
+                        // close instead of a bare reset, then tear the
+                        // connection down (issue 1271).
+                        let reason = match &error {
+                            RpcError::FrameTooLarge { size, max } => {
+                                format!("frame too large: {size} > {max}")
+                            }
+                            other => format!("frame decode aborted: {other:?}"),
+                        };
+                        tracing::warn!(
+                            target: "aether_substrate::rpc",
+                            conn = conn_id,
+                            reason = %reason,
+                            "rpc inbound frame too large to drain; closing connection",
+                        );
+                        self.write_frame_to(
+                            conn_id,
+                            &WireFrame::Bye {
+                                reason: reason.clone(),
+                            },
+                        );
+                        self.close_connection(conn_id, &reason);
+                    }
                 }
             }
         }
@@ -422,6 +507,90 @@ mod server_native {
                                 });
                                 mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
                                 break;
+                            }
+                            Err(FrameError::FrameTooLarge { size, max }) => {
+                                // The 4-byte length prefix has been
+                                // consumed but the body is still on
+                                // the wire (issue 1271). If draining
+                                // the body wouldn't itself be an OOM
+                                // vector, drain it so the stream
+                                // re-syncs at the next frame boundary
+                                // and the connection survives; if it
+                                // would, ask the dispatcher to write a
+                                // structured `Bye` and tear the
+                                // connection down.
+                                let drain_ceiling = max.saturating_mul(2);
+                                #[allow(clippy::cast_possible_truncation)]
+                                let event = if size <= drain_ceiling {
+                                    // `take(size)` bounds the drain so a
+                                    // racy / lying peer can't push us
+                                    // past the cap-2x ceiling on bytes
+                                    // we'll allocate scratch for.
+                                    let mut drain = io::sink();
+                                    let mut bounded = io::Read::take(&mut reader, size as u64);
+                                    let drained = match io::copy(&mut bounded, &mut drain) {
+                                        Ok(n) => n,
+                                        Err(_) => {
+                                            // Drain failed (socket
+                                            // dropped, truncated
+                                            // body). Treat as a
+                                            // real read error and
+                                            // close the connection.
+                                            let _ = inbound_tx.send(InboundEvent::ReaderClosed {
+                                                conn_id,
+                                                reason: format!(
+                                                    "frame too large drain failed: {size} > {max}"
+                                                ),
+                                            });
+                                            mailer.push(Mail::new(
+                                                self_id,
+                                                wake_kind,
+                                                Vec::new(),
+                                                1,
+                                            ));
+                                            break;
+                                        }
+                                    };
+                                    if (drained as usize) != size {
+                                        // Peer hung up mid-body.
+                                        let _ = inbound_tx.send(InboundEvent::ReaderClosed {
+                                            conn_id,
+                                            reason: format!(
+                                                "frame too large partial drain: {drained}/{size}"
+                                            ),
+                                        });
+                                        mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                                        break;
+                                    }
+                                    InboundEvent::FrameDecodeError {
+                                        conn_id,
+                                        error: RpcError::FrameTooLarge {
+                                            size: size as u64,
+                                            max: max as u64,
+                                        },
+                                    }
+                                } else {
+                                    InboundEvent::FrameDecodeAborted {
+                                        conn_id,
+                                        error: RpcError::FrameTooLarge {
+                                            size: size as u64,
+                                            max: max as u64,
+                                        },
+                                    }
+                                };
+                                let abort =
+                                    matches!(event, InboundEvent::FrameDecodeAborted { .. },);
+                                if inbound_tx.send(event).is_err() {
+                                    break;
+                                }
+                                mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                                if abort {
+                                    // The dispatcher will close the
+                                    // connection. Exit the read loop
+                                    // to free the read half.
+                                    break;
+                                }
+                                continue;
                             }
                             Err(e) => {
                                 if shutdown_for_thread.load(Ordering::Acquire) {
@@ -1186,5 +1355,96 @@ mod tests {
             }
             other => panic!("expected Bye, got {other:?}"),
         }
+    }
+
+    /// iamacoffeepot/aether#1271: an inbound frame whose announced
+    /// length exceeds the framing cap but is within the drain ceiling
+    /// (`size <= 2 * max`) is fail-soft. The server drains the body,
+    /// writes a `ReplyEnd { cid: 0, Err(RpcError::FrameTooLarge) }`,
+    /// and keeps the connection alive — a follow-up `Ping` round-trips
+    /// as `Pong`, proving the session survived.
+    #[test]
+    fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
+        use crate::rpc::wire::RpcError;
+        use aether_codec::frame::{MAX_FRAME_SIZE, max_frame_size};
+        use std::io::Write;
+
+        let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
+        complete_handshake(&mut stream);
+
+        // Set the read timeout high — the server has to read the full
+        // oversize body off the wire before it can write the error
+        // reply, so the read for the ReplyEnd is gated on that drain.
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("set_write_timeout");
+
+        // Announce a body just over the cap, then push that many zero
+        // bytes. The cap defaults to 64 MiB (MAX_FRAME_SIZE), and the
+        // process-wide accessor caches on first read — so the drain
+        // ceiling is exactly `2 * max_frame_size()`. Pick the smallest
+        // legal oversize: max + 1.
+        let max = max_frame_size();
+        assert!(max >= MAX_FRAME_SIZE, "cap accessor lifted below default");
+        let oversize: usize = max + 1;
+        assert!(
+            oversize <= max.saturating_mul(2),
+            "test size must be inside the drain ceiling",
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let prefix = (oversize as u32).to_le_bytes();
+        stream
+            .write_all(&prefix)
+            .expect("write oversize length prefix");
+        // Write the body in chunks so a 64 MiB+ payload doesn't single-
+        // syscall through.
+        let chunk = vec![0u8; 1024 * 1024];
+        let mut remaining = oversize;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            stream
+                .write_all(&chunk[..n])
+                .expect("write oversize body chunk");
+            remaining -= n;
+        }
+
+        // The server replies with a structured ReplyEnd carrying
+        // FrameTooLarge. cid is 0 (the sentinel for "wire-level error,
+        // no in-flight cid to bind to").
+        let reply: WireFrame = read_frame(&mut stream).expect("read fail-soft ReplyEnd");
+        match reply {
+            WireFrame::ReplyEnd { cid, result } => {
+                assert_eq!(cid, 0, "fail-soft uses cid=0 sentinel");
+                match result {
+                    Err(RpcError::FrameTooLarge { size, max: cap }) => {
+                        assert_eq!(size, oversize as u64);
+                        assert_eq!(cap, max as u64);
+                    }
+                    other => panic!("expected FrameTooLarge, got {other:?}"),
+                }
+            }
+            other => panic!("expected ReplyEnd, got {other:?}"),
+        }
+
+        // Ping/Pong round-trips — the session is still alive.
+        write_frame(&mut stream, &WireFrame::Ping(0xfeed_face))
+            .expect("write Ping after fail-soft");
+        let pong: WireFrame = read_frame(&mut stream).expect("read Pong after fail-soft");
+        assert_eq!(pong, WireFrame::Pong(0xfeed_face));
+    }
+
+    /// Tiny postcard roundtrip for the new `RpcError::FrameTooLarge`
+    /// variant — protects the wire shape against accidental rename /
+    /// re-ordering.
+    #[test]
+    fn rpc_error_frame_too_large_postcard_roundtrips() {
+        use crate::rpc::wire::RpcError;
+        let err = RpcError::FrameTooLarge {
+            size: 99_000_000,
+            max: 64 * 1024 * 1024,
+        };
+        let bytes = postcard::to_allocvec(&err).expect("postcard encode");
+        let back: RpcError = postcard::from_bytes(&bytes).expect("postcard decode");
+        assert_eq!(err, back);
     }
 }

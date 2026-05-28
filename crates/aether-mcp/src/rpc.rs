@@ -21,8 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_capabilities::rpc::{
-    MailEnvelope, PeerKind, RpcClient, RpcConnection, RpcReaderHandle, WireFrame,
+    MailEnvelope, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcReaderHandle, WireFrame,
 };
+use aether_codec::frame::FrameError;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -124,6 +125,29 @@ impl Connection {
                         // client-side router never expects these.
                         _ => continue,
                     };
+                    // `cid == 0` is the wire-level out-of-band error
+                    // sentinel (iamacoffeepot/aether#1271): the server
+                    // couldn't decode the frame far enough to learn the
+                    // real cid (e.g. an oversize body), so the
+                    // structured error rides under id 0. Fan it out to
+                    // every pending caller so the original failing
+                    // call surfaces the wire error instead of hanging.
+                    // A `ReplyEnd { cid: 0, Ok }` is not a valid wire
+                    // shape — only `Err` frames carry the sentinel.
+                    if cid == 0 {
+                        if let WireFrame::ReplyEnd {
+                            result: Err(_), ..
+                        } = &frame
+                        {
+                            let pending = router_pending
+                                .lock()
+                                .expect("router pending mutex is never poisoned");
+                            for tx in pending.values() {
+                                let _ = tx.send(frame.clone());
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(tx) = router_pending
                         .lock()
                         .expect("router pending mutex is never poisoned")
@@ -337,10 +361,7 @@ impl RpcSession {
             let cid = match write {
                 Ok(cid) => cid,
                 Err(e) => {
-                    return Err(CallError::Transport {
-                        generation,
-                        source: anyhow::anyhow!("rpc call write failed: {e}"),
-                    });
+                    return Err(classify_write_error(e, generation));
                 }
             };
             pending.insert(cid, tx);
@@ -454,10 +475,7 @@ impl RpcSession {
             let cid = match write {
                 Ok(cid) => cid,
                 Err(e) => {
-                    return Err(CallError::Transport {
-                        generation,
-                        source: anyhow::anyhow!("rpc call write failed: {e}"),
-                    });
+                    return Err(classify_write_error(e, generation));
                 }
             };
             pending.insert(cid, tx);
@@ -541,10 +559,7 @@ impl RpcSession {
             .expect("rpc client mutex is never poisoned")
             .call(envelope.clone())
             .map(|_cid| ())
-            .map_err(|e| CallError::Transport {
-                generation,
-                source: anyhow::anyhow!("rpc call write failed: {e}"),
-            })
+            .map_err(|e| classify_write_error(e, generation))
     }
 }
 
@@ -569,6 +584,22 @@ impl CallError {
         match self {
             Self::Transport { source, .. } | Self::Call(source) => source,
         }
+    }
+}
+
+/// Classify an [`RpcClientError`] from the outbound write path
+/// (iamacoffeepot/aether#1271). `EncodeTooLarge` is a clean
+/// client-side rejection — the bytes never hit the wire, so the
+/// socket is still healthy and a re-dial would only re-encode + fail
+/// the same way. Everything else (TCP write errors, broken pipes) is
+/// a transport failure that warrants a single re-dial + retry.
+fn classify_write_error(e: RpcClientError, generation: u64) -> CallError {
+    if let RpcClientError::Frame(FrameError::EncodeTooLarge { .. }) = &e {
+        return CallError::Call(anyhow::anyhow!("rpc call encode rejected: {e}"));
+    }
+    CallError::Transport {
+        generation,
+        source: anyhow::anyhow!("rpc call write failed: {e}"),
     }
 }
 
