@@ -491,127 +491,15 @@ mod server_native {
             let thread = match thread::Builder::new()
                 .name(format!("aether-rpc-reader-{conn_id}"))
                 .spawn(move || {
-                    let mut reader = BufReader::new(read_half);
-                    loop {
-                        if shutdown_for_thread.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let frame: WireFrame = match read_frame(&mut reader) {
-                            Ok(f) => f,
-                            Err(FrameError::Io(io_err))
-                                if io_err.kind() == io::ErrorKind::UnexpectedEof =>
-                            {
-                                let _ = inbound_tx.send(InboundEvent::ReaderClosed {
-                                    conn_id,
-                                    reason: "eof".into(),
-                                });
-                                mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
-                                break;
-                            }
-                            Err(FrameError::FrameTooLarge { size, max }) => {
-                                // The 4-byte length prefix has been
-                                // consumed but the body is still on
-                                // the wire (issue 1271). If draining
-                                // the body wouldn't itself be an OOM
-                                // vector, drain it so the stream
-                                // re-syncs at the next frame boundary
-                                // and the connection survives; if it
-                                // would, ask the dispatcher to write a
-                                // structured `Bye` and tear the
-                                // connection down.
-                                let drain_ceiling = max.saturating_mul(2);
-                                #[allow(clippy::cast_possible_truncation)]
-                                let event = if size <= drain_ceiling {
-                                    // `take(size)` bounds the drain so a
-                                    // racy / lying peer can't push us
-                                    // past the cap-2x ceiling on bytes
-                                    // we'll allocate scratch for.
-                                    let mut drain = io::sink();
-                                    let mut bounded = io::Read::take(&mut reader, size as u64);
-                                    let drained = match io::copy(&mut bounded, &mut drain) {
-                                        Ok(n) => n,
-                                        Err(_) => {
-                                            // Drain failed (socket
-                                            // dropped, truncated
-                                            // body). Treat as a
-                                            // real read error and
-                                            // close the connection.
-                                            let _ = inbound_tx.send(InboundEvent::ReaderClosed {
-                                                conn_id,
-                                                reason: format!(
-                                                    "frame too large drain failed: {size} > {max}"
-                                                ),
-                                            });
-                                            mailer.push(Mail::new(
-                                                self_id,
-                                                wake_kind,
-                                                Vec::new(),
-                                                1,
-                                            ));
-                                            break;
-                                        }
-                                    };
-                                    if (drained as usize) != size {
-                                        // Peer hung up mid-body.
-                                        let _ = inbound_tx.send(InboundEvent::ReaderClosed {
-                                            conn_id,
-                                            reason: format!(
-                                                "frame too large partial drain: {drained}/{size}"
-                                            ),
-                                        });
-                                        mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
-                                        break;
-                                    }
-                                    InboundEvent::FrameDecodeError {
-                                        conn_id,
-                                        error: RpcError::FrameTooLarge {
-                                            size: size as u64,
-                                            max: max as u64,
-                                        },
-                                    }
-                                } else {
-                                    InboundEvent::FrameDecodeAborted {
-                                        conn_id,
-                                        error: RpcError::FrameTooLarge {
-                                            size: size as u64,
-                                            max: max as u64,
-                                        },
-                                    }
-                                };
-                                let abort =
-                                    matches!(event, InboundEvent::FrameDecodeAborted { .. },);
-                                if inbound_tx.send(event).is_err() {
-                                    break;
-                                }
-                                mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
-                                if abort {
-                                    // The dispatcher will close the
-                                    // connection. Exit the read loop
-                                    // to free the read half.
-                                    break;
-                                }
-                                continue;
-                            }
-                            Err(e) => {
-                                if shutdown_for_thread.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                let _ = inbound_tx.send(InboundEvent::ReaderClosed {
-                                    conn_id,
-                                    reason: format!("read error: {e}"),
-                                });
-                                mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
-                                break;
-                            }
-                        };
-                        if inbound_tx
-                            .send(InboundEvent::FrameReceived { conn_id, frame })
-                            .is_err()
-                        {
-                            break;
-                        }
-                        mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
-                    }
+                    run_reader_loop(
+                        read_half,
+                        conn_id,
+                        &shutdown_for_thread,
+                        &inbound_tx,
+                        &mailer,
+                        self_id,
+                        wake_kind,
+                    );
                 }) {
                 Ok(t) => t,
                 Err(e) => {
@@ -836,6 +724,158 @@ mod server_native {
                 self.close_connection(conn_id, reason);
             }
         }
+    }
+
+    /// Per-connection reader thread body. Reads frames from
+    /// `read_half` and pushes them onto `inbound_tx`; on an oversize
+    /// inbound frame (`FrameError::FrameTooLarge`) drains the body if
+    /// it's inside the drain ceiling so the connection survives, or
+    /// asks the dispatcher to close it with a structured `Bye` if not
+    /// (iamacoffeepot/aether#1271). Returns when the connection closes
+    /// (peer EOF, read error, shutdown flag, oversize-abort).
+    fn run_reader_loop(
+        read_half: TcpStream,
+        conn_id: ConnId,
+        shutdown: &AtomicBool,
+        inbound_tx: &mpsc::Sender<InboundEvent>,
+        mailer: &Arc<Mailer>,
+        self_id: MailboxId,
+        wake_kind: KindId,
+    ) {
+        let mut reader = BufReader::new(read_half);
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            match read_frame(&mut reader) {
+                Ok(frame) => {
+                    if inbound_tx
+                        .send(InboundEvent::FrameReceived { conn_id, frame })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                }
+                Err(FrameError::Io(io_err)) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
+                    let _ = inbound_tx.send(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: "eof".into(),
+                    });
+                    mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                    return;
+                }
+                Err(FrameError::FrameTooLarge { size, max }) => {
+                    let outcome = handle_oversize_frame(
+                        &mut reader,
+                        conn_id,
+                        size,
+                        max,
+                        inbound_tx,
+                        mailer,
+                        self_id,
+                        wake_kind,
+                    );
+                    if outcome.is_terminal() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    if shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let _ = inbound_tx.send(InboundEvent::ReaderClosed {
+                        conn_id,
+                        reason: format!("read error: {e}"),
+                    });
+                    mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Outcome of [`handle_oversize_frame`]. `Continue` means the
+    /// reader resumed frame-sync; `Terminal` means the read loop must
+    /// exit (drain failed, partial drain, or oversize-abort the
+    /// dispatcher is closing the connection for).
+    enum OversizeOutcome {
+        Continue,
+        Terminal,
+    }
+
+    impl OversizeOutcome {
+        fn is_terminal(&self) -> bool {
+            matches!(self, Self::Terminal)
+        }
+    }
+
+    /// Body half of [`run_reader_loop`]'s `FrameTooLarge` arm: when
+    /// the inbound length prefix exceeds the cap, either drain the
+    /// body (if `size <= 2 * max`) so the stream re-syncs and the
+    /// connection survives, or post a structured-abort event that
+    /// asks the dispatcher to close the connection with a `Bye`.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::cast_possible_truncation)]
+    fn handle_oversize_frame(
+        reader: &mut BufReader<TcpStream>,
+        conn_id: ConnId,
+        size: usize,
+        max: usize,
+        inbound_tx: &mpsc::Sender<InboundEvent>,
+        mailer: &Arc<Mailer>,
+        self_id: MailboxId,
+        wake_kind: KindId,
+    ) -> OversizeOutcome {
+        let drain_ceiling = max.saturating_mul(2);
+        if size > drain_ceiling {
+            let event = InboundEvent::FrameDecodeAborted {
+                conn_id,
+                error: RpcError::FrameTooLarge {
+                    size: size as u64,
+                    max: max as u64,
+                },
+            };
+            if inbound_tx.send(event).is_err() {
+                return OversizeOutcome::Terminal;
+            }
+            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+            return OversizeOutcome::Terminal;
+        }
+        // `take(size)` bounds the drain so a racy / lying peer can't
+        // push us past the cap-2x ceiling on bytes we'll allocate
+        // scratch for.
+        let mut drain = io::sink();
+        let mut bounded = io::Read::take(reader, size as u64);
+        let Ok(drained) = io::copy(&mut bounded, &mut drain) else {
+            let _ = inbound_tx.send(InboundEvent::ReaderClosed {
+                conn_id,
+                reason: format!("frame too large drain failed: {size} > {max}"),
+            });
+            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+            return OversizeOutcome::Terminal;
+        };
+        if (drained as usize) != size {
+            // Peer hung up mid-body.
+            let _ = inbound_tx.send(InboundEvent::ReaderClosed {
+                conn_id,
+                reason: format!("frame too large partial drain: {drained}/{size}"),
+            });
+            mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+            return OversizeOutcome::Terminal;
+        }
+        let event = InboundEvent::FrameDecodeError {
+            conn_id,
+            error: RpcError::FrameTooLarge {
+                size: size as u64,
+                max: max as u64,
+            },
+        };
+        if inbound_tx.send(event).is_err() {
+            return OversizeOutcome::Terminal;
+        }
+        mailer.push(Mail::new(self_id, wake_kind, Vec::new(), 1));
+        OversizeOutcome::Continue
     }
 }
 

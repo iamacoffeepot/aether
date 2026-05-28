@@ -1678,11 +1678,11 @@ fn internal_msg(msg: &str) -> McpError {
 /// through to `internal` for every other shape.
 ///
 /// Detection is by substring of the error chain because the structured
-/// `RpcError` rides under `anyhow::Error` (`format!("rpc call failed:
-/// {e:?}")` in the session's call_once / format!("rpc call encode
-/// rejected: {e}")` from the encode-side classifier). Both shapes
-/// embed the literal `frame too large` / `encoded frame too large`
-/// strings the codec / RPC error variants produce.
+/// `RpcError` rides under `anyhow::Error` (the session's `call_once`
+/// formats the wire error with `{e:?}` into a string; the encode-side
+/// classifier formats `RpcClientError::Frame(...)` with `{e}`). Both
+/// shapes embed the literal `frame too large` / `encoded frame too
+/// large` strings the codec / RPC error variants produce.
 #[allow(clippy::needless_pass_by_value)]
 fn frame_size_aware_error(context: &str, e: anyhow::Error) -> McpError {
     let text = e.to_string();

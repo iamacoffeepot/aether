@@ -134,26 +134,21 @@ impl Connection {
                     // call surfaces the wire error instead of hanging.
                     // A `ReplyEnd { cid: 0, Ok }` is not a valid wire
                     // shape — only `Err` frames carry the sentinel.
-                    if cid == 0 {
-                        if let WireFrame::ReplyEnd { result: Err(_), .. } = &frame {
-                            let pending = router_pending
-                                .lock()
-                                .expect("router pending mutex is never poisoned");
-                            for tx in pending.values() {
-                                let _ = tx.send(frame.clone());
-                            }
-                            continue;
-                        }
-                    }
-                    if let Some(tx) = router_pending
+                    let fanout =
+                        cid == 0 && matches!(&frame, WireFrame::ReplyEnd { result: Err(_), .. },);
+                    let pending = router_pending
                         .lock()
-                        .expect("router pending mutex is never poisoned")
-                        .get(&cid)
-                    {
+                        .expect("router pending mutex is never poisoned");
+                    if fanout {
+                        for tx in pending.values() {
+                            let _ = tx.send(frame.clone());
+                        }
+                    } else if let Some(tx) = pending.get(&cid) {
                         // A failed send just means a stray frame for an
                         // already-finished call — drop it.
                         let _ = tx.send(frame);
                     }
+                    drop(pending);
                 }
                 // The router is exiting (peer `Bye` or `inbound` closed).
                 // Mark the connection dead and drop every pending sender
@@ -358,7 +353,7 @@ impl RpcSession {
             let cid = match write {
                 Ok(cid) => cid,
                 Err(e) => {
-                    return Err(classify_write_error(e, generation));
+                    return Err(classify_write_error(&e, generation));
                 }
             };
             pending.insert(cid, tx);
@@ -472,7 +467,7 @@ impl RpcSession {
             let cid = match write {
                 Ok(cid) => cid,
                 Err(e) => {
-                    return Err(classify_write_error(e, generation));
+                    return Err(classify_write_error(&e, generation));
                 }
             };
             pending.insert(cid, tx);
@@ -556,7 +551,7 @@ impl RpcSession {
             .expect("rpc client mutex is never poisoned")
             .call(envelope.clone())
             .map(|_cid| ())
-            .map_err(|e| classify_write_error(e, generation))
+            .map_err(|e| classify_write_error(&e, generation))
     }
 }
 
@@ -590,8 +585,8 @@ impl CallError {
 /// socket is still healthy and a re-dial would only re-encode + fail
 /// the same way. Everything else (TCP write errors, broken pipes) is
 /// a transport failure that warrants a single re-dial + retry.
-fn classify_write_error(e: RpcClientError, generation: u64) -> CallError {
-    if let RpcClientError::Frame(FrameError::EncodeTooLarge { .. }) = &e {
+fn classify_write_error(e: &RpcClientError, generation: u64) -> CallError {
+    if matches!(e, RpcClientError::Frame(FrameError::EncodeTooLarge { .. })) {
         return CallError::Call(anyhow::anyhow!("rpc call encode rejected: {e}"));
     }
     CallError::Transport {

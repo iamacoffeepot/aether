@@ -21,6 +21,7 @@
 //! than parameterising the existing helpers — most callers know which
 //! format their protocol speaks at compile time.
 
+use std::env;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::sync::OnceLock;
@@ -57,7 +58,7 @@ pub const MAX_FRAME_SIZE_CEILING: usize = 1024 * 1024 * 1024;
 #[must_use]
 pub fn max_frame_size() -> usize {
     static CACHED: OnceLock<usize> = OnceLock::new();
-    *CACHED.get_or_init(|| resolve_max_frame_size(std::env::var("AETHER_MAX_FRAME_SIZE").ok()))
+    *CACHED.get_or_init(|| resolve_max_frame_size(env::var("AETHER_MAX_FRAME_SIZE").ok()))
 }
 
 /// Pure-function half of [`max_frame_size`]: maps an optional env-var
@@ -65,13 +66,10 @@ pub fn max_frame_size() -> usize {
 /// `OnceLock` cache in [`max_frame_size`] is process-global and can't
 /// be re-set across tests.
 fn resolve_max_frame_size(raw: Option<String>) -> usize {
-    match raw {
-        Some(raw) => match raw.trim().parse::<usize>() {
-            Ok(n) if n > 0 => n.min(MAX_FRAME_SIZE_CEILING),
-            _ => MAX_FRAME_SIZE,
-        },
-        None => MAX_FRAME_SIZE,
-    }
+    raw.map_or(MAX_FRAME_SIZE, |raw| match raw.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n.min(MAX_FRAME_SIZE_CEILING),
+        _ => MAX_FRAME_SIZE,
+    })
 }
 
 /// Errors from the framing helpers. Wraps I/O and postcard decode
