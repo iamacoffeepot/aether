@@ -6,16 +6,15 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
-# Historical note: an earlier 300s override on
-# `package(=aether-data-derive) | package(=aether-derive)` was needed
-# because trybuild fixtures spawn a nested `cargo` build per `.rs`
-# fixture and `aether-derive`'s fixtures cold-compiled wasmtime
-# through their `aether-substrate` dev-dep. iamacoffeepot/aether#1275
-# feature-gated wasmtime under a default-on `wasm` feature and made
-# the derive's dev-dep `default-features = false`, dropping wasmtime
-# from the fixture dep graph entirely — the fixtures now fit the
-# default 60s cap, so the override is gone. `aether-data-derive`'s
-# fixture cost is a separate concern not addressed by #1275.
+# Trybuild fixtures spawn a nested `cargo` build per `.rs` fixture;
+# the `aether-data-derive` fixtures comfortably exceed 60s on CI even
+# without substrate's wasmtime in the graph (cargo subprocess + syn
+# monomorphization). iamacoffeepot/aether#1275 retired the
+# `aether-derive` half by feature-gating wasmtime, but data-derive
+# still needs the wider cap until it gets its own speedup pass.
+[[profile.ci.overrides]]
+filter = "package(=aether-data-derive)"
+slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Repeat-run ("soak") flake detection for concurrent tests, driven by
 # `scripts/flake-soak.sh` with nextest `--stress-count`. Each repeat is a
