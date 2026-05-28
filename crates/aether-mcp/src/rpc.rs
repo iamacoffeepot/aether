@@ -329,36 +329,7 @@ impl RpcSession {
         let conn = self.live();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let cid = {
-            let mut pending = conn
-                .pending
-                .lock()
-                .expect("rpc pending mutex is never poisoned");
-            // The router exited (the socket is dead) — registering now
-            // would hang forever, since nothing will deliver a reply or
-            // drop this sender. Bail to a transport error so `call`
-            // re-dials. Checked under the `pending` lock, so it can't
-            // race the router's death.
-            if conn.dead.load(Ordering::Acquire) {
-                return Err(CallError::Transport {
-                    generation,
-                    source: anyhow::anyhow!("rpc connection is closed"),
-                });
-            }
-            let write = conn
-                .client
-                .lock()
-                .expect("rpc client mutex is never poisoned")
-                .call(envelope.clone());
-            let cid = match write {
-                Ok(cid) => cid,
-                Err(e) => {
-                    return Err(classify_write_error(&e, generation));
-                }
-            };
-            pending.insert(cid, tx);
-            cid
-        };
+        let cid = register_call(&conn, envelope, tx, generation)?;
 
         let mut events = Vec::new();
         let outcome = loop {
@@ -448,31 +419,7 @@ impl RpcSession {
         let conn = self.live();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let cid = {
-            let mut pending = conn
-                .pending
-                .lock()
-                .expect("rpc pending mutex is never poisoned");
-            if conn.dead.load(Ordering::Acquire) {
-                return Err(CallError::Transport {
-                    generation,
-                    source: anyhow::anyhow!("rpc connection is closed"),
-                });
-            }
-            let write = conn
-                .client
-                .lock()
-                .expect("rpc client mutex is never poisoned")
-                .call(envelope.clone());
-            let cid = match write {
-                Ok(cid) => cid,
-                Err(e) => {
-                    return Err(classify_write_error(&e, generation));
-                }
-            };
-            pending.insert(cid, tx);
-            cid
-        };
+        let cid = register_call(&conn, envelope, tx, generation)?;
 
         let mut events = Vec::new();
         // `sleep` is created once, outside the loop, so its deadline is
@@ -593,6 +540,41 @@ fn classify_write_error(e: &RpcClientError, generation: u64) -> CallError {
         generation,
         source: anyhow::anyhow!("rpc call write failed: {e}"),
     }
+}
+
+/// Send a `Call` over `conn`, register the resulting `cid` against
+/// `tx` in `conn.pending`, and return the cid. Bundles the dead-socket
+/// check, the write, and the pending registration — every call shape
+/// (`call_once`, `call_collecting_once`) does the same dance, so
+/// factoring it here keeps Qodana's `DuplicatedCode` quiet and
+/// localizes the lock-section invariant. All steps run under one hold
+/// of `conn.pending` so the check-and-register is atomic against the
+/// router's death.
+fn register_call(
+    conn: &Connection,
+    envelope: &MailEnvelope,
+    tx: mpsc::UnboundedSender<WireFrame>,
+    generation: u64,
+) -> Result<u64, CallError> {
+    let mut pending = conn
+        .pending
+        .lock()
+        .expect("rpc pending mutex is never poisoned");
+    if conn.dead.load(Ordering::Acquire) {
+        return Err(CallError::Transport {
+            generation,
+            source: anyhow::anyhow!("rpc connection is closed"),
+        });
+    }
+    let cid = conn
+        .client
+        .lock()
+        .expect("rpc client mutex is never poisoned")
+        .call(envelope.clone())
+        .map_err(|e| classify_write_error(&e, generation))?;
+    pending.insert(cid, tx);
+    drop(pending);
+    Ok(cid)
 }
 
 #[cfg(test)]
