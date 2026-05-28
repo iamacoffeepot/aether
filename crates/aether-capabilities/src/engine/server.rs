@@ -58,10 +58,19 @@ mod server_native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{ReplyTarget, ReplyTo};
     use std::collections::HashMap;
+    use std::env;
     use std::io;
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::Arc;
+
+    /// Env override for the parent directory under which the cap
+    /// allocates per-engine handle-store dirs (issue 1274). Absent →
+    /// fall through to `dirs::data_dir().join("aether/engines")`, then
+    /// to `std::env::temp_dir().join("aether-engines")` if no data dir
+    /// is resolvable.
+    const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
 
     /// One supervised engine in [`EngineServer`]'s table.
     struct EngineEntry {
@@ -142,9 +151,20 @@ mod server_native {
                 }
             };
 
+            // ADR-0049 §7 reserves each handle-store dir to one
+            // substrate via `lock.pid`; two engines pointing at the
+            // same dir is a `LockError::Held`. Allocate a unique
+            // subdirectory per spawned engine so the hub-managed
+            // multi-engine workflow doesn't have to set
+            // `AETHER_HANDLE_STORE_DIR` by hand (issue 1274).
+            let engine_id = EngineId(Uuid::from_u128(self.next_engine_seq));
+            self.next_engine_seq += 1;
+            let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
+
             let child = match Command::new(&mail.binary_path)
                 .args(&mail.args)
                 .env("AETHER_RPC_PORT", rpc_port.to_string())
+                .env("AETHER_HANDLE_STORE_DIR", &engine_store_dir)
                 .stdin(Stdio::null())
                 .spawn()
             {
@@ -157,8 +177,6 @@ mod server_native {
                 }
             };
 
-            let engine_id = EngineId(Uuid::from_u128(self.next_engine_seq));
-            self.next_engine_seq += 1;
             let subname = engine_id.0.simple().to_string();
             let rpc_addr = format!("127.0.0.1:{rpc_port}");
 
@@ -340,6 +358,27 @@ mod server_native {
         let port = listener.local_addr()?.port();
         drop(listener);
         Ok(port)
+    }
+
+    /// Parent directory under which the cap allocates per-engine
+    /// handle-store dirs (issue 1274). Priority:
+    ///
+    /// 1. `AETHER_ENGINE_STORE_ROOT` env override (ops escape hatch).
+    /// 2. `dirs::data_dir().join("aether/engines")` (cross-platform
+    ///    default — `~/Library/Application Support/aether/engines` on
+    ///    macOS, `$XDG_DATA_HOME/aether/engines` on Linux, etc.).
+    /// 3. `std::env::temp_dir().join("aether-engines")` if no data
+    ///    dir is resolvable.
+    fn engine_store_root() -> PathBuf {
+        if let Ok(raw) = env::var(ENV_ENGINE_STORE_ROOT)
+            && !raw.is_empty()
+        {
+            return PathBuf::from(raw);
+        }
+        if let Some(data) = dirs::data_dir() {
+            return data.join("aether").join("engines");
+        }
+        env::temp_dir().join("aether-engines")
     }
 }
 
