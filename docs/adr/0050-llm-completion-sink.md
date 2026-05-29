@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-04-25
 - **Revised:** 2026-05-19 (iamacoffeepot/aether#1001) — rewritten from a single `llm` sink to per-provider caps (`aether.anthropic`, `aether.gemini`) with per-API kinds, matching iamacoffeepot/aether#989. CLI is now a sibling kind; media outputs return file paths; retired broadcast-sink cost telemetry removed (issue #775).
+- **Revised:** 2026-05-29 — added the `aether.openai` image cap (image→image `edit` + text→image `generate` via `gpt-image-1`) as a third instance of the per-provider / per-API pattern, in lieu of a separate ADR. A per-API ADR would fragment one decision across many docs; this ADR is the home for "how a provider API becomes a substrate cap," so a new provider amends it rather than spawning a sibling.
 
 ## Context
 
@@ -20,12 +21,13 @@ This ADR commits to the per-provider cap mail surface, the per-cap adapter model
 
 ## Decision
 
-The single `"llm"` sink is replaced by **one cap per provider, one kind per API.** v1 ships two caps:
+The single `"llm"` sink is replaced by **one cap per provider, one kind per API.** The provider caps (`aether.anthropic` + `aether.gemini` shipped in v1; `aether.openai` added 2026-05-29):
 
 - **`aether.anthropic`** — text completion via the official Messages API (HTTPS) *and* the local `claude` CLI subprocess, as explicit sibling kinds.
 - **`aether.gemini`** — media generation only: image (Nano Banana) + music (Lyria). No text completion, no embeddings (the user defaults to Claude CLI for text; embeddings deferred until a use case appears).
+- **`aether.openai`** — image generation only: image→image `edit` + text→image `generate` (`gpt-image-1`). Added 2026-05-29 for image→image transforms (depth / segmentation / stylized passes derived from a source frame). No text completion (Claude CLI is the text default).
 
-Each cap owns provider-scoped state: auth, rate-limit budget, and its client / subprocess slot. Adding a provider (`aether.openai`, `aether.suno`, `aether.runway`) is a new cap; existing caps don't churn.
+Each cap owns provider-scoped state: auth, rate-limit budget, and its client / subprocess slot. Adding a provider (`aether.suno`, `aether.runway`, …) is a new cap; existing caps don't churn — as `aether.openai` itself demonstrates: it was added later with no change to the other two.
 
 ### 1. Mail surface
 
@@ -125,6 +127,50 @@ enum GeminiError {
 
 Per-provider error types carry provider-specific failure shapes instead of a generic `LlmError` that loses information.
 
+#### `aether.openai`
+
+Image generation only — added 2026-05-29 for the image→image transform use case (depth maps, segmentation maps, stylized renders derived from a source frame), which GPT's image model handles markedly better than text-to-image-only backends. Two request kinds, modeled on the OpenAI Images API. Auth: `OPENAI_API_KEY` env var. Source images come in as file paths; the cap reads bytes before dispatch (the same convention as Gemini's reference paths).
+
+```rust
+aether.openai.image.edit {                  // the load-bearing kind: image(s) + prompt -> image
+    request_id: u64,
+    model: String,                          // "gpt-image-1" (newer models ride this field, §4)
+    image_paths: Vec<String>,               // source frame(s); read to bytes before dispatch
+    mask_path: Option<String>,              // optional inpainting mask
+    prompt: String,
+    size: Option<ImageSize>,                // adapter enforces per-model
+    quality: Option<String>,                // low | medium | high
+    input_fidelity: Option<InputFidelity>,  // how strictly to preserve the source structure
+    n: Option<u32>,
+}
+
+aether.openai.image.generate {              // text -> image sibling
+    request_id, model, prompt, size?, quality?, n?,
+}
+
+aether.openai.image.edit_result
+aether.openai.image.generate_result :
+    Ok  { request_id, output_paths: Vec<String>, model_used, usage }
+  | Err { request_id, error: OpenaiError }
+```
+
+Output PNG bytes stage to `save://gen/<uuid>.png`; `output_paths` is a `Vec` because a request may ask for `n > 1`. **`gpt-image-1` returns base64 inline, not a URL** — the cap decodes the b64 payload and stages it (no separate download step, unlike a URL-returning API).
+
+`input_fidelity` is OpenAI-specific and load-bearing for this cap's purpose: it controls how faithfully the model preserves the source image's structure. For the image→image transform use case — a depth or segmentation map must register pixel-for-pixel with the input frame — a high-fidelity setting is the lever against the "reimagine the scene" drift that misaligns the output, so the field is first-class rather than buried in an options bag. Exact `size` / `quality` value sets are surveyed at implementation against the live API (the same "model the kind on what exists, don't invent params" discipline as the Nano Banana / Lyria surfaces).
+
+```rust
+enum OpenaiError {
+    RateLimited { retry_after_ms: Option<u32> },
+    ContentPolicyRefused,
+    Unauthorized,
+    UnknownModel { model: String, supported: Vec<String> },
+    UnsupportedParam { model: String, field: String, reason: String },
+    AdapterError(String),
+}
+```
+
+Dispatch (spawn-and-die, §2), versioning (§4), capability gating (§6), observability (§7), and handle-store integration (§9) are inherited from the per-provider pattern unchanged — the point of the pattern is that a new provider adds a mail surface and an adapter, nothing more.
+
 ### 2. Adapter model
 
 There is no global model-routing registry. Each cap holds its own adapter, and routing to an API is the kind name, not a `model → adapter` lookup. The adapter is the **compat layer between the caller-stable kind and the underlying HTTP / subprocess wire**, holding a `model → ApiShape` dispatch table:
@@ -138,6 +184,11 @@ trait GeminiAdapter: Send + Sync {
 trait AnthropicAdapter: Send + Sync {
     fn messages_send(&self, req: &MessagesSend) -> Result<MessagesResult, AnthropicError>;
     fn cli_send(&self, req: &CliSend) -> Result<MessagesResult, AnthropicError>;
+}
+
+trait OpenaiAdapter: Send + Sync {
+    fn image_edit(&self, req: &OpenaiImageEdit) -> Result<OpenaiImageResult, OpenaiError>;
+    fn image_generate(&self, req: &OpenaiImageGenerate) -> Result<OpenaiImageResult, OpenaiError>;
 }
 ```
 
@@ -173,7 +224,9 @@ Both kinds share the cap's rate-limit budget tracker when the user is on one Ant
 
 Gemini is media-only here. The original ADR's "Gemini does text + vision under the `llm` sink" framing is dropped: text defaults to the Claude CLI; multimodal grading is a deferred follow-up ADR (the Spike B shape is pre-validated but out of scope for these caps).
 
-OpenAI / local-model / enterprise-gateway / video / additional-music caps are deferred — each is a new cap when a use case arrives, not a wire change to these two.
+**`aether.openai`** — image generation, HTTPS to `api.openai.com/v1/images/{generations,edits}`, auth `OPENAI_API_KEY`. `gpt-image-1`: `aether.openai.image.edit` is the primary kind (image→image — source frame + prompt → derived image), `aether.openai.image.generate` the text→image sibling. The API returns base64 PNG; the cap decodes and stages to `save://gen/<uuid>.png`. Added 2026-05-29 for image→image transforms (depth / segmentation / stylized passes) after the GPT image model proved markedly better than alternatives at producing pixel-registered derived images from stylized frames.
+
+Local-model / enterprise-gateway / video / additional-music caps are deferred — each is a new cap when a use case arrives, not a wire change to the existing ones.
 
 ### 4. Versioning policy
 
@@ -198,6 +251,7 @@ Per-provider env vars (v1 — same precedence-stack-deferred posture as ADR-0041
 
 - **`ANTHROPIC_API_KEY`** — auth for `aether.anthropic.messages.send`. Read once at startup. Absent in the user's default workflow (subscription / CLI only).
 - **`GEMINI_API_KEY`** — auth for both `aether.gemini` kinds. Read once at startup.
+- **`OPENAI_API_KEY`** — auth for both `aether.openai` kinds. Read once at startup. A cap whose key is unset still loads but replies `Err { error: Unauthorized }`.
 - **`AETHER_GEN_DIR`** — overrides the `save://gen/` binary-output namespace.
 
 The `aether.anthropic.cli.send` path needs no key — it relies on the `claude` binary being on PATH. The startup log emits which caps and backends initialized at INFO level; a cap whose required key is unset still loads but replies `Err { error: Unauthorized }` to API-mode requests (CLI-mode requests are unaffected).
@@ -221,11 +275,11 @@ Per-request entries land in the per-actor log ring (ADR-0081):
 
 ### 8. Chassis coverage
 
-Both caps are **chassis-owned**, like `aether.fs` (ADR-0041), net (ADR-0043), and audio (ADR-0039):
+All three caps are **chassis-owned**, like `aether.fs` (ADR-0041), net (ADR-0043), and audio (ADR-0039):
 
-- **Desktop** — both caps. `aether.anthropic` with the CLI path by default; API paths active when keys are set. `aether.gemini` active when `GEMINI_API_KEY` is set.
-- **Headless** — both caps, identical semantics. Headless content-gen workloads (CI runners, batch sculpting) are a primary target.
-- **Hub** — neither cap. Mail to `aether.anthropic` / `aether.gemini` warn-drops as unknown mailbox, identical to the `aether.fs` behaviour on hub chassis. The hub coordinates substrate children; it hosts no workload components in v1.
+- **Desktop** — all three caps. `aether.anthropic` with the CLI path by default; API paths active when keys are set. `aether.gemini` active when `GEMINI_API_KEY` is set; `aether.openai` active when `OPENAI_API_KEY` is set.
+- **Headless** — all three caps, identical semantics. Headless content-gen workloads (CI runners, batch sculpting) are a primary target.
+- **Hub** — none of the caps. Mail to `aether.anthropic` / `aether.gemini` / `aether.openai` warn-drops as unknown mailbox, identical to the `aether.fs` behaviour on hub chassis. The hub coordinates substrate children; it hosts no workload components in v1.
 
 Components needing provider access live on a desktop or headless chassis. A component on one chassis cannot dispatch through another chassis's cap directly. If a deployment grows multiple substrate children that share a single Claude subscription and concurrent CLI calls hit subscription rate limits, the right answer is a hub-routed cap dispatched through ADR-0037 bubbling — wire-additive when needed, not v1 work.
 
@@ -281,10 +335,11 @@ Provider integration tests are the only place in the DAG-handles tree that touch
 ## Follow-up work
 
 - **Implementation**: iamacoffeepot/aether#989 — `aether.anthropic` (messages + cli) and `aether.gemini` (nanobanana + lyria) caps, kind modules, per-cap adapters with `model → ApiShape` tables, stub + fixture + `#[ignore]` real-API tests, desktop + headless chassis registration.
+- **Implementation (`aether.openai`)**: `gpt-image-1` image `edit` (primary) + `generate` kinds in `aether-kinds`, the `aether.openai` cap + `OpenaiAdapter` (`model → ApiShape` table, base64 → stage), `StubOpenaiAdapter` + fixture-replay + `#[ignore]` real-API tests, desktop + headless registration. Reuses the `contentgen/{dispatch,shared,staging}` infra unchanged.
 - **Parked, future ADR**: streaming completion (`aether.anthropic.messages.stream`).
 - **Near-term follow-up ADR (Spike B has validated the shape)**: multimodal / vision completion — image inputs via `Ref<Image>` (ADR-0045 handle refs), lifting the spike's `parts: [text, inlineData…]` body shape.
 - **Parked, future ADR**: structured output (response schema, tool use).
 - **Parked, future ADR**: embeddings cap.
-- **Parked, future ADR**: additional provider caps (`aether.openai`, `aether.suno`, `aether.runway`) as use cases arrive.
+- **Parked, future ADR**: additional provider caps (`aether.suno`, `aether.runway`, …) as use cases arrive.
 - **Parked, future ADR**: per-component / per-model capability gradations; credential vault; TOML config layer (matches ADR-0041's deferral).
 - **Parked, future generalization — global named thread-pool registry.** The cap-local `in_flight` counter + `pending` queue (§2) is sufficient until backpressure has to be shared *across* caps. When multiple caps want shared, configurable, bounded pools — or when CPU-bound vs I/O-bound work needs centralized sizing — the generalization is a substrate-level registry of named pools selected by a `ThreadPool` type (it qualifies *which* pool a unit of work runs on: an HTTP pool vs a CPU/transform pool — explicitly **not** named `PoolKey`). This relates to ADR-0048's transform compute pool, the CPU-bound sibling; both the I/O-bound provider-call pool here and that transform pool would eventually be named `ThreadPool`s under one registry. Out of 0.4 scope: the per-cap counter is enough until cross-cap backpressure forces the generalization.
