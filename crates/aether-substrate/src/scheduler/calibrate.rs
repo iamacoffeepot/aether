@@ -53,6 +53,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::config::{KnobKind, KnobRecord};
+
+/// Discovery records for the handoff-cost calibration knob (ADR-0090
+/// unit b2). Describes the `AETHER_HANDOFF_COST_NS` override read in
+/// [`ensure_seeded`] so the e1 sweep / e2 dump cover it; the seed path
+/// stays untouched.
+pub const CALIBRATE_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: "AETHER_HANDOFF_COST_NS",
+    doc: "Pins the cross-worker handoff-cost estimate (nanoseconds) and freezes \
+          live refinement — deterministic tests / a known-good number on a noisy \
+          box. Unset → boot-probed and live-refined.",
+    default: None,
+    kind: KnobKind::HandRegistered,
+}];
+
 /// Round trips measured (after warmup). Even, so the median averages the
 /// two central samples; large enough to median out scheduler jitter,
 /// small enough that the whole probe is sub-millisecond.

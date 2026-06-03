@@ -47,6 +47,7 @@ use aether_kinds::{
 use super::graph::{LifecycleGraph, LifecycleState};
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::error::BootError;
+use crate::config::{KnobKind, KnobRecord};
 use crate::mail::mailer::Mailer;
 use crate::mail::{MailId, MailboxId, ReplyTo};
 
@@ -75,6 +76,20 @@ enum Step {
 /// a permanent wedge into a visible stutter rather than tripping on
 /// ordinary jitter.
 const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = 1_000;
+
+/// Discovery records for the lifecycle advance-timeout knob (ADR-0090
+/// unit b2, iamacoffeepot/aether#1255). Describes the
+/// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` override read in the driver's
+/// `init` so the e1 sweep / e2 dump cover it; the inline env read
+/// stays exactly as-is.
+pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+    doc: "Deadline (ms) for a pending lifecycle advance's Settled before the next \
+          inbound advance force-completes it (degrades a wedged settlement pipeline \
+          into a visible stutter).",
+    default: Some("1000"),
+    kind: KnobKind::HandRegistered,
+}];
 
 /// Construction-time configuration for [`LifecycleDriverCapability`].
 /// Carries the compiled graph + initial chassis context. Constructed
