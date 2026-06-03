@@ -43,7 +43,7 @@ Backlog  → Define     body has a problem statement
 Define   → Design     if multi-PR, umbrella issue exists; if architectural, ADR drafted
 Design   → Plan       tradeoffs aired in comments; ADR merged if applicable
 Plan     → Ready      dependencies declared, AgentReady=Yes, one concept per issue
-Ready    → Executing  agent dispatched (via /delegate or fleet executor)
+Ready    → Executing  /implement run (manually or by the fleet executor)
 Executing → Refine    PR opened, CI running
 Refine   → Done       CI green, merged
 Executing/Refine → Bounced   agent surfaced an upstream-phase issue (BounceTo set)

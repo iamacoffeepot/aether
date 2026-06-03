@@ -1,18 +1,24 @@
 ---
 name: implement
-description: Execute an approved release issue end-to-end. Cuts a branch in an isolated worktree, implements per the issue's §Implementation plan, opens a PR, then loops on CI feedback until green or self-bounce. Does NOT merge — stops at "PR open, CI green" awaiting user or orchestrator. Requires Phase=Ready, AgentReady=Yes.
+description: The single path from issue to open PR. Default mode requires Phase=Ready + AgentReady=Yes (post /approve); --quick skips the board gate for ad-hoc body-carries-the-fix issues. Cuts a worktree branch, implements the plan, opens a PR, loops CI until green, then holds for review (never auto-merges). Replaces the retired /delegate skill.
 ---
 
-# /implement — release-flow execution skill
+# /implement — the implementation skill
 
-The execution side of the release flow. Pairs with `/scope` and `/approve`: where those produce a vetted plan, `/implement` carries it out. Loops the Execute⇄Refine cycle internally until CI is green, then stops and waits for merge (does *not* auto-merge — `/delegate` does, this doesn't).
+The single path from an issue to an open PR. Pairs with `/scope` and `/approve`: where those produce a vetted plan, `/implement` carries it out in a worktree, loops the Execute⇄Refine cycle internally until CI is green, then holds for merge.
 
-Distinct from `/delegate`. `/delegate` is for ad-hoc agent-labeled work outside the Project flow; `/implement` is purpose-built for issues that have passed `/approve`. Both share worktree isolation; everything else differs.
+Two entry shapes, one skill:
+
+- **Scoped** — `/implement <issue>` — the issue passed `/scope` + `/approve` (`Phase=Ready`, `AgentReady=Yes`). The default release-flow path.
+- **Quick** — `/implement <issue> --quick` — an ad-hoc fix whose issue body already carries a complete, mechanical fix. Skips the board approval gate and goes straight to Executing. This **replaces the retired `/delegate` skill** — same niche (small, mechanical, the body carries the fix), but executed in the main session rather than a dispatched isolated Agent (worktree-isolated Agents proved flaky — see `feedback_delegate_implementation_stop_after_commit`).
+
+Always runs in the **main session**, never a dispatched Agent. It opens the PR **as a draft**, drives CI green, and holds it in draft for your review. This repo has native GitHub auto-merge on, so a *non-draft* PR that reaches green merges itself — draft is the review gate (see `feedback_green_pr_automerges_before_review`). Landing is the release *process*'s call: an approved release un-drafts the PR so native auto-merge takes it. This skill never issues a merge command and never un-drafts on its own.
 
 ## Invocation
 
 ```
-/implement <issue>                       run with defaults (retry-cap=3, wall=30min)
+/implement <issue>                       scoped run (defaults: retry-cap=3, wall=30min)
+/implement <issue> --quick               ad-hoc fix: skip the Ready/AgentReady gate (body must carry a complete fix)
 /implement <issue> --retry-cap <N>       override retry cap
 /implement <issue> --wall-clock <mins>   override wall-clock budget
 /implement <issue> --resume              continue an in-flight execution (rare)
@@ -30,6 +36,12 @@ Distinct from `/delegate`. `/delegate` is for ad-hoc agent-labeled work outside 
 | Issue body has `## Implementation plan` | "Missing implementation plan — issue isn't fully scoped. Re-run `/scope`." |
 | `gh auth status` has `repo`+`project` scopes | "Run `gh auth refresh -s project` (repo scope is standard)." |
 
+**`--quick` mode relaxes the gate.** With `--quick`, the `Phase == Ready` and `AgentReady == Yes` checks are skipped, and the issue need not be on the project board at all. In exchange, the issue body MUST carry a complete, mechanical fix — either a `## Implementation plan` section or an unambiguous proposed-fix description. Before proceeding, sanity-check the body:
+
+- **Body ambiguous or missing the fix** → refuse: *"`--quick` needs a complete fix in the body. Run `/scope <issue>` to design it."* Don't guess.
+- **Fix looks design-bearing** (new public API, wire-format change, ADR-worthy choice) → refuse: *"This needs design, not a quick fix. Run `/scope <issue>`."* `--quick` is for mechanical work only (the old `/delegate` bar).
+- **Issue not on the active project board** → run **label-only**: set the `phase:*` labels normally but skip every `Phase` / `AgentReady` board-field write (there's no project item to update). All other behavior is identical.
+
 ## Worktree setup
 
 ```bash
@@ -44,7 +56,7 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
 
 ## Execute phase
 
-1. Set project item's `Phase = Executing`. Post audit comment: `[implement] Executing — branched <type>/issue-<N>-<slug> off main, worktree /tmp/aether-impl-<N>`.
+1. Set project item's `Phase = Executing` and reconcile the issue label to `phase:executing` (see [Phase label reconcile](#phase-label-reconcile)). In `--quick` label-only mode (issue not on the board), set the label and skip the board field. Post audit comment: `[implement] Executing — branched <type>/issue-<N>-<slug> off main, worktree /tmp/aether-impl-<N>`.
 
 2. Implement per the issue body's `## Implementation plan` section. The agent follows the plan literally: same files, same sequence, same test coverage. Deviations are bounces, not freelancing.
 
@@ -59,7 +71,7 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
 4. Push the branch and open the PR:
    ```bash
    git push -u origin <branch>
-   gh pr create --title "<conventional-commit title>" --body "<see PR body template below>"
+   gh pr create --draft --title "<conventional-commit title>" --body "<see PR body template below>"
    ```
 
 5. Audit comment on issue: `[implement] PR opened: #<pr-number>`.
@@ -91,7 +103,7 @@ After PR open, enter the loop. On each iteration:
 
 4. If real failure, fix in the worktree, push to the same branch, increment attempt counter, goto step 1.
 
-5. Set project item's `Phase` to `Refine` during fix-and-wait, back to `Executing` when pushing the fix. (Flicker is intentional — gives the board honest visibility.)
+5. Set project item's `Phase` to `Refine` during fix-and-wait, back to `Executing` when pushing the fix. (Flicker is intentional — gives the board honest visibility.) Reconcile the `phase:*` label on each flip (see [Phase label reconcile](#phase-label-reconcile)).
 
 6. Audit comment per attempt: `[implement] CI failed (attempt <N>/<retry-cap>): <one-line summary>` and `[implement] Fix pushed for attempt <N>`.
 
@@ -113,17 +125,17 @@ Format/clippy/build are never flakes — always real, always immediate fix.
 
 CI green:
 
-1. Audit comment: `[implement] CI green on attempt <N>. PR #<pr-number> ready for merge.`
-2. Project item: leave `Phase = Refine` and `AgentReady = Yes`. The issue is now in the "PR open + green" state; the merge is a separate human or orchestrator decision.
-3. Do not merge. Do not close. Do not auto-set Phase=Done.
+1. Audit comment: `[implement] CI green on attempt <N>. Draft PR #<pr-number> ready for your review.`
+2. Project item: leave `Phase = Refine` and `AgentReady = Yes` (the issue label stays `phase:refine`). The resting state is "draft PR open + green".
+3. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not auto-set Phase=Done. Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
 4. Print to user:
 
    ```
    ✓ #<N> implemented and CI-green.
-   PR: <pr-url>
+   Draft PR: <pr-url>
    Branch: <type>/issue-<N>-<slug>
    Worktree: /tmp/aether-impl-<N>  (clean up after merge with `git worktree remove`)
-   Next: review and merge the PR; Phase will go to Done at merge.
+   Next: review the draft; un-draft (or tell me) to let native auto-merge land it on green. Phase → Done at merge.
    ```
 
 Phase moves to `Done` either:
@@ -177,6 +189,18 @@ The cross-repo close form (`Closes iamacoffeepot/aether#N`) is required because 
 
 Both caps trigger self-bounce to Plan with the budget breach noted. The `AuthBudget` field on the project item is the persistent record; for v1 it's a free-text note ("retry=3, wall=30m"). Phase C orchestrator will read this field to apply per-issue budgets.
 
+## Phase label reconcile
+
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+
+```bash
+gh issue edit <n> \
+  --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
+  --add-label "phase:<new>"
+```
+
+`--remove-label` ignores labels the issue doesn't carry, so this single line is safe on any transition — it strips whatever phase label was present and applies the new one (lowercased: `Phase=Ready` → `phase:ready`). This skill writes `Phase` in four places, each of which must reconcile the label: `Executing` (Execute step 1 + Refine-loop fix-push), `Refine` (Refine-loop fix-and-wait + done condition), `Bounced` (self-bounce on retry-cap / wall-clock / design discovery), and `Stalled` (build-env failure). `Done` carries no label — the merge that closes the issue retires the lifecycle.
+
 ## Failure modes
 
 - **`release-state.json` stale**: rebuild via `/release-init <version> --reuse <num>`.
@@ -193,18 +217,6 @@ Both caps trigger self-bounce to Plan with the budget breach noted. The `AuthBud
 - Re-scope the issue when CI surfaces problems — bounce instead.
 - Address reviewer feedback on the PR. Reviewers comment; `/bounce` if the feedback requires re-scoping; manual handling otherwise.
 - Notify anyone. Audit comments are the surface.
-- Run on issues that aren't in the active project. Use `/delegate` for ad-hoc agent-labeled work outside the Project flow.
+- Merge — code PRs always hold for your review; auto-merge is the release process's call, not this skill's.
+- Run scoped (without `--quick`) on issues that aren't in the active project. For an ad-hoc fix outside the board, use `--quick` (label-only mode).
 - Clean up worktrees after success or bounce. Leaves them for inspection; `git worktree remove /tmp/aether-impl-<N>` is the user's call.
-
-## Comparison: `/delegate` vs `/implement`
-
-| Concern | `/delegate` | `/implement` |
-|---------|-------------|--------------|
-| Required state | `agent` label | `Phase=Ready`, `AgentReady=Yes` |
-| Project board awareness | none | full |
-| CI loop | none (one-shot) | spins until green or bounce |
-| Self-bounce | no | yes (to Plan or Design) |
-| Auth budget | none | retry-cap + wall-clock |
-| Auto-merge | no | no (parity) |
-| Worktree | yes | yes |
-| Use case | quick fixes, hot-takes | release-flow execution |

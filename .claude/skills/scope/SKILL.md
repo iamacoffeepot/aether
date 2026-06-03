@@ -7,7 +7,7 @@ description: Walk a GitHub issue Define → Design → Plan and update the relea
 
 Walk a single issue from Backlog through Define → Design → Plan, producing a problem statement, design rationale, and implementation plan as structured body sections. Updates the active release Project's `Phase` field as it advances. Stops at `Plan` with `AgentReady=No`, awaiting user review via `/approve`.
 
-This skill produces **scoping artifacts only**. It does not write production code (that's `/delegate`), open implementation PRs, or set `AgentReady=Yes` (that's `/approve`).
+This skill produces **scoping artifacts only**. It does not write production code (that's `/implement`), open implementation PRs, or set `AgentReady=Yes` (that's `/approve`).
 
 ## Invocation
 
@@ -44,7 +44,7 @@ The cache is populated by `/release-init`; this skill never writes it.
 
 ## Phase walk
 
-For each sub-phase: read inputs, write the corresponding body section, post a brief progress comment, advance the `Phase` field on the project board. If a sub-phase has nothing to do (already complete on a resumed run), skip it.
+For each sub-phase: read inputs, write the corresponding body section, post a brief progress comment, advance the `Phase` field on the project board — and reconcile the matching `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)). If a sub-phase has nothing to do (already complete on a resumed run), skip it.
 
 ### Define
 
@@ -163,6 +163,18 @@ gh project item-list <active_project> --owner <owner> --format json \
 
 Cache item IDs per-issue per-run to avoid repeated lookups.
 
+## Phase label reconcile
+
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+
+```bash
+gh issue edit <n> \
+  --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
+  --add-label "phase:<new>"
+```
+
+`--remove-label` ignores labels the issue doesn't carry, so this single line is safe on any transition — it strips whatever phase label was present and applies the new one (lowercased: `Phase=Ready` → `phase:ready`). Two phases carry no label: `Backlog` (the resting/default state) and `Done` (the issue is closed). When moving to either, run only the `--remove-label` half. For this skill the writes are `Phase=Design`, `Phase=Plan`, and (on self-bounce) `Phase=Bounced`.
+
 ## Restart and resume semantics
 
 - **Fresh `/scope <issue>`**: detect current `Phase` from the board. Run only the sub-phases that haven't completed. A completed sub-phase is one whose body section is present and non-empty.
@@ -171,8 +183,8 @@ Cache item IDs per-issue per-run to avoid repeated lookups.
 
 ## What `/scope` does NOT do
 
-- Write production code (use `/delegate` after `/approve`).
-- Open implementation PRs (use `/delegate`).
+- Write production code (use `/implement` after `/approve`).
+- Open implementation PRs (use `/implement`).
 - Merge anything.
 - Auto-file side findings as child issues (use `/scope-spinoff`).
 - Set `AgentReady=Yes` (use `/approve`).

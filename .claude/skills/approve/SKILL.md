@@ -1,11 +1,11 @@
 ---
 name: approve
-description: Plan → Ready gate. Validates that an issue's scope artifacts are complete and any drafted ADR has merged, then sets AgentReady=Yes and advances Phase to Ready. Does NOT dispatch implementation — that's /delegate's job. Idempotent on re-run.
+description: Plan → Ready gate. Validates that an issue's scope artifacts are complete and any drafted ADR has merged, then sets AgentReady=Yes and advances Phase to Ready. Does NOT dispatch implementation — that's /implement's job. Idempotent on re-run.
 ---
 
 # /approve — Plan → Ready gate
 
-The primary human review point of the release flow. The user invokes `/approve <issue>` after reading the scope artifacts that `/scope` produced. The skill validates the gates and flips the issue to Ready; from there `/delegate` (or the Phase C orchestrator) picks it up.
+The primary human review point of the release flow. The user invokes `/approve <issue>` after reading the scope artifacts that `/scope` produced. The skill validates the gates and flips the issue to Ready; from there `/implement` (or the Phase C orchestrator) picks it up.
 
 ## Invocation
 
@@ -38,7 +38,7 @@ If **all** gates pass, proceed.
 ## Actions on pass
 
 1. Set the project item's `AgentReady` field to `Yes`.
-2. Set the project item's `Phase` field to `Ready`.
+2. Set the project item's `Phase` field to `Ready`, and reconcile the issue label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)).
 3. Post an audit comment:
 
    ```
@@ -52,7 +52,7 @@ If **all** gates pass, proceed.
    ✓ #N approved.
    Phase: Plan → Ready
    AgentReady: No → Yes
-   Next: /delegate <N>   (or wait for the orchestrator)
+   Next: /implement <N>   (or wait for the orchestrator)
    ```
 
 ## Idempotency
@@ -69,7 +69,7 @@ If `/approve` is re-run on an issue that already has `Phase=Ready` and `AgentRea
 
 ## Multi-PR umbrella issues
 
-If §Sub-issues lists children, the umbrella's `/approve` means "the overall plan is approved, children are split correctly". Each child still goes through its own `/scope` → `/approve` flow. The umbrella itself may not be `/delegate`-able (no code to write at this level); leaving it at `Phase=Ready` is correct — it advances to `Done` only when every child is `Done`.
+If §Sub-issues lists children, the umbrella's `/approve` means "the overall plan is approved, children are split correctly". Each child still goes through its own `/scope` → `/approve` flow. The umbrella itself may not be `/implement`-able (no code to write at this level); leaving it at `Phase=Ready` is correct — it advances to `Done` only when every child is `Done`.
 
 A future `/release-promote-umbrella <parent>` skill can auto-close the umbrella when all children are Done. Out of scope for v1.
 
@@ -98,6 +98,18 @@ When `--skip-adr` is used, the audit comment is verbose:
 
 `--skip-adr` requires `--note "<reason>"`. Don't allow silent ADR bypasses.
 
+## Phase label reconcile
+
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+
+```bash
+gh issue edit <n> \
+  --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
+  --add-label "phase:<new>"
+```
+
+`--remove-label` ignores labels the issue doesn't carry, so this single line is safe on any transition — it strips whatever phase label was present and applies the new one (lowercased: `Phase=Ready` → `phase:ready`). The only write this skill makes is `Phase=Ready` → `phase:ready`. On idempotent re-run (already Ready) the reconcile is a harmless no-op; run it anyway so a hand-stripped label self-heals.
+
 ## Failure modes
 
 - **Issue not in project**: instruct user to add it via `gh project item-add`.
@@ -107,7 +119,7 @@ When `--skip-adr` is used, the audit comment is verbose:
 
 ## What `/approve` does NOT do
 
-- Dispatch implementation. Run `/delegate <issue>` (or wait for the Phase C orchestrator) after approval.
+- Dispatch implementation. Run `/implement <issue>` (or wait for the Phase C orchestrator) after approval.
 - Edit the issue body. Even if a gate fails because a section is missing, /approve doesn't write the missing section — that's `/scope`'s job.
 - Auto-resolve side findings.
 - Close umbrella issues when children complete. Future work.

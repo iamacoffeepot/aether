@@ -43,7 +43,7 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 # iamacoffeepot/aether#1199: the gated command may target a worktree via a
-# leading `cd <path> &&` — the /implement and /delegate skills push from
+# leading `cd <path> &&` — the /implement skill pushes from
 # `.claude/worktrees/<slug>` / `/tmp/aether-*`. Evaluate git state in that
 # directory rather than the hook's own cwd (the main checkout); otherwise
 # HEAD and the stamp gitdir resolve against the wrong tree and a clean
