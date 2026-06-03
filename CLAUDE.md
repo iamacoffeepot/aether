@@ -30,6 +30,7 @@ The guest/actor SDK is **`aether-actor`** — the `Actor` / `FfiActor` traits, `
 - **Merging**: `main` is protected (PR required, all CI checks required, linear history, no force-push). Claude does not push to `main`, does not force-push reviewed branches, does not self-merge, and asks before destructive operations.
 - **PRs** should be small and focused — one concept per PR.
 - **Recursion in load-bearing code**: prefer iterative implementations (explicit work-stack/queue, arena-with-indices for tree data) over recursive ones in any algorithm whose depth could exceed a few hundred frames in practice. Recursion is OK for parse/AST walks where depth is structurally bounded by a small input file. Either way, recursive code on user-controlled or geometrically-derived data must enforce a depth/budget cap that returns an error rather than overflowing the stack.
+- **Naming — units and types**: spell units out in identifiers (`millis`, `nanos`, `micros`, `secs`, `bytes`), never the two-letter abbreviation (`ms`, `ns`, `us`, `kb`) — two letters is the ambiguous zone (`ms` reads as milliseconds *or* movement-speed). Longer well-known abbreviations are fine. And don't encode a value's Rust type in its name (`u32` / `u64` / `usize`) — the signature already states it. E.g. `parse_u32_ms_strict` → `parse_millis_strict`.
 
 ## Commands
 
