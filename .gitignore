@@ -2,6 +2,11 @@
 # Spike crates under spikes/ are standalone Cargo workspaces with
 # their own target dirs (per ADR-0003 §Consequences).
 spikes/*/target/
+# Research projects under research/ are independent nested git repos
+# (own .git, own remote, possibly private). Unlike spikes/ they are
+# never tracked here — their content, including any locally decoded
+# third-party game data, must stay out of aether's history entirely.
+/research/
 # Claude Code session-local state. The base `settings.json` and
 # `hooks/` are shippable (project-wide permissions + pre-flight
 # checks); everything else is per-user / runtime. Skills are local
