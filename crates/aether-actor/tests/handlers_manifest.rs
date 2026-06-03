@@ -121,6 +121,11 @@ fn manifest_const_round_trips_to_expected_records() {
             }
             InputsRecord::Fallback { .. } => fallback_count += 1,
             InputsRecord::Component { .. } => {}
+            // ADR-0090 (issue 1257): this fixture declares no `type
+            // Config`, so the macro emits no Config record.
+            InputsRecord::Config { .. } => {
+                panic!("unexpected Config record for a no-config component")
+            }
         }
     }
 

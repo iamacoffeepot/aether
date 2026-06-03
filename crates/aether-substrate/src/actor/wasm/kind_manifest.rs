@@ -48,7 +48,9 @@ use aether_data::{
     KindShape, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
     canonical::kind_id_from_shape,
 };
-use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
+use aether_kinds::{
+    ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability,
+};
 use serde::de::DeserializeOwned;
 use std::str;
 use wasmparser::{Parser, Payload};
@@ -195,13 +197,14 @@ pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> 
 /// produceable after phase 3 retired the `type Kinds` / `fn receive`
 /// surface.
 ///
-/// Record shape: `[0x01][postcard(InputsRecord)]` back-to-back. The
+/// Record shape: `[0x02][postcard(InputsRecord)]` back-to-back. The
 /// classifier walks the records in declaration order: every Handler
-/// enters `handlers`, at most one Fallback populates `fallback`, and
-/// at most one Component populates `doc`. Duplicate Fallback /
-/// Component records are a substrate-rejected load error — the macro
-/// emits at most one of each so seeing two means the component
-/// binary was built against a different manifest contract.
+/// enters `handlers`, at most one Fallback populates `fallback`, at
+/// most one Component populates `doc`, and at most one Config
+/// populates `config` (ADR-0090 / issue 1257). Duplicate Fallback /
+/// Component / Config records are a substrate-rejected load error —
+/// the macro emits at most one of each so seeing two means the
+/// component binary was built against a different manifest contract.
 pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, String> {
     let mut records: Vec<InputsRecord> = Vec::new();
 
@@ -243,6 +246,17 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
                     ));
                 }
                 caps.doc = Some(doc.into_owned());
+            }
+            InputsRecord::Config { id, name } => {
+                if caps.config.is_some() {
+                    return Err(format!(
+                        "{INPUTS_SECTION}: duplicate Config record — macro emits at most one"
+                    ));
+                }
+                caps.config = Some(ConfigCapability {
+                    id,
+                    name: name.into_owned(),
+                });
             }
         }
     }
@@ -955,6 +969,58 @@ mod tests {
         assert_eq!(caps.handlers[1].name, "aether.ping");
         assert!(caps.handlers[1].doc.is_none());
         assert!(caps.fallback.is_none());
+    }
+
+    #[test]
+    fn reads_config_record() {
+        // ADR-0090 (issue 1257): a `Config` record lifts into
+        // `caps.config` carrying the config kind's id + name.
+        let section = inputs_section(&[
+            InputsRecord::Handler {
+                id: aether_data::KindId(7),
+                name: "aether.config_query".into(),
+                doc: None,
+            },
+            InputsRecord::Config {
+                id: aether_data::KindId(0x00c0_ffee),
+                name: "aether.test_fixtures.probe_config".into(),
+            },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let caps = read_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(caps.handlers.len(), 1);
+        let config = caps.config.expect("config capability present");
+        assert_eq!(config.id, aether_data::KindId(0x00c0_ffee));
+        assert_eq!(config.name, "aether.test_fixtures.probe_config");
+    }
+
+    #[test]
+    fn duplicate_config_is_rejected() {
+        let section = inputs_section(&[
+            InputsRecord::Config {
+                id: aether_data::KindId(1),
+                name: "a".into(),
+            },
+            InputsRecord::Config {
+                id: aether_data::KindId(2),
+                name: "b".into(),
+            },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("duplicate Config"), "err: {err}");
+    }
+
+    #[test]
+    fn absent_config_is_none() {
+        let section = inputs_section(&[InputsRecord::Handler {
+            id: aether_data::KindId(7),
+            name: "aether.tick".into(),
+            doc: None,
+        }]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let caps = read_inputs_from_bytes(&wasm).unwrap();
+        assert!(caps.config.is_none());
     }
 
     #[test]

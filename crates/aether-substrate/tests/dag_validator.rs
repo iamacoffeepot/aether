@@ -102,6 +102,7 @@ fn register_caps_with_fallback(
             .collect(),
         fallback: fallback.then_some(aether_kinds::FallbackCapability { doc: None }),
         doc: None,
+        config: None,
     };
     caps.register(
         mailbox,

@@ -451,7 +451,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section. Very large wasm payloads (typically target/wasm32-unknown-unknown/debug/*.wasm, which can run 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Very large wasm payloads (typically target/wasm32-unknown-unknown/debug/*.wasm, which can run 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(
         &self,
@@ -465,6 +465,16 @@ impl Mcp {
             )
         })?;
         let binary_path = args.binary_path.clone();
+        // ADR-0090 (issue 1257): read optional init-config bytes from a
+        // file path (already encoded to the component's `Config` kind
+        // wire shape). Absent → empty vec → the substrate hands `&[]` to
+        // a `Config = ()` guest's `init`.
+        let config = match args.config_path {
+            Some(ref path) => fs::read(path).await.map_err(|e| {
+                McpError::invalid_params(format!("reading config_path {path:?}: {e}"), None)
+            })?,
+            None => Vec::new(),
+        };
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -473,6 +483,7 @@ impl Mcp {
                 &LoadComponent {
                     wasm,
                     name: args.name,
+                    config,
                 },
             ))
             .await
@@ -514,6 +525,14 @@ impl Mcp {
             )
         })?;
         let binary_path = args.binary_path.clone();
+        // ADR-0090 (issue 1257): optional init-config bytes for the
+        // replacement instance, read from a file path like the load path.
+        let config = match args.config_path {
+            Some(ref path) => fs::read(path).await.map_err(|e| {
+                McpError::invalid_params(format!("reading config_path {path:?}: {e}"), None)
+            })?,
+            None => Vec::new(),
+        };
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -523,6 +542,7 @@ impl Mcp {
                     mailbox_id,
                     wasm,
                     drain_timeout_ms: args.drain_timeout_ms,
+                    config,
                 },
             ))
             .await
@@ -613,7 +633,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, and its top-level doc. Reads aether-mcp's component cache, populated by load_component / replace_component — describing a component aether-mcp didn't load (or after an aether-mcp restart) returns an error."
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, its top-level doc, and (ADR-0090) its boot-config kind id+name when it declared a typed Config. Reads aether-mcp's component cache, populated by load_component / replace_component — describing a component aether-mcp didn't load (or after an aether-mcp restart) returns an error."
     )]
     pub async fn describe_component(
         &self,
@@ -1985,6 +2005,7 @@ mod tests {
                 engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
                 binary_path: "/nonexistent/does-not-exist.wasm".to_owned(),
                 name: None,
+                config_path: None,
             }))
             .await;
         assert!(result.is_err(), "a missing binary should be a tool error");
@@ -2002,6 +2023,7 @@ mod tests {
                 mailbox_id: "not-a-tagged-id".to_owned(),
                 binary_path: "/tmp/whatever.wasm".to_owned(),
                 drain_timeout_ms: None,
+                config_path: None,
             }))
             .await;
         assert!(

@@ -80,6 +80,7 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
                 &LoadComponent {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
+                    config: Vec::new(),
                 },
             ),
         )])

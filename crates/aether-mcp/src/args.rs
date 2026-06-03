@@ -132,6 +132,14 @@ pub struct LoadComponentArgs {
     /// the wasm if omitted; the reply echoes the resolved name.
     #[serde(default)]
     pub name: Option<String>,
+    /// ADR-0090 (issue 1257): optional absolute path to a file holding
+    /// the component's init-config bytes (already encoded to the
+    /// component's `Config` kind wire shape). `aether-mcp` reads the
+    /// file and forwards the bytes on the load mail — paths, not inline
+    /// bytes, per the MCP convention. Omit for a no-config component;
+    /// `describe_component` reports the expected config kind.
+    #[serde(default)]
+    pub config_path: Option<String>,
 }
 
 /// `replace_component` arguments.
@@ -148,6 +156,12 @@ pub struct ReplaceComponentArgs {
     /// substrate (post-ADR-0038 the splice is structural).
     #[serde(default)]
     pub drain_timeout_ms: Option<u32>,
+    /// ADR-0090 (issue 1257): optional absolute path to a file holding
+    /// the replacement instance's init-config bytes, threaded to its
+    /// typed `init` the same way [`LoadComponentArgs::config_path`] is
+    /// on first load.
+    #[serde(default)]
+    pub config_path: Option<String>,
 }
 
 /// `describe_component` arguments.

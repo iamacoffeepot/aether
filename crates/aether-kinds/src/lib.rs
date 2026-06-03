@@ -1043,6 +1043,15 @@ mod control_plane {
     pub struct LoadComponent {
         pub wasm: Vec<u8>,
         pub name: Option<String>,
+        /// ADR-0090 (issue 1257): optional init-config bytes handed to
+        /// the guest's typed `FfiActor::init` at instantiate-time. An
+        /// empty vec means "no config" — the c1 ABI short-circuits it
+        /// to `&[]`, which a `Config = ()` guest decodes uniformly via
+        /// `impl Kind for ()`. The carrier is raw bytes, not a typed
+        /// kind, so the substrate stays byte-transparent: the hub /
+        /// MCP encode the config struct to bytes at the edge
+        /// (SDK-typed, not wire-typed), matching `wasm`'s `Vec<u8>`.
+        pub config: Vec<u8>,
     }
 
     /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id,
@@ -1078,6 +1087,15 @@ mod control_plane {
         pub handlers: Vec<HandlerCapability>,
         pub fallback: Option<FallbackCapability>,
         pub doc: Option<String>,
+        /// ADR-0090 (issue 1257): the kind the component expects as its
+        /// boot config, when it declared a `type Config` other than the
+        /// synthesized `()`. `None` for a no-config component. The
+        /// capability carries the config kind's id + name; its full
+        /// schema is reachable through the engine registry /
+        /// `describe_kinds` because the `#[actor]` macro emits a
+        /// retention static for the config kind on load, exactly as for
+        /// handler kinds.
+        pub config: Option<ConfigCapability>,
     }
 
     /// One `#[handler]` method's advertised capability. `id` is the
@@ -1098,6 +1116,19 @@ mod control_plane {
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct FallbackCapability {
         pub doc: Option<String>,
+    }
+
+    /// ADR-0090 (issue 1257) the component's declared boot-config kind.
+    /// `id` is the compile-time `<C::Config as Kind>::ID`; `name` is
+    /// `C::Config::NAME`. Present only when the component declared a
+    /// `type Config` other than the synthesized `()` — a no-config
+    /// component leaves `ComponentCapabilities.config` `None`. The
+    /// kind's full schema rides the `aether.kinds` section (the macro's
+    /// retention static), so `describe_kinds` resolves it by id.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct ConfigCapability {
+        pub id: aether_data::KindId,
+        pub name: String,
     }
 
     /// `aether.component.drop` — remove a component from the
@@ -1131,6 +1162,11 @@ mod control_plane {
         pub mailbox_id: aether_data::MailboxId,
         pub wasm: Vec<u8>,
         pub drain_timeout_ms: Option<u32>,
+        /// ADR-0090 (issue 1257): optional init-config bytes for the
+        /// replacement instance, threaded through to its typed `init`
+        /// the same way [`LoadComponent::config`] is on first load. An
+        /// empty vec means "no config".
+        pub config: Vec<u8>,
     }
 
     /// Reply to `ReplaceComponent`. Carries the new component's
@@ -3307,6 +3343,45 @@ mod tests {
                     .expect("test setup: postcard decodes HttpMethod variant");
                 assert_eq!(back, m);
             }
+        }
+    }
+
+    mod control_plane_roundtrips {
+        use super::*;
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        #[test]
+        fn load_component_roundtrips_config_bytes() {
+            // ADR-0090 c2: the optional init-config carrier must survive
+            // the postcard wire path intact so the substrate hands the
+            // exact bytes to the guest's typed `init`.
+            let load = LoadComponent {
+                wasm: vec![0x00, 0x61, 0x73, 0x6d],
+                name: Some("probe_with_config".to_string()),
+                config: vec![0xde, 0xad, 0xbe, 0xef],
+            };
+            let bytes = load.encode_into_bytes();
+            let back =
+                LoadComponent::decode_from_bytes(&bytes).expect("decode LoadComponent round-trip");
+            assert_eq!(back.config, vec![0xde, 0xad, 0xbe, 0xef]);
+            assert_eq!(back.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
+            assert_eq!(back.name.as_deref(), Some("probe_with_config"));
+        }
+
+        #[test]
+        fn replace_component_roundtrips_config_bytes() {
+            let replace = ReplaceComponent {
+                mailbox_id: aether_data::MailboxId(7),
+                wasm: vec![0x00, 0x61, 0x73, 0x6d],
+                drain_timeout_ms: Some(2500),
+                config: vec![0x01, 0x02, 0x03],
+            };
+            let bytes = replace.encode_into_bytes();
+            let back = ReplaceComponent::decode_from_bytes(&bytes)
+                .expect("decode ReplaceComponent round-trip");
+            assert_eq!(back.config, vec![0x01, 0x02, 0x03]);
+            assert_eq!(back.mailbox_id, aether_data::MailboxId(7));
         }
     }
 }

@@ -77,3 +77,26 @@ pub const fn write_inputs_component<const N: usize>(doc: &str) -> [u8; N] {
     let _ = pos;
     out
 }
+
+/// Byte length of a `Config` record's postcard encoding (ADR-0090 /
+/// issue 1257). One-byte enum-variant tag (`0x03`) + `varint(id)` +
+/// `postcard(name)`.
+#[must_use]
+pub const fn inputs_config_len(id: u64, name: &str) -> usize {
+    1 + varint_u64_len(id) + str_len(name)
+}
+
+/// Serialize an `InputsRecord::Config` into a fixed-size array sized by
+/// `inputs_config_len`. Exact postcard wire shape for
+/// `InputsRecord::Config { id, name }`.
+#[must_use]
+pub const fn write_inputs_config<const N: usize>(id: u64, name: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = 0usize;
+    out[pos] = 3; // variant tag: Config
+    pos += 1;
+    pos = write_varint_u64(id, &mut out, pos);
+    pos = write_str(name, &mut out, pos);
+    let _ = pos;
+    out
+}

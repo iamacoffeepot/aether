@@ -113,6 +113,11 @@ mod native {
         /// `LoadResult::Ok.capabilities` at the cap. The trampoline
         /// keeps a handle so it can rehydrate after a replace.
         pub capabilities: ComponentCapabilities,
+        /// ADR-0090 (issue 1257): init-config bytes from the
+        /// `aether.component.load` mail, handed to the guest's typed
+        /// `FfiActor::init` via `Component::instantiate`. Empty means
+        /// "no config" — a `Config = ()` guest decodes `&[]` uniformly.
+        pub config: Vec<u8>,
     }
 
     /// Per-component trampoline. Holds the wasm `Component`
@@ -173,16 +178,17 @@ mod native {
             // binding (issue 634 Phase 4 PR 3 — single source of inbox
             // truth lives on `NativeBinding`, not on `ComponentCtx`).
             substrate_ctx.install_binding(Arc::clone(ctx.binding()));
-            // ADR-0090 (issue 1256): config bytes are not yet threaded
-            // from the load mail; c2 of the rollout wires them. For
-            // now pass `&[]` — guests whose `Config = ()` decode this
-            // uniformly via `impl Kind for ()`.
+            // ADR-0090 (issue 1257): thread the load mail's config bytes
+            // into the guest's typed `init`. An empty slice ("no config")
+            // is decoded uniformly by a `Config = ()` guest via
+            // `impl Kind for ()`; a typed-config guest decodes its
+            // `Self::Config` from these bytes.
             let component = Component::instantiate(
                 &config.engine,
                 &config.linker,
                 &config.module,
                 substrate_ctx,
-                &[],
+                &config.config,
             )
             .map_err(|e| {
                 BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
@@ -396,16 +402,16 @@ mod native {
                 Arc::clone(&self.outbound),
             );
 
-            // ADR-0090 (issue 1256): replace does not yet thread config
-            // bytes through (c2). Pass `&[]` so `Config = ()` guests
-            // decode cleanly; typed-config replaces will surface once
-            // the replace ABI carries config alongside the wasm bytes.
+            // ADR-0090 (issue 1257): thread the replace mail's config
+            // bytes into the new instance's typed `init`, the same way
+            // the load path does. Empty means "no config"; a typed-config
+            // guest decodes its `Self::Config` from these bytes.
             let mut new_component = match Component::instantiate(
                 &self.engine,
                 &self.linker,
                 &module,
                 substrate_ctx,
-                &[],
+                &payload.config,
             ) {
                 Ok(c) => c,
                 Err(e) => {

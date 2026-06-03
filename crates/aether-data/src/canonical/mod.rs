@@ -42,8 +42,8 @@ mod primitives;
 mod schema;
 
 pub use inputs::{
-    inputs_component_len, inputs_fallback_len, inputs_handler_len, write_inputs_component,
-    write_inputs_fallback, write_inputs_handler,
+    inputs_component_len, inputs_config_len, inputs_fallback_len, inputs_handler_len,
+    write_inputs_component, write_inputs_config, write_inputs_fallback, write_inputs_handler,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use primitives::{varint_u32_len, varint_u64_len, varint_usize_len};
@@ -458,6 +458,25 @@ mod tests {
         const BYTES: [u8; N] = write_inputs_component::<N>(DOC);
         let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, InputsRecord::Component { doc: DOC.into() });
+    }
+
+    #[test]
+    fn inputs_config_const_round_trips() {
+        // ADR-0090 (issue 1257): the `Config` record's const-eval bytes
+        // must decode to `InputsRecord::Config` byte-for-byte so the
+        // substrate reader lifts the config kind id + name verbatim.
+        const ID: u64 = 0x0123_4567_89ab_cdef;
+        const NAME: &str = "aether.test_fixtures.probe_config";
+        const N: usize = inputs_config_len(ID, NAME);
+        const BYTES: [u8; N] = write_inputs_config::<N>(ID, NAME);
+        let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(
+            decoded,
+            InputsRecord::Config {
+                id: KindId(ID),
+                name: NAME.into(),
+            }
+        );
     }
 
     #[test]
