@@ -737,6 +737,15 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
     })
 }
 
+/// Default worker-pool size for the passive ([`Builder::build_passive`])
+/// build path when no explicit [`Builder::with_workers`] override is set.
+/// Small on purpose: the passive path is the test / `TestBench` embedder
+/// path (no production callers), and a near-full `available_parallelism()`
+/// pool per test over-subscribes nextest's `num_cpus`-wide run. See
+/// [`Builder::build_passive`] for the full rationale
+/// (iamacoffeepot/aether#1295, iamacoffeepot/aether#1142).
+const PASSIVE_DEFAULT_WORKERS: usize = 2;
+
 /// Declarative chassis builder, parametric over the chassis kind `C`
 /// and a type-state `S` tracking whether a driver has been supplied.
 /// `Builder<C, NoDriver>` accepts [`Self::with_actor`] /
@@ -855,11 +864,25 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// and returns a [`PassiveChassis`] whose embedder is responsible
     /// for driving the loop manually (`TestBench`).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
+        // The passive (manually-driven) path has no production callers —
+        // every chassis main goes through `.driver(_).build()`. It is the
+        // build path for `TestBench` and the hundreds of substrate-booting
+        // unit tests. Inheriting `PoolConfig::default()`'s
+        // `available_parallelism() - 1` here means each such test spawns a
+        // near-full worker pool; under nextest's `num_cpus`-wide run that is
+        // ~`num_cpus^2` live threads, and the resulting multi-second
+        // scheduling stalls starve settlement / teardown cycles past their
+        // deadlines — the load-only flakes in iamacoffeepot/aether#1295 and
+        // iamacoffeepot/aether#1142 (green in isolation and on 2-core CI,
+        // red under a saturated local `--workspace` run). A small default
+        // keeps the manual-drive path light; the perf benches that want a
+        // real pool already pass `.with_workers(_)` explicitly, which wins.
+        let workers = self.workers.or(Some(PASSIVE_DEFAULT_WORKERS));
         let booted = boot_passives(
             &self.registry,
             &self.mailer,
             &self.aborter,
-            self.workers,
+            workers,
             self.passives,
         )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
