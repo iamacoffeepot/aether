@@ -1396,7 +1396,14 @@ mod native {
         /// `nb2_only_knob_rejected_on_older_model`, asserting acceptance.
         #[test]
         fn thought_signature_flag_accepted_on_pro() {
-            let (mailer, rx) = test_mailer_and_rx();
+            // Acceptance dispatches off-thread, so the reply lands
+            // asynchronously — peeking at the reply channel here would race
+            // that dispatch (iamacoffeepot/aether#1296). The deterministic
+            // proof of acceptance is the in-flight count, which `submit`
+            // bumps synchronously on this thread; a synchronous validation
+            // error `return`s before dispatch, leaving it at 0. So we don't
+            // need the reply channel at all.
+            let (mailer, _rx) = test_mailer_and_rx();
             let cap_mailbox = MailboxId(0);
             let mut cap = GeminiCapability::from_parts(
                 Arc::new(StubGeminiAdapter),
@@ -1418,16 +1425,11 @@ mod native {
             req.image_size = Some(ImageSize::K1);
             req.include_thought_signature = Some(true);
             cap.on_nanobanana_generate(&mut ctx, req);
-            // No synchronous validation error reply: the flag passed
-            // validation and the request dispatched off-thread.
-            assert!(
-                rx.try_recv().is_err(),
-                "Pro must not reject the cross-model signature flag"
-            );
             assert_eq!(
                 cap.test_in_flight(),
                 1,
-                "the request dispatched rather than erroring synchronously"
+                "Pro must accept the cross-model signature flag and dispatch \
+                 it rather than rejecting synchronously"
             );
         }
     }
