@@ -1685,9 +1685,21 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
     let helper_methods_tokens = helpers.iter();
 
-    let inputs_manifest_consts =
-        build_inputs_manifest_consts(&handlers, fallback.as_ref(), component_doc.as_ref());
-    let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
+    // ADR-0090 (issue 1257): surface the component's declared boot-config
+    // kind. The macro emits a `Config` inputs record + a config-kind
+    // retention static ONLY when the user explicitly declared
+    // `type Config` (the synthesized `= ()` case stays clean — gating on
+    // `config_type.is_some()` at macro time, NOT on `Config != ()` at
+    // runtime, keeps `aether.unit` out of every component's capability).
+    let config_kind_ty: Option<&Type> = config_type.as_ref().map(|it| &it.ty);
+    let inputs_manifest_consts = build_inputs_manifest_consts(
+        &handlers,
+        fallback.as_ref(),
+        component_doc.as_ref(),
+        config_kind_ty,
+    );
+    let kind_retention_statics =
+        build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
     // on the `Actor` super-trait, not `Component` / `FfiActor`. Route
@@ -2082,6 +2094,9 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 handlers: ::std::vec![#(#capability_handler_entries),*],
                 fallback: #capability_fallback,
                 doc: ::core::option::Option::None,
+                // ADR-0090 (issue 1257): native chassis caps don't carry
+                // a describe-surfaced boot-config kind.
+                config: ::core::option::Option::None,
             }
         }
     };
@@ -2359,7 +2374,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// `__AETHER_INPUTS_MANIFEST_LEN: usize` and
 /// `__AETHER_INPUTS_MANIFEST: [u8; …LEN]` — carrying the
 /// concatenated `aether.kinds.inputs` record bytes. Each record is
-/// `[INPUTS_SECTION_VERSION (0x01), ..postcard(InputsRecord)..]`,
+/// `[INPUTS_SECTION_VERSION (0x02), ..postcard(InputsRecord)..]`,
 /// assembled at const-eval via the hub-protocol const-fn encoders.
 /// `aether_actor::export!()` reads these consts and emits the
 /// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
@@ -2367,10 +2382,15 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// is what prevents the section from stacking when a `#[actor]`-
 /// using crate is pulled in as a wasm32 rlib by another cdylib (a
 /// rlib that doesn't call `export!()` contributes no section bytes).
+// One const-eval byte-copy block per record kind (handler / fallback /
+// component-doc / config); inlining them in one walk keeps each emitted
+// block contiguous and reads better than four near-identical helpers.
+#[allow(clippy::too_many_lines)]
 fn build_inputs_manifest_consts(
     handlers: &[HandlerFn],
     fallback: Option<&FallbackFn>,
     component_doc: Option<&String>,
+    config_kind_ty: Option<&Type>,
 ) -> TokenStream2 {
     let mut len_terms: Vec<TokenStream2> = Vec::new();
     let mut copy_blocks: Vec<TokenStream2> = Vec::new();
@@ -2402,7 +2422,10 @@ fn build_inputs_manifest_consts(
                         <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
                     );
-                out[pos] = 0x01;
+                // ADR-0090 (issue 1257): per-record section version byte
+                // bumped 0x01 -> 0x02 alongside the new `Config` variant.
+                // Keep this in lockstep with `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x02;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -2425,7 +2448,10 @@ fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
-                out[pos] = 0x01;
+                // ADR-0090 (issue 1257): per-record section version byte
+                // bumped 0x01 -> 0x02 alongside the new `Config` variant.
+                // Keep this in lockstep with `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x02;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -2448,7 +2474,46 @@ fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit);
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
-                out[pos] = 0x01;
+                // ADR-0090 (issue 1257): per-record section version byte
+                // bumped 0x01 -> 0x02 alongside the new `Config` variant.
+                // Keep this in lockstep with `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x02;
+                pos += 1;
+                let mut i = 0;
+                while i < REC_LEN {
+                    out[pos] = REC_BYTES[i];
+                    pos += 1;
+                    i += 1;
+                }
+            }
+        });
+    }
+
+    // ADR-0090 (issue 1257): emit a `Config` record keyed by the
+    // declared config kind's `Kind::ID` / `NAME`. Only present when the
+    // user spelled `type Config = …` — `config_kind_ty` is `None` for
+    // the macro-synthesized `()` case, so a no-config component stays
+    // clean. Variant tag `0x03` matches `InputsRecord::Config`.
+    if let Some(cfg) = config_kind_ty {
+        len_terms.push(quote! {
+            (1 + ::aether_actor::__macro_internals::canonical::inputs_config_len(
+                <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
+                <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+            ))
+        });
+        copy_blocks.push(quote! {
+            {
+                const REC_LEN: usize =
+                    ::aether_actor::__macro_internals::canonical::inputs_config_len(
+                        <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
+                        <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+                    );
+                const REC_BYTES: [u8; REC_LEN] =
+                    ::aether_actor::__macro_internals::canonical::write_inputs_config::<REC_LEN>(
+                        <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
+                        <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+                    );
+                out[pos] = 0x02;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -2514,11 +2579,31 @@ fn build_inputs_manifest_consts(
 /// component). If that assumption ever breaks, extend this emitter to
 /// walk `Sink<K>` resolutions too.
 #[allow(clippy::too_many_lines)] // per-handler retention static block; one walk keeps each emitted static contiguous
-fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn]) -> TokenStream2 {
+fn build_kinds_section_retention_statics(
+    self_ty: &Type,
+    handlers: &[HandlerFn],
+    config_kind_ty: Option<&Type>,
+) -> TokenStream2 {
     let self_ty_hint = type_hint(self_ty);
 
-    let statics = handlers.iter().enumerate().map(|(idx, h)| {
-        let k = &h.kind_ty;
+    // ADR-0090 (issue 1257): the declared config kind needs the same
+    // `aether.kinds` / `aether.kinds.labels` retention as handler kinds
+    // so its schema + labels survive the rlib→cdylib dead-section strip
+    // and `describe_kinds` can resolve it by id. Tack it onto the walk
+    // with a distinct index suffix so it never collides with a handler
+    // static. `None` (synthesized `()` config) contributes nothing.
+    // The suffix is a plain `String` (e.g. "0", "1", "CONFIG") spliced
+    // into the larger static identifiers below — a bare numeric ident
+    // isn't valid on its own, so it must stay a format arg, not a
+    // standalone `Ident`.
+    let retained_kinds: Vec<(Type, String)> = handlers
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| (h.kind_ty.clone(), idx.to_string()))
+        .chain(config_kind_ty.map(|cfg| (cfg.clone(), "CONFIG".to_string())))
+        .collect();
+
+    let statics = retained_kinds.iter().map(|(k, idx)| {
         let schema_ident = quote::format_ident!(
             "__AETHER_HANDLERS_KIND_SCHEMA_{}_{}",
             self_ty_hint,

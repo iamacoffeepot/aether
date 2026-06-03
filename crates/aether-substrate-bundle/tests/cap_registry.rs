@@ -51,6 +51,7 @@ fn load_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId 
                 &LoadComponent {
                     wasm,
                     name: Some(name.to_owned()),
+                    config: Vec::new(),
                 },
             ),
         )])
@@ -160,6 +161,7 @@ fn cap_registry_updates_on_replace() {
                     mailbox_id: mbox,
                     wasm: camera_wasm,
                     drain_timeout_ms: None,
+                    config: Vec::new(),
                 },
             ),
         )])

@@ -37,6 +37,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
                 &LoadComponent {
                     wasm,
                     name: Some(PROBE_NAME.to_owned()),
+                    config: Vec::new(),
                 },
             ),
         )])

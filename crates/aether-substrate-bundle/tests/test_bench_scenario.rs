@@ -100,6 +100,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
                 &LoadComponent {
                     wasm,
                     name: Some(PROBE_NAME.to_owned()),
+                    config: Vec::new(),
                 },
             ),
         )])
@@ -312,6 +313,7 @@ fn replace_component_preserves_mailbox_identity() {
                     mailbox_id: probe_mbox,
                     wasm,
                     drain_timeout_ms: None,
+                    config: Vec::new(),
                 },
             ),
         )])

@@ -819,6 +819,12 @@ pub enum InputsRecord {
     Fallback { doc: Option<Cow<'static, str>> },
     /// Component-wide rustdoc lifted from the `#[actor]` impl block.
     Component { doc: Cow<'static, str> },
+    /// ADR-0090 (issue 1257): the component's declared boot-config kind.
+    /// `id` is the compile-time `<C::Config as Kind>::ID`; `name` is
+    /// `C::Config::NAME`. Emitted by `#[actor]` only when the user
+    /// declared a `type Config` other than the synthesized `()` — the
+    /// reader lifts it into `ComponentCapabilities.config`.
+    Config { id: KindId, name: Cow<'static, str> },
 }
 
 /// Custom-section name for the inputs manifest (ADR-0033). Paired
@@ -829,5 +835,9 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 
 /// Version byte prefixing every record in the `aether.kinds.inputs`
 /// section. Follows ADR-0028's per-record versioning convention —
-/// unknown versions abort the read rather than silently skip.
-pub const INPUTS_SECTION_VERSION: u8 = 0x01;
+/// unknown versions abort the read rather than silently skip. v0x02
+/// (ADR-0090 / issue 1257) added the `InputsRecord::Config` variant; a
+/// substrate that understands config delivery and a component built
+/// before it would otherwise silently disagree on the config seam, so
+/// the reader rejects v0x01 loudly — a hard rebuild boundary.
+pub const INPUTS_SECTION_VERSION: u8 = 0x02;

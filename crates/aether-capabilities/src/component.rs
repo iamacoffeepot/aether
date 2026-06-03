@@ -291,6 +291,10 @@ mod native {
                 registry: Arc::clone(&self.registry),
                 outbound: Arc::clone(&self.outbound),
                 capabilities: capabilities.clone(),
+                // ADR-0090 (issue 1257): carry the load mail's init-config
+                // bytes into the trampoline; `WasmTrampoline::init` hands
+                // them to the guest's typed `init`.
+                config: payload.config,
             };
             let mailbox_id = match ctx
                 .spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config)
