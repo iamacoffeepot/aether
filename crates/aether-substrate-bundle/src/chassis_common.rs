@@ -34,6 +34,7 @@ use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, known_keys};
 use aether_substrate::handle_store::{ENV_MAX_BYTES, PersistConfig, PersistConfigLayer};
 use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_substrate::scheduler::SCHEDULER_KNOBS;
 use aether_substrate::{LifecycleDriverConfig, LifecycleGraph};
 use confique::Config as _;
 use confique::meta::Meta;
@@ -110,10 +111,12 @@ pub fn chassis_known_keys() -> KnownKeys {
         &NamespaceRootsLayer::META,
         &PersistConfigLayer::META,
     ];
-    // b2 (iamacoffeepot/aether#1255) folds in
-    // `aether_substrate::scheduler::SCHEDULER_KNOBS` alongside
-    // `CHASSIS_KNOBS` once that const lands.
-    known_keys(metas, CHASSIS_KNOBS)
+    // CHASSIS_KNOBS (bare chassis knobs) + the scheduler / lifecycle
+    // hot-path tuning knobs (ADR-0090 unit b2): both join the known-key
+    // set so e1's sweep doesn't flag them and e2's dump lists them.
+    let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
+    records.extend_from_slice(SCHEDULER_KNOBS);
+    known_keys(metas, &records)
 }
 
 /// Chassis-bin verdict on the handle-store persistence config (ADR-0090
@@ -220,4 +223,38 @@ pub fn maybe_with_rpc_server<C: Chassis>(
             kinds: vec![],
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chassis_known_keys;
+
+    #[test]
+    fn chassis_known_keys_includes_scheduler_hot_path_knobs() {
+        // ADR-0090 unit b2: the six scheduler / lifecycle hot-path
+        // knobs join the known-key set, so e1's unknown-AETHER_ sweep
+        // doesn't flag them.
+        let known = chassis_known_keys();
+        for key in [
+            "AETHER_LOCAL_STICKY_MAX",
+            "AETHER_LOCAL_MAIL_BUDGET",
+            "AETHER_LOCAL_TIME_BUDGET_US",
+            "AETHER_PEER_STEAL",
+            "AETHER_HANDOFF_COST_NS",
+            "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+        ] {
+            assert!(known.contains(key), "chassis_known_keys missing {key}");
+        }
+    }
+
+    #[test]
+    fn chassis_known_keys_includes_a_representative_cap_key() {
+        // The cap layer META walk lands the per-cap env keys (a
+        // representative from each migrated cap) plus the bare chassis
+        // knobs — the set is non-empty and covers more than scheduler.
+        let known = chassis_known_keys();
+        assert!(known.contains("AETHER_HTTP_DISABLE"));
+        assert!(known.contains("AETHER_WORKERS"));
+        assert!(!known.is_empty());
+    }
 }

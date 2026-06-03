@@ -48,3 +48,82 @@ pub use slot::{
 };
 pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
+
+use crate::config::KnobRecord;
+use crate::lifecycle::LIFECYCLE_KNOBS;
+
+/// The scheduler + lifecycle hot-path tuning knobs registered for
+/// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).
+/// Concatenates the four deque / keep-local-valve knobs
+/// (`worker_deque::DEQUE_KNOBS`), the handoff-cost calibration knob
+/// (`calibrate::CALIBRATE_KNOBS`), and the lifecycle advance-timeout
+/// knob ([`LIFECYCLE_KNOBS`]) into the single
+/// slice e1's `chassis_known_keys()` folds into the known-key set and
+/// e2's `--config` dump renders. Pure `&'static` metadata — there is
+/// no change to any hot-path `OnceLock` read.
+///
+/// The element-by-element array (rather than a runtime concat) keeps
+/// `SCHEDULER_KNOBS` a `const`: each record is still *defined* once in
+/// its owning module; this only *references* it.
+pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
+    worker_deque::DEQUE_KNOBS[0],
+    worker_deque::DEQUE_KNOBS[1],
+    worker_deque::DEQUE_KNOBS[2],
+    worker_deque::DEQUE_KNOBS[3],
+    calibrate::CALIBRATE_KNOBS[0],
+    LIFECYCLE_KNOBS[0],
+];
+
+#[cfg(test)]
+mod knob_tests {
+    use super::SCHEDULER_KNOBS;
+    use crate::config::KnobKind;
+
+    #[test]
+    fn scheduler_knobs_cover_all_six_hot_path_env_keys() {
+        let keys: Vec<&str> = SCHEDULER_KNOBS.iter().map(|r| r.env_key).collect();
+        for expected in [
+            "AETHER_LOCAL_STICKY_MAX",
+            "AETHER_LOCAL_MAIL_BUDGET",
+            "AETHER_LOCAL_TIME_BUDGET_US",
+            "AETHER_PEER_STEAL",
+            "AETHER_HANDOFF_COST_NS",
+            "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+        ] {
+            assert!(
+                keys.contains(&expected),
+                "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
+            );
+        }
+        assert_eq!(SCHEDULER_KNOBS.len(), 6);
+    }
+
+    #[test]
+    fn scheduler_knobs_are_all_hand_registered() {
+        // None are confique fields — they ride OnceLock getters, so
+        // every record is HandRegistered (the discriminator e2's dump
+        // uses to know there's no Meta to walk).
+        assert!(
+            SCHEDULER_KNOBS
+                .iter()
+                .all(|r| matches!(r.kind, KnobKind::HandRegistered))
+        );
+    }
+
+    #[test]
+    fn adaptive_knobs_have_no_literal_default() {
+        // time_budget / mail_budget are adaptive / off-by-default with
+        // no single literal default (ADR-0090 unit b2): their record
+        // default is None ("derived/unset"), satisfied by the doc text.
+        for key in ["AETHER_LOCAL_TIME_BUDGET_US", "AETHER_LOCAL_MAIL_BUDGET"] {
+            let rec = SCHEDULER_KNOBS
+                .iter()
+                .find(|r| r.env_key == key)
+                .expect("knob present");
+            assert!(
+                rec.default.is_none(),
+                "{key} should have no literal default"
+            );
+        }
+    }
+}

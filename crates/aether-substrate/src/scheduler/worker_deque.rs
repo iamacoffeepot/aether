@@ -48,8 +48,52 @@ use std::time::{Duration, Instant};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
+use crate::config::{KnobKind, KnobRecord};
 use crate::scheduler::calibrate::handoff_cost;
 use crate::scheduler::slot::Drainable;
+
+/// Discovery records for the four deque / keep-local-valve hot-path
+/// tuning knobs (ADR-0090 unit b2, iamacoffeepot/aether#1255). These
+/// describe the `OnceLock` getters below ([`hard_cap`], [`mail_budget`],
+/// [`time_budget`], [`peer_steal_enabled`]) so e1's unknown-`AETHER_*`
+/// sweep doesn't flag them and e2's `--config` dump lists them. The
+/// hot-path read stays exactly as-is — these are pure `&'static`
+/// metadata assembled once at boot, never on the dispatch path. Docs +
+/// defaults are lifted verbatim from the getter doc-comments;
+/// `time_budget` / `mail_budget` are adaptive / off-by-default with no
+/// literal default, so their `default` is `None` (rendered
+/// "derived/unset").
+pub const DEQUE_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: "AETHER_LOCAL_STICKY_MAX",
+        doc: "Deque-length backstop: max slots a worker keeps on its own deque \
+              before forcing a spill (values < 1 / unparseable fall back).",
+        default: Some("256"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_LOCAL_MAIL_BUDGET",
+        doc: "Keep-local mail-count budget per burst, off by default \
+              (Some(n) spills after n mail; Some(0) reproduces cap == 1).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_LOCAL_TIME_BUDGET_US",
+        doc: "Keep-local time valve (microseconds): pins/disables the burst spill \
+              valve. Unset → adaptive, derived from the measured handoff cost; \
+              0 disables the valve (pure inline-cascade).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_PEER_STEAL",
+        doc: "Whether idle workers may raid siblings' deques (peer-deque stealing). \
+              Default off (owner-only); set 1/true to opt the sibling raid back in.",
+        default: Some("off"),
+        kind: KnobKind::HandRegistered,
+    },
+];
 
 /// The unit on the deques: a chassis-registered dispatcher slot. (Phase
 /// 3b makes the blob the unit; 3a keeps the slot.)

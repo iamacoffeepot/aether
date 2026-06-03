@@ -17,7 +17,7 @@
 mod driver;
 mod graph;
 
-pub use driver::{LifecycleDriverCapability, LifecycleDriverConfig};
+pub use driver::{LIFECYCLE_KNOBS, LifecycleDriverCapability, LifecycleDriverConfig};
 pub use graph::{
     BuildError, LifecycleGraph, LifecycleGraphBuilder, NoOpen, OpenNoNext, OpenWithNext,
 };
