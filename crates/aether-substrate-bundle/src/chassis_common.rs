@@ -31,7 +31,7 @@ use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
-use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, known_keys};
+use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, dump_config, known_keys};
 use aether_substrate::handle_store::{ENV_MAX_BYTES, PersistConfig, PersistConfigLayer};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::scheduler::SCHEDULER_KNOBS;
@@ -103,7 +103,17 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
 /// assembly fn is in `config`; the concrete chassis registry is here.
 #[must_use]
 pub fn chassis_known_keys() -> KnownKeys {
-    let metas: &[&'static Meta] = &[
+    let (metas, records) = chassis_registry();
+    known_keys(metas, &records)
+}
+
+/// The chassis-wide config registry: the migrated cap layer `Meta`s
+/// plus the hand-registered knob records (`CHASSIS_KNOBS` + b2's
+/// `SCHEDULER_KNOBS`). Shared by [`chassis_known_keys`] (e1's sweep)
+/// and [`chassis_config_dump`] (e2's `--config`) so both read one
+/// source of truth.
+fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
+    const METAS: &[&Meta] = &[
         &HttpConfigLayer::META,
         &GeminiConfigLayer::META,
         &AnthropicConfigLayer::META,
@@ -111,12 +121,19 @@ pub fn chassis_known_keys() -> KnownKeys {
         &NamespaceRootsLayer::META,
         &PersistConfigLayer::META,
     ];
-    // CHASSIS_KNOBS (bare chassis knobs) + the scheduler / lifecycle
-    // hot-path tuning knobs (ADR-0090 unit b2): both join the known-key
-    // set so e1's sweep doesn't flag them and e2's dump lists them.
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
     records.extend_from_slice(SCHEDULER_KNOBS);
-    known_keys(metas, &records)
+    (METAS, records)
+}
+
+/// Render the `--config` discovery dump for the full-stack chassis
+/// (ADR-0090 §4): every cap layer knob + hand-registered knob with its
+/// live source-resolved value, default, and doc. The chassis bins call
+/// this when `--config` is passed and exit before boot.
+#[must_use]
+pub fn chassis_config_dump() -> String {
+    let (metas, records) = chassis_registry();
+    dump_config(metas, &records)
 }
 
 /// Chassis-bin verdict on the handle-store persistence config (ADR-0090
@@ -256,5 +273,20 @@ mod tests {
         assert!(known.contains("AETHER_HTTP_DISABLE"));
         assert!(known.contains("AETHER_WORKERS"));
         assert!(!known.is_empty());
+    }
+
+    #[test]
+    fn chassis_config_dump_lists_a_knob_from_each_cap_plus_scheduler() {
+        // ADR-0090 §4 `--config`: the dump walks the same registry as
+        // the sweep, so it lists a representative knob from each cap, a
+        // bare chassis knob, and a scheduler hot-path knob — with a
+        // header row.
+        let dump = super::chassis_config_dump();
+        assert!(dump.contains("KEY"));
+        assert!(dump.contains("AETHER_HTTP_DISABLE")); // http cap
+        assert!(dump.contains("AETHER_GEMINI_TIMEOUT_MS")); // gemini cap
+        assert!(dump.contains("AETHER_AUDIO_DISABLE")); // audio cap
+        assert!(dump.contains("AETHER_WORKERS")); // bare chassis knob
+        assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
     }
 }

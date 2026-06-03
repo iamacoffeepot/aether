@@ -124,6 +124,9 @@ impl HeadlessEnv {
         let HeadlessCli {
             common,
             tick_hz: cli_tick_hz,
+            // The bin handles `--config` (print + exit) before this
+            // resolver runs; ignore it here.
+            config: _,
         } = cli;
         let CommonOverlay {
             http,
