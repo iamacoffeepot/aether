@@ -258,9 +258,10 @@ impl SubstrateBootBuilder<'_> {
             // Chassis bin resolved PersistConfig from argv-then-env;
             // use it verbatim (ADR-0090 unit d). max_bytes follows the
             // same overlay (argv > env > default).
-            let max_bytes = self
-                .handle_store_max_bytes
-                .unwrap_or_else(|| HandleStore::from_env().max_bytes());
+            let max_bytes = match self.handle_store_max_bytes {
+                Some(n) => n,
+                None => HandleStore::from_env()?.max_bytes(),
+            };
             HandleStore::with_persist_validated(
                 max_bytes,
                 self.persist_override,
@@ -276,7 +277,7 @@ impl SubstrateBootBuilder<'_> {
             )
         } else {
             // Pure env-only path — byte-identical to pre-d behaviour.
-            HandleStore::from_env_persistent(self.persist_enabled, Some(kind_resolver))
+            HandleStore::from_env_persistent(self.persist_enabled, Some(kind_resolver))?
         });
         // ADR-0049 §7: acquire the single-substrate-per-store lock
         // before doing any writes. A live conflicting lock aborts boot

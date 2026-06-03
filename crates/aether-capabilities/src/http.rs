@@ -13,6 +13,8 @@
 //!   `Fetch.timeout_ms`.
 
 use std::collections::HashSet;
+#[cfg(feature = "native")]
+use std::num::ParseIntError;
 use std::time::Duration;
 
 // Handler-signature kinds must be importable at file root because
@@ -182,21 +184,37 @@ fn parse_allowlist(s: &str) -> Result<HashSet<String>, Infallible> {
         .collect())
 }
 
-/// Parse a byte cap; an unparseable value falls back to
-/// [`DEFAULT_MAX_BODY_BYTES`] (the prior soft-fail — ADR-0090 §4's
-/// hard-error lands in the validation pass, not this migration). Total.
+/// Parse a byte cap (ADR-0090 §4 hard-error half): empty → unset,
+/// falling back to [`DEFAULT_MAX_BODY_BYTES`]; a non-empty value that
+/// doesn't parse as `usize` errors, which confique surfaces from
+/// `.load()` and the chassis env resolver turns into a `ConfigError`.
+///
+/// # Errors
+///
+/// Returns a [`ParseIntError`] for a
+/// non-empty value that isn't a valid `usize`.
 #[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_max_body_bytes(s: &str) -> Result<usize, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_MAX_BODY_BYTES))
+fn parse_max_body_bytes(s: &str) -> Result<usize, ParseIntError> {
+    if s.trim().is_empty() {
+        return Ok(DEFAULT_MAX_BODY_BYTES);
+    }
+    s.trim().parse()
 }
 
-/// Parse a timeout in milliseconds; unparseable falls back to
-/// [`DEFAULT_TIMEOUT_MS`]. Total — never errors.
+/// Parse a timeout in milliseconds (ADR-0090 §4 hard-error half):
+/// empty → [`DEFAULT_TIMEOUT_MS`]; a non-empty value that doesn't
+/// parse as `u32` errors.
+///
+/// # Errors
+///
+/// Returns a [`ParseIntError`] for a
+/// non-empty value that isn't a valid `u32`.
 #[cfg(feature = "native")]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_timeout_ms(s: &str) -> Result<u32, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_TIMEOUT_MS))
+fn parse_timeout_ms(s: &str) -> Result<u32, ParseIntError> {
+    if s.trim().is_empty() {
+        return Ok(DEFAULT_TIMEOUT_MS);
+    }
+    s.trim().parse()
 }
 
 /// Sender-side facade for actors addressed via
@@ -602,15 +620,18 @@ mod native {
         }
 
         #[test]
-        fn parse_numbers_soft_fall_back_to_defaults() {
+        fn parse_numbers_strict_error_on_garbage() {
+            // ADR-0090 §4 hard-error half: a valid value parses, an
+            // empty value falls back to the default (unset), and a
+            // non-empty garbage value errors rather than silently
+            // defaulting.
             use super::super::{DEFAULT_TIMEOUT_MS, parse_max_body_bytes, parse_timeout_ms};
-            assert_eq!(parse_max_body_bytes("1024").unwrap(), 1024);
-            assert_eq!(
-                parse_max_body_bytes("not-a-number").unwrap(),
-                DEFAULT_MAX_BODY_BYTES
-            );
-            assert_eq!(parse_timeout_ms("5000").unwrap(), 5000);
-            assert_eq!(parse_timeout_ms("garbage").unwrap(), DEFAULT_TIMEOUT_MS);
+            assert_eq!(parse_max_body_bytes("1024"), Ok(1024));
+            assert_eq!(parse_max_body_bytes(""), Ok(DEFAULT_MAX_BODY_BYTES));
+            assert!(parse_max_body_bytes("not-a-number").is_err());
+            assert_eq!(parse_timeout_ms("5000"), Ok(5000));
+            assert_eq!(parse_timeout_ms(""), Ok(DEFAULT_TIMEOUT_MS));
+            assert!(parse_timeout_ms("garbage").is_err());
         }
 
         #[test]

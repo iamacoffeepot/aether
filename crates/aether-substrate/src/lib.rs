@@ -82,7 +82,9 @@ pub use chassis::ctx::{
     SharedActorSlots,
 };
 pub use chassis::error::BootError;
-pub use config::FromArgvThenEnv;
+pub use config::{
+    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, known_keys, validate_env,
+};
 pub use lifecycle::{LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{

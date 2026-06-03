@@ -64,7 +64,7 @@ mod config {
     // confique consumes these through `#[config(parse_env = …)]`; IntelliJ-Rust
     // doesn't trace macro-attr path args (Qodana FP), but rustc + clippy do.
     #[allow(unused_imports)]
-    use crate::config_env::{parse_flag, parse_provider_max_in_flight, parse_u32_ms_or};
+    use crate::config_env::{parse_flag, parse_millis_strict, parse_provider_max_in_flight_strict};
     use std::time::Duration;
 
     /// Resolved configuration for the `aether.gemini` cap. Chassis mains
@@ -107,7 +107,7 @@ mod config {
         /// Per-cap concurrency bound (doubles as rate-limit throttling).
         #[cfg_attr(
             feature = "native",
-            config(default = 2, parse = parse_provider_max_in_flight)
+            config(default = 2, parse = parse_provider_max_in_flight_strict)
         )]
         pub max_in_flight: usize,
         /// Per-request timeout for the media APIs. The derive's
@@ -118,7 +118,7 @@ mod config {
             feature = "native",
             config(
                 default = 180_000,
-                parse = parse_u32_ms_or::<DEFAULT_TIMEOUT_MS>,
+                parse = parse_millis_strict::<DEFAULT_TIMEOUT_MS>,
                 ms_duration,
                 layer_field = "timeout_ms"
             )

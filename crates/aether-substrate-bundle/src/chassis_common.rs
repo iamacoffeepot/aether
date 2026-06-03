@@ -15,6 +15,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_actor::Actor;
+use aether_capabilities::anthropic::AnthropicConfigLayer;
+use aether_capabilities::audio::AudioConfigLayer;
+use aether_capabilities::fs::NamespaceRootsLayer;
+use aether_capabilities::gemini::GeminiConfigLayer;
+use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
@@ -26,9 +31,90 @@ use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
-use aether_substrate::handle_store::PersistConfig;
+use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, known_keys};
+use aether_substrate::handle_store::{ENV_MAX_BYTES, PersistConfig, PersistConfigLayer};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::{LifecycleDriverConfig, LifecycleGraph};
+use confique::Config as _;
+use confique::meta::Meta;
+
+/// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
+/// the bare-shadowed knobs the chassis bins read inline
+/// (`AETHER_WORKERS`, `AETHER_TICK_HZ`, `AETHER_RPC_PORT`, the desktop
+/// window knobs) plus the handle-store in-memory budget
+/// (`AETHER_HANDLE_STORE_MAX_BYTES`, which `HandleStore::from_env`
+/// parses outside confique). Registered as [`KnobRecord`]s so e1's
+/// unknown-`AETHER_*` sweep doesn't flag them and e2's `--config`
+/// dump lists them. ADR-0090 §1/§4. The scheduler hot-path knobs are
+/// registered separately by unit b2's `SCHEDULER_KNOBS`.
+pub const CHASSIS_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: "AETHER_WORKERS",
+        doc: "Worker-pool size override (unset → available_parallelism()-1, min 1).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_TICK_HZ",
+        doc: "Headless tick cadence in hertz.",
+        default: Some("60"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_RPC_PORT",
+        doc: "aether.rpc.server bind port (desktop/headless skip the server when unset).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_WINDOW_MODE",
+        doc: "Desktop window mode: windowed[:WxH] / fullscreen-borderless / exclusive:WxH@HZ.",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_WINDOW_TITLE",
+        doc: "Desktop window title text.",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: ENV_MAX_BYTES,
+        doc: "Handle-store in-memory soft byte budget (parsed outside confique; \
+              unparseable aborts boot per ADR-0090 §4).",
+        default: Some("268435456"),
+        kind: KnobKind::HandRegistered,
+    },
+];
+
+/// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
+/// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
+/// persist) plus the hand-registered chassis knobs ([`CHASSIS_KNOBS`])
+/// and scheduler hot-path knobs (b2's
+/// `aether_substrate::scheduler::SCHEDULER_KNOBS`). e1's
+/// [`validate_env`](aether_substrate::config::validate_env) sweeps the
+/// process env against this; e2's `--config` dump walks the same
+/// metas + records.
+///
+/// Lives bundle-side rather than in `aether-substrate::config` because
+/// the cap layer types live in `aether-capabilities`, which depends on
+/// `aether-substrate` (not the reverse) — the generic `known_keys`
+/// assembly fn is in `config`; the concrete chassis registry is here.
+#[must_use]
+pub fn chassis_known_keys() -> KnownKeys {
+    let metas: &[&'static Meta] = &[
+        &HttpConfigLayer::META,
+        &GeminiConfigLayer::META,
+        &AnthropicConfigLayer::META,
+        &AudioConfigLayer::META,
+        &NamespaceRootsLayer::META,
+        &PersistConfigLayer::META,
+    ];
+    // b2 (iamacoffeepot/aether#1255) folds in
+    // `aether_substrate::scheduler::SCHEDULER_KNOBS` alongside
+    // `CHASSIS_KNOBS` once that const lands.
+    known_keys(metas, CHASSIS_KNOBS)
+}
 
 /// Chassis-bin verdict on the handle-store persistence config (ADR-0090
 /// unit d, issue 1258). [`EnvOnly`](Self::EnvOnly) keeps the pre-d
