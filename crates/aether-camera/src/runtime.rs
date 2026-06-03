@@ -48,7 +48,7 @@ use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::{InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{Camera, Tick, WindowSize};
-use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
+use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 
 use crate::{
     CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
@@ -132,10 +132,10 @@ impl OrbitState {
 
     fn tick(&mut self) {
         self.yaw += self.speed;
-        if self.yaw > PI * 2.0 {
-            self.yaw -= PI * 2.0;
+        if self.yaw > TAU {
+            self.yaw -= TAU;
         } else if self.yaw < 0.0 {
-            self.yaw += PI * 2.0;
+            self.yaw += TAU;
         }
     }
 
