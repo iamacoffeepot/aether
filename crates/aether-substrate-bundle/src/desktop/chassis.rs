@@ -194,6 +194,9 @@ impl DesktopEnv {
             audio: audio_overlay,
             window_mode: cli_window_mode,
             window_title: cli_window_title,
+            // The bin handles `--config` (print + exit) before this
+            // resolver runs; ignore it here.
+            config: _,
         } = cli;
         let CommonOverlay {
             http,

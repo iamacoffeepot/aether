@@ -155,6 +155,11 @@ pub struct DesktopCli {
     /// `AETHER_WINDOW_TITLE` — window title text.
     #[arg(long = "window-title")]
     pub window_title: Option<String>,
+
+    /// Print every config knob (source-resolved value, default, doc)
+    /// and exit before boot (ADR-0090 §4 discovery dump).
+    #[arg(long = "config")]
+    pub config: bool,
 }
 
 /// Headless chassis CLI root.
@@ -170,6 +175,11 @@ pub struct HeadlessCli {
     /// `AETHER_TICK_HZ` — tick cadence in hertz (default 60).
     #[arg(long = "tick-hz")]
     pub tick_hz: Option<u32>,
+
+    /// Print every config knob (source-resolved value, default, doc)
+    /// and exit before boot (ADR-0090 §4 discovery dump).
+    #[arg(long = "config")]
+    pub config: bool,
 }
 
 /// Hub chassis CLI root — coordinator-only, no full-stack caps.
@@ -183,4 +193,9 @@ pub struct HubCli {
     /// 8901).
     #[arg(long = "rpc-port")]
     pub rpc_port: Option<u16>,
+
+    /// Print every config knob (source-resolved value, default, doc)
+    /// and exit before boot (ADR-0090 §4 discovery dump).
+    #[arg(long = "config")]
+    pub config: bool,
 }

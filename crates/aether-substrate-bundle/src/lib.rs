@@ -25,7 +25,7 @@
 //! chassis surface.
 
 mod chassis_common;
-pub use chassis_common::PersistOverride;
+pub use chassis_common::{PersistOverride, chassis_config_dump};
 pub mod chassis_root;
 pub mod cli;
 pub mod desktop;
