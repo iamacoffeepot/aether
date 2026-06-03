@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: Reclaim stale local state. `/sweep` (or `/sweep worktrees`) removes worktrees + branches whose PRs merged; `/sweep branches` prunes worktree-less local branches whose PRs merged; `/sweep memory` compresses + de-indexes the project's stale memory index; `/sweep all` runs every target. Each enumerates candidates, classifies by a staleness signal, prints a plan, and confirms before acting. Pair the git targets with `/delegate` — after delegated PRs land, run `/sweep` to reclaim disk + branch space.
+description: Reclaim stale local state. `/sweep` (or `/sweep worktrees`) removes worktrees + branches whose PRs merged; `/sweep branches` prunes worktree-less local branches whose PRs merged; `/sweep memory` compresses + de-indexes the project's stale memory index; `/sweep all` runs every target. Each enumerates candidates, classifies by a staleness signal, prints a plan, and confirms before acting. Pair the git targets with `/implement` — after implemented PRs land, run `/sweep` to reclaim disk + branch space.
 ---
 
 # Sweep skill

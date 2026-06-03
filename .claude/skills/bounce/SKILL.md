@@ -7,7 +7,7 @@ description: Explicit phase regression. Move an issue from its current Phase bac
 
 The user invokes `/bounce` when reviewing scope artifacts (or watching execution) and concludes an upstream phase needs rework. The skill records the regression as a `Phase=Bounced` + `BounceTo=<phase>` state with an audit comment. `/scope` then resumes from the target phase on next invocation.
 
-Self-bounces by other skills (`/scope` hitting a wall, `/delegate` discovering a design flaw) use the same mechanism — this skill is the explicit user-driven wrapper.
+Self-bounces by other skills (`/scope` hitting a wall, `/implement` discovering a design flaw mid-execution) use the same mechanism — this skill is the explicit user-driven wrapper.
 
 ## Invocation
 
@@ -42,7 +42,7 @@ A bounce from `Ready` to `Plan` is valid (target=3 < current=4). A bounce from `
 
 ## Actions on pass
 
-1. Set the project item's `Phase` field to `Bounced`.
+1. Set the project item's `Phase` field to `Bounced`, and reconcile the issue label to `phase:bounced` (see [Phase label reconcile](#phase-label-reconcile)).
 2. Set the project item's `BounceTo` field to the target phase.
 3. Post an audit comment:
 
@@ -67,20 +67,20 @@ A bounce from `Ready` to `Plan` is valid (target=3 < current=4). A bounce from `
 When `/scope <issue>` runs on a Bounced issue, it must:
 
 1. Read `BounceTo` from the project item.
-2. Set `Phase=<BounceTo>` (clears the Bounced state).
+2. Set `Phase=<BounceTo>` (clears the Bounced state), reconciling the label from `phase:bounced` to `phase:<BounceTo>`.
 3. Run from that phase forward — redoing the bounced phase and every downstream phase.
 
 If the user passes `/scope <issue> --phase <name>` while bounced and `<name>` matches `BounceTo`, behavior is identical (the flag is the explicit form of the same intent). If `<name>` differs from `BounceTo`, honor `<name>` (the user is overriding) but post a comment noting the override.
 
 ## Self-bounce by other skills
 
-Skills that detect their own wall conditions (`/scope` hitting a vague issue body, `/delegate` discovering a broken assumption) call into the same logic: set `Phase=Bounced`, set `BounceTo=<phase>`, post a comment. The audit comment prefix changes to identify the source:
+Skills that detect their own wall conditions (`/scope` hitting a vague issue body, `/implement` discovering a broken assumption) call into the same logic: set `Phase=Bounced`, set `BounceTo=<phase>`, post a comment. The audit comment prefix changes to identify the source:
 
 ```
 [scope] Self-bounce: <previous> → Bounced (BounceTo=Design).
    Question: <the blocker>
 
-[delegate] Self-bounce: Executing → Bounced (BounceTo=Plan).
+[implement] Self-bounce: Executing → Bounced (BounceTo=Plan).
    Discovered during implementation: <the issue>
 ```
 
@@ -90,7 +90,19 @@ Same skill mechanism, different invocation site. `/bounce` is the user-driven va
 
 `Phase=Stalled` is a different signal — env/tooling failure, not a phase regression. Examples: qodana CI service down, GitHub API rate-limited mid-batch, `gh` token expired. The issue's scoping is fine; the *environment* is the problem.
 
-v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit` with the BounceTo field left null. Future `/stall <issue> --reason "<env-issue>"` would post the same kind of audit comment.
+v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit` with the BounceTo field left null. When you do, also set the `phase:stalled` label on the issue (`gh issue edit <n> --remove-label "phase:define,…,phase:bounced,phase:stalled" --add-label phase:stalled`) so the halt is visible in `gh issue list`. Future `/stall <issue> --reason "<env-issue>"` would post the same kind of audit comment.
+
+## Phase label reconcile
+
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+
+```bash
+gh issue edit <n> \
+  --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
+  --add-label "phase:<new>"
+```
+
+`--remove-label` ignores labels the issue doesn't carry, so this single line is safe on any transition — it strips whatever phase label was present and applies the new one (lowercased: `Phase=Ready` → `phase:ready`). This skill writes `Phase=Bounced` (`phase:bounced`), and on the `/scope` resume contract `Phase=<BounceTo>` (`phase:<BounceTo>`).
 
 ## Failure modes
 
