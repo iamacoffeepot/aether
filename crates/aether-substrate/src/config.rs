@@ -56,6 +56,15 @@
 //! kept hand-written. The five other caps benefit from the derive;
 //! `PersistConfig` stays inherent.
 
+use std::collections::HashSet;
+use std::env;
+use std::error::Error as StdError;
+use std::fmt;
+
+use confique::meta::{FieldKind, Meta};
+
+use crate::BootError;
+
 /// Build a cap config by overlaying an argv-derived partial confique
 /// layer on top of the env layer (ADR-0090 unit d).
 ///
@@ -95,11 +104,375 @@ pub trait FromArgvThenEnv: Sized {
     /// values flow through total parsers).
     #[must_use]
     fn from_argv_then_env(argv: <Self::Layer as confique::Config>::Layer) -> Self {
+        match Self::try_from_argv_then_env(argv) {
+            Ok(this) => this,
+            Err(e) => panic!("config layer resolution failed: {e}"),
+        }
+    }
+
+    /// Fallible sibling of [`from_argv_then_env`](Self::from_argv_then_env):
+    /// surfaces an unparseable known env value as a [`ConfigError`]
+    /// rather than panicking (ADR-0090 §4 — the e1 hard-error half).
+    /// The chassis env resolvers call this and `?`-propagate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnparseableKnown`] when a known env key
+    /// (or argv overlay value) fails the layer's parser — the soft
+    /// `.expect()` fall-through is gone.
+    fn try_from_argv_then_env(
+        argv: <Self::Layer as confique::Config>::Layer,
+    ) -> Result<Self, ConfigError> {
         let layer = <Self::Layer as confique::Config>::builder()
             .preloaded(argv)
             .env()
             .load()
-            .expect("config layer defaults are well-formed");
-        Self::from_layer(layer)
+            .map_err(ConfigError::from_confique)?;
+        Ok(Self::from_layer(layer))
+    }
+}
+
+/// Distinguishes a confique-backed knob (one carrying a
+/// `Config::META` leaf with an env key) from a hand-registered
+/// `OnceLock` knob (the scheduler hot-path tuning vars, registered via
+/// [`KnobRecord`] because they have no `Meta`). ADR-0090 §1: the
+/// `Meta` walk is the single source of truth for confique knobs;
+/// `KnobRecord` only carries the ones with no `Meta`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KnobKind {
+    /// A knob declared as a `#[derive(Config)]` field — its env key
+    /// and default come from the layer `Meta`. `KnobRecord` is used
+    /// for these only when a caller wants a uniform record alongside
+    /// hand-registered ones; the canonical source is the `Meta`.
+    Confique,
+    /// A knob read directly from a process-global `OnceLock`
+    /// (`scheduler/worker_deque.rs`, `calibrate.rs`,
+    /// `lifecycle/driver.rs`) — no `Config::META`, so it must be
+    /// hand-registered to join the known-key set + the `--config`
+    /// dump (ADR-0090 unit b2, iamacoffeepot/aether#1255).
+    HandRegistered,
+}
+
+/// A uniform, hand-registered knob record. b2 builds a
+/// `&[KnobRecord]` of the scheduler hot-path tuning knobs; e2's
+/// `--config` dump renders them; e1's [`KnownKeys`] folds their
+/// `env_key`s into the accepted set so the unknown-`AETHER_*` sweep
+/// doesn't flag them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnobRecord {
+    /// The `AETHER_*` (or bare) env var this knob reads.
+    pub env_key: &'static str,
+    /// One-line human/agent-facing description, lifted verbatim from
+    /// the getter doc-comment.
+    pub doc: &'static str,
+    /// The literal default, if the knob has one. `None` for adaptive
+    /// / unset knobs (`time_budget`, `mail_budget`) — rendered
+    /// "derived/unset" by the dump.
+    pub default: Option<&'static str>,
+    /// Whether this is a confique-backed or hand-registered knob.
+    pub kind: KnobKind,
+}
+
+/// The set of env keys some part of the substrate config surface
+/// claims — every `AETHER_*` (or registered bare) key that resolves
+/// to a real knob. [`validate_env`] warns on any `AETHER_*` env var
+/// absent from this set. Assembled by [`known_keys`] from the migrated
+/// `*Layer` metas plus the hand-registered [`KnobRecord`] slices.
+#[derive(Clone, Debug, Default)]
+pub struct KnownKeys {
+    keys: HashSet<&'static str>,
+}
+
+impl KnownKeys {
+    /// Whether `key` is a claimed env var.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.keys.contains(key)
+    }
+
+    /// Number of distinct claimed keys.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Whether no key is claimed (only true for an empty assembly).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Iterate the claimed keys (order unspecified).
+    pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.keys.iter().copied()
+    }
+}
+
+/// Walk one `confique::meta::Meta`, collecting every leaf's env key
+/// into `out` (recursing `Nested` metas). Iterative work-stack rather
+/// than recursion (CLAUDE.md: load-bearing tree walks cap depth) — a
+/// `Meta` tree is statically bounded, but the stack keeps it uniform.
+fn collect_meta_env_keys(meta: &'static Meta, out: &mut HashSet<&'static str>) {
+    let mut stack: Vec<&'static Meta> = vec![meta];
+    while let Some(m) = stack.pop() {
+        for field in m.fields {
+            match &field.kind {
+                FieldKind::Leaf { env: Some(key), .. } => {
+                    out.insert(key);
+                }
+                FieldKind::Leaf { env: None, .. } => {}
+                FieldKind::Nested { meta } => stack.push(meta),
+            }
+        }
+    }
+}
+
+/// Assemble a [`KnownKeys`] from a slice of migrated `*Layer` metas
+/// (one `&Meta` per `#[derive(Config)]` cap layer) plus a slice of
+/// hand-registered [`KnobRecord`]s (b2's scheduler knobs). Walks each
+/// `Meta` for `Leaf { env: Some(k) }` (recursing `Nested`) and folds
+/// in each record's `env_key`.
+#[must_use]
+pub fn known_keys(metas: &[&'static Meta], records: &[KnobRecord]) -> KnownKeys {
+    let mut keys = HashSet::new();
+    for meta in metas {
+        collect_meta_env_keys(meta, &mut keys);
+    }
+    for record in records {
+        keys.insert(record.env_key);
+    }
+    KnownKeys { keys }
+}
+
+/// A boot-time config fault (ADR-0090 §4). Distinct from
+/// [`BootError`] so the chassis env resolvers can surface a
+/// config-specific error before the generic boot path; it
+/// `From`-converts into `BootError::Other`.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// A known env key (claimed by a `#[derive(Config)]` field or a
+    /// hand-registered knob) carried a value the parser rejected.
+    /// The soft warn-and-default fall-through is gone (ADR-0090 §4):
+    /// a garbage known value aborts boot loudly. `source` carries the
+    /// underlying parse error (a `confique::Error` or a cap-specific
+    /// `ParseIntError`).
+    UnparseableKnown {
+        /// The env key (or the layer field, when confique didn't
+        /// surface a key) whose value failed to parse.
+        key: String,
+        /// The offending raw value, when the resolver had it in hand.
+        /// confique's own error already embeds the value in its
+        /// `Display`, so this is `None` on the confique path.
+        value: Option<String>,
+        /// The underlying parse error.
+        source: Box<dyn StdError + Send + Sync + 'static>,
+    },
+}
+
+impl ConfigError {
+    /// Wrap a `confique::Error` (always an env-parse failure on the
+    /// load path — defaults are validated by the cap `*_defaults_match`
+    /// tests). The confique error's `Display` already names the field,
+    /// key, and value.
+    #[must_use]
+    pub fn from_confique(err: confique::Error) -> Self {
+        Self::UnparseableKnown {
+            key: String::new(),
+            value: None,
+            source: Box::new(err),
+        }
+    }
+
+    /// Build an `UnparseableKnown` from a hand-resolved env read (the
+    /// handle-store `AETHER_HANDLE_STORE_MAX_BYTES` path, which parses
+    /// outside confique).
+    #[must_use]
+    pub fn unparseable(
+        key: impl Into<String>,
+        value: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::UnparseableKnown {
+            key: key.into(),
+            value: Some(value.into()),
+            source: Box::new(source),
+        }
+    }
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnparseableKnown { key, value, source } => {
+                if key.is_empty() {
+                    write!(f, "unparseable config value: {source}")
+                } else if let Some(value) = value {
+                    write!(
+                        f,
+                        "unparseable value {value:?} for known config key {key:?}: {source}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "unparseable value for known config key {key:?}: {source}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+impl StdError for ConfigError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::UnparseableKnown { source, .. } => Some(&**source),
+        }
+    }
+}
+
+impl From<ConfigError> for BootError {
+    fn from(e: ConfigError) -> Self {
+        Self::Other(Box::new(e))
+    }
+}
+
+/// Validate the process environment against the claimed key set
+/// (ADR-0090 §4). Warns (does not error) on any `AETHER_*` env var
+/// not in `known` — a typo or stray var is loud but non-fatal (§4
+/// rejects strict-reject: a stray CI var must not abort boot). The
+/// hard-error half rides the parse path
+/// ([`FromArgvThenEnv::try_from_argv_then_env`] /
+/// [`HandleStore::from_env`](crate::handle_store::HandleStore::from_env)),
+/// not this sweep. Run once per chassis boot after the env layers
+/// load.
+///
+/// Bare registered keys (e.g. `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`)
+/// that don't carry the `AETHER_` prefix are accepted silently when
+/// present in `known`; only `AETHER_*` keys are *swept* for unknowns,
+/// because the substrate doesn't own the whole bare-env namespace.
+///
+/// # Errors
+///
+/// Never returns `Err` today — the signature returns
+/// `Result<(), ConfigError>` so the hard-error half can join this
+/// pass without a call-site change if §4 evolves.
+pub fn validate_env(known: &KnownKeys) -> Result<(), ConfigError> {
+    for (key, _value) in env::vars() {
+        if key.starts_with("AETHER_") && !known.contains(key.as_str()) {
+            tracing::warn!(
+                target: "aether_substrate::config",
+                env = %key,
+                "unknown AETHER_ env var — not claimed by any registered config knob \
+                 (typo? stale export?); ignored",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use confique::Config as _;
+    use std::num::ParseIntError;
+
+    // Plain `#[derive(confique::Config)]` fixture (not the aether
+    // `Config` derive — that emits a clap `Overlay` whose `#[arg]`
+    // attrs need clap in scope, which `aether-substrate` doesn't
+    // carry). This gives a real `META` + `Layer` to walk; the strict
+    // `parse_env` reproduces the ADR-0090 §4 hard-error path.
+    #[derive(Clone, Debug, confique::Config)]
+    #[allow(dead_code)] // fields exercised via META / load, not read directly
+    struct FixtureConfig {
+        #[config(env = "AETHER_TEST_COUNT", parse_env = parse_count, default = 7)]
+        count: u32,
+        #[config(env = "AETHER_TEST_FLAG", default = false)]
+        enabled: bool,
+    }
+
+    fn parse_count(raw: &str) -> Result<u32, ParseIntError> {
+        raw.trim().parse()
+    }
+
+    /// A real `ParseIntError` for the `ConfigError` constructor tests
+    /// (clippy forbids `unwrap_err()` — a parse of a non-number is the
+    /// honest way to obtain one).
+    fn an_int_error() -> ParseIntError {
+        match "x".parse::<u32>() {
+            Ok(_) => unreachable!("\"x\" is not a u32"),
+            Err(e) => e,
+        }
+    }
+
+    const FIXTURE_KNOBS: &[KnobRecord] = &[KnobRecord {
+        env_key: "AETHER_FIXTURE_KNOB",
+        doc: "a hand-registered fixture knob",
+        default: Some("42"),
+        kind: KnobKind::HandRegistered,
+    }];
+
+    fn fixture_meta() -> &'static Meta {
+        &<FixtureConfig as confique::Config>::META
+    }
+
+    #[test]
+    fn known_keys_collects_meta_env_keys() {
+        let known = known_keys(&[fixture_meta()], &[]);
+        assert!(known.contains("AETHER_TEST_COUNT"));
+        assert!(known.contains("AETHER_TEST_FLAG"));
+        assert_eq!(known.len(), 2);
+    }
+
+    #[test]
+    fn known_keys_folds_in_hand_registered_records() {
+        let known = known_keys(&[fixture_meta()], FIXTURE_KNOBS);
+        assert!(known.contains("AETHER_FIXTURE_KNOB"));
+        assert!(known.contains("AETHER_TEST_COUNT"));
+        assert_eq!(known.len(), 3);
+    }
+
+    #[test]
+    fn known_keys_rejects_unclaimed() {
+        let known = known_keys(&[fixture_meta()], FIXTURE_KNOBS);
+        assert!(!known.contains("AETHER_TYPO"));
+    }
+
+    #[test]
+    fn validate_env_is_ok_with_empty_known_set() {
+        // No assertion on the warn output (it depends on ambient env);
+        // the contract is just "never errors on unknowns".
+        assert!(validate_env(&KnownKeys::default()).is_ok());
+    }
+
+    #[test]
+    fn config_error_display_names_key_and_value() {
+        let e = ConfigError::unparseable("AETHER_HANDLE_STORE_MAX_BYTES", "lots", an_int_error());
+        let msg = e.to_string();
+        assert!(msg.contains("AETHER_HANDLE_STORE_MAX_BYTES"));
+        assert!(msg.contains("lots"));
+    }
+
+    #[test]
+    fn config_error_converts_into_boot_error() {
+        let e = ConfigError::unparseable("K", "v", an_int_error());
+        let boot: BootError = e.into();
+        assert!(matches!(boot, BootError::Other(_)));
+    }
+
+    #[test]
+    fn confique_load_errors_on_garbage_known_value() {
+        // The hard-error half (ADR-0090 §4): a garbage known env value
+        // makes confique `.load()` return `Err`, which
+        // `ConfigError::from_confique` wraps. Mirrors the path
+        // `FromArgvThenEnv::try_from_argv_then_env` takes.
+        //
+        // SAFETY: single-threaded test; we set the unique key, load,
+        // then remove it before any other thread could read it.
+        unsafe { env::set_var("AETHER_TEST_COUNT", "not-a-number") };
+        let loaded = FixtureConfig::builder().env().load();
+        // SAFETY: same single-threaded scope; restoring the env.
+        unsafe { env::remove_var("AETHER_TEST_COUNT") };
+        let result = loaded.map_err(ConfigError::from_confique);
+        assert!(matches!(result, Err(ConfigError::UnparseableKnown { .. })));
     }
 }

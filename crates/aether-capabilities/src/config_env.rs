@@ -3,12 +3,17 @@
 //! migration doesn't carry its own copy of the identical bool /
 //! `> 0`-filtered concurrency parsers (Qodana `DuplicatedCode`).
 //!
-//! Every helper is total — `Result<T, Infallible>` because confique's
-//! `parse_env` contract mandates the wrapper, even when the parse
-//! cannot fail. The strict (erroring) variants land with the
-//! ADR-0090 §4 validation pass (e1).
+//! Two parser families live here. [`parse_flag`] is total —
+//! `Result<bool, Infallible>` — because a bool reader can't fail (any
+//! non-truthy string is `false`). The **strict** (erroring) numeric
+//! variants are the ADR-0090 §4 hard-error half (unit e1): a malformed
+//! *known* env value returns `Err`, which confique surfaces from
+//! `.load()` and the chassis env resolver converts into a
+//! `ConfigError`. An empty value is treated as unset (falls back to
+//! the default) — only a non-empty unparseable value aborts boot.
 
 use std::convert::Infallible;
+use std::num::ParseIntError;
 
 /// Default per-cap concurrency bound shared by the content-gen
 /// providers (`aether.gemini`, `aether.anthropic`) when their
@@ -24,35 +29,51 @@ pub fn parse_flag(s: &str) -> Result<bool, Infallible> {
     Ok(s == "1" || s.eq_ignore_ascii_case("true"))
 }
 
-/// Provider concurrency bound: positive integer, otherwise fall back
-/// to [`DEFAULT_PROVIDER_MAX_IN_FLIGHT`]. The `> 0` filter rejects
-/// `AETHER_*_MAX_IN_FLIGHT=0` (which would otherwise deadlock the cap
-/// by allowing no in-flight requests). Soft-fall-back today;
-/// ADR-0090 §4's hard-error lands in e1.
-#[allow(clippy::unnecessary_wraps)]
-pub fn parse_provider_max_in_flight(s: &str) -> Result<usize, Infallible> {
-    Ok(s.parse::<usize>()
-        .ok()
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_PROVIDER_MAX_IN_FLIGHT))
+/// Strict ms parser (ADR-0090 §4 hard-error half): a non-empty value
+/// that doesn't parse as `u32` returns `Err`, which confique surfaces
+/// from `.load()` and the chassis env resolver converts into a
+/// `ConfigError`. An *empty* string is treated as unset and falls back
+/// to `DEFAULT_MILLIS` (an env var set to `""` is not a typo to abort on).
+///
+/// # Errors
+///
+/// Returns the underlying [`ParseIntError`] when a non-empty value is
+/// not a valid `u32`.
+pub fn parse_millis_strict<const DEFAULT_MILLIS: u32>(s: &str) -> Result<u32, ParseIntError> {
+    if s.trim().is_empty() {
+        return Ok(DEFAULT_MILLIS);
+    }
+    s.trim().parse()
 }
 
-/// Generic ms-soft-parse: positive `u32` from the env string, fall back
-/// to `DEFAULT_MS` (the per-cap default literal) on parse failure. Each
-/// caller instantiates with its own turbofish (e.g.
-/// `parse_env = parse_u32_ms_or::<DEFAULT_GEMINI_TIMEOUT_MS>`), so the
-/// expanded bodies are textually distinct — what Qodana's
-/// `DuplicatedCode` looks for. Soft-fall-back today; ADR-0090 §4's
-/// hard-error lands in e1.
-#[allow(clippy::unnecessary_wraps)]
-pub fn parse_u32_ms_or<const DEFAULT_MS: u32>(s: &str) -> Result<u32, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_MS))
+/// Strict provider concurrency bound (ADR-0090 §4 hard-error half).
+/// Empty → [`DEFAULT_PROVIDER_MAX_IN_FLIGHT`] (unset); a non-empty
+/// value that doesn't parse as `usize` errors; a parsed `0` clamps up
+/// to the default (a zero-concurrency provider deadlocks, so it is
+/// treated as "use the default", not a hard error — matching the soft
+/// variant's `> 0` filter).
+///
+/// # Errors
+///
+/// Returns the underlying [`ParseIntError`] when a non-empty value is
+/// not a valid `usize`.
+pub fn parse_provider_max_in_flight_strict(s: &str) -> Result<usize, ParseIntError> {
+    if s.trim().is_empty() {
+        return Ok(DEFAULT_PROVIDER_MAX_IN_FLIGHT);
+    }
+    let n: usize = s.trim().parse()?;
+    Ok(if n > 0 {
+        n
+    } else {
+        DEFAULT_PROVIDER_MAX_IN_FLIGHT
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_PROVIDER_MAX_IN_FLIGHT, parse_flag, parse_provider_max_in_flight, parse_u32_ms_or,
+        DEFAULT_PROVIDER_MAX_IN_FLIGHT, parse_flag, parse_millis_strict,
+        parse_provider_max_in_flight_strict,
     };
 
     #[test]
@@ -66,29 +87,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_provider_max_in_flight_filters_non_positive_and_unparseable() {
-        assert_eq!(parse_provider_max_in_flight("4").unwrap(), 4);
+    fn parse_provider_max_in_flight_strict_errors_on_garbage() {
+        // ADR-0090 §4: a parseable value passes; `0` clamps to the
+        // default (zero-concurrency deadlocks); empty is unset; a
+        // non-empty non-number errors rather than silently defaulting.
+        assert_eq!(parse_provider_max_in_flight_strict("4"), Ok(4));
         assert_eq!(
-            parse_provider_max_in_flight("0").unwrap(),
-            DEFAULT_PROVIDER_MAX_IN_FLIGHT
+            parse_provider_max_in_flight_strict("0"),
+            Ok(DEFAULT_PROVIDER_MAX_IN_FLIGHT)
         );
         assert_eq!(
-            parse_provider_max_in_flight("garbage").unwrap(),
-            DEFAULT_PROVIDER_MAX_IN_FLIGHT
+            parse_provider_max_in_flight_strict(""),
+            Ok(DEFAULT_PROVIDER_MAX_IN_FLIGHT)
         );
-        assert_eq!(
-            parse_provider_max_in_flight("").unwrap(),
-            DEFAULT_PROVIDER_MAX_IN_FLIGHT
-        );
+        assert!(parse_provider_max_in_flight_strict("garbage").is_err());
     }
 
     #[test]
-    fn parse_u32_ms_or_soft_falls_back_to_const_generic() {
-        assert_eq!(parse_u32_ms_or::<30_000>("5000").unwrap(), 5000);
-        assert_eq!(parse_u32_ms_or::<30_000>("garbage").unwrap(), 30_000);
-        assert_eq!(parse_u32_ms_or::<30_000>("").unwrap(), 30_000);
-        // Different turbofish → different defaults — what makes the
-        // per-cap call sites textually distinct under DuplicatedCode.
-        assert_eq!(parse_u32_ms_or::<120_000>("garbage").unwrap(), 120_000);
+    fn parse_millis_strict_errors_on_garbage() {
+        assert_eq!(parse_millis_strict::<30_000>("5000"), Ok(5000));
+        assert_eq!(parse_millis_strict::<30_000>(""), Ok(30_000));
+        assert!(parse_millis_strict::<30_000>("garbage").is_err());
+        // Different turbofish → different defaults (the unset path),
+        // keeping the per-cap call sites textually distinct.
+        assert_eq!(parse_millis_strict::<120_000>(""), Ok(120_000));
     }
 }

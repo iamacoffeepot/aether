@@ -11,7 +11,7 @@ use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
     let cli = HeadlessCli::parse();
-    let env = HeadlessEnv::from_env_with_argv(cli);
+    let env = HeadlessEnv::from_env_with_argv(cli)?;
     let chassis = HeadlessChassis::build(env)?;
     tracing::info!(
         target: "aether_substrate::boot",

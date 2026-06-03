@@ -521,20 +521,38 @@ fn emit_inherent_impl(domain_ident: &Ident, layer_ident: &Ident) -> TokenStream2
             ///
             /// # Panics
             ///
-            /// Panics only if the layer's literal defaults are themselves
-            /// malformed — a programmer error caught by the cap's
-            /// `*_defaults_match` test, never a runtime config fault
-            /// (env values flow through total parsers).
+            /// Panics if a known env value fails its parser (ADR-0090
+            /// §4's hard-error half — a garbage known key aborts boot).
+            /// Use [`Self::try_from_env`] to surface that as a
+            /// [`ConfigError`](::aether_substrate::config::ConfigError)
+            /// instead of panicking.
             #[must_use]
             pub fn from_env() -> Self {
+                match Self::try_from_env() {
+                    Ok(this) => this,
+                    Err(e) => panic!("{} config resolution failed: {e}", stringify!(#domain_ident)),
+                }
+            }
+
+            /// Fallible sibling of [`Self::from_env`]: surfaces an
+            /// unparseable known env value as a
+            /// [`ConfigError`](::aether_substrate::config::ConfigError)
+            /// (ADR-0090 §4 — the e1 hard-error half) rather than
+            /// panicking.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`ConfigError::UnparseableKnown`](::aether_substrate::config::ConfigError::UnparseableKnown)
+            /// when a known env key fails the layer's parser.
+            pub fn try_from_env() -> ::core::result::Result<Self, ::aether_substrate::config::ConfigError> {
                 use ::aether_substrate::FromArgvThenEnv as _;
                 use ::confique::Config as _;
 
                 let layer = #layer_ident::builder()
                     .env()
                     .load()
-                    .expect(concat!(stringify!(#layer_ident), " defaults are well-formed"));
-                <Self as ::aether_substrate::FromArgvThenEnv>::from_layer(layer)
+                    .map_err(::aether_substrate::config::ConfigError::from_confique)?;
+                ::core::result::Result::Ok(<Self as ::aether_substrate::FromArgvThenEnv>::from_layer(layer))
             }
 
             /// Resolve with an argv-derived partial layer shadowing
@@ -549,6 +567,19 @@ fn emit_inherent_impl(domain_ident: &Ident, layer_ident: &Ident) -> TokenStream2
                 argv: <#layer_ident as ::confique::Config>::Layer,
             ) -> Self {
                 <Self as ::aether_substrate::FromArgvThenEnv>::from_argv_then_env(argv)
+            }
+
+            /// Fallible argv-then-env resolution (ADR-0090 §4).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`ConfigError::UnparseableKnown`](::aether_substrate::config::ConfigError::UnparseableKnown)
+            /// when a known env key (or argv overlay value) fails the
+            /// layer's parser.
+            pub fn try_from_argv_then_env(
+                argv: <#layer_ident as ::confique::Config>::Layer,
+            ) -> ::core::result::Result<Self, ::aether_substrate::config::ConfigError> {
+                <Self as ::aether_substrate::FromArgvThenEnv>::try_from_argv_then_env(argv)
             }
         }
     }

@@ -11,6 +11,8 @@
 //! the loop so a queued `CaptureQueue` request gets pulled on the
 //! next redraw, even when the window is occluded.
 
+use std::error::Error as StdError;
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -28,16 +30,62 @@ use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, maybe_with_rpc_server, tick_only_lifecycle_config,
-    with_common_caps,
+    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server,
+    tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
+use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::handle_store::PersistConfig;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::env;
 use winit::event_loop::ControlFlow;
+
+/// Desktop chassis env-resolution failure (ADR-0090 §4 / issue #571).
+/// Widens the historic `EventLoopError`-only return so the desktop
+/// resolver can surface both the winit event-loop fault *and* a config
+/// fault (an unparseable known `AETHER_*` env value). Both arms
+/// `From`-convert in, and the whole enum `From`-converts into
+/// `anyhow::Error` via its `StdError` impl so `main()` keeps using `?`.
+#[derive(Debug)]
+pub enum DesktopBootError {
+    /// winit `EventLoop::build` failed.
+    EventLoop(EventLoopError),
+    /// A known `AETHER_*` env var (or argv overlay value) was
+    /// unparseable (ADR-0090 §4 hard-error half).
+    Config(ConfigError),
+}
+
+impl fmt::Display for DesktopBootError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EventLoop(e) => write!(f, "desktop event loop build failed: {e}"),
+            Self::Config(e) => write!(f, "desktop config resolution failed: {e}"),
+        }
+    }
+}
+
+impl StdError for DesktopBootError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::EventLoop(e) => Some(e),
+            Self::Config(e) => Some(e),
+        }
+    }
+}
+
+impl From<EventLoopError> for DesktopBootError {
+    fn from(e: EventLoopError) -> Self {
+        Self::EventLoop(e)
+    }
+}
+
+impl From<ConfigError> for DesktopBootError {
+    fn from(e: ConfigError) -> Self {
+        Self::Config(e)
+    }
+}
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Just one variant today: a wake-up so the loop picks up a queued
@@ -115,10 +163,17 @@ impl DesktopEnv {
     /// issue 464). Tests bypass this by constructing `DesktopEnv`
     /// directly.
     ///
-    /// The only fallible step is `EventLoop::build`; everything else
-    /// is infallible env reads. The signature names that fault rather
-    /// than the historic catch-all `wasmtime::Result` (issue #571).
-    pub fn from_env() -> Result<Self, EventLoopError> {
+    /// The fallible steps are `EventLoop::build` (winit) and the
+    /// ADR-0090 §4 config validation / parse path; both ride
+    /// [`DesktopBootError`] (issue #571 named the winit fault; e1
+    /// widens it to carry the config fault too).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DesktopBootError::EventLoop`] when winit's event loop
+    /// fails to build, or [`DesktopBootError::Config`] when a known
+    /// `AETHER_*` env var holds an unparseable value.
+    pub fn from_env() -> Result<Self, DesktopBootError> {
         Self::from_env_with_argv(DesktopCli::default())
     }
 
@@ -127,7 +182,13 @@ impl DesktopEnv {
     /// unset fields fall through to env-only resolution, so an empty
     /// argv (the path the existing `from_env` callers exercise) is
     /// byte-identical to the pre-d behaviour.
-    pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, EventLoopError> {
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::from_env`].
+    pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, DesktopBootError> {
+        // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var.
+        validate_env(&chassis_known_keys())?;
         let DesktopCli {
             common,
             audio: audio_overlay,
@@ -148,11 +209,11 @@ impl DesktopEnv {
         event_loop.set_control_flow(ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
 
-        let http = HttpConf::from_argv_then_env(http.into_layer());
-        let anthropic = AnthropicConfig::from_argv_then_env(anthropic.into_layer());
-        let gemini = GeminiConfig::from_argv_then_env(gemini.into_layer());
+        let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
+        let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
+        let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
-        let audio = AudioConf::from_argv_then_env(audio_overlay.into_layer());
+        let audio = AudioConf::try_from_argv_then_env(audio_overlay.into_layer())?;
 
         // Window mode: argv wins over `AETHER_WINDOW_MODE` env. The
         // parser is shared (`parse_window_mode_env`); a bad argv string

@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config::ConfigError;
 use crate::mail::Mail;
 use crate::mail::registry::Registry;
 use aether_data::{EnumVariant, Primitive, SchemaType};
@@ -697,30 +698,30 @@ impl HandleStore {
     }
 
     /// Build a store sized from `AETHER_HANDLE_STORE_MAX_BYTES` if
-    /// set, otherwise `DEFAULT_MAX_BYTES`. Unparseable values fall
-    /// back to the default with a warn log so a typo doesn't silently
-    /// shrink the cache to zero.
-    pub fn from_env() -> Self {
-        // Nested match keeps the warn-log path readable.
-        #[allow(clippy::option_if_let_else)]
+    /// set, otherwise `DEFAULT_MAX_BYTES`.
+    ///
+    /// ADR-0090 §4 (unit e1): an *unparseable* value is now a hard
+    /// [`ConfigError`] rather than a soft warn-and-default — the
+    /// soft→hard flip unit b1 deferred. An empty value is treated as
+    /// unset (falls back to the default). The chassis env resolver
+    /// `?`-propagates the error so a garbage budget aborts boot
+    /// loudly rather than silently shrinking the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnparseableKnown`] when
+    /// `AETHER_HANDLE_STORE_MAX_BYTES` is set to a non-empty value
+    /// that doesn't parse as `usize`.
+    pub fn from_env() -> Result<Self, ConfigError> {
         let max_bytes = match env::var(ENV_MAX_BYTES) {
-            Ok(raw) => match raw.parse::<usize>() {
+            Ok(raw) if raw.trim().is_empty() => DEFAULT_MAX_BYTES,
+            Ok(raw) => match raw.trim().parse::<usize>() {
                 Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::handle_store",
-                        env = ENV_MAX_BYTES,
-                        value = %raw,
-                        error = %e,
-                        default = DEFAULT_MAX_BYTES,
-                        "ignoring unparseable env var; falling back to default",
-                    );
-                    DEFAULT_MAX_BYTES
-                }
+                Err(e) => return Err(ConfigError::unparseable(ENV_MAX_BYTES, raw, e)),
             },
             Err(_) => DEFAULT_MAX_BYTES,
         };
-        Self::new(max_bytes)
+        Ok(Self::new(max_bytes))
     }
 
     /// Build a store sized from the environment with on-disk
@@ -730,13 +731,22 @@ impl HandleStore {
     /// drives the schema-evolution check (ADR-0049 §6). When persistence
     /// resolves to `Some`, the boot scan (issue #985) populates the disk
     /// index from the existing tree, dropping schema-stale entries.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnparseableKnown`] when
+    /// `AETHER_HANDLE_STORE_MAX_BYTES` is set to garbage (ADR-0090
+    /// §4 — via [`Self::from_env`]).
     pub fn from_env_persistent(
         enabled: bool,
         kind_resolver: Option<Arc<dyn KindResolver>>,
-    ) -> Self {
-        let max_bytes = Self::from_env().max_bytes;
-        Self::with_persist_validated(max_bytes, PersistConfig::from_env(enabled), kind_resolver)
+    ) -> Result<Self, ConfigError> {
+        let max_bytes = Self::from_env()?.max_bytes;
+        Ok(Self::with_persist_validated(
+            max_bytes,
+            PersistConfig::from_env(enabled),
+            kind_resolver,
+        ))
     }
 
     /// Mint a fresh ephemeral handle id. Pure counter today; content-

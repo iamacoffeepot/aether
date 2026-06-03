@@ -31,11 +31,12 @@ use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, maybe_with_rpc_server, tick_only_lifecycle_config,
-    with_common_caps,
+    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server,
+    tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
+use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -95,8 +96,13 @@ impl HeadlessEnv {
     /// The single env-reading edge for the headless chassis (per
     /// issue 464). Tests bypass this by constructing `HeadlessEnv`
     /// directly.
-    #[must_use]
-    pub fn from_env() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a known `AETHER_*` env var holds
+    /// an unparseable value (ADR-0090 §4); an unknown `AETHER_*` var
+    /// only warns (non-fatal).
+    pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_argv(HeadlessCli::default())
     }
 
@@ -105,9 +111,16 @@ impl HeadlessEnv {
     /// unset fields fall through to env-only resolution, so an empty
     /// argv (the path the integration tests and existing `from_env`
     /// callers exercise) is byte-identical to the pre-d behaviour.
-    #[must_use]
-    pub fn from_env_with_argv(cli: HeadlessCli) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a known `AETHER_*` env var (or an
+    /// argv overlay value) holds an unparseable value (ADR-0090 §4).
+    pub fn from_env_with_argv(cli: HeadlessCli) -> Result<Self, ConfigError> {
         use std::net::{IpAddr, Ipv4Addr};
+        // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var before
+        // resolving — a typo / stale export is loud but non-fatal.
+        validate_env(&chassis_known_keys())?;
         let HeadlessCli {
             common,
             tick_hz: cli_tick_hz,
@@ -121,9 +134,9 @@ impl HeadlessEnv {
             workers: cli_workers,
             rpc_port: cli_rpc_port,
         } = common;
-        let http = HttpConf::from_argv_then_env(http.into_layer());
-        let anthropic = AnthropicConfig::from_argv_then_env(anthropic.into_layer());
-        let gemini = GeminiConfig::from_argv_then_env(gemini.into_layer());
+        let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
+        let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
+        let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
         // Persistence overlay: the cap accepts the full argv-then-env
         // overlay shape (dir + persist_disable + numeric layer). The
@@ -156,7 +169,7 @@ impl HeadlessEnv {
             .or_else(hub::rpc_port_from_env)
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = cli_workers.or_else(parse_workers_env);
-        Self {
+        Ok(Self {
             namespace_roots,
             http,
             anthropic,
@@ -166,7 +179,7 @@ impl HeadlessEnv {
             workers,
             persist: persist_state,
             handle_store_max_bytes,
-        }
+        })
     }
 }
 
