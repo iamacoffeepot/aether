@@ -10,6 +10,7 @@
 # Foundations
 
 - [The type system](foundations/type-system.md)
+- [The actor model](foundations/actor-model.md)
 - [Invariants & guarantees](foundations/invariants.md)
 
 # The systems
@@ -17,7 +18,7 @@
 - [Subsystem map](systems.md)
   - [Mail, kinds & scheduling](systems/mail-and-kinds.md)
   - [Concurrency & blocking](systems/concurrency.md)
-  - [Components & lifecycle]()
+  - [Components & lifecycle](systems/components.md)
   - [Rendering & camera]()
   - [Mesh authoring & the DSL]()
   - [Input, file I/O & audio]()
