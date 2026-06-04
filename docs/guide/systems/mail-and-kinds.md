@@ -74,10 +74,14 @@ Keep it a single actor when the multiplicity is just internal state — the
 camera component drives many cameras from one actor, no per-camera mailbox
 needed.
 
-One caveat, still settling: each actor currently gets its own OS thread
-(ADR-0038) — comfortable for the 10s–100s of actors a game wants, but pushing
-against ceilings at hub-server scale (1000s+). A future scheduler ADR may
-revise the threading without changing the model.
+Fine granularity is cheap because actors **don't each own a thread** — they're
+multiplexed onto a shared work-stealing scheduler (ADR-0087), and the run-token
+that lets only one worker run a given actor at a time is what gives you the
+single-threaded-per-actor property. So thousands of instanced actors cost mail
+and state, not threads. The rare exception is blocking I/O: an actor that must
+make a blocking call may spawn a dedicated thread for *that* (a listener's
+accept loop, a blocking provider call), but that's specific to blocking I/O,
+not how actors run in general — see the no-blocking note under *Scheduling*.
 
 ## What it does
 
