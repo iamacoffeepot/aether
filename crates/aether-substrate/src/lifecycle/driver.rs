@@ -352,9 +352,25 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
             // of wedging forever, then fall through to process *this*
             // advance against the now-advanced state.
             if !self.pending_timed_out() {
+                // Name what's still in flight so a slow settlement is
+                // diagnosable from the drop warn alone: the stuck root
+                // (tagged), how long it's been pending, which broadcast
+                // stage hasn't settled, and the first-level fan-out it
+                // dispatched to (iamacoffeepot/aether#1052). The
+                // descendant mail *currently* executing lives in the
+                // trace observer's graph, not here — cross-reference it
+                // by `pending_root`.
+                let pending = self
+                    .pending
+                    .as_ref()
+                    .expect("pending.is_some() checked above");
                 tracing::warn!(
                     target: "aether_substrate::lifecycle",
                     current = ?self.current_state,
+                    pending_root = ?pending.root,
+                    pending_for_millis = pending.started.elapsed().as_millis(),
+                    stuck_stage = %pending.completed_kind,
+                    fanout = ?self.subscribers.get(&pending.completed_kind),
                     "LifecycleAdvance received while a prior advance is still in flight; dropping"
                 );
                 return;

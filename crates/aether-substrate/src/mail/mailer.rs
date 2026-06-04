@@ -589,7 +589,7 @@ fn route_mail(
                     target: "aether_substrate::handle_store",
                     handle = %handle,
                     kind = %kind,
-                    recipient = ?mail.recipient,
+                    recipient = %mail.recipient,
                     "parking mail on missing handle",
                 );
                 // A parked mail sits in the store until the handle
@@ -605,7 +605,7 @@ fn route_mail(
                     target: "aether_substrate::handle_store",
                     kind = %mail.kind,
                     error = ?e,
-                    recipient = ?mail.recipient,
+                    recipient = %mail.recipient,
                     "ref-walk failed against registered schema; mail dropped",
                 );
                 // ADR-0080 §2: balance the `Sent` so settlement chains

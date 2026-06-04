@@ -145,7 +145,7 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
 /// bits in the high nibble. `#[repr(transparent)]` over `u64` so
 /// cast-shape kinds keep their layouts.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct MailboxId(pub u64);
 
 impl MailboxId {
@@ -199,6 +199,16 @@ impl fmt::Display for MailboxId {
     }
 }
 
+// Manual `Debug` (not derived) so `?id` in tracing and assert-failure
+// messages renders the tagged `mbx-…` form instead of the opaque numeric
+// hash — same body as `Display`, since the tag prefix already names the
+// id type so a `MailboxId(…)` wrapper would be redundant (iamacoffeepot/aether#1052).
+impl fmt::Debug for MailboxId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
 impl Serialize for MailboxId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         serialize_id(self.0, s)
@@ -215,7 +225,7 @@ impl<'de> Deserialize<'de> for MailboxId {
 /// `Tag::Kind` discriminator + a 60-bit FNV-1a hash of the kind's
 /// canonical schema bytes. `#[repr(transparent)]` over `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct KindId(pub u64);
 
 impl KindId {
@@ -224,6 +234,13 @@ impl KindId {
 }
 
 impl fmt::Display for KindId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+// Tagged `Debug` — see the note on `MailboxId`'s impl.
+impl fmt::Debug for KindId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
@@ -246,7 +263,7 @@ impl<'de> Deserialize<'de> for KindId {
 /// counter masked into the low bits. `#[repr(transparent)]` over
 /// `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct HandleId(pub u64);
 
 impl HandleId {
@@ -255,6 +272,13 @@ impl HandleId {
 }
 
 impl fmt::Display for HandleId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+// Tagged `Debug` — see the note on `MailboxId`'s impl.
+impl fmt::Debug for HandleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
@@ -278,7 +302,7 @@ impl<'de> Deserialize<'de> for HandleId {
 /// session salt, analogous to [`HandleId`] rather than a name hash.
 /// `#[repr(transparent)]` over `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct DagId(pub u64);
 
 impl DagId {
@@ -287,6 +311,13 @@ impl DagId {
 }
 
 impl fmt::Display for DagId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+// Tagged `Debug` — see the note on `MailboxId`'s impl.
+impl fmt::Debug for DagId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
@@ -313,7 +344,7 @@ impl<'de> Deserialize<'de> for DagId {
 /// shape so the descriptor's `Transform` node encodes/decodes.
 /// `#[repr(transparent)]` over `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct TransformId(pub u64);
 
 impl TransformId {
@@ -322,6 +353,13 @@ impl TransformId {
 }
 
 impl fmt::Display for TransformId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+// Tagged `Debug` — see the note on `MailboxId`'s impl.
+impl fmt::Debug for TransformId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
@@ -347,7 +385,7 @@ impl<'de> Deserialize<'de> for TransformId {
 /// per hop; the cold render path reverses it to a display name through
 /// the runtime registry. `#[repr(transparent)]` over `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct ThreadId(pub u64);
 
 impl ThreadId {
@@ -365,6 +403,13 @@ impl ThreadId {
 }
 
 impl fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_tagged(self.0, f)
+    }
+}
+
+// Tagged `Debug` — see the note on `MailboxId`'s impl.
+impl fmt::Debug for ThreadId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
