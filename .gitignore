@@ -2,6 +2,9 @@
 # Spike crates under spikes/ are standalone Cargo workspaces with
 # their own target dirs (per ADR-0003 §Consequences).
 spikes/*/target/
+# mdBook render output for the guide (docs/book.toml). CI rebuilds it
+# fresh and publishes to Pages; the built site is never committed.
+/docs/book/
 # Research projects under research/ are independent nested git repos
 # (own .git, own remote, possibly private). Unlike spikes/ they are
 # never tracked here — their content, including any locally decoded
