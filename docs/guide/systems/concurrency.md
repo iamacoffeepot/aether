@@ -18,9 +18,10 @@ blocking when a handler needs to wait.
 
 ## The model: cooperative scheduling
 
-Actors don't each own a thread. They're multiplexed onto a shared pool of worker
-threads, and **the unit the pool schedules is the actor, not the message**
-(ADR-0087).
+Actors don't each own a thread. There are far more actors than worker threads,
+and the pool multiplexes them on demand (ADR-0087) — no actor is pinned to a
+core. And the thing the pool actually hands around is not a message, nor "an
+actor," but a **blob**.
 
 Sends don't deliver eagerly. While a handler runs, each `send` is written into
 that actor's own **outbound mail ring** — a fixed-size, single-producer byte
@@ -36,8 +37,11 @@ in place, so a wide fan-out parallelizes across the pool rather than serializing
 on one worker. The pool is **work-stealing** — a worker with nothing to do steals
 from a busy sibling — so no actor or blob is pinned to a particular thread.
 
-What keeps an actor single-threaded through all of this is a **run-token**: a
-worker must claim the recipient actor's token (`Idle → Running`, a
+Notice what the pool does *not* do: it never assigns an actor to a worker. A
+blob fans out to many recipients, and "one worker, one actor at a time" is
+**emergent** — it falls out of a worker seizing a recipient-group and holding
+that actor's **run-token** while it dispatches, not from any actor-level
+scheduling. A worker must claim the recipient's token (`Idle → Running`, a
 compare-and-swap) before dispatching to it, and a `Running` actor is never
 claimed by a second worker — even a thief skips it. Because one worker owns a
 given recipient's group, **per-recipient FIFO falls out for free** (one worker
