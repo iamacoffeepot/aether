@@ -23,8 +23,8 @@ what lets the agent driving the engine introspect it — `describe_kinds`,
 
 ## Kinds — typed payloads
 
-A **kind** is a payload shape: a Rust type that derives `Kind` + `Schema` and
-declares a name.
+A **kind** is a named, sendable mail payload — a Rust type carrying a name, a
+stable id, and a wire encoding. You declare one with two derives and a name:
 
 ```rust
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
@@ -32,11 +32,24 @@ declares a name.
 struct NoteOn { instrument: u8, pitch: u8, velocity: f32 }
 ```
 
-The derive gives the type three compile-time constants:
+**Two derives, because they describe two different things.**
 
-- `const NAME: &'static str` — the declared name (`#[kind(name = …)]`).
-- `const ID: KindId` — a 64-bit hash of `name + schema` (ADR-0030).
-- `const SCHEMA: SchemaType` — a description of the type's bytes (ADR-0031).
+- **`Schema`** gives `const SCHEMA: SchemaType` — a description of the type's
+  byte *layout* (ADR-0031). It's compositional: every type that can sit inside a
+  payload implements it — the primitives, `String`, `Vec<T>`, `Option<T>`,
+  arrays, and your own structs — so a struct's schema is assembled from its
+  fields'. A type that only ever appears as a *field* of a kind derives `Schema`
+  alone.
+- **`Kind`** marks the type as a top-level, addressable payload: `const NAME`
+  (the declared name), `const ID: KindId`, and the encode/decode bodies. `Kind`
+  is *layered on* `Schema` — the id is `hash(name + canonical(SCHEMA))`, so the
+  derive reads the type's schema to compute it. A kind is always a schema; a
+  schema is not always a kind.
+
+So you write `#[derive(Kind, Schema)]` on a message you send, and
+`#[derive(Schema)]` alone on a helper struct that only appears as a field of one.
+That gives a kind three compile-time constants — `NAME` and `ID` from `Kind`,
+`SCHEMA` from `Schema`.
 
 Because `ID` and `SCHEMA` are `const`, there is no host round-trip to learn a
 kind's identity or shape — `Kind::ID` is a compile-time value. And because the
@@ -103,6 +116,38 @@ worth knowing beyond "it's a type tree":
   `MailboxId`, `KindId`, or `HandleId` as a first-class typed reference, not just
   a bare `u64` (ADR-0065). These encode as a tagged string on JSON and a varint
   on the wire.
+
+### What counts as the same kind
+
+The canonical schema is a *positional* encoding: each arm becomes a type tag plus
+its structural content — field and variant *names* are dropped, but field
+*order*, array *lengths*, enum *discriminants*, and the `repr_c` flag are all
+kept. Two kinds with the same declared name share a `KindId` exactly when those
+bytes match. The "which edits move the id" matrix above lists the basics; the
+cases that surprise people live at the schema-arm level. Holding the
+`#[kind(name = …)]` fixed:
+
+**Still the same kind** — the id doesn't move:
+
+- renaming a field but keeping its type — `{ x: u32 }` and `{ count: u32 }` are
+  identical;
+- renaming the Rust `struct`, or renaming an enum variant while keeping its
+  discriminant and payload shape.
+
+**A different kind, despite looking alike:**
+
+- **Reordering fields** — `{ a: u32, b: u8 }` ≠ `{ b: u8, a: u32 }`; positions
+  are structural.
+- **A same-size type swap** — `{ a: u32 }` ≠ `{ a: i32 }`, and `{ a: u64 }` ≠
+  `{ a: MailboxId }` even though both are eight wire bytes: a typed-id field is a
+  distinct `TypeId` arm, not a `Scalar`.
+- **Flipping `#[repr(C)]`** when it changes the cast/postcard choice — `repr_c`
+  is part of the canonical bytes, so the same fields under a different wire
+  format are a different kind.
+- **Wrapping a field** — `{ a: u32 }`, `{ a: Option<u32> }`, and `{ a: Ref<u32> }`
+  are three distinct kinds; likewise `[u32; 3]` ≠ `[u32; 4]` ≠ `Vec<u32>`.
+- **Changing an enum discriminant** — discriminants are encoded; variant names
+  are not.
 
 ## Mailboxes — typed addresses
 
