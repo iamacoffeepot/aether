@@ -45,10 +45,10 @@ There is no shared memory between components. Anything one component needs to kn
 > engine. Instanced actors are now a first-class category (ADR-0079), and the
 > blob dispatcher (ADR-0087) makes large volumes of mail across many small
 > actors cheap — so an actor per TCP session, per monster, or per document is an
-> expected pattern, not an anti-pattern. (One open caveat, not a granularity
-> limit: each actor currently gets its own OS thread, which pushes against
-> ceilings at hub-server scale — a future scheduler ADR may revise that.) The
-> text below is preserved as the decision as originally made.
+> expected pattern, not an anti-pattern. (They're cheap because actors are
+> multiplexed onto the shared work-stealing scheduler, ADR-0087 — not one OS
+> thread each, which is what ADR-0038 originally shipped.) The text below is
+> preserved as the decision as originally made.
 
 **Components are subsystem-sized, not entity-sized.** A physics component owns its entire physics world. A scene component owns its entire scene graph. An AI component owns its entire AI state. Inside a component, state is plain data and iteration is a tight loop in native (WASM) code.
 
