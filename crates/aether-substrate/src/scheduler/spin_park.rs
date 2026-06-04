@@ -368,6 +368,7 @@ impl Default for SpinPark {
     clippy::unwrap_used,
     reason = "test-setup unwraps: a failed recv/join is the assertion"
 )]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
     use crossbeam_channel::{Receiver, Sender, unbounded};

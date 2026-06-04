@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // integration test — spawns threads; no settlement contract
 //! Issue #986: disk eviction by created_at-LRU (ADR-0049 §5).
 //!
 //! When the on-disk byte ledger exceeds the budget, the eviction tick

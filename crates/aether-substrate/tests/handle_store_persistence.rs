@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // integration test — spawns threads; no settlement contract
 //! Issue #984: on-disk layout + atomic write path for the persistent
 //! handle store (ADR-0049 §2 + §3).
 //!

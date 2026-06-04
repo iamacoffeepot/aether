@@ -103,6 +103,9 @@ mod listener_native {
             let self_id = ctx.self_id();
             let connection_ready_kind = KindId(<ConnectionReady as Kind>::ID.0);
 
+            // Transport thread below the mail layer — it carries inbound mail in;
+            // no inbound chain to inherit, so no settlement umbrella to honor.
+            #[allow(clippy::disallowed_methods)]
             let thread = thread::Builder::new()
                 .name(format!("aether-tcp-accept-{port}"))
                 .spawn(move || {

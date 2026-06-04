@@ -100,6 +100,10 @@ impl ClaudeCliAdapter {
         // `claude` (and thus the deadline poll) while we own the `Child`
         // on this thread. stderr is small and drained after the wait.
         let stdout = child.stdout.take();
+        // Scoped stdout-drain sub-thread inside the blocking call (joined before
+        // return, just below) — the blocking call itself already runs on a
+        // task-system worker; this thread touches no mail and holds no chain.
+        #[allow(clippy::disallowed_methods)]
         let stdout_reader = thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut out) = stdout {

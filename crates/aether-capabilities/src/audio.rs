@@ -855,6 +855,9 @@ mod native {
         let (init_tx, init_rx) = mpsc::channel::<Result<AudioEventSender, AudioBuildError>>();
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
+        // cpal device-callback thread, owned by the audio backend — not actor work,
+        // no ctx, no inbound chain; the audio peripheral runs outside the mail layer.
+        #[allow(clippy::disallowed_methods)]
         let thread = thread::Builder::new()
             .name("aether-audio-cpal".into())
             .spawn(move || {

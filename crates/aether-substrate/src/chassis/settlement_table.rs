@@ -444,6 +444,7 @@ impl Default for SettlementTable {
     clippy::cast_sign_loss,
     reason = "test arithmetic: thread joins and small bounded loop counters"
 )]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
     use aether_data::MailboxId;

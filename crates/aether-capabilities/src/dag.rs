@@ -88,6 +88,10 @@ mod native {
             let reap_shutdown_for_thread = Arc::clone(&reap_shutdown);
             let reap_kind = KindId(<DagReapTick as Kind>::ID.0);
             let timer_mailer = Arc::clone(&mailer);
+            // Periodic reap timer spawned at init — no inbound chain to inherit and no
+            // ctx here. Its wake is currently a rootless Mail::new; routing that through a
+            // tracked chassis-root path is tracked by iamacoffeepot/aether#1335.
+            #[allow(clippy::disallowed_methods)]
             let spawned = thread::Builder::new()
                 .name("aether-dag-reaper".to_owned())
                 .spawn(move || {

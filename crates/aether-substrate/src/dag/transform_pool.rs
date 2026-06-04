@@ -97,6 +97,9 @@ impl TransformPool {
             let outcomes = Arc::clone(&outcomes);
             let invoke_count = Arc::clone(&invoke_count);
             let mailer = Arc::clone(mailer);
+            // DAG transform worker pool — execution floor below the actor model,
+            // built without a ctx; not per-handler chain work.
+            #[allow(clippy::disallowed_methods)]
             let spawned = thread::Builder::new()
                 .name(format!("aether-transform-{i}"))
                 .spawn(move || worker_loop(&rx, &outcomes, &invoke_count, &mailer));
