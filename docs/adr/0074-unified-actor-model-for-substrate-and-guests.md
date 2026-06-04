@@ -175,6 +175,20 @@ Capabilities communicate with each other the same way components communicate wit
 
 The frame-bound→free-running guard from decision 6 lives at the top of this function.
 
+**Amendment (2026-06-04): `wait_reply` retired; orchestration is not a handler concern.**
+
+The host-side `wait_reply` described above shipped (phase 4) but went unused and was retired in #1201. The unified model settled on a stricter stance, decided by attrition rather than fiat: **cap/actor handlers do not block on replies, and do not orchestrate.** A handler runs to completion as a single-threaded unit on the blob scheduler (ADR-0087); a blocking in-handler wait parks a scheduler worker and couples handler latency to peer latency.
+
+Request/reply between actors is still mail — the responder `ctx.reply()`s and the originator observes the reply asynchronously. What does *not* belong in a handler is fan-out-and-collect ("wait for N peers' replies"). That is orchestration, and it lives in one of three async homes:
+
+- the **chassis driver** — the free-running run loop plus settlement subscriptions (`SettlementRegistry::subscribe_settlement`, ADR-0080/0086);
+- the **DAG executor** — a typed transform graph (ADR-0047), for compute fan-out;
+- the **out-of-process MCP client** — e.g. `send_mail_traced`, an atomic batch under one trace root that returns the settled reply subtree.
+
+Settlement is the "tell me when this chain is done" mechanism, and it is consumed from the async layer, never from a handler. The frame-bound → free-running guard from decision 6 still applies to any remaining synchronous cross-class call.
+
+Background: issue #960 catalogued the frictions of building an in-handler fan-out aggregator (the per-actor log aggregator for ADR-0081) and posed the fork "ship `ctx.gather()` vs codify orchestration-lives-elsewhere." Retiring `wait_reply` answered it: elsewhere.
+
 ### 10. Scoping: runtime contact surface vs chassis-driver-internal
 
 "Everything is mail" applies to the **runtime contact surface** — the surface reachable by components, the hub, peer capabilities, and any other actor in the system. Through that surface, every actor is reached only via its mailbox.
