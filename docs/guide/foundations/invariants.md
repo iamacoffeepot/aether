@@ -28,11 +28,17 @@ It splits in two:
 
 ## What the engine guarantees you
 
-**Mail is the only channel between actors.** No actor holds a pointer into
-another; nothing is shared mutable across the boundary (ADR-0002). An actor's
-entire interaction with the rest of the engine is the mail it sends and the mail
-it receives. This is what makes hot-swap, sandboxing, and universal
-observability possible at all — see [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
+**Mail is the only channel between actors.** No actor holds a reference into
+another actor's memory — no shared mutable state crosses the boundary, so a
+peer's data can't be read or mutated directly (ADR-0002). An actor's entire
+interaction with the rest of the engine is the mail it sends and the mail it
+receives. The *enforcement* differs by actor kind: a loaded component can't even
+form such a reference (the sandbox gives it its own linear memory), while a
+native capability — Rust in the same process — upholds it as a discipline (peer
+references are bootstrap-only; handlers talk by mail, never by reaching into
+sibling state). Same contract, a wall in one case and a rule in the other. This
+is what makes hot-swap, sandboxing, and universal observability possible at all
+— see [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
 
 **A mailbox is an address; a kind is a payload shape; they route
 independently.** The mailbox decides *where* mail goes; the kind only describes
