@@ -419,19 +419,20 @@ mod free_dispatch_tests {
 
     fn build_envelope<K: Kind + serde::Serialize>(payload: &K, reply_to: ReplyTo) -> Envelope {
         let bytes = postcard::to_allocvec(payload).expect("postcard encode");
-        Envelope {
-            kind: KindId(<K as Kind>::ID.0),
-            kind_name: <K as Kind>::NAME.to_owned(),
-            origin: None,
-            sender: reply_to,
-            payload: MailRef::from(bytes),
-            count: 1,
-            mail_id: MailId::NONE,
-            root: MailId::NONE,
-            parent_mail: None,
-            t_enqueue: Nanos(0),
-            enqueue_depth: 0,
-        }
+        Envelope::disarmed(
+            KindId(<K as Kind>::ID.0),
+            <K as Kind>::NAME.to_owned(),
+            None,
+            reply_to,
+            MailRef::from(bytes),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            MailboxId(0),
+        )
     }
 
     /// The free-fn log-tail arm fires a `LogTailResult` reply to the

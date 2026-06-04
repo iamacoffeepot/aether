@@ -517,10 +517,16 @@ impl App {
         // `DispatcherSlot::run_cycle`'s ordering. Factored into a free
         // fn so the desktop-driver unit test exercises the routing
         // shape directly without standing up a winit `App`. The
-        // framework arms own their own settlement bracket, so we do NOT
-        // discharge here — the early return skips the
-        // `discharge_settlement` at the tail.
+        // matching `DispatcherSlot::run_cycle`'s ordering. The framework
+        // arms reply but (unlike `dispatch_one`, which records `Finished`
+        // unconditionally at its tail for every arm) do NOT record their
+        // own settlement bracket — so we discharge here on the
+        // early-return path too, mirroring `dispatch_one`'s unconditional
+        // tail. ADR-0094: `env.discharge()` disarms the obligation guard
+        // beside that settlement discharge.
         if try_framework_dispatch(&self.queue, self.window_mailbox, &env) {
+            discharge_settlement(&self.queue, mail_id, root);
+            env.discharge();
             return;
         }
         if env.kind == self.kind_set_window_mode {
@@ -534,6 +540,7 @@ impl App {
                         },
                     );
                     discharge_settlement(&self.queue, mail_id, root);
+                    env.discharge();
                     return;
                 }
             };
@@ -550,6 +557,7 @@ impl App {
                         },
                     );
                     discharge_settlement(&self.queue, mail_id, root);
+                    env.discharge();
                     return;
                 }
             };
@@ -577,6 +585,9 @@ impl App {
         // root would otherwise leak settlement the same way. Mirrors
         // `dispatch_one` (`dispatcher_slot.rs:289`).
         discharge_settlement(&self.queue, mail_id, root);
+        // ADR-0094: disarm the obligation guard beside the settlement
+        // discharge for the success + unrecognised-kind arms.
+        env.discharge();
     }
 
     fn publish_window_size(&self, width: u32, height: u32) {
@@ -1119,19 +1130,20 @@ mod tests {
         let bytes = postcard::to_allocvec(&request).expect("encode LogTail");
         let session = SessionToken::NIL;
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0x99);
-        let env = Envelope {
-            kind: KindId(<LogTail as Kind>::ID.0),
-            kind_name: <LogTail as Kind>::NAME.to_owned(),
-            origin: None,
-            sender: reply_to,
-            payload: MailRef::from(bytes),
-            count: 1,
-            mail_id: MailId::NONE,
-            root: MailId::NONE,
-            parent_mail: None,
-            t_enqueue: Nanos(0),
-            enqueue_depth: 0,
-        };
+        let env = Envelope::disarmed(
+            KindId(<LogTail as Kind>::ID.0),
+            <LogTail as Kind>::NAME.to_owned(),
+            None,
+            reply_to,
+            MailRef::from(bytes),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            MailboxId(0),
+        );
 
         let window_mailbox = mailbox_id_from_name("aether.window");
         let slots = ActorSlots::new();
@@ -1185,19 +1197,20 @@ mod tests {
             title: "ignored".to_owned(),
         })
         .expect("encode SetWindowTitle");
-        let env = Envelope {
-            kind: KindId(<SetWindowTitle as Kind>::ID.0),
-            kind_name: <SetWindowTitle as Kind>::NAME.to_owned(),
-            origin: None,
-            sender: ReplyTo::NONE,
-            payload: MailRef::from(payload),
-            count: 1,
-            mail_id: MailId::NONE,
-            root: MailId::NONE,
-            parent_mail: None,
-            t_enqueue: Nanos(0),
-            enqueue_depth: 0,
-        };
+        let env = Envelope::disarmed(
+            KindId(<SetWindowTitle as Kind>::ID.0),
+            <SetWindowTitle as Kind>::NAME.to_owned(),
+            None,
+            ReplyTo::NONE,
+            MailRef::from(payload),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            MailboxId(0),
+        );
 
         let window_mailbox = mailbox_id_from_name("aether.window");
         let slots = ActorSlots::new();

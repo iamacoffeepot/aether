@@ -121,19 +121,20 @@ fn enqueue<K: Kind + serde::Serialize>(
         panic!("expected inbox mailbox for {mailbox_name}");
     };
     let bytes = postcard::to_allocvec(payload).expect("encode request");
-    handler.enqueue(OwnedDispatch {
-        kind: K::ID,
-        kind_name: K::NAME.to_owned(),
-        origin: None,
+    handler.enqueue(OwnedDispatch::disarmed(
+        K::ID,
+        K::NAME.to_owned(),
+        None,
         sender,
-        payload: MailRef::from(bytes),
-        count: 1,
-        mail_id: MailId::NONE,
-        root: MailId::NONE,
-        parent_mail: None,
-        t_enqueue: Nanos(0),
-        enqueue_depth: 0,
-    });
+        MailRef::from(bytes),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
+        Nanos(0),
+        0,
+        MailboxId(0),
+    ));
 }
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding

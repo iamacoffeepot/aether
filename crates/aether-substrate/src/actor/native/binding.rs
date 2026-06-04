@@ -920,6 +920,12 @@ mod tests {
         // into the forwarded [`Envelope`] without `to_vec()` /
         // `to_owned()` clones.
         Arc::new(move |dispatch: OwnedDispatch| {
+            // ADR-0094: this test sink is the terminal consumer (there is
+            // no real downstream dispatcher to discharge), so discharge
+            // the obligation here before forwarding the value for the
+            // test to observe — otherwise the observing `drop(env)` would
+            // trip the debug guard.
+            dispatch.discharge();
             // `Envelope` is now a type alias for `OwnedDispatch`, so
             // the inbox-handler value moves straight onto the actor
             // mpsc with no field-by-field translation.

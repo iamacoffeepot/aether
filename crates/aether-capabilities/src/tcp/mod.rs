@@ -626,19 +626,20 @@ mod cap_native {
                 panic!("expected mailbox entry");
             };
             let bytes = postcard::to_allocvec(mail).expect("encode");
-            handler.enqueue(OwnedDispatch {
-                kind: K::ID,
-                kind_name: K::NAME.to_owned(),
-                origin: None,
-                sender: session_reply(),
-                payload: MailRef::from(bytes),
-                count: 1,
-                mail_id: MailId::NONE,
-                root: MailId::NONE,
-                parent_mail: None,
-                t_enqueue: Nanos(0),
-                enqueue_depth: 0,
-            });
+            handler.enqueue(OwnedDispatch::disarmed(
+                K::ID,
+                K::NAME.to_owned(),
+                None,
+                session_reply(),
+                MailRef::from(bytes),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                aether_data::MailboxId(0),
+            ));
 
             let deadline = Instant::now() + Duration::from_secs(2);
             let frame = loop {

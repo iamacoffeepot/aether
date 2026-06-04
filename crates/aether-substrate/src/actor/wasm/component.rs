@@ -251,12 +251,15 @@ impl ComponentCtx {
                 // flow straight into the downstream cap's mpsc
                 // envelope without a `to_vec()` clone.
                 let origin = self.registry.mailbox_name(self.sender);
-                handler.enqueue(OwnedDispatch {
+                // ADR-0094: the second of two production mint sites
+                // (ComponentCtx's inline send bypasses `route_mail`). Armed
+                // here; the recipient actor's dispatcher discharges it.
+                handler.enqueue(OwnedDispatch::armed(
                     kind,
                     kind_name,
                     origin,
-                    sender: reply_to,
-                    payload: MailRef::from(payload),
+                    reply_to,
+                    MailRef::from(payload),
                     count,
                     mail_id,
                     root,
@@ -266,9 +269,10 @@ impl ComponentCtx {
                     // bypasses `route_mail`), so stamp the deposit instant
                     // + scheduler backlog here too — else the recipient's
                     // `Received` would read a zeroed `t_enqueue`.
-                    t_enqueue: self.queue.now_nanos(),
-                    enqueue_depth: pending_depth(),
-                });
+                    self.queue.now_nanos(),
+                    pending_depth(),
+                    recipient,
+                ));
                 return;
             }
             Some(MailboxEntry::Inline(handler)) => {
@@ -771,6 +775,8 @@ mod tests {
             .try_register_inbox(
                 name,
                 Arc::new(move |dispatch: OwnedDispatch| {
+                    // ADR-0094: terminal test capture sink — discharge.
+                    dispatch.discharge();
                     captured_for_handler.lock().unwrap().push((
                         dispatch.mail_id,
                         dispatch.root,

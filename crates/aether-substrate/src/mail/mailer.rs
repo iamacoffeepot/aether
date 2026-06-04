@@ -648,25 +648,32 @@ fn route_mail(
             // their downstream envelope (via
             // `Envelope::from(OwnedDispatch)`) with zero payload
             // copies.
-            handler.enqueue(OwnedDispatch {
-                kind: mail.kind,
-                kind_name: lookup.kind_name,
-                origin: None,
-                sender: mail.reply_to,
-                payload: mail.payload,
-                count: mail.count,
-                mail_id: mail.mail_id,
-                root: mail.root,
-                parent_mail: mail.parent_mail,
+            // ADR-0094: the first of two production mint sites. The
+            // dispatch is armed here; the downstream actor dispatcher
+            // (`dispatcher_slot::dispatch_one`) discharges it beside its
+            // `record_finished`. The relay closure that forwards it onto
+            // the actor's mpsc (`spawn.rs` / `chassis/ctx.rs`) is a
+            // transfer — the obligation rides the moved value.
+            handler.enqueue(OwnedDispatch::armed(
+                mail.kind,
+                lookup.kind_name,
+                None,
+                mail.reply_to,
+                mail.payload,
+                mail.count,
+                mail.mail_id,
+                mail.root,
+                mail.parent_mail,
                 // iamacoffeepot/aether#1134: stamp the deposit instant +
                 // scheduler backlog here — the single Inbox chokepoint
                 // every mail-to-an-actor funnels through. Read back at the
                 // recipient's `Received` hook to split the hop into
                 // send→enqueue vs queue residence. One clock read on the
                 // already-traced path; depth is `0` off a pool worker.
-                t_enqueue: trace_handle.now_nanos(),
-                enqueue_depth: pending_depth(),
-            });
+                trace_handle.now_nanos(),
+                pending_depth(),
+                recipient,
+            ));
         }
         Some(MailboxEntry::Inline(handler)) => {
             // ADR-0080 §2: synchronous handler. Records `Finished`
@@ -1122,6 +1129,10 @@ mod tests {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(move |dispatch: OwnedDispatch| {
+                // ADR-0094: terminal test consumer — discharge the
+                // obligation (these tests don't subscribe to settlement;
+                // the obligation ends here) before the partial-move below.
+                dispatch.discharge();
                 captured.write().unwrap().push(dispatch.payload.into_vec());
                 count.fetch_add(1, Ordering::SeqCst);
             })

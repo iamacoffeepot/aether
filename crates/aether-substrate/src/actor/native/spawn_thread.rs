@@ -418,6 +418,9 @@ mod tests {
         let _ = registry.try_register_inbox(
             name.to_owned(),
             Arc::new(move |dispatch: OwnedDispatch| {
+                // ADR-0094: terminal test consumer — discharge the
+                // obligation it captures.
+                dispatch.discharge();
                 captured_for_handler.lock().unwrap().push(CapturedDispatch {
                     mail_id: dispatch.mail_id,
                     root: dispatch.root,

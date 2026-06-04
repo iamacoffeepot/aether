@@ -695,23 +695,29 @@ impl BlobWork {
         };
         match seized {
             Some(slot) => {
-                let seed = Envelope {
-                    kind: mail.kind,
-                    kind_name: lookup.kind_name,
-                    origin: None,
-                    sender: mail.reply_to,
-                    payload: mail.payload,
-                    count: mail.count,
-                    mail_id: mail.mail_id,
-                    root: mail.root,
-                    parent_mail: mail.parent_mail,
+                // ADR-0094: the #1135 in-place demux seed is an
+                // obligation-creation site equivalent to the `route_mail`
+                // Inbox arm (it bypasses `route_mail`), so it is armed
+                // here and discharged by the receiving dispatcher
+                // (`dispatch_one` / the finalized-slot seed path).
+                let seed = Envelope::armed(
+                    mail.kind,
+                    lookup.kind_name,
+                    None,
+                    mail.reply_to,
+                    mail.payload,
+                    mail.count,
+                    mail.mail_id,
+                    mail.root,
+                    mail.parent_mail,
                     // iamacoffeepot/aether#1150: the blob-pickup stamp, not
                     // a fresh `now` — `now` here ≈ `t_received` and collapsed
                     // residence to ~0. With the pickup instant, the recipient's
                     // `Received` reads a real `t_received − t_enqueue` drain.
-                    t_enqueue: received,
-                    enqueue_depth: 0,
-                };
+                    received,
+                    0,
+                    recipient,
+                );
                 match slot.seize_and_run(seed, budget) {
                     CycleResult::Requeue => self.sink.schedule(slot),
                     CycleResult::Idle | CycleResult::Closed => {}
@@ -956,6 +962,8 @@ mod tests {
         tx: mpsc::Sender<u8>,
     ) -> MailboxId {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: OwnedDispatch| {
+            // ADR-0094: terminal test consumer — discharge the obligation.
+            d.discharge();
             let _ = tx.send(d.payload.bytes()[0]);
         });
         registry.register_inbox(name, handler)
@@ -978,6 +986,12 @@ mod tests {
             CycleResult::Idle
         }
         fn seize_and_run(&self, seed: SeizeSeed, _budget: BatchBudget) -> CycleResult {
+            // ADR-0094: this mock stands in for the real
+            // `DispatcherSlot::seize_and_run` → `dispatch_one`, which
+            // discharges the seed's obligation. Mirror that here so the
+            // armed in-place demux seed (`blob_work::dispatch_one`) does
+            // not trip the debug guard on drop.
+            seed.discharge();
             let _ = self.direct.send(seed.payload.bytes()[0]);
             self.state.mark_idle();
             CycleResult::Idle
