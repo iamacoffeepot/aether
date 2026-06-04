@@ -38,7 +38,15 @@ them, and routes your mail to the right one by `engine_id`. A **substrate** is o
 running engine — a full chassis — and you can have several at once.
 
 Because the hub heartbeats every engine and evicts a dead or wedged one, an engine
-that shows up in `list_engines` is one you can actually reach. To restart the hub
+that shows up in `list_engines` is one you can actually reach. Each entry also
+carries a `last_heartbeat_age_millis`, and it's the first thing to check when an
+engine stops behaving: a healthy engine's age stays small, so a climbing value is
+the early sign it's gone slow or unresponsive — wedged but not yet past the miss
+limit the hub evicts on. If your mail to an engine isn't landing, read that age
+before anything else; it tells you whether the engine is struggling or the problem
+is on your side.
+
+To restart the hub
 after a rebuild *without* losing your session, hit the tunnel's admin endpoint
 (`POST /admin/restart-hub`); the tunnel re-forks the hub and aether-mcp re-dials
 it on your next call. Restarting aether-mcp itself does drop the session, so prefer
