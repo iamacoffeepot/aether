@@ -276,6 +276,10 @@ pub fn log_handoff_calibration() {
 /// round trip. The flags guard each `park` against a spurious return so
 /// the lockstep can't desync into a deadlock, and the sticky unpark token
 /// means an `unpark` that races ahead of its `park` is not lost.
+// Boot-time scheduler calibration probe — measures handoff cost before any actor
+// runs; no mail, no ctx, no settlement chain. (Spawn is a block-tail expression, so
+// the allow sits on the fn rather than the statement.)
+#[allow(clippy::disallowed_methods)]
 fn measure_handoff_cost_nanos() -> u64 {
     let rounds = WARMUP + TRIALS;
     // request: waker → worker hand-off signal; reply: worker → waker.
@@ -337,6 +341,7 @@ fn median_nanos(samples: &mut [u64]) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
 

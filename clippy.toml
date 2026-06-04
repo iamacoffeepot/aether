@@ -1,0 +1,13 @@
+# Raw OS-thread spawns bypass the trace + settlement umbrella (ADR-0080 §12):
+# the spawned work emits no HoldOpen/Release and any mail it pushes is rootless,
+# so it is invisible to settlement and the trace tree. Handler/capability code
+# must instead route through a sanctioned primitive:
+#   - NativeCtx::spawn_inherit / spawn_detached  (ADR-0080 §12) for chain-continuing async work
+#   - the ADR-0093 task system (dispatch_blocking / TaskQueue / #[handler(task)]) for per-handler blocking work
+# Every remaining raw spawn is infra below the actor/mail layer (transport sockets,
+# worker pools, device-callback threads, periodic timers, the primitive's own impl)
+# and must carry an explicit #[allow(clippy::disallowed_methods)] + a one-line reason.
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached or the ADR-0093 task system, or #[allow] with a reason for infra threads" },
+    { path = "std::thread::Builder::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached or the ADR-0093 task system, or #[allow] with a reason for infra threads" },
+]

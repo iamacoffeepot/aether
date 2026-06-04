@@ -180,6 +180,9 @@ impl RpcClient {
         let shutdown_for_thread = Arc::clone(&shutdown);
         let (inbound_tx, inbound_rx) = mpsc::channel::<WireFrame>();
 
+        // Transport thread below the mail layer — it carries inbound mail in;
+        // no inbound chain to inherit, so no settlement umbrella to honor.
+        #[allow(clippy::disallowed_methods)]
         let thread = thread::Builder::new()
             .name("aether-rpc-client-reader".into())
             .spawn(move || {
@@ -266,6 +269,7 @@ impl RpcClient {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::{RpcClient, RpcClientError};
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};

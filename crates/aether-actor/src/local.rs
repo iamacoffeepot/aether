@@ -385,6 +385,7 @@ pub trait Local: Default + 'static {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     extern crate std;
 

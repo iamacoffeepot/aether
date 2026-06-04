@@ -215,6 +215,7 @@ impl Lifecycle {
     clippy::needless_collect,
     reason = "test setup: unwraps signal failure; thread handles are collected so every worker is spawned before any join"
 )]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
     use std::collections::BTreeSet;

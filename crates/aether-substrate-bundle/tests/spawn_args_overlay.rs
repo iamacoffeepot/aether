@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // integration test — spawns helper binaries/threads; no settlement contract
 // ADR-0090 unit d (issue 1258) acceptance test: argv reaches the
 // headless chassis binary and shadows `AETHER_TICK_HZ`. Spawns
 // `aether-substrate-headless` three times with the bin's

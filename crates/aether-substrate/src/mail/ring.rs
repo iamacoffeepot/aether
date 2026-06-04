@@ -784,6 +784,7 @@ impl MailRing {
     clippy::needless_collect,
     reason = "test code: unwraps assert via panic; unsafe blocks exercise the ring API whose safety contracts are documented on the methods and upheld by construction here; casts are capacity-bounded; the consumer-handle collect forces every thread to spawn before any join"
 )]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use std::collections::BTreeSet;
 

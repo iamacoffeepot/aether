@@ -105,6 +105,9 @@ impl Connection {
         let dead = Arc::new(AtomicBool::new(false));
         let router_pending = Arc::clone(&pending);
         let router_dead = Arc::clone(&dead);
+        // Out-of-process aether-mcp router — not an engine actor; there is no
+        // settlement/trace umbrella in this process to opt out of.
+        #[allow(clippy::disallowed_methods)]
         let router = thread::Builder::new()
             .name("aether-mcp-rpc-router".into())
             .spawn(move || {
@@ -578,6 +581,7 @@ fn register_call(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::RpcSession;
     use aether_capabilities::rpc::{

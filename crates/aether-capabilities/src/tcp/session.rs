@@ -123,6 +123,9 @@ mod session_native {
             let data_ready_kind = KindId(<SessionDataReady as Kind>::ID.0);
 
             let thread_name = format!("aether-tcp-read-{}", config.session_name);
+            // Transport thread below the mail layer — it carries inbound mail in;
+            // no inbound chain to inherit, so no settlement umbrella to honor.
+            #[allow(clippy::disallowed_methods)]
             let thread = thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || {

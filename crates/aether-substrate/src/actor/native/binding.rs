@@ -903,6 +903,7 @@ impl NativeBinding {
     clippy::unwrap_used,
     reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
 )]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};

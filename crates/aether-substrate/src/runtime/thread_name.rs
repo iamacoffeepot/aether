@@ -236,6 +236,7 @@ pub fn current_thread_id() -> Option<ThreadId> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
 

@@ -211,6 +211,9 @@ mod server_native {
             let self_id = ctx.self_id();
             let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
 
+            // Transport thread below the mail layer — it accepts sockets that carry
+            // inbound mail in; no inbound chain to inherit, no settlement umbrella.
+            #[allow(clippy::disallowed_methods)]
             let thread = thread::Builder::new()
                 .name(format!("aether-rpc-accept-{port}"))
                 .spawn(move || {
@@ -488,6 +491,9 @@ mod server_native {
             let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
             let inbound_tx = self.inbound_tx.clone();
 
+            // Per-connection transport reader below the mail layer — carries inbound
+            // mail in; no inbound chain to inherit, no settlement umbrella.
+            #[allow(clippy::disallowed_methods)]
             let thread = match thread::Builder::new()
                 .name(format!("aether-rpc-reader-{conn_id}"))
                 .spawn(move || {

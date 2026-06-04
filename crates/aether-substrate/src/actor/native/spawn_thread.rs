@@ -310,6 +310,9 @@ impl<A: Actor> MailSender for RootCtx<A> {
 /// `spawn_inherit` entry point on
 /// [`super::ctx::NativeCtx`]; this function is the crate-private
 /// runtime body it delegates to.
+// This IS the spawn_inherit primitive (ADR-0080 §12) — the sanctioned raw spawn
+// the lint points callers at; it cannot route through itself.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn spawn_inherit<A, F>(
     binding: Arc<NativeBinding>,
     in_flight_mail_id: MailId,
@@ -348,6 +351,9 @@ where
 /// ADR-0080 §12 thread-spawn helper. Spawns a thread carrying a
 /// [`RootCtx<A>`] — each send the worker emits mints a fresh root
 /// chain with `A`'s mailbox as producer.
+// This IS the spawn_detached primitive (ADR-0080 §12) — the sanctioned raw spawn
+// the lint points callers at; it cannot route through itself.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn spawn_detached<A, F>(binding: Arc<NativeBinding>, f: F) -> JoinHandle<()>
 where
     A: Actor + Singleton + 'static,

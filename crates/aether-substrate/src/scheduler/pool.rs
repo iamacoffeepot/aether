@@ -215,6 +215,9 @@ impl Pool {
             let aborter = Arc::clone(&aborter);
             let template = config.budget_template;
             let thread_name = name.clone();
+            // Scheduler worker pool — the execution floor that *runs* actors; spawned
+            // at boot, below the actor model. A handler's spawn_inherit work runs here.
+            #[allow(clippy::disallowed_methods)]
             let handle = thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || worker_loop(idx, deque, stealers, injector, spin, aborter, template))

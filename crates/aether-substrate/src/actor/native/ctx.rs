@@ -263,6 +263,9 @@ impl<'a> NativeCtx<'a> {
         // scalable form is a reused work-stealing blocking pool isolated
         // from the cooperative scheduler (#1322).
         let binding = Arc::clone(self.binding);
+        // This IS the ADR-0093 dispatch_blocking primitive — the hold lives in the
+        // ledger (not on this worker), so the chain stays open until the resolve.
+        #[allow(clippy::disallowed_methods)]
         let spawned = ThreadBuilder::new()
             .name(String::from("aether-dispatch-blocking"))
             .spawn(move || {

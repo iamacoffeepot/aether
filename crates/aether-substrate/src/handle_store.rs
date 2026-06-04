@@ -1462,6 +1462,9 @@ impl HandleStore {
         };
         let weak = Arc::downgrade(self);
         let tick = Duration::from_secs(cfg.eviction_tick_secs.max(1));
+        // Long-lived eviction timer — spawned without a ctx, no inbound chain to
+        // inherit; periodic infra, not per-handler work.
+        #[allow(clippy::disallowed_methods)]
         thread::Builder::new()
             .name("handle-store-evict".to_owned())
             .spawn(move || {
