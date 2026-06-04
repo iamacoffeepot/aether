@@ -77,6 +77,28 @@ enum Step {
 /// ordinary jitter.
 const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = 1_000;
 
+/// Early-warning threshold for slow settlement (iamacoffeepot/aether#1052,
+/// the prevention follow-up to #1048). A `Sent`→`Settled` latency past
+/// `advance_timeout / SLOW_SETTLE_DIVISOR` (≈100ms at the 1s default, ~6
+/// frames at 60Hz) is well above the sub-tick norm but a full 10× short of
+/// the force-complete deadline — so the warn surfaces a degrading
+/// settlement pipeline *before* it wedges, with headroom to act. Derived
+/// from `advance_timeout` rather than a separate knob so it auto-scales
+/// with the deadline and adds no config surface.
+const SLOW_SETTLE_DIVISOR: u32 = 10;
+
+/// EWMA smoothing factor for the rolling settlement-latency stat, as a
+/// permille (200 ‰ = 0.2). A single spike moves the average ~20%, so the
+/// reported `ewma_millis` reflects a sustained trend rather than one
+/// outlier — the "rolling stat" #1048's profiling agenda called for.
+const SETTLE_EWMA_ALPHA_PERMILLE: u32 = 200;
+
+/// Minimum spacing between slow-settlement warns. A saturating pipeline
+/// settles slowly on *every* advance (~240/s under load), so an unguarded
+/// warn would itself spam the rings; one line per episode is enough to
+/// flag the trend.
+const SLOW_SETTLE_WARN_COOLDOWN: Duration = Duration::from_secs(5);
+
 /// Discovery records for the lifecycle advance-timeout knob (ADR-0090
 /// unit b2, iamacoffeepot/aether#1255). Describes the
 /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` override read in the driver's
@@ -156,6 +178,17 @@ pub struct LifecycleDriverCapability<C: 'static + Send + Sync> {
     /// settlement pipeline wedging the lifecycle permanently
     /// (iamacoffeepot/aether#1048). Set from `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`.
     advance_timeout: Duration,
+    /// EWMA of observed `Sent`→`Settled` latency (ADR-0082 §6), updated
+    /// once per settle in `on_settled`. `None` until the first settlement.
+    /// The rolling early-warning stat for the lifecycle↔trace-pipeline
+    /// coupling (iamacoffeepot/aether#1052 / #1048); reported alongside the
+    /// acute spike in the slow-settlement warn so a sustained trend is
+    /// distinguishable from a one-off outlier.
+    settlement_latency_ewma: Option<Duration>,
+    /// Last time a slow-settlement warn fired, for the
+    /// [`SLOW_SETTLE_WARN_COOLDOWN`] rate limit. `None` until the first
+    /// warn.
+    last_slow_warn: Option<Instant>,
     /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
     /// calls inside handlers (which only have `&mut self` + `&mut
     /// NativeCtx`, not a way to clone the mailer cheaply otherwise).
@@ -239,6 +272,8 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
             quit_pending: false,
             pending: None,
             advance_timeout: Duration::from_millis(advance_timeout_ms),
+            settlement_latency_ewma: None,
+            last_slow_warn: None,
             mailer,
             _marker: PhantomData,
         })
@@ -485,6 +520,11 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
         if payload.root != pending.root {
             return;
         }
+        // Sent→Settled latency for this advance — the direct early-warning
+        // signal for the lifecycle↔trace-pipeline coupling (#1048). Captured
+        // before `pending` is cleared.
+        let latency = pending.started.elapsed();
+        let root = pending.root;
         let LifecycleAdvanceComplete { completed, next } = LifecycleAdvanceComplete {
             completed: pending.completed_kind.0,
             next: pending.next_kind.0,
@@ -500,6 +540,7 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
         } else {
             self.current_state = next_kind;
         }
+        self.record_settlement_latency(latency, root);
         // Route the reply to whoever issued the LifecycleAdvance —
         // chassis main loops block on it to gate the next frame.
         ctx.reply_to(reply_to, &LifecycleAdvanceComplete { completed, next });
@@ -507,6 +548,60 @@ impl<C: 'static + Send + Sync> NativeActor for LifecycleDriverCapability<C> {
 }
 
 impl<C: 'static + Send + Sync> LifecycleDriverCapability<C> {
+    /// Fold one observed `Sent`→`Settled` latency into the rolling EWMA
+    /// and emit a rate-limited warn when a settle blows past the slow
+    /// threshold (`advance_timeout / SLOW_SETTLE_DIVISOR`). This is the
+    /// early-warning for a degrading settlement pipeline
+    /// (iamacoffeepot/aether#1052, the prevention follow-up to #1048): it
+    /// fires with ~10× headroom before the force-complete deadline, naming
+    /// the offending `root` so a `describe_tree <root>` surfaces the
+    /// in-flight nodes. O(1) per settle — no graph walk and no central
+    /// accumulation (the trace observer that once held that graph was
+    /// retired in ADR-0086 Phase 3c).
+    fn record_settlement_latency(&mut self, latency: Duration, root: MailId) {
+        // EWMA in nanos, α = SETTLE_EWMA_ALPHA_PERMILLE/1000. Up and down
+        // moves are handled separately so the whole thing stays in u128
+        // (no signed casts): next = prev ± α·|sample − prev|.
+        let alpha = u128::from(SETTLE_EWMA_ALPHA_PERMILLE);
+        let next_nanos = self
+            .settlement_latency_ewma
+            .map_or(latency.as_nanos(), |prev| {
+                let prev = prev.as_nanos();
+                let sample = latency.as_nanos();
+                if sample >= prev {
+                    prev + (sample - prev) * alpha / 1000
+                } else {
+                    prev - (prev - sample) * alpha / 1000
+                }
+            });
+        let ewma = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
+        self.settlement_latency_ewma = Some(ewma);
+
+        let threshold = self.advance_timeout / SLOW_SETTLE_DIVISOR;
+        if latency < threshold {
+            return;
+        }
+        // Rate-limit: a saturating pipeline settles slowly on every advance,
+        // so warn once per episode rather than ~240×/s.
+        if self
+            .last_slow_warn
+            .is_some_and(|t| t.elapsed() < SLOW_SETTLE_WARN_COOLDOWN)
+        {
+            return;
+        }
+        self.last_slow_warn = Some(Instant::now());
+        tracing::warn!(
+            target: "aether_substrate::lifecycle",
+            root = ?root,
+            latency_millis = latency.as_millis(),
+            ewma_millis = ewma.as_millis(),
+            threshold_millis = threshold.as_millis(),
+            "settlement latency exceeded the slow threshold; the trace/settlement \
+             pipeline is degrading — `describe_tree <root>` for the in-flight nodes; \
+             a sustained climb wedges the lifecycle (iamacoffeepot/aether#1048)"
+        );
+    }
+
     /// True when a pending advance has exceeded [`Self::advance_timeout`]
     /// without settling (iamacoffeepot/aether#1048). `false` when nothing
     /// is pending.
@@ -529,8 +624,8 @@ impl<C: 'static + Send + Sync> LifecycleDriverCapability<C> {
         tracing::error!(
             target: "aether_substrate::lifecycle",
             root = ?pending.root,
-            elapsed_ms = pending.started.elapsed().as_millis(),
-            timeout_ms = self.advance_timeout.as_millis(),
+            elapsed_millis = pending.started.elapsed().as_millis(),
+            timeout_millis = self.advance_timeout.as_millis(),
             "LifecycleAdvance settlement timed out; force-advancing to avoid a permanent wedge \
              (settlement pipeline may be saturated — see iamacoffeepot/aether#1048)"
         );
@@ -664,6 +759,8 @@ mod tests {
             quit_pending: false,
             pending: None,
             advance_timeout,
+            settlement_latency_ewma: None,
+            last_slow_warn: None,
             mailer,
             _marker: PhantomData,
         }
@@ -737,5 +834,42 @@ mod tests {
         // A long timeout never trips on a freshly-issued advance.
         driver.advance_timeout = Duration::from_hours(1);
         assert!(!driver.pending_timed_out());
+    }
+
+    #[test]
+    fn settlement_latency_ewma_and_slow_warn_gate() {
+        // advance_timeout 1s → slow threshold = 1s / 10 = 100ms.
+        let mut driver = test_driver(Duration::from_secs(1));
+
+        // First sample seeds the EWMA exactly.
+        driver.record_settlement_latency(Duration::from_millis(10), MailId::NONE);
+        assert_eq!(
+            driver.settlement_latency_ewma,
+            Some(Duration::from_millis(10))
+        );
+        // Sub-threshold → no warn armed.
+        assert!(driver.last_slow_warn.is_none());
+
+        // Second sample moves the EWMA toward it by α=0.2:
+        // 10ms + 0.2·(20ms − 10ms) = 12ms.
+        driver.record_settlement_latency(Duration::from_millis(20), MailId::NONE);
+        assert_eq!(
+            driver.settlement_latency_ewma,
+            Some(Duration::from_millis(12))
+        );
+        assert!(driver.last_slow_warn.is_none());
+
+        // A settle past the 100ms threshold arms the warn (and its cooldown).
+        driver.record_settlement_latency(Duration::from_millis(250), MailId::NONE);
+        assert!(driver.last_slow_warn.is_some());
+        let armed_at = driver.last_slow_warn.expect("warn armed");
+
+        // A second slow settle inside the cooldown does not re-arm.
+        driver.record_settlement_latency(Duration::from_millis(300), MailId::NONE);
+        assert_eq!(
+            driver.last_slow_warn.expect("still armed"),
+            armed_at,
+            "cooldown should suppress the second warn"
+        );
     }
 }
