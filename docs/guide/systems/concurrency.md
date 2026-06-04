@@ -31,22 +31,29 @@ receives a lightweight *reference into the producer's ring*, not a copied buffer
 so cross-actor mail is largely zero-copy. The blob — one producer's grouped
 fan-out — is the unit of work the scheduler hands around.
 
-A blob is drained **cooperatively by several workers at once**: an idle worker
-claims a whole recipient-group off the blob and dispatches that recipient's mail
-in place, so a wide fan-out parallelizes across the pool rather than serializing
-on one worker. The pool is **work-stealing** — a worker with nothing to do steals
-from a busy sibling — so no actor or blob is pinned to a particular thread.
+A blob isn't handed to one worker to own — it's **published and raced**. The
+worker that produced it keeps it warm on its own queue by default (a relay chain
+stays on one hot worker, no cross-thread handoff), but once a fan-out is big
+enough to be worth spreading, the blob is published and idle workers are woken to
+**join in on the same blob**: they race a single shared cursor — one small atomic
+— each grabbing the next recipient-group, seizing that recipient, and dispatching
+its mail in place, then coming back for the next. The scheduler never decides
+*where* a piece of work should run; there is no placement step and no
+load-balancer. Work is just made available, and whatever workers are free race to
+drain it as fast as they can, contending only on that cursor. **That minimal
+coordination is the speed**: claiming the next group is a single atomic operation,
+not a scheduling decision about who should do what.
 
-Notice what the pool does *not* do: it never assigns an actor to a worker. A
-blob fans out to many recipients, and "one worker, one actor at a time" is
-**emergent** — it falls out of a worker seizing a recipient-group and holding
-that actor's **run-token** while it dispatches, not from any actor-level
-scheduling. A worker must claim the recipient's token (`Idle → Running`, a
-compare-and-swap) before dispatching to it, and a `Running` actor is never
-claimed by a second worker — even a thief skips it. Because one worker owns a
-given recipient's group, **per-recipient FIFO falls out for free** (one worker
-walks that recipient's mail in send order) while distinct recipients run
-concurrently — exactly the ordering spine the
+What keeps an actor single-threaded through all of this is its **run-token** — a
+per-actor `Idle → Ready → Running` word, not anything the pool does by placing
+actors. It guards two points. When mail arrives, only the waker that wins the
+`Idle → Ready` CAS publishes the actor's work, so it is never enqueued twice. And
+a worker racing the cursor must win that recipient's `→ Running` CAS before
+dispatching to it — lose the race (the actor is *already* `Running` under another
+worker) and the mail is re-deposited for later rather than run concurrently. So
+two workers never run one actor; and because a single worker thereby walks a
+given recipient's mail, **per-recipient FIFO falls out for free** while distinct
+recipients run concurrently — exactly the ordering spine the
 [invariants](../foundations/invariants.md) and
 [mail](mail-and-kinds.md) pages rely on. And single-threaded-per-actor is *why*
 actor state is plain fields with no locks: nothing else can touch it
