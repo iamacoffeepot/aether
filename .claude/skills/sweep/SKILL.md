@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: Reclaim stale local state. `/sweep` (or `/sweep worktrees`) removes worktrees + branches whose PRs merged; `/sweep branches` prunes worktree-less local branches whose PRs merged; `/sweep memory` compresses + de-indexes the project's stale memory index; `/sweep all` runs every target. Each enumerates candidates, classifies by a staleness signal, prints a plan, and confirms before acting. Pair the git targets with `/implement` — after implemented PRs land, run `/sweep` to reclaim disk + branch space.
+description: Reclaim stale local state. `/sweep` (or `/sweep worktrees`) removes worktrees + branches whose PRs merged; `/sweep branches` prunes worktree-less local branches whose PRs merged; `/sweep memory` compresses + de-indexes the project's stale memory index; `/sweep adrs` flags ADRs whose recorded status has drifted from reality (Proposed-but-shipped, unacknowledged supersession); `/sweep all` runs every target. Each enumerates candidates, classifies by a staleness signal, prints a plan, and confirms before acting. Pair the git targets with `/implement` — after implemented PRs land, run `/sweep` to reclaim disk + branch space.
 ---
 
 # Sweep skill
@@ -16,9 +16,10 @@ Parse the invocation argument to pick the target. Bare `/sweep` defaults to `wor
 | `worktrees` (default) | non-primary git worktrees + their branches | branch's PR merged on GitHub | merged only |
 | `branches` | local branches **without** a worktree | PR merged / `[gone]` upstream / merged into main | PR-merged only |
 | `memory` | the project's `MEMORY.md` index | over-limit / over-long lines / superseded / orphaned / stale refs | nothing (compress + de-index only) |
-| `all` | run `worktrees`, then `branches`, then `memory` in sequence | — | per-target |
+| `adrs` | the `docs/adr/NNNN-*.md` decision records | recorded status drifted from reality: Proposed-but-shipped / unacknowledged supersession / stale partial-phase | nothing (surface only) |
+| `all` | run `worktrees`, then `branches`, then `memory`, then `adrs` in sequence | — | per-target |
 
-The git targets auto-remove only the entries with a hard merge-oracle (a merged PR) after one confirm; everything fuzzier is surfaced and left for the user. The `memory` target has no oracle, so it **never deletes files** — it tightens index hooks and drops index lines for superseded notes (the topic files stay on disk as archive).
+The git targets auto-remove only the entries with a hard merge-oracle (a merged PR) after one confirm; everything fuzzier is surfaced and left for the user. The `memory` target has no oracle, so it **never deletes files** — it tightens index hooks and drops index lines for superseded notes (the topic files stay on disk as archive). The `adrs` target **never edits an ADR** — a decision record's status is the user's to change, and the "did it ship" signal is a heuristic, not an oracle; the target only surfaces drift with evidence.
 
 ## Target: worktrees (default)
 
@@ -84,7 +85,25 @@ Curates the current project's auto-memory index (`MEMORY.md`) without losing kno
 
 6. **Report** — new index size + margin, count of lines compressed, entries de-indexed (with their archived filenames), and stale refs flagged for follow-up.
 
-## Constraints and notes
+## Target: adrs
+
+Flags ADRs in `docs/adr/NNNN-*.md` whose recorded **Status** line has drifted from reality — a decision that shipped but still reads `Proposed`, or a supersession that one side never acknowledged. Surface-only: **never edit an ADR.** The status of a decision record is the user's call, and the shipped-signal is a heuristic (code references), not a hard oracle like a merged PR.
+
+1. **Enumerate ADRs + their status.** `ls docs/adr/[0-9]*.md` (skip `TEMPLATE.md`). For each, read the `- **Status:** …` line near the top. Normalise the leading word: `Proposed` / `Accepted` / `Superseded` / `Rejected`, plus any parenthetical qualifier (`(parked)`, `(Draft …)`, `(Phase 1 only; Phase 2 deferred)`, `(phases 1–3 shipped)`).
+
+2. **Classify each by drift signal.**
+   - **Proposed-but-shipped** — status leads with `Proposed` **and** the ADR is cited from non-docs source: `grep -rl "ADR-NNNN" crates --include="*.rs"`. A `Proposed` ADR with a dedicated module / tests citing it (e.g. ADR-0047 → `src/dag/`, ADR-0049 → `src/handle_store/`, ADR-0080 → `src/chassis/settlement*`) has almost certainly been accepted-in-practice; the status line just never caught up. The list of citing files **is** the evidence. Strongest, most common drift.
+   - **Supersession asymmetry** — two directions, both drift:
+     - *Forward orphan*: ADR-A's status says `Superseded by ADR-B`, but ADR-B never references A (`grep -l "ADR-00A\|0A-" docs/adr/00B-*.md` empty) — the supersession is unacknowledged by the successor.
+     - *Backward orphan*: ADR-B's body says it *supersedes / replaces / retires* ADR-A (`grep -il "supersed\|replaces\|retires" docs/adr/*.md` then check which ADR-A it names), but ADR-A's own status still reads `Proposed` / `Accepted` — A's status should be `Superseded by ADR-B`. **This grep is bidirectional and noisy** — a superseded ADR usually points *forward* at its successor near the same words, so the same proximity match fires in both directions. Read the sentence to confirm which ADR is the successor before flagging; never assert direction from the grep alone. (This noise is the reason the target surfaces rather than edits.)
+   - **Stale partial-phase** — status like `Accepted (Phase 1 shipped; Phase 2 in progress)` or `(phases 1–2 shipped)`. Check whether the later phase landed (a follow-on `grep` for the phase's subsystem, or a merged PR citing the ADR). If it did, the phase annotation is stale. Lower confidence — surface, don't assert.
+   - **Intentionally open (NOT drift)** — status carries an explicit `(parked)` / `(Draft — …)` / `Rejected` qualifier. These are deliberate resting states, not drift. List them in a separate "left as-is (intentional)" group so a genuinely-drifted `Proposed` isn't lost among ADRs that are *meant* to sit at Proposed. A plain `Proposed` with **no** code citations is also not-yet-drifted — a pending decision — leave it.
+
+3. **Surface the plan.** Table per drifted ADR: number, title, current status, **proposed** status, and the one-line evidence (`cited by N source files: …`, `ADR-00B says "supersedes" but A still Accepted`, …). Group by signal; put the highest-confidence (Proposed-but-shipped with many citations, asymmetric supersession) first. Then the "intentional / pending — left as-is" group for completeness. Confirm — but note there is nothing to auto-apply.
+
+4. **Act — surface only.** Print, for each drifted ADR, the exact edit the user could make (`- **Status:** Proposed` → `- **Status:** Accepted (shipped — see crates/…)`), but **do not edit any ADR**. If the user explicitly asks, *then* apply a specific status change as a normal edit (and only the ones they name) — an ADR status change is a decision-record amendment and may warrant its own commit / PR.
+
+5. **Report** — counts per signal (drifted-shipped, asymmetric-supersession, stale-phase), the ADRs flagged, and the intentional/pending set left untouched. No files changed unless the user asked for a named edit in beat 4.
 
 - **Confirm before acting**, on every target. Auto-removal is limited to the hard-oracle cases (PR-merged worktrees / branches); memory never auto-deletes anything off disk.
 - **worktrees**: never sweep the primary worktree or a worktree whose branch has an open PR. `git worktree list --porcelain` blocks are `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` separated by blank lines; detached-HEAD entries lack a `branch` line. A locked worktree refuses removal — `git worktree unlock <path>` first, or surface the lock reason rather than forcing.
