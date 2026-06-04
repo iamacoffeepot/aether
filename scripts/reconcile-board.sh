@@ -73,12 +73,21 @@ if [[ -z "$OWNER" || -z "$PROJECT" ]]; then
     exit 1
 fi
 
-# Phase field + options, resolved live (never stale).
-PROJECT_NODE=$(gh project view "$PROJECT" --owner "$OWNER" --format json 2>/dev/null | jq -r '.id // empty')
-FIELDS_JSON=$(gh project field-list "$PROJECT" --owner "$OWNER" --format json 2>/dev/null || echo '{}')
+# Phase field + options, resolved live (never stale). Surface gh's own error
+# rather than dying mutely under set -e when the token can't read the project.
+if ! proj_json=$(gh project view "$PROJECT" --owner "$OWNER" --format json 2>&1); then
+    echo "cannot read project $PROJECT for owner $OWNER — the token likely lacks project read scope (classic 'project', or fine-grained Projects: Read)." >&2
+    echo "  gh: $proj_json" >&2
+    exit 1
+fi
+PROJECT_NODE=$(echo "$proj_json" | jq -r '.id // empty')
+if ! FIELDS_JSON=$(gh project field-list "$PROJECT" --owner "$OWNER" --format json 2>&1); then
+    echo "cannot list project $PROJECT fields — token scope? gh: $FIELDS_JSON" >&2
+    exit 1
+fi
 PHASE_FIELD=$(echo "$FIELDS_JSON" | jq -r '.fields[]? | select(.name=="Phase") | .id' | head -1)
 if [[ -z "$PROJECT_NODE" || -z "$PHASE_FIELD" ]]; then
-    echo "could not resolve project $PROJECT / Phase field for owner $OWNER (token scope? project number?)" >&2
+    echo "resolved no project node / Phase field on project $PROJECT (owner $OWNER)" >&2
     exit 1
 fi
 
