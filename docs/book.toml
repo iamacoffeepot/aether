@@ -1,0 +1,23 @@
+[book]
+title = "Aether Guide"
+description = "How aether works and how to build with it — written for agents."
+authors = ["aether"]
+language = "en"
+# The guide source lives under docs/guide/ so it sits next to the ADRs
+# (docs/adr/) without entangling with them. The rendered site builds to
+# docs/book/ (gitignored); CI rebuilds it fresh and deploys to Pages.
+src = "guide"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/iamacoffeepot/aether"
+edit-url-template = "https://github.com/iamacoffeepot/aether/edit/main/docs/{path}"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
