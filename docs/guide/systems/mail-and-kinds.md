@@ -77,10 +77,16 @@ revise the threading without changing the model.
 ## What it does
 
 **Mailbox vs kind — the distinction to internalize first.** The *mailbox* is
-the address; the *kind* is the payload shape. They are independent even when
-they share a name prefix: you send the kind `aether.audio.note_on` to the
-mailbox `aether.audio`. Getting these two confused is the single most common
-early mistake.
+the address (where mail goes); the *kind* is the payload shape (what the mail
+is). They're independent — but they share a naming convention, and that's the
+source of the confusion: a kind name is usually its mailbox's prefix plus a
+verb (`aether.audio` + `.note_on` → `aether.audio.note_on`). So the kind reads
+like a *more specific mailbox*, and the reflex is to use it as the address. The
+trap, concretely: sending kind `aether.audio.note_on` to recipient
+`aether.audio.note_on` instead of to `aether.audio`. No mailbox has that name,
+so it silently warn-drops (see the addressing rules below). The mail routes by
+mailbox; the kind only describes the bytes. When something you sent seems to
+vanish, this is the first thing to check.
 
 **A kind is a typed, self-describing payload.** It's a Rust type deriving
 `Kind` + `Schema` with a `#[kind(name = "…")]`, carrying a stable hashed
