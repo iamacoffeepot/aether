@@ -10,6 +10,7 @@
 # Foundations
 
 - [The type system](foundations/type-system.md)
+- [The actor model](foundations/actor-model.md)
 - [Invariants & guarantees](foundations/invariants.md)
 
 # The systems
