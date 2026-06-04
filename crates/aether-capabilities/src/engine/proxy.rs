@@ -982,83 +982,74 @@ mod tests {
         }
     }
 
-    /// A wedged engine (handshakes, then never answers a heartbeat
-    /// `Ping`) is evicted: after `miss_limit` missed pongs the proxy
-    /// reports `EngineDied` to the engines cap. This is the wedge case
-    /// the lazy connection-drop path misses.
-    #[test]
-    fn heartbeat_evicts_engine_after_missed_pongs() {
-        let (port, _server) = fake_server(Behavior::Ignore);
-        let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
-            42,
-            port,
-            Some(HeartbeatParams {
-                interval: Duration::from_millis(40),
-                miss_limit: 3,
-            }),
-        );
-        let died = await_first(&cells.died, "wedged engine not evicted");
-        assert_eq!(died, engine_id, "the wedged engine's id is reported dead");
-    }
+    /// Contention/backoff-sensitive tests live in `mod heavy`: heartbeat
+    /// eviction / alive reporting ride timer + dispatcher threads and are
+    /// timing-sensitive under load, so they are serialized into the
+    /// `serial-heavy` nextest group (`.config/nextest.toml`) and selected by
+    /// `scripts/flake-soak.sh` for fresh-process soak repetition.
+    mod heavy {
+        use super::*;
 
-    /// A healthy engine (pongs every heartbeat) is reported alive and
-    /// never evicted.
-    #[test]
-    fn heartbeat_reports_alive_on_pong() {
-        let (port, _server) = fake_server(Behavior::Pong);
-        let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
-            7,
-            port,
-            Some(HeartbeatParams {
-                interval: Duration::from_millis(40),
-                miss_limit: 3,
-            }),
-        );
-        let alive = await_first(&cells.alive, "healthy engine never reported alive");
-        assert_eq!(
-            alive, engine_id,
-            "the healthy engine's id is reported alive"
-        );
-        // Give the miss-limit window a chance to (wrongly) fire, then
-        // confirm a ponging engine is never declared dead.
-        thread::sleep(Duration::from_millis(200));
-        assert!(
-            cells
-                .died
-                .lock()
-                .expect("test setup: died cell mutex poisoned")
-                .is_empty(),
-            "a ponging engine must not be evicted",
-        );
-    }
+        /// A wedged engine (handshakes, then never answers a heartbeat
+        /// `Ping`) is evicted: after `miss_limit` missed pongs the proxy
+        /// reports `EngineDied` to the engines cap. This is the wedge case
+        /// the lazy connection-drop path misses.
+        #[test]
+        fn heartbeat_evicts_engine_after_missed_pongs() {
+            let (port, _server) = fake_server(Behavior::Ignore);
+            let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
+                42,
+                port,
+                Some(HeartbeatParams {
+                    interval: Duration::from_millis(40),
+                    miss_limit: 3,
+                }),
+            );
+            let died = await_first(&cells.died, "wedged engine not evicted");
+            assert_eq!(died, engine_id, "the wedged engine's id is reported dead");
+        }
 
-    /// A proxy whose substrate closes the connection reports
-    /// `EngineDied` so the cap drops the registry entry — the reactive
-    /// path that, before issue 1339, left `list_engines` reporting a
-    /// corpse. No heartbeat needed; the `Bye` drives it.
-    #[test]
-    fn proxy_reports_died_when_connection_closes() {
-        let (port, _server) = fake_server(Behavior::Close);
-        let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
-        let died = await_first(&cells.died, "closed engine not reported dead");
-        assert_eq!(died, engine_id, "the closed engine's id is reported dead");
-    }
+        /// A healthy engine (pongs every heartbeat) is reported alive and
+        /// never evicted.
+        #[test]
+        fn heartbeat_reports_alive_on_pong() {
+            let (port, _server) = fake_server(Behavior::Pong);
+            let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
+                7,
+                port,
+                Some(HeartbeatParams {
+                    interval: Duration::from_millis(40),
+                    miss_limit: 3,
+                }),
+            );
+            let alive = await_first(&cells.alive, "healthy engine never reported alive");
+            assert_eq!(
+                alive, engine_id,
+                "the healthy engine's id is reported alive"
+            );
+            // Give the miss-limit window a chance to (wrongly) fire, then
+            // confirm a ponging engine is never declared dead.
+            thread::sleep(Duration::from_millis(200));
+            assert!(
+                cells
+                    .died
+                    .lock()
+                    .expect("test setup: died cell mutex poisoned")
+                    .is_empty(),
+                "a ponging engine must not be evicted",
+            );
+        }
 
-    // Heartbeat eviction / alive reporting ride timer + dispatcher
-    // threads (timing-flaky); duplicate-wrap them for the pre-release
-    // flake soak (CLAUDE.md "Flake soak").
-    #[test]
-    fn flaky_heartbeat_evicts_engine_after_missed_pongs() {
-        heartbeat_evicts_engine_after_missed_pongs();
-    }
-
-    #[test]
-    fn flaky_heartbeat_reports_alive_on_pong() {
-        heartbeat_reports_alive_on_pong();
-    }
-
-    #[test]
-    fn flaky_proxy_reports_died_when_connection_closes() {
-        proxy_reports_died_when_connection_closes();
+        /// A proxy whose substrate closes the connection reports
+        /// `EngineDied` so the cap drops the registry entry — the reactive
+        /// path that, before issue 1339, left `list_engines` reporting a
+        /// corpse. No heartbeat needed; the `Bye` drives it.
+        #[test]
+        fn proxy_reports_died_when_connection_closes() {
+            let (port, _server) = fake_server(Behavior::Close);
+            let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
+            let died = await_first(&cells.died, "closed engine not reported dead");
+            assert_eq!(died, engine_id, "the closed engine's id is reported dead");
+        }
     }
 }

@@ -947,7 +947,6 @@ fn transform_invoke_resolves_handle() {
 
 /// A panicking transform maps to `Failed` with the panic message in the
 /// diagnostic; the executor + sibling branches survive (ADR-0048 §6).
-#[test]
 fn transform_panic_fails_node() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
@@ -1090,7 +1089,6 @@ fn transform_output_overflow_fails_node() {
 /// identical across DAGs) skips the invoke entirely — the cache hit
 /// resolves the node. The pool's invoke count reports 1, not 2
 /// (ADR-0048 §4, iamacoffeepot/aether#982).
-#[test]
 fn transform_skips_invoke_on_cache_hit() {
     super::test_support::SEED_INVOKE_COUNT.store(0, Ordering::Release);
     let (registry, mailer, rx) = fresh_substrate_with_rx();
@@ -1162,16 +1160,22 @@ fn transform_skips_invoke_on_cache_hit() {
     drop(chassis);
 }
 
-/// Flake-soak wrapper (iamacoffeepot/aether#1060). Re-runs
-/// [`transform_skips_invoke_on_cache_hit`] under a `flaky_` name so the
-/// `scripts/flake-soak.sh` filterset (`test(/flaky/)`) repeat-runs it
-/// before a release — it asserts on async observer recording, the race
-/// the trace ring-buffer change (iamacoffeepot/aether#1056) exposed
-/// here. The original still runs once in normal CI; this duplicate is
-/// the soak target.
-#[test]
-fn flaky_transform_skips_invoke_on_cache_hit() {
-    transform_skips_invoke_on_cache_hit();
+/// Contention/backoff-sensitive tests live in `mod heavy`: they drive the
+/// live actor dispatch / parking / settlement path through a multi-worker
+/// pool, so they are serialized into the `serial-heavy` nextest group
+/// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
+/// fresh-process soak repetition. Each delegates to the scenario body
+/// declared at module scope.
+mod heavy {
+    #[test]
+    fn transform_panic_fails_node() {
+        super::transform_panic_fails_node();
+    }
+
+    #[test]
+    fn transform_skips_invoke_on_cache_hit() {
+        super::transform_skips_invoke_on_cache_hit();
+    }
 }
 
 /// A transform that blocks briefly does not stall the executor's

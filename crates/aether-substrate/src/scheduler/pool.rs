@@ -584,103 +584,103 @@ mod tests {
         );
     }
 
-    /// Stress: 4 slots × 1000 envelopes each across 2 workers. Confirm
-    /// every envelope dispatches and no slot is left orphaned.
-    #[test]
-    fn stress_many_slots_across_workers() {
-        let handle = standard_handle(2);
-        let slots: Vec<_> = (0..4)
-            .map(|i| CounterSlot::new(Box::leak(format!("s{i}").into_boxed_str())))
-            .collect();
-        let wakes: Vec<_> = slots
-            .iter()
-            .map(|slot| {
-                let slot_dyn: Arc<dyn Drainable> = slot.clone();
-                let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
-                drop(slot_dyn);
-                WakeHandle::new(slot.state.clone(), weak, handle.wake_sink())
-            })
-            .collect();
+    /// Contention/backoff-sensitive tests live in `mod heavy`: they exercise
+    /// the worker dispatch / wake path, so they are serialized into the
+    /// `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
+    /// oversubscribing cores against one another, and selected by
+    /// `scripts/flake-soak.sh` for fresh-process soak repetition.
+    mod heavy {
+        use super::*;
 
-        for (i, slot) in slots.iter().enumerate() {
-            for n in 0..1000 {
-                // Test fixture uses tiny indices that fit in u32.
-                #[allow(clippy::cast_possible_truncation)]
-                let value = (i * 1000 + n) as u32;
-                slot.push(value);
-            }
-            // Stress seeding — bool ignored; test asserts via total().
-            let _ = wakes[i].wake();
-        }
-
-        let total_expected: u32 = 4 * 1000;
-        let total = || -> u32 { slots.iter().map(|s| s.dispatched()).sum() };
-        assert!(wait_until(Duration::from_secs(5), || total() == total_expected));
-        for slot in &slots {
-            assert_eq!(slot.dispatched(), 1000);
-            assert_eq!(slot.state.current(), SlotStateLabel::Idle);
-        }
-
-        drop(wakes);
-        let _ = handle.shutdown_with_results();
-    }
-
-    /// Flake-soak wrapper (iamacoffeepot/aether#1059). Re-runs the
-    /// multi-worker stress under a `flaky_` name so `scripts/flake-soak.sh`
-    /// repeat-runs the rewritten `acquire_slot` dispatch path. The original
-    /// still runs once in normal CI; this duplicate is the soak target.
-    #[test]
-    fn flaky_stress_many_slots_across_workers() {
-        stress_many_slots_across_workers();
-    }
-
-    /// Build a depth-`d` relay chain of `CounterSlot`s: slot[i] forwards
-    /// each dispatched env to slot[i+1] and wakes it. The forwarding wake
-    /// runs on a pool worker, so the chain drives the worker-local stash
-    /// path that `acquire_slot` reads first (iamacoffeepot/aether#1059).
-    fn relay_chain(handle: &PoolHandle, depth: usize) -> Vec<Arc<CounterSlot>> {
-        let slots: Vec<Arc<CounterSlot>> = (0..depth).map(|_| CounterSlot::new("relay")).collect();
-        for i in 0..depth.saturating_sub(1) {
-            let target = slots[i + 1].clone();
-            let target_dyn: Arc<dyn Drainable> = target.clone();
-            let weak: Weak<dyn Drainable> = Arc::downgrade(&target_dyn);
-            drop(target_dyn);
-            let wake = WakeHandle::new(target.state.clone(), weak, handle.wake_sink());
-            *slots[i].forward.lock().unwrap() = Some((target, wake));
-        }
-        slots
-    }
-
-    /// Flake-soak (iamacoffeepot/aether#1059): a relay chain on a
-    /// multi-worker pool. Each hop's wake stashes the downstream in the
-    /// running worker's local cell, so the chain stays on one warm worker
-    /// instead of bouncing across parked siblings. Soaked because the
-    /// stash path is concurrency-sensitive (worker thread-local + the
-    /// `Idle → Ready` CAS) and fires only on real worker threads — which
-    /// the other slot tests, driven from the test thread, never hit.
-    #[test]
-    fn flaky_relay_chain_stays_on_worker() {
-        let handle = standard_handle(4);
-        let slots = relay_chain(&handle, 8);
-
-        let entry = slots[0].clone();
-        let entry_dyn: Arc<dyn Drainable> = entry.clone();
-        let weak: Weak<dyn Drainable> = Arc::downgrade(&entry_dyn);
-        drop(entry_dyn);
-        let entry_wake = WakeHandle::new(entry.state.clone(), weak, handle.wake_sink());
-
-        entry.push(1);
-        assert!(entry_wake.wake());
-
-        assert!(
-            wait_until(Duration::from_secs(5), || slots
+        /// Stress: 4 slots × 1000 envelopes each across 2 workers. Confirm
+        /// every envelope dispatches and no slot is left orphaned.
+        #[test]
+        fn stress_many_slots_across_workers() {
+            let handle = standard_handle(2);
+            let slots: Vec<_> = (0..4)
+                .map(|i| CounterSlot::new(Box::leak(format!("s{i}").into_boxed_str())))
+                .collect();
+            let wakes: Vec<_> = slots
                 .iter()
-                .all(|s| s.dispatched() >= 1)),
-            "every slot in the relay chain should dispatch its forwarded env"
-        );
+                .map(|slot| {
+                    let slot_dyn: Arc<dyn Drainable> = slot.clone();
+                    let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
+                    drop(slot_dyn);
+                    WakeHandle::new(slot.state.clone(), weak, handle.wake_sink())
+                })
+                .collect();
 
-        drop(entry_wake);
-        let _ = handle.shutdown_with_results();
+            for (i, slot) in slots.iter().enumerate() {
+                for n in 0..1000 {
+                    // Test fixture uses tiny indices that fit in u32.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let value = (i * 1000 + n) as u32;
+                    slot.push(value);
+                }
+                // Stress seeding — bool ignored; test asserts via total().
+                let _ = wakes[i].wake();
+            }
+
+            let total_expected: u32 = 4 * 1000;
+            let total = || -> u32 { slots.iter().map(|s| s.dispatched()).sum() };
+            assert!(wait_until(Duration::from_secs(5), || total() == total_expected));
+            for slot in &slots {
+                assert_eq!(slot.dispatched(), 1000);
+                assert_eq!(slot.state.current(), SlotStateLabel::Idle);
+            }
+
+            drop(wakes);
+            let _ = handle.shutdown_with_results();
+        }
+
+        /// Build a depth-`d` relay chain of `CounterSlot`s: slot[i] forwards
+        /// each dispatched env to slot[i+1] and wakes it. The forwarding wake
+        /// runs on a pool worker, so the chain drives the worker-local stash
+        /// path that `acquire_slot` reads first (iamacoffeepot/aether#1059).
+        fn relay_chain(handle: &PoolHandle, depth: usize) -> Vec<Arc<CounterSlot>> {
+            let slots: Vec<Arc<CounterSlot>> =
+                (0..depth).map(|_| CounterSlot::new("relay")).collect();
+            for i in 0..depth.saturating_sub(1) {
+                let target = slots[i + 1].clone();
+                let target_dyn: Arc<dyn Drainable> = target.clone();
+                let weak: Weak<dyn Drainable> = Arc::downgrade(&target_dyn);
+                drop(target_dyn);
+                let wake = WakeHandle::new(target.state.clone(), weak, handle.wake_sink());
+                *slots[i].forward.lock().unwrap() = Some((target, wake));
+            }
+            slots
+        }
+
+        /// A relay chain on a multi-worker pool: each hop's wake stashes the
+        /// downstream in the running worker's local cell, so the chain stays on
+        /// one warm worker instead of bouncing across parked siblings. The stash
+        /// path is concurrency-sensitive (worker thread-local + the `Idle → Ready`
+        /// CAS) and fires only on real worker threads — which the other slot
+        /// tests, driven from the test thread, never hit.
+        #[test]
+        fn relay_chain_stays_on_worker() {
+            let handle = standard_handle(4);
+            let slots = relay_chain(&handle, 8);
+
+            let entry = slots[0].clone();
+            let entry_dyn: Arc<dyn Drainable> = entry.clone();
+            let weak: Weak<dyn Drainable> = Arc::downgrade(&entry_dyn);
+            drop(entry_dyn);
+            let entry_wake = WakeHandle::new(entry.state.clone(), weak, handle.wake_sink());
+
+            entry.push(1);
+            assert!(entry_wake.wake());
+
+            assert!(
+                wait_until(Duration::from_secs(5), || slots
+                    .iter()
+                    .all(|s| s.dispatched() >= 1)),
+                "every slot in the relay chain should dispatch its forwarded env"
+            );
+
+            drop(entry_wake);
+            let _ = handle.shutdown_with_results();
+        }
     }
 
     // Reuse the standard wallclock budget for fairness tests — 200µs
