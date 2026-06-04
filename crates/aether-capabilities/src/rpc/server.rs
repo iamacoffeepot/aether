@@ -1099,6 +1099,89 @@ mod tests {
         }
     }
 
+    /// iamacoffeepot/aether#1321 regression: a `Call` routed through the
+    /// RPC server tags its reply `ReplyTarget::Component(rpc_server)`, so
+    /// a capability that replies via `HubOutbound::send_reply` (which
+    /// only routes `Session` / `EngineMailbox`) drops the reply silently —
+    /// the same drop #1316/#1319 fixed for the desktop driver. The
+    /// `HeadlessWindowCapability` `Err`-replies on `set_window_mode`; with
+    /// the bug present this `Call` would yield a bare `ReplyEnd` and zero
+    /// `ReplyEvent`s. Routing through the `Mailer` (the complete router)
+    /// pushes the reply back locally to the server's `on_any`, so the
+    /// `Err` rides home as a `ReplyEvent` before the `ReplyEnd`.
+    #[test]
+    fn call_headless_window_set_mode_err_reaches_component_reply() {
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::trace::TraceDispatchCapability;
+        use crate::window::HeadlessWindowCapability;
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+        use aether_kinds::{SetWindowMode, SetWindowModeResult, WindowMode};
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<HeadlessWindowCapability>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
+        complete_handshake(&mut stream);
+
+        let payload = postcard::to_allocvec(&SetWindowMode {
+            mode: WindowMode::Windowed,
+            width: None,
+            height: None,
+        })
+        .expect("test setup: SetWindowMode serializes via postcard");
+        let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Actor>::NAMESPACE);
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: Some(0xdef),
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(window_mailbox),
+                    from: None,
+                    kind: <SetWindowMode as Kind>::ID,
+                    correlation_id: None,
+                    payload,
+                },
+            },
+        )
+        .expect("test: write_frame Call to rpc server");
+
+        // The `Err` reply must arrive as a ReplyEvent — the drop this
+        // test guards against would leave zero events before ReplyEnd.
+        let event: WireFrame = read_frame(&mut stream).expect("read ReplyEvent");
+        let envelope = match event {
+            WireFrame::ReplyEvent { cid, envelope } => {
+                assert_eq!(cid, 0xdef);
+                envelope
+            }
+            other => panic!("expected ReplyEvent, got {other:?}"),
+        };
+        assert_eq!(envelope.kind, <SetWindowModeResult as Kind>::ID);
+        let decoded: SetWindowModeResult =
+            postcard::from_bytes(&envelope.payload).expect("decode SetWindowModeResult");
+        assert!(
+            matches!(decoded, SetWindowModeResult::Err { .. }),
+            "headless window cap replies Err, got {decoded:?}"
+        );
+
+        let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+        match end {
+            WireFrame::ReplyEnd { cid, result } => {
+                assert_eq!(cid, 0xdef);
+                result.expect("ReplyEnd result Ok");
+            }
+            other => panic!("expected ReplyEnd, got {other:?}"),
+        }
+    }
+
     /// iamacoffeepot/aether#1031 end-to-end: a `Call` against an actor
     /// that replies through the ADR-0093 hold-until-resolve dispatch
     /// (spawned worker -> completion wake -> re-reply) must still

@@ -15,16 +15,12 @@ use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle};
 
 #[aether_actor::bridge(singleton)]
 mod native {
-    use std::sync::Arc;
-
     use aether_actor::actor;
     use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::mail::outbound::HubOutbound;
 
     use super::{FocusWindow, SetWindowMode, SetWindowTitle};
-    use std::io;
 
     /// Chassis-without-window companion to the desktop driver's
     /// driver-as-actor `aether.window` claim. Mirrors
@@ -35,9 +31,7 @@ mod native {
     ///
     /// Each chassis composes one of {desktop driver, this cap}, never
     /// both — the chassis builder rejects double-claiming a mailbox.
-    pub struct HeadlessWindowCapability {
-        outbound: Arc<HubOutbound>,
-    }
+    pub struct HeadlessWindowCapability;
 
     #[actor]
     impl NativeActor for HeadlessWindowCapability {
@@ -45,22 +39,24 @@ mod native {
 
         const NAMESPACE: &'static str = "aether.window";
 
-        fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-                BootError::Other(Box::new(io::Error::other(
-                    "HubOutbound must be wired on Mailer before \
-                     HeadlessWindowCapability::init (chassis main connects the hub before \
-                     the Builder chain)",
-                )))
-            })?;
-            Ok(Self { outbound })
+        fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
         }
 
         /// Reply `Err` so MCP `set_window_mode` fails fast instead of
         /// hanging on a reply that never comes.
+        ///
+        /// Reply through `ctx.mailer().send_reply` (the `Mailer`, the
+        /// complete router) rather than `HubOutbound::send_reply`, which
+        /// silently drops `ReplyTarget::Component` — the local-RPC-server
+        /// reply target an MCP-spawned engine tags (iamacoffeepot/aether#1321,
+        /// matching the desktop driver fix in #1319).
+        // `&self` keeps the dispatch ABI (ADR-0033 / ADR-0038); the
+        // capability is stateless, so the reply routes purely off `ctx`.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_set_mode(&self, ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) {
-            self.outbound.send_reply(
+            ctx.mailer().send_reply(
                 ctx.reply_target(),
                 &SetWindowModeResult::Err {
                     error: "unsupported on this chassis — no window peripheral".to_owned(),
@@ -69,9 +65,10 @@ mod native {
         }
 
         /// Reply `Err` for the same reason as `on_set_mode`.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_set_title(&self, ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) {
-            self.outbound.send_reply(
+            ctx.mailer().send_reply(
                 ctx.reply_target(),
                 &SetWindowTitleResult::Err {
                     error: "unsupported on this chassis — no window peripheral".to_owned(),
@@ -82,9 +79,10 @@ mod native {
         /// Reply `Err` for the same reason as `on_set_mode`
         /// (iamacoffeepot/aether#1318): a chassis without a window
         /// peripheral can't foreground one.
+        #[allow(clippy::unused_self)]
         #[handler]
         fn on_focus(&self, ctx: &mut NativeCtx<'_>, _mail: FocusWindow) {
-            self.outbound.send_reply(
+            ctx.mailer().send_reply(
                 ctx.reply_target(),
                 &FocusWindowResult::Err {
                     error: "unsupported on this chassis — no window peripheral".to_owned(),
