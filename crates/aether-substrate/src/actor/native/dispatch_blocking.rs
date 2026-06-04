@@ -575,6 +575,99 @@ mod tests {
         );
     }
 
+    /// The resumed entry uses the *supplied* `(hold, reply_to)`, not the
+    /// dispatching ctx's — the property a bounded `TaskQueue` relies on
+    /// when it drains a buffered request from a *different* handler's turn.
+    /// Accept on one root/caller, dispatch via `dispatch_blocking_resumed`
+    /// from a ctx with a different root and reply target, then assert the
+    /// *accept* chain is the one held and the *original* caller is replied
+    /// to.
+    #[test]
+    fn dispatch_blocking_resumed_uses_supplied_hold_and_reply_to() {
+        let (registry, mailer) = fresh_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+
+        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+        let caller = registry.register_inbox("test.dispatch_resumed.caller", forward_to(reply_tx));
+
+        let actor_mailbox = mailbox_id_from_name("test.dispatch_resumed.actor");
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            actor_mailbox,
+        ));
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        registry.register_inbox("test.dispatch_resumed.actor", forward_to(wake_tx));
+
+        let accept_root = root_id(1);
+        let caller_reply_to = ReplyTo::with_correlation(ReplyTarget::Component(caller), 77);
+
+        // "Accept": acquire the hold on the accept root + capture the
+        // caller, as a TaskQueue does when buffering an over-limit request.
+        let buffered_hold = {
+            let ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, accept_root);
+            ctx.acquire_settlement_hold()
+        };
+        assert_eq!(
+            counter.held_open(accept_root),
+            1,
+            "the accept-time hold keeps the chain open while buffered"
+        );
+
+        // "Drain": dispatch the buffered work from a *different* handler
+        // turn — a ctx with a different root and reply target — passing the
+        // captured `(hold, reply_to)` explicitly.
+        let other_root = root_id(2);
+        let id = {
+            let mut ctx = NativeCtx::new(
+                &binding,
+                ReplyTo::with_correlation(ReplyTarget::None, 99),
+                MailId::NONE,
+                other_root,
+            );
+            ctx.dispatch_blocking_resumed(buffered_hold, caller_reply_to, move || Answer {
+                value: 7,
+            })
+        };
+
+        // The held chain is the accept root, not the drain ctx's root.
+        assert_eq!(
+            counter.held_open(accept_root),
+            1,
+            "the supplied hold keeps the accept chain open across the resumed dispatch"
+        );
+        assert_eq!(
+            counter.held_open(other_root),
+            0,
+            "the drain ctx's own chain is never held"
+        );
+
+        let landed = await_wake(&wake_rx);
+        assert_eq!(landed, id);
+
+        {
+            let mut ctx = NativeCtx::new(&binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let done = ctx
+                .take_task_done::<Answer, ()>(id)
+                .expect("the resumed dispatch is in the ledger");
+            assert_eq!(*done.output(), Answer { value: 7 });
+            done.resolve(&mut ctx);
+        }
+
+        // Reply went to the *original* caller (corr 77), not the drain ctx.
+        let reply = reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the re-reply lands on the captured caller, not the drain ctx");
+        assert_eq!(
+            reply.sender.correlation_id, 77,
+            "the resumed dispatch replies to the captured caller, not the drain ctx"
+        );
+        assert_eq!(
+            counter.held_open(accept_root),
+            0,
+            "resolve releases the captured hold"
+        );
+    }
+
     /// `dispatch_blocking_with` carries an opt-in context the completion
     /// handler reads via `TaskDone::context`, and `resolve_with` maps
     /// `(output, context)` to the reply.
