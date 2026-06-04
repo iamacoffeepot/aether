@@ -58,12 +58,17 @@ of the mailbox name (FNV-1a 64, ADR-0029); a `KindId` is a hash of the kind name
   survive the swap (ADR-0029; the `replace_component_preserves_mailbox_identity`
   scenario guards it).
 
-**A kind id encodes its schema — drift fails loud, not silently.** Because the
-`KindId` hashes `name + schema`, a producer emitting `Thing v1 { a }` and a
-consumer expecting `Thing v2 { a, b }` compute *different* ids. The stale mail
-lands on "kind not found"; it can never silently garbage-decode into the wrong
-shape (ADR-0030). The fix for a mismatch is always "recompile both sides," and
-the failure points straight at it.
+**A kind id encodes its shape — drift fails loud, not silently.** The `KindId`
+hashes `name + schema`, where `name` is the kind's *declared* name
+(`#[kind(name = "…")]`) and `schema` is its *structural shape* — field types and
+positions only. The Rust type name and the field names are deliberately erased
+from the hash (ADR-0031/0032), so they're not what's being compared. What that
+buys: a producer emitting `Thing { a }` and a consumer expecting
+`Thing { a, b }` compute *different* ids, so the stale mail lands on "kind not
+found" and can never silently garbage-decode into the wrong shape (ADR-0030).
+The fix for a mismatch is always "recompile both sides," and the failure points
+straight at it. (Exactly which edits move the id — and which, like a field
+rename, leave it untouched — is the type system's story: [The type system]().)
 
 **A kind is self-describing.** Every kind carries a schema describing its bytes
 (ADR-0005/0031), so the wire layer can encode it from JSON and a recipient can
