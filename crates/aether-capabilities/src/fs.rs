@@ -555,7 +555,7 @@ mod native {
                 save = %roots.save.display(),
                 assets = %roots.assets.display(),
                 config = %roots.config.display(),
-                "io adapters registered",
+                "adapters registered",
             );
             Ok(Self { registry })
         }
