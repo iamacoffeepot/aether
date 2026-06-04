@@ -6,13 +6,16 @@ addressed to a *mailbox*, and the scheduler runs the handlers. Understand this
 page and every other subsystem reads as "an actor that receives some kinds."
 
 **The cast, in one breath.** Everything in the engine is an **actor** — a unit
-that owns some state and talks only by mail. Actors come in two forms: a
-**component** is a *wasm* actor loaded at runtime (your logic — and the thing
-that can be hot-swapped), and a **capability** is a *native* actor compiled
-into the substrate (render, audio, file I/O, and the rest). They're the same
-actor model and address each other identically; "component" vs "capability" is
-just wasm-and-loaded vs native-and-built-in. When this page says "component" it
-means specifically the wasm kind; "actor" means either. The deep dive is
+that owns some state and talks only by mail. Two kinds: a **capability** is a
+*native* actor compiled into the substrate (render, audio, file I/O, and the
+rest), and a **component** is an actor *loaded at runtime* across the engine's
+FFI boundary (the `FfiActor` ABI) — your logic, and the thing that gets
+hot-swapped. The split is built-in-native vs loaded-guest, **not a specific
+language**: the FFI boundary is target-agnostic by design, and WASM is simply
+the only guest target wired up today. So a component is WASM *right now*, but a
+C / C++ / other guest that speaks the ABI is the same category. All of them are
+one actor model and address each other identically. When this page says
+"component" it means a loaded FFI actor; "actor" means either kind. Deep dive:
 [Components & lifecycle]().
 
 > Governing ADRs: **ADR-0002** (mail-first actor model), **ADR-0005** (mail
@@ -30,9 +33,11 @@ buys four things the project treats as non-negotiable:
 - **Hot-swap.** A component can be unloaded and reloaded mid-run without the
   host contortions shared state would require — because nothing else holds a
   pointer into it; it only receives mail.
-- **Sandboxing.** Agent-authored code runs as a wasm **component** in a sandbox,
-  and can't be trusted with shared memory. Mail is its only channel, so the
-  component's reach is exactly the mailboxes it can address — nothing more.
+- **Sandboxing.** Agent-authored code can't be trusted with shared memory, so it
+  runs as a loaded **component** whose only channel is mail — its reach is
+  exactly the mailboxes it can address, nothing more. The current guest target,
+  WASM, backs that with a real memory sandbox (its own linear memory, traps
+  contained), which is a large part of why WASM is the target wired up first.
 - **Capability equals reachability — and so does observability.** There is no
   privileged side-channel, not even for Claude: what an actor can do is exactly
   what it can mail, so gating a build is just choosing which mailboxes are
