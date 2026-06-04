@@ -10,7 +10,7 @@
 # The systems
 
 - [Subsystem map](systems.md)
-  - [Mail, kinds & scheduling]()
+  - [Mail, kinds & scheduling](systems/mail-and-kinds.md)
   - [Components & lifecycle]()
   - [Rendering & camera]()
   - [Mesh authoring & the DSL]()
