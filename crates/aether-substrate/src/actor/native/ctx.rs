@@ -32,6 +32,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::registry::MonitorError;
 use crate::mail::ReplyTo;
 use crate::mail::mailer::Mailer;
+use crate::runtime::trace::SettlementHold;
 
 use super::{NativeActor, NativeDispatch};
 use crate::actor::native::InheritCtx;
@@ -189,22 +190,66 @@ impl<'a> NativeCtx<'a> {
         C: Send + 'static,
         F: FnOnce() -> O + Send + 'static,
     {
-        // Two deferred follow-ups, both behind this exact call-site API:
-        //   - per-source concurrency bound + pending queue
-        //     (InFlightDispatch::max_in_flight, default 4) so the paid-
-        //     endpoint rate limit (ADR-0050 §2) is honoured — lands with
-        //     the content-gen migration (#1313). PR1a dispatches at once.
-        //   - the per-request thread spawn below is a placeholder; the
-        //     scalable form is a reused work-stealing blocking pool,
-        //     isolated from the cooperative scheduler so blocking work
-        //     can't starve it (#1322).
-        //
-        // ADR-0093 §1 / ADR-0080 §12: eager-acquire the hold on this
-        // thread before spawning, exactly like `spawn_inherit`. The
-        // `MailId::NONE` root skips it — no chain to keep open.
-        let root = self.in_flight_root;
-        let hold = self.mailer().acquire_settlement_hold(root);
-        let reply_to = self.sender;
+        // ADR-0093 §1 / ADR-0080 §12: acquire the hold on the current root
+        // and capture the reply target from *this* handler, then hand them
+        // to the resumed core. The `MailId::NONE` root skips the hold — no
+        // chain to keep open. A bounded `TaskQueue` (aether-capabilities)
+        // instead captures `(hold, reply_to)` at accept time and replays
+        // them via `dispatch_blocking_resumed` when a slot frees, so a
+        // deferred request keeps its own chain held and replies to its own
+        // caller.
+        let hold = self.acquire_settlement_hold();
+        let reply_to = self.reply_target();
+        self.dispatch_blocking_resumed_with(hold, reply_to, cx, f)
+    }
+
+    /// Acquire a [`SettlementHold`] on the current in-flight root
+    /// (ADR-0080 §12). `MailId::NONE` (no inbound chain) yields a no-op
+    /// hold. Use to keep a chain open across deferred work — e.g. a
+    /// `TaskQueue` buffering an over-limit request holds it until a slot
+    /// frees, then moves it into [`Self::dispatch_blocking_resumed`].
+    #[must_use]
+    pub fn acquire_settlement_hold(&self) -> SettlementHold {
+        self.mailer().acquire_settlement_hold(self.in_flight_root)
+    }
+
+    /// ADR-0093: dispatch a blocking closure with an externally-supplied
+    /// `(hold, reply_to)` — *moved in* rather than read from this ctx.
+    /// [`Self::dispatch_blocking`] is sugar over this that supplies them
+    /// from the current handler. The bound/queue path (`TaskQueue`)
+    /// captures the hold + reply target when a request is accepted and
+    /// replays them here when the request finally dispatches from a later
+    /// handler turn — so the deferred work keeps its *own* chain held and
+    /// replies to its *own* caller, not the completion handler's.
+    pub fn dispatch_blocking_resumed<O, F>(
+        &mut self,
+        hold: SettlementHold,
+        reply_to: ReplyTo,
+        f: F,
+    ) -> DispatchId
+    where
+        O: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        self.dispatch_blocking_resumed_with(hold, reply_to, (), f)
+    }
+
+    /// Context-carrying core of the resumed dispatch — the single worker
+    /// spawn site for every `dispatch_blocking*` path. Inserts the ledger
+    /// entry with the supplied `(hold, reply_to, cx)` and spawns the
+    /// worker that runs `f`, parks its output, and wakes the actor.
+    pub fn dispatch_blocking_resumed_with<O, C, F>(
+        &mut self,
+        hold: SettlementHold,
+        reply_to: ReplyTo,
+        cx: C,
+        f: F,
+    ) -> DispatchId
+    where
+        O: Send + 'static,
+        C: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
         let id = self.binding.dispatch_insert(hold, reply_to, Box::new(cx));
 
         // The worker captures the binding + dispatch id, runs the
@@ -214,7 +259,9 @@ impl<'a> NativeCtx<'a> {
         // push. This is the one sanctioned raw spawn for the
         // hold-until-resolve shape (ADR-0093) — umbrella-aware because
         // the hold (held in the ledger, not here) keeps the chain open
-        // until the resolve.
+        // until the resolve. The per-request spawn is a placeholder; the
+        // scalable form is a reused work-stealing blocking pool isolated
+        // from the cooperative scheduler (#1322).
         let binding = Arc::clone(self.binding);
         let spawned = ThreadBuilder::new()
             .name(String::from("aether-dispatch-blocking"))
