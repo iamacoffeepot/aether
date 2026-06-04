@@ -1399,9 +1399,16 @@ impl<C: Chassis> BuiltChassis<C> {
         )
     }
 
-    /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
-    /// embedders that want to introspect live instanced actors
-    /// (test assertions, diagnostics) reach for this.
+    /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only,
+    /// introspection only: embedders that want to inspect live
+    /// instanced actors (test assertions, diagnostics) reach for this.
+    /// It is **not** the seam for in-handler fleet supervision or
+    /// fan-out-and-collect — orchestration is an async-layer concern,
+    /// not a handler one (ADR-0074 §9; `wait_reply` was retired in
+    /// #1201). A cap that needs to fan a request out to N peers does
+    /// it from the chassis driver, the DAG executor, or the
+    /// out-of-process client, never by walking this registry from a
+    /// handler.
     #[must_use]
     pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
         &self.booted.actor_registry
@@ -1536,9 +1543,16 @@ impl<C: Chassis> PassiveChassis<C> {
         )
     }
 
-    /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
-    /// embedders that want to introspect live instanced actors
-    /// (test assertions, diagnostics) reach for this.
+    /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only,
+    /// introspection only: embedders that want to inspect live
+    /// instanced actors (test assertions, diagnostics) reach for this.
+    /// It is **not** the seam for in-handler fleet supervision or
+    /// fan-out-and-collect — orchestration is an async-layer concern,
+    /// not a handler one (ADR-0074 §9; `wait_reply` was retired in
+    /// #1201). A cap that needs to fan a request out to N peers does
+    /// it from the chassis driver, the DAG executor, or the
+    /// out-of-process client, never by walking this registry from a
+    /// handler.
     #[must_use]
     pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
         &self.booted.actor_registry
