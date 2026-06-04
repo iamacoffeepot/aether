@@ -13,6 +13,10 @@
 - [The actor model](foundations/actor-model.md)
 - [Invariants & guarantees](foundations/invariants.md)
 
+# Driving the engine
+
+- [The MCP harness](mcp-harness.md)
+
 # The systems
 
 - [Subsystem map](systems.md)
