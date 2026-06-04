@@ -36,9 +36,10 @@ use crate::mail::mailer::Mailer;
 use super::{NativeActor, NativeDispatch};
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
+use crate::actor::native::dispatch_blocking::{DispatchId, TaskCompletionWake, TaskDone};
 use crate::actor::native::spawn_thread;
-use crate::mail::ReplyTarget;
-use std::thread::JoinHandle;
+use crate::mail::{Mail, ReplyTarget};
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
 /// actor's [`NativeBinding`] for outbound mail and carries the
@@ -146,6 +147,114 @@ impl<'a> NativeCtx<'a> {
         spawn_thread::spawn_detached::<A, F>(Arc::clone(self.binding), f)
     }
 
+    /// ADR-0093 hold-until-resolve dispatch: run the blocking closure
+    /// `f` on a worker thread and reply to the current caller in a
+    /// *later* handler turn, when the worker's output lands.
+    ///
+    /// The settlement hold is acquired **eagerly on this thread, before
+    /// the worker spawns** (so `HoldOpen` precedes this handler's
+    /// `Finished` and the #716 premature-settlement window is closed by
+    /// construction), then parked in the per-actor in-flight ledger
+    /// alongside the originating [`ReplyTo`] — it outlives the worker
+    /// (which holds nothing) and releases only when the completion is
+    /// resolved. `MailId::NONE` for [`Self::in_flight_root`] skips the
+    /// hold cleanly (no chain to hold), matching `spawn_inherit`.
+    ///
+    /// When `f` returns, the worker stores the output in the ledger's
+    /// completion slot and pushes a [`TaskCompletionWake`] to this
+    /// actor's own mailbox (the loopback-wake mechanism). The actor's
+    /// completion handler decodes that wake's [`DispatchId`] and calls
+    /// [`Self::take_task_done`] to rebuild the [`TaskDone`], then
+    /// `resolve`s it.
+    ///
+    /// Returns the [`DispatchId`] for *optional* cancellation; the happy
+    /// path ignores it.
+    pub fn dispatch_blocking<O, F>(&mut self, f: F) -> DispatchId
+    where
+        O: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        self.dispatch_blocking_with::<O, (), F>((), f)
+    }
+
+    /// Context-carrying variant of [`Self::dispatch_blocking`]
+    /// (ADR-0093 §5): parks `cx` in the in-flight ledger alongside the
+    /// hold + reply target so the completion handler receives a
+    /// [`TaskDone<O, C>`] whose [`TaskDone::context`] is `cx`. Use when
+    /// the completion genuinely needs actor-thread state the pure worker
+    /// shouldn't take.
+    pub fn dispatch_blocking_with<O, C, F>(&mut self, cx: C, f: F) -> DispatchId
+    where
+        O: Send + 'static,
+        C: Send + 'static,
+        F: FnOnce() -> O + Send + 'static,
+    {
+        // Two deferred follow-ups, both behind this exact call-site API:
+        //   - per-source concurrency bound + pending queue
+        //     (InFlightDispatch::max_in_flight, default 4) so the paid-
+        //     endpoint rate limit (ADR-0050 §2) is honoured — lands with
+        //     the content-gen migration (#1313). PR1a dispatches at once.
+        //   - the per-request thread spawn below is a placeholder; the
+        //     scalable form is a reused work-stealing blocking pool,
+        //     isolated from the cooperative scheduler so blocking work
+        //     can't starve it (#1322).
+        //
+        // ADR-0093 §1 / ADR-0080 §12: eager-acquire the hold on this
+        // thread before spawning, exactly like `spawn_inherit`. The
+        // `MailId::NONE` root skips it — no chain to keep open.
+        let root = self.in_flight_root;
+        let hold = self.mailer().acquire_settlement_hold(root);
+        let reply_to = self.sender;
+        let id = self.binding.dispatch_insert(hold, reply_to, Box::new(cx));
+
+        // The worker captures the binding + dispatch id, runs the
+        // blocking closure, parks its output in the ledger, then pushes
+        // the completion-wake to the actor's own mailbox. It touches no
+        // actor state beyond the ledger slot it owns and dies after the
+        // push. This is the one sanctioned raw spawn for the
+        // hold-until-resolve shape (ADR-0093) — umbrella-aware because
+        // the hold (held in the ledger, not here) keeps the chain open
+        // until the resolve.
+        let binding = Arc::clone(self.binding);
+        let spawned = ThreadBuilder::new()
+            .name(String::from("aether-dispatch-blocking"))
+            .spawn(move || {
+                let output = f();
+                binding.dispatch_fill_output(id, Box::new(output));
+                let wake = TaskCompletionWake { dispatch_id: id.0 };
+                let self_id = binding.self_mailbox();
+                binding.mailer().push(Mail::new(
+                    self_id,
+                    TaskCompletionWake::ID,
+                    wake.encode_into_bytes(),
+                    1,
+                ));
+            });
+        if let Err(e) = spawned {
+            tracing::error!(
+                target: "aether_substrate::actor::native::dispatch_blocking",
+                error = %e,
+                "failed to spawn dispatch_blocking worker thread",
+            );
+        }
+        id
+    }
+
+    /// ADR-0093 completion-routing entry point: remove the in-flight
+    /// ledger entry named by `id` (decoded from a landed
+    /// [`TaskCompletionWake`]) and rebuild its [`TaskDone<O, C>`]. The
+    /// (future) `#[handler(task)]` macro — and, for now, a hand-wired
+    /// completion handler — calls this and then `resolve`s the result.
+    ///
+    /// `None` for an unknown id (cancelled or double-landed) or an `O` /
+    /// `C` that doesn't match the dispatch's types (a wiring bug).
+    pub fn take_task_done<O: 'static, C: 'static>(
+        &mut self,
+        id: DispatchId,
+    ) -> Option<TaskDone<O, C>> {
+        self.binding.dispatch_take::<O, C>(id)
+    }
+
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
     /// dispatched. Read by outbound `send` paths to stamp
     /// `parent_mail` on child mail. `MailId::NONE` when the ctx was
@@ -202,6 +311,19 @@ impl<'a> NativeCtx<'a> {
     #[must_use]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
+    }
+
+    /// Reply to an explicit [`ReplyTo`] rather than the inbound's own
+    /// sender. The ADR-0093 hold-until-resolve path reaches for this:
+    /// [`TaskDone::resolve`](super::dispatch_blocking::TaskDone::resolve)
+    /// re-replies through the *originating* caller's reply target
+    /// (captured at dispatch, parked in the in-flight ledger), not the
+    /// completion-wake's sender (the worker thread's loopback mail, which
+    /// has no caller behind it). Routes through the same
+    /// [`NativeBinding::send_reply_for_handler`] path as
+    /// [`MailCtx::reply`].
+    pub fn reply_to_target<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
+        self.binding.send_reply_for_handler(sender, payload);
     }
 
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a

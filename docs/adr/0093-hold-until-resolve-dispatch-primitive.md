@@ -1,6 +1,6 @@
 # ADR-0093: Hold-until-resolve dispatch primitive
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 
 ## Context

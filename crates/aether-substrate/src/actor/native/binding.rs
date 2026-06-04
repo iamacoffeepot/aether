@@ -36,6 +36,7 @@
 //! traits in `aether_actor::actor::ctx` are the only cross-target
 //! abstraction.
 
+use std::any::Any;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
@@ -49,6 +50,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+use crate::runtime::trace::SettlementHold;
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
@@ -202,6 +204,16 @@ pub struct NativeBinding {
     /// eager per-mail route. `Mutex` only for `&self` interior mutability —
     /// driven solely from this actor's dispatch thread, so uncontended.
     blob_producer: Mutex<Option<super::blob_work::BlobProducer>>,
+    /// ADR-0093: the hold-until-resolve in-flight ledger. Maps a
+    /// [`DispatchId`](super::dispatch_blocking::DispatchId) minted by
+    /// [`super::ctx::NativeCtx::dispatch_blocking`] to its held
+    /// `(SettlementHold, ReplyTo, context)` plus the worker's eventual
+    /// output. The actor thread writes the entry at dispatch and reads +
+    /// removes it when the completion-wake lands; the worker thread fills
+    /// the output slot once. `Mutex` only for `&self` interior
+    /// mutability — the same single-logical-writer discipline as
+    /// `outbound` / `blob_producer`.
+    inflight: super::dispatch_blocking::InflightLedger,
 }
 
 impl NativeBinding {
@@ -236,6 +248,7 @@ impl NativeBinding {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             outbound: Mutex::new(OutboundBuffer::new()),
             blob_producer: Mutex::new(None),
+            inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
         }
     }
 
@@ -798,6 +811,70 @@ impl NativeBinding {
     /// reply with the request it sent.
     pub fn prev_correlation(&self) -> u64 {
         self.correlation.load(Ordering::Acquire)
+    }
+}
+
+/// ADR-0093 hold-until-resolve dispatch: the `&self`-interior-mutability
+/// bridge between [`super::ctx::NativeCtx`]'s dispatch primitive and the
+/// per-actor [`super::dispatch_blocking::InflightTable`]. Each method
+/// takes the table lock for one operation — mint+insert at dispatch,
+/// fill-output from the worker, take at completion — matching the
+/// `outbound` / `blob_producer` locking pattern (uncontended, single
+/// logical writer).
+impl NativeBinding {
+    /// Insert a freshly-minted in-flight dispatch entry and return its
+    /// [`DispatchId`](super::dispatch_blocking::DispatchId). Called on
+    /// the actor thread at dispatch time, after the hold is acquired and
+    /// before the worker spawns.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_insert(
+        &self,
+        hold: SettlementHold,
+        reply_to: ReplyTo,
+        context: Box<dyn Any + Send>,
+    ) -> super::dispatch_blocking::DispatchId {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_insert(hold, reply_to, context)
+    }
+
+    /// Fill the worker's output into the named dispatch's completion
+    /// slot. Called once, on the worker thread, before it pushes the
+    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake).
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_fill_output(
+        &self,
+        id: super::dispatch_blocking::DispatchId,
+        output: Box<dyn Any + Send>,
+    ) {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_fill_output(id, output);
+    }
+
+    /// Remove the named dispatch entry and rebuild its
+    /// [`TaskDone`](super::dispatch_blocking::TaskDone). Called on the
+    /// actor thread when the completion-wake mail lands.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_take<O: 'static, C: 'static>(
+        &self,
+        id: super::dispatch_blocking::DispatchId,
+    ) -> Option<super::dispatch_blocking::TaskDone<O, C>> {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_take(id)
     }
 }
 
