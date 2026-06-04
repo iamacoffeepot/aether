@@ -49,7 +49,19 @@ struct NoteOn { instrument: u8, pitch: u8, velocity: f32 }
 So you write `#[derive(Kind, Schema)]` on a message you send, and
 `#[derive(Schema)]` alone on a helper struct that only appears as a field of one.
 That gives a kind three compile-time constants — `NAME` and `ID` from `Kind`,
-`SCHEMA` from `Schema`.
+`SCHEMA` from `Schema`. In practice `Schema` is derived on far more types than
+`Kind`: every field-only struct has one, but isn't independently sendable.
+
+Why not just fold `Schema` into `Kind`, so one derive does everything? Because a
+kind's schema is *composed* from its fields' schemas by trait dispatch — the
+derive emits `<Self as Schema>::SCHEMA`, which recurses into
+`<FieldType as Schema>::SCHEMA` for each field. For that to resolve, every field
+type — including nested structs that are never mailed — has to implement `Schema`
+on its own, so `Schema` must be a standalone derive regardless. Given that,
+`Kind` *reads* the schema rather than recomputing it; merging the two would
+duplicate the schema walk that ADR-0031/0032 deliberately collapsed into one
+trait-dispatched path. (It's the `Serialize` / `Deserialize` split: one trait,
+one derive.)
 
 Because `ID` and `SCHEMA` are `const`, there is no host round-trip to learn a
 kind's identity or shape — `Kind::ID` is a compile-time value. And because the
