@@ -1017,6 +1017,20 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         for impl_item in &actor_impl.items {
             match impl_item {
                 ImplItem::Fn(f) if f.attrs.iter().any(attr_is_handler) => {
+                    // ADR-0093 §3: `#[handler(task)]` completions route by
+                    // their `TaskDone<O, C>` output type, not a kind id —
+                    // they carry no mail kind and emit no `HandlesKind`
+                    // marker, so skip them when collecting the mail-handler
+                    // kinds. Only `#[handler]` / `#[handler(mail)]` feed the
+                    // marker set.
+                    let handler_attr = f
+                        .attrs
+                        .iter()
+                        .find(|a| attr_is_handler(a))
+                        .expect("matched on attr_is_handler above");
+                    if parse_handler_variant(handler_attr)? == HandlerVariant::Task {
+                        continue;
+                    }
                     let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig)?;
                     handler_kinds.push(kind_ty);
                 }

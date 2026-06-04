@@ -15,9 +15,11 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use aether_data::Kind;
+use aether_data::{Kind, ReplyTo};
 use aether_kinds::descriptors;
-use aether_substrate::actor::native::{NativeActor, NativeDispatch};
+use aether_substrate::actor::native::binding::NativeBinding;
+use aether_substrate::actor::native::ctx::NativeCtx;
+use aether_substrate::actor::native::{NativeActor, NativeDispatch, TaskCompletionWake};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -99,6 +101,54 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
     let store = Arc::new(HandleStore::new(1024 * 1024));
     let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
     (mailer, rx)
+}
+
+/// Drive an ADR-0093 dispatch completion through `cap`'s `#[handler(task)]`
+/// arm the way the chassis trampoline would.
+///
+/// A content-gen cap's generate handler now calls
+/// `TaskQueue::submit` → `ctx.dispatch_blocking`, which spawns a real
+/// worker thread that runs the closure (the stub adapter + staging) and
+/// pushes a [`TaskCompletionWake`] at the cap's own mailbox. Under
+/// `new_for_test` that mailbox is unregistered, so the wake bubbles to the
+/// loopback outbound as an [`EgressEvent::UnresolvedMail`]. This helper
+/// drains egress until that wake lands, then routes it through
+/// `cap.__aether_dispatch_envelope(TaskCompletionWake::ID, payload)` — the
+/// same entry the chassis dispatcher uses — so the cap's task handler
+/// runs `done.resolve(ctx)` (re-replying the worker's staged result to the
+/// original caller through the framework-held reply target) and
+/// `tasks.on_complete(ctx)`.
+///
+/// The driving `NativeCtx` carries no inbound reply target ([`ReplyTo::NONE`]):
+/// the completion's reply routes through the reply target captured at
+/// dispatch and parked in the framework's in-flight ledger, not this ctx.
+pub fn drive_task_completion<A>(
+    cap: &mut A,
+    binding: &Arc<NativeBinding>,
+    rx: &Receiver<EgressEvent>,
+) where
+    A: NativeDispatch,
+{
+    let payload = loop {
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test: dispatch completion wake arrives within deadline");
+        if let EgressEvent::UnresolvedMail {
+            kind_id, payload, ..
+        } = event
+            && kind_id == TaskCompletionWake::ID
+        {
+            break payload;
+        }
+    };
+    let mut ctx = NativeCtx::new(
+        binding,
+        ReplyTo::NONE,
+        aether_data::MailId::NONE,
+        aether_data::MailId::NONE,
+    );
+    cap.__aether_dispatch_envelope(&mut ctx, TaskCompletionWake::ID, &payload)
+        .expect("test: task completion routes to a #[handler(task)] arm");
 }
 
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding

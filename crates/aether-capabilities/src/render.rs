@@ -381,8 +381,9 @@ mod native {
             // `Finished`; the hold rides on `PendingCapture` and drops
             // with `req` after `outbound.send_reply` on the render
             // thread (`desktop/driver.rs` line ~568, `test_bench/
-            // bench.rs` line ~1019). Mirrors the `contentgen::dispatch`
-            // submit path. The early-return branches above reply
+            // bench.rs` line ~1019). Mirrors the ADR-0093
+            // hold-until-resolve dispatch's eager-acquire. The
+            // early-return branches above reply
             // synchronously inside this handler's own dispatch window,
             // so they're naturally covered by the handler's in-flight
             // `Finished` bracket and don't need the hold.

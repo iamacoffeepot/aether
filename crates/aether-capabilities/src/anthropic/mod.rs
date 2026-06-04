@@ -6,13 +6,15 @@
 //! schemas, the routing chosen by the kind name.
 //!
 //! Long-tail calls (a multi-second Messages request, a `claude`
-//! subprocess) ride issue 1013's spawn-and-die dispatch helper: an
-//! ephemeral OS thread per in-flight request runs the blocking call and
-//! routes the reply back through the cap's `Mailer` loopback, so the
-//! single-threaded actor's mail intake isn't blocked. The cap holds an
-//! `InFlightDispatch` (`in_flight` counter + `pending` queue +
-//! `request_id` correlation) in its lock-free actor state — no
-//! `Semaphore`, no `Mutex`.
+//! subprocess) ride the ADR-0093 hold-until-resolve dispatch: the
+//! generate handler submits the blocking call to a
+//! [`TaskQueue`](crate::contentgen::TaskQueue), which hands it to
+//! `ctx.dispatch_blocking` — the substrate spawns an ephemeral worker,
+//! holds the chain open in its in-flight ledger, and routes the
+//! completion to the cap's `#[handler(task)]` as a `TaskDone`. The cap
+//! holds only the queue's slot count + pending queue (the per-cap
+//! concurrency bound) in its lock-free actor state — no `Semaphore`, no
+//! `Mutex`.
 //!
 //! The kind is the caller-stable contract; the `AnthropicAdapter` is
 //! the vendor-compat layer (ADR-0050 §4). Production wires
@@ -256,16 +258,14 @@ mod native {
         map_adapter_error,
     };
     use crate::contentgen::adapter::{AdapterUsage, AnthropicResponse};
-    use crate::contentgen::dispatch::{BlockingCall, InFlightDispatch};
+    use crate::contentgen::task_queue::TaskQueue;
     use aether_actor::{OutboundReply, actor};
-    use aether_data::{Kind, KindId, MailboxId, ReplyTo};
     use aether_kinds::{AnthropicError, Message, Role, Usage};
-    use aether_substrate::Mailer;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
 
-    /// Which send path a request rode. The reply-landing handler uses
-    /// it only to pick the result kind; correlation is by `request_id`.
+    /// Which send path a request rode. The generate handler threads it
+    /// into the worker closure to pick the blocking call + result kind.
     #[derive(Copy, Clone)]
     enum SendPath {
         Messages,
@@ -273,39 +273,31 @@ mod native {
     }
 
     /// `aether.anthropic` mailbox cap. Owns the resolved adapter and the
-    /// spawn-and-die dispatch helper. Single-threaded post-ADR-0038, so
-    /// the `InFlightDispatch` state lives in plain fields with no lock.
+    /// cap-level rate-limit queue over the ADR-0093 dispatch primitive.
+    /// Single-threaded post-ADR-0038, so the queue state lives in plain
+    /// fields with no lock.
     pub struct AnthropicCapability {
         adapter: Arc<dyn AnthropicAdapter>,
-        dispatch: InFlightDispatch,
-        mailer: Arc<Mailer>,
-        self_mailbox: MailboxId,
+        tasks: TaskQueue,
     }
 
     #[cfg(test)]
     impl AnthropicCapability {
         /// Test-only constructor. Production boots through
         /// `Builder::with_actor::<AnthropicCapability>(config)`; tests
-        /// hand in a stub adapter + test mailer directly.
-        pub(crate) fn from_parts(
-            adapter: Arc<dyn AnthropicAdapter>,
-            mailer: Arc<Mailer>,
-            self_mailbox: MailboxId,
-            max_in_flight: usize,
-        ) -> Self {
+        /// hand in a stub adapter directly.
+        pub(crate) fn from_parts(adapter: Arc<dyn AnthropicAdapter>, max_in_flight: usize) -> Self {
             Self {
                 adapter,
-                dispatch: InFlightDispatch::new(max_in_flight),
-                mailer,
-                self_mailbox,
+                tasks: TaskQueue::new(max_in_flight),
             }
         }
 
-        /// White-box accessor for tests asserting the dispatch helper's
-        /// in-flight counter (e.g. that a synchronous validation error
-        /// never spawned work).
+        /// White-box accessor for tests asserting the queue's in-flight
+        /// counter (e.g. that a synchronous validation error never spawned
+        /// work).
         pub(crate) fn test_in_flight(&self) -> usize {
-            self.dispatch.in_flight()
+            self.tasks.in_flight()
         }
     }
 
@@ -354,85 +346,29 @@ mod native {
     }
 
     impl AnthropicCapability {
-        /// Common path for both send kinds: validate the model, stash
-        /// the caller's `ReplyTo`, and hand the blocking call to the
-        /// spawn-and-die helper. Unknown model errors synchronously
-        /// before any dispatch. The handler flattens the conversation
-        /// into `req` so this path takes a pre-built [`AnthropicRequest`]
-        /// rather than the raw kind fields.
-        fn dispatch_send(
-            &mut self,
+        /// Gate a request's model before any dispatch. Returns `false`
+        /// (after replying `UnknownModel`) when the Messages path's
+        /// supported-model table rejects it; `true` to proceed. Empty
+        /// `supported` = accept-any (disabled / CLI passthrough); the CLI
+        /// path always passes through.
+        fn gate_model(
+            &self,
             ctx: &mut NativeCtx<'_>,
             path: SendPath,
             request_id: u64,
-            req: AnthropicRequest,
-        ) {
+            model: &str,
+        ) -> bool {
             let supported = self.adapter.supported_models();
-            // Empty `supported` = accept-any (disabled / CLI passthrough).
-            // The CLI path always passes through; only the Messages path
-            // gates on a non-empty table.
             let gate = matches!(path, SendPath::Messages) && !supported.is_empty();
-            if gate && !supported.iter().any(|m| m == &req.model) {
+            if gate && !supported.iter().any(|m| m == model) {
                 let err = AnthropicError::UnknownModel {
-                    model: req.model,
+                    model: model.to_string(),
                     supported,
                 };
                 Self::reply_err(ctx, path, request_id, err);
-                return;
+                return false;
             }
-
-            let reply_to = OutboundReply::reply_target(ctx).unwrap_or(ReplyTo::NONE);
-            let root = ctx.in_flight_root();
-            let adapter = Arc::clone(&self.adapter);
-
-            let call: BlockingCall = Box::new(move || {
-                let result = match path {
-                    SendPath::Messages => adapter.messages_send(req),
-                    SendPath::Cli => adapter.cli_send(req),
-                };
-                build_result_mail(path, request_id, result)
-            });
-
-            self.dispatch.submit(
-                &self.mailer,
-                self.self_mailbox,
-                root,
-                request_id,
-                reply_to,
-                call,
-            );
-        }
-
-        /// Re-reply to the original caller for a landed result mail.
-        /// `take_landed` pops the stashed `ReplyTo` + settlement hold
-        /// (FIFO-independent correlation by `request_id`);
-        /// `on_reply_landed` frees the in-flight slot and drains the
-        /// next pending request.
-        ///
-        /// ADR-0080 §12 ordering: re-reply through `reply_to` first,
-        /// then let the `LandedReply` (carrying the hold) drop at the
-        /// end of this scope so the re-reply's `Sent` event is queued
-        /// before the guard's `Release` — settlement fires exactly once
-        /// the reply is on the wire (iamacoffeepot/aether#1031).
-        fn on_result_landed<K>(&mut self, ctx: &mut NativeCtx<'_>, request_id: u64, result: &K)
-        where
-            K: Kind + serde::Serialize,
-        {
-            if let Some(landed) = self.dispatch.take_landed(request_id) {
-                OutboundReply::reply_to(ctx, landed.reply_to, result);
-                // `landed.hold` drops here, after the re-reply — `Sent`
-                // precedes `Release`.
-                drop(landed);
-            } else {
-                tracing::warn!(
-                    target: "aether_capabilities::anthropic",
-                    request_id,
-                    "result landed for an unknown request_id (double-landing?)",
-                );
-            }
-            let _ = self
-                .dispatch
-                .on_reply_landed(&self.mailer, self.self_mailbox);
+            true
         }
 
         /// Reply an `Err` synchronously (model validation failure)
@@ -450,31 +386,6 @@ mod native {
                 SendPath::Cli => {
                     OutboundReply::reply(ctx, &CliSendResult::Err { request_id, error });
                 }
-            }
-        }
-    }
-
-    /// Convert an adapter result into the `(KindId, payload)` loopback
-    /// mail the ephemeral thread lands on the cap's own mailbox.
-    fn build_result_mail(
-        path: SendPath,
-        request_id: u64,
-        result: Result<AnthropicResponse, String>,
-    ) -> (KindId, Vec<u8>) {
-        match path {
-            SendPath::Messages => {
-                let reply = messages_reply(request_id, result);
-                (
-                    KindId(<MessagesSendResult as Kind>::ID.0),
-                    reply.encode_into_bytes(),
-                )
-            }
-            SendPath::Cli => {
-                let reply = cli_reply(request_id, result);
-                (
-                    KindId(<CliSendResult as Kind>::ID.0),
-                    reply.encode_into_bytes(),
-                )
             }
         }
     }
@@ -533,12 +444,10 @@ mod native {
         /// loopback result mails. The adapter is built immediately so a
         /// key-absent boot still loads (replying Unauthorized) rather
         /// than warn-dropping.
-        fn init(config: AnthropicConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(config: AnthropicConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 adapter: build_adapter(&config),
-                dispatch: InFlightDispatch::new(config.max_in_flight),
-                mailer: ctx.mailer(),
-                self_mailbox: ctx.self_id(),
+                tasks: TaskQueue::new(config.max_in_flight),
             })
         }
 
@@ -551,6 +460,10 @@ mod native {
         /// thread; the reply lands when the call returns.
         #[handler]
         fn on_messages_send(&mut self, ctx: &mut NativeCtx<'_>, mail: MessagesSend) {
+            let request_id = mail.request_id;
+            if !self.gate_model(ctx, SendPath::Messages, request_id, &mail.model) {
+                return;
+            }
             let req = AnthropicRequest {
                 prompt: flatten_prompt(&mail.messages),
                 model: mail.model,
@@ -558,7 +471,11 @@ mod native {
                 max_tokens: mail.max_tokens,
                 temperature: mail.temperature,
             };
-            self.dispatch_send(ctx, SendPath::Messages, mail.request_id, req);
+            let adapter = Arc::clone(&self.adapter);
+            self.tasks.submit(ctx, move || {
+                let result = adapter.messages_send(req);
+                messages_reply(request_id, result)
+            });
         }
 
         /// Run a `claude`-subprocess completion off the dispatcher
@@ -594,6 +511,9 @@ mod native {
                 Self::reply_err(ctx, SendPath::Cli, mail.request_id, error);
                 return;
             }
+            let request_id = mail.request_id;
+            // CLI passes the model through to `claude` (no gate), so no
+            // `gate_model` call here.
             let req = AnthropicRequest {
                 prompt: flatten_prompt(&mail.messages),
                 model: mail.model,
@@ -601,35 +521,31 @@ mod native {
                 max_tokens: mail.max_tokens,
                 temperature: mail.temperature,
             };
-            self.dispatch_send(ctx, SendPath::Cli, mail.request_id, req);
+            let adapter = Arc::clone(&self.adapter);
+            self.tasks.submit(ctx, move || {
+                let result = adapter.cli_send(req);
+                cli_reply(request_id, result)
+            });
         }
 
-        /// Loopback landing for a completed Messages call. The ephemeral
-        /// thread fired this at the cap's own mailbox; re-reply to the
-        /// stashed original caller and free the in-flight slot.
-        // The decoded payload arrives by value per the ADR-0033 dispatch
-        // ABI; the handler re-replies the same value by ref, so clippy
-        // sees it as unconsumed.
-        #[allow(clippy::needless_pass_by_value)]
-        #[handler]
-        fn on_messages_result(&mut self, ctx: &mut NativeCtx<'_>, mail: MessagesSendResult) {
-            let request_id = match &mail {
-                MessagesSendResult::Ok { request_id, .. }
-                | MessagesSendResult::Err { request_id, .. } => *request_id,
-            };
-            self.on_result_landed(ctx, request_id, &mail);
+        /// ADR-0093 completion for a finished Messages call: re-reply the
+        /// worker's result to the original caller (drops the hold), then
+        /// free the in-flight slot (draining the next pending request).
+        #[handler(task)]
+        fn on_messages_done(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            done: TaskDone<MessagesSendResult>,
+        ) {
+            done.resolve(ctx);
+            self.tasks.on_complete(ctx);
         }
 
-        /// Loopback landing for a completed CLI call.
-        #[allow(clippy::needless_pass_by_value)]
-        #[handler]
-        fn on_cli_result(&mut self, ctx: &mut NativeCtx<'_>, mail: CliSendResult) {
-            let request_id = match &mail {
-                CliSendResult::Ok { request_id, .. } | CliSendResult::Err { request_id, .. } => {
-                    *request_id
-                }
-            };
-            self.on_result_landed(ctx, request_id, &mail);
+        /// ADR-0093 completion for a finished CLI call.
+        #[handler(task)]
+        fn on_cli_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<CliSendResult>) {
+            done.resolve(ctx);
+            self.tasks.on_complete(ctx);
         }
     }
 
@@ -643,7 +559,8 @@ mod native {
             AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
         };
         use crate::test_chassis::{
-            TestChassis, decode_session_reply, fresh_substrate, test_mailer_and_rx,
+            TestChassis, decode_session_reply, drive_task_completion, fresh_substrate,
+            test_mailer_and_rx,
         };
         use aether_actor::Actor;
         use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
@@ -710,11 +627,10 @@ mod native {
             drop(chassis);
         }
 
-        /// Drive a stub Messages request through the dispatch loop and
-        /// assert the `Ok` reply lands. The cap submits to the spawn-and-die
-        /// helper; the ephemeral thread fires a loopback result mail at the
-        /// cap's own mailbox (id 0). We drive that landing directly by
-        /// invoking the result handler with the decoded loopback payload.
+        /// Drive a stub Messages request end-to-end through the ADR-0093
+        /// dispatch primitive: the cap submits to the `TaskQueue`, the real
+        /// worker runs the stub call, pushes a completion wake, and the
+        /// cap's `#[handler(task)]` re-replies the `Ok` to the caller.
         #[test]
         fn anthropic_stub_messages() {
             let (mailer, rx) = test_mailer_and_rx();
@@ -723,8 +639,6 @@ mod native {
                 Arc::new(RecordingStub {
                     inner: StubAnthropicAdapter::default(),
                 }),
-                Arc::clone(&mailer),
-                cap_mailbox,
                 4,
             );
             let transport = Arc::new(NativeBinding::new_for_test(
@@ -748,30 +662,9 @@ mod native {
                     system: None,
                 },
             );
-            // The ephemeral thread lands a loopback `MessagesSendResult` at
-            // mailbox 0. With `new_for_test` there's no real inbox, so the
-            // loopback push routes to the loopback outbound — drive the
-            // landing directly with the canned result the stub produces.
-            let mut landing_ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
-            cap.on_messages_result(
-                &mut landing_ctx,
-                MessagesSendResult::Ok {
-                    request_id: 7,
-                    text: "stub completion".to_string(),
-                    model_used: "claude-test".to_string(),
-                    usage: aether_kinds::Usage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        wall_clock_ms: 0,
-                        cost_micros: Some(0),
-                    },
-                },
-            );
+            // The worker runs the stub call and pushes the completion wake;
+            // route it through the cap's task handler.
+            drive_task_completion(&mut cap, &transport, &rx);
             match decode_reply::<MessagesSendResult>(&rx) {
                 MessagesSendResult::Ok {
                     request_id, text, ..
@@ -792,8 +685,6 @@ mod native {
                 Arc::new(RecordingStub {
                     inner: StubAnthropicAdapter::default(),
                 }),
-                Arc::clone(&mailer),
-                cap_mailbox,
                 4,
             );
             let transport = Arc::new(NativeBinding::new_for_test(
@@ -847,8 +738,6 @@ mod native {
                 Arc::new(RecordingStub {
                     inner: StubAnthropicAdapter::default(),
                 }),
-                Arc::clone(mailer),
-                cap_mailbox,
                 4,
             );
             let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), cap_mailbox));
@@ -957,8 +846,6 @@ mod native {
                         Duration::from_secs(30),
                     ),
                 }),
-                Arc::clone(&mailer),
-                cap_mailbox,
                 4,
             );
             let transport = Arc::new(NativeBinding::new_for_test(
@@ -982,16 +869,10 @@ mod native {
                     system: None,
                 },
             );
-            // The CLI runs synchronously on an ephemeral thread; drive its
-            // loopback landing with the result the backend produces.
-            let result = build_cli_result_for_test(&cap, 5);
-            let mut landing_ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
-            cap.on_cli_result(&mut landing_ctx, result);
+            // The CLI backend runs on the real worker against a missing
+            // binary, yielding CliNotFound; route the completion through the
+            // cap's task handler.
+            drive_task_completion(&mut cap, &transport, &rx);
             match decode_reply::<CliSendResult>(&rx) {
                 CliSendResult::Err {
                     request_id,
@@ -1008,12 +889,8 @@ mod native {
         fn anthropic_disabled_messages_replies_unauthorized() {
             let (mailer, rx) = test_mailer_and_rx();
             let cap_mailbox = MailboxId(0);
-            let mut cap = AnthropicCapability::from_parts(
-                Arc::new(DisabledAnthropicAdapter::default()),
-                Arc::clone(&mailer),
-                cap_mailbox,
-                4,
-            );
+            let mut cap =
+                AnthropicCapability::from_parts(Arc::new(DisabledAnthropicAdapter::default()), 4);
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 cap_mailbox,
@@ -1036,22 +913,10 @@ mod native {
                 },
             );
             // Disabled adapter has an empty supported-models table, so the
-            // model gate is skipped and the request dispatches; the
-            // ephemeral thread produces the Unauthorized result. Drive the
-            // landing with that result.
-            let mut landing_ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
-            cap.on_messages_result(
-                &mut landing_ctx,
-                MessagesSendResult::Err {
-                    request_id: 9,
-                    error: AnthropicError::Unauthorized,
-                },
-            );
+            // model gate is skipped and the request dispatches; the worker
+            // produces the Unauthorized result. Route the completion through
+            // the cap's task handler.
+            drive_task_completion(&mut cap, &transport, &rx);
             match decode_reply::<MessagesSendResult>(&rx) {
                 MessagesSendResult::Err {
                     request_id,
@@ -1084,20 +949,10 @@ mod native {
             assert!(!resp.text.is_empty());
         }
 
-        // Helpers reaching into the cap for white-box assertions. Both stay
-        // test-local; the cap's `dispatch` field is private, so we expose
-        // narrow accessors here via a re-export shim.
+        // White-box accessor for the queue's in-flight count; the cap's
+        // `tasks` field is private, so tests read it through this shim.
         fn cap_in_flight(cap: &AnthropicCapability) -> usize {
             cap.test_in_flight()
-        }
-
-        fn build_cli_result_for_test(_cap: &AnthropicCapability, request_id: u64) -> CliSendResult {
-            // The missing-binary CLI backend yields CliNotFound; mirror what
-            // the ephemeral thread would have produced.
-            CliSendResult::Err {
-                request_id,
-                error: AnthropicError::CliNotFound,
-            }
         }
     }
 }

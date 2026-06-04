@@ -1100,8 +1100,8 @@ mod tests {
     }
 
     /// iamacoffeepot/aether#1031 end-to-end: a `Call` against an actor
-    /// that replies through the content-gen `InFlightDispatch`
-    /// (spawned worker -> loopback result -> re-reply) must still
+    /// that replies through the ADR-0093 hold-until-resolve dispatch
+    /// (spawned worker -> completion wake -> re-reply) must still
     /// produce a `ReplyEvent` followed by a `ReplyEnd`. The settlement
     /// hold keeps the chain open across the spawn, so the RPC server's
     /// settlement subscription wakes only *after* the deferred reply
@@ -1192,7 +1192,7 @@ mod tests {
     /// (typically the RPC server holding the wire `cid`'s in-flight
     /// entry), so child replies — sync or deferred — bubble through to
     /// the wire as `ReplyEvent`s, and settlement still fires only after
-    /// each `InFlightDispatch` hold drops.
+    /// each hold-until-resolve dispatch's hold drops.
     ///
     /// Test asserts: TWO `ReplyEvent`s (one `DeferredEchoReply` per
     /// request), then exactly ONE `ReplyEnd`. Order of the two events is

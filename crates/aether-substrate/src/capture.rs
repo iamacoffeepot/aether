@@ -58,9 +58,9 @@ pub struct PendingCapture {
     /// cap handler's `Finished` lands before the readback reply, the
     /// trace observer settles the chain, and the wire `Call` ends with
     /// zero reply events (iamacoffeepot/aether#1273). The pattern
-    /// mirrors `contentgen::dispatch` (acquired before queue handoff so
-    /// `HoldOpen` is visible to the settlement counter ahead of
-    /// `Finished`).
+    /// mirrors the ADR-0093 hold-until-resolve dispatch (acquired before
+    /// the queue handoff so `HoldOpen` is visible to the settlement
+    /// counter ahead of `Finished`).
     ///
     /// The field is never read — its sole job is to keep the
     /// [`SettlementHold`]'s `Drop` impl tied to the lifetime of this

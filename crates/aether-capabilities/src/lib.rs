@@ -90,8 +90,8 @@ pub use dag::DagCapability;
 // provider caps (issue 1014 / 1015) embed these.
 #[cfg(not(target_arch = "wasm32"))]
 pub use contentgen::{
-    AnthropicAdapter, BlockingCall, GeminiAdapter, InFlightDispatch, StubAnthropicAdapter,
-    StubGeminiAdapter, stage_gen_output,
+    AnthropicAdapter, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter, TaskQueue,
+    stage_gen_output,
 };
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). It re-exports only on the native

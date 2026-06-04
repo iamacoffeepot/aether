@@ -84,8 +84,8 @@ mod native {
         /// `cid`'s in-flight entry) rather than the default
         /// `Component(self_mailbox)`. This trace cap is a re-dispatcher
         /// with no handler for child reply kinds, so without the
-        /// forward each child's deferred reply (the `InFlightDispatch`
-        /// spawn-and-die pattern in content-gen caps) lands here and
+        /// forward each child's deferred reply (the ADR-0093
+        /// hold-until-resolve dispatch in content-gen caps) lands here and
         /// silently drops, leaving the wire call with no `ReplyEvent`s.
         /// Forwarding lets every child's reply (sync or deferred)
         /// bubble straight to the original caller with the same
