@@ -67,6 +67,21 @@ pub struct Gpu {
     /// pipeline as an extra inside the same render pass.
     wire_pipeline: Option<wgpu::RenderPipeline>,
     render_handles: RenderHandles,
+    /// Submission index of the previous frame's `queue.submit`, drained
+    /// at the top of the next `render_impl` to bound the window present
+    /// loop to one frame in flight (iamacoffeepot/aether#1312).
+    ///
+    /// Without this bound the loop submits + presents as fast as
+    /// `nextDrawable` backpressure allows (up to `maximumDrawableCount`
+    /// = 3 frames of command buffers overlapping). Under sustained
+    /// rendering that exposes a use-after-free in Metal/IOGPU's command-
+    /// buffer completion path (`IOGPUMetalCommandBufferStorageReset` on
+    /// `com.Metal.CompletionQueueDispatch`): the completion handler for
+    /// an earlier frame tears its command buffer down while the main
+    /// thread is acquiring/submitting a later one. Draining the prior
+    /// submission first means that teardown runs while this thread is
+    /// parked in `device.poll`, never racing the next submit.
+    last_submission: Option<wgpu::SubmissionIndex>,
 }
 
 /// Wireframe rendering mode, set at boot via `AETHER_WIREFRAME`.
@@ -276,6 +291,7 @@ impl Gpu {
             limits,
             wire_pipeline,
             render_handles,
+            last_submission: None,
         }
     }
 
@@ -315,6 +331,28 @@ impl Gpu {
     fn render_impl(&mut self, capture: bool) -> Option<Result<Vec<u8>, String>> {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
+
+        // Bound the loop to one frame in flight (iamacoffeepot/aether#1312):
+        // block until the previous frame's submission has fully completed
+        // before recording the next. This drains the prior frame's command-
+        // buffer completion (and its Metal/IOGPU teardown) while this thread
+        // is parked here, so it can't race the acquire/submit below — and it
+        // serialises writes to the shared persistent vertex/camera buffers
+        // against the prior frame's reads. `poll` errors (a lost device)
+        // fall through to `acquire_surface_texture`, which reconfigures.
+        if let Some(index) = self.last_submission.take()
+            && let Err(error) = device.poll(wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: None,
+            })
+        {
+            tracing::warn!(
+                target: "aether_substrate::render",
+                ?error,
+                "device.poll for previous frame failed; continuing",
+            );
+        }
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame encoder"),
         });
@@ -378,7 +416,11 @@ impl Gpu {
             });
         }
 
-        queue.submit(iter::once(encoder.finish()));
+        // Retain the submission index so the next frame can wait on it
+        // (see `last_submission`). The present command buffer wgpu creates
+        // internally is committed after this submit and bounded by
+        // `nextDrawable`, so it needs no separate tracking.
+        self.last_submission = Some(queue.submit(iter::once(encoder.finish())));
         if let Some(tex) = surface_tex {
             tex.present();
         }
