@@ -73,12 +73,27 @@ if [[ -z "$OWNER" || -z "$PROJECT" ]]; then
     exit 1
 fi
 
-# Phase field + options, resolved live (never stale).
-PROJECT_NODE=$(gh project view "$PROJECT" --owner "$OWNER" --format json 2>/dev/null | jq -r '.id // empty')
-FIELDS_JSON=$(gh project field-list "$PROJECT" --owner "$OWNER" --format json 2>/dev/null || echo '{}')
+# Phase field + options, resolved live (never stale). Address the project as
+# "@me" (the authenticated user) rather than by owner login: `gh project
+# --owner <login>` resolves the owner by querying both user(login) and
+# organization(login), and on some gh versions the org half's error for a User
+# login poisons the response into "unknown owner type". "@me" routes through
+# `viewer`, skipping that lookup. (Assumes the board is owned by the token's
+# user — true for this release board; an org-owned board would use its login.)
+# Surface gh's own error rather than dying mutely under set -e on failure.
+if ! proj_json=$(gh project view "$PROJECT" --owner "@me" --format json 2>&1); then
+    echo "cannot read project $PROJECT as @me — token lacks project scope, or @me is not the board owner ($OWNER)." >&2
+    echo "  gh: $proj_json" >&2
+    exit 1
+fi
+PROJECT_NODE=$(echo "$proj_json" | jq -r '.id // empty')
+if ! FIELDS_JSON=$(gh project field-list "$PROJECT" --owner "@me" --format json 2>&1); then
+    echo "cannot list project $PROJECT fields — token scope? gh: $FIELDS_JSON" >&2
+    exit 1
+fi
 PHASE_FIELD=$(echo "$FIELDS_JSON" | jq -r '.fields[]? | select(.name=="Phase") | .id' | head -1)
 if [[ -z "$PROJECT_NODE" || -z "$PHASE_FIELD" ]]; then
-    echo "could not resolve project $PROJECT / Phase field for owner $OWNER (token scope? project number?)" >&2
+    echo "resolved no project node / Phase field on project $PROJECT (owner $OWNER)" >&2
     exit 1
 fi
 
@@ -100,7 +115,7 @@ label_to_phase() {
 BOARD_TSV="$(mktemp)"
 trap 'rm -f "$BOARD_TSV"' EXIT
 load_board() {
-    gh project item-list "$PROJECT" --owner "$OWNER" --format json --limit 500 2>/dev/null \
+    gh project item-list "$PROJECT" --owner "@me" --format json --limit 500 2>/dev/null \
         | jq -r '.items[] | select(.content.number != null)
                  | [.content.number, .id, (.phase // "")] | @tsv' > "$BOARD_TSV" || {
         echo "warning: could not list project $PROJECT items — is GH_TOKEN scoped for projects?" >&2

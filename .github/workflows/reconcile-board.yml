@@ -41,9 +41,12 @@ jobs:
 
       - name: Reconcile board
         env:
-          # Projects v2 (user-level) needs a project-scoped token; GITHUB_TOKEN
-          # cannot write it. PROJECTS_TOKEN is the fine-grained PAT (see header).
-          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN || github.token }}
+          # Projects v2 (user-level) needs a project-scoped token; the default
+          # GITHUB_TOKEN cannot read or write it (it yields "unknown owner type"
+          # on a user owner). No fallback on purpose: if PROJECTS_TOKEN is unset
+          # the run fails loudly with an auth error instead of limping along on
+          # the useless default token. See header for how to set it.
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
           # .claude/release-state.json is gitignored, so it is absent in CI; the
           # script falls back to these. Owner is the built-in repo owner (never
           # stale). The project number rolls every release, so it lives in the
