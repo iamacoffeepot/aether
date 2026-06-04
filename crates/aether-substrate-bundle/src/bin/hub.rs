@@ -15,16 +15,30 @@ use aether_substrate_bundle::cli::HubCli;
 use aether_substrate_bundle::hub::{Chassis, HubChassis, HubEnv};
 use clap::Parser as _;
 
-/// The hub chassis is coordinator-only — its sole config knob is the
-/// RPC bind port (ADR-0090 §4 discovery). The full-stack cap knobs
-/// don't apply, so the hub dumps just this one rather than the shared
+/// The hub chassis is coordinator-only — the full-stack cap knobs
+/// don't apply, so the hub dumps just its own (RPC bind port + the
+/// engines-cap liveness heartbeat, issue 1339) rather than the shared
 /// `chassis_config_dump`.
-const HUB_KNOBS: &[KnobRecord] = &[KnobRecord {
-    env_key: "AETHER_RPC_PORT",
-    doc: "aether.rpc.server bind port (default 8901).",
-    default: Some("8901"),
-    kind: KnobKind::HandRegistered,
-}];
+const HUB_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: "AETHER_RPC_PORT",
+        doc: "aether.rpc.server bind port (default 8901).",
+        default: Some("8901"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_HUB_HEARTBEAT_INTERVAL_SECS",
+        doc: "Engine liveness-heartbeat ping cadence in seconds; 0 disables (--hub-heartbeat-interval-secs).",
+        default: Some("5"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_HUB_HEARTBEAT_MISS_LIMIT",
+        doc: "Consecutive missed pings before an engine is evicted (--hub-heartbeat-miss-limit).",
+        default: Some("3"),
+        kind: KnobKind::HandRegistered,
+    },
+];
 
 fn main() -> anyhow::Result<()> {
     let cli = HubCli::parse();

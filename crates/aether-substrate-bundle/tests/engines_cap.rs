@@ -10,7 +10,7 @@
 // `EngineServer` unit tests cover the error arms in-process.
 
 use aether_actor::Actor;
-use aether_capabilities::EngineServer;
+use aether_capabilities::{EngineConfig, EngineServer};
 use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::descriptors;
 use aether_kinds::{
@@ -115,7 +115,7 @@ fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
     let cells = ReplyCells::default();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EngineServer>(())
+        .with_actor::<EngineServer>(EngineConfig::default())
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");

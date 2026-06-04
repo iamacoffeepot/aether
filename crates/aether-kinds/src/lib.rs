@@ -913,10 +913,18 @@ mod engine {
     /// the wire carries the string form (the same convention the
     /// `aether.process.*` kinds use). `rpc_port` is the localhost port
     /// the cap assigned the substrate's `RpcServerCapability`.
+    ///
+    /// `last_heartbeat_age_millis` is how long ago the cap last saw a
+    /// liveness signal from this engine (issue 1339) — `0` right after
+    /// spawn, refreshed each time the engine's proxy confirms a `Pong`.
+    /// A value climbing past the heartbeat interval means the engine is
+    /// going stale; the cap evicts it (drops it from this list) once it
+    /// crosses the miss limit.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct EngineDescriptor {
         pub engine_id: String,
         pub rpc_port: u16,
+        pub last_heartbeat_age_millis: u64,
     }
 
     /// `aether.engine.list_result` — reply to [`ListEngines`]: every
@@ -1021,6 +1029,48 @@ mod engine {
     pub enum CallSettled {
         Ok,
         Err { error: String },
+    }
+
+    /// `aether.engine.heartbeat_tick` — the per-engine proxy's own
+    /// liveness timer wake (issue 1339). Internal control-plane mail,
+    /// not a user surface: a sidecar thread the proxy spawns at init
+    /// fires this (empty-payload) at the proxy's own mailbox every
+    /// heartbeat interval, the same wake-mail shape `RpcInboundReady`
+    /// uses for the reader sidecar. The handler pings the substrate and
+    /// counts consecutive misses, evicting the engine once the miss
+    /// limit is crossed.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.engine.heartbeat_tick")]
+    pub struct EngineHeartbeatTick {}
+
+    /// `aether.engine.died` — a per-engine proxy telling the engines
+    /// cap (`aether.engine`) that its substrate is gone, so the cap
+    /// drops it from the supervised-engine table (issue 1339). The
+    /// proxy sends this when it observes the connection close (`Bye` /
+    /// `eof`) or when the liveness heartbeat crosses its miss limit —
+    /// the positive signal the lazy connection-drop path misses for a
+    /// wedged-but-alive engine. Idempotent on the cap side: a `died`
+    /// for an already-removed engine (e.g. one a concurrent
+    /// `TerminateEngine` already dropped) is a no-op. `engine_id` is
+    /// the plain UUID string, matching [`TerminateEngine`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.died")]
+    pub struct EngineDied {
+        pub engine_id: String,
+    }
+
+    /// `aether.engine.alive` — a per-engine proxy reporting a confirmed
+    /// liveness signal (a `Pong` answering its heartbeat `Ping`) to the
+    /// engines cap (issue 1339). The cap stamps the engine's
+    /// last-seen-alive time so [`ListEnginesResult`] can report
+    /// `last_heartbeat_age_millis`. Fire-and-forget; an `alive` for an
+    /// unknown engine is a no-op. `engine_id` is the plain UUID string.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.alive")]
+    pub struct EngineAlive {
+        pub engine_id: String,
     }
 }
 

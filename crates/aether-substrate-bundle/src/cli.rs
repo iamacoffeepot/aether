@@ -43,6 +43,7 @@ use confique::{Config, Layer};
 // (`NamespaceRootsOverlay`), not the namespace prefix (`FsOverlay`) —
 // alias the historical name so the bundle's compose code keeps
 // reading.
+pub use aether_capabilities::EngineOverlay;
 pub use aether_capabilities::anthropic::AnthropicOverlay;
 pub use aether_capabilities::audio::AudioOverlay;
 pub use aether_capabilities::fs::NamespaceRootsOverlay as FsOverlay;
@@ -193,6 +194,12 @@ pub struct HubCli {
     /// 8901).
     #[arg(long = "rpc-port")]
     pub rpc_port: Option<u16>,
+
+    /// Engines-cap knobs — the liveness-heartbeat tuning
+    /// (`--hub-heartbeat-interval-secs` / `--hub-heartbeat-miss-limit`,
+    /// issue 1339). Flattened from the derive-emitted overlay.
+    #[command(flatten)]
+    pub engine: EngineOverlay,
 
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).

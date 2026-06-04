@@ -57,8 +57,8 @@ To restart the hub after a rebuild **without dropping the MCP session**, hit the
 
 Tools (`mcp__aether-hub__*`):
 
-- `list_engines` — every engine the hub supervises: `{engine_id, rpc_port}`.
-- `spawn_substrate(binary_path, args?)` — fork+exec a substrate (RPC port injected as `AETHER_RPC_PORT`). Returns `{engine_id, rpc_port}`.
+- `list_engines` — every engine the hub supervises: `{engine_id, rpc_port, last_heartbeat_age_millis}`. The hub heartbeats each engine (`AETHER_HUB_HEARTBEAT_INTERVAL_SECS` / `_MISS_LIMIT`, default 5 s × 3) and evicts a dead/wedged one from this list once it crosses the miss limit, so a listed engine is live (ADR-0090 / issue 1339); `last_heartbeat_age_millis` shows staleness short of eviction.
+- `spawn_substrate(binary_path, args?)` — fork+exec a substrate (RPC port injected as `AETHER_RPC_PORT`). Returns `{engine_id, rpc_port, last_heartbeat_age_millis}` (`0` — just spawned).
 - `terminate_substrate(engine_id)` — the engine's proxy SIGKILLs the child and self-shuts-down.
 - `send_mail(mails)` — best-effort batch; each item `{engine_id, recipient_name, kind_name, params}` is schema-encoded against the substrate vocabulary and routed as a wire `Call`. Per-item status.
 - `send_mail_traced(engine_id, mails, settlement_timeout_ms?)` — atomic batch under one shared trace root (the `aether.trace` mailbox); returns the full trace subtree once the chain settles, no window guessing (ADR-0080/0086). A bad spec aborts the whole batch.
