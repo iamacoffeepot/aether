@@ -199,6 +199,7 @@ impl Mcp {
             .map(|e| EngineInfo {
                 engine_id: e.engine_id,
                 rpc_port: e.rpc_port,
+                last_heartbeat_age_millis: e.last_heartbeat_age_millis,
             })
             .collect();
         json(&engines)
@@ -229,6 +230,8 @@ impl Mcp {
             }) => json(&EngineInfo {
                 engine_id,
                 rpc_port,
+                // A just-spawned engine is alive as of now.
+                last_heartbeat_age_millis: 0,
             }),
             Some(SpawnEngineResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable SpawnEngineResult")),
@@ -1777,11 +1780,11 @@ mod tests {
         ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
         TerminateSubstrateArgs, TracedMailSpec,
     };
-    use aether_capabilities::EngineServer;
     use aether_capabilities::rpc::{
         PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
     };
     use aether_capabilities::trace::TraceDispatchCapability;
+    use aether_capabilities::{EngineConfig, EngineServer};
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
     use aether_substrate::mail::mailer::Mailer;
@@ -1808,7 +1811,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<EngineServer>(())
+            .with_actor::<EngineServer>(EngineConfig::default())
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
                 peer_kind: PeerKind::Substrate {
@@ -1867,7 +1870,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<EngineServer>(())
+            .with_actor::<EngineServer>(EngineConfig::default())
             // The inventory cap pulls `Arc::clone(ctx.mailer().registry())`
             // in `init`, so it sees the same `Registry` we just wrote
             // the extra kinds into.

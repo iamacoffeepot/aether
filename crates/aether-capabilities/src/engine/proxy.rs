@@ -37,24 +37,24 @@
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
-use aether_kinds::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
+use aether_kinds::{EngineHeartbeatTick, ForwardEnvelope, RpcInboundReady, TerminateEngine};
 
-// `EngineProxyConfig` carries only wasm-safe types, but it lives inside
-// the bridge mod (which the macro elides on wasm), so the re-export is
-// gated like `TcpListenerConfig`.
+// `EngineProxyConfig` / `HeartbeatParams` carry only wasm-safe types,
+// but they live inside the bridge mod (which the macro elides on wasm),
+// so the re-export is gated like `TcpListenerConfig`.
 #[cfg(not(target_arch = "wasm32"))]
-pub use proxy_native::EngineProxyConfig;
+pub use proxy_native::{EngineProxyConfig, HeartbeatParams};
 
 #[aether_actor::bridge(instanced, one_per = "engine")]
 mod proxy_native {
-    use super::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
+    use super::{EngineHeartbeatTick, ForwardEnvelope, RpcInboundReady, TerminateEngine};
     use crate::rpc::{
         MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcError,
         WireFrame,
     };
     use aether_actor::actor;
-    use aether_data::{EngineId, Kind, KindId};
-    use aether_kinds::CallSettled;
+    use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
+    use aether_kinds::{CallSettled, EngineAlive, EngineDied};
     use aether_substrate::Mail;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -64,8 +64,18 @@ mod proxy_native {
     use std::io::ErrorKind;
     use std::process::Child;
     use std::sync::Arc;
-    use std::thread;
+    use std::sync::mpsc;
+    use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
+
+    /// Mailbox of the engines cap (`aether.engine`) — where a proxy
+    /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
+    /// issue 1339). A compile-time const from the well-known name, so no
+    /// host round-trip; matches the `RpcServerCapability`'s own
+    /// `mailbox_id_from_name("aether.engine")` route lookup.
+    fn engine_cap_mailbox() -> MailboxId {
+        mailbox_id_from_name("aether.engine")
+    }
 
     /// Total time [`connect_proxy`] keeps retrying a refused dial when
     /// the proxy just forked the substrate and it may still be coming
@@ -88,10 +98,52 @@ mod proxy_native {
     /// failed boot, and SIGKILLs + reaps it on `Drop`. `None` for an
     /// adopted / externally-running substrate, whose lifetime the
     /// proxy doesn't manage.
+    ///
+    /// `heartbeat` is the liveness-probe tuning the cap resolved from
+    /// its [`EngineConfig`](crate::engine::server) (issue 1339). `None`
+    /// disables the heartbeat (the engine is then only evicted on a
+    /// connection-close `Bye`, never on a wedge); `Some` arms the
+    /// timer sidecar.
     pub struct EngineProxyConfig {
         pub engine_id: EngineId,
         pub rpc_addr: String,
         pub spawned: Option<Child>,
+        pub heartbeat: Option<HeartbeatParams>,
+    }
+
+    /// Resolved liveness-heartbeat tuning for one proxy (issue 1339).
+    /// `interval` is the ping cadence; `miss_limit` is how many
+    /// consecutive unanswered pings mark the engine dead — a small N
+    /// tolerates a transient hiccup without flapping. Detection latency
+    /// is `miss_limit × interval`. Built by the engines cap from its
+    /// `EngineConfig` and handed down via [`EngineProxyConfig`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct HeartbeatParams {
+        pub interval: Duration,
+        pub miss_limit: u32,
+    }
+
+    /// Owns the per-proxy heartbeat timer thread (issue 1339). The
+    /// thread sleeps `interval` on a `recv_timeout` over the stop
+    /// channel and fires an [`EngineHeartbeatTick`] wake-mail at the
+    /// proxy's own mailbox each interval — the same sidecar-wake shape
+    /// the RPC reader uses. `Drop` disconnects the channel (so the
+    /// thread's `recv_timeout` returns `Disconnected` and it breaks)
+    /// then joins, mirroring `RpcReaderHandle`'s orderly teardown.
+    struct HeartbeatHandle {
+        stop: Option<mpsc::Sender<()>>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for HeartbeatHandle {
+        fn drop(&mut self) {
+            // Dropping the sender disconnects the channel; the thread's
+            // next `recv_timeout` returns `Disconnected` and it exits.
+            drop(self.stop.take());
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
     }
 
     /// Per-engine proxy: one outbound RPC connection to one substrate,
@@ -115,6 +167,23 @@ mod proxy_native {
         /// (see [`EngineProxyConfig::spawned`]). `Drop` SIGKILLs +
         /// reaps it; `None` once taken or for an adopted substrate.
         spawned: Option<Child>,
+        /// Consecutive heartbeat pings sent without a `Pong` reply
+        /// (issue 1339). Incremented each `on_heartbeat_tick`, reset to
+        /// `0` on any inbound `Pong`. Crossing `miss_limit` evicts the
+        /// engine.
+        missed_heartbeats: u32,
+        /// Consecutive-miss threshold that marks the engine dead. `0`
+        /// when the heartbeat is disabled (`heartbeat: None`), in which
+        /// case `on_heartbeat_tick` never fires anyway.
+        miss_limit: u32,
+        /// Monotonic nonce stamped on each heartbeat `Ping` — for log
+        /// correlation only; a `Pong` carrying any nonce counts as
+        /// liveness, since there is at most one heartbeat outstanding.
+        heartbeat_seq: u64,
+        /// The heartbeat timer thread, when armed. `Drop` stops + joins
+        /// it. Held as the field's RAII guard — the leading `_` marks
+        /// it as owned-for-its-Drop, not read.
+        _heartbeat: Option<HeartbeatHandle>,
     }
 
     #[actor]
@@ -158,12 +227,30 @@ mod proxy_native {
                 "engine proxy connected",
             );
 
+            // Arm the liveness heartbeat, if configured. The sidecar
+            // thread fires an `EngineHeartbeatTick` at this proxy's own
+            // mailbox every `interval`; `on_heartbeat_tick` does the
+            // ping + miss accounting on the dispatcher thread (so the
+            // RPC write and all proxy state stay single-threaded).
+            let (heartbeat, miss_limit) = match config.heartbeat {
+                Some(params) if !params.interval.is_zero() && params.miss_limit > 0 => {
+                    let handle =
+                        spawn_heartbeat(Arc::clone(&mailer), self_mailbox, params.interval);
+                    (Some(handle), params.miss_limit)
+                }
+                _ => (None, 0),
+            };
+
             Ok(Self {
                 engine_id: config.engine_id,
                 mailer,
                 conn,
                 in_flight: HashMap::new(),
                 spawned: config.spawned,
+                missed_heartbeats: 0,
+                miss_limit,
+                heartbeat_seq: 0,
+                _heartbeat: heartbeat,
             })
         }
 
@@ -210,6 +297,16 @@ mod proxy_native {
                 match frame {
                     WireFrame::ReplyEvent { cid, envelope } => self.route_reply(cid, envelope),
                     WireFrame::ReplyEnd { cid, result } => self.route_settled(cid, result),
+                    // A `Pong` answers this proxy's heartbeat `Ping`
+                    // (issue 1339): the substrate is alive. Clear the
+                    // miss counter and report the liveness up to the
+                    // engines cap so `list_engines` can show a fresh
+                    // heartbeat age. The nonce is for log correlation
+                    // only — any `Pong` is a liveness signal.
+                    WireFrame::Pong(_nonce) => {
+                        self.missed_heartbeats = 0;
+                        self.report_alive(ctx);
+                    }
                     WireFrame::Bye { reason } => {
                         tracing::info!(
                             target: "aether_substrate::engine_proxy",
@@ -217,12 +314,17 @@ mod proxy_native {
                             reason = %reason,
                             "engine proxy: substrate closed the connection; shutting down",
                         );
+                        // Tell the engines cap the engine is gone so it
+                        // drops the registry entry — without this the
+                        // proxy dies but `list_engines` keeps reporting
+                        // a corpse (issue 1339).
+                        self.report_died(ctx);
                         ctx.shutdown();
                         return;
                     }
-                    // Hello / HelloAck / Call / Ping / Pong: a client-
-                    // side proxy never expects these inbound. Drop with
-                    // a debug line rather than warn-storming.
+                    // Hello / HelloAck / Call / Ping: a client-side proxy
+                    // never expects these inbound. Drop with a debug
+                    // line rather than warn-storming.
                     other => {
                         tracing::debug!(
                             target: "aether_substrate::engine_proxy",
@@ -251,7 +353,89 @@ mod proxy_native {
                 engine_id = ?self.engine_id,
                 "engine proxy: terminate requested; shutting down",
             );
+            // No `report_died` here: the engines cap initiated this
+            // terminate and already dropped the registry entry, so the
+            // proxy reporting back would be a redundant (idempotent)
+            // no-op. The self-death paths (`Bye`, heartbeat timeout) are
+            // the ones the cap doesn't already know about.
             ctx.shutdown();
+        }
+
+        /// Liveness-heartbeat timer wake (issue 1339).
+        ///
+        /// # Agent
+        /// Internal wake mail — not part of the proxy's external
+        /// surface. The heartbeat sidecar thread fires this every
+        /// interval. The handler counts the tick as an outstanding miss
+        /// (a `Pong` since the last tick would have cleared the
+        /// counter), and once `miss_limit` consecutive ticks go
+        /// unanswered it declares the engine dead: reports `EngineDied`
+        /// to the engines cap and self-shuts-down (its `Drop` SIGKILLs
+        /// the wedged child). Otherwise it sends a fresh `Ping`.
+        #[handler]
+        fn on_heartbeat_tick(&mut self, ctx: &mut NativeCtx<'_>, _mail: EngineHeartbeatTick) {
+            self.heartbeat_seq += 1;
+            // A write failure means the socket is already broken — the
+            // reader sidecar will surface a `Bye` and `on_inbound_ready`
+            // handles the eviction. Count it as a miss and carry on so
+            // the miss-limit path also covers it (whichever fires first
+            // evicts; the cap side is idempotent).
+            if let Err(e) = self.conn.client.ping(self.heartbeat_seq) {
+                tracing::debug!(
+                    target: "aether_substrate::engine_proxy",
+                    engine_id = ?self.engine_id,
+                    error = %e,
+                    "engine proxy: heartbeat ping write failed",
+                );
+            }
+            self.missed_heartbeats += 1;
+            if self.missed_heartbeats >= self.miss_limit {
+                tracing::warn!(
+                    target: "aether_substrate::engine_proxy",
+                    engine_id = ?self.engine_id,
+                    missed = self.missed_heartbeats,
+                    miss_limit = self.miss_limit,
+                    "engine proxy: heartbeat miss limit crossed; evicting engine",
+                );
+                self.report_died(ctx);
+                ctx.shutdown();
+            }
+        }
+    }
+
+    /// Spawn the per-proxy heartbeat timer thread. It sleeps `interval`
+    /// on a `recv_timeout` over the returned handle's stop channel and
+    /// pushes an [`EngineHeartbeatTick`] wake-mail at `self_mailbox`
+    /// each interval — the empty-payload wake shape the RPC reader
+    /// sidecar uses (the timer carries no data, only the schedule). The
+    /// handle's `Drop` stops + joins the thread.
+    fn spawn_heartbeat(
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+        interval: Duration,
+    ) -> HeartbeatHandle {
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let tick_kind = KindId(<EngineHeartbeatTick as Kind>::ID.0);
+        // Infra timer thread below the mail layer — like the RPC reader
+        // sidecar it only fires a wake-mail (no inbound chain to inherit,
+        // so no settlement umbrella to honor), and the proxy is instanced
+        // so `spawn_detached` (Singleton-only) doesn't apply.
+        #[allow(clippy::disallowed_methods)]
+        let thread = thread::Builder::new()
+            .name("aether-engine-heartbeat".into())
+            .spawn(move || {
+                // `recv_timeout` returns `Timeout` each interval (fire a
+                // tick); a stop signal or a disconnected channel (the
+                // proxy dropped the sender) returns otherwise and ends
+                // the loop.
+                while stop_rx.recv_timeout(interval) == Err(mpsc::RecvTimeoutError::Timeout) {
+                    mailer.push(Mail::new(self_mailbox, tick_kind, Vec::new(), 1));
+                }
+            })
+            .expect("spawn aether-engine-heartbeat thread");
+        HeartbeatHandle {
+            stop: Some(stop_tx),
+            thread: Some(thread),
         }
     }
 
@@ -265,7 +449,7 @@ mod proxy_native {
     fn connect_proxy(
         addr: &str,
         mailer: &Arc<Mailer>,
-        self_mailbox: aether_data::MailboxId,
+        self_mailbox: MailboxId,
         wake_kind: KindId,
         retry: bool,
     ) -> Result<RpcConnection, RpcClientError> {
@@ -326,6 +510,37 @@ mod proxy_native {
     }
 
     impl EngineProxy {
+        /// Report a confirmed liveness signal to the engines cap so it
+        /// refreshes this engine's last-heartbeat timestamp (issue
+        /// 1339). Sent as a fresh root: the `Pong` that triggered it is
+        /// an external event causally unrelated to whatever inbound
+        /// mail woke the handler.
+        fn report_alive(&self, ctx: &NativeCtx<'_>) {
+            let alive = EngineAlive {
+                engine_id: self.engine_id.0.to_string(),
+            };
+            let _ = ctx.send_envelope_as_root(
+                engine_cap_mailbox(),
+                <EngineAlive as Kind>::ID,
+                &alive.encode_into_bytes(),
+            );
+        }
+
+        /// Report this engine's death to the engines cap so it drops the
+        /// registry entry (issue 1339). Idempotent on the cap side — a
+        /// `died` for an already-evicted engine is a no-op. Sent as a
+        /// fresh root for the same reason as [`Self::report_alive`].
+        fn report_died(&self, ctx: &NativeCtx<'_>) {
+            let died = EngineDied {
+                engine_id: self.engine_id.0.to_string(),
+            };
+            let _ = ctx.send_envelope_as_root(
+                engine_cap_mailbox(),
+                <EngineDied as Kind>::ID,
+                &died.encode_into_bytes(),
+            );
+        }
+
         /// Route a `ReplyEvent`'s envelope back to whoever sent the
         /// `ForwardEnvelope` that opened `cid`. Mirrors
         /// `Mailer::send_reply`'s `Component` branch: push a `Mail`
@@ -401,6 +616,70 @@ mod proxy_native {
 
 #[cfg(test)]
 use crate::rpc::test_echo::TestEchoReply;
+// Handler-signature kinds for the test sink below — must be importable
+// at file root so the `#[bridge]` macro's `HandlesKind` markers stay
+// addressable, the same constraint as the proxy's own handler kinds.
+#[cfg(test)]
+use aether_kinds::{EngineAlive, EngineDied};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
+
+/// Shared capture cells for [`EngineCapSink`]. Lives at file root (not
+/// inside the bridge mod) like `EngineServer`'s `ReplyCells` — it's the
+/// sink actor's `Config`, so it must be addressable as `super::…` from
+/// the bridge mod.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct EngineCapCells {
+    pub alive: Arc<Mutex<Vec<String>>>,
+    pub died: Arc<Mutex<Vec<String>>>,
+}
+
+/// Test-only stand-in for the engines cap, registered at the cap's own
+/// `aether.engine` mailbox so a proxy's `EngineAlive` / `EngineDied`
+/// reports land here without booting the real `EngineServer`. Records
+/// the reported `engine_id`s into shared vecs the heartbeat tests
+/// assert on. Lives at file root for `#[bridge]` marker addressability.
+#[cfg(test)]
+#[aether_actor::bridge(singleton)]
+mod engine_cap_sink {
+    use super::{EngineAlive, EngineCapCells, EngineDied};
+    use aether_actor::actor;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+
+    pub struct EngineCapSink {
+        cells: EngineCapCells,
+    }
+
+    #[actor]
+    impl NativeActor for EngineCapSink {
+        type Config = EngineCapCells;
+        const NAMESPACE: &'static str = "aether.engine";
+
+        fn init(cells: EngineCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { cells })
+        }
+
+        #[handler]
+        fn on_alive(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
+            self.cells
+                .alive
+                .lock()
+                .expect("test setup: alive cell mutex poisoned")
+                .push(mail.engine_id);
+        }
+
+        #[handler]
+        fn on_died(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
+            self.cells
+                .died
+                .lock()
+                .expect("test setup: died cell mutex poisoned")
+                .push(mail.engine_id);
+        }
+    }
+}
 
 /// Test-only sink: records the `value` of every [`TestEchoReply`] it
 /// receives into a shared cell so the round-trip test can observe a
@@ -444,17 +723,22 @@ mod proxy_reply_sink {
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineProxy, EngineProxyConfig, ProxyReplySink};
+    use super::{
+        EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig, HeartbeatParams,
+        ProxyReplySink,
+    };
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
-    use crate::rpc::wire::PeerKind;
+    use crate::rpc::wire::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use crate::test_chassis::{TestChassis, fresh_substrate};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Actor;
+    use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_substrate::Subname;
-    use aether_substrate::chassis::builder::Builder;
+    use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
+    use std::io::BufReader;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -508,6 +792,7 @@ mod tests {
                     engine_id: EngineId(Uuid::from_u128(1)),
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
+                    heartbeat: None,
                 },
             )
             .finish()
@@ -584,6 +869,7 @@ mod tests {
                     engine_id: EngineId(Uuid::from_u128(2)),
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
+                    heartbeat: None,
                 },
             )
             .finish();
@@ -591,5 +877,188 @@ mod tests {
             result.is_err(),
             "spawning a proxy at a closed port should fail at init",
         );
+    }
+
+    /// How a [`fake_server`] treats the proxy's heartbeat pings after
+    /// the handshake.
+    #[derive(Clone, Copy)]
+    enum Behavior {
+        /// Mirror every `Ping(n)` back as `Pong(n)` — a healthy engine.
+        Pong,
+        /// Read and drop pings without answering — a wedged engine.
+        Ignore,
+        /// Drop the connection right after the handshake — the
+        /// connection-close (`Bye`) eviction path.
+        Close,
+    }
+
+    /// Spin a one-shot fake substrate RPC server on an OS-picked port:
+    /// accept one connection, run the `Hello` / `HelloAck` handshake,
+    /// then behave per `behavior`. Returns the port and the server
+    /// thread handle (detached — it exits when the proxy disconnects on
+    /// test teardown).
+    fn fake_server(behavior: Behavior) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        let port = listener.local_addr().expect("local_addr").port();
+        // Test-only fake substrate server thread (infra, no mail layer).
+        #[allow(clippy::disallowed_methods)]
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("fake server accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut writer = stream;
+            let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
+            write_frame(
+                &mut writer,
+                &WireFrame::HelloAck(HelloAck {
+                    wire_version: WIRE_VERSION,
+                    server: substrate_peer_kind(),
+                }),
+            )
+            .expect("write HelloAck");
+            if matches!(behavior, Behavior::Close) {
+                return; // drop the stream → the proxy reads eof → Bye
+            }
+            // Service pings until the proxy hangs up (read error ends
+            // the `while let`).
+            while let Ok::<WireFrame, _>(frame) = read_frame(&mut reader) {
+                if let (WireFrame::Ping(n), Behavior::Pong) = (&frame, behavior)
+                    && write_frame(&mut writer, &WireFrame::Pong(*n)).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    /// Boot a chassis hosting the engine-cap sink, point an
+    /// `EngineProxy` (with the given heartbeat) at `port`, and return
+    /// the chassis (kept alive for its dispatcher threads) + the sink
+    /// cells. `engine_id` is `Uuid::from_u128(seed)`.
+    fn spawn_proxy_with_heartbeat(
+        seed: u128,
+        port: u16,
+        heartbeat: Option<HeartbeatParams>,
+    ) -> (PassiveChassis<TestChassis>, EngineCapCells, String) {
+        let (registry, mailer) = fresh_substrate();
+        let cells = EngineCapCells::default();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<EngineCapSink>(cells.clone())
+            .build_passive()
+            .expect("caps boot");
+        let engine_id = EngineId(Uuid::from_u128(seed));
+        chassis
+            .spawn_actor::<EngineProxy>(
+                Subname::Named("e"),
+                EngineProxyConfig {
+                    engine_id,
+                    rpc_addr: format!("127.0.0.1:{port}"),
+                    spawned: None,
+                    heartbeat,
+                },
+            )
+            .finish()
+            .expect("proxy connects");
+        (chassis, cells, engine_id.0.to_string())
+    }
+
+    /// Block until `cell` holds at least one entry (returning the
+    /// first), or the deadline passes (panicking with `what`).
+    fn await_first(cell: &Arc<Mutex<Vec<String>>>, what: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // Clone out under the guard, then drop it before the branch
+            // (clippy `significant_drop_in_scrutinee`).
+            let first = cell
+                .lock()
+                .expect("test setup: cell mutex poisoned")
+                .first()
+                .cloned();
+            if let Some(first) = first {
+                return first;
+            }
+            assert!(Instant::now() < deadline, "{what} within 5s");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A wedged engine (handshakes, then never answers a heartbeat
+    /// `Ping`) is evicted: after `miss_limit` missed pongs the proxy
+    /// reports `EngineDied` to the engines cap. This is the wedge case
+    /// the lazy connection-drop path misses.
+    #[test]
+    fn heartbeat_evicts_engine_after_missed_pongs() {
+        let (port, _server) = fake_server(Behavior::Ignore);
+        let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
+            42,
+            port,
+            Some(HeartbeatParams {
+                interval: Duration::from_millis(40),
+                miss_limit: 3,
+            }),
+        );
+        let died = await_first(&cells.died, "wedged engine not evicted");
+        assert_eq!(died, engine_id, "the wedged engine's id is reported dead");
+    }
+
+    /// A healthy engine (pongs every heartbeat) is reported alive and
+    /// never evicted.
+    #[test]
+    fn heartbeat_reports_alive_on_pong() {
+        let (port, _server) = fake_server(Behavior::Pong);
+        let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
+            7,
+            port,
+            Some(HeartbeatParams {
+                interval: Duration::from_millis(40),
+                miss_limit: 3,
+            }),
+        );
+        let alive = await_first(&cells.alive, "healthy engine never reported alive");
+        assert_eq!(
+            alive, engine_id,
+            "the healthy engine's id is reported alive"
+        );
+        // Give the miss-limit window a chance to (wrongly) fire, then
+        // confirm a ponging engine is never declared dead.
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            cells
+                .died
+                .lock()
+                .expect("test setup: died cell mutex poisoned")
+                .is_empty(),
+            "a ponging engine must not be evicted",
+        );
+    }
+
+    /// A proxy whose substrate closes the connection reports
+    /// `EngineDied` so the cap drops the registry entry — the reactive
+    /// path that, before issue 1339, left `list_engines` reporting a
+    /// corpse. No heartbeat needed; the `Bye` drives it.
+    #[test]
+    fn proxy_reports_died_when_connection_closes() {
+        let (port, _server) = fake_server(Behavior::Close);
+        let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
+        let died = await_first(&cells.died, "closed engine not reported dead");
+        assert_eq!(died, engine_id, "the closed engine's id is reported dead");
+    }
+
+    // Heartbeat eviction / alive reporting ride timer + dispatcher
+    // threads (timing-flaky); duplicate-wrap them for the pre-release
+    // flake soak (CLAUDE.md "Flake soak").
+    #[test]
+    fn flaky_heartbeat_evicts_engine_after_missed_pongs() {
+        heartbeat_evicts_engine_after_missed_pongs();
+    }
+
+    #[test]
+    fn flaky_heartbeat_reports_alive_on_pong() {
+        heartbeat_reports_alive_on_pong();
+    }
+
+    #[test]
+    fn flaky_proxy_reports_died_when_connection_closes() {
+        proxy_reports_died_when_connection_closes();
     }
 }

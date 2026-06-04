@@ -68,6 +68,12 @@ pub struct EngineInfo {
     pub engine_id: String,
     /// The localhost RPC port the hub assigned this substrate.
     pub rpc_port: u16,
+    /// Milliseconds since the hub last confirmed this engine alive
+    /// (issue 1339): `0` right after spawn, refreshed each heartbeat
+    /// interval. A value climbing past the heartbeat interval means the
+    /// engine is going stale; the hub evicts it (drops it from this
+    /// list) once it crosses the miss limit.
+    pub last_heartbeat_age_millis: u64,
 }
 
 /// Per-item outcome from a `send_mail` batch.

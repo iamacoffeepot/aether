@@ -16,13 +16,13 @@
 // Step 2 is the P5a proof: before this phase, `engine = Some` Calls
 // were rejected with `RpcError::UnsupportedTarget`.
 
-use aether_capabilities::EngineServer;
 use aether_capabilities::rpc::RpcServerHandle;
 use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
     WIRE_VERSION, WireFrame,
 };
 use aether_capabilities::trace::TraceDispatchCapability;
+use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
 use aether_kinds::descriptors;
@@ -62,7 +62,7 @@ fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<EngineServer>(())
+        .with_actor::<EngineServer>(EngineConfig::default())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: PeerKind::Substrate {

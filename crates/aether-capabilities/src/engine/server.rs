@@ -37,14 +37,26 @@
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
-use aether_kinds::{ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine};
+use aether_kinds::{
+    EngineAlive, EngineDied, ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine,
+};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
+// `EngineConfig` (+ its derive-emitted `EngineOverlay`) ride through
+// file root for the hub chassis bin, which flattens the overlay into
+// `HubCli`, resolves argv-then-env, and passes the config to
+// `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
+// the engines cap is native-only, so the config has no wasm consumer.
+#[cfg(not(target_arch = "wasm32"))]
+pub use server_native::{EngineConfig, EngineOverlay};
+
 #[aether_actor::bridge(singleton)]
 mod server_native {
-    use super::{ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine};
-    use crate::engine::proxy::{EngineProxy, EngineProxyConfig};
+    use super::{
+        EngineAlive, EngineDied, ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine,
+    };
+    use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
     use aether_actor::{MailCtx, actor};
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
@@ -58,12 +70,14 @@ mod server_native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{ReplyTarget, ReplyTo};
     use std::collections::HashMap;
+    use std::convert::Infallible;
     use std::env;
     use std::io;
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     /// Env override for the parent directory under which the cap
     /// allocates per-engine handle-store dirs (issue 1274). Absent →
@@ -72,6 +86,81 @@ mod server_native {
     /// is resolvable.
     const ENV_ENGINE_STORE_ROOT: &str = "AETHER_ENGINE_STORE_ROOT";
 
+    /// Default heartbeat ping cadence (issue 1339). 5 s × the miss
+    /// limit is the detection-latency vs. flap-tolerance tradeoff.
+    const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
+    /// Default consecutive-miss threshold before an engine is declared
+    /// dead. Small N tolerates a transient hiccup / GC pause.
+    const DEFAULT_HEARTBEAT_MISS_LIMIT: u32 = 3;
+
+    /// Resolved engines-cap configuration (ADR-0090, issue 1339).
+    /// Today this is just the liveness-heartbeat tuning; the inline
+    /// `AETHER_ENGINE_STORE_ROOT` reader (`engine_store_root`) is a
+    /// pre-ADR-0090 holdover left to a separate migration.
+    ///
+    /// `#[derive(aether_substrate::Config)]` emits the env-shaped
+    /// `EngineConfigLayer`, the clap-shaped `EngineOverlay`, and the
+    /// inherent `from_env` / `from_argv_then_env` shims (argv beats env
+    /// beats the literal default). The hub chassis resolves it with
+    /// `EngineConfig::from_argv_then_env(cli.engine.into_layer())` and
+    /// hands it to `with_actor::<EngineServer>(cfg)`; tests build it
+    /// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` field
+    /// names compose the `AETHER_HUB_HEARTBEAT_*` env keys and
+    /// `--hub-heartbeat-*` flags. `Default` (the test constructor)
+    /// resolves to `0/0` = heartbeat-disabled; production picks up the
+    /// `default = 5/3` literals through the layer.
+    #[derive(Clone, Debug, Default, aether_substrate::Config)]
+    #[config(env_prefix = "AETHER_HUB", cli_prefix = "hub")]
+    pub struct EngineConfig {
+        /// Heartbeat ping cadence in seconds
+        /// (`AETHER_HUB_HEARTBEAT_INTERVAL_SECS` /
+        /// `--hub-heartbeat-interval-secs`). `0` disables the heartbeat
+        /// entirely (engines are then only evicted on a
+        /// connection-close, never on a wedge).
+        #[config(default = 5, parse = parse_heartbeat_interval_secs)]
+        pub heartbeat_interval_secs: u64,
+        /// Consecutive missed pings that mark an engine dead
+        /// (`AETHER_HUB_HEARTBEAT_MISS_LIMIT` /
+        /// `--hub-heartbeat-miss-limit`). Small N tolerates a transient
+        /// hiccup; `0` also disables the heartbeat. Detection latency is
+        /// `miss_limit × interval_secs`.
+        #[config(default = 3, parse = parse_heartbeat_miss_limit)]
+        pub heartbeat_miss_limit: u32,
+    }
+
+    impl EngineConfig {
+        /// The [`HeartbeatParams`] to arm each proxy with, or `None`
+        /// when the heartbeat is disabled (`0` interval or miss limit).
+        fn heartbeat_params(&self) -> Option<HeartbeatParams> {
+            if self.heartbeat_interval_secs == 0 || self.heartbeat_miss_limit == 0 {
+                None
+            } else {
+                Some(HeartbeatParams {
+                    interval: Duration::from_secs(self.heartbeat_interval_secs),
+                    miss_limit: self.heartbeat_miss_limit,
+                })
+            }
+        }
+    }
+
+    // confique's `parse_env` contract is `fn(&str) -> Result<T, impl
+    // Error>`; these total helpers carry a `Result` they never fill with
+    // `Err` — an unparseable value folds back to the default (soft, like
+    // the DAG validator's caps; the ADR-0090 §4 strict/erroring variant
+    // is a follow-up). Hence the `unnecessary_wraps` allow.
+
+    /// Parse the heartbeat interval; unparseable → the default.
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_heartbeat_interval_secs(s: &str) -> Result<u64, Infallible> {
+        Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS))
+    }
+
+    /// Parse the heartbeat miss limit; unparseable → the default.
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_heartbeat_miss_limit(s: &str) -> Result<u32, Infallible> {
+        Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
+    }
+
     /// One supervised engine in [`EngineServer`]'s table.
     struct EngineEntry {
         /// Mailbox of the `aether.engine.proxy:<id>` actor — the
@@ -79,6 +168,11 @@ mod server_native {
         proxy_mailbox: MailboxId,
         /// The localhost RPC port the cap assigned this substrate.
         rpc_port: u16,
+        /// When the cap last saw this engine alive (issue 1339): set at
+        /// spawn (just-connected = alive) and refreshed on each
+        /// `EngineAlive` the proxy reports from a confirmed `Pong`.
+        /// `on_list` reports `now - last_alive` as the heartbeat age.
+        last_alive: Instant,
     }
 
     /// Engines capability: supervises a fleet of [`EngineProxy`]
@@ -96,18 +190,23 @@ mod server_native {
         /// sends stamp the cap as sender, but a routed call's reply
         /// must reach the originating `RpcServerCapability`, not here.
         mailer: Arc<Mailer>,
+        /// Liveness-heartbeat tuning each spawned proxy is armed with
+        /// (issue 1339), resolved once from [`EngineConfig`] at init.
+        /// `None` disables the heartbeat fleet-wide.
+        heartbeat: Option<HeartbeatParams>,
     }
 
     #[actor]
     impl NativeActor for EngineServer {
-        type Config = ();
+        type Config = EngineConfig;
         const NAMESPACE: &'static str = "aether.engine";
 
-        fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(config: EngineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 engines: HashMap::new(),
                 next_engine_seq: 1,
                 mailer: ctx.mailer(),
+                heartbeat: config.heartbeat_params(),
             })
         }
 
@@ -115,15 +214,20 @@ mod server_native {
         ///
         /// # Agent
         /// Send `ListEngines` (fieldless). Reply: `ListEnginesResult
-        /// { engines: [{ engine_id, rpc_port }] }`.
+        /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }] }`.
         #[handler]
         fn on_list(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListEngines) {
+            let now = Instant::now();
             let engines = self
                 .engines
                 .iter()
                 .map(|(id, entry)| EngineDescriptor {
                     engine_id: id.0.to_string(),
                     rpc_port: entry.rpc_port,
+                    last_heartbeat_age_millis: u64::try_from(
+                        now.saturating_duration_since(entry.last_alive).as_millis(),
+                    )
+                    .unwrap_or(u64::MAX),
                 })
                 .collect();
             ctx.reply(&ListEnginesResult { engines });
@@ -191,6 +295,7 @@ mod server_native {
                         engine_id,
                         rpc_addr,
                         spawned: Some(child),
+                        heartbeat: self.heartbeat,
                     },
                 )
                 .finish();
@@ -202,6 +307,9 @@ mod server_native {
                         EngineEntry {
                             proxy_mailbox,
                             rpc_port,
+                            // Just connected = alive; the heartbeat
+                            // refreshes this on each confirmed Pong.
+                            last_alive: Instant::now(),
                         },
                     );
                     ctx.reply(&SpawnEngineResult::Ok {
@@ -330,6 +438,53 @@ mod server_native {
                 .with_reply_to(reply_to),
             );
         }
+
+        /// Evict a dead engine from the table (issue 1339).
+        ///
+        /// # Agent
+        /// Not a user-facing tool — a proxy sends `EngineDied` when it
+        /// observes its substrate's connection close or its liveness
+        /// heartbeat cross the miss limit. The cap drops the table entry
+        /// so `list_engines` stops reporting a corpse. Idempotent: a
+        /// `died` for an already-removed engine (e.g. one a concurrent
+        /// `terminate_substrate` already dropped) is a logged no-op, so
+        /// it can't race the terminate path.
+        #[handler]
+        fn on_engine_died(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
+            let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
+                tracing::warn!(
+                    target: "aether_substrate::engine_server",
+                    engine_id = %mail.engine_id,
+                    "engine died: unparseable engine_id; ignoring",
+                );
+                return;
+            };
+            if self.engines.remove(&EngineId(uuid)).is_some() {
+                tracing::info!(
+                    target: "aether_substrate::engine_server",
+                    engine_id = %mail.engine_id,
+                    "engine evicted: proxy reported death",
+                );
+            }
+        }
+
+        /// Refresh an engine's last-seen-alive time (issue 1339).
+        ///
+        /// # Agent
+        /// Not a user-facing tool — a proxy sends `EngineAlive` each
+        /// time it confirms a heartbeat `Pong`. The cap stamps the
+        /// table entry so `list_engines` reports a fresh
+        /// `last_heartbeat_age_millis`. An `alive` for an unknown engine
+        /// (already evicted) is a silent no-op.
+        #[handler]
+        fn on_engine_alive(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
+            let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
+                return;
+            };
+            if let Some(entry) = self.engines.get_mut(&EngineId(uuid)) {
+                entry.last_alive = Instant::now();
+            }
+        }
     }
 
     /// Push a `CallSettled::Err` back to `target` (correlation
@@ -456,13 +611,14 @@ mod sink {
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineServer, ReplyCells, ReplySink};
+    use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
     use crate::test_chassis::TestChassis;
     use aether_actor::Actor;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
-        ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult,
+        EngineAlive, EngineDied, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
+        TerminateEngineResult,
     };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
@@ -487,7 +643,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
         let cells = ReplyCells::default();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<EngineServer>(())
+            .with_actor::<EngineServer>(EngineConfig::default())
             .with_actor::<ReplySink>(cells.clone())
             .build_passive()
             .expect("caps boot");
@@ -603,6 +759,79 @@ mod tests {
         assert!(
             matches!(unknown, TerminateEngineResult::Err { .. }),
             "a well-formed but unknown engine_id should be rejected",
+        );
+    }
+
+    /// Push a fire-and-forget kind at the cap, then drive a `ListEngines`
+    /// so the assertion runs only after the cap has processed the
+    /// earlier mail (single-threaded actor, in-order mailbox). Returns
+    /// the engine list the cap reports afterward.
+    fn push_then_list<K: Kind + serde::Serialize>(
+        mailer: &Arc<Mailer>,
+        cells: &ReplyCells,
+        fire: &K,
+    ) -> Vec<aether_kinds::EngineDescriptor> {
+        let server = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
+        mailer.push(Mail::new(server, K::ID, fire.encode_into_bytes(), 1));
+        drive(mailer, &ListEngines {}, || {
+            cells
+                .list
+                .lock()
+                .expect("test setup: list cell mutex poisoned")
+                .take()
+        })
+        .engines
+    }
+
+    /// `on_engine_died` for an engine the cap never supervised — the
+    /// terminate-race / double-report case — is an idempotent no-op,
+    /// not a panic, and inserts nothing. Covers both a malformed and a
+    /// well-formed-but-unknown `engine_id` (issue 1339).
+    #[test]
+    fn engine_died_for_unknown_is_noop() {
+        let (_chassis, mailer, cells) = boot();
+
+        let after_malformed = push_then_list(
+            &mailer,
+            &cells,
+            &EngineDied {
+                engine_id: "not-a-uuid".to_owned(),
+            },
+        );
+        assert!(
+            after_malformed.is_empty(),
+            "a malformed died must not panic or insert",
+        );
+
+        let after_unknown = push_then_list(
+            &mailer,
+            &cells,
+            &EngineDied {
+                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            },
+        );
+        assert!(
+            after_unknown.is_empty(),
+            "a died for an unknown engine is a no-op",
+        );
+    }
+
+    /// `on_engine_alive` for an unknown engine is a silent no-op (no
+    /// panic, no spurious insert) — a stale `alive` racing an eviction
+    /// must not resurrect the engine (issue 1339).
+    #[test]
+    fn engine_alive_for_unknown_is_noop() {
+        let (_chassis, mailer, cells) = boot();
+        let after = push_then_list(
+            &mailer,
+            &cells,
+            &EngineAlive {
+                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            },
+        );
+        assert!(
+            after.is_empty(),
+            "an alive for an unknown engine must not insert it",
         );
     }
 }

@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
-use aether_capabilities::{EngineServer, trace::TraceDispatchCapability};
+use aether_capabilities::{EngineConfig, EngineServer, trace::TraceDispatchCapability};
 use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
@@ -44,10 +44,12 @@ impl Chassis for HubChassis {
 /// Resolved configuration the hub chassis takes at build time.
 /// `rpc_addr` is the `aether.rpc.server` bind — the target the
 /// out-of-process `aether-mcp` coordinator dials. `AETHER_RPC_PORT`
-/// overrides the port.
-#[derive(Clone, Copy)]
+/// overrides the port. `engine` is the engines-cap config — today the
+/// liveness-heartbeat tuning (issue 1339), resolved argv-then-env.
+#[derive(Clone)]
 pub struct HubEnv {
     pub rpc_addr: SocketAddr,
+    pub engine: EngineConfig,
 }
 
 impl HubEnv {
@@ -63,9 +65,12 @@ impl HubEnv {
     /// ADR-0090 unit d (issue 1258): resolve from argv-then-env.
     /// `cli.rpc_port` shadows `AETHER_RPC_PORT`; falling through still
     /// lands on [`DEFAULT_RPC_PORT`] (the hub always binds an RPC
-    /// server, unlike desktop / headless). Takes `&HubCli` since the
-    /// only field today is a `Copy` `Option<u16>` — owned ownership
-    /// would be a needless move.
+    /// server, unlike desktop / headless). The engines overlay
+    /// (`--hub-heartbeat-*`, issue 1339) resolves through the
+    /// derive-emitted `from_argv_then_env` (argv beats
+    /// `AETHER_HUB_HEARTBEAT_*` env beats the literal default). Takes
+    /// `&HubCli`, cloning the overlay rather than consuming `cli` so the
+    /// bin keeps it for the `--config` dump.
     #[must_use]
     pub fn from_env_with_argv(cli: &HubCli) -> Self {
         use std::net::{IpAddr, Ipv4Addr};
@@ -75,13 +80,14 @@ impl HubEnv {
             .unwrap_or(DEFAULT_RPC_PORT);
         Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
+            engine: EngineConfig::from_argv_then_env(cli.engine.clone().into_layer()),
         }
     }
 }
 
 impl HubChassis {
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let HubEnv { rpc_addr } = env;
+        let HubEnv { rpc_addr, engine } = env;
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -90,7 +96,9 @@ impl HubChassis {
 
         Builder::<Self>::new(registry, mailer)
             .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<EngineServer>(())
+            // Liveness-heartbeat tuning (issue 1339), resolved
+            // argv-then-env in `HubEnv::from_env_with_argv`.
+            .with_actor::<EngineServer>(engine)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
                 peer_kind: PeerKind::Substrate {

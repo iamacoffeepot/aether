@@ -104,6 +104,8 @@ pub use engine::EngineProxy;
 #[cfg(not(target_arch = "wasm32"))]
 pub use engine::EngineProxyConfig;
 pub use engine::EngineServer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use engine::{EngineConfig, EngineOverlay};
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
 pub use input::InputCapability;
