@@ -515,6 +515,9 @@ mod tests {
             // (was: `payload.to_vec()` clone via the legacy
             // borrowed-dispatch shape).
             Arc::new(move |dispatch: OwnedDispatch| {
+                // ADR-0094: terminal test consumer — discharge before the
+                // partial-move of `payload` below.
+                dispatch.discharge();
                 captured_clone.lock().unwrap().push(CapturedDispatch {
                     kind: dispatch.kind,
                     payload: dispatch.payload.into_vec(),

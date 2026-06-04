@@ -139,19 +139,20 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         panic!("expected mailbox entry under {recipient}");
     };
     let bytes = payload.encode_into_bytes();
-    handler.enqueue(OwnedDispatch {
-        kind: <K as Kind>::ID,
-        kind_name: K::NAME.to_owned(),
-        origin: None,
-        sender: ReplyTo::NONE,
-        payload: MailRef::from(bytes),
-        count: 1,
-        mail_id: MailId::NONE,
-        root: MailId::NONE,
-        parent_mail: None,
-        t_enqueue: Nanos(0),
-        enqueue_depth: 0,
-    });
+    handler.enqueue(OwnedDispatch::disarmed(
+        <K as Kind>::ID,
+        K::NAME.to_owned(),
+        None,
+        ReplyTo::NONE,
+        MailRef::from(bytes),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
+        Nanos(0),
+        0,
+        MailboxId(0),
+    ));
 }
 
 fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
@@ -239,20 +240,21 @@ fn seize_and_run_dispatches_seed_in_place() {
 
     // Build one seed envelope and dispatch it in place — no inbox bounce.
     let payload = Greet { tag: 11 }.encode_into_bytes();
-    let seed = OwnedDispatch {
-        kind: <Greet as Kind>::ID,
-        kind_name: Greet::NAME.to_owned(),
-        origin: None,
-        sender: ReplyTo::NONE,
-        payload: MailRef::from(payload),
-        count: 1,
-        mail_id: MailId::NONE,
-        root: MailId::NONE,
-        parent_mail: None,
+    let seed = OwnedDispatch::disarmed(
+        <Greet as Kind>::ID,
+        Greet::NAME.to_owned(),
+        None,
+        ReplyTo::NONE,
+        MailRef::from(payload),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
         // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
-        t_enqueue: Nanos(0),
-        enqueue_depth: 0,
-    };
+        Nanos(0),
+        0,
+        MailboxId(0),
+    );
     slot.seize_and_run(seed, BatchBudget::standard());
 
     // Handler ran exactly once; the slot drained empty back to `Idle`.

@@ -417,6 +417,11 @@ impl Spawner {
             full_name.clone(),
             Arc::new(move |dispatch: OwnedDispatch| {
                 let Some(tx) = weak_for_handler.upgrade() else {
+                    // ADR-0094: the actor's sender is gone — the mail is
+                    // discarded at this relay seam, not held here, so
+                    // mark the obligation transferred (the dropped-mail
+                    // accounting is a separate concern, not this guard's).
+                    dispatch.mark_transferred();
                     tracing::warn!(
                         target: "aether_substrate::spawn",
                         kind = %dispatch.kind_name,
@@ -424,6 +429,10 @@ impl Spawner {
                     );
                     return;
                 };
+                // ADR-0094: the success path moves `env` onto the channel
+                // (a transfer — the obligation rides the value); the
+                // actor's dispatcher discharges it on drain. No annotation
+                // here because the value is not dropped at this seam.
                 let env: Envelope = dispatch;
                 pending_for_handler.fetch_add(1, Ordering::AcqRel);
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
@@ -433,6 +442,8 @@ impl Spawner {
                     // drop the counter entirely now that
                     // `wait_instanced_quiesce` retired).
                     pending_for_handler.fetch_sub(1, Ordering::AcqRel);
+                    // ADR-0094: discarded at the relay seam — transfer.
+                    env.mark_transferred();
                     tracing::warn!(
                         target: "aether_substrate::spawn",
                         kind = %env.kind_name,
@@ -654,22 +665,27 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
         K: Kind,
     {
         let payload = mail.encode_into_bytes();
-        let env = Envelope {
-            kind: KindId(<K as Kind>::ID.0),
-            kind_name: <K as Kind>::NAME.to_owned(),
-            origin: None,
-            sender: self.sender,
-            payload: MailRef::from(payload),
-            count: 1,
-            mail_id: MailId::NONE,
-            root: MailId::NONE,
-            parent_mail: None,
+        // ADR-0094: the bootstrap seed carries no settlement lineage
+        // (`MailId::NONE`), so it is built *disarmed* — there is no
+        // obligation to discharge (and `dispatch_one` no-ops its
+        // `record_finished` on `NONE` anyway).
+        let env = Envelope::disarmed(
+            KindId(<K as Kind>::ID.0),
+            <K as Kind>::NAME.to_owned(),
+            None,
+            self.sender,
+            MailRef::from(payload),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
             // Bootstrap seed carries no lineage (`MailId::NONE`), so it
             // never folds into a traced tree node — no deposit instant to
             // record (iamacoffeepot/aether#1134).
-            t_enqueue: Nanos(0),
-            enqueue_depth: 0,
-        };
+            Nanos(0),
+            0,
+            MailboxId(0),
+        );
         self.after_init.push(env);
         self
     }

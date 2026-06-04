@@ -778,19 +778,20 @@ mod native {
             else {
                 panic!("expected mailbox entry for {name}");
             };
-            handler.enqueue(OwnedDispatch {
+            handler.enqueue(OwnedDispatch::disarmed(
                 kind,
-                kind_name: "test.kind".to_owned(),
-                origin: None,
-                sender: ReplyTo::NONE,
-                payload: MailRef::from(payload.to_vec()),
-                count: 1,
-                mail_id: MailId::NONE,
-                root: MailId::NONE,
-                parent_mail: None,
-                t_enqueue: Nanos(0),
-                enqueue_depth: 0,
-            });
+                "test.kind".to_owned(),
+                None,
+                ReplyTo::NONE,
+                MailRef::from(payload.to_vec()),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                aether_data::MailboxId(0),
+            ));
         }
 
         #[test]

@@ -274,19 +274,20 @@ mod native {
             };
             let bytes = postcard::to_allocvec(&req)
                 .expect("test setup: HandlePublish serializes via postcard");
-            handler.enqueue(OwnedDispatch {
-                kind: <HandlePublish as Kind>::ID,
-                kind_name: "aether.handle.publish".to_owned(),
-                origin: None,
-                sender: session_reply_to(),
-                payload: MailRef::from(bytes),
-                count: 1,
-                mail_id: MailId::NONE,
-                root: MailId::NONE,
-                parent_mail: None,
-                t_enqueue: Nanos(0),
-                enqueue_depth: 0,
-            });
+            handler.enqueue(OwnedDispatch::disarmed(
+                <HandlePublish as Kind>::ID,
+                "aether.handle.publish".to_owned(),
+                None,
+                session_reply_to(),
+                MailRef::from(bytes),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                aether_data::MailboxId(0),
+            ));
 
             let deadline = Instant::now() + Duration::from_secs(2);
             let frame = loop {
@@ -354,19 +355,20 @@ mod native {
 
             let req = HandleDescribe { max: 16 };
             let bytes = postcard::to_allocvec(&req).expect("HandleDescribe serializes");
-            handler.enqueue(OwnedDispatch {
-                kind: <HandleDescribe as Kind>::ID,
-                kind_name: "aether.handle.describe".to_owned(),
-                origin: None,
-                sender: session_reply_to(),
-                payload: MailRef::from(bytes),
-                count: 1,
-                mail_id: MailId::NONE,
-                root: MailId::NONE,
-                parent_mail: None,
-                t_enqueue: Nanos(0),
-                enqueue_depth: 0,
-            });
+            handler.enqueue(OwnedDispatch::disarmed(
+                <HandleDescribe as Kind>::ID,
+                "aether.handle.describe".to_owned(),
+                None,
+                session_reply_to(),
+                MailRef::from(bytes),
+                1,
+                MailId::NONE,
+                MailId::NONE,
+                None,
+                Nanos(0),
+                0,
+                aether_data::MailboxId(0),
+            ));
 
             let deadline = Instant::now() + Duration::from_secs(2);
             let frame = loop {

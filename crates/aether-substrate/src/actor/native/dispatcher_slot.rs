@@ -287,6 +287,11 @@ where
         self.binding
             .mailer()
             .record_finished(inbound_mail_id, env.root);
+        // ADR-0094: discharge the obligation guard beside the
+        // `record_finished` that consumes this envelope. The canonical
+        // discharge site — every wasm component and native actor (issue
+        // 634 Phase 4) drains through here.
+        env.discharge();
         if let Some(p) = &self.pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -351,6 +356,10 @@ where
                 self.binding
                     .mailer()
                     .record_finished(seed.mail_id, seed.root);
+                // ADR-0094: discharge beside the finalized-slot seed's
+                // `record_finished` — the seed is consumed (dropped)
+                // here, never run.
+                seed.discharge();
             }
             drop(actor_guard);
             self.state.mark_idle();

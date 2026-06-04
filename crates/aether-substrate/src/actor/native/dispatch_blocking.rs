@@ -455,6 +455,9 @@ mod tests {
     /// `ReplyTarget::Component(sink)` mailbox.
     fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
         Arc::new(move |dispatch: OwnedDispatch| {
+            // ADR-0094: terminal test consumer — discharge before the
+            // value is forwarded for the test to observe and drop.
+            dispatch.discharge();
             let _ = tx.send(dispatch);
         })
     }

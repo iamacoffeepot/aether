@@ -333,8 +333,13 @@ impl<'a> ChassisCtx<'a> {
             // the warn-log reads `env.kind_name` (the owned String)
             // without needing to clone ahead of the send.
             Arc::new(move |dispatch: OwnedDispatch| {
+                // ADR-0094: the success path moves `env` onto the claim's
+                // channel (a transfer — the claiming consumer, e.g. the
+                // desktop window drain, discharges it). The failure branch
+                // discards at this seam, also a transfer.
                 let env: Envelope = dispatch;
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
+                    env.mark_transferred();
                     tracing::warn!(
                         target: "aether_substrate::capability",
                         kind = %env.kind_name,
