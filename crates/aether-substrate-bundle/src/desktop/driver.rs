@@ -352,6 +352,42 @@ fn try_framework_dispatch(mailer: &Arc<Mailer>, self_mailbox: MailboxId, env: &E
         || dispatch_cost_tail_if_matching_free(m, env.sender, self_mailbox, env)
 }
 
+/// Discharge the ADR-0080 §2 settlement bracket for one inbound
+/// `aether.window` envelope. `aether.window` is an `Inbox`
+/// (actor-enqueue) mailbox: the mailer records *no* settlement bracket
+/// on the producer side (`mail/mailer.rs` `Inbox` arm), so the
+/// `InboxHandler` contract (`mail/registry.rs`, ADR-0080 §2) puts the
+/// obligation on the downstream consumer — this hand-rolled window
+/// drain. Without it the inbound Call's root `in_flight` never reaches
+/// zero, no `Settled` fires, no wire `ReplyEnd` is emitted, and a
+/// blocking `send_mail` to `set_mode` / `set_title` / `focus` hangs
+/// (iamacoffeepot/aether#1325, a recurrence of the #846 dropped-bracket
+/// class).
+///
+/// Mirrors the bracket template in
+/// [`DispatcherSlot::dispatch_one`](aether_substrate::actor::native)
+/// (`actor/native/dispatcher_slot.rs:289`): `record_finished` after the
+/// reply, so the reply child's `Sent` is accounted before the inbound
+/// parent's `Finished` (the #1150 flush-before-Finished ordering).
+///
+/// Deliberately **settlement-only**: it discharges `in_flight` via
+/// `record_finished` but does not additionally push `Received` /
+/// `Finished` `TraceEvent`s into the driver's per-actor ring the way
+/// `dispatch_one` does. The bug is a settlement leak, not a
+/// trace-visibility gap; full trace-event emission is a separable
+/// trace-fidelity change the minimal fix does not need.
+///
+/// Early-returns on `mail_id == MailId::NONE` for legible intent —
+/// `record_finished` also no-ops on `NONE`, so this is belt-and-braces
+/// for the chassis-internal window-size / frame-stats pushes minted with
+/// `MailId::NONE` roots via `push_chassis_root`.
+fn discharge_settlement(mailer: &Mailer, mail_id: MailId, root: MailId) {
+    if mail_id == MailId::NONE {
+        return;
+    }
+    mailer.record_finished(mail_id, root);
+}
+
 impl App {
     /// ADR-0080 §6 chassis-source push helper (issue
     /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
@@ -470,11 +506,20 @@ impl App {
     // owning-handoff symmetry with the rest of the dispatch surface.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_window_envelope(&mut self, env: Envelope) {
+        // iamacoffeepot/aether#1325: capture the inbound settlement
+        // identity before any arm moves fields out of the owned `env`,
+        // so the ADR-0080 §2 bracket is discharged for every
+        // driver-specific arm below (see `discharge_settlement`).
+        let mail_id = env.mail_id;
+        let root = env.root;
         // iamacoffeepot/aether#1272: framework-built-in dispatch arms
         // run BEFORE the driver-specific kinds, matching
         // `DispatcherSlot::run_cycle`'s ordering. Factored into a free
         // fn so the desktop-driver unit test exercises the routing
-        // shape directly without standing up a winit `App`.
+        // shape directly without standing up a winit `App`. The
+        // framework arms own their own settlement bracket, so we do NOT
+        // discharge here — the early return skips the
+        // `discharge_settlement` at the tail.
         if try_framework_dispatch(&self.queue, self.window_mailbox, &env) {
             return;
         }
@@ -488,6 +533,7 @@ impl App {
                             error: format!("postcard decode failed: {e}"),
                         },
                     );
+                    discharge_settlement(&self.queue, mail_id, root);
                     return;
                 }
             };
@@ -503,6 +549,7 @@ impl App {
                             error: format!("postcard decode failed: {e}"),
                         },
                     );
+                    discharge_settlement(&self.queue, mail_id, root);
                     return;
                 }
             };
@@ -522,6 +569,14 @@ impl App {
                 "desktop driver dropped unrecognised aether.window kind",
             );
         }
+        // iamacoffeepot/aether#1325 / §Side finding #2: discharge the
+        // ADR-0080 §2 settlement bracket once per envelope at the
+        // drain-loop level (after `send_reply`), covering the two
+        // success arms AND the unrecognised-kind warn-drop arm — a
+        // blocking send of an unhandled window kind carrying a non-NONE
+        // root would otherwise leak settlement the same way. Mirrors
+        // `dispatch_one` (`dispatcher_slot.rs:289`).
+        discharge_settlement(&self.queue, mail_id, root);
     }
 
     fn publish_window_size(&self, width: u32, height: u32) {
@@ -1151,5 +1206,62 @@ mod tests {
         });
         assert!(!matched, "SetWindowTitle is a driver-specific kind");
         assert!(rx.try_recv().is_err(), "no reply emitted on skip path");
+    }
+
+    /// iamacoffeepot/aether#1325: the window inbox drain owns the
+    /// ADR-0080 §2 settlement bracket for every inbound envelope (the
+    /// `Inbox` mailbox records none on the producer side). Drive the
+    /// extracted `discharge_settlement` free fn — the same call the
+    /// driver makes per envelope — against a seeded in-flight root and
+    /// assert it settles. This is the CI-runnable regression guard for
+    /// every window-kind arm without standing up winit/wgpu; the
+    /// windowed end-to-end blocking-send path stays MCP-manual.
+    #[test]
+    fn discharge_settlement_settles_window_root() {
+        use aether_data::MailId;
+        use aether_substrate::chassis::settlement::SettlementRegistry;
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::registry::Registry;
+
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Mailer::new(registry, store);
+
+        // Wire a settlement registry into the trace handle (the chassis
+        // builder does both installs at boot, builder.rs:1119-1122) so
+        // the emit-time counter's zero-transition can `fire_settled`.
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.install_settlement_registry(Arc::clone(&settlement));
+        mailer
+            .trace_handle()
+            .install_settlement_registry(Arc::clone(&settlement));
+
+        // Mint a root, seed its emit-time `in_flight`, and subscribe its
+        // settlement the way the driver does at driver.rs:606. A second
+        // root stays seeded but is only ever poked by the NONE discharge
+        // below — its receiver proves that arm is a no-op.
+        let window_mailbox = mailbox_id_from_name("aether.window");
+        let root = MailId::new(window_mailbox, 1);
+        let mail_id = MailId::new(window_mailbox, 2);
+        let guard_root = MailId::new(window_mailbox, 3);
+        mailer.record_sent_inflight(root);
+        mailer.record_sent_inflight(guard_root);
+        let rx = settlement.subscribe_settlement(root);
+        let guard_rx = settlement.subscribe_settlement(guard_root);
+
+        // The per-envelope discharge the drain loop performs after
+        // `send_reply`. With it, the inbound root's `in_flight` reaches
+        // zero and `Settled` fires.
+        discharge_settlement(&mailer, mail_id, root);
+        rx.recv().expect("window root settles after discharge");
+
+        // The chassis-internal-push guard: a `MailId::NONE` envelope
+        // (window-size / frame-stats pushes) is a no-op — `guard_root`
+        // stays in-flight and its receiver never wakes.
+        discharge_settlement(&mailer, MailId::NONE, guard_root);
+        assert!(
+            guard_rx.try_recv().is_err(),
+            "NONE discharge must not settle any root",
+        );
     }
 }
