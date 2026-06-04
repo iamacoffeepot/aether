@@ -7,10 +7,16 @@
 - [Why aether is shaped this way](philosophy.md)
 - [Architecture overview](architecture.md)
 
+# Foundations
+
+- [The type system]()
+- [Invariants & guarantees]()
+
 # The systems
 
 - [Subsystem map](systems.md)
-  - [Mail, kinds & scheduling]()
+  - [Mail, kinds & scheduling](systems/mail-and-kinds.md)
+  - [Concurrency & blocking]()
   - [Components & lifecycle]()
   - [Rendering & camera]()
   - [Mesh authoring & the DSL]()
