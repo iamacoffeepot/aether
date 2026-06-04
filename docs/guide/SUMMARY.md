@@ -10,7 +10,7 @@
 # Foundations
 
 - [The type system]()
-- [Invariants & guarantees]()
+- [Invariants & guarantees](foundations/invariants.md)
 
 # The systems
 
