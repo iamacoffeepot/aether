@@ -28,7 +28,7 @@ Two properties make it tractable to reason about:
 - **Actors communicate *only* by mail.** No actor holds a reference into another
   actor's memory, calls another's methods, or shares a lock with it. The only way
   to affect another actor is to send it a kind it handles. This is what lets the
-  same model span a trusted in-process capability and a sandboxed wasm component
+  same model span an in-process capability and a sandboxed wasm component
   without either knowing which it's talking to — mail is the only coupling, so the
   *host* is an implementation detail. (See [capability = reachability](invariants.md)
   for the security consequence.)
@@ -198,42 +198,69 @@ get reached: a mailbox id is just a compile-time hash of the name
 with no runtime lookup — the type carries its `NAMESPACE`, the hash is a const, and
 the send lands at the right mailbox.
 
+Because the name *is* the address, it has to be unique — two actors claiming the same
+name hash to the same mailbox. The substrate enforces one claimant per name **at
+registration**: a second capability claiming a taken name fails to boot, and a
+component loaded under a name already in use comes back as a load error. This is not
+a compile-time check — two types can declare the same `NAMESPACE` string and compile
+cleanly; the collision only surfaces when the second one tries to register. For an
+instanced actor (below) the uniqueness is on the full `NAMESPACE:subname`, not the
+shared prefix.
+
 What the name maps to depends on the host. For a **capability** the `NAMESPACE` *is*
 the mailbox — `aether.audio`, `aether.render`, `aether.input` — claimed by the
-chassis at boot, so addressing one by type reaches it directly. For a **component**
-the `NAMESPACE` is only the *default load name*: once loaded, the actor is registered
-at `aether.component.trampoline:<name>` (the name `LoadResult` hands back, which is
-the `NAMESPACE` unless the load overrode it). You reach a loaded component through
-that resolved name — `ctx.loaded::<Camera>("camera")`, or the `LoadResult.name`
-string — not by hashing its bare `NAMESPACE`.
+chassis at boot, so `ctx.actor::<AudioCapability>()` reaches it directly. For a
+**component** the `NAMESPACE` is only the *default load name*: once loaded, the actor
+is registered at `aether.component.trampoline:<name>` (the name `LoadResult` hands
+back, which is the `NAMESPACE` unless the load overrode it). You reach it by that
+registered name, not by hashing the bare `NAMESPACE` — either pass `LoadResult.name`
+to `resolve_actor`, or use the `loaded` helper below.
+
+A capability can also dress up its mail surface with **extension-trait helpers** —
+typed methods on the mailbox handle that stand in for raw kind sends.
+`ctx.actor::<InputCapability>().subscribe(Tick::ID, me)` is one (from
+`InputMailboxExt`), and `ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")`
+is the loaded-component lookup just mentioned (from `ComponentHostExt`). Each such
+trait is implemented for *both* the component and the capability handle, so the same
+helper reads the same whichever host you write from.
 
 ## One or many: cardinality
 
 An actor type is either **singleton** or **instanced**, marked by the `Singleton` or
-`Instanced` trait, and that choice decides how its name and addressing work.
+`Instanced` trait, and the choice sets whether its `NAMESPACE` is a whole name or a
+prefix.
 
-A **singleton** is one of a kind: at most one instance per `NAMESPACE`, and the
-`NAMESPACE` is its whole name. Capabilities are always singletons, and a component
-loaded at its default name is one too. You address it by type, `ctx.actor::<R>()`.
+A **singleton** is one of a kind: at most one instance, and the `NAMESPACE` is its
+whole name. Every capability is a singleton — and because a capability's name is its
+mailbox, you address it straight by type, `ctx.actor::<R>()`.
 
 An **instanced** actor is one of many sharing a prefix. Its `NAMESPACE` is that
 prefix, and each live instance has a full name `NAMESPACE:subname` — for example
 `aether.net.session:42`. The case that drives this is sockets: a singleton listener
-accepts connections and, for each one, spawns a session actor with `ctx.spawn_child`
-(ADR-0079); you then reach a specific instance by its subname,
-`ctx.resolve_actor::<SessionActor>("42")`. Spawning children this way is a native
-capability's job — a wasm component is itself a singleton, loaded rather than spawned.
+accepts connections and spawns a session actor per connection with `ctx.spawn_child`
+(ADR-0079), then reaches a specific one by subname,
+`ctx.resolve_actor::<SessionActor>("42")`.
+
+Spawning children on demand like that is a **native** facility — `spawn_child` is
+bounded to `Instanced` native actors. A wasm component can't spawn children of its
+own (a current gap, not a principle). It *can* still run as several instances,
+though: load the same wasm under different names and each is an independent actor at
+its own `aether.component.trampoline:<name>`. The loader in fact hosts every
+component behind an instanced trampoline actor, spawned once per load — so even a
+single loaded component is, underneath, one instance of an instanced host.
 
 ## One model, two hosts
 
 Here's the part that ties the engine together. There aren't two actor systems —
-there's **one model with two hosts**, differing only in where the actor's code
-lives and what it's trusted with (ADR-0074):
+there's **one model with two hosts**, differing in where the actor's code lives and
+how it reaches the outside world (ADR-0074):
 
-- A **native capability** is an actor compiled *into* the substrate. It implements
-  `NativeActor`, it's linked at build time, and it's trusted with raw I/O — the
-  renderer, the audio mixer, the filesystem, the input streams, the
-  component-loader itself are all capabilities. This is the chassis.
+- A **native capability** is an actor compiled *into* the substrate, implementing
+  `NativeActor` and linked at build time. It's the host an actor takes when what it
+  does needs native Rust APIs or raw performance — the GPU through wgpu, the audio
+  device through cpal, the filesystem, the OS input loop. The renderer, the audio
+  mixer, the filesystem, the input streams, and the component-loader itself are all
+  capabilities; together they're the chassis.
 - A **component** is an actor *loaded at runtime* as a wasm module, run sandboxed
   behind the wasm wall and reaching the outside world only by mailing capabilities.
   It implements `FfiActor`, and the substrate drives it through an FFI
