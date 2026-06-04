@@ -165,11 +165,11 @@ lives and what it's trusted with (ADR-0074):
   `NativeActor`, it's linked at build time, and it's trusted with raw I/O — the
   renderer, the audio mixer, the filesystem, the input streams, the
   component-loader itself are all capabilities. This is the chassis.
-- A **component** is an actor *loaded at runtime* — wasm today — that runs
-  sandboxed behind the wasm wall and reaches the outside world only by mailing
-  capabilities. It implements `FfiActor`, and the substrate drives it through an
-  FFI **trampoline**. This is the agent-facing extension path: new behavior with
-  no substrate rebuild.
+- A **component** is an actor *loaded at runtime* as a wasm module, run sandboxed
+  behind the wasm wall and reaching the outside world only by mailing capabilities.
+  It implements `FfiActor`, and the substrate drives it through an FFI
+  **trampoline**. This is the agent-facing extension path: new behavior with no
+  substrate rebuild.
 
 The two traits are deliberately mirror images. Both sit on the shared `Actor`
 super-trait (which owns only `NAMESPACE`). Both have a `type Config`, the same
