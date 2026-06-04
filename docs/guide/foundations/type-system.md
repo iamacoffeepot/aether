@@ -70,9 +70,26 @@ a mismatched producer and consumer compute *different* ids and the mail lands on
 
 A kind's shape is a tree of `SchemaType`. The leaves and containers are what
 you'd expect — `Bool`, `Scalar` (the primitives), `String`, `Bytes`, `Option`,
-`Vec`, `Array`, `Struct`, `Enum`, and `Map` (a keyed lookup table). Three things
-are worth knowing beyond "it's a type tree":
+`Vec`, `Array` (fixed-length `[T; N]`; `Vec` is the variable-length form),
+`Struct`, `Enum`, and `Map` (a keyed lookup table). The arms that carry rules
+worth knowing beyond "it's a type tree":
 
+- **Two wire shapes, and what picks them.** A struct encodes as a raw
+  `#[repr(C)]` byte cast (`repr_c = true`) *only if* it is `#[repr(C)]` **and**
+  every field is cast-eligible, recursively; otherwise it encodes as postcard.
+  Cast-eligible means a scalar primitive, a typed-id newtype (`MailboxId` and
+  friends are `#[repr(transparent)]` over `u64`), a fixed `[T; N]` array of
+  cast-eligible elements, or a nested all-cast-eligible `#[repr(C)]` struct. A
+  single `String`, `Bytes`, `Vec`, `Option`, `Map`, `Enum`, or `Ref` field
+  anywhere short-circuits the whole struct to postcard. You don't choose this —
+  the derive computes it at compile time (`CastEligible::ELIGIBLE` ANDs every
+  field) — but it's why two similar-looking kinds can have different wire
+  encodings, and it's the `encode` vs `encode_struct` split in the SDK.
+- **`Map` keys are restricted.** A map key may only be a `String`, an integer
+  scalar, or `Bool` — the `BTreeMap<K: Ord, V>` bound rules out `f32`/`f64`/
+  `Vec`/`Option` at the type level and the codec rejects them defensively.
+  Entries serialize in key-sorted order, and a map (being variable-length)
+  always forces its parent struct onto the postcard path.
 - **The canonical bytes are positional-only.** When a schema is serialized for
   hashing and for the `aether.kinds` manifest, field and variant names are
   dropped; a separate labels sidecar (`aether.kinds.labels`) carries them for
