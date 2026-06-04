@@ -86,13 +86,19 @@ if [[ ",$allowed," != *",a,"* ]] && printf '%s' "$search_text" | grep -qE '\\[`$
     issues+=("Pattern A: backslash-escaped backtick or dollar — drop the backslash; quoted heredocs (<<'EOF') pass them through literally")
 fi
 
-# Pattern B: bare #NNN auto-link. GitHub renders any standalone
-# `#<digits>` as a cross-ref. Allow `owner/repo#NNN` (preceded by
+# Pattern B: bare #NNN auto-link — PR bodies only. A separate hook
+# strips bare `#<digits>` out of PR bodies (so unintended close
+# keywords can't fire), which also silently drops plain mentions;
+# the `owner/repo#NNN` form survives that strip. That hazard is a PR
+# concern (feedback_close_keyword_hook_strips_hash.md). In an *issue*
+# body a bare `#NNN` cross-ref to a sibling is the desired auto-link
+# and nothing strips it, so Pattern B does not apply there
+# (iamacoffeepot/aether#1289). Allow `owner/repo#NNN` (preceded by
 # `/`); allow ADR-0045-style refs (preceded by an alphanum or `-`).
 # Allow occurrences inside obvious URL paths (preceded by digits via
 # the `[A-Za-z0-9_/-]` exclusion).
-if [[ ",$allowed," != *",b,"* ]] && printf '%s' "$search_text" | grep -qE '(^|[^A-Za-z0-9_/-])#[0-9]+'; then
-    issues+=("Pattern B: bare #NNN auto-links — write 'PR 235' instead of '#235', or 'owner/repo#NNN' for cross-repo refs")
+if [[ ",$allowed," != *",b,"* ]] && (( is_pr_cmd == 1 )) && printf '%s' "$search_text" | grep -qE '(^|[^A-Za-z0-9_/-])#[0-9]+'; then
+    issues+=("Pattern B: bare #NNN in a PR body — a hook strips it (dropping the ref); write 'PR 235' or 'owner/repo#NNN' to survive")
 fi
 
 # Pattern D: $...$ inline math span. GitHub treats `$foo$` as LaTeX.
@@ -165,7 +171,7 @@ if (( ${#issues[@]} )); then
         printf '  - PR title: same {type}({scope}): <subject> shape; PR types additionally allow test build ci style revert.\n'
         printf '  - Subject (issue + PR) must start lowercase.\n'
         printf '  - Scope is a crate name OR a meta-scope: ci docs adr qodana repo release workflow.\n'
-        printf '  - Body: no backslash before a backtick/dollar (A); no bare hash-number, use owner/repo#NNN (B); no dollar-delimited math span, use backticks (D).\n'
+        printf '  - Body: no backslash before a backtick/dollar (A); in PR bodies no bare hash-number, use owner/repo#NNN (B — issue bodies allow bare #NNN); no dollar-delimited math span, use backticks (D).\n'
         printf '\nTo override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d/e, comma-separated; only listed patterns are skipped).\n'
         printf 'Context: feedback_heredoc_no_backtick_escape.md (auto-memory).\n'
     } >&2
