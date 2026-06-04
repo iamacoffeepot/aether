@@ -14,9 +14,10 @@
 //! - [`TestCallActor`] is the mid-graph `Call` target: configurable to
 //!   reply once, N times, or never; the never-reply mode exercises the
 //!   per-`Call` settlement timeout.
-//! - [`TestDeferredCallActor`] answers off-thread through the
-//!   content-gen `InFlightDispatch` (spawn-and-die worker + settlement
-//!   hold), exercising the exact-settlement-through-the-hold path.
+//! - [`TestDeferredCallActor`] answers off-thread through the ADR-0093
+//!   hold-until-resolve dispatch (`TaskQueue` over `ctx.dispatch_blocking`
+//!   — spawned worker + framework-held settlement hold), exercising the
+//!   exact-settlement-through-the-hold path.
 
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -339,25 +340,21 @@ mod test_call {
 #[aether_actor::bridge(singleton)]
 mod test_deferred_call {
     use super::{TestCallReply, TestCallRequest, ref_value};
-    use crate::contentgen::dispatch::{BlockingCall, InFlightDispatch};
-    use aether_actor::{actor, actor::ctx::OutboundReply};
-    use aether_data::{Kind, KindId, MailboxId, ReplyTo};
-    use aether_substrate::Mailer;
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use crate::contentgen::task_queue::TaskQueue;
+    use aether_actor::actor;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
-    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
-    /// `Call` target that answers off-thread through the content-gen
-    /// [`InFlightDispatch`] — spawn-and-die worker + a [`SettlementHold`]
+    /// `Call` target that answers off-thread through the ADR-0093
+    /// hold-until-resolve dispatch (`TaskQueue` over
+    /// `ctx.dispatch_blocking`) — the framework holds a `SettlementHold`
     /// that keeps `call_root` open across the async reply
     /// (iamacoffeepot/aether#1031). Exercises that the executor's bundle
     /// stays open until the worker's deferred reply lands.
     pub struct TestDeferredCallActor {
-        dispatch: InFlightDispatch,
-        mailer: Arc<Mailer>,
-        self_mailbox: MailboxId,
+        tasks: TaskQueue,
     }
 
     #[actor]
@@ -365,11 +362,9 @@ mod test_deferred_call {
         type Config = ();
         const NAMESPACE: &'static str = "aether.dag.test.deferred_call";
 
-        fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
-                dispatch: InFlightDispatch::new(4),
-                mailer: ctx.mailer(),
-                self_mailbox: ctx.self_id(),
+                tasks: TaskQueue::new(4),
             })
         }
 
@@ -377,37 +372,16 @@ mod test_deferred_call {
         #[handler]
         fn on_call(&mut self, ctx: &mut NativeCtx<'_>, mail: TestCallRequest) {
             let value = ref_value(&mail.input);
-            let request_id = value;
-            let reply_to = OutboundReply::reply_target(ctx).unwrap_or(ReplyTo::NONE);
-            let root = ctx.in_flight_root();
-            let call: BlockingCall = Box::new(move || {
+            self.tasks.submit(ctx, move || {
                 thread::sleep(Duration::from_millis(50));
-                let reply = TestCallReply { index: value };
-                (
-                    KindId(<TestCallReply as Kind>::ID.0),
-                    reply.encode_into_bytes(),
-                )
+                TestCallReply { index: value }
             });
-            self.dispatch.submit(
-                &self.mailer,
-                self.self_mailbox,
-                root,
-                request_id,
-                reply_to,
-                call,
-            );
         }
 
-        #[allow(clippy::needless_pass_by_value)]
-        #[handler]
-        fn on_result(&mut self, ctx: &mut NativeCtx<'_>, mail: TestCallReply) {
-            if let Some(landed) = self.dispatch.take_landed(mail.index) {
-                OutboundReply::reply_to(ctx, landed.reply_to, &mail);
-                drop(landed);
-            }
-            let _ = self
-                .dispatch
-                .on_reply_landed(&self.mailer, self.self_mailbox);
+        #[handler(task)]
+        fn on_call_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<TestCallReply>) {
+            done.resolve(ctx);
+            self.tasks.on_complete(ctx);
         }
     }
 }
