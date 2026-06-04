@@ -67,6 +67,7 @@ pub(crate) mod blob_lifecycle;
 pub(crate) mod blob_work;
 pub mod ctx;
 pub(crate) mod dispatch;
+pub mod dispatch_blocking;
 pub(crate) mod dispatcher_slot;
 pub mod envelope;
 pub mod mailbox;
@@ -75,6 +76,7 @@ pub mod spawn_thread;
 
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
+pub use dispatch_blocking::{DispatchId, TaskCompletionWake, TaskDone};
 // iamacoffeepot/aether#1272: driver-as-actor capabilities that own
 // their inbox drain inline (today only the desktop window driver)
 // reach for the `NativeCtx`-free variants of the framework dispatch
