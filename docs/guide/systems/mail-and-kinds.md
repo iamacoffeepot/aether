@@ -5,6 +5,16 @@ other — they send **mail**. A piece of mail is a typed payload (a *kind*)
 addressed to a *mailbox*, and the scheduler runs the handlers. Understand this
 page and every other subsystem reads as "an actor that receives some kinds."
 
+**The cast, in one breath.** Everything in the engine is an **actor** — a unit
+that owns some state and talks only by mail. Actors come in two forms: a
+**component** is a *wasm* actor loaded at runtime (your logic — and the thing
+that can be hot-swapped), and a **capability** is a *native* actor compiled
+into the substrate (render, audio, file I/O, and the rest). They're the same
+actor model and address each other identically; "component" vs "capability" is
+just wasm-and-loaded vs native-and-built-in. When this page says "component" it
+means specifically the wasm kind; "actor" means either. The deep dive is
+[Components & lifecycle]().
+
 > Governing ADRs: **ADR-0002** (mail-first actor model), **ADR-0005** (mail
 > typing), **ADR-0019** (unified encoding), **ADR-0087** (blob dispatch + the
 > ordering spine). The mail/kind model is **stable**; the *scheduler internals*
@@ -20,21 +30,49 @@ buys four things the project treats as non-negotiable:
 - **Hot-swap.** A component can be unloaded and reloaded mid-run without the
   host contortions shared state would require — because nothing else holds a
   pointer into it; it only receives mail.
-- **Sandboxing.** Agent-authored code can't be trusted with shared memory. Mail
-  is the only channel, so a component's reach is exactly the mailboxes it can
-  address.
-- **Capability equals reachability.** There is no privileged side-channel — not
-  even for Claude. What an actor can do is what it can mail. Gating a build is
-  just choosing which mailboxes are registered.
-- **Location independence.** A recipient can't tell whether mail came from a
-  sibling actor in the same process or from Claude over the MCP wire. The
-  "in-process vs out-of-process" question dissolves into a transport choice.
+- **Sandboxing.** Agent-authored code runs as a wasm **component** in a sandbox,
+  and can't be trusted with shared memory. Mail is its only channel, so the
+  component's reach is exactly the mailboxes it can address — nothing more.
+- **Capability equals reachability — and so does observability.** There is no
+  privileged side-channel, not even for Claude: what an actor can do is exactly
+  what it can mail, so gating a build is just choosing which mailboxes are
+  registered. The payoff on the flip side is the point, not a side effect —
+  because *every* function in the engine is reachable as mail, you can interpose
+  anywhere in the stack: address any mailbox, watch any exchange, inject a
+  message mid-flow to reproduce or debug a state. Universal reachability is what
+  makes the running engine inspectable by the agent driving it, and it is a
+  primary reason the model is shaped this way.
+- **Location independence.** Transport is a choice the recipient doesn't have
+  to reason about: mail from a sibling actor in the same process and mail from
+  Claude over the MCP wire run the same handler path, so the "in-process SDK vs
+  out-of-process server" question dissolves (ADR-0002/0006). A handler isn't
+  fully blind to provenance — it can see a reply target and sender lineage
+  (ADR-0083) — but the guarantee is that correctness and capability never
+  *depend* on where mail came from. (Pinning down the exact origin, e.g. for a
+  security policy, isn't first-class today; it's a plausible future.)
 
-The one discipline this demands: **actors are subsystem-sized, not
-entity-sized** (ADR-0002). A physics actor owns the whole physics world; inside
-it, state is plain data and iteration is a tight loop. "One actor per entity"
-would turn every interaction into per-frame mail and is explicitly *not* what
-the model authorizes.
+**A note on granularity.** Actors span a wide range of sizes. A coarse actor
+can own a whole subsystem — the entire physics world, state as plain data and a
+tight inner loop. A fine one can be a single instance: **instanced** actors are
+a first-class category (cardinality — `Singleton` vs `Instanced` — is its own
+axis, ADR-0079), and the blob dispatcher (ADR-0087) is built to rip through
+large sets of mail, so fan-out across many small actors is cheap, not the
+performance trap an earlier design assumed. ADR-0002's "subsystem-sized, never
+per-entity" rule predates both and is superseded on this point.
+
+When do you split into instances versus manage multiplicity inside one actor?
+Reach for an instanced actor when each instance needs its own lifecycle and
+isolation — one actor per TCP session is the canonical case (a `NetCapability`
+listener spawns a `SessionActor` per connection, each able to drop
+independently); per-session game logic and per-monster AI are the same shape.
+Keep it a single actor when the multiplicity is just internal state — the
+camera component drives many cameras from one actor, no per-camera mailbox
+needed.
+
+One caveat, still settling: each actor currently gets its own OS thread
+(ADR-0038) — comfortable for the 10s–100s of actors a game wants, but pushing
+against ceilings at hub-server scale (1000s+). A future scheduler ADR may
+revise the threading without changing the model.
 
 ## What it does
 
