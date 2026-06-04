@@ -38,6 +38,9 @@ use aether_substrate::actor::native::{
 };
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::settlement::{
+    TerminalDisposition, WaitOutcome, await_internal_signal,
+};
 use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
     HubOutbound, Mailer, SharedActorSlots, SubstrateBoot,
@@ -58,6 +61,12 @@ use std::io;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use winit::dpi::PhysicalSize;
+
+/// Cumulative patience cap for the per-frame settlement gates (advance +
+/// capture pre-mail). The per-round budget is `frame_loop::DRAIN_BUDGET`
+/// (the log cadence); a starved-but-healthy chain resolves before this
+/// cap, a genuine wedge exhausts it (issue #1305).
+const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 
 pub struct App {
     queue: Arc<Mailer>,
@@ -585,19 +594,20 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if let Some(registry) = self.queue.settlement_registry() {
                     let rx = registry.subscribe_settlement(advance_root);
-                    if rx.recv_timeout(frame_loop::DRAIN_BUDGET).is_err() {
-                        // A frame chain that doesn't settle within the
-                        // drain budget is a wedged dispatcher — same
-                        // fail-fast disposition the old drain barrier
-                        // had (ADR-0063).
-                        lifecycle::fatal_abort(
-                            &self.outbound,
-                            format!(
-                                "frame chain wedged: LifecycleAdvance root {advance_root:?} did \
-                                 not settle within {:?}",
-                                frame_loop::DRAIN_BUDGET
-                            ),
-                        );
+                    // A frame chain that doesn't settle is a wedged
+                    // dispatcher — same fail-fast disposition the old
+                    // drain barrier had (ADR-0063). Escalating-patience
+                    // wait (issue #1305) replaces the bare wall-clock:
+                    // a starved-but-healthy chain resolves before the
+                    // cumulative cap, a genuine wedge exhausts it.
+                    if let WaitOutcome::Wedged(wedge) = await_internal_signal(
+                        &rx,
+                        "desktop.frame_advance",
+                        frame_loop::DRAIN_BUDGET,
+                        FRAME_SETTLEMENT_CAP,
+                        TerminalDisposition::Abort,
+                    ) {
+                        lifecycle::fatal_abort(&self.outbound, wedge.reason());
                     }
                 }
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -614,12 +624,14 @@ impl ApplicationHandler<UserEvent> for App {
                             // the chassis).
                             let mut pre_failed: Option<String> = None;
                             for rx in req.pre_settlements {
-                                if rx.recv_timeout(Duration::from_secs(5)).is_err() {
-                                    pre_failed = Some(
-                                        "capture pre-mail chain failed to settle within 5s — \
-                                         a downstream cap is wedged"
-                                            .to_owned(),
-                                    );
+                                if let WaitOutcome::Wedged(wedge) = await_internal_signal(
+                                    &rx,
+                                    "desktop.capture_pre_mail",
+                                    frame_loop::DRAIN_BUDGET,
+                                    FRAME_SETTLEMENT_CAP,
+                                    TerminalDisposition::ReplyErr,
+                                ) {
+                                    pre_failed = Some(wedge.reason());
                                     break;
                                 }
                             }
