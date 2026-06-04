@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (elevated from Proposed by ADR-0003)
 - **Date:** 2026-04-13
+- **Superseded in part (2026-06-04):** the *Component granularity* decision below — the "subsystem-sized, not entity-sized" rule — was lifted by ADR-0079 (instanced actors as a first-class category) and ADR-0087 (the mail blob as the unit of dispatch). Fine-grained / per-instance actors (e.g. one actor per TCP session) are now first-class and cheap. The original text is preserved below as the decision as made; see the inline note in that section.
 
 ## Context
 
@@ -38,6 +39,16 @@ Every component is addressable by **mailbox**. Mail envelopes are typed and **ba
 There is no shared memory between components. Anything one component needs to know about another component's state arrives as mail. This is deliberately strict: it keeps the abstraction uniform, keeps capability reasoning simple (you can reach who you can mail), and lets us observe where — and whether — the strictness actually hurts us.
 
 ### Component granularity
+
+> **Superseded by ADR-0079 + ADR-0087 (2026-06-04).** The prohibition on
+> fine-grained / per-entity actors below was a performance hedge from the early
+> engine. Instanced actors are now a first-class category (ADR-0079), and the
+> blob dispatcher (ADR-0087) makes large volumes of mail across many small
+> actors cheap — so an actor per TCP session, per monster, or per document is an
+> expected pattern, not an anti-pattern. (They're cheap because actors are
+> multiplexed onto the shared work-stealing scheduler, ADR-0087 — not one OS
+> thread each, which is what ADR-0038 originally shipped.) The text below is
+> preserved as the decision as originally made.
 
 **Components are subsystem-sized, not entity-sized.** A physics component owns its entire physics world. A scene component owns its entire scene graph. An AI component owns its entire AI state. Inside a component, state is plain data and iteration is a tight loop in native (WASM) code.
 
