@@ -1,9 +1,12 @@
 # Introduction
 
-Aether is a game engine being built to be **driven by an agent**. The
-working assumption everywhere in the design is that the primary operator —
-the one who spawns engines, loads components, sends mail, authors content,
-and extends the codebase — is Claude, sitting in a harness. Humans are
+Aether is an application engine — built for games, and **driven by an
+agent**. The substrate underneath is general: it hosts whatever real-time,
+interactive software runs on it (a game, a tool, a server), and games are the
+motivating target rather than a baked-in assumption — so don't expect a fixed
+game loop to be load-bearing. What *is* baked in everywhere is **who operates
+it**: the one who spawns engines, loads components, sends mail, authors
+content, and extends the codebase is Claude, sitting in a harness. Humans are
 welcome, but the surfaces are shaped for a machine consumer first.
 
 This guide is the narrative companion to that codebase. It is written for

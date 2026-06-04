@@ -8,29 +8,29 @@ establish where everything sits.
 ## The stack
 
 ```
-        ┌──────────────────────────────────────────────┐
- agent  │  Claude in a harness                          │
-        └───────────────┬──────────────────────────────┘
-                        │ MCP (tool calls)
-        ┌───────────────▼──────────────────────────────┐
-        │  aether-tunnel        stable MCP front (:8890) │  ADR-0089
-        │    ├─ aether-mcp      dials the hub  (:8891)   │
-        │    └─ aether-substrate-hub  RPC server (:8901) │  ADR-0034
-        └───────────────┬──────────────────────────────┘
-                        │ wire Call / MailFrame
-        ┌───────────────▼──────────────────────────────┐
-        │  substrate (a chassis)                         │  ADR-0035/0073
-        │   ┌──────────────────────────────────────┐    │
-        │   │ mail scheduler  (blob dispatch)        │    │  ADR-0087
-        │   ├──────────────────────────────────────┤    │
-        │   │ native capabilities (actors)           │    │  ADR-0070/0071
-        │   │  render · audio · fs · input · window  │    │
-        │   │  component-loader · handle-store · dag │    │
-        │   ├──────────────────────────────────────┤    │
-        │   │ wasm runtime → components (actors)     │    │  ADR-0010/0074
-        │   │  aether.component.trampoline:NAME      │    │
-        │   └──────────────────────────────────────┘    │
-        └────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  agent: Claude in a harness                      │
+└────────────────────────┬─────────────────────────┘
+                         │ MCP (tool calls)
+┌────────────────────────v─────────────────────────┐
+│  aether-tunnel        stable MCP front (:8890)   │   ADR-0089
+│   |- aether-mcp       dials the hub   (:8891)    │
+│   `- aether-substrate-hub  RPC server (:8901)    │   ADR-0034
+└────────────────────────┬─────────────────────────┘
+                         │ wire Call / MailFrame
+┌────────────────────────v─────────────────────────┐
+│  substrate (a chassis)                           │   ADR-0035/0073
+│  ┌────────────────────────────────────────────┐  │
+│  │ mail scheduler  (blob dispatch)            │  │   ADR-0087
+│  ├────────────────────────────────────────────┤  │
+│  │ native capabilities (actors)               │  │   ADR-0070/0071
+│  │  render, audio, fs, input, window          │  │
+│  │  component-loader, handle-store, dag       │  │
+│  ├────────────────────────────────────────────┤  │
+│  │ wasm runtime -> components (actors)        │  │   ADR-0010/0074
+│  │  aether.component.trampoline:NAME          │  │
+│  └────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────┘
 ```
 
 Everything inside the substrate is an **actor**, and actors only ever talk by
