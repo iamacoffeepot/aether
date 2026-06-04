@@ -255,6 +255,28 @@ impl<'a> NativeCtx<'a> {
         self.binding.dispatch_take::<O, C>(id)
     }
 
+    /// Non-consuming sibling of [`Self::take_task_done`]: probe the
+    /// in-flight entry named by `id` against `O` / `C` and only remove +
+    /// rebuild the [`TaskDone<O, C>`] on a match, leaving the entry intact
+    /// on a mismatch.
+    ///
+    /// This is the routing primitive behind `#[handler(task)]`. Multiple
+    /// task handlers on one actor are discriminated by their `TaskDone<O>`
+    /// output type, not a kind id — all completions arrive as the single
+    /// [`TaskCompletionWake`] kind. The generated dispatch arm tries each
+    /// task handler's `(O, C)` in
+    /// turn; a wrong-type probe must *not* consume the entry, or the first
+    /// handler tried would swallow a completion destined for a later one.
+    ///
+    /// `None` for an unknown id (cancelled / double-landed), an unfilled
+    /// output, or an `O` / `C` that doesn't match this entry's dispatch.
+    pub fn try_take_task_done<O: 'static, C: 'static>(
+        &mut self,
+        id: DispatchId,
+    ) -> Option<TaskDone<O, C>> {
+        self.binding.dispatch_try_take::<O, C>(id)
+    }
+
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
     /// dispatched. Read by outbound `send` paths to stamp
     /// `parent_mail` on child mail. `MailId::NONE` when the ctx was
