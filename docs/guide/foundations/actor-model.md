@@ -87,12 +87,13 @@ mail-driven setup or teardown to do.
 ## The context
 
 Every lifecycle method and handler is handed a **context** (`ctx`) — the actor's
-only handle to the world outside its own state. It's how the actor resolves an
-address, sends mail, replies to a sender, persists state across a swap, or asks to
-shut down; anything that reaches past its own fields goes through it. You never
-construct one — the runtime passes it in for the duration of the call and takes it
-back when the call returns, so an actor interacts with the world only while a
-handler is actually running, never through a saved-away handle.
+only handle to the world outside its own state. Through it the actor resolves
+addresses, sends mail, and replies to whoever sent the current message; depending on
+where it's running it can also spawn a child actor, persist state for a successor, or
+ask to shut down. Anything that reaches past the actor's own fields goes through the
+context, and you never construct one — the runtime passes it in for the duration of a
+call and takes it back when the call returns, so an actor touches the world only
+while a handler is running, never through a stashed handle.
 
 There's more than one context *type* because what an actor is allowed to do changes
 from stage to stage, and the type is how that's enforced. The context handed to
@@ -103,9 +104,13 @@ persist state. That's what "the context is the contract" means literally: the me
 you're in determines which context type you hold, and that type determines what
 compiles.
 
-The concrete types differ by host — `FfiCtx` in a wasm component, `NativeCtx` in a
-native capability — but you write handlers against a shared set of capability traits
-(`Resolver`, `MailSender`, and friends), so the same body works on either.
+Host matters as well as stage. Resolving, sending, and replying are common to both,
+but a few operations live on one side only: a native capability can spawn child
+actors and shut itself down, while a wasm component currently can't — its lifetime is
+driven from outside, by load, drop, and replace. The concrete context types differ by
+host too — `FfiCtx` in a component, `NativeCtx` in a capability — but you write
+handlers against a shared set of capability traits (`Resolver`, `MailSender`, and
+friends), so the same body works on either.
 
 ## Authoring an actor
 
@@ -154,6 +159,41 @@ compiles only if that actor actually handles the payload's kind, and both the
 mailbox id and kind id resolve at compile time. The handler takes the decoded mail
 **by value** and gets `&mut self` because nothing else can touch the state
 concurrently.
+
+## Names and addressing
+
+The `NAMESPACE` const on the `Actor` trait is the name an actor claims — the
+`"hello"`, `"camera"`, `"aether.audio"` in the examples above. Names are how actors
+get reached: a mailbox id is just a compile-time hash of the name
+(`mailbox_id_from_name`), so `ctx.actor::<RenderCapability>()` resolves to an address
+with no runtime lookup — the type carries its `NAMESPACE`, the hash is a const, and
+the send lands at the right mailbox.
+
+What the name maps to depends on the host. For a **capability** the `NAMESPACE` *is*
+the mailbox — `aether.audio`, `aether.render`, `aether.input` — claimed by the
+chassis at boot, so addressing one by type reaches it directly. For a **component**
+the `NAMESPACE` is only the *default load name*: once loaded, the actor is registered
+at `aether.component.trampoline:<name>` (the name `LoadResult` hands back, which is
+the `NAMESPACE` unless the load overrode it). You reach a loaded component through
+that resolved name — `ctx.loaded::<Camera>("camera")`, or the `LoadResult.name`
+string — not by hashing its bare `NAMESPACE`.
+
+## One or many: cardinality
+
+An actor type is either **singleton** or **instanced**, marked by the `Singleton` or
+`Instanced` trait, and that choice decides how its name and addressing work.
+
+A **singleton** is one of a kind: at most one instance per `NAMESPACE`, and the
+`NAMESPACE` is its whole name. Capabilities are always singletons, and a component
+loaded at its default name is one too. You address it by type, `ctx.actor::<R>()`.
+
+An **instanced** actor is one of many sharing a prefix. Its `NAMESPACE` is that
+prefix, and each live instance has a full name `NAMESPACE:subname` — for example
+`aether.net.session:42`. The case that drives this is sockets: a singleton listener
+accepts connections and, for each one, spawns a session actor with `ctx.spawn_child`
+(ADR-0079); you then reach a specific instance by its subname,
+`ctx.resolve_actor::<SessionActor>("42")`. Spawning children this way is a native
+capability's job — a wasm component is itself a singleton, loaded rather than spawned.
 
 ## One model, two hosts
 
