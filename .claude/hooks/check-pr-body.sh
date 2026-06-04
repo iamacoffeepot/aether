@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Pre-flight check for `gh pr create` / `gh pr edit` / `gh issue
-# create` / `gh issue edit` body and title content. Catches the five
+# create` / `gh issue edit` body and title content. Catches the four
 # recurring failure modes documented in the user's auto-memory file
-# `feedback_heredoc_no_backtick_escape.md`.
+# `feedback_heredoc_no_backtick_escape.md`. (Pattern B — bare #NNN in
+# PR bodies — was retired: it guarded against a body-stripping hook
+# that does not exist; bare #NNN auto-links fine on GitHub.)
 #
 # Reads the Bash tool call JSON from stdin (Claude Code PreToolUse
 # hook protocol), filters to only `gh` commands that publish text,
@@ -12,8 +14,8 @@
 # To deliberately submit a body that looks like one of the patterns
 # (rare — usually the pattern means the body really is broken),
 # include `<!-- pr-body-ok: <letters> — <reason> -->` in the command.
-# The letter list is one or more of a/b/c/d/e (comma-separated, e.g.
-# `<!-- pr-body-ok: a,b — reason -->`); only listed patterns are
+# The letter list is one or more of a/c/d/e (comma-separated, e.g.
+# `<!-- pr-body-ok: a,d — reason -->`); only listed patterns are
 # skipped, unlisted ones still fire. A bare `pr-body-ok:` with no
 # letter list is rejected to force the author to think about which
 # check they're overriding. The legacy `# pr-body-ok: ...` form still
@@ -86,21 +88,6 @@ if [[ ",$allowed," != *",a,"* ]] && printf '%s' "$search_text" | grep -qE '\\[`$
     issues+=("Pattern A: backslash-escaped backtick or dollar — drop the backslash; quoted heredocs (<<'EOF') pass them through literally")
 fi
 
-# Pattern B: bare #NNN auto-link — PR bodies only. A separate hook
-# strips bare `#<digits>` out of PR bodies (so unintended close
-# keywords can't fire), which also silently drops plain mentions;
-# the `owner/repo#NNN` form survives that strip. That hazard is a PR
-# concern (feedback_close_keyword_hook_strips_hash.md). In an *issue*
-# body a bare `#NNN` cross-ref to a sibling is the desired auto-link
-# and nothing strips it, so Pattern B does not apply there
-# (iamacoffeepot/aether#1289). Allow `owner/repo#NNN` (preceded by
-# `/`); allow ADR-0045-style refs (preceded by an alphanum or `-`).
-# Allow occurrences inside obvious URL paths (preceded by digits via
-# the `[A-Za-z0-9_/-]` exclusion).
-if [[ ",$allowed," != *",b,"* ]] && (( is_pr_cmd == 1 )) && printf '%s' "$search_text" | grep -qE '(^|[^A-Za-z0-9_/-])#[0-9]+'; then
-    issues+=("Pattern B: bare #NNN in a PR body — a hook strips it (dropping the ref); write 'PR 235' or 'owner/repo#NNN' to survive")
-fi
-
 # Pattern D: $...$ inline math span. GitHub treats `$foo$` as LaTeX.
 # Exclude `$(...)` (shell expansion) and `$ ` (variable form) by
 # requiring the byte after the opening `$` to be neither space, paren,
@@ -171,8 +158,8 @@ if (( ${#issues[@]} )); then
         printf '  - PR title: same {type}({scope}): <subject> shape; PR types additionally allow test build ci style revert.\n'
         printf '  - Subject (issue + PR) must start lowercase.\n'
         printf '  - Scope is a crate name OR a meta-scope: ci docs adr qodana repo release workflow.\n'
-        printf '  - Body: no backslash before a backtick/dollar (A); in PR bodies no bare hash-number, use owner/repo#NNN (B — issue bodies allow bare #NNN); no dollar-delimited math span, use backticks (D).\n'
-        printf '\nTo override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d/e, comma-separated; only listed patterns are skipped).\n'
+        printf '  - Body: no backslash before a backtick/dollar (A); no dollar-delimited math span, use backticks (D).\n'
+        printf '\nTo override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/c/d/e, comma-separated; only listed patterns are skipped).\n'
         printf 'Context: feedback_heredoc_no_backtick_escape.md (auto-memory).\n'
     } >&2
     exit 2
