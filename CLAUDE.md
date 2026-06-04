@@ -142,13 +142,17 @@ A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of
 
 ## Qodana pre-flight (local)
 
-Qodana gates merges via the `ci-pass` aggregator, but running `qodana scan` locally is blocked: the container's cargo-metadata pass times out on the colima virtiofs bind mount. The local equivalent is RustRover's inspection set — Qodana's `qodana.recommended` profile rehosts most of its checks from the same IntelliJ inspector RustRover runs in-IDE.
+Qodana gates merges via the `ci-pass` aggregator. Run the **same scan CI submits**, locally, with `scripts/qodana-local.sh` (issue 1099). The naive `qodana scan` times out because it bind-mounts the repo over colima's virtiofs and Qodana's `cargo metadata` pass does thousands of small reads there; the script sidesteps that the way CI does — it syncs the working tree into a Docker named volume (the VM's native fs) and keeps a persistent cache volume for the bootstrapped toolchain + analysis caches. Same linter image / `qodana.recommended` profile / `--fail-threshold 0` as the CI job, reading the same `qodana.yaml`.
 
-- **Per-file**: the gutter + Problems tool window surface the same inspection ids Qodana reports (`RsUnnecessaryParentheses`, `RsApproxConstant`, `DuplicatedCode`, …).
-- **Whole-project**: `Code → Inspect Code…` → scope `Whole project` (or `Uncommitted files` for a fast pre-push check) → profile `Project Default`.
-- **Agent-side**: `mcp__rustrover__get_file_problems` (`errorsOnly: false`) returns the same problem set for one file. Iterate it over `git diff --name-only` before commits on Qodana-touched files. RustRover MCP has no project-wide inspect runner — use the IDE menu for that.
+- **Run it**: `colima start` first (the script won't auto-boot a cold VM), then `scripts/qodana-local.sh`. ~3.3min warm; SARIF + HTML report land in `./.qodana-local/` (gitignored). Exit code is Qodana's gate (non-zero = findings). `--rebuild-cache` drops the cache volume.
+- **Fidelity**: validated against a main CI run — local reproduced 19/22 findings exactly (`RsUnnecessaryQualifications`, `DuplicatedCode`, `RsUnusedImport`, `CargoUnusedDependency` all matched). The one offline gap is `NewCrateVersionAvailable` (queries crates.io; needs `QODANA_TOKEN`) — export the token to close it, else it stays CI-only. Note `CargoUnusedDependency` **does** run locally.
 
-Cargo.toml-level checks (`NewCrateVersionAvailable`, `UnusedDependency`) surface only in CI. Re-baselining (`qodana.sarif.json`) is done by downloading the `qodana-report` workflow artifact from a CI run.
+For a quick single-file check without spinning up the container, RustRover's inspector rehosts most of the same checks:
+
+- **Agent-side**: `mcp__rustrover__get_file_problems` (`errorsOnly: false`) returns the problem set for one file. Iterate it over `git diff --name-only` for a fast pre-commit pass on Qodana-touched files. RustRover MCP has no project-wide runner — use `scripts/qodana-local.sh` (or the IDE's `Code → Inspect Code…`) for whole-project.
+- **Per-file in-IDE**: the gutter + Problems tool window surface the same inspection ids (`RsUnnecessaryParentheses`, `RsApproxConstant`, `DuplicatedCode`, …).
+
+Re-baselining (`qodana.sarif.json`) is done by downloading the `qodana-report` workflow artifact from a CI run.
 
 ## Flake soak (pre-release)
 
