@@ -259,7 +259,6 @@ fn mail_saturation_profile() {
 /// guarding the observer fold against settling on a truncated chain;
 /// that failure mode retired with the fold — the counter never settles
 /// on a partial chain.)
-#[test]
 #[allow(clippy::print_stderr)]
 fn depth_chain_settles_every_root() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
@@ -288,12 +287,32 @@ fn depth_chain_settles_every_root() {
     }
 }
 
-/// Flake-soak duplicate of [`depth_chain_settles_every_root`] (the
-/// `flaky_` prefix is the soak selector; see CLAUDE.md "Flake soak").
-#[test]
-#[allow(clippy::print_stderr)]
-fn flaky_depth_chain_settles_every_root() {
-    depth_chain_settles_every_root();
+/// Contention/backoff-sensitive tests live in `mod heavy`: these settlement
+/// scenarios drive a multi-worker pool whose park/wake backoff path
+/// oversubscribes cores under the full suite, so they are serialized into the
+/// `serial-heavy` nextest group (`.config/nextest.toml`) and selected by
+/// `scripts/flake-soak.sh` for fresh-process soak repetition. Each delegates
+/// to the scenario body declared at module scope.
+mod heavy {
+    #[test]
+    fn depth_chain_settles_every_root() {
+        super::depth_chain_settles_every_root();
+    }
+
+    #[test]
+    fn emit_settlement_settles_two_level_tree() {
+        super::emit_settlement_settles_two_level_tree();
+    }
+
+    #[test]
+    fn emit_settlement_settles_wide_fanout() {
+        super::emit_settlement_settles_wide_fanout();
+    }
+
+    #[test]
+    fn emit_settlement_settles_under_chunked_demux() {
+        super::emit_settlement_settles_under_chunked_demux();
+    }
 }
 
 /// ADR-0086 Phase 2 emit-authority guard: the emit-time
@@ -335,15 +354,8 @@ fn emit_settlement_settles_every_root(topo: &Topology) {
 }
 
 /// Rich topology: fan-out + a shared (two-parent) node + depth.
-#[test]
 fn emit_settlement_settles_two_level_tree() {
     emit_settlement_settles_every_root(&two_level_tree());
-}
-
-/// Flake-soak duplicate (concurrent multi-worker dispatch; see CLAUDE.md).
-#[test]
-fn flaky_emit_settlement_settles_two_level_tree() {
-    emit_settlement_settles_two_level_tree();
 }
 
 /// ADR-0087 Phase 3b focused guard: a wide single-source fan-out — one
@@ -353,17 +365,8 @@ fn flaky_emit_settlement_settles_two_level_tree() {
 /// inline-demux path balances `Sent`/`Finished` for every fanned mail —
 /// a dropped or double-counted demux mail would wedge `in_flight` and
 /// the root would never settle.
-#[test]
 fn emit_settlement_settles_wide_fanout() {
     emit_settlement_settles_every_root(&fanout(8));
-}
-
-/// Flake-soak duplicate of the 3b wide-fan-out demux — the
-/// inline-vs-deposit (free-vs-busy) claim race across workers is
-/// timing-sensitive (see CLAUDE.md "Flake soak").
-#[test]
-fn flaky_emit_settlement_settles_wide_fanout() {
-    emit_settlement_settles_wide_fanout();
 }
 
 /// ADR-0087 Phase 3c: with the inline-demux chunk cap forced small
@@ -375,7 +378,6 @@ fn flaky_emit_settlement_settles_wide_fanout() {
 /// `in_flight` and a root would never settle. Also drives the
 /// steal-mid-demux race (a sibling steals a remainder sub-blob while the
 /// producer runs its own chunk).
-#[test]
 #[allow(clippy::print_stderr)]
 fn emit_settlement_settles_under_chunked_demux() {
     // Force chunking on for this process. SAFETY: set before any actor is
@@ -387,15 +389,6 @@ fn emit_settlement_settles_under_chunked_demux() {
         env::set_var("AETHER_BLOB_DEMUX_CHUNK", "2");
     }
     emit_settlement_settles_every_root(&fanout(8));
-}
-
-/// Flake-soak duplicate (iamacoffeepot/aether#1116) of the 3c chunked
-/// demux — the steal-mid-demux / inline-vs-deposit race across workers is
-/// timing-sensitive (see CLAUDE.md "Flake soak").
-#[test]
-#[allow(clippy::print_stderr)]
-fn flaky_emit_settlement_settles_under_chunked_demux() {
-    emit_settlement_settles_under_chunked_demux();
 }
 
 /// Hold path: a `spawn_inherit` worker keeps the root open past the

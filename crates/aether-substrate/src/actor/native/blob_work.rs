@@ -1241,77 +1241,78 @@ mod tests {
         );
     }
 
-    /// End-to-end under a live multi-worker pool: a wide fan-out recruits
-    /// siblings, and every recipient is dispatched **exactly once** while
-    /// many workers race the shared cursor. The exactly-once gate is the
-    /// cursor CAS (each group to one worker) + the per-recipient seize.
-    #[test]
-    fn concurrent_pool_drain_delivers_each_recipient_once() {
-        use crate::runtime::lifecycle::PanicAborter;
-        use crate::scheduler::{Pool, PoolConfig};
-        use std::thread;
-        use std::time::{Duration, Instant};
+    /// Contention/backoff-sensitive tests live in `mod heavy`: this exercises
+    /// the concurrent multi-worker drain, so it is serialized into the
+    /// `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
+    /// oversubscribing cores, and selected by `scripts/flake-soak.sh` for
+    /// fresh-process soak repetition.
+    mod heavy {
+        use super::*;
 
-        // A wide fan-out (> recruit_min) so the flush broadcast-recruits.
-        // N < 256 keeps the per-recipient marker byte unique.
-        const N: usize = 60;
+        /// End-to-end under a live multi-worker pool: a wide fan-out recruits
+        /// siblings, and every recipient is dispatched **exactly once** while
+        /// many workers race the shared cursor. The exactly-once gate is the
+        /// cursor CAS (each group to one worker) + the per-recipient seize.
+        #[test]
+        fn concurrent_pool_drain_delivers_each_recipient_once() {
+            use crate::runtime::lifecycle::PanicAborter;
+            use crate::scheduler::{Pool, PoolConfig};
+            use std::thread;
+            use std::time::{Duration, Instant};
 
-        let pool = Pool::start(
-            PoolConfig {
-                workers: 8,
-                ..PoolConfig::default()
-            },
-            Arc::new(PanicAborter),
-        );
-        let (registry, mailer) = fresh_substrate();
-        let mut producer = BlobProducer::new(Arc::clone(&mailer), pool.wake_sink());
+            // A wide fan-out (> recruit_min) so the flush broadcast-recruits.
+            // N < 256 keeps the per-recipient marker byte unique.
+            const N: usize = 60;
 
-        let mut fixtures = Vec::new();
-        let mut rxs = Vec::new();
-        let mut routed = Vec::new();
-        for i in 0..N {
-            let (id, fix, direct_rx, deposit_rx) = seizable_recipient(&registry, &format!("c{i}"));
-            #[allow(clippy::cast_possible_truncation)]
-            let byte = i as u8;
-            routed.push(Mail::new(id, KindId(7), MailRef::from(vec![byte]), 1));
-            fixtures.push((fix, deposit_rx));
-            rxs.push(direct_rx);
-        }
-        producer.flush(routed);
+            let pool = Pool::start(
+                PoolConfig {
+                    workers: 8,
+                    ..PoolConfig::default()
+                },
+                Arc::new(PanicAborter),
+            );
+            let (registry, mailer) = fresh_substrate();
+            let mut producer = BlobProducer::new(Arc::clone(&mailer), pool.wake_sink());
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut got: Vec<u8> = Vec::new();
-        while got.len() < N && Instant::now() < deadline {
-            for rx in &rxs {
-                while let Ok(b) = rx.try_recv() {
-                    got.push(b);
+            let mut fixtures = Vec::new();
+            let mut rxs = Vec::new();
+            let mut routed = Vec::new();
+            for i in 0..N {
+                let (id, fix, direct_rx, deposit_rx) =
+                    seizable_recipient(&registry, &format!("c{i}"));
+                #[allow(clippy::cast_possible_truncation)]
+                let byte = i as u8;
+                routed.push(Mail::new(id, KindId(7), MailRef::from(vec![byte]), 1));
+                fixtures.push((fix, deposit_rx));
+                rxs.push(direct_rx);
+            }
+            producer.flush(routed);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut got: Vec<u8> = Vec::new();
+            while got.len() < N && Instant::now() < deadline {
+                for rx in &rxs {
+                    while let Ok(b) = rx.try_recv() {
+                        got.push(b);
+                    }
+                }
+                if got.len() < N {
+                    thread::yield_now();
                 }
             }
-            if got.len() < N {
-                thread::yield_now();
-            }
+
+            let results = pool.shutdown_with_results();
+            assert!(
+                results.iter().all(thread::Result::is_ok),
+                "no worker thread panicked during concurrent drain"
+            );
+            got.sort_unstable();
+            let want: Vec<u8> = (0..N as u8).collect();
+            assert_eq!(
+                got, want,
+                "each recipient dispatched exactly once under concurrent drain"
+            );
         }
-
-        let results = pool.shutdown_with_results();
-        assert!(
-            results.iter().all(thread::Result::is_ok),
-            "no worker thread panicked during concurrent drain"
-        );
-        got.sort_unstable();
-        let want: Vec<u8> = (0..N as u8).collect();
-        assert_eq!(
-            got, want,
-            "each recipient dispatched exactly once under concurrent drain"
-        );
-    }
-
-    /// Flake-soak duplicate (iamacoffeepot/aether#1137): the concurrent
-    /// drain is timing-sensitive (cursor race + seize CAS across 8
-    /// workers), so it gets a `flaky_` wrapper for `scripts/flake-soak.sh`.
-    /// The original runs once in normal CI.
-    #[test]
-    fn flaky_concurrent_pool_drain_delivers_each_recipient_once() {
-        concurrent_pool_drain_delivers_each_recipient_once();
     }
 
     // iamacoffeepot/aether#1178: the cost-aware recruiter. `recruit_k` is a

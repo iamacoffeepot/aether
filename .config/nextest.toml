@@ -1,6 +1,29 @@
 [profile.default]
 final-status-level = "slow"
 
+# Contention/backoff-sensitive tests (iamacoffeepot/aether#1341) live in a
+# `mod heavy` submodule and exercise the scheduler's spin-then-park backoff
+# (`scheduler::spin_park` park/wake, settlement deadlines, hub restart).
+# Under a saturated `--workspace` run they oversubscribe cores, and a
+# settlement that needs timely cross-thread progress can miss its ~30s
+# deadline — passing in isolation but wedging the full suite. This group
+# runs them single-file (at most one at a time) so they never contend with
+# one another, while the thousands of lightweight tests keep saturating the
+# rest. `test(/::heavy::/)` matches the `mod heavy` path segment. The same
+# `mod heavy` set is the soak selector in `scripts/flake-soak.sh`.
+[test-groups]
+serial-heavy = { max-threads = 1 }
+
+# Profiles don't inherit overrides, so the assignment is repeated for the
+# `default` and `ci` profiles (the soak profile intentionally omits it).
+[[profile.default.overrides]]
+filter = "test(/::heavy::/)"
+test-group = "serial-heavy"
+
+[[profile.ci.overrides]]
+filter = "test(/::heavy::/)"
+test-group = "serial-heavy"
+
 [profile.ci]
 # Don't fail fast in CI to run the full test suite.
 fail-fast = false

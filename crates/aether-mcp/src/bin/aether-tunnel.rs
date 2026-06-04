@@ -741,11 +741,7 @@ mod tests {
     /// last one could (the stub spaces them 300ms apart). If the proxy
     /// buffered the body to EOF, the first read would block until the
     /// whole stream finished — this guards against that regression.
-    #[tokio::test]
-    async fn sse_get_streams_incrementally_without_buffering() {
-        run_sse_streams_incrementally().await;
-    }
-
+    /// Driven by `mod heavy::sse_get_streams_incrementally_without_buffering`.
     async fn run_sse_streams_incrementally() {
         let upstream = start_stub_upstream().await;
         let (tunnel_port, _t) = start_tunnel_with_upstream(upstream, sleep_hub_spec()).await;
@@ -803,11 +799,6 @@ mod tests {
             }
         }
         None
-    }
-
-    #[tokio::test]
-    async fn restart_hub_cycles_the_child() {
-        run_restart_hub_cycles_the_child().await;
     }
 
     async fn run_restart_hub_cycles_the_child() {
@@ -874,16 +865,20 @@ mod tests {
         serde_json::from_str(&text).expect("json body")
     }
 
-    // Flake-soak duplicates (CLAUDE.md): the SSE timing assertion and the
-    // restart-pid race are timing-sensitive. A `flaky_`-prefixed wrapper
-    // lets `scripts/flake-soak.sh` run each in a fresh process N times.
-    #[tokio::test]
-    async fn flaky_sse_get_streams_incrementally_without_buffering() {
-        run_sse_streams_incrementally().await;
-    }
+    /// Contention/backoff-sensitive tests live in `mod heavy`: the SSE timing
+    /// assertion and the restart-pid race are timing-sensitive under load, so
+    /// they are serialized into the `serial-heavy` nextest group
+    /// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
+    /// fresh-process soak repetition. Each delegates to its `run_*` body.
+    mod heavy {
+        #[tokio::test]
+        async fn sse_get_streams_incrementally_without_buffering() {
+            super::run_sse_streams_incrementally().await;
+        }
 
-    #[tokio::test]
-    async fn flaky_restart_hub_cycles_the_child() {
-        run_restart_hub_cycles_the_child().await;
+        #[tokio::test]
+        async fn restart_hub_cycles_the_child() {
+            super::run_restart_hub_cycles_the_child().await;
+        }
     }
 }

@@ -154,8 +154,11 @@ For a quick single-file check without spinning up the container, RustRover's ins
 
 Re-baselining (`qodana.sarif.json`) is done by downloading the `qodana-report` workflow artifact from a CI run.
 
-## Flake soak (pre-release)
+## Heavy (contention-sensitive) tests
 
-Concurrent / scheduler / mail-dispatch tests are timing-flaky — they pass on a lucky run and fail intermittently, so a single green CI pass does not clear one. Mark such a test by adding a thin **duplicate wrapper** next to it — keep the original, add `#[test] fn flaky_<name>() { <name>(); }`. `nextest` selects tests by name/path, so a `flaky_`-named duplicate is the simplest marker — no macro, no rename of the original.
+Concurrent / scheduler / mail-dispatch tests are timing-flaky — they pass on a lucky run and fail intermittently, and under a saturated `--workspace` run they oversubscribe cores so a settlement that needs timely cross-thread progress can miss its ~30s deadline (passing in isolation but wedging the full suite). A single green CI pass does not clear one.
 
-Before a release, soak the marked set with `scripts/flake-soak.sh [count]` (default 200): it runs `cargo nextest run --profile flake-soak --stress-count <count> -E 'test(/flaky/)'`, so each `flaky_` duplicate runs `count` times, **each in a fresh process** (the isolation that reproduces timing flakes), failing if any iteration fails. Override the selector with `AETHER_FLAKE_FILTER`.
+Mark such a test by declaring it inside a **`mod heavy`** submodule of its test module — e.g. `mod heavy { #[test] fn lost_wakeup_stress() { … } }` (shared helpers stay in the parent `mod tests`, reached via `use super::*`; or keep a body fn at module scope and delegate with `super::body()`). `nextest` selects by name/path, so the `::heavy::` path segment is the marker — no macro, no `flaky_` duplicate (iamacoffeepot/aether#1341 retired the old duplicate-wrapper convention). The one marker drives two things:
+
+- **Serialize in every run.** `.config/nextest.toml` puts `test(/::heavy::/)` in the `serial-heavy` test-group (`max-threads = 1`), so the heavy set runs single-file — never contending with one another — while the thousands of lightweight tests keep saturating cores. The override is repeated on the `default` and `ci` profiles (profiles don't inherit). Verify membership with `cargo nextest show-config test-groups --profile ci`.
+- **Soak before a release.** `scripts/flake-soak.sh [count]` (default 200) runs `cargo nextest run --profile flake-soak --stress-count <count> -E 'test(/::heavy::/)'`, so each heavy test runs `count` times, **each in a fresh process** (the isolation that reproduces timing flakes), failing if any iteration fails. Override the selector with `AETHER_FLAKE_FILTER`.

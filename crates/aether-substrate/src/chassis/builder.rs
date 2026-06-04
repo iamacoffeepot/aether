@@ -2308,148 +2308,165 @@ mod tests {
         drop(chassis);
     }
 
-    /// Issue 685: chassis teardown drives `unwire` on every spawned
-    /// instanced actor, even those that never received a self-shutdown
-    /// trigger. Pre-685 the Pooled spawn path's slot was reachable
-    /// from the chassis only through the wake's `Weak`, and nothing
-    /// signaled shutdown at chassis exit — so spawned actors silently
-    /// skipped their close path. The Spawner's `shutdown_instanced`
-    /// step now signals + wakes every spawned slot before the pool
-    /// drops, and the chassis waits for each `Drainable::is_closed`.
-    #[test]
-    fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
-        use crate::actor::native::spawn::Subname;
-        use aether_actor::Instanced;
-        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+    /// Contention/backoff-sensitive tests live in `mod heavy`: chassis
+    /// teardown drives `unwire` across pooled spawned actors through the
+    /// worker park/wake path, which loses wakes under oversubscription, so
+    /// they are serialized into the `serial-heavy` nextest group
+    /// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
+    /// fresh-process soak repetition.
+    mod heavy {
+        use super::*;
 
-        struct Quiet {
-            close_observed: Arc<AtomicU32>,
-        }
-        impl Actor for Quiet {
-            const NAMESPACE: &'static str = "test.teardown.quiet";
-        }
-        impl Instanced for Quiet {}
-        impl NativeActor for Quiet {
-            type Config = Arc<AtomicU32>;
-            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self {
-                    close_observed: config,
-                })
+        /// Issue 685: chassis teardown drives `unwire` on every spawned
+        /// instanced actor, even those that never received a self-shutdown
+        /// trigger. Pre-685 the Pooled spawn path's slot was reachable
+        /// from the chassis only through the wake's `Weak`, and nothing
+        /// signaled shutdown at chassis exit — so spawned actors silently
+        /// skipped their close path. The Spawner's `shutdown_instanced`
+        /// step now signals + wakes every spawned slot before the pool
+        /// drops, and the chassis waits for each `Drainable::is_closed`.
+        #[test]
+        fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
+            use crate::actor::native::spawn::Subname;
+            use aether_actor::Instanced;
+            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+            struct Quiet {
+                close_observed: Arc<AtomicU32>,
             }
-            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            impl Actor for Quiet {
+                const NAMESPACE: &'static str = "test.teardown.quiet";
             }
-        }
-        impl NativeDispatch for Quiet {
-            fn __aether_dispatch_envelope(
-                &mut self,
-                _ctx: &mut NativeCtx<'_>,
-                _kind: KindId,
-                _payload: &[u8],
-            ) -> Option<()> {
-                None
+            impl Instanced for Quiet {}
+            impl NativeActor for Quiet {
+                type Config = Arc<AtomicU32>;
+                fn init(
+                    config: Self::Config,
+                    _ctx: &mut NativeInitCtx<'_>,
+                ) -> Result<Self, BootError> {
+                    Ok(Self {
+                        close_observed: config,
+                    })
+                }
+                fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                    self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+                }
             }
-        }
-
-        let (registry, mailer) = fresh_substrate();
-        let close_observed = Arc::new(AtomicU32::new(0));
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .build_passive()
-            .expect("empty chassis boots");
-
-        let id = chassis
-            .spawn_actor::<Quiet>(Subname::Counter, Arc::clone(&close_observed))
-            .finish()
-            .expect("spawn instanced actor");
-
-        // No mail at all — the actor sits idle from the moment it
-        // spawns. Pre-685 chassis teardown skipped its close path
-        // entirely; post-685 the teardown step signals + wakes it and
-        // the worker runs the close cycle before the pool drops.
-        assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 0);
-
-        drop(chassis);
-
-        assert_eq!(
-            close_observed.load(AtomicOrdering::SeqCst),
-            1,
-            "chassis teardown must drive unwire exactly once for a quiet spawned actor",
-        );
-        // Drop the unused id binding so clippy stays quiet — its
-        // referent (the actor_registry's Live entry) drops with the
-        // chassis above.
-        let _ = id;
-    }
-
-    /// Issue 714: stress version of the chassis-teardown contract.
-    /// Spawn N=64 instanced actors and assert all N `close_observed`
-    /// counters tick to exactly 1 after `drop(chassis)`. Pre-714 the
-    /// polling-based `shutdown_instanced` could lose individual wakes
-    /// under contention; the channel-signal rewrite is deterministic
-    /// — even one missed `unwire` here fails the test.
-    #[test]
-    fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
-        use crate::actor::native::spawn::Subname;
-        use aether_actor::Instanced;
-        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-        struct Quiet {
-            close_observed: Arc<AtomicU32>,
-        }
-        impl Actor for Quiet {
-            const NAMESPACE: &'static str = "test.teardown.quiet_many";
-        }
-        impl Instanced for Quiet {}
-        impl NativeActor for Quiet {
-            type Config = Arc<AtomicU32>;
-            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self {
-                    close_observed: config,
-                })
+            impl NativeDispatch for Quiet {
+                fn __aether_dispatch_envelope(
+                    &mut self,
+                    _ctx: &mut NativeCtx<'_>,
+                    _kind: KindId,
+                    _payload: &[u8],
+                ) -> Option<()> {
+                    None
+                }
             }
-            fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
-                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
-            }
-        }
-        impl NativeDispatch for Quiet {
-            fn __aether_dispatch_envelope(
-                &mut self,
-                _ctx: &mut NativeCtx<'_>,
-                _kind: KindId,
-                _payload: &[u8],
-            ) -> Option<()> {
-                None
-            }
-        }
 
-        const N: usize = 64;
+            let (registry, mailer) = fresh_substrate();
+            let close_observed = Arc::new(AtomicU32::new(0));
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .build_passive()
+                .expect("empty chassis boots");
 
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .build_passive()
-            .expect("empty chassis boots");
-
-        let counters: Vec<Arc<AtomicU32>> = (0..N).map(|_| Arc::new(AtomicU32::new(0))).collect();
-        for (i, counter) in counters.iter().enumerate() {
-            let name = format!("inst-{i}");
-            chassis
-                .spawn_actor::<Quiet>(Subname::Named(&name), Arc::clone(counter))
+            let id = chassis
+                .spawn_actor::<Quiet>(Subname::Counter, Arc::clone(&close_observed))
                 .finish()
                 .expect("spawn instanced actor");
-        }
 
-        for counter in &counters {
-            assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
-        }
+            // No mail at all — the actor sits idle from the moment it
+            // spawns. Pre-685 chassis teardown skipped its close path
+            // entirely; post-685 the teardown step signals + wakes it and
+            // the worker runs the close cycle before the pool drops.
+            assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 0);
 
-        drop(chassis);
+            drop(chassis);
 
-        for (i, counter) in counters.iter().enumerate() {
             assert_eq!(
-                counter.load(AtomicOrdering::SeqCst),
+                close_observed.load(AtomicOrdering::SeqCst),
                 1,
-                "actor {i} must have run unwire exactly once",
+                "chassis teardown must drive unwire exactly once for a quiet spawned actor",
             );
+            // Drop the unused id binding so clippy stays quiet — its
+            // referent (the actor_registry's Live entry) drops with the
+            // chassis above.
+            let _ = id;
+        }
+
+        /// Issue 714: stress version of the chassis-teardown contract.
+        /// Spawn N=64 instanced actors and assert all N `close_observed`
+        /// counters tick to exactly 1 after `drop(chassis)`. Pre-714 the
+        /// polling-based `shutdown_instanced` could lose individual wakes
+        /// under contention; the channel-signal rewrite is deterministic
+        /// — even one missed `unwire` here fails the test.
+        #[test]
+        fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
+            use crate::actor::native::spawn::Subname;
+            use aether_actor::Instanced;
+            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+            struct Quiet {
+                close_observed: Arc<AtomicU32>,
+            }
+            impl Actor for Quiet {
+                const NAMESPACE: &'static str = "test.teardown.quiet_many";
+            }
+            impl Instanced for Quiet {}
+            impl NativeActor for Quiet {
+                type Config = Arc<AtomicU32>;
+                fn init(
+                    config: Self::Config,
+                    _ctx: &mut NativeInitCtx<'_>,
+                ) -> Result<Self, BootError> {
+                    Ok(Self {
+                        close_observed: config,
+                    })
+                }
+                fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
+                    self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+                }
+            }
+            impl NativeDispatch for Quiet {
+                fn __aether_dispatch_envelope(
+                    &mut self,
+                    _ctx: &mut NativeCtx<'_>,
+                    _kind: KindId,
+                    _payload: &[u8],
+                ) -> Option<()> {
+                    None
+                }
+            }
+
+            const N: usize = 64;
+
+            let (registry, mailer) = fresh_substrate();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .build_passive()
+                .expect("empty chassis boots");
+
+            let counters: Vec<Arc<AtomicU32>> =
+                (0..N).map(|_| Arc::new(AtomicU32::new(0))).collect();
+            for (i, counter) in counters.iter().enumerate() {
+                let name = format!("inst-{i}");
+                chassis
+                    .spawn_actor::<Quiet>(Subname::Named(&name), Arc::clone(counter))
+                    .finish()
+                    .expect("spawn instanced actor");
+            }
+
+            for counter in &counters {
+                assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
+            }
+
+            drop(chassis);
+
+            for (i, counter) in counters.iter().enumerate() {
+                assert_eq!(
+                    counter.load(AtomicOrdering::SeqCst),
+                    1,
+                    "actor {i} must have run unwire exactly once",
+                );
+            }
         }
     }
 

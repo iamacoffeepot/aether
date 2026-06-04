@@ -467,139 +467,123 @@ mod tests {
         assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
     }
 
-    /// Part 2 (iamacoffeepot/aether#1182): a genuine parked-worker wake
-    /// folds one live `notify → wake` sample into the handoff estimate. A
-    /// worker parks (scan always empty), the main thread waits for it to
-    /// register idle, then `notify`s — which stamps the worker and unparks
-    /// it, so on resume it folds the measured latency. The folded-sample
-    /// count must rise by at least one.
-    fn parked_worker_folds_a_handoff_sample() {
-        let before = super::super::calibrate::handoff_samples();
-        let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(20)));
-        let c2 = Arc::clone(&coord);
-        // The worker parks (scan never yields), folds on the notify wake,
-        // re-spins, and exits on shutdown.
-        let worker =
-            thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
+    /// Contention/backoff-sensitive tests live in `mod heavy`: they exercise
+    /// the spin-then-park backoff path, so they are serialized into the
+    /// `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
+    /// oversubscribing cores against one another, and selected by
+    /// `scripts/flake-soak.sh` for fresh-process soak repetition.
+    mod heavy {
+        use super::*;
+        use crate::scheduler::calibrate;
 
-        // Wait until the worker has committed to the idle list — so the
-        // `notify` below hits the park path (stamp + unpark), not the
-        // route-to-spinner fast path (which folds nothing).
-        assert!(
-            wait_until(Duration::from_secs(2), || !coord.idle().is_empty()),
-            "worker should register as parked",
-        );
-        coord.notify(); // stamp + unpark → the worker folds notify→wake
-        // Give the woken worker time to fold before tearing down.
-        assert!(
-            wait_until(Duration::from_secs(2), || {
-                super::super::calibrate::handoff_samples() > before
-            }),
-            "a live parked-worker wake must fold a handoff sample",
-        );
+        /// Part 2 (iamacoffeepot/aether#1182): a genuine parked-worker wake
+        /// folds one live `notify → wake` sample into the handoff estimate. A
+        /// worker parks (scan always empty), the main thread waits for it to
+        /// register idle, then `notify`s — which stamps the worker and unparks
+        /// it, so on resume it folds the measured latency. The folded-sample
+        /// count must rise by at least one.
+        #[test]
+        fn parked_worker_folds_a_handoff_sample() {
+            let before = calibrate::handoff_samples();
+            let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(20)));
+            let c2 = Arc::clone(&coord);
+            // The worker parks (scan never yields), folds on the notify wake,
+            // re-spins, and exits on shutdown.
+            let worker =
+                thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
 
-        coord.set_shutdown();
-        worker.thread().unpark();
-        assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
-    }
-
-    #[test]
-    fn parked_worker_folds_a_handoff_sample_once() {
-        parked_worker_folds_a_handoff_sample();
-    }
-
-    /// Flake-soak wrapper (iamacoffeepot/aether#1182 Part 2): the
-    /// park → notify → fold path is timing-sensitive (the worker must be
-    /// parked when `notify` fires), so `scripts/flake-soak.sh` re-runs it
-    /// in fresh processes.
-    #[test]
-    fn flaky_parked_worker_folds_a_handoff_sample() {
-        parked_worker_folds_a_handoff_sample();
-    }
-
-    /// Lost-wakeup stress: many producers push tokens onto a shared
-    /// queue + `notify`; many workers `acquire`-drain. Every pushed
-    /// token must be consumed exactly once — a stranded token (work in
-    /// the queue, all workers parked, no pending unpark) hangs the
-    /// drain and trips the timeout. This is the highest-risk surface;
-    /// the `flaky_` wrapper below is the soak target.
-    fn lost_wakeup_stress() {
-        const WORKERS: usize = 6;
-        const PRODUCERS: usize = 4;
-        const PER_PRODUCER: u64 = 5_000;
-
-        let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(30)));
-        let (tx, rx): (Sender<u64>, Receiver<u64>) = unbounded();
-        let consumed = Arc::new(AtomicU64::new(0));
-        let total = PRODUCERS as u64 * PER_PRODUCER;
-
-        let workers: Vec<_> = (0..WORKERS)
-            .map(|_| {
-                let coord = Arc::clone(&coord);
-                let rx = rx.clone();
-                let consumed = Arc::clone(&consumed);
-                thread::spawn(move || {
-                    loop {
-                        match coord.acquire(|| rx.try_recv().ok()) {
-                            Acquired::Slot(_) => {
-                                consumed.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Acquired::Shutdown => return,
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        let producers: Vec<_> = (0..PRODUCERS)
-            .map(|p| {
-                let coord = Arc::clone(&coord);
-                let tx = tx.clone();
-                thread::spawn(move || {
-                    for n in 0..PER_PRODUCER {
-                        tx.send(p as u64 * PER_PRODUCER + n).unwrap();
-                        coord.notify();
-                    }
-                })
-            })
-            .collect();
-        for p in producers {
-            p.join().unwrap();
-        }
-
-        // Wait for full drain — a lost wakeup strands the tail and this
-        // times out.
-        let start = Instant::now();
-        while consumed.load(Ordering::Relaxed) < total {
+            // Wait until the worker has committed to the idle list — so the
+            // `notify` below hits the park path (stamp + unpark), not the
+            // route-to-spinner fast path (which folds nothing).
             assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "drain stalled at {}/{} — likely a lost wakeup",
-                consumed.load(Ordering::Relaxed),
-                total,
+                wait_until(Duration::from_secs(2), || !coord.idle().is_empty()),
+                "worker should register as parked",
             );
-            thread::sleep(Duration::from_millis(5));
+            coord.notify(); // stamp + unpark → the worker folds notify→wake
+            // Give the woken worker time to fold before tearing down.
+            assert!(
+                wait_until(Duration::from_secs(2), || {
+                    calibrate::handoff_samples() > before
+                }),
+                "a live parked-worker wake must fold a handoff sample",
+            );
+
+            coord.set_shutdown();
+            worker.thread().unpark();
+            assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
         }
 
-        coord.set_shutdown();
-        for w in &workers {
-            w.thread().unpark();
-        }
-        for w in workers {
-            w.join().unwrap();
-        }
-        assert_eq!(consumed.load(Ordering::Relaxed), total);
-    }
+        /// Lost-wakeup stress: many producers push tokens onto a shared
+        /// queue + `notify`; many workers `acquire`-drain. Every pushed
+        /// token must be consumed exactly once — a stranded token (work in
+        /// the queue, all workers parked, no pending unpark) hangs the
+        /// drain and trips the timeout. This is the highest-risk surface.
+        #[test]
+        fn lost_wakeup_stress() {
+            const WORKERS: usize = 6;
+            const PRODUCERS: usize = 4;
+            const PER_PRODUCER: u64 = 5_000;
 
-    #[test]
-    fn lost_wakeup_stress_once() {
-        lost_wakeup_stress();
-    }
+            let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(30)));
+            let (tx, rx): (Sender<u64>, Receiver<u64>) = unbounded();
+            let consumed = Arc::new(AtomicU64::new(0));
+            let total = PRODUCERS as u64 * PER_PRODUCER;
 
-    /// Flake-soak wrapper (iamacoffeepot/aether#1064). `scripts/flake-soak.sh`
-    /// re-runs the lost-wakeup stress in fresh processes to catch the
-    /// `StoreLoad` race that a single green run can mask.
-    #[test]
-    fn flaky_lost_wakeup_stress() {
-        lost_wakeup_stress();
+            let workers: Vec<_> = (0..WORKERS)
+                .map(|_| {
+                    let coord = Arc::clone(&coord);
+                    let rx = rx.clone();
+                    let consumed = Arc::clone(&consumed);
+                    thread::spawn(move || {
+                        loop {
+                            match coord.acquire(|| rx.try_recv().ok()) {
+                                Acquired::Slot(_) => {
+                                    consumed.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Acquired::Shutdown => return,
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            let producers: Vec<_> = (0..PRODUCERS)
+                .map(|p| {
+                    let coord = Arc::clone(&coord);
+                    let tx = tx.clone();
+                    thread::spawn(move || {
+                        for n in 0..PER_PRODUCER {
+                            tx.send(p as u64 * PER_PRODUCER + n).unwrap();
+                            coord.notify();
+                        }
+                    })
+                })
+                .collect();
+            for p in producers {
+                p.join().unwrap();
+            }
+
+            // Wait for full drain — a lost wakeup strands the tail and this
+            // times out.
+            let start = Instant::now();
+            while consumed.load(Ordering::Relaxed) < total {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "drain stalled at {}/{} — likely a lost wakeup",
+                    consumed.load(Ordering::Relaxed),
+                    total,
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            coord.set_shutdown();
+            for w in &workers {
+                w.thread().unpark();
+            }
+            for w in workers {
+                w.join().unwrap();
+            }
+            assert_eq!(consumed.load(Ordering::Relaxed), total);
+        }
     }
 }
