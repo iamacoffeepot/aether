@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-04-21
+- **Superseded in part (2026-06-04):** the **§2 Threading model** below — one OS thread per actor (thread-per-component) — was retired. Actors are now multiplexed onto a shared work-stealing scheduler (the worker pool reintroduced by issue #635, refined into blob dispatch by ADR-0087); the single-threaded-per-actor property is preserved by the run-token, not a dedicated thread. A dedicated OS thread is now the exception, spawned only for blocking I/O. See ADR-0087 for the current dispatch model. The original decision is preserved below.
 
 ## Context
 
@@ -45,6 +46,12 @@ pub struct ComponentEntry {
 The `Component` (and its wasmtime `Store`) lives on the dispatch thread's stack for the component's lifetime. It never escapes to the host side. `on_drop` runs on the dispatch thread as the last act before the thread returns and the `Component` drops.
 
 ### 2. Threading model
+
+> **Superseded by ADR-0087 (2026-06-04).** Thread-per-component was retired for
+> a shared work-stealing scheduler — actors are multiplexed onto worker threads,
+> with the run-token preserving single-threaded-per-actor. A dedicated OS thread
+> is now spawned only for blocking I/O. The decision as originally made is
+> preserved below.
 
 wasmtime calls are synchronous and can block the calling thread for arbitrary guest time. Two viable shapes:
 

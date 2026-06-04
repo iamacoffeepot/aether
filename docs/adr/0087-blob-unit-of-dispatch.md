@@ -1,6 +1,6 @@
 # ADR-0087: The mail blob is the unit of dispatch — per-producer rings + work-stealing pool
 
-- **Status:** Proposed
+- **Status:** Accepted — the base model (blob dispatch, per-producer rings, work-stealing pool, single-worker in-place demux) has shipped and is how all actors are dispatched; the phase-2+ items flagged as deferred below (cooperative multi-worker demux, affinity-biased stealing) remain future work.
 - **Date:** 2026-05-23
 
 ## Context

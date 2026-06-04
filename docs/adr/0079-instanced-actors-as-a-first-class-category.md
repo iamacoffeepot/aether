@@ -24,7 +24,7 @@ The forces we're balancing:
 - Singular actors stay singular — most caps and components are conceptually one-of-a-kind.
 - Instanced actors must be first-class enough that the framework participates in their lifecycle (registration, monitoring, cleanup) rather than each cap reinventing it.
 - The wire format and existing actor SDK should accommodate the new category additively, without re-shaping `MailboxId` or breaking existing types.
-- The threading model under ADR-0038 (one thread per actor) extends to instances naturally for game-engine workloads (10s–100s of actors) but pushes against operational ceilings at hub-server scale (1000s+). That's a separable concern — a future scheduler ADR may revise threading without invalidating this one.
+- The threading model under ADR-0038 (one thread per actor) extends to instances naturally for game-engine workloads (10s–100s of actors) but pushes against operational ceilings at hub-server scale (1000s+). That's a separable concern — a future scheduler ADR may revise threading without invalidating this one. **(Resolved 2026-06-04: ADR-0087 did exactly this — actors are now multiplexed onto a shared work-stealing pool, so per-instance actors no longer cost an OS thread each; the run-token preserves single-threaded-per-actor.)**
 
 ## Decision
 
