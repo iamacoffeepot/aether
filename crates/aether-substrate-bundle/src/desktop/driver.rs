@@ -56,7 +56,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use super::chassis::UserEvent;
 use super::render::Gpu;
-use aether_substrate::capture::CaptureQueue;
+use aether_substrate::capture::{CaptureQueue, PendingCapture};
 use std::io;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -388,6 +388,60 @@ fn discharge_settlement(mailer: &Mailer, mail_id: MailId, root: MailId) {
     mailer.record_finished(mail_id, root);
 }
 
+/// The disposition of a `capture_frame` wake against the current window
+/// occlusion state — the pure branch-selection half of the occluded
+/// fail-fast (iamacoffeepot/aether#1317), factored out of the winit
+/// wiring so it is unit-testable without standing up a winit `App`
+/// (mirroring [`try_framework_dispatch`]).
+enum OccludedCaptureDisposition {
+    /// Window is visible — the caller falls through to `request_redraw`
+    /// so `RedrawRequested` services the (still-parked) capture normally.
+    Redraw,
+    /// Window is occluded but no capture was parked (already serviced, or
+    /// a stale wake) — nothing to do.
+    Empty,
+    /// Window is occluded and a capture is parked — fail it fast. Carries
+    /// the taken [`PendingCapture`] (so the caller drains `after_mails`,
+    /// replies, then drops it to release the settlement hold) and the
+    /// `Err` reply to send.
+    FailFast {
+        request: PendingCapture,
+        result: CaptureFrameResult,
+    },
+}
+
+/// The capture-frame error message naming `aether.window.focus` as the
+/// remedy. Shared by every occluded fail-fast site so the wording can't
+/// drift.
+const OCCLUDED_CAPTURE_ERROR: &str = "capture_frame: window is occluded (hidden/minimized); bring it to the \
+     foreground via aether.window.focus and retry";
+
+/// Select the disposition for a `capture_frame` wake (or an occlusion
+/// onset) given the window's occlusion state and any parked capture.
+///
+/// The winit side only `take()`s the [`CaptureQueue`] slot when occluded,
+/// so a visible-window wake never steals the entry that `RedrawRequested`
+/// is about to service — the `Redraw` arm carries no `PendingCapture`. The
+/// occluded arms move the taken request through so the caller can drain
+/// `after_mails`, reply via the `Mailer`, and drop the request *after* the
+/// reply (releasing the ADR-0086 §12 settlement hold, iamacoffeepot/aether#1273).
+fn occluded_capture_disposition(
+    occluded: bool,
+    pending: Option<PendingCapture>,
+) -> OccludedCaptureDisposition {
+    if !occluded {
+        return OccludedCaptureDisposition::Redraw;
+    }
+    pending.map_or(OccludedCaptureDisposition::Empty, |request| {
+        OccludedCaptureDisposition::FailFast {
+            request,
+            result: CaptureFrameResult::Err {
+                error: OCCLUDED_CAPTURE_ERROR.to_owned(),
+            },
+        }
+    })
+}
+
 impl App {
     /// ADR-0080 §6 chassis-source push helper (issue
     /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
@@ -595,6 +649,49 @@ impl App {
         self.push_chassis_root(self.input_mailbox, self.kind_window_size, payload, 1);
     }
 
+    /// Fail-fast any parked `capture_frame` while the window is occluded
+    /// (iamacoffeepot/aether#1317). Returns `true` when the wake was
+    /// consumed (the window is occluded — whether or not a capture was
+    /// parked); `false` when the window is visible, signalling the caller
+    /// to fall through to its normal `request_redraw`.
+    ///
+    /// macOS does not deliver `RedrawRequested` to a hidden window, so a
+    /// capture parked while occluded would otherwise never be serviced and
+    /// the wire `Call` would hang on its settlement hold until timeout.
+    /// Here we take the parked entry, drain its `after_mails` (parity with
+    /// the `RedrawRequested` service arm), reply `Err` via the `Mailer`
+    /// (`self.queue.send_reply`, never `self.outbound` — `HubOutbound`
+    /// drops `ReplyTarget::Component`, iamacoffeepot/aether#1316), then let
+    /// the request drop *after* the reply so the ADR-0086 §12 settlement
+    /// hold's `Release` fires post-reply (iamacoffeepot/aether#1273).
+    ///
+    /// The slot is taken only when occluded, so a visible-window wake never
+    /// steals the entry `RedrawRequested` is about to service.
+    fn fail_capture_if_occluded(&mut self) -> bool {
+        let pending = if self.occluded {
+            self.capture_queue.take()
+        } else {
+            None
+        };
+        match occluded_capture_disposition(self.occluded, pending) {
+            OccludedCaptureDisposition::Redraw => false,
+            OccludedCaptureDisposition::Empty => true,
+            OccludedCaptureDisposition::FailFast { request, result } => {
+                for mail in request.after_mails {
+                    self.queue.push(mail);
+                }
+                // `reply_to` is `Copy`, so this read leaves `request` whole;
+                // it (and its `PendingCapture._hold`) drops at end of this
+                // scope — *after* `send_reply` returns — firing `Release` on
+                // the trace root so `Settled{root}` is exact post-reply.
+                // Don't restructure to move the reply below other work
+                // (iamacoffeepot/aether#1273 drop-order discipline).
+                self.queue.send_reply(request.reply_to, &result);
+                true
+            }
+        }
+    }
+
     fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
         if self.occluded == occluded {
             return;
@@ -602,6 +699,13 @@ impl App {
         self.occluded = occluded;
         if occluded {
             event_loop.set_control_flow(ControlFlow::Wait);
+            // iamacoffeepot/aether#1317 (race fold-in): a capture poked
+            // while the window was visible can land here before its
+            // `RedrawRequested` is delivered — and macOS suppresses that
+            // redraw once hidden. Fail any such parked capture fast on the
+            // occlusion transition, with the same disposition the
+            // wake-time path uses, so it never hangs on its settlement hold.
+            self.fail_capture_if_occluded();
         } else {
             event_loop.set_control_flow(ControlFlow::Poll);
             if let Some(w) = &self.window {
@@ -642,14 +746,29 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        // Both proxy events do the same minimal thing: nudge a redraw
-        // so the loop turns. `Capture` lets `RedrawRequested` pull a
-        // queued capture; `WindowMail` (iamacoffeepot/aether#1318) lets
-        // winit run `about_to_wait` (which drains the `aether.window`
-        // inbox) even under `ControlFlow::Wait`. Neither does the work
-        // itself — the redraw / drain handlers do.
+        // Both proxy events nudge a redraw so the loop turns — but
+        // `Capture` first checks occlusion. A capture needs a rendered
+        // frame, and macOS does not deliver `RedrawRequested` to a hidden
+        // window under `ControlFlow::Wait`; so when occluded we fail the
+        // parked capture fast (`fail_capture_if_occluded`) rather than
+        // poking a redraw that never lands and leaves the call hung on its
+        // settlement hold (iamacoffeepot/aether#1317). When visible,
+        // `Capture` falls through to `request_redraw` so `RedrawRequested`
+        // pulls the queued capture. `WindowMail`
+        // (iamacoffeepot/aether#1318) always pokes a redraw so winit runs
+        // `about_to_wait` (which drains the `aether.window` inbox) even
+        // under `ControlFlow::Wait`. Neither arm does the work itself —
+        // the redraw / drain handlers do.
         match event {
-            UserEvent::Capture | UserEvent::WindowMail => {
+            UserEvent::Capture => {
+                if self.fail_capture_if_occluded() {
+                    return;
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::WindowMail => {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -1275,6 +1394,74 @@ mod tests {
         assert!(
             guard_rx.try_recv().is_err(),
             "NONE discharge must not settle any root",
+        );
+    }
+
+    /// iamacoffeepot/aether#1317: the occluded-capture branch selection.
+    /// This is the CI-runnable core of the fail-fast — the winit wiring
+    /// (`fail_capture_if_occluded` → `take` → `send_reply` → drop) stays
+    /// MCP-manual because `ControlFlow::Wait` + `RedrawRequested`
+    /// suppression has no CI display surface. Here we pin only the pure
+    /// branch logic: occluded-with-parked-capture selects an `Err` reply,
+    /// occluded-with-empty-slot and visible-window are no-ops/redraw.
+    #[test]
+    fn occluded_capture_disposition_selects_failfast_only_when_occluded_and_parked() {
+        use aether_data::MailId;
+        use aether_substrate::ReplyTarget;
+        use aether_substrate::capture::PendingCapture;
+        use aether_substrate::mail::ReplyTo;
+        use aether_substrate::runtime::trace::TraceHandle;
+
+        fn parked() -> PendingCapture {
+            // `MailId::NONE` keeps the hold's acquire/release a counter
+            // no-op; the test exercises branch selection, not settlement.
+            let hold = TraceHandle::new().acquire_settlement_hold(MailId::NONE);
+            PendingCapture {
+                reply_to: ReplyTo::to(ReplyTarget::Session(aether_data::SessionToken::NIL)),
+                after_mails: Vec::new(),
+                pre_settlements: Vec::new(),
+                hold,
+            }
+        }
+
+        // Occluded + a parked capture → fail it fast with an `Err` reply
+        // whose message names `aether.window.focus` as the remedy.
+        match occluded_capture_disposition(true, Some(parked())) {
+            OccludedCaptureDisposition::FailFast { result, .. } => match result {
+                CaptureFrameResult::Err { error } => {
+                    assert!(
+                        error.contains("occluded") && error.contains("aether.window.focus"),
+                        "Err reply must name occlusion + the focus remedy, got: {error}",
+                    );
+                }
+                CaptureFrameResult::Ok { .. } => panic!("occluded capture must fail, not Ok"),
+            },
+            _ => panic!("occluded + parked capture must select FailFast"),
+        }
+
+        // Occluded but nothing parked → no-op (already serviced / stale wake).
+        assert!(
+            matches!(
+                occluded_capture_disposition(true, None),
+                OccludedCaptureDisposition::Empty
+            ),
+            "occluded + empty slot must be a no-op",
+        );
+
+        // Visible window → fall through to redraw, regardless of the slot.
+        assert!(
+            matches!(
+                occluded_capture_disposition(false, Some(parked())),
+                OccludedCaptureDisposition::Redraw
+            ),
+            "visible window must fall through to redraw",
+        );
+        assert!(
+            matches!(
+                occluded_capture_disposition(false, None),
+                OccludedCaptureDisposition::Redraw
+            ),
+            "visible window must fall through to redraw",
         );
     }
 }
