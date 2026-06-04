@@ -33,6 +33,7 @@ use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::MailboxWakeSlot;
 use crate::chassis::error::BootError;
+use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
@@ -46,7 +47,6 @@ use aether_actor::local;
 use aether_actor::local::ActorSlots;
 use std::sync::Weak;
 use std::time::Duration;
-use std::time::Instant;
 
 /// How to derive the subname for a [`SpawnBuilder::finish`] call. The
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
@@ -188,11 +188,21 @@ impl Spawner {
     /// close cycle fires it after `unwire` + registry close land, so
     /// teardown wakes the instant the cycle settles instead of polling.
     ///
-    /// On timeout: logs at warn level and returns. The slot Arcs we
-    /// drained out of `instanced_slots` will then drop, and any actor
-    /// whose close cycle didn't run misses its `unwire` (matches
-    /// the today behavior pre-685).
-    pub(crate) fn shutdown_instanced(&self, timeout: Duration) {
+    /// Issue #1305: each close-done receiver is waited on via
+    /// [`await_internal_signal`] with escalating patience rather than a
+    /// bare wall-clock `recv_timeout`. A genuinely wedged close cycle is
+    /// unrecoverable — `unwire` never ran, so teardown invariants are
+    /// already corrupt — so the disposition is `Abort` in release
+    /// (route the wedge through the Spawner's
+    /// [`FatalAborter`]) and `Panic` in test/debug (so #1295's
+    /// assertion fails attributably at the gate site instead of as a
+    /// downstream `0 != 1`). The old silent `warn!`-and-return-anyway
+    /// path that left an un-closed actor is gone.
+    ///
+    /// `round_budget` is the per-round patience interval (the log
+    /// cadence); `cumulative_cap` is the total patience per slot before
+    /// declaring a wedge.
+    pub(crate) fn shutdown_instanced(&self, round_budget: Duration, cumulative_cap: Duration) {
         let entries: Vec<InstancedSlotEntry> = {
             let mut guard = self
                 .instanced_slots
@@ -222,35 +232,32 @@ impl Spawner {
             // we just need *some* worker to pick the slot up.
             let _ = entry.wake.wake();
         }
-        let deadline = Instant::now() + timeout;
-        let mut stuck = 0usize;
+        // `Panic` in test/debug (attributable failure at the gate),
+        // `Abort` in release (the wedge is unrecoverable — route it
+        // through the Spawner's aborter). The helper diverges itself on
+        // `Panic`; on `Abort` it hands back the wedge for us to abort.
+        let disposition = if cfg!(debug_assertions) {
+            TerminalDisposition::Panic
+        } else {
+            TerminalDisposition::Abort
+        };
         for rx in &waiters {
-            let now = Instant::now();
-            let remaining = deadline.saturating_duration_since(now);
-            // `remaining == 0` means the deadline has passed; pass
-            // `Duration::ZERO` to `recv_timeout` and treat as a
-            // timeout. crossbeam channels return Timeout for the
-            // zero-duration call when the channel has nothing to
-            // recv, which is exactly what we want.
-            match rx.recv_timeout(remaining) {
-                Ok(()) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    stuck += 1;
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    // Slot dropped its sender without firing — treat
-                    // the same as a timeout (close cycle didn't run).
-                    stuck += 1;
+            match await_internal_signal(
+                rx,
+                "shutdown_instanced.close_done",
+                round_budget,
+                cumulative_cap,
+                disposition,
+            ) {
+                WaitOutcome::Settled => {}
+                WaitOutcome::Wedged(wedge) => {
+                    // `Abort` disposition (release): the close cycle
+                    // never ran `unwire`; teardown invariants are
+                    // corrupt and unrecoverable. Route through the
+                    // Spawner's aborter — diverges.
+                    self.aborter.abort(wedge.reason());
                 }
             }
-        }
-        if stuck > 0 {
-            tracing::warn!(
-                target: "aether_substrate::spawner",
-                stuck_count = stuck,
-                total = entries.len(),
-                "shutdown_instanced timed out waiting for spawned actors to run close path",
-            );
         }
     }
 

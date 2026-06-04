@@ -1036,7 +1036,14 @@ impl BootedPassives {
         // point (drops via `_pool` field order after this method
         // returns), so workers can drain the close cycles the
         // `shutdown_instanced` wakes queue.
-        self.spawner.shutdown_instanced(Duration::from_secs(2));
+        // Issue #1305: escalating patience replaces the old 2s
+        // wall-clock deadline that false-fired under `--workspace`
+        // saturation (flake #1295). The per-round budget is the log
+        // cadence; the cumulative cap is generous (a healthy close
+        // cycle resolves well before it; a genuine wedge exhausts it
+        // and aborts/panics).
+        self.spawner
+            .shutdown_instanced(Duration::from_secs(2), Duration::from_secs(30));
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
