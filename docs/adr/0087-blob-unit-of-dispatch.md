@@ -1,6 +1,6 @@
 # ADR-0087: The mail blob is the unit of dispatch — per-producer rings + work-stealing pool
 
-- **Status:** Accepted — the base model (blob dispatch, per-producer rings, work-stealing pool, single-worker in-place demux) has shipped and is how all actors are dispatched; the phase-2+ items flagged as deferred below (cooperative multi-worker demux, affinity-biased stealing) remain future work.
+- **Status:** Accepted — the base model (blob dispatch, per-producer rings, work-stealing pool) plus the single-worker in-place demux (#1135/#1139) **and** the cursor-shared **cooperative multi-worker** blob demux (#1141, refined by #1146/#1148/#1153/#1159) have all shipped and are how every actor is dispatched. **Affinity-biased stealing** is the one phase-2+ item still future. (Status corrected 2026-06-04: the prior line — and the §"Phasing" amendment below — recorded the cooperative multi-worker demux as deferred/future, but it landed in #1141 right after the 2026-05-24 amendment that called it a "later phase." See the forward-note on that section.)
 - **Date:** 2026-05-23
 
 ## Context
@@ -110,3 +110,5 @@ Strict cross-recipient execution order is explicitly *not* a contract. Enforcing
 ### Phasing: single-worker in-place first, cooperative multi-worker deferred
 
 §3 frames a blob as stolen whole by one owner. That holds for the single-worker in-place demux #1135 ships — order-safe under the spine (send-order walk, one worker). The **cooperative multi-worker** variant — several workers draining one blob via a shared cursor (#1137) — is a later phase that supersedes §3's one-owner framing. It is sound under the spine (cross-recipient async) but adds concurrency machinery (packed lifecycle word, per-group closeable-stack merge handshake, recruitment) and is gated on whether #1135's in-place dispatch still leaves serialization residence on wide/heavy fan-out.
+
+> **Shipped (forward-note, 2026-06-04).** The "later phase" framed as deferred above is no longer future: the cursor-shared cooperative multi-worker blob demux landed in **#1141** (issue #1137) and was refined by **#1146 / #1148 / #1153 / #1159**. A blob is now drained by N workers, each claiming a whole recipient-group off the shared cursor and dispatching it in place; per-recipient FIFO is preserved by one-worker-per-group, and a wide fan-out parallelises across the pool instead of serialising on the demuxing worker. This supersedes §3's one-owner framing exactly as anticipated. Only **affinity-biased stealing** remains future work. The implementation lives in `crates/aether-substrate/src/actor/native/blob_work.rs`.
