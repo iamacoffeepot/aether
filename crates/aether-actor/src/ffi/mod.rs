@@ -253,6 +253,44 @@ pub trait Replaceable: FfiActor {
     }
 }
 
+/// Reusable inbound-mail scratch buffer (iamacoffeepot/aether#1337 Phase 2).
+///
+/// The substrate delivers small mail through a fixed low-memory scratch
+/// offset, but a larger payload (e.g. a whole file via `aether.fs.read_result`)
+/// would overrun that window. For those, the substrate calls the
+/// `mail_scratch_reserve_p32` export (emitted by [`crate::export!`]) to get a
+/// pointer into this guest-*heap*-owned buffer, writes the payload there, then
+/// calls `receive`. Because the buffer lives on the heap (not the fixed stack
+/// scratch) there is no overrun, and because it is a persistent `static` reused
+/// across mails — grown to a high-water mark, never shrunk — there is no
+/// per-mail allocation churn (wasm has no GC, so a fresh alloc per mail would
+/// force a matching host-driven free).
+#[cfg(target_arch = "wasm32")]
+pub mod mail_scratch {
+    use alloc::vec::Vec;
+
+    static mut BUFFER: Vec<u8> = Vec::new();
+
+    /// Ensure the buffer holds at least `min_len` bytes and return a pointer to
+    /// its start. The substrate writes exactly `min_len` bytes there and hands
+    /// the pointer to `receive`, all before the next `reserve`.
+    ///
+    /// # Safety
+    /// The wasm guest is single-threaded, so there is no aliasing of `BUFFER`.
+    /// The returned pointer is valid until the next `reserve` call (which may
+    /// reallocate); the substrate uses it synchronously before reserving again.
+    pub unsafe fn reserve(min_len: usize) -> *mut u8 {
+        // SAFETY: single-threaded guest; sole access to BUFFER per the contract.
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUFFER) };
+        if buf.len() < min_len {
+            // Grows capacity (freeing the old allocation) only past the
+            // high-water mark; a smaller mail reuses the existing buffer.
+            buf.resize(min_len, 0);
+        }
+        buf.as_mut_ptr()
+    }
+}
+
 /// Bind a `FfiActor` implementor to the guest's `#[no_mangle]`
 /// `init` / `receive` exports. Expands to:
 ///
@@ -498,6 +536,23 @@ macro_rules! __export_internal {
             let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             instance.__aether_dispatch(&mut ctx, mail)
+        }
+
+        /// iamacoffeepot/aether#1337 Phase 2: hand the substrate a pointer into
+        /// a reusable guest-heap buffer of at least `min_len` bytes for an
+        /// inbound payload too large for the fixed-offset scratch window. The
+        /// substrate writes the payload there and passes the pointer to
+        /// `receive`. Backed by [`$crate::ffi::mail_scratch`] — one buffer per
+        /// wasm module, reused across mails.
+        ///
+        /// # Safety
+        /// Called by the substrate before `receive`; see
+        /// [`$crate::ffi::mail_scratch::reserve`].
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(export_name = "mail_scratch_reserve_p32")]
+        pub unsafe extern "C" fn mail_scratch_reserve(min_len: u32) -> u32 {
+            // SAFETY: see `mail_scratch::reserve`. wasm32 pointers are 32-bit.
+            unsafe { $crate::ffi::mail_scratch::reserve(min_len as usize).addr() as u32 }
         }
 
         /// # Safety
