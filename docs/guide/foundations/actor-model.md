@@ -1,28 +1,27 @@
 # The actor model
 
-The engine is built from one primitive: the **actor**. The renderer is an actor.
-The audio mixer is an actor. A component you load is an actor. There is no second
-kind of thing — no privileged "system objects" that actors orbit. Everything in
-the substrate is an actor, and actors interact in exactly one way: by **mail**.
+The engine is built from one kind of thing: the **actor**. The renderer, the audio
+mixer, the filesystem, a component you load — all of them are actors, with no
+privileged class of "system object" sitting above them. Everything in the substrate
+is an actor, and the only way actors ever interact is by **mail**.
 
-Understand the actor and most of the engine follows, because every subsystem in
-this guide is "an actor (or a few) that does X." This page is the primitive
-itself: what an actor is, the lifecycle every actor moves through, how you author
-one, and the two *hosts* the same primitive runs under — native **capabilities**
-and wasm **components**.
+If you understand actors, most of the engine follows: every subsystem in this guide
+is some actor (or a handful) doing a job. This page covers the actor itself — what
+it is, the lifecycle it moves through, how you write one — and the two *hosts* it
+runs under, native **capabilities** and wasm **components**.
 
 > Governing ADR: **ADR-0074** (the unified actor model — capabilities and
-> components are one primitive, not two) with **ADR-0079** (the lifecycle stages)
+> components are one model, not two) with **ADR-0079** (the lifecycle stages)
 > and **ADR-0033** (the `#[actor]` macro). This model is **stable**; it's the
 > spine everything else hangs off. Signatures here were read from the current SDK
 > (`aether-actor`) and runtime (`aether-substrate`).
 
 ## What an actor is
 
-An actor is a bundle of **private state** and a set of **typed handlers**. It does
-nothing until mail arrives; when an envelope lands, the handler registered for
-that kind runs, with exclusive `&mut` access to the state. That's the whole shape:
-state in, mail drives handlers, handlers mutate state and send more mail.
+An actor is some **private state** paired with a set of **typed handlers**. It sits
+idle until mail arrives; when an envelope lands, the handler registered for that
+kind runs with exclusive `&mut` access to the state, updating it and sending mail
+of its own. Nothing happens except in response to a message.
 
 Two properties make it tractable to reason about:
 
@@ -33,17 +32,17 @@ Two properties make it tractable to reason about:
   without either knowing which it's talking to — mail is the only coupling, so the
   *host* is an implementation detail. (See [capability = reachability](invariants.md)
   for the security consequence.)
-- **An actor is single-threaded from its own perspective.** The scheduler
-  guarantees that no two threads ever run one actor's handlers at once, so actor
-  state is **plain fields** — no `Mutex`, no `RefCell`, no atomics. You write
-  ordinary sequential Rust and the runtime makes it safe. (How the scheduler
-  enforces this — the run-token — is the [concurrency](../systems/concurrency.md)
-  page; here, just take it as the contract.)
+- **An actor only ever runs on one thread at a time.** The scheduler guarantees no
+  two threads run an actor's handlers at once, so an actor can freely mutate the
+  data on its own struct — its state is **plain fields**, no `Mutex`, no `RefCell`,
+  no atomics, just ordinary sequential Rust. (How the scheduler enforces this — the
+  run-token — is the [concurrency](../systems/concurrency.md) page; here, take it as
+  a guarantee you can build on.)
 
 What flows between actors — the kinds, their ids, the wire encoding — is the
 [type system](type-system.md). How it routes and in what order — mailboxes, FIFO,
-fire-and-forget — is [mail & scheduling](../systems/mail-and-kinds.md). This page
-is the actor on the receiving end of all that.
+fire-and-forget — is [mail & scheduling](../systems/mail-and-kinds.md). The rest of
+this page stays with the actor on the receiving end: how it's built and how it runs.
 
 ## The lifecycle
 
@@ -58,17 +57,55 @@ contract: it's exactly what you're permitted to do at that point.
 | handlers | steady state, one call per inbound kind | full send + resolve + reply | the actor's actual behavior |
 | **`unwire`** | after the inbox drains, before drop | full send + resolve | final broadcast, signal monitors, flush state |
 
-`init` is a **pure synchronous constructor**: its ctx can resolve kind ids and
-mailbox addresses but *cannot send mail*, because the actor's own mailbox isn't
-published yet and peers may not exist. Anything mail-driven — above all,
-subscribing to the tick or input streams — belongs in `wire`, which runs once
-`init` returns `Ok` and the mailbox is live. If startup can fail (a missing
-handle, an unparseable config), `init` returns `Err(BootError)` and the failure
-surfaces cleanly rather than producing a half-built actor.
+The three stages exist because constructing an actor and letting it participate in
+the mail system are different moments, and only the second is safe to send from.
+`init` runs while the actor is still being built: its mailbox isn't published yet,
+peers may not have booted, and it returns `Result<Self, BootError>` so a failure
+aborts the load cleanly. Sending mail from there would mean announcing yourself
+before you're addressable, or mailing a peer that doesn't exist yet. So `init` stays
+a pure synchronous constructor — resolve kind ids and mailbox addresses, assemble
+state, return it (or fail with a `BootError` that surfaces instead of leaving a
+half-built actor behind).
 
-`wire` and `unwire` default to no-ops; override them only when you have setup or
-teardown to do. (Both are mail-allowed; the older single `on_drop` hook was
-folded into `unwire`.)
+`wire` is the first point where sending is safe. It runs once `init` has succeeded,
+the mailbox is live, and the chassis is past its boot barrier, so peers are
+addressable and replies can route back. That's why mail-driven setup lives here:
+subscribing to the tick or input streams, announcing yourself to a peer, starting a
+poll loop by mailing yourself. An actor that needs to subscribe at startup would have
+nowhere safe to do it if `init` were the only hook.
+
+`unwire` is the mirror at the other end, and it exists for the same reason in
+reverse — teardown often needs to send, whether that's a closing broadcast, a signal
+to monitors, or a final flush to a peer, and Rust's `Drop` can't reach cleanly into
+the mail system. It runs after the inbox has drained but before the actor drops, so
+its sends still land in live peers (mail to one that's already gone warn-drops). It
+absorbs what used to be a separate `on_drop` hook.
+
+Both `wire` and `unwire` default to no-ops; override them only when you have
+mail-driven setup or teardown to do.
+
+## The context
+
+Every lifecycle method and handler is handed a **context** (`ctx`) — the actor's
+only handle to the world outside its own state. It's how the actor resolves an
+address, sends mail, replies to a sender, persists state across a swap, or asks to
+shut down; anything that reaches past its own fields goes through it. You never
+construct one — the runtime passes it in for the duration of the call and takes it
+back when the call returns, so an actor interacts with the world only while a
+handler is actually running, never through a saved-away handle.
+
+There's more than one context *type* because what an actor is allowed to do changes
+from stage to stage, and the type is how that's enforced. The context handed to
+`init` can resolve addresses but has no `send` method at all — so "init can't mail"
+isn't a rule you have to remember, it simply won't compile. `wire`, handlers, and
+`unwire` get a context that can send and reply; the hot-swap hooks get one that can
+persist state. That's what "the context is the contract" means literally: the method
+you're in determines which context type you hold, and that type determines what
+compiles.
+
+The concrete types differ by host — `FfiCtx` in a wasm component, `NativeCtx` in a
+native capability — but you write handlers against a shared set of capability traits
+(`Resolver`, `MailSender`, and friends), so the same body works on either.
 
 ## Authoring an actor
 
@@ -118,10 +155,10 @@ mailbox id and kind id resolve at compile time. The handler takes the decoded ma
 **by value** and gets `&mut self` because nothing else can touch the state
 concurrently.
 
-## One primitive, two hosts
+## One model, two hosts
 
 Here's the part that ties the engine together. There aren't two actor systems —
-there's **one primitive with two hosts**, differing only in where the actor's code
+there's **one model with two hosts**, differing only in where the actor's code
 lives and what it's trusted with (ADR-0074):
 
 - A **native capability** is an actor compiled *into* the substrate. It implements

@@ -1,8 +1,8 @@
 # Components & lifecycle
 
-A **component** is the wasm host of an actor. The [actor model](../foundations/actor-model.md)
-is the primitive — the `#[actor]` block, the `init` / `wire` / `unwire` lifecycle,
-handlers, addressing by type — and a component is one of its two hosts: an actor
+A **component** is the wasm host of an actor. The shared model — the `#[actor]`
+block, the `init` / `wire` / `unwire` lifecycle, handlers, addressing by type — is
+the [actor model](../foundations/actor-model.md), and a component is one of its two hosts: an actor
 that arrives as **wasm bytes**, runs **sandboxed** behind the wasm wall, is reached
 by the substrate through an **FFI trampoline**, and can be **loaded, dropped, and
 hot-swapped at runtime**. The other host, a native capability, is the same shape
@@ -123,8 +123,8 @@ bundle unless you're persisting a non-kind blob or driving an explicit migration
 
 ## Where to read more
 
-- The actor primitive this specializes — its lifecycle, `#[actor]`, handlers,
-  addressing — [The actor model](../foundations/actor-model.md).
+- The actor this specializes — its lifecycle, `#[actor]`, handlers, addressing —
+  [The actor model](../foundations/actor-model.md).
 - Kinds, ids, and how the vocabulary crosses the wasm boundary — [The type system](../foundations/type-system.md).
 - How mail routes and what a kind is — [Mail, kinds & scheduling](mail-and-kinds.md).
 - Why a handler must never block, and how to wait instead — [Concurrency & blocking](concurrency.md).
