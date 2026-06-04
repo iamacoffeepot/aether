@@ -914,8 +914,19 @@ mod tests {
     use crossbeam_deque::{Injector, Steal};
     use std::sync::mpsc;
 
+    /// Pool size for the wake helper. Immaterial here: these tests
+    /// exercise the wake/drain path below the recruit gate, so the
+    /// `workers - 1` recruit cap (iamacoffeepot/aether#1147) never
+    /// engages. Local copy of `scheduler::slot::tests::TEST_WORKERS`,
+    /// which isn't reachable from outside `scheduler`.
+    const TEST_WORKERS: usize = 8;
+
     fn wake_sink(injector: &Arc<Injector<Arc<dyn Drainable>>>) -> WakeSink {
-        WakeSink::new(Arc::clone(injector), Arc::new(SpinPark::new()), 8)
+        WakeSink::new(
+            Arc::clone(injector),
+            Arc::new(SpinPark::new()),
+            TEST_WORKERS,
+        )
     }
 
     /// Drain the injector by running every queued `Drainable` to `Idle`

@@ -386,7 +386,7 @@ mod tests {
     use super::*;
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::slot::BATCH_MAX_USEC;
-    use crate::scheduler::slot::tests::CounterSlot;
+    use crate::scheduler::slot::tests::{CounterSlot, TEST_WORKERS};
     use crate::scheduler::{SlotStateLabel, WakeHandle};
     use crossbeam_deque::Steal;
     use std::sync::Weak;
@@ -552,7 +552,11 @@ mod tests {
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         drop(slot_dyn);
-        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), 8);
+        let sink = WakeSink::new(
+            Arc::clone(&injector),
+            Arc::new(SpinPark::new()),
+            TEST_WORKERS,
+        );
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         slot.push(1);
