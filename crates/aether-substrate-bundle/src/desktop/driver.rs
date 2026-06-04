@@ -27,9 +27,9 @@ use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
-    CaptureFrameResult, Key, KeyRelease, MouseButton, MouseMove, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
-    keycode,
+    CaptureFrameResult, FocusWindow, FocusWindowResult, Key, KeyRelease, MouseButton, MouseMove,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode,
+    WindowSize, keycode,
 };
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{
@@ -133,13 +133,14 @@ pub struct App {
     /// `aether.window` inbox claimed via `DriverCtx::claim_mailbox`
     /// at boot (issue 603 Phase 3). The driver is the cap — drained
     /// inside [`ApplicationHandler::about_to_wait`] between frames to
-    /// apply `SetWindowMode` / `SetWindowTitle` inline on the chassis
-    /// main thread (winit / macOS require window mutations there). No
-    /// dispatcher thread, no `EventLoopProxy` bounce; the receiver
-    /// is the wake. Under `ControlFlow::Wait` (set when the window
-    /// occludes) `about_to_wait` only fires after a winit event, so
-    /// window-kind mail can stall briefly until the user nudges the
-    /// window — accepted limitation for v1.
+    /// apply `SetWindowMode` / `SetWindowTitle` / `FocusWindow` inline
+    /// on the chassis main thread (winit / macOS require window
+    /// mutations there). No dispatcher thread; the receiver is the
+    /// drain source. Mail arrival pokes `UserEvent::WindowMail` via the
+    /// claim's wake slot (iamacoffeepot/aether#1318), so `about_to_wait`
+    /// runs and drains even under `ControlFlow::Wait` (set when the
+    /// window occludes) — the case `aether.window.focus` most needs,
+    /// since the loop is otherwise parked until a winit event arrives.
     window_inbox: Receiver<Envelope>,
     /// Per-actor [`aether_actor::local::ActorSlots`] carried out of the
     /// [`aether_substrate::MailboxClaim`] this driver produced at boot.
@@ -159,6 +160,10 @@ pub struct App {
     window_mailbox: MailboxId,
     kind_set_window_mode: aether_data::KindId,
     kind_set_window_title: aether_data::KindId,
+    /// `aether.window.focus` kind id, resolved at boot. The dispatch
+    /// arm calls [`App::apply_window_focus`] to raise the window
+    /// (iamacoffeepot/aether#1318).
+    kind_focus_window: aether_data::KindId,
     /// ADR-0080 §6 chassis-root correlation counter (issue
     /// iamacoffeepot/aether#723). Bumped per chassis-source push so
     /// every input/window/frame-stats emission carries a fresh
@@ -411,6 +416,23 @@ impl App {
         SetWindowTitleResult::Ok { title }
     }
 
+    /// Bring the window to the foreground (iamacoffeepot/aether#1318):
+    /// un-minimize, show if hidden, then raise + focus. winit's
+    /// `focus_window` is best-effort per platform, but the three calls
+    /// are the full lever the substrate has. `Err` if the window isn't
+    /// created yet (mail arrived before `resumed`).
+    fn apply_window_focus(&self) -> FocusWindowResult {
+        let Some(window) = self.window.as_ref() else {
+            return FocusWindowResult::Err {
+                error: "focus requested before window initialized".to_owned(),
+            };
+        };
+        window.set_minimized(false);
+        window.set_visible(true);
+        window.focus_window();
+        FocusWindowResult::Ok
+    }
+
     /// Drain the `aether.window` inbox without blocking. Called from
     /// `about_to_wait` (per-frame cadence). Each envelope dispatches
     /// inline against the framework-built-in arms first
@@ -486,6 +508,13 @@ impl App {
             };
             let result = self.apply_window_title(payload.title);
             self.queue.send_reply(env.sender, &result);
+        } else if env.kind == self.kind_focus_window {
+            // `FocusWindow` is a unit payload — nothing to decode.
+            // Reply through `self.queue.send_reply` (the `Mailer`),
+            // never `self.outbound` (`HubOutbound` drops
+            // `ReplyTarget::Component`, iamacoffeepot/aether#1316).
+            let result = self.apply_window_focus();
+            self.queue.send_reply(env.sender, &result);
         } else {
             tracing::warn!(
                 target: "aether_substrate::driver",
@@ -547,8 +576,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        // Both proxy events do the same minimal thing: nudge a redraw
+        // so the loop turns. `Capture` lets `RedrawRequested` pull a
+        // queued capture; `WindowMail` (iamacoffeepot/aether#1318) lets
+        // winit run `about_to_wait` (which drains the `aether.window`
+        // inbox) even under `ControlFlow::Wait`. Neither does the work
+        // itself — the redraw / drain handlers do.
         match event {
-            UserEvent::Capture => {
+            UserEvent::Capture | UserEvent::WindowMail => {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -827,11 +862,27 @@ impl DriverCapability for DesktopDriverCapability {
             .registry
             .kind_id(SetWindowTitle::NAME)
             .expect("SetWindowTitle registered");
+        let kind_focus_window = boot
+            .registry
+            .kind_id(FocusWindow::NAME)
+            .expect("FocusWindow registered");
 
         // Issue 603 Phase 3: the desktop driver is the cap for
         // `aether.window`. Claim the inbox here; the receiver lives on
         // `App` and `about_to_wait` drains it inline between frames.
+        //
+        // iamacoffeepot/aether#1318: install an `EventLoopProxy` wake on
+        // the claim so window-control mail (`focus` / `set_mode` /
+        // `set_title`) arriving at an occluded window pokes
+        // `UserEvent::WindowMail`, letting winit run `about_to_wait` and
+        // drain even under `ControlFlow::Wait`. The proxy is minted here
+        // while `event_loop` is still owned by the capability (it moves
+        // into `DesktopDriverRunning` after `boot`).
         let window_claim = ctx.claim_mailbox("aether.window")?;
+        let window_mail_proxy = event_loop.create_proxy();
+        window_claim.wake_slot.set(Arc::new(move || {
+            let _ = window_mail_proxy.send_event(UserEvent::WindowMail);
+        }));
 
         let lifecycle_mailbox = mailbox_id_from_name(
             <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE,
@@ -868,6 +919,7 @@ impl DriverCapability for DesktopDriverCapability {
             window_mailbox: window_claim.id,
             kind_set_window_mode,
             kind_set_window_title,
+            kind_focus_window,
             // 0 is the "no correlation" sentinel; mirror NativeBinding's
             // start-at-1 convention.
             chassis_correlation: AtomicU64::new(1),

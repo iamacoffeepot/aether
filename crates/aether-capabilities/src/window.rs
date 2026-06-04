@@ -11,19 +11,19 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{SetWindowMode, SetWindowTitle};
+use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle};
 
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
 
     use aether_actor::actor;
-    use aether_kinds::{SetWindowModeResult, SetWindowTitleResult};
+    use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::outbound::HubOutbound;
 
-    use super::{SetWindowMode, SetWindowTitle};
+    use super::{FocusWindow, SetWindowMode, SetWindowTitle};
     use std::io;
 
     /// Chassis-without-window companion to the desktop driver's
@@ -74,6 +74,19 @@ mod native {
             self.outbound.send_reply(
                 ctx.reply_target(),
                 &SetWindowTitleResult::Err {
+                    error: "unsupported on this chassis — no window peripheral".to_owned(),
+                },
+            );
+        }
+
+        /// Reply `Err` for the same reason as `on_set_mode`
+        /// (iamacoffeepot/aether#1318): a chassis without a window
+        /// peripheral can't foreground one.
+        #[handler]
+        fn on_focus(&self, ctx: &mut NativeCtx<'_>, _mail: FocusWindow) {
+            self.outbound.send_reply(
+                ctx.reply_target(),
+                &FocusWindowResult::Err {
                     error: "unsupported on this chassis — no window peripheral".to_owned(),
                 },
             );
