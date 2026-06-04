@@ -21,10 +21,19 @@ use aether_actor::Actor;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{Kind, encode_empty, mailbox_id_from_name};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, LifecycleAdvance};
-use aether_substrate::chassis::settlement::SettlementRegistry;
+use aether_substrate::chassis::settlement::{
+    SettlementRegistry, TerminalDisposition, WaitOutcome, await_internal_signal,
+};
+use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
     Chassis, LifecycleDriverCapability, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId,
 };
+
+/// Cumulative patience cap for the per-frame settlement gates (advance +
+/// capture pre-mail), matching the desktop driver. The per-round budget
+/// is `frame_loop::DRAIN_BUDGET`; a starved-but-healthy chain resolves
+/// before this cap, a genuine wedge exhausts it (issue #1305).
+const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
@@ -207,12 +216,18 @@ fn run_frame(
             1,
         );
         let rx = settlement_registry.subscribe_settlement(advance_root);
-        if rx.recv_timeout(frame_loop::DRAIN_BUDGET).is_err() {
-            tracing::error!(
-                target: "aether_substrate::lifecycle",
-                root = ?advance_root,
-                "frame chain did not settle within drain budget; submitting anyway",
-            );
+        // Reconciled to `Abort` to match the desktop advance gate
+        // (issue #1305): a frame chain that never settles is a wedged
+        // dispatcher, not a "submit anyway" — escalating patience under
+        // the wait, fail-fast on a genuine wedge (ADR-0063).
+        if let WaitOutcome::Wedged(wedge) = await_internal_signal(
+            &rx,
+            "test_bench_bin.frame_advance",
+            frame_loop::DRAIN_BUDGET,
+            FRAME_SETTLEMENT_CAP,
+            TerminalDisposition::Abort,
+        ) {
+            lifecycle::fatal_abort(outbound, wedge.reason());
         }
     }
 
@@ -224,12 +239,14 @@ fn run_frame(
             // bailing out of the frame loop.
             let mut pre_failed: Option<String> = None;
             for rx in req.pre_settlements {
-                if rx.recv_timeout(Duration::from_secs(5)).is_err() {
-                    pre_failed = Some(
-                        "capture pre-mail chain failed to settle within 5s — \
-                         a downstream cap is wedged"
-                            .to_owned(),
-                    );
+                if let WaitOutcome::Wedged(wedge) = await_internal_signal(
+                    &rx,
+                    "test_bench_bin.capture_pre_mail",
+                    frame_loop::DRAIN_BUDGET,
+                    FRAME_SETTLEMENT_CAP,
+                    TerminalDisposition::ReplyErr,
+                ) {
+                    pre_failed = Some(wedge.reason());
                     break;
                 }
             }

@@ -42,6 +42,9 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_actor::Actor;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
+use aether_substrate::chassis::settlement::{
+    TerminalDisposition, WaitOutcome, await_internal_signal,
+};
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
     SubstrateBoot,
@@ -118,10 +121,16 @@ impl fmt::Display for TestBenchError {
     }
 }
 
-/// Per-send settlement timeout. Mirrors the `run_frame` tick wait at
-/// `bench.rs::run_frame`; long enough to absorb wasm compile + cap
-/// dispatcher wake under nextest CPU contention.
+/// Per-round settlement patience (the log cadence of the escalating
+/// wait). Mirrors the `run_frame` tick wait at `bench.rs::run_frame`;
+/// long enough to absorb wasm compile + cap dispatcher wake under
+/// nextest CPU contention.
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cumulative patience cap before a settlement gate is declared wedged
+/// (issue #1305). A starved-but-healthy chain resolves before this cap;
+/// a genuine wedge exhausts it and surfaces `SettlementTimeout`.
+const SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 
 impl error::Error for TestBenchError {}
 
@@ -469,9 +478,15 @@ impl TestBench {
             .queue
             .push_chassis_root_mail(cid, mailbox, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
-        match rx.recv_timeout(SETTLEMENT_TIMEOUT) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(TestBenchError::SettlementTimeout {
+        match await_internal_signal(
+            &rx,
+            "test_bench.push_and_settle",
+            SETTLEMENT_TIMEOUT,
+            SETTLEMENT_CAP,
+            TerminalDisposition::ReplyErr,
+        ) {
+            WaitOutcome::Settled => Ok(()),
+            WaitOutcome::Wedged(_) => Err(TestBenchError::SettlementTimeout {
                 recipient: recipient_name.to_owned(),
                 kind_name,
             }),
@@ -1005,7 +1020,13 @@ impl TestBench {
                 // (no pre-mails, or a chassis without trace pipeline)
                 // skips the loop cleanly.
                 for rx in req.pre_settlements {
-                    if rx.recv_timeout(SETTLEMENT_TIMEOUT).is_err() {
+                    if let WaitOutcome::Wedged(_) = await_internal_signal(
+                        &rx,
+                        "test_bench.capture_pre_mail",
+                        SETTLEMENT_TIMEOUT,
+                        SETTLEMENT_CAP,
+                        TerminalDisposition::ReplyErr,
+                    ) {
                         return Err(TestBenchError::SettlementTimeout {
                             recipient: "capture pre-mail chain".to_owned(),
                             kind_name: "<pre-mail>",

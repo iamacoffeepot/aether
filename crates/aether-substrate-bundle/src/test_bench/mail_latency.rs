@@ -27,6 +27,9 @@ use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{
     DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult,
 };
+use aether_substrate::chassis::settlement::{
+    TerminalDisposition, WaitOutcome, await_internal_signal,
+};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
 use super::TestBench;
@@ -151,7 +154,31 @@ fn spawn_topology(tb: &TestBench, topo: &Topology) {
     }
 }
 
+/// Per-round settlement patience (the log cadence of the escalating
+/// wait, issue #1305).
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Cumulative patience cap before a settlement gate panics attributably
+/// (issue #1305). A starved-but-healthy chain settles before this cap; a
+/// genuine wedge exhausts it and the helper `panic!`s at the gate site.
+const SETTLE_CAP: Duration = Duration::from_secs(50);
+
+/// Panic-on-wedge settlement wait shared by the mail-latency assertions:
+/// escalating patience under the wait, attributable panic at the gate on
+/// a genuine wedge instead of a downstream assertion. `Panic` diverges
+/// inside the helper, so a return means the chain settled.
+fn assert_settled(rx: &crossbeam_channel::Receiver<()>, gate: &str) {
+    match await_internal_signal(
+        rx,
+        gate,
+        SETTLE_TIMEOUT,
+        SETTLE_CAP,
+        TerminalDisposition::Panic,
+    ) {
+        WaitOutcome::Settled => {}
+        WaitOutcome::Wedged(_) => unreachable!("Panic disposition diverges on a wedge"),
+    }
+}
 
 /// Multi-worker saturation profile target (samply). Boots the pool at
 /// max workers, wires a ring of N `RingRelay` actors, seeds M circulating
@@ -257,10 +284,7 @@ fn depth_chain_settles_every_root() {
     }
 
     for (idx, (_root, rx)) in pending.iter().enumerate() {
-        assert!(
-            rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-            "root {idx} never settled — per-root lineage accounting may be broken (in_flight stuck)"
-        );
+        assert_settled(rx, &format!("mlat.per_root_lineage[{idx}]"));
     }
 }
 
@@ -306,10 +330,7 @@ fn emit_settlement_settles_every_root(topo: &Topology) {
         pending.push(tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes()));
     }
     for (idx, (_root, rx)) in pending.iter().enumerate() {
-        assert!(
-            rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-            "root {idx} never settled — the emit-time counter must fire Settled"
-        );
+        assert_settled(rx, &format!("mlat.emit_time_counter[{idx}]"));
     }
 }
 
@@ -405,10 +426,7 @@ fn emit_settlement_settles_with_holds() {
         pending.push(tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes()));
     }
     for (idx, (_root, rx)) in pending.iter().enumerate() {
-        assert!(
-            rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-            "hold root {idx} never settled — the hold's Release must fire the counter"
-        );
+        assert_settled(rx, &format!("mlat.hold_release[{idx}]"));
     }
 }
 
@@ -454,10 +472,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
 
     spawn_topology(&tb, &depth_chain(1));
     let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
-    assert!(
-        rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-        "injected root never settled"
-    );
+    assert_settled(&rx, "mlat.trace_ring_dual_write");
 
     // The recipient relay's own ring holds the mail's Received + Finished.
     let relay = trace_tail(&mut tb, "mlat.relay:0", root);
@@ -521,10 +536,7 @@ fn guided_walk_reconstructs_causal_tree() {
 
     spawn_topology(&tb, &two_level_tree());
     let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
-    assert!(
-        rx.recv_timeout(SETTLE_TIMEOUT).is_ok(),
-        "injected root never settled"
-    );
+    assert_settled(&rx, "mlat.guided_walk");
 
     let mails = match tb.describe_tree_walked(root) {
         DescribeTreeResult::Ok { mails, .. } => mails,
@@ -761,10 +773,7 @@ fn settlement_detection_latency() {
         let t0 = Instant::now();
         let seq = u32::try_from(seq).unwrap_or(u32::MAX);
         let (_root, rx) = tb.inject_root(entry, Ping::ID, Ping { seq }.encode_into_bytes());
-        if rx.recv_timeout(SETTLE_TIMEOUT).is_err() {
-            eprintln!("settlement_detection_latency: root {seq} never settled");
-            return;
-        }
+        assert_settled(&rx, &format!("mlat.settlement_detection_latency[{seq}]"));
         lat.push(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
 
