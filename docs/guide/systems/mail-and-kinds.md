@@ -105,26 +105,44 @@ reply. If a reply matters, that's a separate, explicit contract between the two
 kinds — never an implicit "every kind has a response." Don't write a caller
 that blocks waiting for a reply a handler never agreed to send.
 
-**The ordering spine** (ADR-0087, the contract you can rely on):
+**The ordering spine** (ADR-0087) — **the single contract to hold in your head
+when writing handlers.** Get it wrong and you write code that passes in dev and
+breaks under load:
 
-> Same recipient, same sender → handled in the order you sent them
-> (per-recipient FIFO). Different recipients → **no** ordering guarantee; each
-> send is async, like a server call.
+> **Same sender, same recipient → arrives in send order** (per-recipient FIFO).
+> **Different recipients → no ordering guarantee** — each send is an independent
+> async call, like hitting a server.
 
-That's the whole guarantee. Cross-recipient sequencing is *causal* — B happens
-after A because A's completion triggered it or A mailed B — never inferred from
-the order you happened to send things. Strict cross-recipient order is
-deliberately not a contract: it would let one slow recipient stall every later
-one in a fan-out.
+In practice: if you `send(A)` then `send(B)` to the *same* actor, B is handled
+after A — rely on it. If you send A to actor X and B to actor Y, you know
+*nothing* about their relative order; Y might finish before X starts. So
+**never encode a cross-actor sequence by send order.** When B must happen after
+A across actors, make it **causal**: have A's handler trigger B, or have the
+actor that needs the order receive both and sequence them itself. Strict
+cross-recipient ordering is deliberately not offered — it would let one slow
+recipient stall everything queued behind it in a fan-out.
 
 **Scheduling, at the level you can depend on.** Each actor is single-threaded
 *from its own perspective* — its handlers never run concurrently with each
 other, so actor state is plain fields (no locks, no `RefCell`). The scheduler
-runs handlers cooperatively across a thread pool; a long handler ties up only
-its own worker and blocks nobody else's work. *How* mail is batched and
-balanced across workers (the per-producer rings, the work-stealing pool, the
-blob-as-unit-of-dispatch) is the part still settling — read ADR-0087 for the
-current design, but don't build on its internals; build on the spine above.
+runs handlers cooperatively across a thread pool.
+
+**A handler must never block its thread.** No sleeping, no blocking I/O, no
+waiting on a blocking lock or channel, no busy-spin. Because scheduling is
+cooperative, a blocked handler doesn't just stall itself — it pins a worker
+doing nothing and can deadlock a reply chain (the actor you're waiting on may
+have *its* next mail queued behind you). A long *compute* handler is tolerated
+(it ties up only its own worker), but anything that *waits on the outside
+world* is not: await a reply through the framework so the scheduler can run
+other work meanwhile, or hand heavy/async work to a computation DAG, off the
+actor thread entirely. The full treatment — the await/hold primitives and how
+to reason about concurrency here — is its own topic (forthcoming). The rule to
+carry now: **don't block in a handler.**
+
+*How* mail is batched and balanced across workers (the per-producer rings, the
+work-stealing pool, the blob-as-unit-of-dispatch) is still settling — read
+ADR-0087 for the current design, but build on the contracts above, not its
+internals.
 
 ## How to use it
 
