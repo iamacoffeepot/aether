@@ -88,8 +88,8 @@ echo "qodana-local: syncing working tree → $proj_vol ..."
 COPYFILE_DISABLE=1 tar -C "$repo_root" \
     --exclude='._*' \
     --exclude=./target --exclude=./.git --exclude=./.claude \
-    --exclude=./wishes --exclude=./research --exclude=./traces \
-    --exclude=./audits --exclude='./*.png' --exclude=./.qodana-local \
+    --exclude=./wishes --exclude=./research \
+    --exclude='./*.png' --exclude=./.qodana-local \
     -cf - . \
     | docker run --rm -i -v "$proj_vol":/data/project alpine \
         sh -c 'cd /data/project && rm -rf ./* ./.[!.]* 2>/dev/null; tar -xf -'

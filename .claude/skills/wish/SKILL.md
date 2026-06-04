@@ -17,7 +17,7 @@ Each wish carries its design-space context — the alternatives it was picked fr
 
 `/wish` proposes design through structured drilling. It writes a directory tree of wish files. It does **not** file issues, write production code, or update the project board. The user reads the tree, decides which leaves to file as issues for `/scope` to pick up.
 
-Distinct from `/audit` (internal code-quality scans) and `/scope` (formalizing one chosen wish/issue into Define→Design→Plan). `/wish` is the upstream that surfaces what's *worth* scoping.
+Distinct from `/scope` (formalizing one chosen wish/issue into Define→Design→Plan). `/wish` is the upstream that surfaces what's *worth* scoping.
 
 ## Core principles
 
@@ -246,7 +246,7 @@ The user reads top-down:
 
 No `--depth`, no `--count` flags. Depth is whatever the chains produce; count is whatever survives producibility + filter.
 
-Roles: `player`, `designer`, `agent`, `operator`, `developer`. Skip `substrate-developer` — that's `/audit`'s scope.
+Roles: `player`, `designer`, `agent`, `operator`, `developer`. Skip `substrate-developer` — engine-internals work isn't surfaced as a use-case wish.
 
 ## Steps the agent runs
 
@@ -382,4 +382,4 @@ The "why rejected as the chosen path" line names which dimension(s) the chosen w
 
 ## Output gitignore
 
-`/wishes/` is gitignored (per-run scratch, like `/audits/`).
+`/wishes/` is gitignored (per-run scratch).

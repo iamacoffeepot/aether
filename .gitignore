@@ -21,7 +21,6 @@ spikes/*/target/
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/approve/
-!.claude/skills/audit/
 !.claude/skills/bounce/
 !.claude/skills/delegate/
 !.claude/skills/implement/
@@ -31,22 +30,10 @@ spikes/*/target/
 !.claude/skills/scope-spinoff/
 !.claude/skills/secretary/
 !.claude/skills/sweep/
-# Agent audit artifacts — runs of an audit workflow that examines
-# the repo and emits findings. Outputs are per-run and per-machine,
-# not part of the source tree; issues filed from them link back to
-# the source instead.
-/audits/
 # Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run
 # markdown, not part of the source tree. Read locally, file the wishes you
 # like as issues, discard the file.
 /wishes/
-# Trace dumps from `dump_trace` (issue #730 / ADR-0080). Per-run
-# JSON, not part of the source tree — keep them out of /tmp so
-# they survive shell sessions and land somewhere predictable. The
-# directory itself is tracked via `.gitkeep` so the path is
-# discoverable; everything else under it is ignored.
-/traces/*
-!/traces/.gitkeep
 .claude/release-state.json
 .claude/release-units.json
 # Perf-comparison artifacts written by scripts/perf-compare.sh
