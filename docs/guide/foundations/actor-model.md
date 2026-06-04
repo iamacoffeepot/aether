@@ -160,6 +160,35 @@ mailbox id and kind id resolve at compile time. The handler takes the decoded ma
 **by value** and gets `&mut self` because nothing else can touch the state
 concurrently.
 
+## Configuring an actor
+
+An actor can take typed **boot configuration**. Declare a `Config` associated type
+and the chassis threads a decoded value into `init` as its leading argument:
+
+```rust
+#[actor]
+impl FfiActor for ProbeWithConfig {
+    type Config = ProbeConfig;
+    const NAMESPACE: &'static str = "probe_with_config";
+
+    fn init<C>(config: ProbeConfig, ctx: &mut C) -> Result<Self, BootError>
+    where C: Resolver { … }
+}
+```
+
+Most actors need none. Omit `Config` and the `#[actor]` macro synthesizes `()` and
+injects the unused argument, so a no-config `init` stays the terse
+`fn init<C>(ctx: &mut C)` from the examples above — there's no `type Config = ()` to
+write by hand.
+
+The two hosts differ in one way, and it follows from how the config reaches them. A
+capability's config is built in-process by the chassis, so it can be any
+`Send + 'static` type. A component's config has to cross the wasm boundary as bytes,
+so it must be a `Kind` — encoded at the load edge, decoded on the way in. That seam
+aside, the authoring shape is identical. (How a component's config rides the load
+call, and how a chassis assembles its own layered config, are the
+[components](../systems/components.md) and configuration pages.)
+
 ## Names and addressing
 
 The `NAMESPACE` const on the `Actor` trait is the name an actor claims — the
