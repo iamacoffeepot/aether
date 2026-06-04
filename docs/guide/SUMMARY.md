@@ -16,7 +16,7 @@
 
 - [Subsystem map](systems.md)
   - [Mail, kinds & scheduling](systems/mail-and-kinds.md)
-  - [Concurrency & blocking]()
+  - [Concurrency & blocking](systems/concurrency.md)
   - [Components & lifecycle]()
   - [Rendering & camera]()
   - [Mesh authoring & the DSL]()
