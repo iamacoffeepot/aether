@@ -7,9 +7,11 @@
 //! `RenderCapability` (Phase 2), window kinds through driver-as-actor
 //! on `aether.window` (Phase 3), and `platform_info` was deleted as a
 //! kind (Phase 4) along with the closure-fallback that served it.
-//! `UserEvent::Capture` is the lone remaining proxy event — it wakes
-//! the loop so a queued `CaptureQueue` request gets pulled on the
-//! next redraw, even when the window is occluded.
+//! Two proxy events wake the loop under `ControlFlow::Wait`:
+//! `UserEvent::Capture` so a queued `CaptureQueue` request gets pulled
+//! on the next redraw, and `UserEvent::WindowMail` so `about_to_wait`
+//! drains the `aether.window` inbox when window-control mail arrives at
+//! an occluded window (iamacoffeepot/aether#1318).
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -96,6 +98,13 @@ pub enum UserEvent {
     /// A capture was just enqueued on `CaptureQueue`; wake the loop
     /// so `RedrawRequested` pulls and fulfils it.
     Capture,
+    /// Window-control mail was enqueued on `aether.window`; wake the
+    /// loop so `about_to_wait` drains the inbox even under
+    /// `ControlFlow::Wait` (iamacoffeepot/aether#1318). Without this an
+    /// `aether.window.focus` / `set_mode` / `set_title` mail sent to an
+    /// occluded window sits undrained until an unrelated winit event
+    /// nudges the loop.
+    WindowMail,
 }
 
 /// Marker type for the desktop chassis. Carries no fields — the

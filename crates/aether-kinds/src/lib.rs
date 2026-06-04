@@ -1387,6 +1387,32 @@ mod control_plane {
         Err { error: String },
     }
 
+    /// `aether.window.focus` — bring the substrate window to the
+    /// foreground (un-minimize, show if hidden, raise + focus). Takes
+    /// no fields: focus is a single imperative with no parameters.
+    ///
+    /// Motivating use (iamacoffeepot/aether#1318): an MCP-driven
+    /// session that wants to `capture_frame` against a backgrounded /
+    /// minimized / hidden window has no programmatic lever to raise it
+    /// otherwise. The desktop driver applies `set_minimized(false)` +
+    /// `set_visible(true)` + `focus_window()`. Headless / hub chassis
+    /// reply `Err` (no window peripheral).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.window.focus")]
+    pub struct FocusWindow {}
+
+    /// Reply to `FocusWindow`. `Ok` confirms the window was raised
+    /// (winit's `focus_window` is best-effort per the platform docs,
+    /// but the substrate has applied the three calls). `Err` carries
+    /// the reason — a pre-window-ready request, or a chassis without a
+    /// window peripheral (headless, hub).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.window.focus_result")]
+    pub enum FocusWindowResult {
+        Ok,
+        Err { error: String },
+    }
+
     /// Reply to `SetMasterGain` (ADR-0039). `Ok` echoes the gain the
     /// substrate actually applied — values above `1.0` are clamped, so
     /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
@@ -2829,6 +2855,8 @@ mod tests {
         assert_eq!(SetWindowModeResult::NAME, "aether.window.set_mode_result");
         assert_eq!(SetWindowTitle::NAME, "aether.window.set_title");
         assert_eq!(SetWindowTitleResult::NAME, "aether.window.set_title_result");
+        assert_eq!(FocusWindow::NAME, "aether.window.focus");
+        assert_eq!(FocusWindowResult::NAME, "aether.window.focus_result");
         assert_eq!(Camera::NAME, "aether.camera");
         // ADR-0066: aether.camera.{create,destroy,set_active,set_mode,
         // orbit.set,topdown.set} kind-name asserts live in

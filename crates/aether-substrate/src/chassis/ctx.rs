@@ -50,6 +50,16 @@ pub struct MailboxClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
     pub actor_slots: SharedActorSlots,
+    /// Optional wake hook fired by the registry sink after each
+    /// accepted send (iamacoffeepot/aether#1318). The plain claim path
+    /// — unlike `claim_mailbox_drop_on_shutdown` — drains on a cadence
+    /// the claimer controls (the desktop window driver drains in
+    /// `about_to_wait`), so it needs a way to nudge that cadence when
+    /// mail arrives while the loop is parked. Defaults to an unset
+    /// slot; the desktop window driver installs an `EventLoopProxy`
+    /// wake so `aether.window` mail wakes the winit loop even under
+    /// `ControlFlow::Wait`. Empty for every other plain-claim consumer.
+    pub wake_slot: Arc<MailboxWakeSlot>,
 }
 
 impl fmt::Debug for MailboxClaim {
@@ -305,6 +315,14 @@ impl<'a> ChassisCtx<'a> {
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
+        // iamacoffeepot/aether#1318: optional wake hook fired after each
+        // accepted send. Unset by default (a single relaxed atomic load
+        // on the hot path); the desktop window driver installs an
+        // `EventLoopProxy` wake so `aether.window` mail nudges the winit
+        // loop under `ControlFlow::Wait`. Mirrors the `MailboxWakeSlot`
+        // the `claim_mailbox_drop_on_shutdown` variant carries.
+        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
+        let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_inbox(
             name.to_owned(),
             // iamacoffeepot/aether#848: closure takes [`OwnedDispatch`]
@@ -322,6 +340,13 @@ impl<'a> ChassisCtx<'a> {
                         kind = %env.kind_name,
                         "capability mailbox receiver dropped — mail discarded"
                     );
+                    return;
+                }
+                // iamacoffeepot/aether#1318: fire the wake hook (if
+                // installed). `get()` returns `None` until a claimer sets
+                // it, so this is a single relaxed atomic load otherwise.
+                if let Some(wake) = wake_for_handler.get() {
+                    wake();
                 }
             }),
         )?;
@@ -338,6 +363,7 @@ impl<'a> ChassisCtx<'a> {
             id,
             receiver: rx,
             actor_slots: SharedActorSlots::new(),
+            wake_slot,
         })
     }
 
