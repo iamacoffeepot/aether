@@ -93,10 +93,20 @@ pub struct App {
     render_handles: RenderHandles,
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
-    /// `render_and_capture`, then reply-to-sender on `outbound`.
+    /// `render_and_capture`, then reply to the sender via
+    /// `queue.send_reply` (the `Mailer`, which routes every
+    /// `ReplyTarget` — see `outbound`).
     capture_queue: CaptureQueue,
-    /// Hub outbound — shared with the log-capture layer and the
-    /// capture-reply path.
+    /// Hub outbound — held for log egress to the hub and
+    /// `lifecycle::fatal_abort`. NOT used for chassis replies:
+    /// `HubOutbound::send_reply` only routes `Session` / `EngineMailbox`
+    /// targets and silently drops `ReplyTarget::Component`, but mail
+    /// dispatched by this engine's own `RpcServerCapability` (every
+    /// hub/MCP call lands via the proxy → local RPC server) carries a
+    /// `Component(rpc_server)` reply target. Replies go through
+    /// `self.queue.send_reply` (the `Mailer`) instead, which pushes the
+    /// reply as local mail so the RPC server's `on_any` lifts it into a
+    /// `ReplyEvent` (iamacoffeepot/aether#1316).
     outbound: Arc<HubOutbound>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -450,7 +460,7 @@ impl App {
             let payload: SetWindowMode = match postcard::from_bytes(env.payload.bytes()) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.outbound.send_reply(
+                    self.queue.send_reply(
                         env.sender,
                         &SetWindowModeResult::Err {
                             error: format!("postcard decode failed: {e}"),
@@ -460,12 +470,12 @@ impl App {
                 }
             };
             let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
-            self.outbound.send_reply(env.sender, &result);
+            self.queue.send_reply(env.sender, &result);
         } else if env.kind == self.kind_set_window_title {
             let payload: SetWindowTitle = match postcard::from_bytes(env.payload.bytes()) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.outbound.send_reply(
+                    self.queue.send_reply(
                         env.sender,
                         &SetWindowTitleResult::Err {
                             error: format!("postcard decode failed: {e}"),
@@ -475,7 +485,7 @@ impl App {
                 }
             };
             let result = self.apply_window_title(payload.title);
-            self.outbound.send_reply(env.sender, &result);
+            self.queue.send_reply(env.sender, &result);
         } else {
             tracing::warn!(
                 target: "aether_substrate::driver",
@@ -643,7 +653,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 //noinspection DuplicatedCode
                                 self.queue.push(mail);
                             }
-                            self.outbound.send_reply(req.reply_to, &result);
+                            self.queue.send_reply(req.reply_to, &result);
                             // iamacoffeepot/aether#1273: `req` still owns
                             // `PendingCapture._hold` after the partial moves
                             // above; the field drops at end of this scope —
@@ -657,7 +667,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 } else if let Some(req) = pending_capture {
-                    self.outbound.send_reply(
+                    self.queue.send_reply(
                         req.reply_to,
                         &CaptureFrameResult::Err {
                             error: "capture requested before GPU initialized".to_owned(),
