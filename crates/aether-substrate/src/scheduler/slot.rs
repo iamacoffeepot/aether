@@ -599,6 +599,15 @@ pub mod tests {
     use std::hint;
     use std::thread;
 
+    /// Pool size handed to `WakeSink::new` in the wake/schedule tests.
+    /// The exact value is immaterial: these tests drive the wake +
+    /// ready-queue path, which sits below the recruit gate, so the
+    /// `workers - 1` recruit cap (iamacoffeepot/aether#1147) never
+    /// engages — any plausible pool size behaves identically. Shared
+    /// with `pool::tests` (same parent module); `blob_work::tests`
+    /// keeps its own local copy since it lives outside `scheduler`.
+    pub const TEST_WORKERS: usize = 8;
+
     /// Test fixture: a slot with a `Vec<u32>` inbox and a counter
     /// incremented per dispatch. Exercises the [`Drainable`] surface
     /// without dragging in the real chassis machinery.
@@ -926,7 +935,11 @@ pub mod tests {
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let slot = CounterSlot::new("wake");
         let weak: Weak<dyn Drainable> = Arc::downgrade(&(slot.clone() as Arc<dyn Drainable>));
-        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), 8);
+        let sink = WakeSink::new(
+            Arc::clone(&injector),
+            Arc::new(SpinPark::new()),
+            TEST_WORKERS,
+        );
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         // First wake should spill one slot.
