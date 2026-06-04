@@ -35,6 +35,31 @@ use crate::scheduler::pending_depth;
 // never need to coexist within the same wasm function activation.
 const MAIL_OFFSET: u32 = 1024;
 
+/// Stack headroom (bytes) reserved below the standard wasm32 1 MiB stack
+/// top when sizing [`MAX_MAIL_PAYLOAD_BYTES`] — room for the `receive`
+/// call chain's own frames (shallow in practice; 256 KiB is generous).
+const MAIL_SCRATCH_STACK_RESERVE: usize = 256 * 1024;
+
+/// Largest inbound mail payload (bytes) [`Component::deliver`] will write
+/// into the guest's fixed [`MAIL_OFFSET`] scratch region
+/// (iamacoffeepot/aether#1337). Kind-agnostic; a larger payload is
+/// dropped with a loud log rather than overrunning guest memory.
+///
+/// `Memory::write` does not grow memory, and `MAIL_OFFSET` sits at the
+/// bottom of linear memory — inside the low stack region of the standard
+/// stack-first wasm32 layout (1 MiB shadow stack at `[0, 1 MiB)`, then
+/// static data, then the heap). So the scratch write is bounded by the
+/// *stack*, not the heap: the payload must stay below the live stack's
+/// low-water mark. That bound isn't introspectable — Rust guests don't
+/// export `__stack_pointer` (only `__heap_base` / `__data_end`, which sit
+/// *above* the stack and are the wrong bound for low-memory scratch) — so
+/// this is a flat cap: the 1 MiB default stack minus a stack reserve and
+/// the offset. Phase 2 (a reusable guest *heap* buffer) removes the
+/// low-scratch constraint and lets large mail through; until then this
+/// makes oversize fail cleanly. Comparable to `host_fns`'s 1 MiB
+/// `MAX_STATE_BUNDLE_BYTES`, sized down to stay clear of the stack top.
+const MAX_MAIL_PAYLOAD_BYTES: usize = (1 << 20) - MAIL_SCRATCH_STACK_RESERVE - MAIL_OFFSET as usize;
+
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
 /// buffer from the moment `save_state` is called on the old instance
 /// until the bundle is handed to the new instance via `on_rehydrate`
@@ -347,6 +372,13 @@ impl ComponentCtx {
 /// is deferred to a later ADR; Phase 2 is warnings only.
 pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
+/// Sentinel [`Component::deliver`] returns when it refused to deliver an
+/// inbound because its payload exceeded the guest's `mail_scratch_ceiling`
+/// (iamacoffeepot/aether#1337). The mail was dropped (logged) without
+/// touching guest memory or invoking `receive`; the caller treats it as a
+/// non-error so the native dispatcher still discharges settlement.
+pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
+
 /// Offset the substrate writes prior-state bytes to before calling
 /// `on_rehydrate` (ADR-0016 §3). Deliberately separated from
 /// `MAIL_OFFSET` so the two scratch regions don't overlap in the
@@ -527,7 +559,6 @@ impl Component {
         // method. wire stays one-shot — the trampoline drops the
         // typed-func handle after the call.
         let wire = instance.get_typed_func::<u64, u32>(&mut store, "wire").ok();
-
         Ok(Self {
             store,
             memory,
@@ -604,12 +635,45 @@ impl Component {
             Some(e) => self.store.data_mut().reply_table.allocate(e),
             None => NO_REPLY_HANDLE,
         };
+        // iamacoffeepot/aether#1337: refuse a payload that won't fit the
+        // fixed MAIL_OFFSET scratch window. `Memory::write` does not grow
+        // memory and the offset is in the low stack region, so an
+        // oversize write would either run off the end (fresh guest) or
+        // silently clobber the guest's static data + heap (warmed guest
+        // → dlmalloc trap). Drop it loudly instead: returning `Ok`
+        // without invoking `receive` lets the trampoline's
+        // `forward_to_wasm` return normally, so the native dispatcher
+        // discharges the inbound's settlement bracket — no corruption, no
+        // trap, no hung caller. Kind-agnostic by design (not
+        // fs-specific). Phase 2 adds a reusable guest heap buffer to
+        // raise the ceiling and carry large mail.
+        let payload_len = mail.payload.len();
+        if payload_len > MAX_MAIL_PAYLOAD_BYTES {
+            let kind_name = self
+                .store
+                .data()
+                .registry
+                .kind_name(mail.kind)
+                .unwrap_or_default();
+            tracing::error!(
+                target: "aether_substrate::component",
+                kind = %kind_name,
+                kind_id = mail.kind.0,
+                payload_bytes = payload_len,
+                ceiling_bytes = MAX_MAIL_PAYLOAD_BYTES,
+                "inbound mail payload exceeds the guest scratch ceiling; dropping \
+                 (would overrun guest memory). Raise via the Phase 2 reusable \
+                 buffer (iamacoffeepot/aether#1337)",
+            );
+            return Ok(DISPATCH_DROPPED_OVERSIZE);
+        }
+
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, mail.payload.bytes())?;
         // Wasm32 ABI carries `u32` byte lengths; mail payloads are
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
-        let byte_len = mail.payload.len() as u32;
+        let byte_len = payload_len as u32;
         // ADR-0080 §5 (issue iamacoffeepot/aether#722): publish the
         // inbound's lineage on `ComponentCtx` so any guest-triggered
         // `send_mail_p32` / `reply_mail_p32` host fn — both routed
@@ -840,6 +904,17 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 0))
+    "#;
+
+    /// iamacoffeepot/aether#1337: fixture with 18 pages (1.18 MiB) of
+    /// memory so a test can deliver a sub-cap payload that exceeds a
+    /// single 64 KiB page (the [`MAX_MAIL_PAYLOAD_BYTES`] cap is
+    /// `785_408`, larger than one page).
+    const WAT_BIG_MEMORY: &str = r#"
+        (module
+            (memory (export "memory") 18)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
@@ -1188,6 +1263,48 @@ mod tests {
     fn unwire_on_component_without_export_is_noop() {
         let mut component = instantiate(WAT_NO_HOOKS);
         component.unwire();
+    }
+
+    /// iamacoffeepot/aether#1337: a payload larger than
+    /// [`MAX_MAIL_PAYLOAD_BYTES`] is dropped — `deliver` returns the drop
+    /// sentinel (not an error/trap) and never writes into guest memory or
+    /// invokes `receive`. Without the guard this would either run off the
+    /// end of memory or clobber the guest's static data + heap.
+    #[test]
+    fn deliver_drops_payload_over_scratch_ceiling() {
+        let mut component = instantiate(WAT_BIG_MEMORY);
+        // Cap is 785_408 bytes; go comfortably over it.
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 900_000], 1);
+        let rc = component.deliver(&mail).expect("deliver must not trap");
+        assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
+    }
+
+    /// A payload comfortably under the cap is delivered normally — the
+    /// guest's `receive` runs and returns 0. Guards against the cap being
+    /// so tight it rejects legitimate large mail (e.g. a ~739 KiB mesh).
+    #[test]
+    fn deliver_accepts_payload_under_scratch_ceiling() {
+        let mut component = instantiate(WAT_BIG_MEMORY);
+        // 700_000 < 785_408 cap, and fits the 18-page memory.
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 700_000], 1);
+        let rc = component.deliver(&mail).expect("deliver ok");
+        assert_eq!(rc, 0, "guest receive should have run");
+    }
+
+    /// The cap is enforced regardless of guest memory size: a single-page
+    /// guest still drops an over-cap payload cleanly rather than trapping
+    /// on the write (the guard fires before the `Memory::write`).
+    #[test]
+    fn deliver_drops_oversize_on_small_guest() {
+        let mut component = instantiate(WAT_NO_HOOKS);
+        let mail = Mail::new(
+            MailboxId(0),
+            aether_data::KindId(0),
+            vec![0u8; MAX_MAIL_PAYLOAD_BYTES + 1],
+            1,
+        );
+        let rc = component.deliver(&mail).expect("deliver must not trap");
+        assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
     }
 
     #[test]
