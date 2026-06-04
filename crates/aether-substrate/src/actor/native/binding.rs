@@ -876,6 +876,26 @@ impl NativeBinding {
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
             .dispatch_take(id)
     }
+
+    /// Non-consuming peek-then-take of the named dispatch entry: probe its
+    /// boxed output + context against `O` / `C` and only remove + rebuild
+    /// the [`TaskDone`](super::dispatch_blocking::TaskDone) on a match,
+    /// leaving the entry intact on a mismatch. The `#[handler(task)]`
+    /// dispatch chain calls this to route a completion to the right
+    /// output-typed handler without a wrong-type probe consuming the entry.
+    ///
+    /// # Panics
+    /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(
+        &self,
+        id: super::dispatch_blocking::DispatchId,
+    ) -> Option<super::dispatch_blocking::TaskDone<O, C>> {
+        self.inflight
+            .lock()
+            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
+            .dispatch_try_take(id)
+    }
 }
 
 #[cfg(test)]

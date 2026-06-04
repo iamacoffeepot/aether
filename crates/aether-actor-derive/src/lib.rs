@@ -1517,6 +1517,140 @@ fn attr_is_fallback(attr: &Attribute) -> bool {
         .is_some_and(|s| s.ident == "fallback")
 }
 
+/// The category of a `#[handler]` method (ADR-0093 §3). `#[handler]` and
+/// `#[handler(mail)]` both mean an inbound-mail handler (the default);
+/// `#[handler(task)]` marks a hold-until-resolve dispatch completion,
+/// matched by its `TaskDone<O, C>` output type rather than a kind id.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HandlerVariant {
+    Mail,
+    Task,
+}
+
+/// Parse the parenthesized argument of a `#[handler(...)]` attribute into
+/// a [`HandlerVariant`]. Bare `#[handler]` (no parens) is `Mail`. The
+/// only accepted parenthesized spellings are `mail` and `task`; anything
+/// else is a pointed compile error spanned at the attribute.
+fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
+    match &attr.meta {
+        // Bare `#[handler]` — the default inbound-mail handler.
+        Meta::Path(_) => Ok(HandlerVariant::Mail),
+        // `#[handler(mail)]` / `#[handler(task)]` — parse the single
+        // ident argument.
+        Meta::List(_) => {
+            let ident: syn::Ident = attr.parse_args().map_err(|_| {
+                syn::Error::new_spanned(
+                    attr,
+                    "#[handler(...)] accepts exactly `mail` or `task` — \
+                     `#[handler]` and `#[handler(mail)]` are inbound mail, \
+                     `#[handler(task)]` is a dispatch completion (ADR-0093 §3)",
+                )
+            })?;
+            if ident == "mail" {
+                Ok(HandlerVariant::Mail)
+            } else if ident == "task" {
+                Ok(HandlerVariant::Task)
+            } else {
+                Err(syn::Error::new_spanned(
+                    &ident,
+                    "unknown #[handler] variant — accepts exactly `mail` or `task` \
+                     (`#[handler]` / `#[handler(mail)]` = inbound mail, \
+                     `#[handler(task)]` = a dispatch completion, ADR-0093 §3)",
+                ))
+            }
+        }
+        Meta::NameValue(nv) => Err(syn::Error::new_spanned(
+            nv,
+            "#[handler] takes no `= value` — write `#[handler]`, `#[handler(mail)]`, \
+             or `#[handler(task)]`",
+        )),
+    }
+}
+
+/// Extract `(O, C)` from a `#[handler(task)]` method's third parameter,
+/// which must be `done: TaskDone<O>` (where `C` defaults to `()`) or
+/// `done: TaskDone<O, C>`. Unlike a mail handler's third parameter (a
+/// `Kind`), a task completion's parameter is the framework's
+/// `TaskDone<...>` — `O` / `C` are its generic arguments, not a kind.
+fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type)> {
+    if sig.inputs.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[handler(task)] method must have signature \
+             `(&self | &mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<O>)` \
+             (or `TaskDone<O, C>` with an opt-in context)",
+        ));
+    }
+    let first = &sig.inputs[0];
+    if !matches!(first, FnArg::Receiver(_)) {
+        return Err(syn::Error::new_spanned(
+            first,
+            "#[handler(task)] first parameter must be `&self` or `&mut self`",
+        ));
+    }
+    let third = &sig.inputs[2];
+    let FnArg::Typed(pt) = third else {
+        return Err(syn::Error::new_spanned(
+            third,
+            "#[handler(task)] third parameter must be `done: TaskDone<O>` or `TaskDone<O, C>`",
+        ));
+    };
+    let Type::Path(type_path) = &*pt.ty else {
+        return Err(syn::Error::new_spanned(
+            &pt.ty,
+            "#[handler(task)] third parameter must be a `TaskDone<O>` / `TaskDone<O, C>` path type",
+        ));
+    };
+    let last = type_path.path.segments.last().ok_or_else(|| {
+        syn::Error::new_spanned(
+            &pt.ty,
+            "#[handler(task)] third parameter must be `TaskDone<…>`",
+        )
+    })?;
+    if last.ident != "TaskDone" {
+        return Err(syn::Error::new_spanned(
+            &pt.ty,
+            "#[handler(task)] third parameter must be `TaskDone<O>` or `TaskDone<O, C>` \
+             (the framework completion type, ADR-0093 §3)",
+        ));
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return Err(syn::Error::new_spanned(
+            last,
+            "#[handler(task)] `TaskDone` needs an output type argument: `TaskDone<O>` or \
+             `TaskDone<O, C>`",
+        ));
+    };
+    let type_args: Vec<&Type> = args
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let output = match type_args.first() {
+        Some(t) => (*t).clone(),
+        None => {
+            return Err(syn::Error::new_spanned(
+                last,
+                "#[handler(task)] `TaskDone` needs an output type argument: `TaskDone<O>`",
+            ));
+        }
+    };
+    // `C` defaults to `()` (a bare `TaskDone<O>` / `dispatch_blocking`).
+    let context = type_args
+        .get(1)
+        .map_or_else(|| syn::parse_quote!(()), |t| (*t).clone());
+    if type_args.len() > 2 {
+        return Err(syn::Error::new_spanned(
+            last,
+            "#[handler(task)] `TaskDone` takes at most two type arguments: `TaskDone<O, C>`",
+        ));
+    }
+    Ok((output, context))
+}
+
 /// Wasm-actor expansion — `#[actor] impl FfiActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
 /// surface: dispatch table referencing `aether_actor::FfiCtx<'_>`,
@@ -1579,6 +1713,19 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                 }
 
                 if let Some(idx) = handler_attr_idx {
+                    // ADR-0093 §7: dispatch completions are native-only.
+                    // `try_take_task_done` lives on `NativeCtx`; the
+                    // wasm/bridge path has no umbrella-aware blocking
+                    // dispatch yet. Reject `#[handler(task)]` here with a
+                    // clear diagnostic rather than letting it expand into
+                    // a guest dispatch table that can't satisfy it.
+                    if parse_handler_variant(&f.attrs[idx])? == HandlerVariant::Task {
+                        return Err(syn::Error::new_spanned(
+                            &f,
+                            "dispatch completions are native-only (ADR-0093 §7); \
+                             `#[handler(task)]` is not supported in wasm components",
+                        ));
+                    }
                     let kind_ty = extract_handler_kind_type(&f.sig)?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     f.attrs.remove(idx);
@@ -1816,6 +1963,12 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut config_type: Option<syn::ImplItemType> = None;
     let mut handlers: Vec<NativeActorHandlerFn> = Vec::new();
+    // ADR-0093 §3: `#[handler(task)]` completion handlers, collected
+    // separately from mail handlers — they get no `HandlesKind<K>` impl
+    // and aren't in the `aether.kinds.inputs` manifest (a completion is
+    // not inbound mail), and they route by output type via a single
+    // `TaskCompletionWake` dispatch arm rather than per-kind arms.
+    let mut task_handlers: Vec<NativeActorTaskHandlerFn> = Vec::new();
     let mut fallback: Option<NativeFallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
@@ -1855,13 +2008,26 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     ));
                 }
                 if let Some(idx) = handler_attr_idx {
-                    let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig)?;
+                    let variant = parse_handler_variant(&f.attrs[idx])?;
                     f.attrs.remove(idx);
-                    handlers.push(NativeActorHandlerFn {
-                        method: f,
-                        kind_ty,
-                        is_slice,
-                    });
+                    match variant {
+                        HandlerVariant::Mail => {
+                            let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig)?;
+                            handlers.push(NativeActorHandlerFn {
+                                method: f,
+                                kind_ty,
+                                is_slice,
+                            });
+                        }
+                        HandlerVariant::Task => {
+                            let (output_ty, context_ty) = extract_task_handler_types(&f.sig)?;
+                            task_handlers.push(NativeActorTaskHandlerFn {
+                                method: f,
+                                output_ty,
+                                context_ty,
+                            });
+                        }
+                    }
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
                         return Err(syn::Error::new_spanned(
@@ -1916,12 +2082,34 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // misses, so per-handler `HandlesKind<K>` markers are still
     // authoritative at the type system — `ctx.actor::<X>().send(K)`
     // compiles only for declared K.
-    if handlers.is_empty() && fallback.is_none() {
+    if handlers.is_empty() && fallback.is_none() && task_handlers.is_empty() {
         return Err(syn::Error::new_spanned(
             self_ty,
             "#[actor] impl NativeActor requires at least one #[handler] method \
              or a #[fallback] method",
         ));
+    }
+
+    // ADR-0093 §3: two `#[handler(task)]` methods with the same
+    // `TaskDone<O>` output type are ambiguous — completions route by `O`,
+    // so a duplicate `O` would let the first-tried handler shadow the
+    // second. Reject it at compile time, spanned at the later handler.
+    for (i, later) in task_handlers.iter().enumerate() {
+        if let Some(earlier) = task_handlers[..i]
+            .iter()
+            .find(|earlier| types_token_eq(&earlier.output_ty, &later.output_ty))
+        {
+            let earlier_name = &earlier.method.sig.ident;
+            return Err(syn::Error::new_spanned(
+                &later.method.sig.ident,
+                format!(
+                    "two #[handler(task)] methods share the `TaskDone<O>` output type \
+                     (also on `{earlier_name}`) — completions route by output type, so a \
+                     duplicate `O` is ambiguous (ADR-0093 §3). Give each task handler a \
+                     distinct output type."
+                ),
+            ));
+        }
     }
 
     // `NAMESPACE` is declared on the supertrait `Actor`, but the user
@@ -2034,7 +2222,53 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     });
 
+    // ADR-0093 §3: a SINGLE dispatch arm for all task completions. They
+    // all arrive as `TaskCompletionWake` (carrying just a `DispatchId`);
+    // the discriminant between task handlers is their `TaskDone<O, C>`
+    // output type, not a kind id. Decode the id once, then try each task
+    // handler's `(O, C)` via the non-consuming `try_take_task_done` — a
+    // wrong-type probe leaves the ledger entry intact for a later
+    // handler. `None` falls through to the default (unknown id / already
+    // taken).
+    let task_completion_arm = if task_handlers.is_empty() {
+        quote! {}
+    } else {
+        let try_take_lines = task_handlers.iter().map(|t| {
+            let output_ty = &t.output_ty;
+            let context_ty = &t.context_ty;
+            let method_ident = &t.method.sig.ident;
+            quote! {
+                if let ::core::option::Option::Some(__aether_done) =
+                    __aether_ctx.try_take_task_done::<#output_ty, #context_ty>(__aether_dispatch_id)
+                {
+                    self.#method_ident(__aether_ctx, __aether_done);
+                    return ::core::option::Option::Some(());
+                }
+            }
+        });
+        quote! {
+            if __aether_kind.0
+                == <::aether_substrate::actor::native::TaskCompletionWake
+                    as ::aether_data::Kind>::ID.0
+            {
+                let __aether_wake = match
+                    <::aether_substrate::actor::native::TaskCompletionWake
+                        as ::aether_data::Kind>::decode_from_bytes(__aether_payload)
+                {
+                    ::core::option::Option::Some(__aether_w) => __aether_w,
+                    ::core::option::Option::None => return ::core::option::Option::None,
+                };
+                let __aether_dispatch_id =
+                    ::aether_substrate::actor::native::DispatchId(__aether_wake.dispatch_id);
+                #(#try_take_lines)*
+                return ::core::option::Option::None;
+            }
+        }
+    };
+
     let handler_methods: Vec<&syn::ImplItemFn> = handlers.iter().map(|h| &h.method).collect();
+    let task_handler_methods: Vec<&syn::ImplItemFn> =
+        task_handlers.iter().map(|t| &t.method).collect();
     let fallback_method = fallback.as_ref().map(|f| &f.method);
     let helper_methods = helpers.iter();
 
@@ -2136,6 +2370,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
                 #(#dispatch_arms)*
+                #task_completion_arm
                 ::core::option::Option::None
             }
 
@@ -2147,6 +2382,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics #self_ty #where_clause {
             #(#handler_methods)*
+            #(#task_handler_methods)*
             #fallback_method
             #(#helper_methods)*
         }
@@ -2160,6 +2396,27 @@ struct NativeActorHandlerFn {
     /// than `K`. The dispatcher decodes via `decode_cast_slice` so a
     /// single envelope with `count > 1` reaches the handler intact.
     is_slice: bool,
+}
+
+/// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
+/// parameter is `done: TaskDone<O, C>` (C defaults to `()`); `output_ty`
+/// / `context_ty` are the extracted `O` / `C`. Routed not by a kind id
+/// but by output type, via a non-consuming `try_take_task_done::<O, C>`
+/// probe in the single `TaskCompletionWake` dispatch arm.
+struct NativeActorTaskHandlerFn {
+    method: syn::ImplItemFn,
+    output_ty: Type,
+    context_ty: Type,
+}
+
+/// Token-level type equality, used to reject duplicate `TaskDone<O>`
+/// output types across `#[handler(task)]` methods. `syn::Type` is not
+/// `PartialEq`, so compare the pretty-printed token streams — exact
+/// enough for the duplicate-`O` ambiguity check (two spellings of the
+/// same type that tokenize differently are a corner case the author can
+/// resolve by normalising).
+fn types_token_eq(a: &Type, b: &Type) -> bool {
+    quote!(#a).to_string() == quote!(#b).to_string()
 }
 
 /// Issue 576: native-side `#[fallback]` collected on a

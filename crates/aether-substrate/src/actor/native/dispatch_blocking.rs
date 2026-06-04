@@ -330,6 +330,33 @@ impl InflightTable {
             resolved: false,
         })
     }
+
+    /// Non-consuming peek-then-take (ADR-0093 §3, peek variant). Look the
+    /// entry up by `id` and *probe* the boxed `output` + `context` against
+    /// `O` / `C` via `downcast_ref` **without removing the entry**. Only
+    /// when both probes succeed is the entry removed and rebuilt into a
+    /// typed [`TaskDone`]; a probe miss leaves the entry intact and returns
+    /// `None`.
+    ///
+    /// This is what the `#[handler(task)]` dispatch chain needs:
+    /// completions all arrive as the single [`TaskCompletionWake`] kind and
+    /// are routed to the right task handler by *output type*, so the
+    /// generated arm tries each handler's `(O, C)` in turn. A wrong-type
+    /// attempt must not consume the entry, or the first probed handler
+    /// would swallow a completion meant for a later one. Returns `None` for
+    /// an unknown id, an unfilled output (worker not finished — in practice
+    /// the unknown-id case, since the wake lands after the fill), or a type
+    /// mismatch on either downcast.
+    fn try_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
+        let entry = self.entries.get(&id)?;
+        // Probe both boxes without disturbing the entry — an unfilled
+        // output slot or a type mismatch on either box short-circuits to
+        // `None` (the entry stays intact for a later handler to claim).
+        entry.output.as_deref()?.downcast_ref::<O>()?;
+        entry.context.downcast_ref::<C>()?;
+        // Both match — now it's safe to remove and rebuild.
+        self.take(id)
+    }
 }
 
 /// Crate-internal accessors the [`NativeBinding`](super::binding) wraps
@@ -356,6 +383,13 @@ impl InflightTable {
         id: DispatchId,
     ) -> Option<TaskDone<O, C>> {
         self.take(id)
+    }
+
+    pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(
+        &mut self,
+        id: DispatchId,
+    ) -> Option<TaskDone<O, C>> {
+        self.try_take(id)
     }
 }
 

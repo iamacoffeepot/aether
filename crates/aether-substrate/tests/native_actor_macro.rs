@@ -20,11 +20,12 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, ReplyTo};
 use aether_kinds::trace::Nanos;
+use aether_substrate::actor::native::TaskDone;
 use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::mail::{MailId, MailRef};
@@ -354,6 +355,224 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
     thread::sleep(Duration::from_millis(50));
     assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
     assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+
+    drop(chassis);
+}
+
+// ADR-0093 §3: `#[handler(task)]` completion handlers, routed by their
+// `TaskDone<O>` output type rather than a kind id. The cap below has two
+// task handlers of distinct `O` (`ResultA` / `ResultB`); a single
+// `TaskCompletionWake` arm tries each via the non-consuming
+// `try_take_task_done` probe, so each completion lands on exactly the
+// handler whose output type matches.
+
+/// First completion output type. Distinct from `ResultB` so the macro's
+/// output-type routing has two arms to discriminate.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.result_a")]
+struct ResultA {
+    value: u64,
+}
+
+/// Second completion output type — a structurally different shape so a
+/// mis-route to the `ResultA` handler couldn't accidentally type-check.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.result_b")]
+struct ResultB {
+    tag: u32,
+}
+
+/// Trigger that makes the cap dispatch a `ResultA`-producing worker.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.kick_a")]
+struct KickA {
+    seed: u64,
+}
+
+/// Trigger that makes the cap dispatch a `ResultB`-producing worker.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.kick_b")]
+struct KickB {
+    seed: u32,
+}
+
+/// Where each task handler records what it observed, so the test can
+/// assert routing landed on the correct handler with the correct value.
+#[derive(Clone)]
+struct TaskObservations {
+    /// How many times each kick handler dispatched a worker, so the cap's
+    /// mail handlers touch `self` (and the test can sanity-check the
+    /// dispatch side fired).
+    dispatched: Arc<AtomicU32>,
+    /// `value` the `ResultA` completion handler saw + how many times it
+    /// fired.
+    a_value: Arc<AtomicU64>,
+    a_calls: Arc<AtomicU32>,
+    /// `tag` the `ResultB` completion handler saw + its call count.
+    b_tag: Arc<AtomicU32>,
+    b_calls: Arc<AtomicU32>,
+}
+
+struct TaskRouteCap {
+    obs: TaskObservations,
+}
+
+impl aether_actor::Singleton for TaskRouteCap {}
+
+#[aether_data::actor]
+impl NativeActor for TaskRouteCap {
+    type Config = TaskObservations;
+    const NAMESPACE: &'static str = "test.macro_native_actor.task_route";
+
+    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { obs: config })
+    }
+
+    /// Dispatch a worker that produces a `ResultA`. The completion routes
+    /// to `on_result_a` by output type.
+    #[aether_data::handler]
+    fn on_kick_a(&self, ctx: &mut NativeCtx<'_>, mail: KickA) {
+        self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
+        let seed = mail.seed;
+        ctx.dispatch_blocking(move || ResultA { value: seed });
+    }
+
+    /// Dispatch a worker that produces a `ResultB`.
+    #[aether_data::handler]
+    fn on_kick_b(&self, ctx: &mut NativeCtx<'_>, mail: KickB) {
+        self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
+        let seed = mail.seed;
+        ctx.dispatch_blocking(move || ResultB { tag: seed });
+    }
+
+    /// `ResultA` completion handler. Records the value + a call so the
+    /// test can confirm only the `ResultA` dispatch reached it.
+    #[aether_data::handler(task)]
+    fn on_result_a(&self, ctx: &mut NativeCtx<'_>, done: TaskDone<ResultA>) {
+        self.obs
+            .a_value
+            .store(done.output().value, AtomicOrdering::SeqCst);
+        self.obs.a_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        // No caller behind these test dispatches (ReplyTo::NONE), so the
+        // re-reply is a no-op; resolve still consumes the TaskDone and
+        // releases the hold (avoiding the drop-without-resolve assert).
+        done.resolve(ctx);
+    }
+
+    /// `ResultB` completion handler.
+    #[aether_data::handler(task)]
+    fn on_result_b(&self, ctx: &mut NativeCtx<'_>, done: TaskDone<ResultB>) {
+        self.obs
+            .b_tag
+            .store(done.output().tag, AtomicOrdering::SeqCst);
+        self.obs.b_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        done.resolve(ctx);
+    }
+}
+
+#[test]
+fn macro_routes_task_completions_by_output_type() {
+    let (registry, mailer) = fresh_substrate();
+    let obs = TaskObservations {
+        dispatched: Arc::new(AtomicU32::new(0)),
+        a_value: Arc::new(AtomicU64::new(0)),
+        a_calls: Arc::new(AtomicU32::new(0)),
+        b_tag: Arc::new(AtomicU32::new(0)),
+        b_calls: Arc::new(AtomicU32::new(0)),
+    };
+
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TaskRouteCap>(obs.clone())
+            .build_passive()
+            .expect("task-routing cap boots");
+
+    // Kick off both dispatches. Each handler spawns a worker that fills
+    // the ledger and pushes a `TaskCompletionWake` back to this actor's
+    // own mailbox; the chassis redelivers those wakes through the macro's
+    // single completion arm, which routes each to its output-typed
+    // handler.
+    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
+    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
+
+    assert!(
+        wait_for(1, &obs.a_calls, Duration::from_secs(2)),
+        "the ResultA completion routed to on_result_a"
+    );
+    assert!(
+        wait_for(1, &obs.b_calls, Duration::from_secs(2)),
+        "the ResultB completion routed to on_result_b"
+    );
+
+    // Each completion landed on the correct handler with the correct
+    // payload — output-type routing, not a kind id.
+    assert_eq!(
+        obs.a_value.load(AtomicOrdering::SeqCst),
+        7,
+        "on_result_a saw its own dispatch's value"
+    );
+    assert_eq!(
+        obs.b_tag.load(AtomicOrdering::SeqCst),
+        9,
+        "on_result_b saw its own dispatch's tag"
+    );
+
+    // Neither completion was mis-delivered to the other-typed handler:
+    // each task handler fired exactly once. A wrong-type probe in the
+    // completion arm must leave the ledger entry intact (non-consuming
+    // `try_take_task_done`) — if it consumed, one handler would swallow
+    // the other's completion and its call count would be 0.
+    assert_eq!(
+        obs.a_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "on_result_a fired exactly once (no mis-routed extra completion)"
+    );
+    assert_eq!(
+        obs.b_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "on_result_b fired exactly once"
+    );
+    assert_eq!(
+        obs.dispatched.load(AtomicOrdering::SeqCst),
+        2,
+        "both kick handlers dispatched a worker"
+    );
 
     drop(chassis);
 }
