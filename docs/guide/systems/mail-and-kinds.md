@@ -1,5 +1,11 @@
 # Mail, kinds & scheduling
 
+> Governing ADRs: **ADR-0002** (mail-first actor model), **ADR-0005** (mail
+> typing), **ADR-0019** (unified encoding), **ADR-0087** (blob dispatch + the
+> ordering spine). The mail/kind model is **stable**; the *scheduler internals*
+> (how work is batched and balanced across threads) are **settling** — this
+> page documents the stable contract and defers the guts to ADR-0087.
+
 This is the spine the rest of the engine hangs on. Actors don't call each
 other — they send **mail**. A piece of mail is a typed payload (a *kind*)
 addressed to a *mailbox*, and the scheduler runs the handlers. Understand this
@@ -17,12 +23,6 @@ C / C++ / other guest that speaks the ABI is the same category. All of them are
 one actor model and address each other identically. When this page says
 "component" it means a loaded FFI actor; "actor" means either kind. Deep dive:
 [Components & lifecycle]().
-
-> Governing ADRs: **ADR-0002** (mail-first actor model), **ADR-0005** (mail
-> typing), **ADR-0019** (unified encoding), **ADR-0087** (blob dispatch + the
-> ordering spine). The mail/kind model is **stable**; the *scheduler internals*
-> (how work is batched and balanced across threads) are **settling** — this
-> page documents the stable contract and defers the guts to ADR-0087.
 
 ## Why it exists
 

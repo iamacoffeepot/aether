@@ -1,5 +1,11 @@
 # The actor model
 
+> Governing ADR: **ADR-0074** (the unified actor model — capabilities and
+> components are one model, not two) with **ADR-0079** (the lifecycle stages)
+> and **ADR-0033** (the `#[actor]` macro). This model is **stable**; it's the
+> spine everything else hangs off. Signatures here were read from the current SDK
+> (`aether-actor`) and runtime (`aether-substrate`).
+
 The engine is built from one kind of thing: the **actor**. The renderer, the audio
 mixer, the filesystem, a component you load — all of them are actors, with no
 privileged class of "system object" sitting above them. Everything in the substrate
@@ -9,12 +15,6 @@ If you understand actors, most of the engine follows: every subsystem in this gu
 is some actor (or a handful) doing a job. This page covers the actor itself — what
 it is, the lifecycle it moves through, how you write one — and the two *hosts* it
 runs under, native **capabilities** and wasm **components**.
-
-> Governing ADR: **ADR-0074** (the unified actor model — capabilities and
-> components are one model, not two) with **ADR-0079** (the lifecycle stages)
-> and **ADR-0033** (the `#[actor]` macro). This model is **stable**; it's the
-> spine everything else hangs off. Signatures here were read from the current SDK
-> (`aether-actor`) and runtime (`aether-substrate`).
 
 ## What an actor is
 

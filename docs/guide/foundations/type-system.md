@@ -1,5 +1,13 @@
 # The type system
 
+> Governing ADRs: **ADR-0005** (mail typing), **ADR-0019** (unified encoding),
+> **ADR-0029/0030** (name- and schema-derived ids), **ADR-0031/0032** (const
+> schema + canonical bytes / labels sidecar), **ADR-0045/0048/0049** (handles,
+> transforms, the handle store), **ADR-0064/0065** (type-tagged wire ids +
+> first-class id types). The type vocabulary is **stable** — the wire format
+> depends on it. The DAG composition surface that handles and transforms feed is
+> **shipped and settling** (its 0.4 stack merged).
+
 Everything the engine moves is typed, and the vocabulary is small. Four kinds of
 thing carry types — **kinds** (payloads), **mailboxes** (addresses), **handles**
 (references to stored values), and **transforms** (pure functions) — and each is
@@ -12,14 +20,6 @@ without a shared header, and answer "what are you?" to a live engine. That's
 what lets the agent driving the engine introspect it — `describe_kinds`,
 `describe_component`, `describe_handles`, `describe_transforms` are all just
 "read the types." Typing is the substrate of observability, not paperwork.
-
-> Governing ADRs: **ADR-0005** (mail typing), **ADR-0019** (unified encoding),
-> **ADR-0029/0030** (name- and schema-derived ids), **ADR-0031/0032** (const
-> schema + canonical bytes / labels sidecar), **ADR-0045/0048/0049** (handles,
-> transforms, the handle store), **ADR-0064/0065** (type-tagged wire ids +
-> first-class id types). The type vocabulary is **stable** — the wire format
-> depends on it. The DAG composition surface that handles and transforms feed is
-> **shipped and settling** (its 0.4 stack merged).
 
 ## Kinds — typed payloads
 
