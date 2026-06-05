@@ -1,7 +1,7 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
 //! `FfiActor::Config` path. Loads the `probe_with_config` example
 //! cdylib through a [`TestBench`] and asserts the wasm guest's
-//! `init_v2_p32` decode-error surfaces in `LoadResult::Err` when the
+//! `init_with_config_p32` decode-error surfaces in `LoadResult::Err` when the
 //! load mail carries no config bytes — c1 wires the host probe and
 //! the guest shim but does not yet thread real config bytes through
 //! the load mail (that is c2). The negative path is the load-bearing
@@ -80,7 +80,7 @@ fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
 /// it — the `ConfigEcho` reply must echo the exact `(seed, label)` the
 /// guest decoded at `init`. This proves the full c2 delivery seam: the
 /// load mail's `config` bytes reach `Component::instantiate`, the c1
-/// ABI writes them into the guest's linear memory, and `init_v2_p32`
+/// ABI writes them into the guest's linear memory, and `init_with_config_p32`
 /// decodes them into `Probe::init(config, ctx)`.
 ///
 /// c1 parked this behind `AETHER_CONFIG_C2` because the delivery seam

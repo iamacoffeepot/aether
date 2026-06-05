@@ -389,8 +389,8 @@ macro_rules! __export_internal {
         /// returned `Err(BootError)` or its `Config::decode_from_bytes`
         /// produced `None`.
         #[cfg(target_arch = "wasm32")]
-        #[unsafe(export_name = "init_v2_p32")]
-        pub unsafe extern "C" fn init_v2(
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(
             mailbox_id: u64,
             config_ptr: u32,
             config_len: u32,
@@ -458,8 +458,8 @@ macro_rules! __export_internal {
 
         /// # Safety
         /// ADR-0090: legacy zero-config `init` shim. Called by older
-        /// substrate builds that don't know about `init_v2_p32`. Reaches
-        /// into `init_v2` with empty config bytes — works as long as
+        /// substrate builds that don't know about `init_with_config_p32`. Reaches
+        /// into `init_with_config` with empty config bytes — works as long as
         /// `<Self as FfiActor>::Config` decodes from `&[]` (i.e.
         /// `Config = ()`); a typed-config actor returns an
         /// `init_failed` here, which is the right behavior for a host
@@ -467,11 +467,11 @@ macro_rules! __export_internal {
         #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
-            // SAFETY: forwarding to `init_v2` with `config_len = 0`
+            // SAFETY: forwarding to `init_with_config` with `config_len = 0`
             // makes `config_ptr` unread (the function's empty-len
             // branch returns `&[]`), so the dummy `0` pointer is
             // never dereferenced.
-            unsafe { init_v2(mailbox_id, 0, 0) }
+            unsafe { init_with_config(mailbox_id, 0, 0) }
         }
 
         /// # Safety
