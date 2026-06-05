@@ -1,7 +1,8 @@
 // A loaded WASM component: its wasmtime `Store<ComponentCtx>`, instance,
-// and the cached handles needed to deliver mail. Mail payloads are
-// written to the guest at a static `MAIL_OFFSET`; a guest-side
-// allocator is parked until an actual use case forces the question.
+// and the cached handles needed to deliver mail. A small mail payload is
+// written to the guest at a static `MAIL_OFFSET`; a payload too large for
+// that fixed window rides an on-demand guest-heap reserve buffer the guest
+// grows to fit (iamacoffeepot/aether#1337 Phase 2).
 //
 // Holds the `ComponentCtx` (per-component context stored as wasmtime
 // `Store` data) and `StateBundle` (ADR-0016 state-migration payload)
@@ -404,19 +405,23 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
 /// Offset the substrate writes prior-state bytes to before calling
-/// `on_rehydrate` (ADR-0016 §3). Deliberately separated from
-/// `MAIL_OFFSET` so the two scratch regions don't overlap in the
-/// worst-case size. The lifetimes are also disjoint in practice —
-/// rehydrate runs once, post-init, before any mail arrives — but the
-/// offset split keeps out-of-bounds checks obvious.
+/// `on_rehydrate` (ADR-0016 §3). Ordered above `MAIL_OFFSET`, but not
+/// spatially isolated from it — a max-size mail write at `MAIL_OFFSET`
+/// runs right over this offset. State and mail are safe to share the
+/// scratch because their uses are disjoint in lifecycle phase: rehydrate
+/// runs once, post-init, before any mail arrives, so the two never occupy
+/// the scratch in the same wasm activation.
 const STATE_OFFSET: u32 = 8192;
 
 /// Offset the substrate writes config bytes to before calling
 /// `init_with_config_p32` (ADR-0090) when the config fits the fixed inline
-/// window ([`MAX_CONFIG_PAYLOAD_BYTES`]). Sits after `STATE_OFFSET` so the three
-/// fixed scratch regions (mail / state / config) never overlap. Config is
-/// written once at instantiate time, before any other host fn runs. A larger
-/// config rides the guest-heap reserve buffer instead (iamacoffeepot/aether#1390).
+/// window ([`MAX_CONFIG_PAYLOAD_BYTES`]). Ordered above `STATE_OFFSET`, but the
+/// mail / state / config offsets are not spatially isolated — a max-size payload
+/// at `MAIL_OFFSET` writes right over both. They are safe because the three
+/// regions are consumed in disjoint lifecycle phases (config@init,
+/// state@rehydrate, mail@deliver) and never coexist in one wasm activation.
+/// Config is written once at instantiate time, before any other host fn runs. A
+/// larger config rides the guest-heap reserve buffer instead (iamacoffeepot/aether#1390).
 const CONFIG_OFFSET: u32 = 16384;
 
 /// Contract with the guest: it exports a
