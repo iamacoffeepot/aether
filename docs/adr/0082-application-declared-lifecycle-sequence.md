@@ -5,18 +5,35 @@
 - **Amends:** ADR-0074 §Decision 5 (retires `FRAME_BARRIER`)
 - **Supersedes:** iamacoffeepot/aether#687 (closed)
 
-> **Amendment (2026-06-05).** Status moved Proposed → Accepted. The decision
-> shipped: `LifecycleDriverCapability`, the `LifecycleGraph` builder,
-> settlement-gated advance, and the `aether.lifecycle.*` stage kinds are wired
-> into the desktop, headless, and test_bench chassis, and §6's `FRAME_BARRIER` +
-> `drain_frame_bound_or_abort` retired as designed. One implementation point
-> departs from the body: §12 prescribes subscribing to `Tick` on the lifecycle
-> driver, but a component subscribes through `InputCapability` —
-> `ctx.actor::<InputCapability>().subscribe(Tick::ID, me)` — and the driver relays
-> its broadcast `Tick` to `aether.input` via the chassis's initial-subscriber
-> wiring. The driver's own `LifecycleSubscribe` mechanism exists and carries that
-> relay rather than direct component subscription; read §12's subscribe site
-> accordingly.
+> **Amendment (2026-06-05).** Status moved Proposed → Accepted, then
+> iamacoffeepot/aether#1380 reshaped the driver into a bridged capability. Read
+> the body with these changes in force:
+>
+> - **§2 / §4 — the driver is a bridged, non-generic `LifecycleCapability`** in
+>   `aether-capabilities`; the body's generic `LifecycleDriverCapability<C>` is
+>   retired. It is `#[bridge(singleton)]`d like `InputCapability` /
+>   `RenderCapability`, so a wasm guest names it via
+>   `ctx.actor::<LifecycleCapability>()`. The chassis drives it with one
+>   `LifecycleAdvance` per frame and owns no driver state; the cap owns the
+>   graph, the subscriber table, the fan-out, and the settlement gating. The
+>   per-chassis `FrameContext` and the `Ctx` generic (§4) are gone.
+> - **§1 — the graph is data, not factory closures.** Stage kinds are empty ZST
+>   signals, so `LifecycleGraphData` holds `{ stage_kind, next, optional quit }`
+>   edges behind a type-state builder; the body's `.state(|ctx| …)` factory
+>   closures are retired. The broadcast carries an empty payload — per-frame
+>   data a subscriber needs rides its own mail (the camera publishes `view_proj`
+>   to `aether.render`), never a stage payload.
+> - **§2 / §6 — settlement gating shipped** (the body's "arrives in PR 3"): the
+>   cap broadcasts, waits for that stage's chain to settle on the ADR-0080 root,
+>   then advances and replies `LifecycleAdvanceComplete`. `FRAME_BARRIER` and
+>   `drain_frame_bound_or_abort` retired as §6 designed.
+> - **§12 — subscribe site:** an actor subscribes a stage via
+>   `ctx.actor::<LifecycleCapability>()` (the bridged cap is nameable from wasm).
+>   The shipped chassis graph is Tick-only; a component subscribes `Tick`
+>   through `InputCapability`, and the lifecycle relays its broadcast `Tick` to
+>   `aether.input` via the chassis's initial-subscriber wiring. The
+>   `Tick → Render → Present` graph and per-stage component subscription land
+>   with iamacoffeepot/aether#1378.
 
 ## Context
 
