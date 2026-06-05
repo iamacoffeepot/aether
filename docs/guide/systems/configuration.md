@@ -1,20 +1,5 @@
 # Configuration
 
-Configuration is how a knob's value gets decided before the engine runs — the
-worker-pool size, an HTTP allowlist, a provider's API key, the tick rate. Values
-come from a **layered stack** of sources (defaults, environment, command-line
-arguments) with a defined precedence, declared once per knob and resolved the
-same way everywhere. And it's **per-spawn**: two substrates launched from one
-shell can be told apart — one with a capability enabled under key A, another with
-it off — the axis the "substrate as a general application host" direction needs.
-
-If you drive the engine over MCP, the part that matters most is that
-configuration is no longer one frozen, fleet-wide environment: you can hand
-`spawn_substrate` per-engine arguments and a loaded component its own typed
-config. If you author a capability or component, the part that matters is that a
-knob is *declared* — one annotation gives you parsing, a default, validation, and
-discovery — so you never hand-roll an `env::var(...).parse()` chain again.
-
 > **Governing ADR:** [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md)
 > (application configuration). The **model** — the layered source-stack, one
 > typed struct per subsystem, validation, and discovery — is **stable** and
@@ -23,26 +8,40 @@ discovery — so you never hand-roll an `env::var(...).parse()` chain again.
 > read inline). This page documents the contract and defers the rollout's
 > internals to the ADR.
 
+Configuration is how a knob's value gets decided before the engine runs — the
+worker-pool size, an HTTP allowlist, a provider's API key, the tick rate. Values
+come from a **layered stack** of sources (defaults, environment, command-line
+arguments) with a defined precedence, declared once per knob and resolved the
+same way everywhere. And it's **per-spawn**: two substrates launched from one
+shell can be told apart — one with a capability enabled under key A, another with
+it off — the axis the "substrate as a general application host" direction needs.
+
+If you drive the engine over MCP, configuration is per engine: you hand
+`spawn_substrate` the arguments for one substrate and give a loaded component its
+own typed config, independent of any other engine. If you author a capability or
+component, you declare each knob once on its config struct — that single
+declaration parses the value, supplies its default, validates it, and lists it
+for discovery.
+
 ## Why it exists
 
-The engine used to read some fifty `AETHER_*` environment variables, each parsed
-where it was used — `env::var("AETHER_HTTP_MAX_BODY_BYTES").ok().and_then(|s|
-s.parse().ok()).unwrap_or(DEFAULT)`, repeated in slightly different forms across
-the codebase. That shape has three costs. Nothing **validates**: a typo'd key
-silently no-ops and falls through to the default, and a known key set to garbage
-does the same. Nothing **discovers**: there's no list of what knobs exist, what
-they default to, or what they do. And the parsers get **copy-pasted**, which is
-how `parse_env_u64` ended up living in three places.
+Aether is assembled from many subsystems — capabilities, the runtime, the chassis
+— each with its own knobs, and all of them are configured together at startup. A
+single configuration standard gives them one way to declare a knob and one way to
+resolve it, and three properties follow from that: **validation** (a typo'd key,
+or a known key set to garbage, is caught at boot rather than swallowed by a
+default), **discovery** (one listing of every knob, its default, and what it
+does), and no **duplicated** parsing across subsystems.
 
-There's a deeper, structural reason too. A process's environment is frozen at
-`exec` and inherited down the whole tree — the tunnel's shell into the hub, the
-hub into every substrate it forks. So configuration was **global to the entire
-fleet**: there was no way to spawn one substrate with a capability enabled and
-another with it disabled, because they all inherited the same environment from
-the root. Correcting a single key meant relaunching the whole tunnel and dropping
-the MCP session. The fix isn't new plumbing — `spawn_substrate` already forwarded
-per-spawn `args` end to end; they were simply never parsed. Configuration becomes
-per-application by adding an argument layer above the environment.
+The second reason is per-spawn configuration. Configuration enters a process
+once, at startup, and a substrate inherits its environment from the hub that
+forked it — the hub from the tunnel, the tunnel from the launching shell.
+Environment values are therefore **fleet-global**: every engine the hub forks
+sees the same ones, with no way to enable a capability on one substrate and
+disable it on another. Per-spawn arguments are what let one engine differ from
+the rest — they ride the spawn call to a single substrate and layer above the
+shared environment — which is what the "substrate as a general application host"
+direction needs.
 
 ## The model: layered sources, one struct per subsystem
 
@@ -69,8 +68,8 @@ declaration.
 
 ## Resolution, validation, and discovery
 
-Resolution is strict where the old chain was silent. At boot the chassis **warns**
-on any `AETHER_*` variable that no registered knob claims — catching a typo
+Resolution is strict. At boot the chassis **warns** on any `AETHER_*` variable
+that no registered knob claims — catching a typo
 without breaking on a stray CI variable — and **hard-errors** on a *known* key
 that's set but fails to parse, rather than falling through to the default. A bad
 value stops the boot with the key named, instead of a subsystem quietly running
@@ -87,7 +86,7 @@ when you're unsure what a build will do with a given variable.
 
 Over MCP there are three ways to set configuration, from coarsest to finest:
 
-- **The environment** is still the workhorse, and it's what `CLAUDE.md` documents
+- **The environment** is the workhorse, and it's what `CLAUDE.md` documents
   knob by knob (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`, and
   the rest). It's fleet-wide and fixed at launch: set it before bringing the
   tunnel up, and every engine the hub forks inherits it.
