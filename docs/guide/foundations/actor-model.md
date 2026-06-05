@@ -1,8 +1,8 @@
 # The actor model
 
-> Governing ADR: **ADR-0074** (the unified actor model — capabilities and
-> components are one model, not two) with **ADR-0079** (the lifecycle stages)
-> and **ADR-0033** (the `#[actor]` macro). This model is **stable**; it's the
+> **Governing ADR:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (the unified actor model — capabilities and
+> components are one model, not two) with [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md) (the lifecycle stages)
+> and [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the `#[actor]` macro). This model is **stable**; it's the
 > spine everything else hangs off. Signatures here were read from the current SDK
 > (`aether-actor`) and runtime (`aether-substrate`).
 
@@ -47,7 +47,7 @@ this page stays with the actor on the receiving end: how it's built and how it r
 ## The lifecycle
 
 Every actor — regardless of host — moves through the same three authored stages
-(ADR-0079). Each stage gets a different context, and the context *is* the
+([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)). Each stage gets a different context, and the context *is* the
 contract: it's exactly what you're permitted to do at that point.
 
 | stage | when | ctx allows | use it for |
@@ -238,7 +238,7 @@ An **instanced** actor is one of many sharing a prefix. Its `NAMESPACE` is that
 prefix, and each live instance has a full name `NAMESPACE:subname` — for example
 `aether.net.session:42`. The case that drives this is sockets: a singleton listener
 accepts connections and spawns a session actor per connection with `ctx.spawn_child`
-(ADR-0079), then reaches a specific one by subname,
+([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
 
 Spawning children on demand like that is a **native** facility — `spawn_child` is
@@ -253,7 +253,7 @@ single loaded component is, underneath, one instance of an instanced host.
 
 Here's the part that ties the engine together. There aren't two actor systems —
 there's **one model with two hosts**, differing in where the actor's code lives and
-how it reaches the outside world (ADR-0074):
+how it reaches the outside world ([ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md)):
 
 - A **native capability** is an actor compiled *into* the substrate, implementing
   `NativeActor` and linked at build time. It's the host an actor takes when what it
@@ -290,7 +290,7 @@ impl NativeActor for AudioCapability {
 Because the only coupling is mail, an actor can't tell whether the mailbox it
 sends to is backed by native Rust or sandboxed wasm — and doesn't need to. A
 component sends `aether.render` a `DrawTriangle` exactly as one capability sends
-another. This symmetry is the point of ADR-0074: one mental model, one macro, one
+another. This symmetry is the point of [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md): one mental model, one macro, one
 lifecycle, and components get to reuse every pattern capabilities use.
 
 So **start here, with the actor**, and the two host pages are just specializations:

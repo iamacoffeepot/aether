@@ -13,7 +13,7 @@ This section is the home for the agent-recipe corpus
 
 The motivating failure: an agent reached for a raw `env::var(...).parse()` to
 add a tuning knob, when the blessed path was the layered config API
-(ADR-0090). The "why" was in an ADR and the "that it exists" was in `CLAUDE.md`,
+([ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md)). The "why" was in an ADR and the "that it exists" was in `CLAUDE.md`,
 but **nobody showed the steps**. A recipe titled *Adding a config knob* — the
 `derive(Config)` → emitted overlay → `from_argv_then_env` → wire into the
 chassis CLI → add to the `--config` dump — would have made the right path the
@@ -55,7 +55,7 @@ These are drafted in the nav and land in subsequent PRs. The first is *Adding a
 config knob* — the pattern is shipped and proven, and it's the freshest worked
 example.
 
-- **Adding a config knob** (recompile) — the ADR-0090 layered-config dance.
+- **Adding a config knob** (recompile) — the [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) layered-config dance.
 - **Adding a substrate kind** (recompile) — `aether-kinds` → inventory
   descriptor → MCP surface → tests, end to end.
 - **Adding a chassis capability** (recompile) — a native actor, its mailbox,

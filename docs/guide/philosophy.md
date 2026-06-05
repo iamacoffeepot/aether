@@ -18,7 +18,7 @@ things happen.
 Consequences that follow from taking this seriously:
 
 - The control surface is **out-of-process and restartable** without dropping
-  the agent's session (ADR-0089). The agent must be able to rebuild and
+  the agent's session ([ADR-0089](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0089-mcp-hub-lifecycle-tunnel.md)). The agent must be able to rebuild and
   relaunch the volatile backends mid-task and keep its connection.
 - Observation is first-class. The agent can capture a frame, read an actor's
   logs, trace a mail chain, and inspect handles — because an operator that
@@ -26,7 +26,7 @@ Consequences that follow from taking this seriously:
 
 ## 2. Everything is mail
 
-Actors do not call each other. They **send mail** (ADR-0002). A piece of mail
+Actors do not call each other. They **send mail** ([ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md)). A piece of mail
 is a typed payload (a *kind*) addressed to a *mailbox*. This is the single
 most pervasive decision in the system, and it buys:
 
@@ -36,9 +36,9 @@ most pervasive decision in the system, and it buys:
 - **Location independence.** A mailbox might be a native capability, a wasm
   component, or a peer on another process reached through the hub — the
   sender addresses it the same way. Mail bubbles up to the hub when it isn't
-  local (ADR-0037).
+  local ([ADR-0037](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0037-mail-bubbles-up-to-hub-substrate.md)).
 - **Observability for free.** Because all interaction is mail, the tracing and
-  settlement machinery (ADR-0080/0086) can watch *all* of it without each
+  settlement machinery ([ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md)/[ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)) can watch *all* of it without each
   subsystem opting in.
 
 Mail is **fire-and-forget by default.** A handler promises nothing about a
@@ -49,8 +49,8 @@ implicit "every kind has a response."
 
 The native base layer is deliberately small. It owns I/O, GPU, audio, the
 mail scheduler, and the wasm host — and little else. Game and tool behavior
-lives **above** it, as actors (ADR-0034/0035/0073). Two kinds of actor, one
-model (ADR-0074):
+lives **above** it, as actors ([ADR-0034](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0034-hub-as-substrate.md)/[ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md)/[ADR-0073](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0073-substrate-cluster-consolidation.md)). Two kinds of actor, one
+model ([ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md)):
 
 - **Native chassis capabilities** — render, audio, file I/O, input, the
   component loader, the handle store. Compiled into the substrate.
@@ -62,7 +62,7 @@ is intentional and defended: prefer a design that treats wasm and native
 uniformly over one that special-cases the target.
 
 The chassis is **composed**, not monolithic — a builder assembles the
-capabilities a given deployment needs (ADR-0070/0071), which is why there are
+capabilities a given deployment needs ([ADR-0070](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md)/[ADR-0071](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md)), which is why there are
 several chassis (desktop, headless, hub, test-bench) sharing one runtime.
 
 ## 4. Design for machine consumers
@@ -72,8 +72,8 @@ being legible to a human. Where human API design prizes terseness and DRY,
 aether's surfaces prize being **regular, explicit, self-describing, and
 repetition-tolerant**:
 
-- Kinds carry their own schema (ADR-0031/0032) and ids are type-tagged on the
-  wire (ADR-0064/0065), so a tool result can be handed back verbatim and a
+- Kinds carry their own schema ([ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md)) and ids are type-tagged on the
+  wire ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)/[ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md)), so a tool result can be handed back verbatim and a
   kind can describe itself.
 - Prefer **explicit nulls over absent-field semantics** — every option
   addressed in a payload, because verbosity is nearly free for a machine
@@ -86,7 +86,7 @@ repetition-tolerant**:
 
 Two habits keep the system honest as it grows:
 
-- **Load-bearing decisions are recorded as ADRs** (ADR-0001) — numbered,
+- **Load-bearing decisions are recorded as ADRs** ([ADR-0001](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0001-record-architecture-decisions.md)) — numbered,
   reviewed like code, and cited from the code and from this guide. The ADR is
   the durable "why." When in doubt, the ADR wins over prose that has drifted.
 - **Every callable surface ships a tutorial, and the tutorial is the sanity

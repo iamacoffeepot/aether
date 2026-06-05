@@ -1,9 +1,9 @@
 # The type system
 
-> Governing ADRs: **ADR-0005** (mail typing), **ADR-0019** (unified encoding),
-> **ADR-0029/0030** (name- and schema-derived ids), **ADR-0031/0032** (const
-> schema + canonical bytes / labels sidecar), **ADR-0045/0048/0049** (handles,
-> transforms, the handle store), **ADR-0064/0065** (type-tagged wire ids +
+> **Governing ADRs:** [ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md) (mail typing), [ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md) (unified encoding),
+> [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md) (name- and schema-derived ids), [ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md) (const
+> schema + canonical bytes / labels sidecar), [ADR-0045](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0045-computation-dag-and-typed-handles.md)/[ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)/[ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) (handles,
+> transforms, the handle store), [ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)/[ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md) (type-tagged wire ids +
 > first-class id types). The type vocabulary is **stable** — the wire format
 > depends on it. The DAG composition surface that handles and transforms feed is
 > **shipped and settling** (its 0.4 stack merged).
@@ -35,7 +35,7 @@ struct NoteOn { instrument: u8, pitch: u8, velocity: f32 }
 **Two derives, because they describe two different things.**
 
 - **`Schema`** gives `const SCHEMA: SchemaType` — a description of the type's
-  byte *layout* (ADR-0031). It's compositional: every type that can sit inside a
+  byte *layout* ([ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)). It's compositional: every type that can sit inside a
   payload implements it — the primitives, `String`, `Vec<T>`, `Option<T>`,
   arrays, and your own structs — so a struct's schema is assembled from its
   fields'. A type that only ever appears as a *field* of a kind derives `Schema`
@@ -59,14 +59,14 @@ derive emits `<Self as Schema>::SCHEMA`, which recurses into
 type — including nested structs that are never mailed — has to implement `Schema`
 on its own, so `Schema` must be a standalone derive regardless. Given that,
 `Kind` *reads* the schema rather than recomputing it; merging the two would
-duplicate the schema walk that ADR-0031/0032 deliberately collapsed into one
+duplicate the schema walk that [ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md) deliberately collapsed into one
 trait-dispatched path. (It's the `Serialize` / `Deserialize` split: one trait,
 one derive.)
 
 Because `ID` and `SCHEMA` are `const`, there is no host round-trip to learn a
 kind's identity or shape — `Kind::ID` is a compile-time value. And because the
 schema travels with the type, the wire layer can encode a kind from JSON and a
-recipient can decode it without a shared header (ADR-0019). On the wire a
+recipient can decode it without a shared header ([ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md)). On the wire a
 `#[repr(C)]` plain-data kind rides as a raw byte cast; everything else as
 postcard — the derive autodetects from the type's layout, so a single
 `send` / `reply` call site handles both.
@@ -75,7 +75,7 @@ postcard — the derive autodetects from the type's layout, so a single
 schema`, where `name` is the declared kind name and `schema` is the *structural*
 shape — field types and positions. All nominal information (the Rust type name,
 field names, variant names) is erased from the hashed bytes and carried in a
-parallel labels sidecar instead (ADR-0031/0032). So:
+parallel labels sidecar instead ([ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md)). So:
 
 | edit | id changes? | why |
 |---|---|---|
@@ -119,14 +119,14 @@ worth knowing beyond "it's a type tree":
   hashing and for the `aether.kinds` manifest, field and variant names are
   dropped; a separate labels sidecar (`aether.kinds.labels`) carries them for
   consumers that want human-readable reconstruction, like `describe_kinds`
-  (ADR-0032). The wire never carries names — postcard fields are positional.
+  ([ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md)). The wire never carries names — postcard fields are positional.
 - **`Ref` is a schema arm.** A field whose type is `Ref<K>` is a *handle-or-
   inline* slot — see *Handles* below. The
   schema wraps the inner kind's shape, so a recipient decodes the resolved value
   the same way whether it arrived inline or via the store.
 - **`TypeId` is a schema arm.** A kind can have a field that *is* an id — a
   `MailboxId`, `KindId`, or `HandleId` as a first-class typed reference, not just
-  a bare `u64` (ADR-0065). These encode as a tagged string on JSON and a varint
+  a bare `u64` ([ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md)). These encode as a tagged string on JSON and a varint
   on the wire.
 
 ### What counts as the same kind
@@ -164,7 +164,7 @@ cases that surprise people live at the schema-arm level. Holding the
 ## Mailboxes — typed addresses
 
 A **mailbox** is an address: where mail goes. Its `MailboxId` is a 64-bit hash
-of the mailbox *name* alone (no schema — a mailbox is a pure address, ADR-0029),
+of the mailbox *name* alone (no schema — a mailbox is a pure address, [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)),
 so it's the same id in every process that hashes the same name, and it survives
 a component hot-swap. In a component you rarely touch the id directly: you
 address a peer by type (`ctx.actor::<RenderCapability>()`) or hold a `Mailbox<K>`
@@ -196,7 +196,7 @@ has to know which form arrived.
 
 Handle ids are **content-addressed** (the id is derived from the bytes, so two
 producers of the same value get the same handle and the store deduplicates,
-ADR-0048), and the store is **persistent** with a disk budget (ADR-0049 —
+[ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)), and the store is **persistent** with a disk budget ([ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) —
 inspect it with `describe_handles`). Handles are how the computation DAG passes
 values between steps without round-tripping them through an actor's memory; see
 [The computation DAG & handles]().
@@ -205,7 +205,7 @@ values between steps without round-tripping them through an actor's memory; see
 
 A **transform** is a pure function the DAG runs between steps — `#[transform] fn
 foo(input: A) -> B`, registered at build time with a `TransformId` and typed by
-its input and output kinds (ADR-0048). Where a kind is a value and a mailbox is
+its input and output kinds ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)). Where a kind is a value and a mailbox is
 an address, a transform is a typed *edge*: it takes a resolved handle of one kind
 and writes a new handle of another. Inspect the linked set with
 `describe_transforms`. The DAG that wires sources, transforms, and outputs into a
@@ -217,10 +217,10 @@ Every typed thing is named by a newtype over a hash, not a bare integer:
 
 | id | wraps | derived from |
 |---|---|---|
-| `KindId` | `u64` | `name + schema` (ADR-0030) |
-| `MailboxId` | `u64` | mailbox name (ADR-0029) |
-| `HandleId` | `u64` | the stored bytes (content-addressed, ADR-0048) |
-| `TransformId` | `u64` | the transform's identity (ADR-0048) |
+| `KindId` | `u64` | `name + schema` ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)) |
+| `MailboxId` | `u64` | mailbox name ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)) |
+| `HandleId` | `u64` | the stored bytes (content-addressed, [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
+| `TransformId` | `u64` | the transform's identity ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
 | `DagId` | `u64` | an in-flight DAG job |
 | `EngineId`, `SessionToken` | `Uuid` | wire identity of an engine / session |
 
@@ -228,12 +228,12 @@ Two properties keep these from being foot-guns:
 
 - **Disjoint hash domains.** A kind id and a mailbox id are hashed with
   different domain prefixes, so the *same* name produces *different* ids in the
-  two spaces — the id spaces don't collide even when names are shared (ADR-0030).
+  two spaces — the id spaces don't collide even when names are shared ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)).
   This is the mechanical reason a kind name and a mailbox name can look alike yet
   address different things.
 - **Tagged strings on the MCP wire.** Across the agent boundary, ids encode as
   `<tag>-XXXX-XXXX-XXXX` — `mbx-…` for a mailbox, `knd-…` for a kind, `hdl-…` for
-  a handle (ADR-0064). The tag makes an id self-identifying, so a mailbox id and
+  a handle ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)). The tag makes an id self-identifying, so a mailbox id and
   a kind id can't be silently swapped in a tool call. **Hand these back
   verbatim** — they're opaque tokens, not numbers to parse.
 

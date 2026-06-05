@@ -1,8 +1,8 @@
 # Components & lifecycle
 
-> Governing ADRs: **ADR-0074** (one actor model, two hosts), **ADR-0024** (the
-> dual-target FFI convention), **ADR-0028 / ADR-0033** (the kind + handler
-> manifests in the wasm), **ADR-0090** (boot config), **ADR-0022 / ADR-0038**
+> **Governing ADRs:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (one actor model, two hosts), [ADR-0024](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0024-dual-target-host-fn-ffi.md) (the
+> dual-target FFI convention), [ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md) / [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the kind + handler
+> manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) / [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)
 > (in-place hot-swap). The authoring and loading surface here is **stable** — it's
 > what every reference component (`aether-camera`, `aether-mesh-viewer`) is built
 > on, and the signatures were read from the current SDK.
@@ -42,7 +42,7 @@ custom sections**:
 
 You never write `extern "C"` by hand. The `_p32` suffix on the pointer-taking
 exports (`receive_p32`, `on_rehydrate_p32`) is the dual-target FFI convention
-(ADR-0024): wasm32 addresses are 32-bit, so those shims take `u32` pointers and
+([ADR-0024](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0024-dual-target-host-fn-ffi.md)): wasm32 addresses are 32-bit, so those shims take `u32` pointers and
 lengths. The exports are **wasm32-only** — a native (host) build of the same crate
 carries no FFI symbols, which is why a host-side test of a component drives it
 through the in-process transport rather than the FFI path.
@@ -69,13 +69,13 @@ In practice you drive this through the MCP harness — `load_component(engine_id
 binary_path, name?)`, `replace_component(...)`, `terminate_substrate(...)` — which
 takes a **path** and reads the bytes for you (tool JSON never carries the wasm
 buffer; the wire kind does). The component's kind vocabulary travels inside the
-wasm's `aether.kinds` custom section (ADR-0028), so the loader declares nothing —
+wasm's `aether.kinds` custom section ([ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md)), so the loader declares nothing —
 the substrate reads the types directly off the binary.
 
 ## Boot configuration across the boundary
 
 A component takes typed boot config the same way a capability does — declare a
-`type Config` and the chassis threads it into `init` (ADR-0090). What's
+`type Config` and the chassis threads it into `init` ([ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md)). What's
 wasm-specific is the *carrier*: the config rides as raw bytes on
 `LoadComponent.config`, encoded at the hub / MCP edge (SDK-typed, not wire-typed),
 so the substrate stays byte-transparent and never needs the config's Rust type.
@@ -105,7 +105,7 @@ impl Replaceable for MyComponent {
 aether_actor::export!(MyComponent, replaceable);
 ```
 
-`aether.component.replace` (ADR-0022) freezes the target mailbox, **drains
+`aether.component.replace` ([ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md)) freezes the target mailbox, **drains
 in-flight mail through the old instance**, calls `on_replace` on it (its chance to
 serialize state via the `Persistence` ctx), instantiates the new wasm module
 **behind the same binding**, and calls `on_rehydrate` on the new instance with the
@@ -114,7 +114,7 @@ fails and the **old instance stays bound** — a failed swap is a no-op, not a
 half-swapped actor. `ReplaceResult::Ok` carries the new component's capabilities so
 the hub's cached view reflects the swapped binary.
 
-The load-bearing property is **binding stability** (ADR-0038): the swap replaces
+The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): the swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
 route cache, and existing input subscriptions all stay valid across the swap. Peers
 mailing the component never learn it changed. Prefer `save_state_kind` (which

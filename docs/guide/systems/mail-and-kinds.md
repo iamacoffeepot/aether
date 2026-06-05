@@ -1,10 +1,10 @@
 # Mail, kinds & scheduling
 
-> Governing ADRs: **ADR-0002** (mail-first actor model), **ADR-0005** (mail
-> typing), **ADR-0019** (unified encoding), **ADR-0087** (blob dispatch + the
+> **Governing ADRs:** [ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md) (mail-first actor model), [ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md) (mail
+> typing), [ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md) (unified encoding), [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) (blob dispatch + the
 > ordering spine). The mail/kind model is **stable**; the *scheduler internals*
 > (how work is batched and balanced across threads) are **settling** — this
-> page documents the stable contract and defers the guts to ADR-0087.
+> page documents the stable contract and defers the guts to [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md).
 
 This is the spine the rest of the engine hangs on. Actors don't call each
 other — they send **mail**. A piece of mail is a typed payload (a *kind*)
@@ -27,7 +27,7 @@ one actor model and address each other identically. When this page says
 ## Why it exists
 
 Aether could have let subsystems share memory and coordinate through a
-scheduler. It deliberately doesn't (ADR-0002). One uniform message boundary
+scheduler. It deliberately doesn't ([ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md)). One uniform message boundary
 buys four things the project treats as non-negotiable:
 
 - **Hot-swap.** A component can be unloaded and reloaded mid-run without the
@@ -50,9 +50,9 @@ buys four things the project treats as non-negotiable:
 - **Location independence.** Transport is a choice the recipient doesn't have
   to reason about: mail from a sibling actor in the same process and mail from
   Claude over the MCP wire run the same handler path, so the "in-process SDK vs
-  out-of-process server" question dissolves (ADR-0002/0006). A handler isn't
+  out-of-process server" question dissolves ([ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md)/[ADR-0006](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0006-external-mail-transport.md)). A handler isn't
   fully blind to provenance — it can see a reply target and sender lineage
-  (ADR-0083) — but the guarantee is that correctness and capability never
+  ([ADR-0083](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0083-mail-sender-lineage.md)) — but the guarantee is that correctness and capability never
   *depend* on where mail came from. (Pinning down the exact origin, e.g. for a
   security policy, isn't first-class today; it's a plausible future.)
 
@@ -60,9 +60,9 @@ buys four things the project treats as non-negotiable:
 can own a whole subsystem — the entire physics world, state as plain data and a
 tight inner loop. A fine one can be a single instance: **instanced** actors are
 a first-class category (cardinality — `Singleton` vs `Instanced` — is its own
-axis, ADR-0079), and the blob dispatcher (ADR-0087) is built to rip through
+axis, [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), and the blob dispatcher ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) is built to rip through
 large sets of mail, so fan-out across many small actors is cheap, not the
-performance trap an earlier design assumed. ADR-0002's "subsystem-sized, never
+performance trap an earlier design assumed. [ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md)'s "subsystem-sized, never
 per-entity" rule predates both and is superseded on this point.
 
 When do you split into instances versus manage multiplicity inside one actor?
@@ -75,7 +75,7 @@ camera component drives many cameras from one actor, no per-camera mailbox
 needed.
 
 Fine granularity is cheap because actors **don't each own a thread** — they're
-multiplexed onto a shared work-stealing scheduler (ADR-0087), and the run-token
+multiplexed onto a shared work-stealing scheduler ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)), and the run-token
 that lets only one worker run a given actor at a time is what gives you the
 single-threaded-per-actor property. So thousands of instanced actors cost mail
 and state, not threads. The rare exception is blocking I/O: an actor that must
@@ -99,12 +99,12 @@ vanish, this is the first thing to check.
 
 **A kind is a typed, self-describing payload.** It's a Rust type deriving
 `Kind` + `Schema` with a `#[kind(name = "…")]`, carrying a stable hashed
-`KindId` and a schema that describes its bytes (ADR-0005/0031). Because a kind
+`KindId` and a schema that describes its bytes ([ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md)/[ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)). Because a kind
 carries its own schema, the wire layer can encode it from JSON and a recipient
 can decode it without a shared header — and an agent can ask a live engine what
 kinds exist (`describe_kinds`).
 
-**Encoding is schema-driven** (ADR-0019). On the way in, params are encoded to
+**Encoding is schema-driven** ([ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md)). On the way in, params are encoded to
 wire bytes against the kind's schema; the recipient decodes those bytes back
 into the kind per-kind. The bytes stay opaque until the addressed handler
 decodes them — nothing in the middle needs to understand the payload.
@@ -114,7 +114,7 @@ reply. If a reply matters, that's a separate, explicit contract between the two
 kinds — never an implicit "every kind has a response." Don't write a caller
 that blocks waiting for a reply a handler never agreed to send.
 
-**The ordering spine** (ADR-0087) — **the single contract to hold in your head
+**The ordering spine** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — **the single contract to hold in your head
 when writing handlers.** Get it wrong and you write code that passes in dev and
 breaks under load:
 
@@ -150,7 +150,7 @@ carry now: **don't block in a handler.**
 
 *How* mail is batched and balanced across workers (the per-producer rings, the
 work-stealing pool, the blob-as-unit-of-dispatch) is still settling — read
-ADR-0087 for the current design, but build on the contracts above, not its
+[ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) for the current design, but build on the contracts above, not its
 internals.
 
 ## How to use it
