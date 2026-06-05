@@ -60,6 +60,12 @@ pub mod input;
 // 1122). Serves the per-build name/template manifest + dynamic-instance
 // resolve over mail.
 pub mod inventory;
+// `aether.lifecycle` driver sender-side facade (ADR-0082 §7/§12). The
+// receive-side driver lives in `aether-substrate` (native-only, generic
+// over the chassis context `C`); this module is target-agnostic so the
+// stage-subscribe helper compiles on wasm32 — it addresses the driver
+// by name, not by the un-nameable generic type.
+pub mod lifecycle;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod rpc;
@@ -112,6 +118,7 @@ pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
 pub use inventory::InventoryCapability;
+pub use lifecycle::{LifecycleMailbox, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
 // ADR-0050 `aether.gemini` cap (issue 1015).
