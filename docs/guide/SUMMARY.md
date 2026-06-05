@@ -26,7 +26,7 @@
   - [Rendering & camera]()
   - [Mesh authoring & the DSL]()
   - [Input, file I/O & audio]()
-  - [Tracing & settlement]()
+  - [Tracing & settlement](systems/tracing-and-settlement.md)
   - [Configuration]()
   - [The computation DAG & handles]()
 

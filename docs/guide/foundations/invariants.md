@@ -171,4 +171,4 @@ is fine. *Tell:* a stack-overflow abort on adversarial or pathological input.
   [The type system]().
 - The mail spine these all hang on —
   [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
-- Settlement and tracing in depth — [Tracing & settlement]().
+- Settlement and tracing in depth — [Tracing & settlement](../systems/tracing-and-settlement.md).
