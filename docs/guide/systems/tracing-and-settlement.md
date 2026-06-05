@@ -14,9 +14,10 @@ before it reads a frame or sends the next thing, and on the trace tree to see
 capability or component needs the model because a handler that replies late owes
 its chain an obligation — miss it and a caller hangs with nothing named.
 
-> Governing ADRs: **ADR-0080** (mail lineage + settlement detection), **ADR-0086**
-> (settlement decoupled from the trace stream), **ADR-0093** (hold-until-resolve
-> dispatch), **ADR-0094** (the owned-dispatch obligation guard). The **contract**
+> Governing ADRs: **[ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md)** (mail lineage + settlement detection),
+> **[ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)** (settlement decoupled from the trace stream),
+> **[ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)** (hold-until-resolve dispatch),
+> **[ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md)** (the owned-dispatch obligation guard). The **contract**
 > — what "settled" means and what you must uphold for it — is **stable**. The
 > **mechanism** that delivers it (the emit-time per-root counter, the per-actor
 > trace rings, the guided walk that rebuilds a tree) is **settling**, so this page
@@ -168,6 +169,10 @@ Both surfaces are covered operationally on [The MCP harness](../mcp-harness.md).
   practice — [Concurrency & blocking](concurrency.md).
 - The agent-facing tool surface for `send_mail` / `send_mail_traced` —
   [The MCP harness](../mcp-harness.md).
-- The lineage model and the emit-time counter — ADR-0080 and ADR-0086; the
-  hold-until-resolve dispatch primitive — ADR-0093; the owned-dispatch obligation
-  guard — ADR-0094.
+- The lineage model and the emit-time counter —
+  [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md)
+  and [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md);
+  the hold-until-resolve dispatch primitive —
+  [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md);
+  the owned-dispatch obligation guard —
+  [ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md).
