@@ -46,17 +46,17 @@ Always runs in the **main session**, never a dispatched Agent. It opens the PR *
 
 ```bash
 # branch name derived from issue: <type>/issue-<N>-<slug>
-git worktree add /tmp/aether-impl-<N> -b <type>/issue-<N>-<slug> main
-cd /tmp/aether-impl-<N>
+git worktree add .claude/worktrees/issue-<N> -b <type>/issue-<N>-<slug> main
+cd .claude/worktrees/issue-<N>
 ```
 
-Worktree path is `/tmp/aether-impl-<N>` so concurrent `/implement` runs on different issues don't collide. Branch is cut from `main` (not the current branch) per the user's memory rule.
+Worktree path is `.claude/worktrees/issue-<N>` (gitignored per CLAUDE.md §Workflow) so concurrent `/implement` runs on different issues don't collide. Branch is cut from `main` (not the current branch) per the user's memory rule.
 
 Type comes from the project item's `Type` field. Slug is the issue title sanitized: lowercased, alnum + dashes, max 30 chars.
 
 ## Execute phase
 
-1. Set project item's `Phase = Executing` and reconcile the issue label to `phase:executing` (see [Phase label reconcile](#phase-label-reconcile)). In `--quick` label-only mode (issue not on the board), set the label and skip the board field. Post audit comment: `[implement] Executing — branched <type>/issue-<N>-<slug> off main, worktree /tmp/aether-impl-<N>`.
+1. Set project item's `Phase = Executing` and reconcile the issue label to `phase:executing` (see [Phase label reconcile](#phase-label-reconcile)). In `--quick` label-only mode (issue not on the board), set the label and skip the board field. Post audit comment: `[implement] Executing — branched <type>/issue-<N>-<slug> off main, worktree .claude/worktrees/issue-<N>`.
 
 2. Implement per the issue body's `## Implementation plan` section. The agent follows the plan literally: same files, same sequence, same test coverage. Deviations are bounces, not freelancing.
 
@@ -134,7 +134,7 @@ CI green:
    ✓ #<N> implemented and CI-green.
    Draft PR: <pr-url>
    Branch: <type>/issue-<N>-<slug>
-   Worktree: /tmp/aether-impl-<N>  (clean up after merge with `git worktree remove`)
+   Worktree: .claude/worktrees/issue-<N>  (clean up after merge with `git worktree remove`)
    Next: review the draft; un-draft (or tell me) to let native auto-merge land it on green. Phase → Done at merge.
    ```
 
@@ -218,4 +218,4 @@ The remove and add are **two separate invocations** on purpose: a single `gh iss
 - Notify anyone. Audit comments are the surface.
 - Merge — code PRs always hold for your review; auto-merge is the release process's call, not this skill's.
 - Run scoped (without `--quick`) on issues that aren't in the active project. For an ad-hoc fix outside the board, use `--quick` (label-only mode).
-- Clean up worktrees after success or bounce. Leaves them for inspection; `git worktree remove /tmp/aether-impl-<N>` is the user's call.
+- Clean up worktrees after success or bounce. Leaves them for inspection; `git worktree remove .claude/worktrees/issue-<N>` is the user's call.
