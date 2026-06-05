@@ -167,5 +167,5 @@ cap-local spawn, scoped tightly to the blocking call (ADR-0050).
 
 - The contracts this page implements — [Invariants & guarantees](../foundations/invariants.md).
 - The mail spine and the per-recipient ordering guarantee — [Mail, kinds & scheduling](mail-and-kinds.md).
-- Settlement and the hold contract in depth — [Tracing & settlement]().
+- Settlement and the hold contract in depth — [Tracing & settlement](tracing-and-settlement.md).
 - Offloading heavy compute — [The computation DAG & handles]().
