@@ -111,7 +111,7 @@ lands on any future driver that owns and drains its own mailbox off-thread.
 
 Forget it and you get the worst diagnostic the runtime offers: a silent
 multi-second hang with no actor and no mail named, ending only when the
-settlement or MCP timeout fires. ADR-0094 converts that into an immediate, located
+settlement or MCP timeout fires. [ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md) converts that into an immediate, located
 failure in debug builds. Every owned dispatch must end one of two ways —
 **discharged** (*the obligation ends here; I am recording `Finished`*) or
 **transferred** (*the obligation moves with the work onto a downstream
@@ -151,7 +151,7 @@ A node still missing `t_finished` is mail that hasn't finished handling yet.
 
 **Where it lives, and how to read it.** Trace events aren't kept centrally. Each
 actor holds its own **trace ring** — the same per-actor storage logs use
-(ADR-0081 / ADR-0086) — recording the events that passed through it. A tree is
+([ADR-0081](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0081-decentralized-per-actor-log-storage.md) / [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)) — recording the events that passed through it. A tree is
 rebuilt by a **guided walk**: start at the root's sender, read its ring
 (`aether.trace.tail`, the sibling of the `aether.log.tail` behind `actor_logs`),
 follow each onward `Sent` to the recipient's ring, and stitch. `send_mail_traced`
@@ -162,7 +162,7 @@ log rings. The tree it returns carries `t_construct_start`, `t_sent`,
 ready-queue depth live in the rings but aren't surfaced there, so over MCP queue
 latency reads as one `t_sent → t_received` span.
 
-Tracing and settlement are deliberately **decoupled** (ADR-0086) because they have
+Tracing and settlement are deliberately **decoupled** ([ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)) because they have
 opposite requirements. Settlement is control-plane: exact, on the frame's critical
 path, never allowed to lag or settle early. Tracing is observability: best-effort
 and off the critical path, so it can lose data without ever affecting whether or
