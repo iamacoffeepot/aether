@@ -12,7 +12,7 @@ The events they produce — a key down, the cursor moving, a resize, a tick —
 reach actors as ordinary mail through one mailbox, `aether.input`, on a
 publish/subscribe model. An actor that wants a stream **subscribes** to it; the
 substrate fans each event out to every subscriber. Nothing is pushed at an actor
-that didn't ask: a stream with no subscribers is dropped, not queued.
+that didn't ask; a stream with no subscribers is dropped at the source.
 
 When you author a component, this is how it feels the world — you subscribe to
 `Tick` to advance each frame, to `Key` to react to input, to `WindowSize` to
@@ -22,15 +22,15 @@ platform layer, but you can inject a synthetic event by mailing its kind to
 
 ## Why it exists
 
-The question input routing answers isn't "who owns the keyboard" — it's "who's
-listening." A renderer, a physics step, and a telemetry collector might all want
-`Tick`; a debug overlay might watch keystrokes alongside the component reacting
-to them. A single-owner model forces the extra listeners to fan out through one
-of them — exactly the incidental coupling the mail-first design exists to avoid.
-So the substrate keeps a subscriber *set* per stream and broadcasts, the same
-shape observation mail already uses to reach every attached session. There's no
-default recipient and no focus primitive: a component that wants exclusive input
-gets it by being the sole subscriber.
+Several actors can want the same input at once. A renderer, a physics step, and
+a telemetry collector might all advance on `Tick`; a debug overlay might watch
+keystrokes alongside the component reacting to them. Routing input to a single
+owner would force the extra listeners to fan out through that one — the
+incidental coupling the mail-first design exists to avoid. So the substrate keeps
+a subscriber *set* per stream and broadcasts to every member, the same shape
+observation mail already uses to reach every attached session. There's no default
+recipient and no focus primitive; a component that wants exclusive input gets it
+by being the sole subscriber.
 
 Streams are keyed by **`KindId`** ([ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)) — the same identifier the mail
 wire, dispatch, and the SDK already use for every kind. One identifier space, so
@@ -77,10 +77,10 @@ dropped or unknown id is rejected with `Err`.
 mail to `aether.input`; the cap then sends one copy per subscriber, carrying the
 inbound mail's lineage so a trace shows the copies fanning out under one parent.
 If a stream has no subscribers, the fan-out reaches no one and the event is
-dropped — never enqueued-then-discarded.
+dropped before it's ever enqueued.
 
-**Subscriptions are keyed by mailbox, so they track the component, not the
-instance.** A `replace_component` keeps the same mailbox id, so the new instance
+**Subscriptions are keyed by mailbox, so they belong to the component across
+instances.** A `replace_component` keeps the same mailbox id, so the new instance
 inherits the old one's subscriptions with nothing to redo. A `drop` is the end of
 them — the component host mails `unsubscribe_all`, so a torn-down mailbox can't
 keep receiving fan-out.
@@ -107,9 +107,9 @@ Then handle each stream as its kind, like any other mail:
 fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) { /* advance a frame */ }
 ```
 
-That's the whole pattern — the reference `aether-camera` subscribes `Tick` and
-`WindowSize` this way and advances its cameras on each. You don't unsubscribe on
-the way out: the host clears your subscriptions when the component drops.
+The reference `aether-camera` subscribes `Tick` and `WindowSize` this way and
+advances its cameras on each. You don't unsubscribe on the way out — the host
+clears your subscriptions when the component drops.
 
 **From an agent over MCP.** Input originates at the platform layer, so the usual
 way you see it is through a subscribed component's behavior or its logs. To drive
