@@ -25,23 +25,23 @@ its chain an obligation — miss it and a caller hangs with nothing named.
 
 ## Why it exists
 
-The engine is forever asking whether a piece of work is *done*. A frame can't
-advance until the tick's effects have played out; a component swap waits for the
-old instance to finish draining; a lifecycle step waits for wiring to complete;
-an agent waits for its mail's effects before reading the result back. Every one
-of these is the same question — is this causal chain closed? — and none of them
-can be answered by looking at a single mail, because the work that matters is
-everything that mail *triggered*.
+The engine needs to know a piece of work is fully *done* only at specific points
+— when something has to happen atomically, once everything an earlier mail set in
+motion has finished. A frame can't advance until the tick's effects have played
+out; a component swap waits for the old instance to finish draining; a lifecycle
+step waits for wiring to complete; an agent waits for its mail's effects before
+it reads the result back. What's being waited on is never one mail but the whole
+chain of work it set off, and no single mail can report that the chain has closed
+— the work that matters is everything it *triggered*.
 
-The old answer was to guess with a deadline: poll a counter until it looks quiet,
-wait a fixed window, send a redundant mail to ride FIFO ordering. Those
-heuristics raced — they passed on a quiet machine and flaked under load, because
-the substrate had no way to know the last broadcast was still coming and could
-only assume it had already arrived. Settlement replaces the guess with an exact
-signal, and it
-does so by tracking the one thing the guess was missing: the causal lineage of
-every mail. That lineage, kept anyway, is also a complete cause-and-effect graph
-— which is the trace tree.
+Without an exact signal, the only way to wait is to approximate — and every
+approximation of "has this chain closed" races. You could poll a counter until it
+looks quiet, wait out a fixed window, or send a redundant mail to ride FIFO
+ordering; each holds up on a quiet machine and breaks under load, because nothing
+tells the waiter that the last mail in the chain is still on its way. Settlement
+removes the guesswork: it tracks the causal lineage of every mail, so a gate waits
+on a fact rather than a timeout. That same lineage, kept anyway, doubles as a
+complete cause-and-effect graph — the trace tree.
 
 ## The model: lineage and the settled condition
 
