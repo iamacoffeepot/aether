@@ -99,9 +99,15 @@ There is a second way to break a chain, on the receiving side. A capability that
 owns an **inbox** mailbox — one that takes an *owned* dispatch and is expected to
 move it onward to a downstream channel — carries the finish obligation itself: it
 must record the inbound mail as `Finished`, or its chain never closes. The
-substrate brackets the two synchronous mailbox shapes automatically (an inline
-handler, and the standard actor dispatcher at handler exit), but a hand-rolled
-drain — the desktop window driver is the precedent — is on its own.
+substrate brackets the two synchronous mailbox shapes automatically — an inline
+handler, and the standard actor dispatcher at handler exit — so an ordinary actor
+never has to think about this. What's on its own is a mailbox drained *by hand*,
+off the pool, and the engine has exactly one such case today: the **desktop
+chassis's window driver**. Window operations have to run on the OS event-loop
+thread rather than a pool worker, so `aether.window` is registered as an inbox the
+event loop drains itself, recording each inbound mail's `Finished` as it applies
+the op and sends the reply. That's the lone precedent — but the same obligation
+lands on any future driver that owns and drains its own mailbox off-thread.
 
 Forget it and you get the worst diagnostic the runtime offers: a silent
 multi-second hang with no actor and no mail named, ending only when the
