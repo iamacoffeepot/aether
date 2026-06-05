@@ -49,8 +49,23 @@ pub use slot::{
 pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
 
-use crate::config::KnobRecord;
-use crate::lifecycle::LIFECYCLE_KNOBS;
+use crate::config::{KnobKind, KnobRecord};
+
+/// The lifecycle advance-timeout knob (ADR-0090 unit b2,
+/// iamacoffeepot/aether#1255). The `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
+/// override is read directly in `LifecycleCapability::init`
+/// (`aether-capabilities`); the record lives here, substrate-side,
+/// because the config-discovery aggregation below
+/// ([`SCHEDULER_KNOBS`]) is substrate-side and `aether-capabilities`
+/// depends on `aether-substrate`, not the reverse.
+pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+    doc: "Deadline (ms) for a pending lifecycle advance's Settled before the next \
+          inbound advance force-completes it (degrades a wedged settlement pipeline \
+          into a visible stutter).",
+    default: Some("1000"),
+    kind: KnobKind::HandRegistered,
+}];
 
 /// The scheduler + lifecycle hot-path tuning knobs registered for
 /// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).

@@ -21,11 +21,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Actor;
+use aether_capabilities::LifecycleCapability;
 use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
 use aether_kinds::LifecycleAdvance;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{LifecycleDriverCapability, Mailer, SubstrateBoot, mail::MailboxId};
+use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};
 
 use crate::chassis_root::next_chassis_correlation;
 
@@ -62,9 +63,9 @@ pub fn parse_tick_hz_env() -> u32 {
 /// captures them on a [`HeadlessTimerRunning`] that drives the loop.
 ///
 /// Pre-ADR-0082 this drove `Tick` mail directly to `aether.input`;
-/// PR 3b reroutes through `LifecycleDriverCapability` so the driver
-/// owns the broadcast vocabulary and the substrate observes a
-/// labelled `aether.lifecycle` root for every frame chain.
+/// it now fires `LifecycleAdvance` at `aether.lifecycle`, and the
+/// `LifecycleCapability` owns the broadcast vocabulary so the substrate
+/// observes a labelled `aether.lifecycle` root for every frame chain.
 pub struct HeadlessTimerCapability {
     pub boot: SubstrateBoot,
     /// Field kept for wire compatibility; the timer body no longer
@@ -105,9 +106,7 @@ impl DriverCapability for HeadlessTimerCapability {
 
         Ok(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
-            lifecycle_mailbox: mailbox_id_from_name(
-                <LifecycleDriverCapability<()> as Actor>::NAMESPACE,
-            ),
+            lifecycle_mailbox: mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE),
             kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             tick_period,
             _boot: boot,

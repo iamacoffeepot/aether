@@ -50,7 +50,6 @@ pub mod chassis;
 pub mod config;
 pub mod dag;
 pub mod handle_store;
-pub mod lifecycle;
 pub mod mail;
 #[cfg(feature = "render")]
 pub mod render;
@@ -86,7 +85,6 @@ pub use config::{
     ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, dump_config, known_keys,
     validate_env,
 };
-pub use lifecycle::{LifecycleDriverCapability, LifecycleDriverConfig, LifecycleGraph};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend,

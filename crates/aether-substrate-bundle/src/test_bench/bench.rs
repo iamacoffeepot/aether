@@ -349,7 +349,7 @@ impl TestBench {
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
         let lifecycle_mailbox = aether_data::mailbox_id_from_name(
-            <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE,
+            <aether_capabilities::LifecycleCapability as Actor>::NAMESPACE,
         );
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the

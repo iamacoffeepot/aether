@@ -10,6 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
     InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, fs::NamespaceRoots,
@@ -22,8 +23,7 @@ use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue,
-    render::VERTEX_BUFFER_BYTES,
+    Chassis, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
@@ -311,7 +311,7 @@ impl TestBenchChassis {
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<TestBenchCapability>(test_bench_cap_config)
-            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

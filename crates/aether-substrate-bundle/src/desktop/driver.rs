@@ -1069,9 +1069,8 @@ impl DriverCapability for DesktopDriverCapability {
             let _ = window_mail_proxy.send_event(UserEvent::WindowMail);
         }));
 
-        let lifecycle_mailbox = mailbox_id_from_name(
-            <aether_substrate::LifecycleDriverCapability<()> as Actor>::NAMESPACE,
-        );
+        let lifecycle_mailbox =
+            mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; the
         // chassis still resolves the kind id via `boot.registry` for

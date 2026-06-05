@@ -18,6 +18,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use aether_actor::Actor;
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{Kind, encode_empty, mailbox_id_from_name};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, LifecycleAdvance};
@@ -25,9 +26,7 @@ use aether_substrate::chassis::settlement::{
     SettlementRegistry, TerminalDisposition, WaitOutcome, await_internal_signal,
 };
 use aether_substrate::runtime::lifecycle;
-use aether_substrate::{
-    Chassis, LifecycleDriverCapability, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId,
-};
+use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId};
 
 /// Cumulative patience cap for the per-frame settlement gates (advance +
 /// capture pre-mail), matching the desktop driver. The per-round budget
@@ -134,8 +133,7 @@ fn drive_events_loop(
     let outbound = Arc::clone(&boot.outbound);
     let _ = kind_tick; // PR 3c retired the direct Tick push; the bin now
     // drives `LifecycleAdvance` and the lifecycle driver broadcasts Tick.
-    let lifecycle_mailbox =
-        mailbox_id_from_name(<LifecycleDriverCapability<()> as Actor>::NAMESPACE);
+    let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE);
     let kind_lifecycle_advance = <LifecycleAdvance as Kind>::ID;
     let settlement_registry = Arc::clone(passive.settlement_registry());
     // ADR-0080 §6 chassis-root correlation counter (issue
