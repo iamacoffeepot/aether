@@ -70,21 +70,53 @@ if [[ -n "$override_line" ]]; then
     fi
 fi
 
-# Body-file content joins the search corpus alongside the command
-# itself so heredoc + --body-file paths are both covered.
+# Patterns A and D scan only the extracted BODY, never the surrounding
+# command. A body assembled from shell plumbing — a $(gh issue view …)
+# capture, a piped "$new", a perl $1 backref — carries unrelated
+# dollar-expansions that read as a `$…$` math span when the raw command
+# is scanned, even though the published body is clean. The body is what
+# publishes, so it is the only corpus. Three sources, one per place a
+# body can come from:
+#   --body-file PATH      → file contents
+#   --body '…' / "…"      → the inline literal
+#   <<'EOF' … EOF heredoc → the heredoc text (common EOF delimiter)
 body_file=$(printf '%s' "$command" | grep -oE -- '--body-file[ =]+[^ ]+' | sed -E 's/^--body-file[ =]+//' | tr -d '"' | tr -d "'")
 body_content=""
 if [[ -n "$body_file" && -f "$body_file" ]]; then
     body_content=$(cat "$body_file")
 fi
-search_text="$command"$'\n'"$body_content"
+
+# Inline --body literal (single- or double-quoted), extracted the same
+# way --title is below. The `--body[ =]` class never matches
+# `--body-file` (that is followed by `-`, not a space or `=`).
+body_inline=$(printf '%s' "$command" | grep -oE -- "--body[ =]+(\"[^\"]*\"|'[^']*')" | head -1 || true)
+if [[ -n "$body_inline" ]]; then
+    body_inline=${body_inline#*--body}
+    body_inline=${body_inline# }
+    body_inline=${body_inline#=}
+    body_inline=${body_inline# }
+    body_inline=${body_inline%\'}
+    body_inline=${body_inline#\'}
+    body_inline=${body_inline%\"}
+    body_inline=${body_inline#\"}
+fi
+
+# Heredoc body text between `<<EOF` / `<<'EOF'` and a closing `EOF`.
+# Only the common EOF delimiter is recognised — a general delimiter
+# parser is not worth the bash, and a non-EOF heredoc simply falls back
+# to the file / inline sources rather than being scanned.
+body_heredoc=$(printf '%s' "$command" | awk '/<<.*EOF/ { grab=1; next } grab && /^[[:space:]]*EOF[[:space:]]*$/ { grab=0; next } grab { print }')
+
+# The Pattern A/D corpus: the three body sources joined, never the
+# command. Title checks (C/E) keep using $command's --title below.
+body_corpus=$(printf '%s\n%s\n%s' "$body_content" "$body_inline" "$body_heredoc")
 
 issues=()
 
 # Pattern A: \` or \$ — escaped backticks/dollars are literal in
 # quoted heredocs and render as broken text on GitHub. Drop the
 # backslash.
-if [[ ",$allowed," != *",a,"* ]] && printf '%s' "$search_text" | grep -qE '\\[`$]'; then
+if [[ ",$allowed," != *",a,"* ]] && printf '%s' "$body_corpus" | grep -qE '\\[`$]'; then
     issues+=("Pattern A: backslash-escaped backtick or dollar — drop the backslash; quoted heredocs (<<'EOF') pass them through literally")
 fi
 
@@ -92,7 +124,7 @@ fi
 # Exclude `$(...)` (shell expansion) and `$ ` (variable form) by
 # requiring the byte after the opening `$` to be neither space, paren,
 # nor digit.
-if [[ ",$allowed," != *",d,"* ]] && printf '%s' "$search_text" | grep -qE '\$[^ \(0-9][^$]*\$'; then
+if [[ ",$allowed," != *",d,"* ]] && printf '%s' "$body_corpus" | grep -qE '\$[^ \(0-9][^$]*\$'; then
     issues+=("Pattern D: \$...\$ renders as LaTeX math on GitHub — switch inline code to backticks")
 fi
 
