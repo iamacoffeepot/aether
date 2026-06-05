@@ -27,7 +27,7 @@
   - [Mesh authoring & the DSL]()
   - [Input, file I/O & audio]()
   - [Tracing & settlement](systems/tracing-and-settlement.md)
-  - [Configuration]()
+  - [Configuration](systems/configuration.md)
   - [The computation DAG & handles]()
 
 # Building with aether
