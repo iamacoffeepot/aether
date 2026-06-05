@@ -33,6 +33,10 @@ use crate::scheduler::pending_depth;
 //
 // `Component` writes a region exactly once per call, so the regions
 // never need to coexist within the same wasm function activation.
+// Each fixed window is small (low shadow-stack region); a mail or config
+// payload too large for its window instead rides the reusable guest-heap
+// reserve buffer (`mail_scratch_reserve`, iamacoffeepot/aether#1337/#1390),
+// which is heap-backed and shared across the two temporally-disjoint paths.
 const MAIL_OFFSET: u32 = 1024;
 
 /// Stack headroom (bytes) reserved below the standard wasm32 1 MiB stack
@@ -65,6 +69,20 @@ const MAX_MAIL_PAYLOAD_BYTES: usize = (1 << 20) - MAIL_SCRATCH_STACK_RESERVE - M
 /// exhaust its memory and trap. The wire frame cap bounds arrivals upstream —
 /// this is defense in depth. 64 MiB matches the default `AETHER_MAX_FRAME_SIZE`.
 const MAX_DELIVERABLE_MAIL_BYTES: usize = 64 << 20;
+
+/// Largest init config payload (bytes) [`Component::instantiate`] writes through
+/// the guest's fixed [`CONFIG_OFFSET`] scratch window (ADR-0090, iamacoffeepot/
+/// aether#1390). A config at or below this takes the fast inline path; a larger
+/// one rides the same reusable guest-heap buffer the mail path uses
+/// (`mail_scratch_reserve`) — config and mail are temporally disjoint (config at
+/// init, before any mail), so sharing the one buffer is safe.
+///
+/// Sized exactly like [`MAX_MAIL_PAYLOAD_BYTES`] from `MAIL_OFFSET`: `CONFIG_OFFSET`
+/// also sits in the guest's low shadow-stack region, so the fast-path write is
+/// bounded by the live stack's low-water mark, not the heap. Flat threshold:
+/// the 1 MiB default stack minus the same stack reserve and the (higher) offset.
+const MAX_CONFIG_PAYLOAD_BYTES: usize =
+    (1 << 20) - MAIL_SCRATCH_STACK_RESERVE - CONFIG_OFFSET as usize;
 
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
 /// buffer from the moment `save_state` is called on the old instance
@@ -394,9 +412,11 @@ pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 const STATE_OFFSET: u32 = 8192;
 
 /// Offset the substrate writes config bytes to before calling
-/// `init_with_config_p32` (ADR-0090). Sits after `STATE_OFFSET` so the three
-/// scratch regions (mail / state / config) never overlap. Config is
-/// written once at instantiate time, before any other host fn runs.
+/// `init_with_config_p32` (ADR-0090) when the config fits the fixed inline
+/// window ([`MAX_CONFIG_PAYLOAD_BYTES`]). Sits after `STATE_OFFSET` so the three
+/// fixed scratch regions (mail / state / config) never overlap. Config is
+/// written once at instantiate time, before any other host fn runs. A larger
+/// config rides the guest-heap reserve buffer instead (iamacoffeepot/aether#1390).
 const CONFIG_OFFSET: u32 = 16384;
 
 /// Contract with the guest: it exports a
@@ -441,9 +461,12 @@ pub struct Component {
     /// iamacoffeepot/aether#1337 Phase 2: the guest's
     /// `mail_scratch_reserve_p32` export, used to deliver a payload larger
     /// than [`MAX_MAIL_PAYLOAD_BYTES`] into a reusable guest-heap buffer
-    /// instead of the fixed [`MAIL_OFFSET`] scratch window. `None` for a
-    /// guest too old to export it — such a guest drops oversize mail
-    /// (Phase 1 disposition) rather than risking an overrun.
+    /// instead of the fixed [`MAIL_OFFSET`] scratch window. The same buffer
+    /// carries an over-window init config (iamacoffeepot/aether#1390) —
+    /// config use is temporally disjoint from mail use, so sharing it is safe.
+    /// `None` for a guest too old to export it — such a guest drops oversize
+    /// mail (Phase 1 disposition) and rejects an over-window config rather
+    /// than risking an overrun.
     mail_scratch_reserve: Option<TypedFunc<u32, u32>>,
     /// Mailbox id stamped at instantiate-time, replayed into `wire`
     /// and `unwire` calls. Same value the guest's `init` shim received.
@@ -459,9 +482,17 @@ impl Component {
     /// `<FfiActor::Config as Kind>` payload threaded through to the
     /// guest's `init_with_config_p32` shim. Pass `&[]` for actors whose
     /// `Config = ()` or for the back-compat path (legacy `init` does
-    /// not consume the bytes). The substrate writes the bytes at
-    /// `CONFIG_OFFSET` in the guest's linear memory and calls
-    /// `init_with_config_p32(mailbox_id, CONFIG_OFFSET, config_bytes.len())`.
+    /// not consume the bytes).
+    ///
+    /// iamacoffeepot/aether#1390: the config write routes by size, mirroring
+    /// [`Component::deliver`]'s mail routing. A config at or below the fixed
+    /// `CONFIG_OFFSET` window cap (`MAX_CONFIG_PAYLOAD_BYTES`) lands inline at
+    /// `CONFIG_OFFSET`; a larger one (up to the `MAX_DELIVERABLE_MAIL_BYTES`
+    /// ceiling) rides the same reusable guest-heap reserve buffer the mail path
+    /// uses; a config past that ceiling, or to a raw-FFI guest with no reserve
+    /// export, is a clean boot error (`LoadResult::Err`) — never a write or trap.
+    /// Whichever pointer the config landed at is what
+    /// `init_with_config_p32(mailbox_id, ptr, len)` receives.
     pub fn instantiate(
         engine: &Engine,
         linker: &Linker<ComponentCtx>,
@@ -499,6 +530,18 @@ impl Component {
         // path reports it via `LoadResult::Err { error }` — same
         // shape as a wasm trap, just with a more informative message.
         let mailbox_id = store.data().sender.0;
+        // iamacoffeepot/aether#1337 Phase 2: the guest's reusable-buffer export.
+        // Looked up here (before the config write) because the config path below
+        // routes a large config through it, mirroring `deliver`'s mail routing.
+        // Present on macro-built guests (emitted by `export!`); absent on raw-FFI
+        // guests, which then can't take an over-window config. The reserve
+        // (`mail_scratch::reserve`) is a module-level guest allocator, ready right
+        // after instantiation and independent of the actor's `init`, so calling it
+        // during `instantiate` before `init` is valid; config use is temporally
+        // disjoint from mail use, so sharing the one buffer is safe.
+        let mail_scratch_reserve = instance
+            .get_typed_func::<u32, u32>(&mut store, "mail_scratch_reserve_p32")
+            .ok();
         // Wasm32 ABI carries `u32` byte lengths; config bytes are
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
@@ -506,13 +549,52 @@ impl Component {
         let init_rc = if let Ok(init_with_config) =
             instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_with_config_p32")
         {
-            // Write config bytes (even an empty slice — the guest's
-            // shim still receives the `(ptr, 0)` pair and handles the
-            // empty-len short-circuit).
-            if !config_bytes.is_empty() {
+            // iamacoffeepot/aether#1390: route the config write by size, exactly
+            // like `deliver` routes mail. `CONFIG_OFFSET` sits in the guest's low
+            // shadow-stack region, so a config that overruns the fixed window
+            // would clobber the live stack and trap on init — surfaced as a
+            // generic wasm trap rather than a clear bound message.
+            //   - small (<= MAX_CONFIG_PAYLOAD_BYTES): fast inline write at
+            //     CONFIG_OFFSET (the current fast path).
+            //   - larger (<= MAX_DELIVERABLE_MAIL_BYTES) AND a reserve export
+            //     exists: write into the reusable guest-heap buffer — heap-backed,
+            //     no stack clobber.
+            //   - beyond the ceiling, or no reserve export (raw-FFI guest): clean
+            //     boot error (surfaces as LoadResult::Err) with a structured log,
+            //     never a write or trap.
+            // Empty config short-circuits the write (the guest's shim still
+            // receives the `(ptr, 0)` pair and handles the empty-len case).
+            let config_ptr = if config_bytes.is_empty() {
+                CONFIG_OFFSET
+            } else if config_bytes.len() <= MAX_CONFIG_PAYLOAD_BYTES {
                 memory.write(&mut store, CONFIG_OFFSET as usize, config_bytes)?;
-            }
-            Some(init_with_config.call(&mut store, (mailbox_id, CONFIG_OFFSET, config_len))?)
+                CONFIG_OFFSET
+            } else if config_bytes.len() > MAX_DELIVERABLE_MAIL_BYTES {
+                Self::log_oversize_config(
+                    &store,
+                    config_bytes.len(),
+                    "exceeds the absolute config-size bound",
+                );
+                return Err(wasmtime::Error::msg(format!(
+                    "guest init config of {} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
+                    config_bytes.len(),
+                )));
+            } else if let Some(reserve) = &mail_scratch_reserve {
+                let ptr = reserve.call(&mut store, config_len)?;
+                memory.write(&mut store, ptr as usize, config_bytes)?;
+                ptr
+            } else {
+                Self::log_oversize_config(
+                    &store,
+                    config_bytes.len(),
+                    "guest exports no mail_scratch_reserve buffer (raw-FFI guest)",
+                );
+                return Err(wasmtime::Error::msg(format!(
+                    "guest init config of {} bytes exceeds the {MAX_CONFIG_PAYLOAD_BYTES}-byte inline window and the guest exports no reserve buffer",
+                    config_bytes.len(),
+                )));
+            };
+            Some(init_with_config.call(&mut store, (mailbox_id, config_ptr, config_len))?)
         } else if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
             // Legacy Phase 2 fallback. Discards config bytes — only
             // safe for `Config = ()`. A typed-config guest that lands
@@ -550,12 +632,6 @@ impl Component {
         // STATE_OFFSET, len)`.
         let on_rehydrate = instance
             .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32")
-            .ok();
-        // iamacoffeepot/aether#1337 Phase 2: optional reusable-buffer export.
-        // Present on macro-built guests (emitted by `export!`); absent on
-        // raw-FFI guests, which then drop oversize mail rather than overrun.
-        let mail_scratch_reserve = instance
-            .get_typed_func::<u32, u32>(&mut store, "mail_scratch_reserve_p32")
             .ok();
         // Issue 584 Phase 2b: optional wire/unwire exports. Both take
         // the component's own mailbox id (same as `init`) so the guest
@@ -728,6 +804,24 @@ impl Component {
             deliverable_cap_bytes = MAX_DELIVERABLE_MAIL_BYTES,
             reason,
             "dropping inbound mail; cannot deliver safely (see iamacoffeepot/aether#1337)",
+        );
+    }
+
+    /// Loudly log an init config rejected by [`Component::instantiate`]
+    /// (iamacoffeepot/aether#1390) because it could not be delivered safely —
+    /// either past the absolute ceiling, or to a raw-FFI guest with no reserve
+    /// buffer. Mirrors [`Self::log_dropped_oversize`]; the caller returns an
+    /// `Err` that surfaces as `LoadResult::Err` rather than writing or trapping.
+    /// Associated (no `&self`) because `instantiate` has no `Component` yet.
+    fn log_oversize_config(store: &Store<ComponentCtx>, config_bytes: usize, reason: &str) {
+        tracing::error!(
+            target: "aether_substrate::component",
+            mailbox_id = store.data().sender.0,
+            config_bytes,
+            inline_cap_bytes = MAX_CONFIG_PAYLOAD_BYTES,
+            deliverable_cap_bytes = MAX_DELIVERABLE_MAIL_BYTES,
+            reason,
+            "rejecting init config; cannot deliver safely (see iamacoffeepot/aether#1390)",
         );
     }
 
@@ -916,12 +1010,20 @@ mod tests {
     /// WAT-level `init_with_config_p32` can inspect what the host wrote at
     /// `CONFIG_OFFSET`.
     fn instantiate_with_config(wat: &str, config_bytes: &[u8]) -> Component {
+        try_instantiate_with_config(wat, config_bytes).expect("instantiate")
+    }
+
+    /// Non-panicking sibling of [`instantiate_with_config`] so the
+    /// iamacoffeepot/aether#1390 rejection tests can assert the `Err` the
+    /// substrate returns (which `dispatch_load_component` surfaces as
+    /// `LoadResult::Err`) instead of unwrapping it.
+    fn try_instantiate_with_config(wat: &str, config_bytes: &[u8]) -> wasmtime::Result<Component> {
         let engine = Engine::default();
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
-        Component::instantiate(&engine, &linker, &module, ctx(), config_bytes).expect("instantiate")
+        Component::instantiate(&engine, &linker, &module, ctx(), config_bytes)
     }
 
     /// WAT where `on_replace` writes 0x11 to offset 200 — same pattern
@@ -1028,6 +1130,80 @@ mod tests {
                     i32.load8_u
                     i32.store8
                 end
+                i32.const 0))
+    "#;
+
+    /// iamacoffeepot/aether#1390: a guest exporting BOTH `init_with_config_p32`
+    /// and `mail_scratch_reserve_p32`. The reserve returns a fixed high offset
+    /// (`2_000_000`) standing in for the reusable heap buffer; `init_with_config_p32`
+    /// stamps the same `(mailbox_id, config_ptr, config_len)` triple `WAT_INIT_WITH_CONFIG`
+    /// does and copies the first two config bytes — so a test can prove a large
+    /// config routes through the reserve pointer and round-trips its bytes to
+    /// init. 80 pages (5.2 MiB) leaves room for a >inline-window config at the
+    /// high offset.
+    const WAT_INIT_CONFIG_WITH_RESERVE: &str = r#"
+        (module
+            (memory (export "memory") 80)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "mail_scratch_reserve_p32") (param i32) (result i32)
+                i32.const 2000000)
+            (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
+                ;; *(u32*)200 = low32(mailbox_id)
+                i32.const 200
+                local.get 0
+                i32.wrap_i64
+                i32.store
+                ;; *(u32*)204 = config_ptr
+                i32.const 204
+                local.get 1
+                i32.store
+                ;; *(u32*)208 = config_len
+                i32.const 208
+                local.get 2
+                i32.store
+                ;; if config_len > 0, copy first byte to offset 212
+                local.get 2
+                i32.const 0
+                i32.gt_u
+                if
+                    i32.const 212
+                    local.get 1
+                    i32.load8_u
+                    i32.store8
+                end
+                ;; if config_len > 1, copy second byte to offset 213
+                local.get 2
+                i32.const 1
+                i32.gt_u
+                if
+                    i32.const 213
+                    local.get 1
+                    i32.const 1
+                    i32.add
+                    i32.load8_u
+                    i32.store8
+                end
+                i32.const 0))
+    "#;
+
+    /// iamacoffeepot/aether#1390: a guest exporting `init_with_config_p32` but
+    /// NO `mail_scratch_reserve_p32`. 80 pages so a large config would *fit*
+    /// linear memory — the rejection must come from the missing reserve export,
+    /// not a memory-bound trap. Stamps the same triple so a test could inspect
+    /// it on the fast path (it is never reached for the oversize case).
+    const WAT_INIT_CONFIG_NO_RESERVE: &str = r#"
+        (module
+            (memory (export "memory") 80)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
+                i32.const 204
+                local.get 1
+                i32.store
+                i32.const 208
+                local.get 2
+                i32.store
                 i32.const 0))
     "#;
 
@@ -1234,6 +1410,84 @@ mod tests {
         // No bytes were copied to 212 / 213 (the WAT skips the copy
         // when len == 0), so the slot stays zero.
         assert_eq!(component.read_u32(212), 0);
+    }
+
+    /// iamacoffeepot/aether#1390: a config at/under [`MAX_CONFIG_PAYLOAD_BYTES`]
+    /// takes the fast inline path — it lands at the fixed `CONFIG_OFFSET`, not a
+    /// reserve pointer, even when the guest also exports the reserve buffer.
+    #[test]
+    fn instantiate_small_config_takes_fast_inline_path() {
+        let payload: &[u8] = &[0x01, 0x02, 0x03];
+        let mut component = instantiate_with_config(WAT_INIT_CONFIG_WITH_RESERVE, payload);
+        // config_ptr == CONFIG_OFFSET (the fast window), NOT the reserve's 2_000_000.
+        assert_eq!(component.read_u32(204), CONFIG_OFFSET);
+        assert_eq!(component.read_u32(208) as usize, payload.len());
+        // Bytes physically landed at CONFIG_OFFSET.
+        assert_eq!(
+            component.read_bytes(CONFIG_OFFSET as usize, payload.len()),
+            payload,
+        );
+    }
+
+    /// iamacoffeepot/aether#1390: a config too large for the inline window but
+    /// within the deliverable bound rides the guest's `mail_scratch_reserve`
+    /// buffer — `init_with_config_p32` is handed the reserve pointer (not
+    /// `CONFIG_OFFSET`) and the config bytes round-trip to it.
+    #[test]
+    fn instantiate_large_config_routes_through_reserve_buffer() {
+        // 900_000 > MAX_CONFIG_PAYLOAD_BYTES (770_048), < MAX_DELIVERABLE_MAIL_BYTES.
+        let mut payload = vec![0u8; 900_000];
+        payload[0] = 0xA1;
+        payload[1] = 0xB2;
+        let mut component = instantiate_with_config(WAT_INIT_CONFIG_WITH_RESERVE, &payload);
+        // init saw the reserve pointer, not CONFIG_OFFSET.
+        assert_eq!(
+            component.read_u32(204),
+            2_000_000,
+            "large config should route via the reserve buffer pointer",
+        );
+        assert_eq!(component.read_u32(208) as usize, payload.len());
+        // The substrate physically wrote the config at the reserve pointer.
+        assert_eq!(component.read_bytes(2_000_000, 4), payload[..4]);
+        // The guest's shim read the first two bytes back through (config_ptr + i).
+        assert_eq!(component.read_u32(212) & 0xFF, u32::from(payload[0]));
+        assert_eq!(component.read_u32(213) & 0xFF, u32::from(payload[1]));
+    }
+
+    /// iamacoffeepot/aether#1390: a config past the absolute ceiling is a clean
+    /// boot error — `instantiate` returns `Err` (→ `LoadResult::Err`) without
+    /// writing or trapping. (Uses a small fixture: the guard fires on the length
+    /// check before any write, regardless of guest memory size.)
+    #[test]
+    fn instantiate_oversize_config_returns_clean_error() {
+        let payload = vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1];
+        // `Component` is not `Debug`, so match rather than `expect_err`.
+        let Err(err) = try_instantiate_with_config(WAT_INIT_WITH_CONFIG, &payload) else {
+            panic!("oversize config must fail to instantiate");
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("exceeds") && msg.contains("deliverable"),
+            "error should name the deliverable bound; got: {msg}",
+        );
+    }
+
+    /// iamacoffeepot/aether#1390: a config too large for the inline window
+    /// delivered to a guest with NO `mail_scratch_reserve` export is a clean boot
+    /// error, not a trap — the guard fires before the write even though the
+    /// 80-page guest has room for the bytes.
+    #[test]
+    fn instantiate_large_config_without_reserve_returns_clean_error() {
+        let payload = vec![0u8; MAX_CONFIG_PAYLOAD_BYTES + 1];
+        // `Component` is not `Debug`, so match rather than `expect_err`.
+        let Err(err) = try_instantiate_with_config(WAT_INIT_CONFIG_NO_RESERVE, &payload) else {
+            panic!("large config without a reserve export must fail");
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no reserve buffer"),
+            "error should name the missing reserve buffer; got: {msg}",
+        );
     }
 
     #[test]

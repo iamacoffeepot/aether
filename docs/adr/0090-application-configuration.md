@@ -244,6 +244,22 @@ both paths). Init-time config is a chassis *push* into `init`, not a guest
 host-fn *pull*, so it stays consistent with ADR-0030's "guests don't host-fn-pull"
 stance.
 
+#### Config delivery routes by size, reusing the shared guest-heap reserve (#1390)
+
+The wire-encoded config bytes are written into the guest's linear memory before
+`init_with_config_p32(mailbox_id, ptr, len)`. The substrate routes that write by
+size, mirroring the mail path (#1337): a config at or below the fixed
+`CONFIG_OFFSET` window's `MAX_CONFIG_PAYLOAD_BYTES` cap lands inline at
+`CONFIG_OFFSET`; a larger config rides the same reusable guest-heap reserve buffer
+the large-mail path uses (`mail_scratch::reserve`), so a config that would overrun
+the low shadow-stack window is delivered heap-backed instead of clobbering the
+stack and trapping init. The reserve is a module-level guest allocator, ready
+right after instantiation and independent of the actor's `init`, and config use is
+temporally disjoint from mail use, so sharing the one buffer across the two paths
+is safe. A config past the absolute deliverable ceiling, or destined for a raw-FFI
+guest with no reserve export, is a **clean boot error** (`LoadResult::Err`) with a
+structured log — never a write or a trap.
+
 ## Consequences
 
 **Positive**
