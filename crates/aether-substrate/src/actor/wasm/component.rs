@@ -36,7 +36,7 @@ use crate::scheduler::pending_depth;
 // never need to coexist within the same wasm function activation.
 // Each fixed window is small (low shadow-stack region); a mail or config
 // payload too large for its window instead rides the reusable guest-heap
-// reserve buffer (`mail_scratch_reserve`, iamacoffeepot/aether#1337/#1390),
+// reserve buffer (`kind_scratch_reserve`, iamacoffeepot/aether#1337/#1390),
 // which is heap-backed and shared across the two temporally-disjoint paths.
 const MAIL_OFFSET: u32 = 1024;
 
@@ -48,7 +48,7 @@ const MAIL_SCRATCH_STACK_RESERVE: usize = 256 * 1024;
 /// Largest inbound payload (bytes) [`Component::deliver`] writes through the
 /// guest's fixed [`MAIL_OFFSET`] scratch window (iamacoffeepot/aether#1337). A
 /// payload at or below this takes the fast inline path; a larger one rides the
-/// reusable guest-heap buffer (`mail_scratch_reserve`, Phase 2) instead.
+/// reusable guest-heap buffer (`kind_scratch_reserve`, Phase 2) instead.
 ///
 /// `Memory::write` does not grow memory, and `MAIL_OFFSET` sits at the bottom
 /// of linear memory — inside the low stack region of the standard stack-first
@@ -75,7 +75,7 @@ const MAX_DELIVERABLE_MAIL_BYTES: usize = 64 << 20;
 /// the guest's fixed [`CONFIG_OFFSET`] scratch window (ADR-0090, iamacoffeepot/
 /// aether#1390). A config at or below this takes the fast inline path; a larger
 /// one rides the same reusable guest-heap buffer the mail path uses
-/// (`mail_scratch_reserve`) — config and mail are temporally disjoint (config at
+/// (`kind_scratch_reserve`) — config and mail are temporally disjoint (config at
 /// init, before any mail), so sharing the one buffer is safe.
 ///
 /// Sized exactly like [`MAX_MAIL_PAYLOAD_BYTES`] from `MAIL_OFFSET`: `CONFIG_OFFSET`
@@ -398,7 +398,7 @@ impl ComponentCtx {
 pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
 /// Sentinel [`Component::deliver`] returns when it refused to deliver an
-/// inbound because its payload exceeded the guest's `mail_scratch_ceiling`
+/// inbound because its payload exceeded the guest's `kind_scratch_ceiling`
 /// (iamacoffeepot/aether#1337). The mail was dropped (logged) without
 /// touching guest memory or invoking `receive`; the caller treats it as a
 /// non-error so the native dispatcher still discharges settlement.
@@ -464,7 +464,7 @@ pub struct Component {
     on_replace: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
     /// iamacoffeepot/aether#1337 Phase 2: the guest's
-    /// `mail_scratch_reserve_p32` export, used to deliver a payload larger
+    /// `kind_scratch_reserve_p32` export, used to deliver a payload larger
     /// than [`MAX_MAIL_PAYLOAD_BYTES`] into a reusable guest-heap buffer
     /// instead of the fixed [`MAIL_OFFSET`] scratch window. The same buffer
     /// carries an over-window init config (iamacoffeepot/aether#1390) —
@@ -472,7 +472,7 @@ pub struct Component {
     /// `None` for a guest too old to export it — such a guest drops oversize
     /// mail (Phase 1 disposition) and rejects an over-window config rather
     /// than risking an overrun.
-    mail_scratch_reserve: Option<TypedFunc<u32, u32>>,
+    kind_scratch_reserve: Option<TypedFunc<u32, u32>>,
     /// Mailbox id stamped at instantiate-time, replayed into `wire`
     /// and `unwire` calls. Same value the guest's `init` shim received.
     self_mailbox_id: u64,
@@ -540,12 +540,12 @@ impl Component {
         // routes a large config through it, mirroring `deliver`'s mail routing.
         // Present on macro-built guests (emitted by `export!`); absent on raw-FFI
         // guests, which then can't take an over-window config. The reserve
-        // (`mail_scratch::reserve`) is a module-level guest allocator, ready right
+        // (`kind_scratch::reserve`) is a module-level guest allocator, ready right
         // after instantiation and independent of the actor's `init`, so calling it
         // during `instantiate` before `init` is valid; config use is temporally
         // disjoint from mail use, so sharing the one buffer is safe.
-        let mail_scratch_reserve = instance
-            .get_typed_func::<u32, u32>(&mut store, "mail_scratch_reserve_p32")
+        let kind_scratch_reserve = instance
+            .get_typed_func::<u32, u32>(&mut store, "kind_scratch_reserve_p32")
             .ok();
         // Wasm32 ABI carries `u32` byte lengths; config bytes are
         // bounded by guest memory size (well below `u32::MAX`).
@@ -584,7 +584,7 @@ impl Component {
                     "guest init config of {} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
                     config_bytes.len(),
                 )));
-            } else if let Some(reserve) = &mail_scratch_reserve {
+            } else if let Some(reserve) = &kind_scratch_reserve {
                 let ptr = reserve.call(&mut store, config_len)?;
                 memory.write(&mut store, ptr as usize, config_bytes)?;
                 ptr
@@ -592,7 +592,7 @@ impl Component {
                 Self::log_oversize_config(
                     &store,
                     config_bytes.len(),
-                    "guest exports no mail_scratch_reserve buffer (raw-FFI guest)",
+                    "guest exports no kind_scratch_reserve buffer (raw-FFI guest)",
                 );
                 return Err(wasmtime::Error::msg(format!(
                     "guest init config of {} bytes exceeds the {MAX_CONFIG_PAYLOAD_BYTES}-byte inline window and the guest exports no reserve buffer",
@@ -667,7 +667,7 @@ impl Component {
             unwire,
             on_replace,
             on_rehydrate,
-            mail_scratch_reserve,
+            kind_scratch_reserve,
             self_mailbox_id: mailbox_id,
         })
     }
@@ -744,7 +744,7 @@ impl Component {
         // substrate abort). Route by size:
         //   - small (<= MAX_MAIL_PAYLOAD_BYTES): fast inline write at MAIL_OFFSET.
         //   - larger (<= MAX_DELIVERABLE_MAIL_BYTES): a reusable guest-heap
-        //     buffer via `mail_scratch_reserve` — guest-owned, no overrun.
+        //     buffer via `kind_scratch_reserve` — guest-owned, no overrun.
         //   - beyond that, or no buffer export (raw-FFI guest): drop loudly.
         // A drop returns `Ok` without invoking `receive`, so the trampoline's
         // `forward_to_wasm` returns normally and the native dispatcher
@@ -760,13 +760,13 @@ impl Component {
         } else if payload_len > MAX_DELIVERABLE_MAIL_BYTES {
             self.log_dropped_oversize(mail, payload_len, "exceeds the absolute mail-size bound");
             return Ok(DISPATCH_DROPPED_OVERSIZE);
-        } else if let Some(reserve) = &self.mail_scratch_reserve {
+        } else if let Some(reserve) = &self.kind_scratch_reserve {
             reserve.call(&mut self.store, byte_len)?
         } else {
             self.log_dropped_oversize(
                 mail,
                 payload_len,
-                "guest exports no mail_scratch_reserve buffer (raw-FFI guest)",
+                "guest exports no kind_scratch_reserve buffer (raw-FFI guest)",
             );
             return Ok(DISPATCH_DROPPED_OVERSIZE);
         };
@@ -1067,7 +1067,7 @@ mod tests {
     "#;
 
     /// iamacoffeepot/aether#1337 Phase 2: fixture that exports
-    /// `mail_scratch_reserve_p32` (returning a fixed high offset, standing in
+    /// `kind_scratch_reserve_p32` (returning a fixed high offset, standing in
     /// for the reusable heap buffer) and a `receive_p32` that records the
     /// pointer it was handed at offset 16 — so a test can prove a large payload
     /// routes through the reserve pointer rather than `MAIL_OFFSET`. 80 pages
@@ -1075,7 +1075,7 @@ mod tests {
     const WAT_WITH_SCRATCH_BUFFER: &str = r#"
         (module
             (memory (export "memory") 80)
-            (func (export "mail_scratch_reserve_p32") (param i32) (result i32)
+            (func (export "kind_scratch_reserve_p32") (param i32) (result i32)
                 i32.const 2000000)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 16
@@ -1139,7 +1139,7 @@ mod tests {
     "#;
 
     /// iamacoffeepot/aether#1390: a guest exporting BOTH `init_with_config_p32`
-    /// and `mail_scratch_reserve_p32`. The reserve returns a fixed high offset
+    /// and `kind_scratch_reserve_p32`. The reserve returns a fixed high offset
     /// (`2_000_000`) standing in for the reusable heap buffer; `init_with_config_p32`
     /// stamps the same `(mailbox_id, config_ptr, config_len)` triple `WAT_INIT_WITH_CONFIG`
     /// does and copies the first two config bytes — so a test can prove a large
@@ -1151,7 +1151,7 @@ mod tests {
             (memory (export "memory") 80)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "mail_scratch_reserve_p32") (param i32) (result i32)
+            (func (export "kind_scratch_reserve_p32") (param i32) (result i32)
                 i32.const 2000000)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
                 ;; *(u32*)200 = low32(mailbox_id)
@@ -1193,7 +1193,7 @@ mod tests {
     "#;
 
     /// iamacoffeepot/aether#1390: a guest exporting `init_with_config_p32` but
-    /// NO `mail_scratch_reserve_p32`. 80 pages so a large config would *fit*
+    /// NO `kind_scratch_reserve_p32`. 80 pages so a large config would *fit*
     /// linear memory — the rejection must come from the missing reserve export,
     /// not a memory-bound trap. Stamps the same triple so a test could inspect
     /// it on the fast path (it is never reached for the oversize case).
@@ -1435,7 +1435,7 @@ mod tests {
     }
 
     /// iamacoffeepot/aether#1390: a config too large for the inline window but
-    /// within the deliverable bound rides the guest's `mail_scratch_reserve`
+    /// within the deliverable bound rides the guest's `kind_scratch_reserve`
     /// buffer — `init_with_config_p32` is handed the reserve pointer (not
     /// `CONFIG_OFFSET`) and the config bytes round-trip to it.
     #[test]
@@ -1478,7 +1478,7 @@ mod tests {
     }
 
     /// iamacoffeepot/aether#1390: a config too large for the inline window
-    /// delivered to a guest with NO `mail_scratch_reserve` export is a clean boot
+    /// delivered to a guest with NO `kind_scratch_reserve` export is a clean boot
     /// error, not a trap — the guard fires before the write even though the
     /// 80-page guest has room for the bytes.
     #[test]
@@ -1597,7 +1597,7 @@ mod tests {
 
     /// iamacoffeepot/aether#1337 Phase 2: a payload too large for the inline
     /// window but within the deliverable bound is carried through the guest's
-    /// `mail_scratch_reserve` buffer — `receive` runs (rc 0) and is handed the
+    /// `kind_scratch_reserve` buffer — `receive` runs (rc 0) and is handed the
     /// pointer the reserve export returned, not `MAIL_OFFSET`.
     #[test]
     fn deliver_routes_large_payload_through_reserve_buffer() {
@@ -1614,7 +1614,7 @@ mod tests {
         );
     }
 
-    /// A guest that exports no `mail_scratch_reserve` (raw-FFI, pre-Phase-2)
+    /// A guest that exports no `kind_scratch_reserve` (raw-FFI, pre-Phase-2)
     /// drops an over-inline-window payload cleanly rather than trapping on the
     /// write — the guard fires before `Memory::write`, regardless of guest
     /// memory size (single-page fixture here).

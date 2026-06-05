@@ -251,7 +251,7 @@ The wire-encoded config bytes are written into the guest's linear memory before
 size, mirroring the mail path (#1337): a config at or below the fixed
 `CONFIG_OFFSET` window's `MAX_CONFIG_PAYLOAD_BYTES` cap lands inline at
 `CONFIG_OFFSET`; a larger config rides the same reusable guest-heap reserve buffer
-the large-mail path uses (`mail_scratch::reserve`), so a config that would overrun
+the large-mail path uses (`kind_scratch::reserve`), so a config that would overrun
 the low shadow-stack window is delivered heap-backed instead of clobbering the
 stack and trapping init. The reserve is a module-level guest allocator, ready
 right after instantiation and independent of the actor's `init`, and config use is
