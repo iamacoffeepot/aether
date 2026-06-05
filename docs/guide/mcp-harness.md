@@ -1,6 +1,6 @@
 # The MCP harness
 
-> Governing ADR: **ADR-0089** (the tunnel), over the per-subsystem ADRs the tools
+> **Governing ADR:** [ADR-0089](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0089-mcp-hub-lifecycle-tunnel.md) (the tunnel), over the per-subsystem ADRs the tools
 > front. The harness is **stable in shape** but its tools evolve — so treat this
 > page as the map and the mental model, not a parameter reference. Each tool's
 > exact arguments live in its own schema, which your MCP client shows you live;

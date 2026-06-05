@@ -1,13 +1,13 @@
 # Concurrency & blocking
 
-> Governing ADRs: **ADR-0087** (the blob dispatch model + scheduler), **ADR-0093**
-> (the hold-until-resolve offload primitive), **ADR-0080** (settlement). The
+> **Governing ADRs:** [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) (the blob dispatch model + scheduler), [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)
+> (the hold-until-resolve offload primitive), [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) (settlement). The
 > *contracts* on this page — single-threaded actors, per-recipient FIFO, no
 > blocking — are **stable**. The scheduler *internals* that enforce them (the
 > per-actor mail ring, blob formation, the cursor-shared cooperative drain) are
 > **live and still being tuned** — a run of perf PRs through mid-2026 reshaped
 > them — so treat this section as the *shape*, not a spec, and read
-> `aether-substrate` (and ADR-0087) for the current mechanism. Build on the
+> `aether-substrate` (and [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) for the current mechanism. Build on the
 > contracts, not the internals.
 
 The invariants page states three contracts as rules: an actor is single-threaded
@@ -19,7 +19,7 @@ blocking when a handler needs to wait.
 ## The model: cooperative scheduling
 
 Actors don't each own a thread. There are far more actors than worker threads,
-and the pool multiplexes them on demand (ADR-0087) — no actor is pinned to a
+and the pool multiplexes them on demand ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — no actor is pinned to a
 core. And the thing the pool actually hands around is not a message, nor "an
 actor," but a **blob**.
 
@@ -76,7 +76,7 @@ to reply, and B's mail is sitting in a queue behind the very worker you're
 holding, neither of you ever makes progress.
 
 This is history, not hypothetical. The engine once had a synchronous `wait_reply`
-primitive (ADR-0042). Once dispatch became pool-only — the `Dedicated`
+primitive ([ADR-0042](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0042-synchronous-mail-wait.md)). Once dispatch became pool-only — the `Dedicated`
 per-actor-thread opt-in was removed (#1187) — an in-handler `wait_reply` could
 park a shared worker and deadlock if the awaited reply needed that worker. It was
 a latent footgun with no users, so it was retired (#1190). There is deliberately
@@ -93,14 +93,14 @@ send the request, *return* from the handler (freeing the worker), and handle the
 reply when it arrives as a *separate* mail in a later handler call. Correlation
 survives across turns — a handler can stash the correlation id of its send
 (`prev_correlation`) and match it against the inbound reply's id, so multiple
-in-flight requests don't get confused (the surviving half of ADR-0042). Every
+in-flight requests don't get confused (the surviving half of [ADR-0042](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0042-synchronous-mail-wait.md)). Every
 request/reply in the engine works this way: `aether.fs.read` →
 `…read_result`, reply-to-sender, and the rest.
 
 **2. Blocking I/O or slow off-thread work → `dispatch_blocking` + `#[handler(task)]`.**
 When a (native) capability must make a genuinely blocking call — a multi-second
 provider request, a subprocess — it hands the work *off* the scheduler thread
-(ADR-0093):
+([ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)):
 
 ```rust
 #[handler]
@@ -145,7 +145,7 @@ causal chain open*:
 
 The hold is what stops a deferred reply from settling early: if a handler kicks
 off work that replies later, the chain must stay open until that last send, or a
-waiter is told "done" before the reply arrives (ADR-0080 §12).
+waiter is told "done" before the reply arrives ([ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) §12).
 `dispatch_blocking` acquires the hold *eagerly* — before the handler returns —
 and `resolve` releases it *after* the reply, so "reply before release" is
 structural rather than something you remember to order. (A hand-rolled drain that
@@ -161,7 +161,7 @@ real OS thread, deliberately: it's blocking I/O that *should* live off the
 scheduler, isolated so it can't pin a pool worker. That's the **exception** — a
 handful of infrastructure capabilities — not how actors run, and not something to
 reach for from ordinary actor logic (use one of the three shapes above). It's a
-cap-local spawn, scoped tightly to the blocking call (ADR-0050).
+cap-local spawn, scoped tightly to the blocking call ([ADR-0050](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0050-llm-completion-sink.md)).
 
 ## Where to read more
 
