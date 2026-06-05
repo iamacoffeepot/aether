@@ -1,5 +1,12 @@
 # The MCP harness
 
+> Governing ADR: **ADR-0089** (the tunnel), over the per-subsystem ADRs the tools
+> front. The harness is **stable in shape** but its tools evolve — so treat this
+> page as the map and the mental model, not a parameter reference. Each tool's
+> exact arguments live in its own schema, which your MCP client shows you live;
+> that schema is the source of truth and is more current than any prose (this page
+> included). When the two disagree, believe the tool.
+
 An agent doesn't link against the engine or call it in-process. It drives a
 *running* engine from the outside, over **MCP** (Model Context Protocol): each
 tool call becomes mail against a live substrate, or a query about one. This is the
@@ -7,13 +14,6 @@ concrete form of the "agent in a harness" idea — the engine runs, the agent po
 it, watches what happens, and adjusts. If you're an agent reading this guide, this
 is the page that turns everything else into something you can actually *do*: the
 other pages tell you what to send; this one is how you send it.
-
-> Governing ADR: **ADR-0089** (the tunnel), over the per-subsystem ADRs the tools
-> front. The harness is **stable in shape** but its tools evolve — so treat this
-> page as the map and the mental model, not a parameter reference. Each tool's
-> exact arguments live in its own schema, which your MCP client shows you live;
-> that schema is the source of truth and is more current than any prose (this page
-> included). When the two disagree, believe the tool.
 
 ## The shape: three processes and a fleet
 

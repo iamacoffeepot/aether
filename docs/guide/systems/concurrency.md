@@ -1,11 +1,5 @@
 # Concurrency & blocking
 
-The invariants page states three contracts as rules: an actor is single-threaded
-from its own perspective, mail is per-recipient FIFO, and a handler must never
-block. This page is the machinery behind them — how the scheduler makes the
-first two hold, why the third is non-negotiable, and what you do *instead* of
-blocking when a handler needs to wait.
-
 > Governing ADRs: **ADR-0087** (the blob dispatch model + scheduler), **ADR-0093**
 > (the hold-until-resolve offload primitive), **ADR-0080** (settlement). The
 > *contracts* on this page — single-threaded actors, per-recipient FIFO, no
@@ -15,6 +9,12 @@ blocking when a handler needs to wait.
 > them — so treat this section as the *shape*, not a spec, and read
 > `aether-substrate` (and ADR-0087) for the current mechanism. Build on the
 > contracts, not the internals.
+
+The invariants page states three contracts as rules: an actor is single-threaded
+from its own perspective, mail is per-recipient FIFO, and a handler must never
+block. This page is the machinery behind them — how the scheduler makes the
+first two hold, why the third is non-negotiable, and what you do *instead* of
+blocking when a handler needs to wait.
 
 ## The model: cooperative scheduling
 

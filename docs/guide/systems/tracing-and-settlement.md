@@ -1,5 +1,14 @@
 # Tracing & settlement
 
+> **Governing ADRs:** [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) (mail lineage + settlement detection),
+> [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md) (settlement decoupled from the trace stream),
+> [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md) (hold-until-resolve dispatch),
+> [ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md) (the owned-dispatch obligation guard). The **contract**
+> — what "settled" means and what you must uphold for it — is **stable**. The
+> **mechanism** that delivers it (the emit-time per-root counter, the per-actor
+> trace rings, the guided walk that rebuilds a tree) is **settling**, so this page
+> documents the contract and defers the internals to those ADRs.
+
 Send one mail and the handler that receives it may send more, and those handlers
 more again — a single message fans out into a cascade of downstream work.
 **Settlement** is the engine's answer to the question that cascade raises: *has
@@ -13,15 +22,6 @@ before it reads a frame or sends the next thing, and on the trace tree to see
 *why* an exchange was slow or *where* a chain stalled. An author writing a
 capability or component needs the model because a handler that replies late owes
 its chain an obligation — miss it and a caller hangs with nothing named.
-
-> **Governing ADRs:** [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) (mail lineage + settlement detection),
-> [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md) (settlement decoupled from the trace stream),
-> [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md) (hold-until-resolve dispatch),
-> [ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md) (the owned-dispatch obligation guard). The **contract**
-> — what "settled" means and what you must uphold for it — is **stable**. The
-> **mechanism** that delivers it (the emit-time per-root counter, the per-actor
-> trace rings, the guided walk that rebuilds a tree) is **settling**, so this page
-> documents the contract and defers the internals to those ADRs.
 
 ## Why it exists
 

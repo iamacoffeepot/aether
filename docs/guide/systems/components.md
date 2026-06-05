@@ -1,5 +1,12 @@
 # Components & lifecycle
 
+> Governing ADRs: **ADR-0074** (one actor model, two hosts), **ADR-0024** (the
+> dual-target FFI convention), **ADR-0028 / ADR-0033** (the kind + handler
+> manifests in the wasm), **ADR-0090** (boot config), **ADR-0022 / ADR-0038**
+> (in-place hot-swap). The authoring and loading surface here is **stable** — it's
+> what every reference component (`aether-camera`, `aether-mesh-viewer`) is built
+> on, and the signatures were read from the current SDK.
+
 A **component** is the wasm host of an actor. The shared model — the `#[actor]`
 block, the `init` / `wire` / `unwire` lifecycle, handlers, addressing by type — is
 the [actor model](../foundations/actor-model.md), and a component is one of its two hosts: an actor
@@ -11,13 +18,6 @@ against `NativeActor`.
 This page is the wasm-specific machinery — read the [actor model](../foundations/actor-model.md)
 page first for how you actually *write* one; everything below is what's different
 because the actor lives across an FFI boundary and is loaded into a running engine.
-
-> Governing ADRs: **ADR-0074** (one actor model, two hosts), **ADR-0024** (the
-> dual-target FFI convention), **ADR-0028 / ADR-0033** (the kind + handler
-> manifests in the wasm), **ADR-0090** (boot config), **ADR-0022 / ADR-0038**
-> (in-place hot-swap). The authoring and loading surface here is **stable** — it's
-> what every reference component (`aether-camera`, `aether-mesh-viewer`) is built
-> on, and the signatures were read from the current SDK.
 
 ## `export!` and the FFI boundary
 
