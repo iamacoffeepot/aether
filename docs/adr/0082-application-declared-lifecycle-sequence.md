@@ -1,9 +1,22 @@
 # ADR-0082: Application-declared lifecycle sequence
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-19
 - **Amends:** ADR-0074 §Decision 5 (retires `FRAME_BARRIER`)
 - **Supersedes:** iamacoffeepot/aether#687 (closed)
+
+> **Amendment (2026-06-05).** Status moved Proposed → Accepted. The decision
+> shipped: `LifecycleDriverCapability`, the `LifecycleGraph` builder,
+> settlement-gated advance, and the `aether.lifecycle.*` stage kinds are wired
+> into the desktop, headless, and test_bench chassis, and §6's `FRAME_BARRIER` +
+> `drain_frame_bound_or_abort` retired as designed. One implementation point
+> departs from the body: §12 prescribes subscribing to `Tick` on the lifecycle
+> driver, but a component subscribes through `InputCapability` —
+> `ctx.actor::<InputCapability>().subscribe(Tick::ID, me)` — and the driver relays
+> its broadcast `Tick` to `aether.input` via the chassis's initial-subscriber
+> wiring. The driver's own `LifecycleSubscribe` mechanism exists and carries that
+> relay rather than direct component subscription; read §12's subscribe site
+> accordingly.
 
 ## Context
 
