@@ -41,14 +41,17 @@ entirely without the caller noticing.
 **One mailbox, four operations.** Everything addresses the `aether.fs` mailbox.
 Each request kind pairs with a reply kind that names the same operation:
 
-| Request | Fields | Reply | On success |
+| Request | Fields | Reply | `Ok` adds |
 |---|---|---|---|
 | `aether.fs.read` | `namespace`, `path` | `aether.fs.read_result` | `bytes` |
-| `aether.fs.write` | `namespace`, `path`, `bytes` | `aether.fs.write_result` | (no payload) |
-| `aether.fs.delete` | `namespace`, `path` | `aether.fs.delete_result` | (no payload) |
+| `aether.fs.write` | `namespace`, `path`, `bytes` | `aether.fs.write_result` | — (ack) |
+| `aether.fs.delete` | `namespace`, `path` | `aether.fs.delete_result` | — (ack) |
 | `aether.fs.list` | `namespace`, `prefix` | `aether.fs.list_result` | `entries` |
 
-Each reply is an `Ok` / `Err` enum; the `Err` arm carries an `FsError`.
+Each reply is an `Ok` / `Err` enum. Every arm — including the bare `write` /
+`delete` acks — echoes the request's `namespace` + `path` (or `prefix`); the
+column above is what `Ok` adds on top of that echo. The `Err` arm replaces the
+added data with an `FsError`.
 
 **Three namespaces.** A request names one by its short name — `save`, not
 `save://` (the double-colon form is only a convention in prose):
@@ -80,12 +83,15 @@ path under the namespace root — an empty `prefix` lists the root — and the r
 missing directory replies `NotFound`. The names come back bare, so you rebuild a
 path by joining an entry back under the prefix you listed.
 
-**Replies correlate by what they echo, not by an id.** Every reply echoes the
-request's `namespace` and `path` (or `prefix` for `list`), and the reply kind
-itself names the operation. A caller matches a reply to its request on those two
-things — no correlation id, no pending-operation table, no dependence on the order
-replies arrive. The one omission is deliberate: a `write` reply does *not* echo
-the bytes, so persisting a megabyte still produces a small reply.
+**Replies correlate by what they echo, not by an id.** A handler dispatches on
+the reply *kind*, which on its own erases *which* request a given reply answers —
+so every reply echoes the request's `namespace` and `path` (or `prefix` for
+`list`) to restore that. A caller matches a reply to its request on the kind plus
+those echoed fields — no correlation id, no pending-operation table, no dependence
+on the order replies arrive. For `write` and `delete`, whose `Ok` arms add nothing
+else, that echo *is* the result: the ack tells you a specific path landed or was
+removed. The one deliberate omission is the write bytes — a `write` reply doesn't
+echo them back, so persisting a megabyte still produces a small reply.
 
 **`FsError` is one of four shapes.** `NotFound` (no such file or directory);
 `Forbidden` (a read-only namespace, or a path that tried to escape its root);
