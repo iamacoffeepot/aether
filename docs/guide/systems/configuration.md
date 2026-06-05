@@ -16,9 +16,9 @@ same way everywhere. And it's **per-spawn**: two substrates launched from one
 shell can be told apart — one with a capability enabled under key A, another with
 it off — the axis the "substrate as a general application host" direction needs.
 
-If you drive the engine over MCP, configuration is per engine: you hand
+When you drive the engine over MCP, configuration is per engine: you hand
 `spawn_substrate` the arguments for one substrate and give a loaded component its
-own typed config, independent of any other engine. If you author a capability or
+own typed config, independent of any other engine. When you author a capability or
 component, you declare each knob once on its config struct — that single
 declaration parses the value, supplies its default, validates it, and lists it
 for discovery.
