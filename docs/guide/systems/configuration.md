@@ -1,14 +1,12 @@
 # Configuration
 
 Configuration is how a knob's value gets decided before the engine runs — the
-worker-pool size, an HTTP allowlist, a provider's API key, the tick rate. Two
-things make it worth a page of its own rather than a footnote. The values come
-from a **layered stack** of sources (defaults, environment, command-line
+worker-pool size, an HTTP allowlist, a provider's API key, the tick rate. Values
+come from a **layered stack** of sources (defaults, environment, command-line
 arguments) with a defined precedence, declared once per knob and resolved the
-same way everywhere. And configuration is **per-spawn**: two substrates launched
-from one shell can be told apart — one with a capability enabled under key A,
-another with it off — which is the axis the "substrate as a general application
-host" direction needs.
+same way everywhere. And it's **per-spawn**: two substrates launched from one
+shell can be told apart — one with a capability enabled under key A, another with
+it off — the axis the "substrate as a general application host" direction needs.
 
 If you drive the engine over MCP, the part that matters most is that
 configuration is no longer one frozen, fleet-wide environment: you can hand
