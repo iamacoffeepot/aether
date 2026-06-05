@@ -14,10 +14,10 @@ before it reads a frame or sends the next thing, and on the trace tree to see
 capability or component needs the model because a handler that replies late owes
 its chain an obligation — miss it and a caller hangs with nothing named.
 
-> Governing ADRs: **[ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md)** (mail lineage + settlement detection),
-> **[ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)** (settlement decoupled from the trace stream),
-> **[ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)** (hold-until-resolve dispatch),
-> **[ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md)** (the owned-dispatch obligation guard). The **contract**
+> **Governing ADRs:** [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) (mail lineage + settlement detection),
+> [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md) (settlement decoupled from the trace stream),
+> [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md) (hold-until-resolve dispatch),
+> [ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md) (the owned-dispatch obligation guard). The **contract**
 > — what "settled" means and what you must uphold for it — is **stable**. The
 > **mechanism** that delivers it (the emit-time per-root counter, the per-actor
 > trace rings, the guided walk that rebuilds a tree) is **settling**, so this page
@@ -124,23 +124,61 @@ you write: discharge what ends with you, transfer what you pass on.
 
 The same lineage keys that drive settlement — each mail's id, its parent, its
 root — also reconstruct the full causal graph. A trace tree is a set of **mail
-nodes**; each node names who sent the mail, who received it, the kind, and three
-timestamps: `t_sent`, `t_received` (handler entry), and `t_finished` (handler
-exit). You walk a chain by following `parent` edges down from the root, and the
-timestamps break each hop into its queue latency (`t_received − t_sent`) and its
-handler duration (`t_finished − t_received`) — enough to find the slow hop in a
-cascade without instrumenting anything. A node still missing `t_finished` is mail
-that hasn't finished handling yet.
+nodes**; each names who sent the mail, who received it, the kind, and a series of
+timestamps sampled as the mail moves through the engine. You walk a chain by
+following `parent` edges down from the root, and the timestamps localize the slow
+hop in a cascade without instrumenting anything. Here is where each one is taken,
+for a single mail:
 
-Tracing and settlement are deliberately **decoupled** (ADR-0086), because they
-have opposite requirements. Settlement is control-plane: exact, on the frame's
-critical path, and never allowed to lag or settle early. Tracing is observability:
-best-effort, off the critical path, kept in per-actor rings that wrap and drop
-their oldest nodes under load. The consequence worth holding onto is that a trace
-tree can be honestly *incomplete* — it self-reports where it was truncated —
-while the settled signal is never wrong. So don't reach for the tree to decide
-whether work is done; that's settlement's job. Reach for it to see *what*
-happened and *how long* it took.
+```text
+●  t_construct_start    the sender's outbound blob opens (its first buffered send)
+│     construct         the rest of the sending handler runs, buffering more sends
+●  t_sent               flush — at the handler boundary the blob is routed
+│     queued            wakeup + scheduling: waiting for a worker to take the blob
+●  t_enqueue            a worker picks up the blob (enters its run cycle)
+│     drain             earlier mail in the blob is dispatched ahead of this one
+●  t_received           this mail's handler is entered
+│     handler           the handler runs
+●  t_finished           the handler returns
+```
+
+The two spans you reach for most are **queue latency** — how long the mail waited
+before a handler ran it — and **handler duration** (`t_finished − t_received`).
+The finer **queued** / **drain** split says *why* a hop waited: scheduling
+pressure (no worker free yet) versus a long serial fan-out dispatched ahead of it
+in the same blob (the blob model is on [Concurrency & blocking](concurrency.md)).
+A node still missing `t_finished` is mail that hasn't finished handling yet.
+
+**Where it lives, and how to read it.** Trace events aren't kept centrally. Each
+actor holds its own **trace ring** — the same per-actor storage logs use
+(ADR-0081 / ADR-0086) — recording the events that passed through it. A tree is
+rebuilt by a **guided walk**: start at the root's sender, read its ring
+(`aether.trace.tail`, the sibling of the `aether.log.tail` behind `actor_logs`),
+follow each onward `Sent` to the recipient's ring, and stitch. `send_mail_traced`
+runs that walk and hands back the stitched tree — and over MCP that's the surface,
+since there's no standalone per-actor trace tool the way `actor_logs` exposes the
+log rings. The tree it returns carries `t_construct_start`, `t_sent`,
+`t_received`, and `t_finished` per node; the `t_enqueue` pickup point and the
+ready-queue depth live in the rings but aren't surfaced there, so over MCP queue
+latency reads as one `t_sent → t_received` span.
+
+Tracing and settlement are deliberately **decoupled** (ADR-0086) because they have
+opposite requirements. Settlement is control-plane: exact, on the frame's critical
+path, never allowed to lag or settle early. Tracing is observability: best-effort
+and off the critical path, so it can lose data without ever affecting whether or
+when a chain settles. The line to hold onto is that the settled signal is never
+wrong while a trace tree can be honestly incomplete — so don't reach for the tree
+to decide whether work is *done*; that's settlement's job. Reach for it to see
+*what* happened and *how long* it took.
+
+**Gotcha — a trace is a bounded window, not a durable log.** The rings wrap: under
+load, or simply with enough elapsed time, an actor's oldest entries are
+overwritten. Because overwriting any one node leaves a hole its tree can't be
+faithfully rebuilt from, the whole chain is dropped rather than served partial —
+and a chain still in flight when its entries lap is dropped with a warning. A tree
+self-reports where it was truncated, but old or high-volume chains can come back
+incomplete or not at all. Read a trace promptly after the work; don't count on
+reconstructing something from minutes ago or buried under a burst.
 
 ## How an agent uses it
 
