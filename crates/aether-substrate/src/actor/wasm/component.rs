@@ -394,7 +394,7 @@ pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 const STATE_OFFSET: u32 = 8192;
 
 /// Offset the substrate writes config bytes to before calling
-/// `init_v2_p32` (ADR-0090). Sits after `STATE_OFFSET` so the three
+/// `init_with_config_p32` (ADR-0090). Sits after `STATE_OFFSET` so the three
 /// scratch regions (mail / state / config) never overlap. Config is
 /// written once at instantiate time, before any other host fn runs.
 const CONFIG_OFFSET: u32 = 16384;
@@ -457,11 +457,11 @@ impl Component {
     ///
     /// ADR-0090 (issue 1256): `config_bytes` is the wire-encoded
     /// `<FfiActor::Config as Kind>` payload threaded through to the
-    /// guest's `init_v2_p32` shim. Pass `&[]` for actors whose
+    /// guest's `init_with_config_p32` shim. Pass `&[]` for actors whose
     /// `Config = ()` or for the back-compat path (legacy `init` does
     /// not consume the bytes). The substrate writes the bytes at
     /// `CONFIG_OFFSET` in the guest's linear memory and calls
-    /// `init_v2_p32(mailbox_id, CONFIG_OFFSET, config_bytes.len())`.
+    /// `init_with_config_p32(mailbox_id, CONFIG_OFFSET, config_bytes.len())`.
     pub fn instantiate(
         engine: &Engine,
         linker: &Linker<ComponentCtx>,
@@ -484,11 +484,11 @@ impl Component {
         // so raw-FFI components predating the Phase 2 ABI still load —
         // they just don't get auto-subscribe, which they never did.
         //
-        // ADR-0090 (issue 1256): the substrate probes `init_v2_p32`
+        // ADR-0090 (issue 1256): the substrate probes `init_with_config_p32`
         // first (the post-#1256 ABI that carries config bytes), then
         // the `(u64) -> u32` shape (Phase 2), then the legacy `()` shape.
         // The order is deliberate — a `#[actor]`-built guest exports
-        // both `init_v2_p32` and the legacy `init(u64)`, so a substrate
+        // both `init_with_config_p32` and the legacy `init(u64)`, so a substrate
         // that probes `init` first would silently skip the config path.
         //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
@@ -503,8 +503,8 @@ impl Component {
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
         let config_len = config_bytes.len() as u32;
-        let init_rc = if let Ok(init_v2) =
-            instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_v2_p32")
+        let init_rc = if let Ok(init_with_config) =
+            instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_with_config_p32")
         {
             // Write config bytes (even an empty slice — the guest's
             // shim still receives the `(ptr, 0)` pair and handles the
@@ -512,7 +512,7 @@ impl Component {
             if !config_bytes.is_empty() {
                 memory.write(&mut store, CONFIG_OFFSET as usize, config_bytes)?;
             }
-            Some(init_v2.call(&mut store, (mailbox_id, CONFIG_OFFSET, config_len))?)
+            Some(init_with_config.call(&mut store, (mailbox_id, CONFIG_OFFSET, config_len))?)
         } else if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
             // Legacy Phase 2 fallback. Discards config bytes — only
             // safe for `Config = ()`. A typed-config guest that lands
@@ -913,7 +913,7 @@ mod tests {
     }
 
     /// ADR-0090 helper: instantiate with explicit config bytes so a
-    /// WAT-level `init_v2_p32` can inspect what the host wrote at
+    /// WAT-level `init_with_config_p32` can inspect what the host wrote at
     /// `CONFIG_OFFSET`.
     fn instantiate_with_config(wat: &str, config_bytes: &[u8]) -> Component {
         let engine = Engine::default();
@@ -977,7 +977,7 @@ mod tests {
                 i32.const 0))
     "#;
 
-    /// ADR-0090 (issue 1256): `init_v2_p32` shim that stamps the host-
+    /// ADR-0090 (issue 1256): `init_with_config_p32` shim that stamps the host-
     /// provided `(config_ptr, config_len)` triple at known offsets so
     /// tests can assert the substrate wrote bytes at `CONFIG_OFFSET`
     /// and threaded the length through. Layout written by the shim:
@@ -987,12 +987,12 @@ mod tests {
     ///   offset 208  : `config_len`
     ///   offset 212  : first byte of config (when `config_len` >= 1)
     ///   offset 213  : second byte of config (when `config_len` >= 2)
-    const WAT_INIT_V2: &str = r#"
+    const WAT_INIT_WITH_CONFIG: &str = r#"
         (module
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "init_v2_p32") (param i64 i32 i32) (result i32)
+            (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
                 ;; *(u32*)200 = low32(mailbox_id)
                 i32.const 200
                 local.get 0
@@ -1194,14 +1194,14 @@ mod tests {
     }
 
     /// ADR-0090 (issue 1256): `Component::instantiate` writes
-    /// `config_bytes` at `CONFIG_OFFSET` and calls `init_v2_p32` with
+    /// `config_bytes` at `CONFIG_OFFSET` and calls `init_with_config_p32` with
     /// `(mailbox_id, CONFIG_OFFSET, len)`. The WAT shim stamps the
     /// triple at known offsets so this test can assert each leg
     /// without a real Kind decoder in scope.
     #[test]
-    fn init_v2_p32_threads_config_ptr_len_through() {
+    fn init_with_config_p32_threads_config_ptr_len_through() {
         let payload: &[u8] = &[0xAB, 0xCD, 0xEF, 0x12, 0x34];
-        let mut component = instantiate_with_config(WAT_INIT_V2, payload);
+        let mut component = instantiate_with_config(WAT_INIT_WITH_CONFIG, payload);
         // Mailbox id stamped: test ctx uses MailboxId(0), so low 32 bits are 0.
         assert_eq!(component.read_u32(200), 0);
         // config_ptr == CONFIG_OFFSET.
@@ -1221,12 +1221,12 @@ mod tests {
     }
 
     /// Companion: empty config (the trait-default `Config = ()` path)
-    /// still calls `init_v2_p32` with `(mailbox_id, CONFIG_OFFSET, 0)`.
+    /// still calls `init_with_config_p32` with `(mailbox_id, CONFIG_OFFSET, 0)`.
     /// No bytes are written to the scratch region but the shim still
     /// runs and stamps the triple.
     #[test]
-    fn init_v2_p32_empty_config_passes_zero_length() {
-        let mut component = instantiate_with_config(WAT_INIT_V2, &[]);
+    fn init_with_config_p32_empty_config_passes_zero_length() {
+        let mut component = instantiate_with_config(WAT_INIT_WITH_CONFIG, &[]);
         // Triple stamped, len == 0.
         assert_eq!(component.read_u32(200), 0);
         assert_eq!(component.read_u32(204), CONFIG_OFFSET);
