@@ -20,12 +20,13 @@ use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
 use aether_capabilities::gemini::GeminiConfigLayer;
 use aether_capabilities::http::HttpConfigLayer;
+use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
-    InputCapability, InputConfig, InventoryCapability, TcpCapability, fs::NamespaceRoots,
-    http::HttpConfig, trace::TraceDispatchCapability,
+    InputCapability, InputConfig, InventoryCapability, LifecycleConfig, TcpCapability,
+    fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Shutdown, Tick};
@@ -35,7 +36,6 @@ use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, dump_config, kno
 use aether_substrate::handle_store::{ENV_MAX_BYTES, PersistConfig, PersistConfigLayer};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::scheduler::SCHEDULER_KNOBS;
-use aether_substrate::{LifecycleDriverConfig, LifecycleGraph};
 use confique::Config as _;
 use confique::meta::Meta;
 
@@ -165,19 +165,18 @@ pub enum PersistOverride {
 /// the shape is structurally valid; the `expect` documents the
 /// invariant.
 #[must_use]
-pub fn tick_only_lifecycle_config() -> LifecycleDriverConfig<()> {
-    let graph = LifecycleGraph::<()>::builder()
-        .state::<Tick, _>(|()| Tick {})
+pub fn tick_only_lifecycle_config() -> LifecycleConfig {
+    let graph = LifecycleGraphData::builder()
+        .state::<Tick>()
         .next::<Tick>()
         .quit::<Shutdown>()
-        .terminal::<Shutdown, _>(|()| Shutdown {})
+        .terminal::<Shutdown>()
         .start::<Tick>()
         .build()
         .expect("tick-only lifecycle graph is structurally valid");
     let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
-    LifecycleDriverConfig {
+    LifecycleConfig {
         graph,
-        context: (),
         initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
     }
 }

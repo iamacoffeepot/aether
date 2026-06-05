@@ -60,6 +60,10 @@ pub mod input;
 // 1122). Serves the per-build name/template manifest + dynamic-instance
 // resolve over mail.
 pub mod inventory;
+// `aether.lifecycle` cap (ADR-0082). The bridged, non-generic capability
+// the chassis drives one frame at a time. Always-native via `#[bridge]`,
+// so a wasm component can address it by name.
+pub mod lifecycle;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod rpc;
@@ -112,6 +116,9 @@ pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
 pub use inventory::InventoryCapability;
+#[cfg(not(target_arch = "wasm32"))]
+pub use lifecycle::LifecycleConfig;
+pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
 // ADR-0050 `aether.gemini` cap (issue 1015).

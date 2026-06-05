@@ -18,6 +18,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, GeminiConfig,
     InputConfig, RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
@@ -26,7 +27,7 @@ use aether_capabilities::{
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
@@ -453,7 +454,7 @@ impl DesktopChassis {
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         builder.driver(driver).build()
     }

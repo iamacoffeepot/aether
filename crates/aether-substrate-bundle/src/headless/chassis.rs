@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     AnthropicConfig, ComponentHostConfig, GeminiConfig, HeadlessRenderCapability,
     HeadlessWindowCapability, InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots,
@@ -27,7 +28,7 @@ use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::handle_store::PersistConfig;
-use aether_substrate::{Chassis, LifecycleDriverCapability, SubstrateBoot};
+use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 use crate::chassis_common::{
@@ -334,7 +335,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleDriverCapability<()>>(tick_only_lifecycle_config());
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         builder.driver(driver).build()
     }
