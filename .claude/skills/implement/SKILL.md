@@ -194,12 +194,11 @@ Both caps trigger self-bounce to Plan with the budget breach noted. The `AuthBud
 The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
 
 ```bash
-gh issue edit <n> \
-  --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
-  --add-label "phase:<new>"
+gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled"
+gh issue edit <n> --add-label "phase:<new>"
 ```
 
-`--remove-label` ignores labels the issue doesn't carry, so this single line is safe on any transition — it strips whatever phase label was present and applies the new one (lowercased: `Phase=Ready` → `phase:ready`). This skill writes `Phase` in four places, each of which must reconcile the label: `Executing` (Execute step 1 + Refine-loop fix-push), `Refine` (Refine-loop fix-and-wait + done condition), `Bounced` (self-bounce on retry-cap / wall-clock / design discovery), and `Stalled` (build-env failure). `Done` carries no label — the merge that closes the issue retires the lifecycle.
+The remove and add are **two separate invocations** on purpose: a single `gh issue edit` with the target listed in both `--remove-label` and `--add-label` strips it and never re-adds it (the remove wins), so the issue ends up with no phase label on every real transition. Splitting the calls makes the add unconditional. `--remove-label` ignores labels the issue doesn't carry, so the first line is safe on any transition. This skill writes `Phase` in four places, each of which must reconcile the label: `Executing` (Execute step 1 + Refine-loop fix-push), `Refine` (Refine-loop fix-and-wait + done condition), `Bounced` (self-bounce on retry-cap / wall-clock / design discovery), and `Stalled` (build-env failure). `Done` carries no label — the merge that closes the issue retires the lifecycle.
 
 ## Failure modes
 
