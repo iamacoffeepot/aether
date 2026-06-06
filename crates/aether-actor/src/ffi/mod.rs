@@ -253,44 +253,61 @@ pub trait Replaceable: FfiActor {
     }
 }
 
-/// Reusable inbound Kind-payload scratch buffer (iamacoffeepot/aether#1337
-/// Phase 2).
+/// Generic guest allocator backing host→guest payload delivery (ADR-0095).
 ///
-/// The substrate delivers a small inbound payload through a fixed low-memory
-/// scratch offset, but a larger one — a whole file via `aether.fs.read_result`
-/// at runtime, or a large init config at instantiate time (iamacoffeepot/
-/// aether#1390) — would overrun that window. For those, the substrate calls the
-/// `kind_scratch_reserve_p32` export (emitted by [`crate::export!`]) to get a
-/// pointer into this guest-*heap*-owned buffer, writes the payload there, then
-/// calls the entry point (`receive` for mail, `init_with_config` for config).
-/// Because the buffer lives on the heap (not the fixed stack scratch) there is
-/// no overrun, and because it is a persistent `static` reused across payloads —
-/// grown to a high-water mark, never shrunk — there is no per-payload
-/// allocation churn (wasm has no GC, so a fresh alloc each time would force a
-/// matching host-driven free).
+/// The substrate writes every inbound payload — mail, init config, rehydrate
+/// state — into a region it obtains from this allocator, then calls the entry
+/// point (`receive` / `init_with_config` / `on_rehydrate`). The host owns no
+/// fixed offset into guest memory; the guest reports where its memory is, so
+/// delivery is independent of the guest's linear-memory layout.
+///
+/// The export is `cabi_realloc`-shaped (the Component Model canonical): one
+/// function that allocates (`old_ptr == 0`), grows possibly-relocating
+/// (`new_size > old_size`), or frees (`new_size == 0`). The substrate drives it
+/// under the run-token invariant — one small region allocated once and reused,
+/// one large region grown to fit, each consumed synchronously — and never frees
+/// (wasm has no `memory.shrink`, so a free reclaims nothing). Backed here by the
+/// Rust global allocator; a guest in any language supplies the same export
+/// however it likes.
 #[cfg(target_arch = "wasm32")]
-pub mod kind_scratch {
-    use alloc::vec::Vec;
+pub mod guest_alloc {
+    use alloc::alloc::{Layout, alloc, dealloc, realloc};
 
-    static mut BUFFER: Vec<u8> = Vec::new();
-
-    /// Ensure the buffer holds at least `min_len` bytes and return a pointer to
-    /// its start. The substrate writes exactly `min_len` bytes there and hands
-    /// the pointer to `receive`, all before the next `reserve`.
+    /// `cabi_realloc`-shaped reallocation over the global allocator.
+    ///
+    /// - `old_ptr == 0` — allocate `new_size` bytes, return the pointer.
+    /// - `new_size == 0` — free the `(old_ptr, old_size, align)` allocation,
+    ///   return null.
+    /// - otherwise — resize the allocation to `new_size`, returning the current
+    ///   pointer (which differs from `old_ptr` if the block was relocated).
     ///
     /// # Safety
-    /// The wasm guest is single-threaded, so there is no aliasing of `BUFFER`.
-    /// The returned pointer is valid until the next `reserve` call (which may
-    /// reallocate); the substrate uses it synchronously before reserving again.
-    pub unsafe fn reserve(min_len: usize) -> *mut u8 {
-        // SAFETY: single-threaded guest; sole access to BUFFER per the contract.
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUFFER) };
-        if buf.len() < min_len {
-            // Grows capacity (freeing the old allocation) only past the
-            // high-water mark; a smaller mail reuses the existing buffer.
-            buf.resize(min_len, 0);
+    /// `old_ptr` / `old_size` / `align` must describe a live allocation from a
+    /// prior call (or `0` / `0` for a fresh allocation), and `align` must be a
+    /// nonzero power of two. The guest is single-threaded, so there is no
+    /// aliasing.
+    pub unsafe fn realloc_bytes(
+        old_ptr: *mut u8,
+        old_size: usize,
+        align: usize,
+        new_size: usize,
+    ) -> *mut u8 {
+        // SAFETY (every branch): the caller upholds the layout contract above —
+        // `align` is a nonzero power of two so `from_size_align_unchecked` is
+        // sound, and the global allocator is the matching alloc/realloc/dealloc.
+        if new_size == 0 {
+            if !old_ptr.is_null() {
+                let layout = unsafe { Layout::from_size_align_unchecked(old_size, align) };
+                unsafe { dealloc(old_ptr, layout) };
+            }
+            return core::ptr::null_mut();
         }
-        buf.as_mut_ptr()
+        if old_ptr.is_null() {
+            let layout = unsafe { Layout::from_size_align_unchecked(new_size, align) };
+            return unsafe { alloc(layout) };
+        }
+        let old_layout = unsafe { Layout::from_size_align_unchecked(old_size, align) };
+        unsafe { realloc(old_ptr, old_layout, new_size) }
     }
 }
 
@@ -541,21 +558,36 @@ macro_rules! __export_internal {
             instance.__aether_dispatch(&mut ctx, mail)
         }
 
-        /// iamacoffeepot/aether#1337 Phase 2: hand the substrate a pointer into
-        /// a reusable guest-heap buffer of at least `min_len` bytes for an
-        /// inbound payload too large for the fixed-offset scratch window. The
-        /// substrate writes the payload there and passes the pointer to
-        /// `receive`. Backed by [`$crate::ffi::kind_scratch`] — one buffer per
-        /// wasm module, reused across mails.
+        /// ADR-0095: the generic guest allocator the substrate delivers every
+        /// inbound payload through. `cabi_realloc`-shaped — allocate
+        /// (`old_ptr == 0`), grow possibly-relocating (`new_size > old_size`),
+        /// free (`new_size == 0`). The substrate allocates a small region once
+        /// at instantiate and a large region on demand, writes the payload, and
+        /// calls the entry point (`receive` / `init_with_config` /
+        /// `on_rehydrate`). Backed by [`$crate::ffi::guest_alloc`].
         ///
         /// # Safety
-        /// Called by the substrate before `receive`; see
-        /// [`$crate::ffi::kind_scratch::reserve`].
+        /// Called by the substrate per the layout contract; see
+        /// [`$crate::ffi::guest_alloc::realloc_bytes`].
         #[cfg(target_arch = "wasm32")]
-        #[unsafe(export_name = "kind_scratch_reserve_p32")]
-        pub unsafe extern "C" fn kind_scratch_reserve(min_len: u32) -> u32 {
-            // SAFETY: see `kind_scratch::reserve`. wasm32 pointers are 32-bit.
-            unsafe { $crate::ffi::kind_scratch::reserve(min_len as usize).addr() as u32 }
+        #[unsafe(export_name = "realloc_p32")]
+        pub unsafe extern "C" fn realloc_p32(
+            old_ptr: u32,
+            old_size: u32,
+            align: u32,
+            new_size: u32,
+        ) -> u32 {
+            // SAFETY: see `guest_alloc::realloc_bytes`. wasm32 pointers are
+            // 32-bit; a null result (free, or allocation failure) maps to 0.
+            unsafe {
+                $crate::ffi::guest_alloc::realloc_bytes(
+                    old_ptr as *mut u8,
+                    old_size as usize,
+                    align as usize,
+                    new_size as usize,
+                )
+                .addr() as u32
+            }
         }
 
         /// # Safety
