@@ -101,6 +101,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
                     wasm,
                     name: Some(PROBE_NAME.to_owned()),
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -163,6 +164,8 @@ fn multi_actor_module_loads_entry_export() {
                     // No name: resolve from the entry type's aether.namespace section.
                     name: None,
                     config: Vec::new(),
+                    // No selector: load the entry export (RootManager).
+                    export: None,
                 },
             ),
         )])
@@ -184,6 +187,97 @@ fn multi_actor_module_loads_entry_export() {
             );
         }
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
+    }
+}
+
+/// ADR-0096: passing `export: "ui.panel"` instantiates the non-entry
+/// type from the same multi-actor module. The host resolves the
+/// selector to the actor-type tag, `init_typed_p32` constructs `Panel`
+/// (not the entry `RootManager`), the trampoline name defaults to the
+/// selected type's namespace (`:ui.panel`), and the `LoadResult`
+/// capabilities come from `Panel`'s `aether.kinds.inputs` group — which
+/// carries a `#[fallback]` the entry type lacks, so the reply proves
+/// the right group was selected.
+#[test]
+fn multi_actor_module_loads_selected_export() {
+    let Some(wasm_path) = require_runtime("multi_actor") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    // No name: defaults to the selected export's namespace.
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("ui.panel".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok {
+            name, capabilities, ..
+        } => {
+            assert!(
+                name.ends_with(":ui.panel"),
+                "selected export should resolve to Panel's NAMESPACE (ui.panel); got {name}",
+            );
+            assert!(
+                capabilities.fallback.is_some(),
+                "Panel declares a #[fallback]; selecting it must surface that group's capabilities, \
+                 not the entry RootManager's strict-receiver group",
+            );
+        }
+        LoadResult::Err { error } => panic!("multi-actor select-export load failed: {error}"),
+    }
+}
+
+/// ADR-0096: an export selector that names no type the module exports
+/// is a clean `LoadResult::Err`, not a silent fall-through to the entry
+/// type. The error names the requested export.
+#[test]
+fn multi_actor_unknown_export_errors() {
+    let Some(wasm_path) = require_runtime("multi_actor") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("ui.does_not_exist".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Err { error } => {
+            assert!(
+                error.contains("ui.does_not_exist"),
+                "unknown-export error should name the requested export; got {error}",
+            );
+        }
+        LoadResult::Ok { name, .. } => {
+            panic!("unknown export should fail the load, not fall through; loaded {name}")
+        }
     }
 }
 

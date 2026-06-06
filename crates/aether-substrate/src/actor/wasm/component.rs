@@ -576,12 +576,28 @@ impl Component {
     /// boot error (`LoadResult::Err`) — never a write or trap. Whichever pointer
     /// the config landed at is what `init_with_config_p32(mailbox_id, ptr, len)`
     /// receives.
+    ///
+    /// ADR-0096: `type_tag` selects which exported actor type a
+    /// multi-actor module instantiates. `Some(tag)` calls the guest's
+    /// `init_typed_p32(mailbox_id, tag, ptr, len)` — a missing export is
+    /// a clean boot error (the module isn't multi-actor, or doesn't
+    /// export the selected type). `None` is the entry-type / single-actor
+    /// path: the substrate probes `init_with_config_p32`, then the legacy
+    /// `init` shapes, exactly as before.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one cohesive instantiate sequence: build instance, probe the \
+                  delivery allocator, select + run the init shim, look up the \
+                  optional lifecycle exports. Splitting it would thread a dozen \
+                  store/region locals through a helper for no clarity gain."
+    )]
     pub fn instantiate(
         engine: &Engine,
         linker: &Linker<ComponentCtx>,
         module: &Module,
         ctx: ComponentCtx,
         config_bytes: &[u8],
+        type_tag: Option<u64>,
     ) -> wasmtime::Result<Self> {
         let mut store = Store::new(engine, ctx);
         let instance = linker.instantiate(&mut store, module)?;
@@ -646,7 +662,35 @@ impl Component {
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
         let config_len = config_bytes.len() as u32;
-        let init_rc = if let Ok(init_with_config) =
+        let init_rc = if let Some(type_tag) = type_tag {
+            // ADR-0096: a multi-actor module loaded with an export
+            // selector. The module exports `init_typed_p32`
+            // (mailbox_id, type_tag, ptr, len); the tag picks which
+            // exported type to construct. A guest without that export
+            // either isn't a multi-actor module or was built against an
+            // older SDK — a clean boot error, never a silent fall-through
+            // to the entry-only `init_with_config_p32`.
+            let init_typed = instance
+                .get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32")
+                .map_err(|e| {
+                    wasmtime::Error::msg(format!(
+                        "export selector set but guest exports no `init_typed_p32` \
+                         (not a multi-actor module?): {e}"
+                    ))
+                })?;
+            // ADR-0095: same allocator-backed config write as the
+            // entry path below.
+            let config_ptr = Self::place_init_config(
+                &mut store,
+                &memory,
+                realloc.as_ref(),
+                small_ptr,
+                &mut large_ptr,
+                &mut large_cap,
+                config_bytes,
+            )?;
+            Some(init_typed.call(&mut store, (mailbox_id, type_tag, config_ptr, config_len))?)
+        } else if let Ok(init_with_config) =
             instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_with_config_p32")
         {
             // ADR-0095: route the config write through the allocator-backed
@@ -1099,7 +1143,7 @@ mod tests {
         host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
-        Component::instantiate(&engine, &linker, &module, ctx(), &[]).expect("instantiate")
+        Component::instantiate(&engine, &linker, &module, ctx(), &[], None).expect("instantiate")
     }
 
     /// ADR-0090 helper: instantiate with explicit config bytes so a
@@ -1119,7 +1163,7 @@ mod tests {
         host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
-        Component::instantiate(&engine, &linker, &module, ctx(), config_bytes)
+        Component::instantiate(&engine, &linker, &module, ctx(), config_bytes, None)
     }
 
     /// WAT where `on_replace` writes 0x11 to offset 200 — same pattern
@@ -1842,7 +1886,7 @@ mod tests {
         host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).unwrap();
         let module = Module::new(&engine, &wasm).unwrap();
-        Component::instantiate(&engine, &linker, &module, ctx, &[]).unwrap()
+        Component::instantiate(&engine, &linker, &module, ctx, &[], None).unwrap()
     }
 
     #[test]

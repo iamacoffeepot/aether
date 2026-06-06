@@ -118,6 +118,14 @@ mod native {
         /// `FfiActor::init` via `Component::instantiate`. Empty means
         /// "no config" — a `Config = ()` guest decodes `&[]` uniformly.
         pub config: Vec<u8>,
+        /// ADR-0096: the selected export's actor-type tag
+        /// (`mailbox_id_from_name(NAMESPACE)`), threaded through to
+        /// `Component::instantiate` so it calls `init_typed_p32`.
+        /// `None` instantiates the module's entry type via the legacy
+        /// `init_with_config_p32` path — the only type a single-actor
+        /// module has. Stored on the trampoline so a later
+        /// `ReplaceComponent` rebuilds the same export.
+        pub type_tag: Option<u64>,
     }
 
     /// Per-component trampoline. Holds the wasm `Component`
@@ -149,6 +157,11 @@ mod native {
         /// reaching into `ctx.binding().self_mailbox()` on every
         /// handler call.
         mailbox: MailboxId,
+        /// ADR-0096: the selected export's actor-type tag, or `None`
+        /// for the entry type. Held so [`Self::handle_replace`]
+        /// re-instantiates the same exported type from the new wasm
+        /// and re-reads that type's capability group.
+        type_tag: Option<u64>,
     }
 
     #[actor]
@@ -189,6 +202,7 @@ mod native {
                 &config.module,
                 substrate_ctx,
                 &config.config,
+                config.type_tag,
             )
             .map_err(|e| {
                 BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
@@ -219,6 +233,7 @@ mod native {
                 mailer,
                 outbound: config.outbound,
                 mailbox,
+                type_tag: config.type_tag,
             })
         }
 
@@ -359,11 +374,37 @@ mod native {
                 }
             };
 
-            // ADR-0033: parse capabilities from the new wasm so the
+            // ADR-0033 / ADR-0096: parse capabilities from the new wasm
+            // for the SAME exported type this trampoline loaded, so the
             // reply carries the post-replace handler vocabulary.
-            let capabilities = match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
-                Ok(c) => c,
-                Err(error) => return ReplaceResult::Err { error },
+            // `self.type_tag == None` reads the entry type (single-actor
+            // and entry loads). A tag absent from the new module is an
+            // `Err` — the replacement doesn't export the loaded type.
+            let capabilities = match self.type_tag {
+                None => match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
+                    Ok(c) => c,
+                    Err(error) => return ReplaceResult::Err { error },
+                },
+                Some(tag) => {
+                    let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
+                        Ok(a) => a,
+                        Err(error) => return ReplaceResult::Err { error },
+                    };
+                    match actors.into_iter().find(|a| {
+                        a.namespace
+                            .as_deref()
+                            .is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
+                    }) {
+                        Some(group) => group.capabilities,
+                        None => {
+                            return ReplaceResult::Err {
+                                error: format!(
+                                    "replace: new module does not export the actor type (tag {tag:#x}) this trampoline loaded"
+                                ),
+                            };
+                        }
+                    }
+                }
             };
 
             // Run unwire then on_replace on the old instance and lift
@@ -412,6 +453,7 @@ mod native {
                 &module,
                 substrate_ctx,
                 &payload.config,
+                self.type_tag,
             ) {
                 Ok(c) => c,
                 Err(e) => {

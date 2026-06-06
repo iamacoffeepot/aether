@@ -52,6 +52,7 @@ fn load_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId 
                     wasm,
                     name: Some(name.to_owned()),
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])

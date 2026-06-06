@@ -54,6 +54,7 @@ fn typed_config_guest_without_config_bytes_surfaces_decode_error() {
                     wasm,
                     name: Some("probe_with_config".to_owned()),
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])
@@ -109,6 +110,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
                         wasm,
                         name: Some("probe_with_config".to_owned()),
                         config: config_bytes,
+                        export: None,
                     },
                 ),
             ),

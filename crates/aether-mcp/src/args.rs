@@ -146,6 +146,14 @@ pub struct LoadComponentArgs {
     /// `describe_component` reports the expected config kind.
     #[serde(default)]
     pub config_path: Option<String>,
+    /// ADR-0096: which exported actor type to instantiate from a
+    /// multi-actor module, named by its `Actor::NAMESPACE` (e.g.
+    /// `"ui.panel"`). Omit to load the module's entry type — the first
+    /// in its `export!` list, and the only type a single-actor module
+    /// has. An export the module doesn't declare comes back as a
+    /// `LoadResult::Err`.
+    #[serde(default)]
+    pub export: Option<String>,
 }
 
 /// `replace_component` arguments.

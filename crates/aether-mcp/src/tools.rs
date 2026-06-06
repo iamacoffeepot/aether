@@ -454,7 +454,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Very large wasm payloads (typically target/wasm32-unknown-unknown/debug/*.wasm, which can run 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
+        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config_path to deliver init-config bytes to a typed-config component (ADR-0090): the file must already hold the component's Config kind wire bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; omit it to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Very large wasm payloads (typically target/wasm32-unknown-unknown/debug/*.wasm, which can run 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(
         &self,
@@ -487,6 +487,7 @@ impl Mcp {
                     wasm,
                     name: args.name,
                     config,
+                    export: args.export,
                 },
             ))
             .await
@@ -2009,6 +2010,7 @@ mod tests {
                 binary_path: "/nonexistent/does-not-exist.wasm".to_owned(),
                 name: None,
                 config_path: None,
+                export: None,
             }))
             .await;
         assert!(result.is_err(), "a missing binary should be a tool error");
