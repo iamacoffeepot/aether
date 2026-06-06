@@ -1,6 +1,6 @@
 # ADR-0096: Multi-actor wasm modules
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 
 ## Context
