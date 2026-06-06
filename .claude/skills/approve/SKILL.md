@@ -103,11 +103,11 @@ When `--skip-adr` is used, the audit comment is verbose:
 The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
 
 ```bash
-gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled"
-gh issue edit <n> --add-label "phase:<new>"
+gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
+  && gh issue edit <n> --add-label "phase:<new>"
 ```
 
-The remove and add are **two separate invocations** on purpose: a single `gh issue edit` with the target listed in both `--remove-label` and `--add-label` strips it and never re-adds it (the remove wins), so the issue ends up with no phase label on every real transition. Splitting the calls makes the add unconditional. `--remove-label` ignores labels the issue doesn't carry, so the first line is safe on any transition. The only write this skill makes is `Phase=Ready` → `phase:ready`. On idempotent re-run (already Ready) the reconcile is a harmless no-op; run it anyway so a hand-stripped label self-heals.
+`--remove-label` ignores labels the issue doesn't carry, so the remove is safe on any transition and idempotent on re-run (lowercased: `Phase=Ready` → `phase:ready`). The two calls are chained with `&&` so the add fires only after the remove succeeds — if the first `gh` call stalls or errors (a transient CLI or API outage), the chain stops there instead of stamping the new label onto an issue whose old phase label is still present, which would leave two phase labels on the board at once. A reconcile that fails partway leaves the prior label untouched and heals on the next run. The only write this skill makes is `Phase=Ready` → `phase:ready`. On idempotent re-run (already Ready) the reconcile is a harmless no-op; run it anyway so a hand-stripped label self-heals.
 
 ## Failure modes
 
