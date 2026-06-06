@@ -49,5 +49,12 @@ crate-type = ["cdylib"]
 name = "probe_with_config"
 crate-type = ["cdylib"]
 
+# ADR-0096 multi-actor module fixture: two FfiActor types exported from
+# one crate via `export!(RootManager, Panel)`. Cross-builds to one wasm
+# module carrying both; an unmodified host loads the entry type.
+[[example]]
+name = "multi_actor"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

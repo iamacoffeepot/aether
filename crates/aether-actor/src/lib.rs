@@ -118,6 +118,10 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub mod __macro_internals {
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{Kind, Schema, mailbox_id_from_name};
+    // ADR-0096: the multi-actor `export!` arm stores the instance as
+    // `Box<dyn ErasedFfiActor>`; re-export `Box` so the emitted code
+    // doesn't depend on the guest crate's prelude exposing `alloc`.
+    pub use alloc::boxed::Box;
 }
 
 /// ADR-0033 attribute macros and `Kind` / `Schema` derives, behind
