@@ -253,6 +253,39 @@ pub trait Replaceable: FfiActor {
     }
 }
 
+/// Object-safe erasure over a guest [`FfiActor`]'s post-construction
+/// surface (ADR-0096). A multi-actor module — `export!(A, B, …)` —
+/// holds whichever exported type a given instance became in one
+/// `Slot<Box<dyn ErasedFfiActor>>`, and the FFI shims route mail and
+/// lifecycle calls through this trait. `#[actor]` emits the impl per
+/// type, forwarding to the inherent `__aether_dispatch` and the
+/// `FfiActor` lifecycle hooks.
+///
+/// `init` is deliberately not erased: it is generic over the ctx and
+/// returns `Self`, so it cannot be a trait-object method. The
+/// `export!` multi-actor arm matches the inbound actor-type tag against
+/// each exported type and calls the concrete `T::init` before boxing
+/// the result as a `dyn ErasedFfiActor`.
+///
+/// Single-actor modules keep their concrete `Slot<T>` path and never
+/// box, so hot-swap (`Replaceable`) stays available there; the
+/// multi-actor arm is `no_replaceable` in v1 (replaceability per
+/// exported type is a follow-on).
+pub trait ErasedFfiActor {
+    /// The actor type's [`crate::Actor::NAMESPACE`], so the `receive`
+    /// shim can derive the instance's own mailbox id for self-addressing.
+    fn erased_namespace(&self) -> &'static str;
+
+    /// Forwards to the `#[actor]`-synthesized `__aether_dispatch`.
+    fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_>, mail: crate::Mail<'_>) -> u32;
+
+    /// Forwards to [`FfiActor::wire`].
+    fn erased_wire(&mut self, ctx: &mut FfiCtx<'_>);
+
+    /// Forwards to [`FfiActor::unwire`].
+    fn erased_unwire(&mut self, ctx: &mut FfiCtx<'_>);
+}
+
 /// Generic guest allocator backing host→guest payload delivery (ADR-0095).
 ///
 /// The substrate writes every inbound payload — mail, init config, rehydrate

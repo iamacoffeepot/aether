@@ -82,7 +82,10 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 // FFI surface promoted to the crate root so consumers see
 // `aether_actor::FfiCtx<'_>` / `aether_actor::FfiActor` / etc. without
 // an extra `ffi::` segment.
-pub use ffi::{BootError, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx, Replaceable};
+pub use ffi::{
+    BootError, ErasedFfiActor, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx,
+    Replaceable,
+};
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
 // alias. Per-stage capability traits in `actor::ctx` are the
