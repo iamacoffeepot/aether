@@ -110,6 +110,33 @@ impl MailBridge {
         unsafe { raw::prev_correlation() }
     }
 
+    /// Issue 1363: spawn a sibling component instance from inside a
+    /// handler — the wasm-side counterpart of `NativeCtx::spawn_child`.
+    /// `subname` is the caller-chosen instance segment (an empty slice
+    /// ⇒ a host-allocated counter); `config` is the wire-encoded
+    /// init-config payload (the same byte-carrier as
+    /// `LoadComponent.config`, empty for a `Config = ()` child).
+    ///
+    /// Returns the child's non-zero `MailboxId` raw value on success, or
+    /// `0` on failure (the substrate logs the reason). `FfiCtx::spawn_child`
+    /// wraps this into a typed `Option<MailboxId>`.
+    #[must_use]
+    pub fn spawn_child(&self, subname: &[u8], config: &[u8]) -> u64 {
+        // SAFETY: forwards to `raw::spawn_child`, whose ABI is documented
+        // at the import site in `ffi/raw.rs`. Both `(ptr, len)` pairs are
+        // derived from the `&[u8]` slices we just received, which the
+        // borrow checker proves are valid for their lengths for the
+        // duration of the call; the host copies before returning.
+        unsafe {
+            raw::spawn_child(
+                subname.as_ptr().addr() as u32,
+                subname.len() as u32,
+                config.as_ptr().addr() as u32,
+                config.len() as u32,
+            )
+        }
+    }
+
     /// ADR-0081 §7: re-emit one `tracing::*` event on the host side.
     /// Called by the wasm subscriber per event so the host's
     /// `ActorAwareLayer` lands the entry in the trampoline's

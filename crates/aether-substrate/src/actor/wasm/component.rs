@@ -96,6 +96,40 @@ pub struct StateBundle {
     pub bytes: Vec<u8>,
 }
 
+/// Hook that lets a guest mint a sibling component instance from its
+/// own handler (issue 1363). Installed on [`ComponentCtx`] by the wasm
+/// trampoline (`aether-capabilities`); the `spawn_child_p32` host fn
+/// forwards the decoded `(subname, config)` here.
+///
+/// The substrate can't build a trampoline itself — `WasmTrampoline`
+/// lives in `aether-capabilities`, downstream of this crate — so the
+/// concrete spawn machinery is injected through this trait. The
+/// trampoline's impl captures the component's own module + wasmtime
+/// engine/linker + the chassis `Spawner` and runs the standard
+/// instanced-spawn lifecycle (ADR-0079), producing a fresh trampoline
+/// at `aether.component.trampoline:<subname>` that runs the *same*
+/// wasm module — so a wasm-side session manager can grow a fleet of
+/// sub-actors on demand, the same dynamic listener → session pattern a
+/// native capability gets via `NativeCtx::spawn_child`.
+pub trait ChildSpawner: Send + Sync {
+    /// Spawn a child component instance. `subname` is the caller-chosen
+    /// instance segment (`None` ⇒ a `Spawner`-allocated counter, like
+    /// `Subname::Counter`); `config` is the wire-encoded init-config
+    /// payload, the same byte-carrier as `LoadComponent.config`.
+    /// `parent` is the spawning component's own mailbox, stamped onto
+    /// the child's `ReplyTo` so the child's replies route back to it.
+    ///
+    /// Returns the child's [`MailboxId`] on success, or a human-readable
+    /// error string (subname collision / retired, init failure) the
+    /// host fn logs before reporting failure to the guest.
+    fn spawn_child(
+        &self,
+        subname: Option<&str>,
+        config: Vec<u8>,
+        parent: MailboxId,
+    ) -> Result<MailboxId, String>;
+}
+
 /// Per-component context stored as wasmtime `Store` data. Holds the
 /// sender's own `MailboxId`, a handle to the shared mail queue, and a
 /// handle to the registry so the `send_mail` host function can route
@@ -154,6 +188,13 @@ pub struct ComponentCtx {
     /// Phase 4 PR 3); `None` for the test paths that build
     /// `ComponentCtx` without a real trampoline.
     pub binding: Option<Arc<NativeBinding>>,
+    /// Issue 1363: child-spawn hook installed by the wasm trampoline so
+    /// the `spawn_child_p32` host fn can mint a sibling component
+    /// instance. `Some` for ctx instances built by `WasmTrampoline`;
+    /// `None` for test paths and any guest whose host that didn't wire
+    /// one — in which case `spawn_child_p32` reports failure to the
+    /// guest rather than silently dropping.
+    pub child_spawner: Option<Arc<dyn ChildSpawner>>,
     /// ADR-0042 correlation counter. Per-component (one
     /// `ComponentCtx` per component instance). Holds the *next* id
     /// to mint; `prev_correlation()` reads `counter - 1` to return
@@ -200,6 +241,7 @@ impl ComponentCtx {
             save_state_error: None,
             init_failure: None,
             binding: None,
+            child_spawner: None,
             correlation_counter: Cell::new(1),
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
@@ -219,6 +261,36 @@ impl ComponentCtx {
     /// consumer; no other call site exists today and none is intended.
     pub fn install_binding(&mut self, binding: Arc<NativeBinding>) {
         self.binding = Some(binding);
+    }
+
+    /// Install the child-spawn hook (issue 1363). Called by
+    /// `WasmTrampoline::init` (in `aether-capabilities`) right after
+    /// `install_binding`, before `Component::instantiate` — like the
+    /// binding, the host-fn closure captures the ctx via the wasmtime
+    /// `Store` data pointer at instantiation time, so installing it
+    /// before instantiate is sufficient. Replace rebuilds the ctx and
+    /// re-installs, so a hot-swapped guest keeps the ability to spawn.
+    pub fn install_child_spawner(&mut self, spawner: Arc<dyn ChildSpawner>) {
+        self.child_spawner = Some(spawner);
+    }
+
+    /// Issue 1363: forward a guest `spawn_child_p32` call to the
+    /// installed [`ChildSpawner`]. Returns the child's [`MailboxId`] on
+    /// success. `Err` carries a diagnostic string — either "no spawner
+    /// wired" (a guest whose host didn't install one, e.g. a test
+    /// fixture) or the spawn lifecycle's own failure. The host fn maps
+    /// the result to the guest's status code.
+    pub fn spawn_child(
+        &self,
+        subname: Option<&str>,
+        config: Vec<u8>,
+    ) -> Result<MailboxId, String> {
+        let Some(spawner) = self.child_spawner.as_ref() else {
+            return Err(String::from(
+                "spawn_child: no child-spawner wired on this component ctx",
+            ));
+        };
+        spawner.spawn_child(subname, config, self.sender)
     }
 
     /// Mint the next correlation id and bump the counter. Private —
@@ -1939,5 +2011,157 @@ mod tests {
         assert!(parent.is_none(), "no inbound -> no parent edge");
         assert_eq!(root, mail_id, "fresh chain: root == mail_id");
         assert_eq!(mail_id.sender, sender);
+    }
+
+    /// Issue 1363: a stub [`ChildSpawner`] that records each
+    /// `(subname, config, parent)` it's asked to spawn and hands back a
+    /// fixed child id, so the host-fn tests can assert what the guest's
+    /// `spawn_child_p32` call decoded out of guest memory.
+    struct RecordingChildSpawner {
+        calls: Arc<Mutex<Vec<(Option<String>, Vec<u8>, MailboxId)>>>,
+        result: Result<MailboxId, String>,
+    }
+
+    impl ChildSpawner for RecordingChildSpawner {
+        fn spawn_child(
+            &self,
+            subname: Option<&str>,
+            config: Vec<u8>,
+            parent: MailboxId,
+        ) -> Result<MailboxId, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((subname.map(str::to_owned), config, parent));
+            self.result.clone()
+        }
+    }
+
+    /// iamacoffeepot/aether#1363: WAT that calls `spawn_child_p32` from
+    /// its `receive` with a subname slice at offset 600 and a config
+    /// slice at offset 620, then stores the returned child id (low 32
+    /// bits) at offset 700 so the test can read it back.
+    fn wat_spawns_child(subname: &str, config: &[u8]) -> String {
+        let mut data = String::new();
+        for b in subname.as_bytes() {
+            data.push_str(&format!("\\{b:02x}"));
+        }
+        let mut config_data = String::new();
+        for b in config {
+            config_data.push_str(&format!("\\{b:02x}"));
+        }
+        let subname_len = subname.len();
+        let config_len = config.len();
+        format!(
+            r#"
+        (module
+            (import "aether" "spawn_child_p32"
+                (func $spawn_child (param i32 i32 i32 i32) (result i64)))
+            (memory (export "memory") 1)
+            (data (i32.const 600) "{data}")
+            (data (i32.const 620) "{config_data}")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 700
+                (call $spawn_child
+                    (i32.const 600) (i32.const {subname_len})
+                    (i32.const 620) (i32.const {config_len}))
+                i32.wrap_i64
+                i32.store
+                i32.const 0))
+        "#
+        )
+    }
+
+    /// Build a `ComponentCtx` wired with a recording child spawner and
+    /// return the shared call log + ctx.
+    fn ctx_with_child_spawner(
+        result: Result<MailboxId, String>,
+    ) -> (
+        ComponentCtx,
+        Arc<Mutex<Vec<(Option<String>, Vec<u8>, MailboxId)>>>,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = ctx();
+        ctx.install_child_spawner(Arc::new(RecordingChildSpawner {
+            calls: Arc::clone(&calls),
+            result,
+        }));
+        (ctx, calls)
+    }
+
+    #[test]
+    fn spawn_child_host_fn_forwards_subname_and_config() {
+        let child = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x5151));
+        let (ctx, calls) = ctx_with_child_spawner(Ok(child));
+        let mut component =
+            instantiate_with_ctx(&wat_spawns_child("worker-3", &[0xAA, 0xBB]), ctx);
+
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![], 1);
+        component.deliver(&mail).expect("deliver");
+
+        // The guest stored the returned child id's low 32 bits at 700.
+        #[allow(clippy::cast_possible_truncation)]
+        let expected_low = child.0 as u32;
+        assert_eq!(component.read_u32(700), expected_low);
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "spawner should have been called once");
+        let (subname, config, parent) = &calls[0];
+        assert_eq!(subname.as_deref(), Some("worker-3"));
+        assert_eq!(config, &vec![0xAA, 0xBB]);
+        // The test ctx uses MailboxId(0) as its sender.
+        assert_eq!(*parent, MailboxId(0));
+    }
+
+    #[test]
+    fn spawn_child_host_fn_empty_subname_is_counter() {
+        let child = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
+        let (ctx, calls) = ctx_with_child_spawner(Ok(child));
+        let mut component = instantiate_with_ctx(&wat_spawns_child("", &[]), ctx);
+
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![], 1);
+        component.deliver(&mail).expect("deliver");
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (subname, config, _parent) = &calls[0];
+        // Empty subname slice ⇒ None (the Subname::Counter shape).
+        assert_eq!(*subname, None);
+        assert!(config.is_empty());
+    }
+
+    #[test]
+    fn spawn_child_host_fn_reports_failure_as_zero() {
+        let (ctx, calls) = ctx_with_child_spawner(Err("subname in use".into()));
+        let mut component =
+            instantiate_with_ctx(&wat_spawns_child("dup", &[]), ctx);
+
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![], 1);
+        component.deliver(&mail).expect("deliver");
+
+        // A failed spawn returns 0 to the guest (SPAWN_CHILD_FAILED).
+        assert_eq!(component.read_u32(700), 0);
+        // The spawner was still consulted.
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn spawn_child_host_fn_no_spawner_wired_returns_zero() {
+        // A ctx with no `install_child_spawner` call — e.g. a guest whose
+        // host didn't wire one. The host fn reports failure (0) rather
+        // than panicking.
+        let mut component = instantiate_with_ctx(&wat_spawns_child("x", &[]), ctx());
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![], 1);
+        component.deliver(&mail).expect("deliver");
+        assert_eq!(component.read_u32(700), 0);
+    }
+
+    /// `ComponentCtx::spawn_child` with no hook wired returns the
+    /// "no spawner" error rather than reaching for a `None`.
+    #[test]
+    fn ctx_spawn_child_without_hook_errs() {
+        let ctx = ctx();
+        let err = ctx.spawn_child(Some("x"), vec![]).unwrap_err();
+        assert!(err.contains("no child-spawner"), "got: {err}");
     }
 }

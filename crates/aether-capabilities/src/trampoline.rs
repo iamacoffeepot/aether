@@ -84,15 +84,16 @@ mod native {
     use wasmtime::{Engine, Linker, Module};
 
     use aether_substrate::actor::native::envelope::Envelope;
+    use aether_substrate::actor::native::spawn::{Spawner, Subname};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+    use aether_substrate::actor::wasm::component::{ChildSpawner, Component, ComponentCtx};
     use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::capability::MailboxCaps;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::mail::{KindId, Mail, MailboxId};
+    use aether_substrate::mail::{KindId, Mail, MailboxId, ReplyTarget, ReplyTo};
     use std::io;
 
     use aether_actor::Local as _;
@@ -149,6 +150,94 @@ mod native {
         /// reaching into `ctx.binding().self_mailbox()` on every
         /// handler call.
         mailbox: MailboxId,
+        /// Issue 1363: the chassis [`Spawner`], cloned off this
+        /// trampoline's own `NativeBinding` at init. `Some` for a
+        /// chassis-built trampoline (every production load);
+        /// `None` only for a binding with no spawner wired (test
+        /// fixtures), in which case a guest `spawn_child` reports
+        /// failure. Held so [`Self::build_child_spawner`] can capture it
+        /// into the per-instance [`ChildSpawner`] across a replace.
+        spawner: Option<Arc<Spawner>>,
+    }
+
+    /// Issue 1363: the [`ChildSpawner`] the trampoline installs onto each
+    /// component instance's [`ComponentCtx`]. A guest `spawn_child_p32`
+    /// host fn forwards here; this mints a fresh `WasmTrampoline` running
+    /// the **same wasm module** as the parent, under a counter or named
+    /// subname (ADR-0079), and registers the child's receive-side
+    /// capabilities — the same post-spawn bookkeeping
+    /// `ComponentHostCapability::handle_load` does for an externally
+    /// loaded component.
+    ///
+    /// Immutable snapshot: it captures the module + wasmtime
+    /// engine/linker + shared substrate handles at the moment of
+    /// instantiate. A replace rebuilds the `ComponentCtx` and installs a
+    /// fresh `TrampolineChildSpawner` carrying the post-replace module,
+    /// so a hot-swapped guest spawns children of its new code without any
+    /// shared-mutable cell.
+    struct TrampolineChildSpawner {
+        spawner: Arc<Spawner>,
+        engine: Arc<Engine>,
+        linker: Arc<Linker<ComponentCtx>>,
+        module: Module,
+        registry: Arc<Registry>,
+        mailer: Arc<Mailer>,
+        outbound: Arc<HubOutbound>,
+        capabilities: ComponentCapabilities,
+    }
+
+    impl ChildSpawner for TrampolineChildSpawner {
+        fn spawn_child(
+            &self,
+            subname: Option<&str>,
+            config: Vec<u8>,
+            parent: MailboxId,
+        ) -> Result<MailboxId, String> {
+            // Same module + wasmtime instances + substrate handles the
+            // parent runs against; `Module` is `Arc`-backed so the clone
+            // is cheap. The child instantiates the identical wasm under a
+            // new mailbox.
+            let child_config = WasmTrampolineConfig {
+                engine: Arc::clone(&self.engine),
+                linker: Arc::clone(&self.linker),
+                module: self.module.clone(),
+                registry: Arc::clone(&self.registry),
+                outbound: Arc::clone(&self.outbound),
+                capabilities: self.capabilities.clone(),
+                config,
+            };
+            // ADR-0079 subname: a named child claims `NAMESPACE:name`;
+            // `None` lets the Spawner allocate a monotonic counter.
+            let subname = match subname {
+                Some(s) => Subname::Named(s),
+                None => Subname::Counter,
+            };
+            // Stamp the parent as the child's reply target so the
+            // child's `ctx.reply_target()` resolves back to the spawner —
+            // mirrors `NativeCtx::spawn_child`'s `ReplyTarget::Component`.
+            let sender = ReplyTo::with_correlation(
+                ReplyTarget::Component(parent),
+                ReplyTo::NO_CORRELATION,
+            );
+            let mailbox_id = Arc::clone(&self.spawner)
+                .spawn_builder::<WasmTrampoline>(subname, child_config, sender)
+                .finish()
+                .map_err(|e| format!("child trampoline spawn failed: {e:?}"))?;
+
+            // iamacoffeepot/aether#1037: register the child's ADR-0033
+            // receive-side capabilities so the DAG validator (and any
+            // accept-set check) sees the freshly-minted mailbox — the
+            // same step `ComponentHostCapability::handle_load` runs after
+            // spawning a top-level component. Cost-cell seeding already
+            // happened inside the child's `WasmTrampoline::init` (under
+            // the spawn path's `with_stamped`).
+            self.mailer.capability_registry().register(
+                mailbox_id,
+                MailboxCaps::from_component_capabilities(&self.capabilities),
+            );
+
+            Ok(mailbox_id)
+        }
     }
 
     #[actor]
@@ -178,6 +267,24 @@ mod native {
             // binding (issue 634 Phase 4 PR 3 — single source of inbox
             // truth lives on `NativeBinding`, not on `ComponentCtx`).
             substrate_ctx.install_binding(Arc::clone(ctx.binding()));
+            // Issue 1363: clone the chassis `Spawner` off this
+            // trampoline's binding and install a `ChildSpawner` so a
+            // guest `spawn_child` host fn can mint sibling instances of
+            // this same module. `None` only on a binding with no spawner
+            // (test fixtures) — the host fn then reports failure.
+            let spawner = ctx.binding().spawner().map(Arc::clone);
+            if let Some(spawner) = &spawner {
+                substrate_ctx.install_child_spawner(Self::build_child_spawner(
+                    Arc::clone(spawner),
+                    Arc::clone(&config.engine),
+                    Arc::clone(&config.linker),
+                    config.module.clone(),
+                    Arc::clone(&config.registry),
+                    Arc::clone(&mailer),
+                    Arc::clone(&config.outbound),
+                    config.capabilities.clone(),
+                ));
+            }
             // ADR-0090 (issue 1257): thread the load mail's config bytes
             // into the guest's typed `init`. An empty slice ("no config")
             // is decoded uniformly by a `Config = ()` guest via
@@ -219,6 +326,7 @@ mod native {
                 mailer,
                 outbound: config.outbound,
                 mailbox,
+                spawner,
             })
         }
 
@@ -344,6 +452,36 @@ mod native {
     }
 
     impl WasmTrampoline {
+        /// Issue 1363: build the per-instance [`ChildSpawner`].
+        /// Snapshots the module + wasmtime engine/linker + shared
+        /// substrate handles so a guest `spawn_child` mints a sibling
+        /// running this exact module. Called once at `init` and again on
+        /// each successful replace (with the post-replace module +
+        /// capabilities), so a hot-swapped guest spawns children of its
+        /// new code.
+        #[allow(clippy::too_many_arguments)]
+        fn build_child_spawner(
+            spawner: Arc<Spawner>,
+            engine: Arc<Engine>,
+            linker: Arc<Linker<ComponentCtx>>,
+            module: Module,
+            registry: Arc<Registry>,
+            mailer: Arc<Mailer>,
+            outbound: Arc<HubOutbound>,
+            capabilities: ComponentCapabilities,
+        ) -> Arc<dyn ChildSpawner> {
+            Arc::new(TrampolineChildSpawner {
+                spawner,
+                engine,
+                linker,
+                module,
+                registry,
+                mailer,
+                outbound,
+                capabilities,
+            })
+        }
+
         fn handle_replace(&mut self, payload: ReplaceComponent) -> ReplaceResult {
             // `payload.wasm` is the new module bytes; `mailbox_id` is
             // the trampoline's own id (the agent already addressed
@@ -395,12 +533,29 @@ mod native {
             // mailer + registry/outbound/input references, new
             // ReplyTable since wasm-side state resets. Mailbox id is
             // preserved across replace per ADR-0022 §4.
-            let substrate_ctx = ComponentCtx::new(
+            let mut substrate_ctx = ComponentCtx::new(
                 self.mailbox,
                 Arc::clone(&self.registry),
                 Arc::clone(&self.mailer),
                 Arc::clone(&self.outbound),
             );
+            // Issue 1363: re-install the child-spawn hook carrying the
+            // *post-replace* module + capabilities, so a hot-swapped
+            // guest spawns children of its new code. The trampoline's
+            // own `NativeBinding` is stable across replace (ADR-0022 §4),
+            // so the `Spawner` we captured at init is still valid.
+            if let Some(spawner) = &self.spawner {
+                substrate_ctx.install_child_spawner(Self::build_child_spawner(
+                    Arc::clone(spawner),
+                    Arc::clone(&self.engine),
+                    Arc::clone(&self.linker),
+                    module.clone(),
+                    Arc::clone(&self.registry),
+                    Arc::clone(&self.mailer),
+                    Arc::clone(&self.outbound),
+                    capabilities.clone(),
+                ));
+            }
 
             // ADR-0090 (issue 1257): thread the replace mail's config
             // bytes into the new instance's typed `init`, the same way

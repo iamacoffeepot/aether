@@ -325,6 +325,9 @@ const DENY_LIST: &[DeniedPath] = &[
         tail: &["save_state_p32"],
     },
     DeniedPath {
+        tail: &["spawn_child_p32"],
+    },
+    DeniedPath {
         tail: &["resolve_mailbox_p32"],
     },
     DeniedPath {

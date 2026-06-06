@@ -165,6 +165,43 @@ impl FfiCtx<'_> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
 
+    /// Issue 1363: spawn a sibling component instance from inside a
+    /// handler — the wasm-side counterpart of
+    /// `aether_substrate::actor::native::NativeCtx::spawn_child`.
+    ///
+    /// The child runs the **same wasm module** as the calling component,
+    /// minted as a fresh instance under
+    /// `aether.component.trampoline:<subname>` (ADR-0079
+    /// `NAMESPACE:subname` semantics). Pass `Some(name)` to choose the
+    /// instance segment, or `None` to let the substrate allocate a
+    /// monotonic counter (the `Subname::Counter` shape). `config` is the
+    /// child's init payload — encoded the same way mail is, and threaded
+    /// to the child guest's `FfiActor::init`, exactly as
+    /// `LoadComponent.config` is for an externally-loaded component. Pass
+    /// `&()` for a child whose `Config = ()`.
+    ///
+    /// Returns the child's [`MailboxId`](aether_data::MailboxId) on
+    /// success — address it with
+    /// [`resolve_actor`](Self::resolve_actor) (or its name) for
+    /// subsequent mail. `None` if the spawn failed (subname collision /
+    /// retired, init failure, or no spawn hook wired by the host); the
+    /// substrate logs the specific reason.
+    #[must_use]
+    pub fn spawn_child<C: Kind>(
+        &self,
+        subname: Option<&str>,
+        config: &C,
+    ) -> Option<aether_data::MailboxId> {
+        let config_bytes = config.encode_into_bytes();
+        let subname_bytes = subname.map(str::as_bytes).unwrap_or_default();
+        let raw = MAIL_BRIDGE.spawn_child(subname_bytes, &config_bytes);
+        if raw == 0 {
+            None
+        } else {
+            Some(aether_data::MailboxId(raw))
+        }
+    }
+
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
     /// Diverging — does not return. The body `panic!`s; the substrate's
     /// wasm runtime catches the trap and ADR-0063 escalates the

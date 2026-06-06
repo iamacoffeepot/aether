@@ -274,6 +274,32 @@ impl Spawner {
         &self.actor_registry
     }
 
+    /// Build a [`SpawnBuilder`] for an instanced actor `A`, addressing
+    /// the spawner directly (no per-handler `NativeCtx` in hand). The
+    /// `sender` is stamped onto the child's `ReplyTo` so its replies
+    /// route back to the spawning actor's mailbox.
+    ///
+    /// Issue 1363: the wasm trampoline's [`crate::actor::wasm::component::ChildSpawner`]
+    /// reaches for this to mint a child component instance from a guest
+    /// `spawn_child_p32` call — it holds an `Arc<Spawner>` (cloned off
+    /// its own `NativeBinding`) but no ctx, so the `NativeCtx::spawn_child`
+    /// path isn't available. The chassis-level
+    /// `BuiltChassis::spawn_actor` / `PassiveChassis::spawn_actor` entry
+    /// points build the same builder; this is the `Arc<Spawner>`-in-hand
+    /// flavour.
+    #[must_use]
+    pub fn spawn_builder<'a, A>(
+        self: Arc<Self>,
+        subname: Subname<'a>,
+        config: A::Config,
+        sender: ReplyTo,
+    ) -> SpawnBuilder<'a, A>
+    where
+        A: Instanced + NativeActor + NativeDispatch,
+    {
+        SpawnBuilder::new(self, subname, config, sender)
+    }
+
     /// Spawn an instanced actor. Caller threads the bootstrap mail
     /// envelopes through `after_init_mail` (in delivery order); pass
     /// an empty Vec for plain spawn. The `sender_for_after_init`

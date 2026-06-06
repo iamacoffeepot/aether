@@ -105,12 +105,14 @@ you're in determines which context type you hold, and that type determines what
 compiles.
 
 Host matters as well as stage. Resolving, sending, and replying are common to both,
-but a few operations live on one side only: a native capability can spawn child
-actors and shut itself down, while a wasm component currently can't — its lifetime is
-driven from outside, by load, drop, and replace. The concrete context types differ by
-host too — `FfiCtx` in a component, `NativeCtx` in a capability — but you write
-handlers against a shared set of capability traits (`Resolver`, `MailSender`, and
-friends), so the same body works on either.
+and so is spawning children — both `NativeCtx` and `FfiCtx` expose `spawn_child`
+([#1363](https://github.com/iamacoffeepot/aether/issues/1363)), so a wasm component
+can grow a fleet of sub-actors on demand the same way a native capability does. A few
+operations still live on one side only (self-`shutdown` / `monitor` are native-only
+today). The concrete context types differ by host too — `FfiCtx` in a component,
+`NativeCtx` in a capability — but you write handlers against a shared set of
+capability traits (`Resolver`, `MailSender`, and friends), so the same body works on
+either.
 
 ## Authoring an actor
 
@@ -241,13 +243,18 @@ accepts connections and spawns a session actor per connection with `ctx.spawn_ch
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
 
-Spawning children on demand like that is a **native** facility — `spawn_child` is
-bounded to `Instanced` native actors. A wasm component can't spawn children of its
-own (a current gap, not a principle). It *can* still run as several instances,
-though: load the same wasm under different names and each is an independent actor at
-its own `aether.component.trampoline:<name>`. The loader in fact hosts every
-component behind an instanced trampoline actor, spawned once per load — so even a
-single loaded component is, underneath, one instance of an instanced host.
+Spawning children on demand like that works from **either host**
+([#1363](https://github.com/iamacoffeepot/aether/issues/1363)). A native capability
+calls `ctx.spawn_child::<SessionActor>(...)` to mint an `Instanced` native actor; a
+wasm component calls `ctx.spawn_child(Some("42"), &config)` to mint a fresh instance
+of *its own* wasm module — a new trampoline at `aether.component.trampoline:42`
+running the same code, with the child's `config` threaded through to its `init` the
+same way `load`'s config is. Either way the child carries the spawner as its reply
+target, so the dynamic listener → session pattern reads the same on both sides. A
+component can also still run as several instances by being loaded under different
+names from outside; the loader in fact hosts every component behind an instanced
+trampoline actor, spawned once per load — so even a single loaded component is,
+underneath, one instance of an instanced host.
 
 ## One model, two hosts
 

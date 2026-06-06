@@ -33,6 +33,13 @@ pub const MAX_STATE_BUNDLE_BYTES: usize = 1 << 20;
 /// Status codes returned by the `save_state` host fn. 0 is success —
 /// non-zero values let the SDK distinguish component bugs (OOB, no
 /// memory) from policy rejection (over the size cap).
+/// Sentinel the `spawn_child_p32` host fn (issue 1363) returns when the
+/// spawn fails for any reason — out-of-bounds slice, non-UTF-8 subname,
+/// no `ChildSpawner` wired, or a spawn-lifecycle error. `0` is never a
+/// valid `MailboxId` (it's the `MailboxId::NONE` sentinel), so the guest
+/// distinguishes success (a non-zero id) from failure unambiguously.
+pub const SPAWN_CHILD_FAILED: u64 = 0;
+
 pub const SAVE_STATE_OK: u32 = 0;
 pub const SAVE_STATE_NO_MEMORY: u32 = 1;
 pub const SAVE_STATE_OOB: u32 = 2;
@@ -89,6 +96,85 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // moved to the guest SDK — ADR-0033 phase 3 has `#[actor]`
     // prepend `ctx.subscribe_input::<K>()` for every `K::IS_INPUT`
     // handler kind to the user's `init` body.
+
+    // Issue 1363: `spawn_child_p32` mints a sibling component instance
+    // from inside a guest handler — the wasm-side counterpart of
+    // `NativeCtx::spawn_child`. The guest passes a subname slice
+    // (`subname_len == 0` ⇒ a Spawner-allocated counter) and an
+    // init-config slice (the same byte-carrier as `LoadComponent.config`,
+    // empty for a `Config = ()` child). Both are copied out of guest
+    // memory before the spawn runs. The spawn itself is delegated to the
+    // `ChildSpawner` hook the trampoline wired onto the ctx
+    // (`aether-capabilities` owns the trampoline, downstream of this
+    // crate), which runs the standard ADR-0079 instanced-spawn lifecycle
+    // and returns the child's `MailboxId`.
+    //
+    // Returns the child's non-zero mailbox id on success, or `0`
+    // (`SPAWN_CHILD_FAILED`) on any failure — out-of-bounds slice,
+    // non-UTF-8 subname, no spawner wired, or a spawn-lifecycle error.
+    // The detailed reason is logged host-side; the guest sees only
+    // "got an id" vs "didn't".
+    //
+    // HOST_FN_OK: ADR-0002 — spawning is a deliberate capability, the
+    // wasm-host symmetry gap issue 1363 closes. It can't ride a mail
+    // sink: the guest wants the child's id back synchronously to address
+    // it, and mail is fire-and-forget with no return channel.
+    linker.func_wrap(
+        "aether",
+        "spawn_child_p32",
+        |mut caller: Caller<'_, ComponentCtx>,
+         subname_ptr: u32,
+         subname_len: u32,
+         config_ptr: u32,
+         config_len: u32|
+         -> u64 {
+            let Some(memory) = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+            else {
+                return SPAWN_CHILD_FAILED; // guest exports no memory
+            };
+            let data = memory.data(&caller);
+            // Copy the subname slice (if any) out of guest memory.
+            let subname = if subname_len == 0 {
+                None
+            } else {
+                let start = subname_ptr as usize;
+                let end = match start.checked_add(subname_len as usize) {
+                    Some(e) if e <= data.len() => e,
+                    _ => return SPAWN_CHILD_FAILED, // out-of-bounds
+                };
+                match core::str::from_utf8(&data[start..end]) {
+                    Ok(s) => Some(s.to_owned()),
+                    Err(_) => return SPAWN_CHILD_FAILED, // non-UTF-8 subname
+                }
+            };
+            // Copy the config slice out of guest memory.
+            let config = {
+                let start = config_ptr as usize;
+                let end = match start.checked_add(config_len as usize) {
+                    Some(e) if e <= data.len() => e,
+                    _ => return SPAWN_CHILD_FAILED, // out-of-bounds
+                };
+                data[start..end].to_vec()
+            };
+
+            let ctx = caller.data();
+            match ctx.spawn_child(subname.as_deref(), config) {
+                Ok(id) => id.0,
+                Err(reason) => {
+                    tracing::warn!(
+                        target: "aether_substrate::actor::wasm::host_fns",
+                        mailbox = ctx.sender.0,
+                        subname = subname.as_deref().unwrap_or("<counter>"),
+                        %reason,
+                        "spawn_child host fn failed",
+                    );
+                    SPAWN_CHILD_FAILED
+                }
+            }
+        },
+    )?;
 
     // ADR-0016 §2: save_state buffers the component's migration payload
     // into a substrate-owned slot on the store ctx. The guest passes a

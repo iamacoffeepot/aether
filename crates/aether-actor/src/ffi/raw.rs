@@ -31,6 +31,22 @@ unsafe extern "C" {
     pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
     #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
+    /// Issue 1363: spawn a sibling component instance from inside a
+    /// handler — the wasm-side counterpart of `NativeCtx::spawn_child`.
+    /// `subname_ptr/len` is the caller-chosen instance segment
+    /// (`subname_len == 0` ⇒ a host-allocated counter); `config_ptr/len`
+    /// is the wire-encoded init-config payload (the same byte-carrier as
+    /// `LoadComponent.config`, empty for a `Config = ()` child). Both
+    /// slices are copied out of guest memory before the call returns.
+    /// Returns the child's non-zero `MailboxId` on success, or `0` on
+    /// failure (the host logs the reason).
+    #[link_name = "spawn_child_p32"]
+    pub fn spawn_child(
+        subname_ptr: u32,
+        subname_len: u32,
+        config_ptr: u32,
+        config_len: u32,
+    ) -> u64;
     /// ADR-0042: return the correlation id the substrate minted for
     /// this component's most recent `send_mail`. `0` before any
     /// send. A handler filters its inbound reply on this so it picks
@@ -107,6 +123,26 @@ pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count:
 #[must_use]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
     panic!("aether-actor: save_state called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::spawn_child` import. Always
+/// panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub unsafe fn spawn_child(
+    _subname_ptr: u32,
+    _subname_len: u32,
+    _config_ptr: u32,
+    _config_len: u32,
+) -> u64 {
+    panic!("aether-actor: spawn_child called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::prev_correlation` import.
