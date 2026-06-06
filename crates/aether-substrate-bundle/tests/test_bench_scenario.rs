@@ -137,6 +137,56 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
     );
 }
 
+/// ADR-0096: a multi-actor module (`export!(RootManager, Panel)`) loads
+/// through the unmodified host, instantiating its entry export — the
+/// first type in the list, `RootManager` — via the boxed
+/// `ErasedFfiActor` path. Omitting `name` exercises the `aether.namespace`
+/// section, which carries the entry type's `NAMESPACE` (`ui.root`), and
+/// the `LoadResult` capabilities come from the entry type's
+/// `aether.kinds.inputs` manifest. Proves init-through-the-box and the
+/// multi-actor section emission end-to-end; selecting the `Panel` export
+/// is the follow-on.
+#[test]
+fn multi_actor_module_loads_entry_export() {
+    let Some(wasm_path) = require_runtime("multi_actor") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    // No name: resolve from the entry type's aether.namespace section.
+                    name: None,
+                    config: Vec::new(),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok {
+            name, capabilities, ..
+        } => {
+            assert!(
+                name.ends_with(":ui.root"),
+                "entry export should resolve to the first type's NAMESPACE (ui.root); got {name}",
+            );
+            assert!(
+                !capabilities.handlers.is_empty(),
+                "entry export RootManager declares a Ping handler; capabilities.handlers was empty",
+            );
+        }
+        LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
+    }
+}
+
 /// Dropping the probe stops further `tick_observed` broadcasts.
 /// Validates that `aether.component.drop` removes the
 /// mailbox from the input subscriber set so subsequent ticks don't

@@ -1933,6 +1933,31 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             #(#helper_methods_tokens)*
         }
 
+        // ADR-0096: object-safe erasure so a multi-actor module's
+        // `export!(A, B, …)` arm can hold whichever exported type an
+        // instance became in one `Slot<Box<dyn ErasedFfiActor>>` and
+        // route the FFI shims through it. Forwards to the inherent
+        // dispatch table and the `FfiActor` lifecycle hooks; `init`
+        // stays concrete (the `export!` arm tag-matches and boxes).
+        impl #impl_generics ::aether_actor::ErasedFfiActor for #self_ty #where_clause {
+            fn erased_namespace(&self) -> &'static str {
+                <#self_ty as ::aether_actor::Actor>::NAMESPACE
+            }
+            fn erased_dispatch(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_mail: ::aether_actor::Mail<'_>,
+            ) -> u32 {
+                self.__aether_dispatch(__aether_ctx, __aether_mail)
+            }
+            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_>) {
+                <#self_ty as ::aether_actor::FfiActor>::wire(self, __aether_ctx);
+            }
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_>) {
+                <#self_ty as ::aether_actor::FfiActor>::unwire(self, __aether_ctx);
+            }
+        }
+
         #kind_retention_statics
     })
 }

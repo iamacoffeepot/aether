@@ -253,6 +253,55 @@ pub trait Replaceable: FfiActor {
     }
 }
 
+/// Object-safe erasure over a guest [`FfiActor`]'s post-construction
+/// surface (ADR-0096). A multi-actor module — `export!(A, B, …)` —
+/// holds whichever exported type a given instance became in one
+/// `Slot<Box<dyn ErasedFfiActor>>`, and the FFI shims route mail and
+/// lifecycle calls through this trait. `#[actor]` emits the impl per
+/// type, forwarding to the inherent `__aether_dispatch` and the
+/// `FfiActor` lifecycle hooks.
+///
+/// `init` is deliberately not erased: it is generic over the ctx and
+/// returns `Self`, so it cannot be a trait-object method. The
+/// `export!` multi-actor arm matches the inbound actor-type tag against
+/// each exported type and calls the concrete `T::init` before boxing
+/// the result as a `dyn ErasedFfiActor`.
+///
+/// Single-actor modules keep their concrete `Slot<T>` path and never
+/// box, so hot-swap (`Replaceable`) stays available there; the
+/// multi-actor arm is `no_replaceable` in v1 (replaceability per
+/// exported type is a follow-on).
+pub trait ErasedFfiActor {
+    /// The actor type's [`crate::Actor::NAMESPACE`], so the `receive`
+    /// shim can derive the instance's own mailbox id for self-addressing.
+    fn erased_namespace(&self) -> &'static str;
+
+    /// Forwards to the `#[actor]`-synthesized `__aether_dispatch`.
+    fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_>, mail: crate::Mail<'_>) -> u32;
+
+    /// Forwards to [`FfiActor::wire`].
+    fn erased_wire(&mut self, ctx: &mut FfiCtx<'_>);
+
+    /// Forwards to [`FfiActor::unwire`].
+    fn erased_unwire(&mut self, ctx: &mut FfiCtx<'_>);
+}
+
+/// Stage a guest init-failure message into the substrate via
+/// `init_failed_p32` (ADR-0096). Shared by the multi-actor `export!`
+/// init shims so the byte-staging boilerplate isn't repeated at each
+/// construction site. wasm32-only — the host build carries no FFI
+/// surface.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn stage_init_failure(message: &str) {
+    let bytes = message.as_bytes();
+    // SAFETY: `init_failed` copies `len` bytes from `ptr` into the
+    // substrate synchronously; the borrowed slice outlives the call.
+    unsafe {
+        raw::init_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32);
+    }
+}
+
 /// Generic guest allocator backing host→guest payload delivery (ADR-0095).
 ///
 /// The substrate writes every inbound payload — mail, init config, rehydrate
@@ -342,11 +391,21 @@ pub mod guest_alloc {
 /// `replaceable` flag — `aether_actor::export!(Hello, replaceable);`.
 #[macro_export]
 macro_rules! export {
+    // Order matters: the `, replaceable` arm is tried before the
+    // variadic multi-actor arm so `export!(Foo, replaceable)` matches
+    // the literal `replaceable` token rather than parsing it as a
+    // second exported type.
+    ($component:ty, replaceable) => {
+        $crate::__export_internal!($component, replaceable);
+    };
     ($component:ty) => {
         $crate::__export_internal!($component, no_replaceable);
     };
-    ($component:ty, replaceable) => {
-        $crate::__export_internal!($component, replaceable);
+    // ADR-0096: multi-actor module — two or more `FfiActor` types in one
+    // crate. Requires at least a first + one more so it never shadows
+    // the single-actor arms above. `no_replaceable` in v1.
+    ($first:ty $(, $rest:ty)+ $(,)?) => {
+        $crate::__export_multi_internal!(@entry $first ; @all $first $(, $rest)+);
     };
 }
 
@@ -642,4 +701,243 @@ macro_rules! __export_internal {
     (@on_rehydrate replaceable, $component:ty, $instance:ident, $ctx:ident, $prior:ident) => {
         <$component as $crate::Replaceable>::on_rehydrate($instance, &mut $ctx, $prior);
     };
+}
+
+/// ADR-0096: FFI shims for a multi-actor module — `export!(A, B, …)`.
+///
+/// One module-level `Slot<Box<dyn ErasedFfiActor>>` holds whichever
+/// exported type the instance became. Two construction entry points:
+///
+/// - `init_with_config_p32` (the existing 3-arg ABI) constructs the
+///   **entry** type (the first in the `export!` list). A host that
+///   knows nothing about multi-actor modules loads the entry type with
+///   no changes.
+/// - `init_typed_p32` (4-arg, carries an actor-type tag) matches the
+///   tag against each exported type's `mailbox_id_from_name(NAMESPACE)`
+///   and constructs the selected one. The host calls this once it can
+///   resolve an export selector to a tag (the follow-on PR).
+///
+/// `receive` / `wire` / `unwire` route through the boxed
+/// `ErasedFfiActor`. The `aether.kinds.inputs` / `aether.namespace`
+/// sections carry the **entry** type today; per-type framing arrives
+/// with the selector work. Multi-actor modules are `no_replaceable` in
+/// v1 — `on_replace` / `on_rehydrate` are emitted as no-ops.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_multi_internal {
+    (@entry $entry:ty ; @all $($component:ty),+) => {
+        static __AETHER_MULTI: $crate::Slot<
+            $crate::__macro_internals::Box<dyn $crate::ErasedFfiActor>
+        > = $crate::Slot::new();
+
+        // Entry type's manifest + namespace (single-actor section
+        // format) so an unmodified host reads the loadable surface.
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "aether.kinds.inputs")]
+        static __AETHER_INPUTS_SECTION: [u8; <$entry>::__AETHER_INPUTS_MANIFEST_LEN] =
+            <$entry>::__AETHER_INPUTS_MANIFEST;
+
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "aether.namespace")]
+        static __AETHER_NAMESPACE_SECTION: [u8; <$entry as $crate::Actor>::NAMESPACE.len()] = {
+            let bytes = <$entry as $crate::Actor>::NAMESPACE.as_bytes();
+            let mut out = [0u8; <$entry as $crate::Actor>::NAMESPACE.len()];
+            let mut i = 0;
+            while i < bytes.len() {
+                out[i] = bytes[i];
+                i += 1;
+            }
+            out
+        };
+
+        /// # Safety
+        /// Existing 3-arg init ABI; constructs the entry (first) export.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(
+            mailbox_id: u64,
+            config_ptr: u32,
+            config_len: u32,
+        ) -> u32 {
+            $crate::log::install_wasm_subscriber();
+            let config_bytes: &[u8] = if config_len == 0 {
+                &[]
+            } else {
+                // SAFETY: substrate wrote `config_len` bytes at `config_ptr` (ADR-0090).
+                unsafe {
+                    ::core::slice::from_raw_parts(config_ptr as usize as *const u8, config_len as usize)
+                }
+            };
+            $crate::__export_multi_internal!(@construct $entry, mailbox_id, config_bytes)
+        }
+
+        /// # Safety
+        /// ADR-0090 legacy zero-config init; forwards to the entry type.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
+            unsafe { init_with_config(mailbox_id, 0, 0) }
+        }
+
+        /// # Safety
+        /// ADR-0096 typed init: `type_tag` selects which exported type
+        /// to construct (its `mailbox_id_from_name(NAMESPACE)`).
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(export_name = "init_typed_p32")]
+        pub unsafe extern "C" fn init_typed(
+            mailbox_id: u64,
+            type_tag: u64,
+            config_ptr: u32,
+            config_len: u32,
+        ) -> u32 {
+            $crate::log::install_wasm_subscriber();
+            let config_bytes: &[u8] = if config_len == 0 {
+                &[]
+            } else {
+                // SAFETY: substrate wrote `config_len` bytes at `config_ptr` (ADR-0090).
+                unsafe {
+                    ::core::slice::from_raw_parts(config_ptr as usize as *const u8, config_len as usize)
+                }
+            };
+            $(
+                if type_tag
+                    == $crate::__macro_internals::mailbox_id_from_name(
+                        <$component as $crate::Actor>::NAMESPACE,
+                    )
+                    .0
+                {
+                    return $crate::__export_multi_internal!(@construct $component, mailbox_id, config_bytes);
+                }
+            )+
+            $crate::ffi::stage_init_failure(
+                "guest init: unknown actor-type tag for multi-actor module",
+            );
+            1
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
+            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            instance.erased_wire(&mut ctx);
+            0
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
+            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            instance.erased_unwire(&mut ctx);
+            0
+        }
+
+        /// # Safety
+        /// FFI receive contract (ADR-0024); routes through the boxed
+        /// `ErasedFfiActor`. Self-mailbox id derived from the live
+        /// instance's namespace.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(export_name = "receive_p32")]
+        pub unsafe extern "C" fn receive(
+            kind: u64,
+            ptr: u32,
+            byte_len: u32,
+            count: u32,
+            sender: u32,
+        ) -> u32 {
+            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
+                return 1;
+            };
+            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
+                instance.erased_namespace(),
+            )
+            .0;
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
+            instance.erased_dispatch(&mut ctx, mail)
+        }
+
+        /// ADR-0095 guest allocator — identical to the single-actor arm.
+        ///
+        /// # Safety
+        /// Called by the substrate per the layout contract.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(export_name = "realloc_p32")]
+        pub unsafe extern "C" fn realloc_p32(
+            old_ptr: u32,
+            old_size: u32,
+            align: u32,
+            new_size: u32,
+        ) -> u32 {
+            unsafe {
+                $crate::ffi::guest_alloc::realloc_bytes(
+                    old_ptr as *mut u8,
+                    old_size as usize,
+                    align as usize,
+                    new_size as usize,
+                )
+                .addr() as u32
+            }
+        }
+
+        /// # Safety
+        /// Multi-actor modules are `no_replaceable` in v1 — no-op.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn on_replace() -> u32 {
+            let _ = unsafe { __AETHER_MULTI.get_mut() };
+            0
+        }
+
+        /// # Safety
+        /// Multi-actor modules are `no_replaceable` in v1 — prior state
+        /// is ignored.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(export_name = "on_rehydrate_p32")]
+        pub unsafe extern "C" fn on_rehydrate(_version: u32, _ptr: u32, _len: u32) -> u32 {
+            0
+        }
+    };
+
+    // Decode `$ty`'s Config from `$config_bytes`, run its `init`, and box
+    // the result into `__AETHER_MULTI`. Expands inline in an init shim;
+    // a decode/init failure stages the message and `return 1`.
+    (@construct $ty:ty, $mailbox_id:ident, $config_bytes:ident) => {{
+        let config = match <
+            <$ty as $crate::FfiActor>::Config as $crate::__macro_internals::Kind
+        >::decode_from_bytes($config_bytes) {
+            ::core::option::Option::Some(c) => c,
+            ::core::option::Option::None => {
+                $crate::ffi::stage_init_failure(::core::concat!(
+                    "guest init: ",
+                    ::core::stringify!($ty),
+                    " could not decode Config from bytes",
+                ));
+                return 1;
+            }
+        };
+        let mut ctx: $crate::FfiInitCtx<'_> = $crate::FfiInitCtx::__new($mailbox_id);
+        match <$ty as $crate::FfiActor>::init(config, &mut ctx) {
+            ::core::result::Result::Ok(instance) => {
+                unsafe {
+                    __AETHER_MULTI.set(
+                        $crate::__macro_internals::Box::new(instance)
+                            as $crate::__macro_internals::Box<dyn $crate::ErasedFfiActor>,
+                    );
+                }
+                0
+            }
+            ::core::result::Result::Err(err) => {
+                $crate::ffi::stage_init_failure(err.message());
+                1
+            }
+        }
+    }};
 }
