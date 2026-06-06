@@ -759,12 +759,14 @@ macro_rules! __export_multi_internal {
             let mut pos = 0usize;
             $(
                 {
-                    const BR_LEN: usize =
+                    // The per-type `ActorBoundary` record, then that
+                    // type's own `aether.kinds.inputs` manifest bytes.
+                    const BOUNDARY_LEN: usize =
                         $crate::__macro_internals::canonical::inputs_actor_boundary_len(
                             <$component as $crate::Actor>::NAMESPACE,
                         );
-                    const BR_BYTES: [u8; BR_LEN] =
-                        $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BR_LEN>(
+                    const BOUNDARY_BYTES: [u8; BOUNDARY_LEN] =
+                        $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BOUNDARY_LEN>(
                             <$component as $crate::Actor>::NAMESPACE,
                         );
                     // Per-record section version byte (0x02), in lockstep
@@ -772,16 +774,17 @@ macro_rules! __export_multi_internal {
                     out[pos] = 0x02;
                     pos += 1;
                     let mut i = 0;
-                    while i < BR_LEN {
-                        out[pos] = BR_BYTES[i];
+                    while i < BOUNDARY_LEN {
+                        out[pos] = BOUNDARY_BYTES[i];
                         pos += 1;
                         i += 1;
                     }
-                    const MAN_LEN: usize = <$component>::__AETHER_INPUTS_MANIFEST_LEN;
-                    const MAN_BYTES: [u8; MAN_LEN] = <$component>::__AETHER_INPUTS_MANIFEST;
+                    const MANIFEST_LEN: usize = <$component>::__AETHER_INPUTS_MANIFEST_LEN;
+                    const MANIFEST_BYTES: [u8; MANIFEST_LEN] =
+                        <$component>::__AETHER_INPUTS_MANIFEST;
                     let mut j = 0;
-                    while j < MAN_LEN {
-                        out[pos] = MAN_BYTES[j];
+                    while j < MANIFEST_LEN {
+                        out[pos] = MANIFEST_BYTES[j];
                         pos += 1;
                         j += 1;
                     }
