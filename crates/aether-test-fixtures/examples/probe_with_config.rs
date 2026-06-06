@@ -1,6 +1,6 @@
 //! ADR-0090 c1 typed-config fixture. Exercises the
-//! `FfiActor::Config = ProbeConfig` path end-to-end: the host writes
-//! postcard-encoded `ProbeConfig` bytes at `CONFIG_OFFSET` during
+//! `FfiActor::Config = ProbeConfig` path end-to-end: the host places
+//! postcard-encoded `ProbeConfig` bytes in a delivery region (ADR-0095) during
 //! `Component::instantiate`; the guest's `init_with_config_p32` shim decodes
 //! them via `<ProbeConfig as Kind>::decode_from_bytes` and threads
 //! the typed struct into `Probe::init(config, ctx)`.

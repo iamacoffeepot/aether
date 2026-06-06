@@ -1,8 +1,8 @@
 // A loaded WASM component: its wasmtime `Store<ComponentCtx>`, instance,
-// and the cached handles needed to deliver mail. A small mail payload is
-// written to the guest at a static `MAIL_OFFSET`; a payload too large for
-// that fixed window rides an on-demand guest-heap reserve buffer the guest
-// grows to fit (iamacoffeepot/aether#1337 Phase 2).
+// and the cached handles needed to deliver mail. Every payload is written
+// into a region the host obtains from the guest's generic allocator
+// (`realloc_p32`): a small fitting payload into a cached reused region, a
+// larger one into an on-demand region grown to fit (ADR-0095).
 //
 // Holds the `ComponentCtx` (per-component context stored as wasmtime
 // `Store` data) and `StateBundle` (ADR-0016 state-migration payload)
@@ -24,66 +24,44 @@ use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, ReplyTarget, ReplyTo};
 use crate::scheduler::pending_depth;
 
-// Scratch-region layout in the guest's linear memory. Disjoint by
-// design — the three regions are written from different lifecycle
-// hooks and the offset split keeps their bounds checks obvious:
+// ADR-0095: the substrate delivers every host→guest payload — mail, init
+// config (ADR-0090), rehydrate state (ADR-0016) — through the guest's generic
+// allocator (`realloc_p32`), never a host-chosen offset. It holds two regions
+// per component, obtained from that one allocator and reused under the
+// run-token invariant (one payload of each class live at a time, consumed
+// synchronously inside the guest entry point):
 //
-//   MAIL_OFFSET   = 1024   — inbound mail payload (Component::deliver)
-//   STATE_OFFSET  = 8192   — ADR-0016 prior-state bytes (call_on_rehydrate)
-//   CONFIG_OFFSET = 16384  — ADR-0090 init config bytes (Component::instantiate)
+//   - a SMALL region of `SMALL_REGION_BYTES` bytes, allocated once at instantiate and
+//     cached, that the host writes a fitting payload into directly — no
+//     per-payload allocator call;
+//   - a LARGE region grown on demand to the largest over-floor payload the
+//     component has received, reused thereafter.
 //
-// `Component` writes a region exactly once per call, so the regions
-// never need to coexist within the same wasm function activation.
-// Each fixed window is small (low shadow-stack region); a mail or config
-// payload too large for its window instead rides the reusable guest-heap
-// reserve buffer (`kind_scratch_reserve`, iamacoffeepot/aether#1337/#1390),
-// which is heap-backed and shared across the two temporally-disjoint paths.
-const MAIL_OFFSET: u32 = 1024;
+// Neither region is freed — wasm has no `memory.shrink`, so a free reclaims
+// nothing. A payload past `MAX_DELIVERABLE_MAIL_BYTES` is rejected (dropped for
+// mail, boot-error for config / state). Region selection is `Component::place`.
 
-/// Stack headroom (bytes) reserved below the standard wasm32 1 MiB stack
-/// top when sizing [`MAX_MAIL_PAYLOAD_BYTES`] — room for the `receive`
-/// call chain's own frames (shallow in practice; 256 KiB is generous).
-const MAIL_SCRATCH_STACK_RESERVE: usize = 256 * 1024;
+/// Alignment requested from the guest allocator for delivery regions. Payloads
+/// are raw byte buffers the guest reads via `slice::from_raw_parts`; 8 bytes
+/// covers any in-place pod read a guest might do.
+const DELIVERY_ALIGN: u32 = 8;
 
-/// Largest inbound payload (bytes) [`Component::deliver`] writes through the
-/// guest's fixed [`MAIL_OFFSET`] scratch window (iamacoffeepot/aether#1337). A
-/// payload at or below this takes the fast inline path; a larger one rides the
-/// reusable guest-heap buffer (`kind_scratch_reserve`, Phase 2) instead.
-///
-/// `Memory::write` does not grow memory, and `MAIL_OFFSET` sits at the bottom
-/// of linear memory — inside the low stack region of the standard stack-first
-/// wasm32 layout (1 MiB shadow stack at `[0, 1 MiB)`, then static data, then
-/// the heap). So this fast-path write is bounded by the *stack*, not the heap:
-/// the payload must stay below the live stack's low-water mark. That bound
-/// isn't introspectable — Rust guests don't export `__stack_pointer` (only
-/// `__heap_base` / `__data_end`, which sit *above* the stack and are the wrong
-/// bound for low-memory scratch) — so this is a flat threshold: the 1 MiB
-/// default stack minus a stack reserve and the offset. Comparable to
-/// `host_fns`'s 1 MiB `MAX_STATE_BUNDLE_BYTES`, sized down to clear the stack
-/// top.
-const MAX_MAIL_PAYLOAD_BYTES: usize = (1 << 20) - MAIL_SCRATCH_STACK_RESERVE - MAIL_OFFSET as usize;
+/// Size (bytes) of the always-allocated SMALL delivery region. A payload at or
+/// below this writes directly to the cached small pointer with no per-payload
+/// allocator call; a larger one grows the LARGE region. Every component pays
+/// this once, so it is kept modest — most substrate mail (tick, key,
+/// window-size, camera) is tens of bytes, well under it — while still covering
+/// typical small config / state without spilling. Tunable: raising it reduces
+/// spillover at the cost of more per-component memory across many components.
+const SMALL_REGION_BYTES: usize = 8 * 1024;
 
 /// Absolute ceiling on inbound payload bytes the substrate will deliver at all
-/// (iamacoffeepot/aether#1337). Between [`MAX_MAIL_PAYLOAD_BYTES`] and this,
-/// mail rides the reusable guest-heap buffer; above it, mail is dropped with a
-/// loud log rather than asking the guest to allocate a buffer that could
-/// exhaust its memory and trap. The wire frame cap bounds arrivals upstream —
-/// this is defense in depth. 64 MiB matches the default `AETHER_MAX_FRAME_SIZE`.
+/// (iamacoffeepot/aether#1337). A payload past this is dropped (mail) or
+/// rejected (config / state) with a loud log rather than asking the guest to
+/// allocate a buffer that could exhaust its memory and trap. The wire frame cap
+/// bounds arrivals upstream — this is defense in depth. 64 MiB matches the
+/// default `AETHER_MAX_FRAME_SIZE`.
 const MAX_DELIVERABLE_MAIL_BYTES: usize = 64 << 20;
-
-/// Largest init config payload (bytes) [`Component::instantiate`] writes through
-/// the guest's fixed [`CONFIG_OFFSET`] scratch window (ADR-0090, iamacoffeepot/
-/// aether#1390). A config at or below this takes the fast inline path; a larger
-/// one rides the same reusable guest-heap buffer the mail path uses
-/// (`kind_scratch_reserve`) — config and mail are temporally disjoint (config at
-/// init, before any mail), so sharing the one buffer is safe.
-///
-/// Sized exactly like [`MAX_MAIL_PAYLOAD_BYTES`] from `MAIL_OFFSET`: `CONFIG_OFFSET`
-/// also sits in the guest's low shadow-stack region, so the fast-path write is
-/// bounded by the live stack's low-water mark, not the heap. Flat threshold:
-/// the 1 MiB default stack minus the same stack reserve and the (higher) offset.
-const MAX_CONFIG_PAYLOAD_BYTES: usize =
-    (1 << 20) - MAIL_SCRATCH_STACK_RESERVE - CONFIG_OFFSET as usize;
 
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
 /// buffer from the moment `save_state` is called on the old instance
@@ -398,31 +376,11 @@ impl ComponentCtx {
 pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
 /// Sentinel [`Component::deliver`] returns when it refused to deliver an
-/// inbound because its payload exceeded the guest's `kind_scratch_ceiling`
-/// (iamacoffeepot/aether#1337). The mail was dropped (logged) without
-/// touching guest memory or invoking `receive`; the caller treats it as a
-/// non-error so the native dispatcher still discharges settlement.
+/// inbound — its payload exceeded the deliverable ceiling, or the guest exports
+/// no allocator (ADR-0095). The mail was dropped (logged) without touching
+/// guest memory or invoking `receive`; the caller treats it as a non-error so
+/// the native dispatcher still discharges settlement.
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
-
-/// Offset the substrate writes prior-state bytes to before calling
-/// `on_rehydrate` (ADR-0016 §3). Ordered above `MAIL_OFFSET`, but not
-/// spatially isolated from it — a max-size mail write at `MAIL_OFFSET`
-/// runs right over this offset. State and mail are safe to share the
-/// scratch because their uses are disjoint in lifecycle phase: rehydrate
-/// runs once, post-init, before any mail arrives, so the two never occupy
-/// the scratch in the same wasm activation.
-const STATE_OFFSET: u32 = 8192;
-
-/// Offset the substrate writes config bytes to before calling
-/// `init_with_config_p32` (ADR-0090) when the config fits the fixed inline
-/// window ([`MAX_CONFIG_PAYLOAD_BYTES`]). Ordered above `STATE_OFFSET`, but the
-/// mail / state / config offsets are not spatially isolated — a max-size payload
-/// at `MAIL_OFFSET` writes right over both. They are safe because the three
-/// regions are consumed in disjoint lifecycle phases (config@init,
-/// state@rehydrate, mail@deliver) and never coexist in one wasm activation.
-/// Config is written once at instantiate time, before any other host fn runs. A
-/// larger config rides the guest-heap reserve buffer instead (iamacoffeepot/aether#1390).
-const CONFIG_OFFSET: u32 = 16384;
 
 /// Contract with the guest: it exports a
 /// `receive(kind, ptr, byte_len, count, sender) -> u32` entrypoint
@@ -442,6 +400,10 @@ const CONFIG_OFFSET: u32 = 16384;
 /// skips when absent (no-op trait defaults compile down to no symbol
 /// under LTO, so components that don't override stay
 /// backwards-compat).
+/// The guest's generic delivery allocator export (`realloc_p32`,
+/// `cabi_realloc`-shaped): `(old_ptr, old_size, align, new_size) -> ptr`.
+type ReallocFunc = TypedFunc<(u32, u32, u32, u32), u32>;
+
 pub struct Component {
     store: Store<ComponentCtx>,
     memory: Memory,
@@ -463,22 +425,139 @@ pub struct Component {
     unwire: Option<TypedFunc<u64, u32>>,
     on_replace: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
-    /// iamacoffeepot/aether#1337 Phase 2: the guest's
-    /// `kind_scratch_reserve_p32` export, used to deliver a payload larger
-    /// than [`MAX_MAIL_PAYLOAD_BYTES`] into a reusable guest-heap buffer
-    /// instead of the fixed [`MAIL_OFFSET`] scratch window. The same buffer
-    /// carries an over-window init config (iamacoffeepot/aether#1390) —
-    /// config use is temporally disjoint from mail use, so sharing it is safe.
-    /// `None` for a guest too old to export it — such a guest drops oversize
-    /// mail (Phase 1 disposition) and rejects an over-window config rather
-    /// than risking an overrun.
-    kind_scratch_reserve: Option<TypedFunc<u32, u32>>,
+    /// ADR-0095: the guest's generic delivery allocator
+    /// (`realloc_p32`, `cabi_realloc`-shaped). Every payload — mail, config,
+    /// state — is written into a region obtained from it. `None` for a
+    /// non-conforming guest that exports no allocator; such a guest can't
+    /// receive any payload (delivery drops with a loud log).
+    realloc: Option<ReallocFunc>,
+    /// SMALL delivery region: `SMALL_REGION_BYTES` bytes, allocated once at
+    /// instantiate from [`Self::realloc`] and cached. Non-null when an
+    /// allocator is present; `0` for a no-allocator guest. A payload that fits
+    /// is written here directly with no per-payload allocator call.
+    small_ptr: u32,
+    /// LARGE delivery region: grown on demand to the largest over-floor payload
+    /// (`large_cap` bytes) and reused. `0` until the first such payload. The
+    /// pointer is re-fetched from each grow, since a grow may relocate it.
+    large_ptr: u32,
+    /// Current capacity (bytes) of the LARGE region; `0` until first grown.
+    large_cap: u32,
     /// Mailbox id stamped at instantiate-time, replayed into `wire`
     /// and `unwire` calls. Same value the guest's `init` shim received.
     self_mailbox_id: u64,
 }
 
+/// Result of choosing a destination region for a host→guest payload
+/// ([`Component::place`]).
+enum Placement {
+    /// Write the payload at this guest pointer, then call the entry point. The
+    /// pointer is non-null and `DELIVERY_ALIGN`-aligned, so a zero-length
+    /// payload still yields a valid pointer for the guest's slice construction.
+    At(u32),
+    /// Payload exceeds [`MAX_DELIVERABLE_MAIL_BYTES`]; the caller drops (mail)
+    /// or rejects (config / state).
+    Oversize,
+    /// Guest exports no `realloc_p32` allocator (non-conforming guest); nothing
+    /// can be delivered into it.
+    NoAllocator,
+}
+
 impl Component {
+    /// ADR-0095: choose the destination region for a host→guest payload of
+    /// `len` bytes, growing the large region through the guest allocator when
+    /// needed. A payload that fits `SMALL_REGION_BYTES` lands in the cached small
+    /// region with no allocator call; a larger one grows the reused large
+    /// region (re-fetching its pointer, since a grow may relocate it); one past
+    /// the ceiling is [`Placement::Oversize`]. Takes the fields explicitly
+    /// rather than `&mut self` so [`Self::instantiate`] can call it before the
+    /// `Component` value exists.
+    fn place(
+        store: &mut Store<ComponentCtx>,
+        realloc: Option<&ReallocFunc>,
+        small_ptr: u32,
+        large_ptr: &mut u32,
+        large_cap: &mut u32,
+        len: usize,
+    ) -> wasmtime::Result<Placement> {
+        let Some(realloc) = realloc else {
+            return Ok(Placement::NoAllocator);
+        };
+        if len <= SMALL_REGION_BYTES {
+            return Ok(Placement::At(small_ptr));
+        }
+        if len > MAX_DELIVERABLE_MAIL_BYTES {
+            return Ok(Placement::Oversize);
+        }
+        // Wasm32 carries u32 byte lengths; `len <= MAX_DELIVERABLE_MAIL_BYTES`
+        // (64 MiB) keeps the cast lossless.
+        #[allow(clippy::cast_possible_truncation)]
+        let new_cap = len as u32;
+        if *large_cap < new_cap {
+            let ptr = realloc.call(store, (*large_ptr, *large_cap, DELIVERY_ALIGN, new_cap))?;
+            if ptr == 0 {
+                return Err(wasmtime::Error::msg(format!(
+                    "guest allocator returned null growing the delivery buffer to {new_cap} bytes"
+                )));
+            }
+            *large_ptr = ptr;
+            *large_cap = new_cap;
+        }
+        Ok(Placement::At(*large_ptr))
+    }
+
+    /// Place + write the init config into a delivery region (ADR-0095) and
+    /// return the guest pointer to hand `init_with_config_p32`. Mirrors
+    /// [`Self::deliver`]'s routing; a config past the ceiling, or to a guest
+    /// with no allocator, is a clean boot `Err` (surfaces as `LoadResult::Err`)
+    /// rather than a write or trap. Factored out of [`Self::instantiate`].
+    fn place_init_config(
+        store: &mut Store<ComponentCtx>,
+        memory: &Memory,
+        realloc: Option<&ReallocFunc>,
+        small_ptr: u32,
+        large_ptr: &mut u32,
+        large_cap: &mut u32,
+        config_bytes: &[u8],
+    ) -> wasmtime::Result<u32> {
+        match Self::place(
+            store,
+            realloc,
+            small_ptr,
+            large_ptr,
+            large_cap,
+            config_bytes.len(),
+        )? {
+            Placement::At(ptr) => {
+                if !config_bytes.is_empty() {
+                    memory.write(store, ptr as usize, config_bytes)?;
+                }
+                Ok(ptr)
+            }
+            Placement::Oversize => {
+                Self::log_oversize_config(
+                    store,
+                    config_bytes.len(),
+                    "exceeds the absolute deliverable bound",
+                );
+                Err(wasmtime::Error::msg(format!(
+                    "guest init config of {} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
+                    config_bytes.len(),
+                )))
+            }
+            Placement::NoAllocator => {
+                Self::log_oversize_config(
+                    store,
+                    config_bytes.len(),
+                    "guest exports no realloc_p32 allocator (raw-FFI guest)",
+                );
+                Err(wasmtime::Error::msg(format!(
+                    "guest init config of {} bytes cannot be delivered: guest exports no realloc_p32 allocator",
+                    config_bytes.len(),
+                )))
+            }
+        }
+    }
+
     /// Instantiate a component from a compiled `Module`. `ctx` becomes
     /// the store data and is what every host function call against this
     /// component will see.
@@ -489,15 +568,14 @@ impl Component {
     /// `Config = ()` or for the back-compat path (legacy `init` does
     /// not consume the bytes).
     ///
-    /// iamacoffeepot/aether#1390: the config write routes by size, mirroring
-    /// [`Component::deliver`]'s mail routing. A config at or below the fixed
-    /// `CONFIG_OFFSET` window cap (`MAX_CONFIG_PAYLOAD_BYTES`) lands inline at
-    /// `CONFIG_OFFSET`; a larger one (up to the `MAX_DELIVERABLE_MAIL_BYTES`
-    /// ceiling) rides the same reusable guest-heap reserve buffer the mail path
-    /// uses; a config past that ceiling, or to a raw-FFI guest with no reserve
-    /// export, is a clean boot error (`LoadResult::Err`) — never a write or trap.
-    /// Whichever pointer the config landed at is what
-    /// `init_with_config_p32(mailbox_id, ptr, len)` receives.
+    /// ADR-0095: the config write routes through `place`, the same
+    /// allocator-backed two-region path [`Component::deliver`] uses for mail. A
+    /// config that fits the small region lands there; a larger one (up to the
+    /// `MAX_DELIVERABLE_MAIL_BYTES` ceiling) grows the large region; a config
+    /// past that ceiling, or to a guest with no allocator export, is a clean
+    /// boot error (`LoadResult::Err`) — never a write or trap. Whichever pointer
+    /// the config landed at is what `init_with_config_p32(mailbox_id, ptr, len)`
+    /// receives.
     pub fn instantiate(
         engine: &Engine,
         linker: &Linker<ComponentCtx>,
@@ -535,18 +613,35 @@ impl Component {
         // path reports it via `LoadResult::Err { error }` — same
         // shape as a wasm trap, just with a more informative message.
         let mailbox_id = store.data().sender.0;
-        // iamacoffeepot/aether#1337 Phase 2: the guest's reusable-buffer export.
-        // Looked up here (before the config write) because the config path below
-        // routes a large config through it, mirroring `deliver`'s mail routing.
-        // Present on macro-built guests (emitted by `export!`); absent on raw-FFI
-        // guests, which then can't take an over-window config. The reserve
-        // (`kind_scratch::reserve`) is a module-level guest allocator, ready right
-        // after instantiation and independent of the actor's `init`, so calling it
-        // during `instantiate` before `init` is valid; config use is temporally
-        // disjoint from mail use, so sharing the one buffer is safe.
-        let kind_scratch_reserve = instance
-            .get_typed_func::<u32, u32>(&mut store, "kind_scratch_reserve_p32")
+        // ADR-0095: the guest's generic delivery allocator. Probed before the
+        // config write because config delivery routes through it, exactly like
+        // `deliver` routes mail. Present on macro-built guests (emitted by
+        // `export!`); absent on a non-conforming guest, which then can't receive
+        // any payload. The allocator is a module-level export ready right after
+        // instantiation and independent of the actor's `init`.
+        let realloc = instance
+            .get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "realloc_p32")
             .ok();
+        // Allocate the reused SMALL delivery region once, up front, and cache
+        // its (non-null) pointer for the hot path. The LARGE region is grown
+        // lazily by `place` only when a payload exceeds the small floor.
+        let small_ptr = if let Some(realloc) = &realloc {
+            #[allow(clippy::cast_possible_truncation)]
+            let ptr = realloc.call(
+                &mut store,
+                (0, 0, DELIVERY_ALIGN, SMALL_REGION_BYTES as u32),
+            )?;
+            if ptr == 0 {
+                return Err(wasmtime::Error::msg(
+                    "guest allocator returned null for the small delivery region at instantiate",
+                ));
+            }
+            ptr
+        } else {
+            0
+        };
+        let mut large_ptr: u32 = 0;
+        let mut large_cap: u32 = 0;
         // Wasm32 ABI carries `u32` byte lengths; config bytes are
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
@@ -554,51 +649,19 @@ impl Component {
         let init_rc = if let Ok(init_with_config) =
             instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_with_config_p32")
         {
-            // iamacoffeepot/aether#1390: route the config write by size, exactly
-            // like `deliver` routes mail. `CONFIG_OFFSET` sits in the guest's low
-            // shadow-stack region, so a config that overruns the fixed window
-            // would clobber the live stack and trap on init — surfaced as a
-            // generic wasm trap rather than a clear bound message.
-            //   - small (<= MAX_CONFIG_PAYLOAD_BYTES): fast inline write at
-            //     CONFIG_OFFSET (the current fast path).
-            //   - larger (<= MAX_DELIVERABLE_MAIL_BYTES) AND a reserve export
-            //     exists: write into the reusable guest-heap buffer — heap-backed,
-            //     no stack clobber.
-            //   - beyond the ceiling, or no reserve export (raw-FFI guest): clean
-            //     boot error (surfaces as LoadResult::Err) with a structured log,
-            //     never a write or trap.
-            // Empty config short-circuits the write (the guest's shim still
-            // receives the `(ptr, 0)` pair and handles the empty-len case).
-            let config_ptr = if config_bytes.is_empty() {
-                CONFIG_OFFSET
-            } else if config_bytes.len() <= MAX_CONFIG_PAYLOAD_BYTES {
-                memory.write(&mut store, CONFIG_OFFSET as usize, config_bytes)?;
-                CONFIG_OFFSET
-            } else if config_bytes.len() > MAX_DELIVERABLE_MAIL_BYTES {
-                Self::log_oversize_config(
-                    &store,
-                    config_bytes.len(),
-                    "exceeds the absolute config-size bound",
-                );
-                return Err(wasmtime::Error::msg(format!(
-                    "guest init config of {} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
-                    config_bytes.len(),
-                )));
-            } else if let Some(reserve) = &kind_scratch_reserve {
-                let ptr = reserve.call(&mut store, config_len)?;
-                memory.write(&mut store, ptr as usize, config_bytes)?;
-                ptr
-            } else {
-                Self::log_oversize_config(
-                    &store,
-                    config_bytes.len(),
-                    "guest exports no kind_scratch_reserve buffer (raw-FFI guest)",
-                );
-                return Err(wasmtime::Error::msg(format!(
-                    "guest init config of {} bytes exceeds the {MAX_CONFIG_PAYLOAD_BYTES}-byte inline window and the guest exports no reserve buffer",
-                    config_bytes.len(),
-                )));
-            };
+            // ADR-0095: route the config write through the allocator-backed
+            // two-region path `deliver` uses. An empty config still needs a
+            // valid (non-null) pointer for the guest's slice construction,
+            // which the cached small region provides.
+            let config_ptr = Self::place_init_config(
+                &mut store,
+                &memory,
+                realloc.as_ref(),
+                small_ptr,
+                &mut large_ptr,
+                &mut large_cap,
+                config_bytes,
+            )?;
             Some(init_with_config.call(&mut store, (mailbox_id, config_ptr, config_len))?)
         } else if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
             // Legacy Phase 2 fallback. Discards config bytes — only
@@ -632,9 +695,8 @@ impl Component {
             .get_typed_func::<(), u32>(&mut store, "on_replace")
             .ok();
         // ADR-0016: `on_rehydrate` takes `(version, ptr, len)` — the
-        // substrate writes bytes into the new instance's memory at
-        // `STATE_OFFSET`, then calls the shim with `(version,
-        // STATE_OFFSET, len)`.
+        // substrate writes the state bytes into a delivery region (ADR-0095,
+        // via `call_on_rehydrate`), then calls the shim with `(version, ptr, len)`.
         let on_rehydrate = instance
             .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32")
             .ok();
@@ -667,7 +729,10 @@ impl Component {
             unwire,
             on_replace,
             on_rehydrate,
-            kind_scratch_reserve,
+            realloc,
+            small_ptr,
+            large_ptr,
+            large_cap,
             self_mailbox_id: mailbox_id,
         })
     }
@@ -736,39 +801,43 @@ impl Component {
             Some(e) => self.store.data_mut().reply_table.allocate(e),
             None => NO_REPLY_HANDLE,
         };
-        // iamacoffeepot/aether#1337: choose where in guest memory the payload
-        // lands. `Memory::write` does not grow memory and `MAIL_OFFSET` sits in
-        // the low stack region, so a payload that overflows the fixed scratch
-        // window can't be blind-written there (it would run off the end or
-        // clobber the guest's static data + heap, trapping the guest → fatal
-        // substrate abort). Route by size:
-        //   - small (<= MAX_MAIL_PAYLOAD_BYTES): fast inline write at MAIL_OFFSET.
-        //   - larger (<= MAX_DELIVERABLE_MAIL_BYTES): a reusable guest-heap
-        //     buffer via `kind_scratch_reserve` — guest-owned, no overrun.
-        //   - beyond that, or no buffer export (raw-FFI guest): drop loudly.
-        // A drop returns `Ok` without invoking `receive`, so the trampoline's
-        // `forward_to_wasm` returns normally and the native dispatcher
-        // discharges the inbound's settlement bracket — no corruption, no trap,
-        // no hung caller. Kind-agnostic (not fs-specific).
+        // ADR-0095: choose where in guest memory the payload lands via the
+        // guest allocator — a fitting payload into the cached small region, a
+        // larger one into the grown large region, anything past the ceiling or
+        // to a no-allocator guest dropped loudly. A drop returns `Ok` without
+        // invoking `receive`, so the trampoline's `forward_to_wasm` returns
+        // normally and the native dispatcher discharges the inbound's
+        // settlement bracket — no corruption, no trap, no hung caller.
         let payload_len = mail.payload.len();
-        // Wasm32 ABI carries `u32` byte lengths; only read in branches where
+        // Wasm32 ABI carries `u32` byte lengths; only used in branches where
         // `payload_len <= MAX_DELIVERABLE_MAIL_BYTES`, so the cast can't lose data.
         #[allow(clippy::cast_possible_truncation)]
         let byte_len = payload_len as u32;
-        let mail_ptr = if payload_len <= MAX_MAIL_PAYLOAD_BYTES {
-            MAIL_OFFSET
-        } else if payload_len > MAX_DELIVERABLE_MAIL_BYTES {
-            self.log_dropped_oversize(mail, payload_len, "exceeds the absolute mail-size bound");
-            return Ok(DISPATCH_DROPPED_OVERSIZE);
-        } else if let Some(reserve) = &self.kind_scratch_reserve {
-            reserve.call(&mut self.store, byte_len)?
-        } else {
-            self.log_dropped_oversize(
-                mail,
-                payload_len,
-                "guest exports no kind_scratch_reserve buffer (raw-FFI guest)",
-            );
-            return Ok(DISPATCH_DROPPED_OVERSIZE);
+        let mail_ptr = match Self::place(
+            &mut self.store,
+            self.realloc.as_ref(),
+            self.small_ptr,
+            &mut self.large_ptr,
+            &mut self.large_cap,
+            payload_len,
+        )? {
+            Placement::At(ptr) => ptr,
+            Placement::Oversize => {
+                self.log_dropped_oversize(
+                    mail,
+                    payload_len,
+                    "exceeds the absolute mail-size bound",
+                );
+                return Ok(DISPATCH_DROPPED_OVERSIZE);
+            }
+            Placement::NoAllocator => {
+                self.log_dropped_oversize(
+                    mail,
+                    payload_len,
+                    "guest exports no realloc_p32 allocator (raw-FFI guest)",
+                );
+                return Ok(DISPATCH_DROPPED_OVERSIZE);
+            }
         };
 
         self.memory
@@ -805,28 +874,28 @@ impl Component {
             kind = %kind_name,
             kind_id = mail.kind.0,
             payload_bytes = payload_len,
-            inline_cap_bytes = MAX_MAIL_PAYLOAD_BYTES,
+            small_region_bytes = SMALL_REGION_BYTES,
             deliverable_cap_bytes = MAX_DELIVERABLE_MAIL_BYTES,
             reason,
-            "dropping inbound mail; cannot deliver safely (see iamacoffeepot/aether#1337)",
+            "dropping inbound mail; cannot deliver safely (see ADR-0095)",
         );
     }
 
-    /// Loudly log an init config rejected by [`Component::instantiate`]
-    /// (iamacoffeepot/aether#1390) because it could not be delivered safely —
-    /// either past the absolute ceiling, or to a raw-FFI guest with no reserve
-    /// buffer. Mirrors [`Self::log_dropped_oversize`]; the caller returns an
-    /// `Err` that surfaces as `LoadResult::Err` rather than writing or trapping.
-    /// Associated (no `&self`) because `instantiate` has no `Component` yet.
+    /// Loudly log an init config rejected by [`Component::instantiate`] (ADR-0095)
+    /// because it could not be delivered safely — either past the absolute
+    /// ceiling, or to a guest with no allocator export. Mirrors
+    /// [`Self::log_dropped_oversize`]; the caller returns an `Err` that surfaces
+    /// as `LoadResult::Err` rather than writing or trapping. Associated (no
+    /// `&self`) because `instantiate` has no `Component` yet.
     fn log_oversize_config(store: &Store<ComponentCtx>, config_bytes: usize, reason: &str) {
         tracing::error!(
             target: "aether_substrate::component",
             mailbox_id = store.data().sender.0,
             config_bytes,
-            inline_cap_bytes = MAX_CONFIG_PAYLOAD_BYTES,
+            small_region_bytes = SMALL_REGION_BYTES,
             deliverable_cap_bytes = MAX_DELIVERABLE_MAIL_BYTES,
             reason,
-            "rejecting init config; cannot deliver safely (see iamacoffeepot/aether#1390)",
+            "rejecting init config; cannot deliver safely (see ADR-0095)",
         );
     }
 
@@ -873,33 +942,55 @@ impl Component {
         self.store.data_mut().save_state_error.take()
     }
 
-    /// Write the prior-state bytes into the new instance's linear
-    /// memory at `STATE_OFFSET` and invoke `on_rehydrate(version,
-    /// STATE_OFFSET, len)`. Returns `Ok(())` if the instance doesn't
-    /// export `on_rehydrate` (ADR-0016 §3: the bundle is silently
-    /// discarded when no handler claims it).
+    /// Write the prior-state bytes into a delivery region (ADR-0095, via
+    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. Returns
+    /// `Ok(())` if the instance doesn't export `on_rehydrate` (ADR-0016 §3: the
+    /// bundle is silently discarded when no handler claims it).
     ///
-    /// ADR-0016 §4 specifies that a trap here aborts the replace, so
-    /// errors are propagated rather than contained (unlike
-    /// `on_replace` / `unwire`). A memory write failure — the bundle
-    /// doesn't fit in the current pages — propagates too.
+    /// ADR-0016 §4 specifies that a trap here aborts the replace, so errors are
+    /// propagated rather than contained (unlike `on_replace` / `unwire`). A
+    /// region that can't be allocated, or a bundle past the deliverable ceiling,
+    /// propagates as an `Err` too.
     pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> wasmtime::Result<()> {
         let Some(f) = self.on_rehydrate.clone() else {
             return Ok(());
         };
-        self.memory
-            .write(&mut self.store, STATE_OFFSET as usize, &bundle.bytes)?;
+        let len = bundle.bytes.len();
         // Wasm32 ABI carries `u32` byte lengths; bundle bytes are
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
-        let byte_len = bundle.bytes.len() as u32;
-        f.call(&mut self.store, (bundle.version, STATE_OFFSET, byte_len))?;
+        let byte_len = len as u32;
+        let ptr = match Self::place(
+            &mut self.store,
+            self.realloc.as_ref(),
+            self.small_ptr,
+            &mut self.large_ptr,
+            &mut self.large_cap,
+            len,
+        )? {
+            Placement::At(ptr) => ptr,
+            Placement::Oversize => {
+                return Err(wasmtime::Error::msg(format!(
+                    "rehydrate state of {len} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound"
+                )));
+            }
+            Placement::NoAllocator => {
+                return Err(wasmtime::Error::msg(
+                    "cannot rehydrate state: guest exports no realloc_p32 allocator",
+                ));
+            }
+        };
+        if !bundle.bytes.is_empty() {
+            self.memory
+                .write(&mut self.store, ptr as usize, &bundle.bytes)?;
+        }
+        f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
         Ok(())
     }
 
     /// Read a `u32` from guest linear memory at `offset`. Test-only
-    /// accessor: the production mail path writes at `MAIL_OFFSET`
-    /// and the guest interprets the bytes — nothing in non-test
+    /// accessor: the production mail path writes into an allocator
+    /// region and the guest interprets the bytes — nothing in non-test
     /// code reads guest memory directly.
     ///
     /// # Panics
@@ -1012,8 +1103,8 @@ mod tests {
     }
 
     /// ADR-0090 helper: instantiate with explicit config bytes so a
-    /// WAT-level `init_with_config_p32` can inspect what the host wrote at
-    /// `CONFIG_OFFSET`.
+    /// WAT-level `init_with_config_p32` can inspect the region the host placed
+    /// the config in.
     fn instantiate_with_config(wat: &str, config_bytes: &[u8]) -> Component {
         try_instantiate_with_config(wat, config_bytes).expect("instantiate")
     }
@@ -1055,48 +1146,73 @@ mod tests {
                 i32.const 0))
     "#;
 
-    /// iamacoffeepot/aether#1337: fixture with 18 pages (1.18 MiB) of
-    /// memory so a test can deliver a sub-cap payload that exceeds a
-    /// single 64 KiB page (the [`MAX_MAIL_PAYLOAD_BYTES`] cap is
-    /// `785_408`, larger than one page).
-    const WAT_BIG_MEMORY: &str = r#"
-        (module
-            (memory (export "memory") 18)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                i32.const 0))
-    "#;
+    /// ADR-0095: a minimal `realloc_p32` bump allocator for delivery test
+    /// fixtures, interpolated into a fixture module via `format!`. Ignores
+    /// `old_ptr` / `old_size` (leaks on grow — fine for tests), bump-allocates
+    /// from page 1 (`0x10000`, clear of the low stamp offsets the fixtures use),
+    /// grows linear memory to fit, and returns `0` for the free form
+    /// (`new_size == 0`). Contains no `{`/`}`, so it interpolates cleanly.
+    const WAT_REALLOC: &str = r#"
+            (global $bump (mut i32) (i32.const 0x10000))
+            (func (export "realloc_p32")
+                (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32)
+                (result i32)
+                (local $ret i32)
+                (local $end i32)
+                (if (i32.eqz (local.get $new_size))
+                    (then (return (i32.const 0))))
+                (local.set $ret (global.get $bump))
+                (local.set $end
+                    (i32.and
+                        (i32.add (i32.add (local.get $ret) (local.get $new_size)) (i32.const 7))
+                        (i32.const -8)))
+                (if (i32.gt_u (local.get $end) (i32.mul (memory.size) (i32.const 0x10000)))
+                    (then
+                        (drop (memory.grow
+                            (i32.add
+                                (i32.div_u
+                                    (i32.sub (local.get $end) (i32.mul (memory.size) (i32.const 0x10000)))
+                                    (i32.const 0x10000))
+                                (i32.const 1))))))
+                (global.set $bump (local.get $end))
+                (local.get $ret))"#;
 
-    /// iamacoffeepot/aether#1337 Phase 2: fixture that exports
-    /// `kind_scratch_reserve_p32` (returning a fixed high offset, standing in
-    /// for the reusable heap buffer) and a `receive_p32` that records the
-    /// pointer it was handed at offset 16 — so a test can prove a large payload
-    /// routes through the reserve pointer rather than `MAIL_OFFSET`. 80 pages
-    /// (5.2 MiB) leaves room for a >cap payload at the high offset.
-    const WAT_WITH_SCRATCH_BUFFER: &str = r#"
+    /// ADR-0095: fixture whose `receive_p32` records the pointer it was handed
+    /// at offset 16, so a test can prove a payload landed in the cached small
+    /// region (`<= SMALL_REGION_BYTES`) or the grown large region. One page initially;
+    /// the bump allocator grows memory for a large payload.
+    fn wat_records_mail_ptr() -> String {
+        format!(
+            r#"
         (module
-            (memory (export "memory") 80)
-            (func (export "kind_scratch_reserve_p32") (param i32) (result i32)
-                i32.const 2000000)
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 16
                 local.get 1
                 i32.store
                 i32.const 0))
-    "#;
+    "#
+        )
+    }
 
-    /// ADR-0090 (issue 1256): `init_with_config_p32` shim that stamps the host-
-    /// provided `(config_ptr, config_len)` triple at known offsets so
-    /// tests can assert the substrate wrote bytes at `CONFIG_OFFSET`
-    /// and threaded the length through. Layout written by the shim:
+    /// ADR-0090 / ADR-0095: `init_with_config_p32` shim that stamps the host-
+    /// provided `(mailbox_id, config_ptr, config_len)` triple at known offsets
+    /// and copies the first two config bytes — so a test can assert which region
+    /// the config landed in and that the bytes round-tripped. Exports
+    /// `realloc_p32`, so config delivery routes through the allocator. Layout:
     ///
     ///   offset 200  : low 32 bits of `mailbox_id`
-    ///   offset 204  : `config_ptr` (should equal `CONFIG_OFFSET` = 16384)
+    ///   offset 204  : `config_ptr` (the small or grown delivery region)
     ///   offset 208  : `config_len`
     ///   offset 212  : first byte of config (when `config_len` >= 1)
     ///   offset 213  : second byte of config (when `config_len` >= 2)
-    const WAT_INIT_WITH_CONFIG: &str = r#"
+    fn wat_init_with_config() -> String {
+        format!(
+            r#"
         (module
             (memory (export "memory") 1)
+            {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
@@ -1136,70 +1252,17 @@ mod tests {
                     i32.store8
                 end
                 i32.const 0))
-    "#;
+    "#
+        )
+    }
 
-    /// iamacoffeepot/aether#1390: a guest exporting BOTH `init_with_config_p32`
-    /// and `kind_scratch_reserve_p32`. The reserve returns a fixed high offset
-    /// (`2_000_000`) standing in for the reusable heap buffer; `init_with_config_p32`
-    /// stamps the same `(mailbox_id, config_ptr, config_len)` triple `WAT_INIT_WITH_CONFIG`
-    /// does and copies the first two config bytes — so a test can prove a large
-    /// config routes through the reserve pointer and round-trips its bytes to
-    /// init. 80 pages (5.2 MiB) leaves room for a >inline-window config at the
-    /// high offset.
-    const WAT_INIT_CONFIG_WITH_RESERVE: &str = r#"
+    /// ADR-0095: a guest exporting `init_with_config_p32` but NO `realloc_p32`
+    /// allocator. A config delivered to it can't be placed (the host owns no
+    /// region in this guest), so instantiate returns a clean boot error rather
+    /// than writing or trapping. Stamps the triple it never reaches.
+    const WAT_INIT_CONFIG_NO_ALLOC: &str = r#"
         (module
-            (memory (export "memory") 80)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                i32.const 0)
-            (func (export "kind_scratch_reserve_p32") (param i32) (result i32)
-                i32.const 2000000)
-            (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
-                ;; *(u32*)200 = low32(mailbox_id)
-                i32.const 200
-                local.get 0
-                i32.wrap_i64
-                i32.store
-                ;; *(u32*)204 = config_ptr
-                i32.const 204
-                local.get 1
-                i32.store
-                ;; *(u32*)208 = config_len
-                i32.const 208
-                local.get 2
-                i32.store
-                ;; if config_len > 0, copy first byte to offset 212
-                local.get 2
-                i32.const 0
-                i32.gt_u
-                if
-                    i32.const 212
-                    local.get 1
-                    i32.load8_u
-                    i32.store8
-                end
-                ;; if config_len > 1, copy second byte to offset 213
-                local.get 2
-                i32.const 1
-                i32.gt_u
-                if
-                    i32.const 213
-                    local.get 1
-                    i32.const 1
-                    i32.add
-                    i32.load8_u
-                    i32.store8
-                end
-                i32.const 0))
-    "#;
-
-    /// iamacoffeepot/aether#1390: a guest exporting `init_with_config_p32` but
-    /// NO `kind_scratch_reserve_p32`. 80 pages so a large config would *fit*
-    /// linear memory — the rejection must come from the missing reserve export,
-    /// not a memory-bound trap. Stamps the same triple so a test could inspect
-    /// it on the fast path (it is never reached for the oversize case).
-    const WAT_INIT_CONFIG_NO_RESERVE: &str = r#"
-        (module
-            (memory (export "memory") 80)
+            (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
@@ -1301,13 +1364,17 @@ mod tests {
                 i32.const 0))
     "#;
 
-    /// ADR-0016 load-side: `on_rehydrate(version, ptr, len)` copies
-    /// `len` bytes from `ptr` to offset 400 and writes `version` at
-    /// offset 396. Bulk-memory (`memory.copy`) is on by default in
-    /// wasmtime; no feature flag needed.
-    const WAT_REHYDRATES: &str = r#"
+    /// ADR-0016 load-side: `on_rehydrate(version, ptr, len)` copies `len` bytes
+    /// from `ptr` (the delivery region the host placed the state in) to offset
+    /// 400 and writes `version` at offset 396. Exports `realloc_p32` so the
+    /// state delivery has a region to land in. Bulk-memory (`memory.copy`) is on
+    /// by default in wasmtime; no feature flag needed.
+    fn wat_rehydrates() -> String {
+        format!(
+            r#"
         (module
             (memory (export "memory") 1)
+            {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
@@ -1321,25 +1388,34 @@ mod tests {
                 local.get 2
                 memory.copy
                 i32.const 0))
-    "#;
+    "#
+        )
+    }
 
-    /// ADR-0013: `receive` stores the sender handle at offset 500 so
-    /// the test can observe what the substrate passed through.
-    const WAT_STORES_SENDER: &str = r#"
+    /// ADR-0013: `receive` stores the sender handle at offset 500 so the test
+    /// can observe what the substrate passed through. Exports `realloc_p32` so
+    /// even an empty mail has a (non-null) region to be placed in.
+    fn wat_stores_sender() -> String {
+        format!(
+            r#"
         (module
             (memory (export "memory") 1)
+            {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 500
                 local.get 4
                 i32.store
                 i32.const 0))
-    "#;
+    "#
+        )
+    }
 
     /// ADR-0013: `receive` echoes a reply back to the sender under a
     /// caller-provided kind id. Payload is empty — the round-trip is
     /// the observable behavior. ADR-0030 Phase 2 made kind ids hashed,
     /// so the test builds the WAT with the live `kind_id_from_parts`
-    /// for "test.pong" rather than a hardcoded sequential 0.
+    /// for "test.pong" rather than a hardcoded sequential 0. Exports
+    /// `realloc_p32` so the empty mail has a region to be placed in.
     fn wat_replies(kind_id: u64) -> String {
         format!(
             r#"
@@ -1347,6 +1423,7 @@ mod tests {
             (import "aether" "reply_mail_p32"
                 (func $reply_mail (param i32 i64 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
+            {WAT_REALLOC}
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 (drop (call $reply_mail
                     (local.get 4) ;; sender handle from receive param
@@ -1374,25 +1451,26 @@ mod tests {
         component.on_replace();
     }
 
-    /// ADR-0090 (issue 1256): `Component::instantiate` writes
-    /// `config_bytes` at `CONFIG_OFFSET` and calls `init_with_config_p32` with
-    /// `(mailbox_id, CONFIG_OFFSET, len)`. The WAT shim stamps the
-    /// triple at known offsets so this test can assert each leg
-    /// without a real Kind decoder in scope.
+    /// ADR-0090 / ADR-0095: `Component::instantiate` places `config_bytes` in a
+    /// delivery region and calls `init_with_config_p32` with
+    /// `(mailbox_id, config_ptr, len)`. A config that fits lands in the cached
+    /// small region. The WAT shim stamps the triple at known offsets so this
+    /// test can assert each leg without a real Kind decoder in scope.
     #[test]
     fn init_with_config_p32_threads_config_ptr_len_through() {
         let payload: &[u8] = &[0xAB, 0xCD, 0xEF, 0x12, 0x34];
-        let mut component = instantiate_with_config(WAT_INIT_WITH_CONFIG, payload);
+        let mut component = instantiate_with_config(&wat_init_with_config(), payload);
+        let small_ptr = component.small_ptr;
         // Mailbox id stamped: test ctx uses MailboxId(0), so low 32 bits are 0.
         assert_eq!(component.read_u32(200), 0);
-        // config_ptr == CONFIG_OFFSET.
-        assert_eq!(component.read_u32(204), CONFIG_OFFSET);
+        // config_ptr == the cached small region (fits under SMALL_REGION_BYTES).
+        assert_eq!(component.read_u32(204), small_ptr);
         // config_len matches the slice the host wrote.
         let observed_len = component.read_u32(208);
         assert_eq!(observed_len as usize, payload.len());
-        // The substrate physically wrote the bytes at CONFIG_OFFSET —
+        // The substrate physically wrote the bytes into the small region —
         // read them back through the host-side accessor.
-        let observed = component.read_bytes(CONFIG_OFFSET as usize, payload.len());
+        let observed = component.read_bytes(small_ptr as usize, payload.len());
         assert_eq!(observed, payload);
         // And the guest's shim could read the same bytes through
         // `(config_ptr + i)`; the two leading bytes copied via i32.load8_u
@@ -1401,73 +1479,72 @@ mod tests {
         assert_eq!(component.read_u32(213) & 0xFF, u32::from(payload[1]));
     }
 
-    /// Companion: empty config (the trait-default `Config = ()` path)
-    /// still calls `init_with_config_p32` with `(mailbox_id, CONFIG_OFFSET, 0)`.
-    /// No bytes are written to the scratch region but the shim still
-    /// runs and stamps the triple.
+    /// Companion: empty config (the trait-default `Config = ()` path) still
+    /// calls `init_with_config_p32` with `(mailbox_id, small_ptr, 0)` — a
+    /// non-null pointer (the cached small region) even with no bytes to write.
     #[test]
     fn init_with_config_p32_empty_config_passes_zero_length() {
-        let mut component = instantiate_with_config(WAT_INIT_WITH_CONFIG, &[]);
-        // Triple stamped, len == 0.
+        let mut component = instantiate_with_config(&wat_init_with_config(), &[]);
+        let small_ptr = component.small_ptr;
+        // Triple stamped, len == 0, config_ptr is the (non-null) small region.
         assert_eq!(component.read_u32(200), 0);
-        assert_eq!(component.read_u32(204), CONFIG_OFFSET);
+        assert_eq!(component.read_u32(204), small_ptr);
+        assert_ne!(small_ptr, 0, "small region pointer must be non-null");
         assert_eq!(component.read_u32(208), 0);
         // No bytes were copied to 212 / 213 (the WAT skips the copy
         // when len == 0), so the slot stays zero.
         assert_eq!(component.read_u32(212), 0);
     }
 
-    /// iamacoffeepot/aether#1390: a config at/under [`MAX_CONFIG_PAYLOAD_BYTES`]
-    /// takes the fast inline path — it lands at the fixed `CONFIG_OFFSET`, not a
-    /// reserve pointer, even when the guest also exports the reserve buffer.
+    /// ADR-0095: a config at/under `SMALL_REGION_BYTES` lands in the cached small
+    /// region, written directly with no allocator call.
     #[test]
-    fn instantiate_small_config_takes_fast_inline_path() {
+    fn instantiate_small_config_uses_small_region() {
         let payload: &[u8] = &[0x01, 0x02, 0x03];
-        let mut component = instantiate_with_config(WAT_INIT_CONFIG_WITH_RESERVE, payload);
-        // config_ptr == CONFIG_OFFSET (the fast window), NOT the reserve's 2_000_000.
-        assert_eq!(component.read_u32(204), CONFIG_OFFSET);
+        let mut component = instantiate_with_config(&wat_init_with_config(), payload);
+        let small_ptr = component.small_ptr;
+        assert_eq!(component.read_u32(204), small_ptr);
         assert_eq!(component.read_u32(208) as usize, payload.len());
-        // Bytes physically landed at CONFIG_OFFSET.
         assert_eq!(
-            component.read_bytes(CONFIG_OFFSET as usize, payload.len()),
+            component.read_bytes(small_ptr as usize, payload.len()),
             payload,
         );
     }
 
-    /// iamacoffeepot/aether#1390: a config too large for the inline window but
-    /// within the deliverable bound rides the guest's `kind_scratch_reserve`
-    /// buffer — `init_with_config_p32` is handed the reserve pointer (not
-    /// `CONFIG_OFFSET`) and the config bytes round-trip to it.
+    /// ADR-0095: a config larger than `SMALL_REGION_BYTES` but within the deliverable
+    /// bound grows the large region — `init_with_config_p32` is handed the
+    /// large-region pointer (not the small one) and the bytes round-trip to it.
     #[test]
-    fn instantiate_large_config_routes_through_reserve_buffer() {
-        // 900_000 > MAX_CONFIG_PAYLOAD_BYTES (770_048), < MAX_DELIVERABLE_MAIL_BYTES.
+    fn instantiate_large_config_grows_large_region() {
+        // 900_000 > SMALL_REGION_BYTES (8 KiB), < MAX_DELIVERABLE_MAIL_BYTES.
         let mut payload = vec![0u8; 900_000];
         payload[0] = 0xA1;
         payload[1] = 0xB2;
-        let mut component = instantiate_with_config(WAT_INIT_CONFIG_WITH_RESERVE, &payload);
-        // init saw the reserve pointer, not CONFIG_OFFSET.
-        assert_eq!(
-            component.read_u32(204),
-            2_000_000,
-            "large config should route via the reserve buffer pointer",
+        let mut component = instantiate_with_config(&wat_init_with_config(), &payload);
+        let large_ptr = component.large_ptr;
+        assert_ne!(large_ptr, 0, "large region must have been grown");
+        assert_ne!(
+            large_ptr, component.small_ptr,
+            "large config must not land in the small region",
         );
+        // init saw the large-region pointer.
+        assert_eq!(component.read_u32(204), large_ptr);
         assert_eq!(component.read_u32(208) as usize, payload.len());
-        // The substrate physically wrote the config at the reserve pointer.
-        assert_eq!(component.read_bytes(2_000_000, 4), payload[..4]);
+        // The substrate physically wrote the config at the large pointer.
+        assert_eq!(component.read_bytes(large_ptr as usize, 4), payload[..4]);
         // The guest's shim read the first two bytes back through (config_ptr + i).
         assert_eq!(component.read_u32(212) & 0xFF, u32::from(payload[0]));
         assert_eq!(component.read_u32(213) & 0xFF, u32::from(payload[1]));
     }
 
-    /// iamacoffeepot/aether#1390: a config past the absolute ceiling is a clean
-    /// boot error — `instantiate` returns `Err` (→ `LoadResult::Err`) without
-    /// writing or trapping. (Uses a small fixture: the guard fires on the length
-    /// check before any write, regardless of guest memory size.)
+    /// ADR-0095: a config past the absolute ceiling is a clean boot error —
+    /// `instantiate` returns `Err` (→ `LoadResult::Err`) without writing or
+    /// trapping. The guard fires on the length check before any allocator call.
     #[test]
     fn instantiate_oversize_config_returns_clean_error() {
         let payload = vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1];
         // `Component` is not `Debug`, so match rather than `expect_err`.
-        let Err(err) = try_instantiate_with_config(WAT_INIT_WITH_CONFIG, &payload) else {
+        let Err(err) = try_instantiate_with_config(&wat_init_with_config(), &payload) else {
             panic!("oversize config must fail to instantiate");
         };
         let msg = format!("{err}");
@@ -1477,21 +1554,20 @@ mod tests {
         );
     }
 
-    /// iamacoffeepot/aether#1390: a config too large for the inline window
-    /// delivered to a guest with NO `kind_scratch_reserve` export is a clean boot
-    /// error, not a trap — the guard fires before the write even though the
-    /// 80-page guest has room for the bytes.
+    /// ADR-0095: a config delivered to a guest with NO `realloc_p32` allocator is
+    /// a clean boot error, not a trap — the host owns no region in that guest, so
+    /// the guard fires before any write.
     #[test]
-    fn instantiate_large_config_without_reserve_returns_clean_error() {
-        let payload = vec![0u8; MAX_CONFIG_PAYLOAD_BYTES + 1];
+    fn instantiate_config_without_allocator_returns_clean_error() {
+        let payload: &[u8] = &[0x01, 0x02, 0x03];
         // `Component` is not `Debug`, so match rather than `expect_err`.
-        let Err(err) = try_instantiate_with_config(WAT_INIT_CONFIG_NO_RESERVE, &payload) else {
-            panic!("large config without a reserve export must fail");
+        let Err(err) = try_instantiate_with_config(WAT_INIT_CONFIG_NO_ALLOC, payload) else {
+            panic!("config to a guest without an allocator must fail");
         };
         let msg = format!("{err}");
         assert!(
-            msg.contains("no reserve buffer"),
-            "error should name the missing reserve buffer; got: {msg}",
+            msg.contains("no realloc_p32 allocator"),
+            "error should name the missing allocator; got: {msg}",
         );
     }
 
@@ -1582,51 +1658,67 @@ mod tests {
         component.unwire();
     }
 
-    /// iamacoffeepot/aether#1337: a payload at/under [`MAX_MAIL_PAYLOAD_BYTES`]
-    /// takes the fast inline path — the guest's `receive` runs and returns 0.
-    /// Guards against the threshold being so tight it rejects legitimate mail
-    /// the inline window can hold (e.g. a ~739 KiB mesh).
+    /// ADR-0095: a payload at/under `SMALL_REGION_BYTES` lands in the cached small
+    /// region — `receive` runs (rc 0) and is handed the small region pointer.
     #[test]
-    fn deliver_accepts_payload_under_scratch_ceiling() {
-        let mut component = instantiate(WAT_BIG_MEMORY);
-        // 700_000 < 785_408 threshold, and fits the 18-page memory.
-        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 700_000], 1);
-        let rc = component.deliver(&mail).expect("deliver ok");
-        assert_eq!(rc, 0, "guest receive should have run inline");
-    }
-
-    /// iamacoffeepot/aether#1337 Phase 2: a payload too large for the inline
-    /// window but within the deliverable bound is carried through the guest's
-    /// `kind_scratch_reserve` buffer — `receive` runs (rc 0) and is handed the
-    /// pointer the reserve export returned, not `MAIL_OFFSET`.
-    #[test]
-    fn deliver_routes_large_payload_through_reserve_buffer() {
-        let mut component = instantiate(WAT_WITH_SCRATCH_BUFFER);
-        // 900_000 > MAX_MAIL_PAYLOAD_BYTES (785_408), < MAX_DELIVERABLE_MAIL_BYTES.
-        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 900_000], 1);
+    fn deliver_small_payload_uses_small_region() {
+        let mut component = instantiate(&wat_records_mail_ptr());
+        let small_ptr = component.small_ptr;
+        // 100 bytes <= SMALL_REGION_BYTES (8 KiB).
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 100], 1);
         let rc = component.deliver(&mail).expect("deliver ok");
         assert_eq!(rc, 0, "guest receive should have run");
         // The fixture's `receive` recorded the pointer it was handed at offset 16.
         assert_eq!(
             component.read_u32(16),
-            2_000_000,
-            "large payload should route via the reserve buffer pointer",
+            small_ptr,
+            "small payload should land in the cached small region",
         );
     }
 
-    /// A guest that exports no `kind_scratch_reserve` (raw-FFI, pre-Phase-2)
-    /// drops an over-inline-window payload cleanly rather than trapping on the
-    /// write — the guard fires before `Memory::write`, regardless of guest
-    /// memory size (single-page fixture here).
+    /// ADR-0095: a payload larger than `SMALL_REGION_BYTES` but within the deliverable
+    /// bound grows the large region — `receive` runs (rc 0) and is handed the
+    /// large-region pointer, not the small one.
     #[test]
-    fn deliver_drops_large_payload_without_reserve_export() {
-        let mut component = instantiate(WAT_NO_HOOKS);
+    fn deliver_large_payload_grows_large_region() {
+        let mut component = instantiate(&wat_records_mail_ptr());
+        // 900_000 > SMALL_REGION_BYTES (8 KiB), < MAX_DELIVERABLE_MAIL_BYTES.
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 900_000], 1);
+        let rc = component.deliver(&mail).expect("deliver ok");
+        assert_eq!(rc, 0, "guest receive should have run");
+        let large_ptr = component.large_ptr;
+        assert_ne!(large_ptr, 0, "large region must have been grown");
+        assert_ne!(large_ptr, component.small_ptr);
+        assert_eq!(
+            component.read_u32(16),
+            large_ptr,
+            "large payload should land in the grown large region",
+        );
+    }
+
+    /// ADR-0095: a payload past the absolute deliverable ceiling is dropped
+    /// cleanly (no trap, no write) even when the guest exports an allocator —
+    /// the guard fires on the length check.
+    #[test]
+    fn deliver_oversize_payload_dropped() {
+        let mut component = instantiate(&wat_records_mail_ptr());
         let mail = Mail::new(
             MailboxId(0),
             aether_data::KindId(0),
-            vec![0u8; MAX_MAIL_PAYLOAD_BYTES + 1],
+            vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1],
             1,
         );
+        let rc = component.deliver(&mail).expect("deliver must not trap");
+        assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
+    }
+
+    /// ADR-0095: a guest that exports no `realloc_p32` allocator can't receive
+    /// any payload — the host owns no region in it, so delivery drops cleanly
+    /// rather than trapping on a write.
+    #[test]
+    fn deliver_to_guest_without_allocator_dropped() {
+        let mut component = instantiate(WAT_NO_HOOKS);
+        let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; 64], 1);
         let rc = component.deliver(&mail).expect("deliver must not trap");
         assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
     }
@@ -1650,7 +1742,7 @@ mod tests {
 
     #[test]
     fn call_on_rehydrate_writes_bytes_and_invokes_hook() {
-        let mut component = instantiate(WAT_REHYDRATES);
+        let mut component = instantiate(&wat_rehydrates());
         let bundle = StateBundle {
             version: 0x2A,
             bytes: vec![0x01, 0x02, 0x03, 0x04, 0x05],
@@ -1680,7 +1772,7 @@ mod tests {
         use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
-        let mut component = instantiate(WAT_STORES_SENDER);
+        let mut component = instantiate(&wat_stores_sender());
         // Mail::new defaults sender to SessionToken::NIL.
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
@@ -1693,7 +1785,7 @@ mod tests {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use aether_data::{SessionToken, Uuid};
 
-        let mut component = instantiate(WAT_STORES_SENDER);
+        let mut component = instantiate(&wat_stores_sender());
         let token = SessionToken(Uuid::from_u128(0xaaaa));
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
             .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
@@ -1711,7 +1803,7 @@ mod tests {
         use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
 
-        let mut component = instantiate(WAT_STORES_SENDER);
+        let mut component = instantiate(&wat_stores_sender());
         // ADR-0017 / issue #644: component-origin mail (peer-to-peer
         // send sets `reply_to.target = Component(sender)`) gets a
         // Component-variant handle.
