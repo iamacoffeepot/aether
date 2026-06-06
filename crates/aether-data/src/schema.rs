@@ -825,6 +825,16 @@ pub enum InputsRecord {
     /// declared a `type Config` other than the synthesized `()` — the
     /// reader lifts it into `ComponentCapabilities.config`.
     Config { id: KindId, name: Cow<'static, str> },
+    /// ADR-0096: a per-actor boundary marker in a multi-actor module.
+    /// `export!(A, B, …)` writes one `ActorBoundary { namespace }` ahead
+    /// of each exported type's own handler / fallback / component-doc /
+    /// config records, so the reader can group the flat record stream
+    /// back into per-type capability sets. `namespace` is the type's
+    /// `Actor::NAMESPACE`; the first boundary names the entry type.
+    /// Appended last so its postcard variant tag stays additive — a
+    /// single-actor module emits no boundary and decodes byte-identically
+    /// under the existing reader, so no section-version bump is needed.
+    ActorBoundary { namespace: Cow<'static, str> },
 }
 
 /// Custom-section name for the inputs manifest (ADR-0033). Paired

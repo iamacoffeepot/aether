@@ -718,10 +718,14 @@ macro_rules! __export_internal {
 ///   resolve an export selector to a tag (the follow-on PR).
 ///
 /// `receive` / `wire` / `unwire` route through the boxed
-/// `ErasedFfiActor`. The `aether.kinds.inputs` / `aether.namespace`
-/// sections carry the **entry** type today; per-type framing arrives
-/// with the selector work. Multi-actor modules are `no_replaceable` in
-/// v1 — `on_replace` / `on_rehydrate` are emitted as no-ops.
+/// `ErasedFfiActor`. The `aether.kinds.inputs` section carries every
+/// exported type's records, each preceded by an `ActorBoundary`
+/// (ADR-0096), so the host can regroup per type and resolve an export
+/// selector to a tag. The `aether.namespace` section names the
+/// **entry** type — the default mailbox name when the load omits both
+/// an explicit name and an export selector. Multi-actor modules are
+/// `no_replaceable` in v1 — `on_replace` / `on_rehydrate` are emitted
+/// as no-ops.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_multi_internal {
@@ -730,13 +734,62 @@ macro_rules! __export_multi_internal {
             $crate::__macro_internals::Box<dyn $crate::ErasedFfiActor>
         > = $crate::Slot::new();
 
-        // Entry type's manifest + namespace (single-actor section
-        // format) so an unmodified host reads the loadable surface.
+        // ADR-0096: per-actor `aether.kinds.inputs` section. Each
+        // exported type's records are preceded by an
+        // `ActorBoundary { namespace }` record (version-tagged like
+        // every other record) so the host's
+        // `read_actor_inputs_from_bytes` regroups the flat record
+        // stream into one capability set per type. The entry type is
+        // first. A single-actor `export!` never reaches this arm, so
+        // the boundary-free single-actor layout stays byte-identical.
+        #[cfg(target_arch = "wasm32")]
+        const __AETHER_MULTI_INPUTS_LEN: usize = 0usize $(
+            + 1
+            + $crate::__macro_internals::canonical::inputs_actor_boundary_len(
+                <$component as $crate::Actor>::NAMESPACE,
+            )
+            + <$component>::__AETHER_INPUTS_MANIFEST_LEN
+        )+;
+
         #[cfg(target_arch = "wasm32")]
         #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
-        static __AETHER_INPUTS_SECTION: [u8; <$entry>::__AETHER_INPUTS_MANIFEST_LEN] =
-            <$entry>::__AETHER_INPUTS_MANIFEST;
+        static __AETHER_INPUTS_SECTION: [u8; __AETHER_MULTI_INPUTS_LEN] = {
+            let mut out = [0u8; __AETHER_MULTI_INPUTS_LEN];
+            let mut pos = 0usize;
+            $(
+                {
+                    const BR_LEN: usize =
+                        $crate::__macro_internals::canonical::inputs_actor_boundary_len(
+                            <$component as $crate::Actor>::NAMESPACE,
+                        );
+                    const BR_BYTES: [u8; BR_LEN] =
+                        $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BR_LEN>(
+                            <$component as $crate::Actor>::NAMESPACE,
+                        );
+                    // Per-record section version byte (0x02), in lockstep
+                    // with `INPUTS_SECTION_VERSION`.
+                    out[pos] = 0x02;
+                    pos += 1;
+                    let mut i = 0;
+                    while i < BR_LEN {
+                        out[pos] = BR_BYTES[i];
+                        pos += 1;
+                        i += 1;
+                    }
+                    const MAN_LEN: usize = <$component>::__AETHER_INPUTS_MANIFEST_LEN;
+                    const MAN_BYTES: [u8; MAN_LEN] = <$component>::__AETHER_INPUTS_MANIFEST;
+                    let mut j = 0;
+                    while j < MAN_LEN {
+                        out[pos] = MAN_BYTES[j];
+                        pos += 1;
+                        j += 1;
+                    }
+                }
+            )+
+            let _ = pos;
+            out
+        };
 
         #[cfg(target_arch = "wasm32")]
         #[used]

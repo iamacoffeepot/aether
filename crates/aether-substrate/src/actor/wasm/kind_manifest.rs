@@ -190,22 +190,39 @@ pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> 
     Ok(None)
 }
 
-/// Decode the component's `aether.kinds.inputs` section (ADR-0033)
-/// into a structured `ComponentCapabilities`. Components without the
-/// section return `ComponentCapabilities::default()` — valid only for
-/// components built against the pre-ADR-0033 SDK, which are no longer
-/// produceable after phase 3 retired the `type Kinds` / `fn receive`
-/// surface.
-///
-/// Record shape: `[0x02][postcard(InputsRecord)]` back-to-back. The
-/// classifier walks the records in declaration order: every Handler
-/// enters `handlers`, at most one Fallback populates `fallback`, at
-/// most one Component populates `doc`, and at most one Config
-/// populates `config` (ADR-0090 / issue 1257). Duplicate Fallback /
-/// Component / Config records are a substrate-rejected load error —
-/// the macro emits at most one of each so seeing two means the
-/// component binary was built against a different manifest contract.
-pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, String> {
+/// One exported actor's receive-side surface within a (possibly
+/// multi-actor) module, tagged by the `Actor::NAMESPACE` from its
+/// `ActorBoundary` record (ADR-0096). A single-actor module emits no
+/// boundary, so it yields one group with `namespace: None` — the
+/// loader resolves its mailbox name from the `aether.namespace`
+/// section instead. In a multi-actor module the first group is the
+/// entry type.
+#[derive(Debug, Clone)]
+pub struct ActorInputs {
+    /// `Actor::NAMESPACE` of this group's type, from its `ActorBoundary`
+    /// record; `None` for the implicit single-actor group.
+    pub namespace: Option<String>,
+    /// The handler / fallback / component-doc / config records that
+    /// belong to this actor type.
+    pub capabilities: ComponentCapabilities,
+}
+
+/// Decode the component's `aether.kinds.inputs` section (ADR-0033 /
+/// ADR-0096) into one [`ActorInputs`] per exported actor type. The
+/// record stream is `[0x02][postcard(InputsRecord)]` back-to-back; an
+/// `ActorBoundary { namespace }` record opens a new group and the
+/// Handler / Fallback / Component / Config records that follow belong
+/// to it, in declaration order. A single-actor module emits no
+/// boundary, so all its records fall into one implicit `namespace:
+/// None` group (byte-identical to the pre-ADR-0096 layout). The first
+/// group is the entry type. Within each group: every Handler enters
+/// `handlers`, at most one Fallback populates `fallback`, at most one
+/// Component populates `doc`, and at most one Config populates
+/// `config` (ADR-0090 / issue 1257) — a duplicate of any of the
+/// at-most-one records is a substrate-rejected load error, since the
+/// macro emits at most one of each per type. A module that declares no
+/// inputs section at all returns an empty vec.
+pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, String> {
     let mut records: Vec<InputsRecord> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
@@ -219,20 +236,29 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
         decode_inputs_records(reader.data(), &mut records)?;
     }
 
-    let mut caps = ComponentCapabilities::default();
+    let mut groups: Vec<ActorInputs> = Vec::new();
     for record in records {
         match record {
-            InputsRecord::Handler { id, name, doc } => {
-                caps.handlers.push(HandlerCapability {
-                    id,
-                    name: name.into_owned(),
-                    doc: doc.map(Cow::into_owned),
+            InputsRecord::ActorBoundary { namespace } => {
+                groups.push(ActorInputs {
+                    namespace: Some(namespace.into_owned()),
+                    capabilities: ComponentCapabilities::default(),
                 });
             }
+            InputsRecord::Handler { id, name, doc } => {
+                current_capabilities(&mut groups)
+                    .handlers
+                    .push(HandlerCapability {
+                        id,
+                        name: name.into_owned(),
+                        doc: doc.map(Cow::into_owned),
+                    });
+            }
             InputsRecord::Fallback { doc } => {
+                let caps = current_capabilities(&mut groups);
                 if caps.fallback.is_some() {
                     return Err(format!(
-                        "{INPUTS_SECTION}: duplicate Fallback record — macro emits at most one"
+                        "{INPUTS_SECTION}: duplicate Fallback record — macro emits at most one per actor"
                     ));
                 }
                 caps.fallback = Some(FallbackCapability {
@@ -240,17 +266,19 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
                 });
             }
             InputsRecord::Component { doc } => {
+                let caps = current_capabilities(&mut groups);
                 if caps.doc.is_some() {
                     return Err(format!(
-                        "{INPUTS_SECTION}: duplicate Component record — macro emits at most one"
+                        "{INPUTS_SECTION}: duplicate Component record — macro emits at most one per actor"
                     ));
                 }
                 caps.doc = Some(doc.into_owned());
             }
             InputsRecord::Config { id, name } => {
+                let caps = current_capabilities(&mut groups);
                 if caps.config.is_some() {
                     return Err(format!(
-                        "{INPUTS_SECTION}: duplicate Config record — macro emits at most one"
+                        "{INPUTS_SECTION}: duplicate Config record — macro emits at most one per actor"
                     ));
                 }
                 caps.config = Some(ConfigCapability {
@@ -260,7 +288,34 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
             }
         }
     }
-    Ok(caps)
+    Ok(groups)
+}
+
+/// The capabilities of the open (last) group, creating an implicit
+/// `namespace: None` group when records arrive before any
+/// `ActorBoundary` — the single-actor layout, which emits no boundary.
+fn current_capabilities(groups: &mut Vec<ActorInputs>) -> &mut ComponentCapabilities {
+    if groups.is_empty() {
+        groups.push(ActorInputs {
+            namespace: None,
+            capabilities: ComponentCapabilities::default(),
+        });
+    }
+    let last = groups.len() - 1;
+    &mut groups[last].capabilities
+}
+
+/// Decode the component's `aether.kinds.inputs` section into the entry
+/// type's [`ComponentCapabilities`] — the first [`ActorInputs`] group,
+/// or `ComponentCapabilities::default()` when the module declares no
+/// inputs section. The back-compat view for callers that load the
+/// entry (or single) actor without an export selector.
+pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, String> {
+    Ok(read_actor_inputs_from_bytes(wasm)?
+        .into_iter()
+        .next()
+        .map(|actor| actor.capabilities)
+        .unwrap_or_default())
 }
 
 fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(), String> {
@@ -1033,6 +1088,89 @@ mod tests {
         assert!(caps.handlers.is_empty());
         let fallback = caps.fallback.expect("fallback present");
         assert_eq!(fallback.doc.as_deref(), Some("catchall"));
+    }
+
+    // ADR-0096: a multi-actor module frames each exported type's
+    // records behind an `ActorBoundary`. These pin the per-type
+    // grouping the export selector resolves against.
+
+    #[test]
+    fn groups_multi_actor_records_by_boundary() {
+        // Each `ActorBoundary` opens a group; the records that follow
+        // belong to it, in order. The first group is the entry type.
+        let section = inputs_section(&[
+            InputsRecord::ActorBoundary {
+                namespace: "ui.root".into(),
+            },
+            InputsRecord::Component {
+                doc: "Root.".into(),
+            },
+            InputsRecord::Handler {
+                id: aether_data::KindId(1),
+                name: "ui.click".into(),
+                doc: None,
+            },
+            InputsRecord::ActorBoundary {
+                namespace: "ui.panel".into(),
+            },
+            InputsRecord::Handler {
+                id: aether_data::KindId(2),
+                name: "ui.draw".into(),
+                doc: None,
+            },
+            InputsRecord::Fallback {
+                doc: Some("catchall".into()),
+            },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].namespace.as_deref(), Some("ui.root"));
+        assert_eq!(actors[0].capabilities.doc.as_deref(), Some("Root."));
+        assert_eq!(actors[0].capabilities.handlers.len(), 1);
+        assert!(actors[0].capabilities.fallback.is_none());
+        assert_eq!(actors[1].namespace.as_deref(), Some("ui.panel"));
+        assert_eq!(actors[1].capabilities.handlers.len(), 1);
+        assert!(actors[1].capabilities.fallback.is_some());
+
+        // The back-compat entry view returns the FIRST group's caps.
+        let entry = read_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(entry.doc.as_deref(), Some("Root."));
+        assert_eq!(entry.handlers.len(), 1);
+        assert!(entry.fallback.is_none());
+    }
+
+    #[test]
+    fn single_actor_section_is_one_unnamed_group() {
+        // No boundary record (the single-actor layout) → one implicit
+        // group with `namespace: None`; the loader resolves its name
+        // from the `aether.namespace` section instead.
+        let section = inputs_section(&[InputsRecord::Handler {
+            id: aether_data::KindId(7),
+            name: "aether.tick".into(),
+            doc: None,
+        }]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(actors.len(), 1);
+        assert!(actors[0].namespace.is_none());
+        assert_eq!(actors[0].capabilities.handlers.len(), 1);
+    }
+
+    #[test]
+    fn per_actor_duplicate_fallback_rejected() {
+        // The at-most-one rule is per group: two fallbacks within one
+        // boundary is still a rejected load.
+        let section = inputs_section(&[
+            InputsRecord::ActorBoundary {
+                namespace: "ui.root".into(),
+            },
+            InputsRecord::Fallback { doc: None },
+            InputsRecord::Fallback { doc: None },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("duplicate Fallback"), "err: {err}");
     }
 
     #[test]

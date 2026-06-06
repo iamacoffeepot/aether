@@ -66,6 +66,7 @@ fn load_sokoban(bench: &mut TestBench, wasm_path: &Path) {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
+                    export: None,
                 },
             ),
         )])

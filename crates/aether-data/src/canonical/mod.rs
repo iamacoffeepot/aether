@@ -42,8 +42,9 @@ mod primitives;
 mod schema;
 
 pub use inputs::{
-    inputs_component_len, inputs_config_len, inputs_fallback_len, inputs_handler_len,
-    write_inputs_component, write_inputs_config, write_inputs_fallback, write_inputs_handler,
+    inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_fallback_len,
+    inputs_handler_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
+    write_inputs_fallback, write_inputs_handler,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use primitives::{varint_u32_len, varint_u64_len, varint_usize_len};
@@ -475,6 +476,24 @@ mod tests {
             InputsRecord::Config {
                 id: KindId(ID),
                 name: NAME.into(),
+            }
+        );
+    }
+
+    #[test]
+    fn inputs_actor_boundary_const_round_trips() {
+        // ADR-0096: `export!(A, B, …)` writes one `ActorBoundary` record
+        // per exported type; the const-eval bytes must decode to
+        // `InputsRecord::ActorBoundary` byte-for-byte so the substrate
+        // reader groups the flat record stream back by namespace.
+        const NS: &str = "ui.panel";
+        const N: usize = inputs_actor_boundary_len(NS);
+        const BYTES: [u8; N] = write_inputs_actor_boundary::<N>(NS);
+        let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(
+            decoded,
+            InputsRecord::ActorBoundary {
+                namespace: NS.into()
             }
         );
     }

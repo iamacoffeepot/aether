@@ -1102,6 +1102,14 @@ mod control_plane {
         /// MCP encode the config struct to bytes at the edge
         /// (SDK-typed, not wire-typed), matching `wasm`'s `Vec<u8>`.
         pub config: Vec<u8>,
+        /// ADR-0096: which exported actor type to instantiate from a
+        /// multi-actor module, named by its `Actor::NAMESPACE`. `None`
+        /// loads the **entry** type (the first in the module's
+        /// `export!` list), which is also the only type a single-actor
+        /// module has — so an unset selector preserves the pre-ADR-0096
+        /// load. An export that the module doesn't declare is a clean
+        /// `LoadResult::Err`.
+        pub export: Option<String>,
     }
 
     /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id,
@@ -3438,6 +3446,7 @@ mod tests {
                 wasm: vec![0x00, 0x61, 0x73, 0x6d],
                 name: Some("probe_with_config".to_string()),
                 config: vec![0xde, 0xad, 0xbe, 0xef],
+                export: Some("ui.panel".to_string()),
             };
             let bytes = load.encode_into_bytes();
             let back =
@@ -3445,6 +3454,7 @@ mod tests {
             assert_eq!(back.config, vec![0xde, 0xad, 0xbe, 0xef]);
             assert_eq!(back.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
             assert_eq!(back.name.as_deref(), Some("probe_with_config"));
+            assert_eq!(back.export.as_deref(), Some("ui.panel"));
         }
 
         #[test]

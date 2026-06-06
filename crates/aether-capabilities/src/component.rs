@@ -103,7 +103,7 @@ mod native {
     use aether_actor::actor;
     use aether_actor::actor::ctx::OutboundReply;
     use aether_data::Kind;
-    use aether_kinds::LoadResult;
+    use aether_kinds::{ComponentCapabilities, LoadResult};
     use wasmtime::{Engine, Linker, Module};
 
     use super::{DropComponent, LoadComponent, ReplaceComponent, UnsubscribeAll};
@@ -247,10 +247,49 @@ mod native {
                 return LoadResult::Err { error };
             }
 
-            // 2. Parse capabilities manifest (ADR-0033).
-            let capabilities = match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
-                Ok(c) => c,
+            // 2. Parse the per-actor capability manifest (ADR-0033 /
+            //    ADR-0096) and resolve which exported type to load.
+            //    `export: None` selects the entry (first) type — the
+            //    only type a single-actor module has — so the legacy
+            //    load is unchanged. A named selector must match one of
+            //    the module's `ActorBoundary` namespaces, else the load
+            //    fails cleanly. The selected type's `type_tag` drives
+            //    `init_typed_p32` at instantiate; `None` keeps the
+            //    legacy entry-init path.
+            let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
+                Ok(a) => a,
                 Err(error) => return LoadResult::Err { error },
+            };
+            let (capabilities, type_tag, selected_namespace): (
+                ComponentCapabilities,
+                Option<u64>,
+                Option<String>,
+            ) = match &payload.export {
+                Some(requested) => {
+                    let Some(group) = actors
+                        .iter()
+                        .find(|a| a.namespace.as_deref() == Some(requested.as_str()))
+                    else {
+                        let available: Vec<&str> = actors
+                            .iter()
+                            .filter_map(|a| a.namespace.as_deref())
+                            .collect();
+                        return LoadResult::Err {
+                            error: format!(
+                                "export {requested:?} not found in module; exported types: {available:?}"
+                            ),
+                        };
+                    };
+                    (
+                        group.capabilities.clone(),
+                        Some(aether_data::mailbox_id_from_name(requested).0),
+                        Some(requested.clone()),
+                    )
+                }
+                None => match actors.into_iter().next() {
+                    Some(entry) => (entry.capabilities, None, entry.namespace),
+                    None => (ComponentCapabilities::default(), None, None),
+                },
             };
 
             // 3. Compile module.
@@ -263,17 +302,23 @@ mod native {
                 }
             };
 
-            // 4. Resolve the component name. Caller > wasm-declared >
-            // monotonic default.
+            // 4. Resolve the component name. Caller > selected export's
+            // namespace > wasm-declared entry namespace > monotonic
+            // default. A non-entry export defaults its mailbox name to
+            // the selected type's namespace, the multi-actor analog of
+            // the single-actor `aether.namespace` fallback.
             let name = match payload.name {
                 Some(n) => n,
-                None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
-                    Ok(Some(declared)) => declared,
-                    Ok(None) => {
-                        let n = self.default_name_counter.fetch_add(1, Ordering::Relaxed);
-                        format!("component_{n}")
-                    }
-                    Err(error) => return LoadResult::Err { error },
+                None => match selected_namespace {
+                    Some(ns) => ns,
+                    None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
+                        Ok(Some(declared)) => declared,
+                        Ok(None) => {
+                            let n = self.default_name_counter.fetch_add(1, Ordering::Relaxed);
+                            format!("component_{n}")
+                        }
+                        Err(error) => return LoadResult::Err { error },
+                    },
                 },
             };
 
@@ -295,6 +340,11 @@ mod native {
                 // bytes into the trampoline; `WasmTrampoline::init` hands
                 // them to the guest's typed `init`.
                 config: payload.config,
+                // ADR-0096: the selected export's actor-type tag, threaded
+                // through to `Component::instantiate` so it calls
+                // `init_typed_p32`. `None` = entry type (single-actor
+                // modules and unselected loads keep the legacy init path).
+                type_tag,
             };
             let mailbox_id = match ctx
                 .spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config)

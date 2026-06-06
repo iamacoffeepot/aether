@@ -100,3 +100,25 @@ pub const fn write_inputs_config<const N: usize>(id: u64, name: &str) -> [u8; N]
     let _ = pos;
     out
 }
+
+/// Byte length of an `ActorBoundary` record's postcard encoding
+/// (ADR-0096). One-byte enum-variant tag (`0x04`) + `postcard(namespace)`.
+#[must_use]
+pub const fn inputs_actor_boundary_len(namespace: &str) -> usize {
+    1 + str_len(namespace)
+}
+
+/// Serialize an `InputsRecord::ActorBoundary` into a fixed-size array
+/// sized by `inputs_actor_boundary_len`. Exact postcard wire shape for
+/// `InputsRecord::ActorBoundary { namespace }` — the per-actor group
+/// marker `export!(A, B, …)` writes ahead of each type's records.
+#[must_use]
+pub const fn write_inputs_actor_boundary<const N: usize>(namespace: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = 0usize;
+    out[pos] = 4; // variant tag: ActorBoundary
+    pos += 1;
+    pos = write_str(namespace, &mut out, pos);
+    let _ = pos;
+    out
+}

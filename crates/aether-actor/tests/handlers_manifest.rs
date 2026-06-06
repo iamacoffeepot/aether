@@ -126,6 +126,10 @@ fn manifest_const_round_trips_to_expected_records() {
             InputsRecord::Config { .. } => {
                 panic!("unexpected Config record for a no-config component")
             }
+            // ADR-0096: single-actor `export!` emits no boundary record.
+            InputsRecord::ActorBoundary { .. } => {
+                panic!("unexpected ActorBoundary record for a single-actor module")
+            }
         }
     }
 
