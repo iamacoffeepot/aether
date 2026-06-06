@@ -286,6 +286,22 @@ pub trait ErasedFfiActor {
     fn erased_unwire(&mut self, ctx: &mut FfiCtx<'_>);
 }
 
+/// Stage a guest init-failure message into the substrate via
+/// `init_failed_p32` (ADR-0096). Shared by the multi-actor `export!`
+/// init shims so the byte-staging boilerplate isn't repeated at each
+/// construction site. wasm32-only — the host build carries no FFI
+/// surface.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn stage_init_failure(message: &str) {
+    let bytes = message.as_bytes();
+    // SAFETY: `init_failed` copies `len` bytes from `ptr` into the
+    // substrate synchronously; the borrowed slice outlives the call.
+    unsafe {
+        raw::init_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32);
+    }
+}
+
 /// Generic guest allocator backing host→guest payload delivery (ADR-0095).
 ///
 /// The substrate writes every inbound payload — mail, init config, rehydrate
@@ -795,11 +811,9 @@ macro_rules! __export_multi_internal {
                     return $crate::__export_multi_internal!(@construct $component, mailbox_id, config_bytes);
                 }
             )+
-            let msg = "guest init: unknown actor-type tag for multi-actor module";
-            let bytes = msg.as_bytes();
-            unsafe {
-                $crate::ffi::raw::init_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32);
-            }
+            $crate::ffi::stage_init_failure(
+                "guest init: unknown actor-type tag for multi-actor module",
+            );
             1
         }
 
@@ -901,15 +915,11 @@ macro_rules! __export_multi_internal {
         >::decode_from_bytes($config_bytes) {
             ::core::option::Option::Some(c) => c,
             ::core::option::Option::None => {
-                let msg = ::core::concat!(
+                $crate::ffi::stage_init_failure(::core::concat!(
                     "guest init: ",
                     ::core::stringify!($ty),
                     " could not decode Config from bytes",
-                );
-                let bytes = msg.as_bytes();
-                unsafe {
-                    $crate::ffi::raw::init_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32);
-                }
+                ));
                 return 1;
             }
         };
@@ -925,11 +935,7 @@ macro_rules! __export_multi_internal {
                 0
             }
             ::core::result::Result::Err(err) => {
-                let msg = err.message();
-                let bytes = msg.as_bytes();
-                unsafe {
-                    $crate::ffi::raw::init_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32);
-                }
+                $crate::ffi::stage_init_failure(err.message());
                 1
             }
         }
