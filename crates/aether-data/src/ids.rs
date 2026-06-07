@@ -18,7 +18,10 @@ use core::fmt;
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::hash::{TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, thread_id_from_name};
+use crate::hash::{
+    TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, mailbox_id_from_name_pair,
+    thread_id_from_name,
+};
 use crate::tagged_id::{self, Tag};
 
 /// Shared `Display` body — render tagged-string form when the tag
@@ -218,6 +221,33 @@ impl Serialize for MailboxId {
 impl<'de> Deserialize<'de> for MailboxId {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         deserialize_id(d, Tag::Mailbox).map(MailboxId)
+    }
+}
+
+/// A node's per-actor identity — *which actor*, independent of where it
+/// sits in the tree (ADR-0099 §1). A singleton's `ActorId` is its
+/// actor-type tag (ADR-0096), `hash(NAMESPACE)`; an instanced node folds
+/// the runtime discriminator in, `hash(NAMESPACE:subname)`. It already
+/// carries `Tag::Mailbox` bits, so the depth-1 lineage fold is the
+/// identity ([`crate::hash::fold_lineage`]) and a root actor's
+/// [`MailboxId`] equals its `ActorId`.
+#[repr(transparent)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ActorId(pub u64);
+
+impl ActorId {
+    /// A singleton node's `ActorId` — the actor-type tag, `hash(NAMESPACE)`.
+    #[must_use]
+    pub const fn singleton(namespace: &str) -> Self {
+        Self(mailbox_id_from_name(namespace).0)
+    }
+
+    /// An instanced node's `ActorId` — `hash(NAMESPACE:subname)`, the
+    /// namespace with the runtime discriminator folded in by the `:`
+    /// cardinality separator (ADR-0079).
+    #[must_use]
+    pub const fn instanced(namespace: &str, subname: &str) -> Self {
+        Self(mailbox_id_from_name_pair(namespace, subname).0)
     }
 }
 

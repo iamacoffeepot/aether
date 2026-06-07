@@ -39,14 +39,14 @@ const COMPONENT_NAME: &str = "world";
 /// Full mailbox address the substrate registers for the loaded
 /// component (issue 634 Phase 4 PR 1). Mail to the bare
 /// `COMPONENT_NAME` warn-drops as unknown — agents address the
-/// trampoline by its full `aether.component.trampoline:NAME` form,
-/// which is what `LoadResult.name` returns. Built from
-/// `WasmTrampoline::NAMESPACE` — the cap-owned single source of truth
-/// post issue 654.
+/// trampoline by its full `/`-rendered lineage
+/// `aether.component/aether.component.trampoline:NAME` (ADR-0099 §4),
+/// which is what `LoadResult.name` returns: the component host
+/// `/`-joined to the trampoline node.
 fn component_address() -> String {
     use aether_actor::Actor;
     format!(
-        "{}:{}",
+        "aether.component/{}:{}",
         aether_capabilities::WasmTrampoline::NAMESPACE,
         COMPONENT_NAME,
     )

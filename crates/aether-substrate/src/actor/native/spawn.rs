@@ -23,7 +23,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
-use aether_data::{Kind, mailbox_id_from_name};
+use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
@@ -301,6 +301,7 @@ impl Spawner {
         config: A::Config,
         after_init_mail: Vec<Envelope>,
         sender_for_init: ReplyTo,
+        parent: Option<(u64, MailboxId)>,
     ) -> Result<MailboxId, SpawnError>
     where
         A: Instanced + NativeActor + NativeDispatch,
@@ -323,22 +324,47 @@ impl Spawner {
             });
         }
 
-        // 3. Compute full name + id; tombstone check.
-        let full_name = format!("{}:{}", A::NAMESPACE, subname_str);
-        let id = MailboxId(mailbox_id_from_name(&full_name).0);
+        // 3. Compute the lineage carry, id, and rendered name (ADR-0099
+        //    §3). The child's `ActorId` is its instanced node,
+        //    `hash(NAMESPACE:subname)`. Under a parent the carry folds
+        //    that node onto the parent's carry and the id is the lineage
+        //    fold — `MailboxId = hash(name)` no longer holds, so the id
+        //    is taken from the fold and the rendered name nests under the
+        //    parent's registered name. Top-level (no parent) is the
+        //    depth-1 fixed point: the node is the root of its own
+        //    lineage, so it keeps the flat `{NAMESPACE}:{subname}` id.
+        let child_actor = ActorId::instanced(A::NAMESPACE, &subname_str);
+        let (carry, full_name) = match parent {
+            Some((parent_carry, parent_id)) => {
+                let carry = fold_lineage(parent_carry, child_actor);
+                // A spawning actor is always registered, so the `None`
+                // fallback is unreachable in practice; the folded id still
+                // routes, so degrade the *display* name to the flat form
+                // rather than fail the spawn.
+                let name = self.registry.mailbox_name(parent_id).map_or_else(
+                    || format!("{}:{}", A::NAMESPACE, subname_str),
+                    |parent_name| format!("{parent_name}/{}:{}", A::NAMESPACE, subname_str),
+                );
+                (carry, name)
+            }
+            None => (child_actor.0, format!("{}:{}", A::NAMESPACE, subname_str)),
+        };
+        let id = MailboxId(with_tag(Tag::Mailbox, carry));
         if self.actor_registry.is_tombstoned(id) {
             return Err(SpawnError::SubnameRetired { full_name });
         }
 
         // 4. Construct + init on caller's thread. Build the inbox pair
-        // up-front so init may publish its self-id by hashing
-        // `full_name` (the spawn-side derivation matches
-        // `NativeInitCtx::self_id`); spawn-thread doesn't exist yet.
+        // up-front so init may publish its self-id (`NativeInitCtx::self_id`
+        // reads the binding's `self_mailbox`, which is this folded `id`);
+        // the spawn thread doesn't exist yet.
         let (tx, rx) = mpsc::channel::<Envelope>();
 
         let transport = Arc::new(NativeBinding::new(
             Arc::clone(&self.mailer),
             id,
+            // The child's lineage carry — its descendants fold onto it.
+            carry,
             Arc::clone(&self.aborter),
             // Pass the chassis's `Spawner` through so the spawned
             // actor can in turn `ctx.spawn_child` from its own
@@ -414,7 +440,11 @@ impl Spawner {
         // decrement bracket the `tx.send` exactly as before; the
         // failure branch reads `env.kind_name` out of `SendError`
         // since `dispatch` was already moved into `env`.
-        let registered = self.registry.try_register_inbox(
+        // ADR-0099 §3: register under the lineage-folded `id`, not
+        // `hash(full_name)` — the rendered name is display / reverse-map
+        // only and no longer derives the id.
+        let registered = self.registry.try_register_inbox_with_id(
+            id,
             full_name.clone(),
             Arc::new(move |dispatch: OwnedDispatch| {
                 let Some(tx) = weak_for_handler.upgrade() else {
@@ -616,6 +646,13 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
     subname: Subname<'ctx>,
     config: Option<A::Config>,
     sender: ReplyTo,
+    /// ADR-0099 §3: the spawning actor's lineage `(carry, id)`, or
+    /// `None` for a top-level chassis-level spawn. `Some` nests the
+    /// child — its id folds the new node's `ActorId` onto the parent
+    /// carry, and its registered name renders under the parent's. `None`
+    /// is the depth-1 case: the child is the root of its own lineage and
+    /// keeps the flat `{NAMESPACE}:{subname}` id it has today.
+    parent: Option<(u64, MailboxId)>,
     after_init: Vec<Envelope>,
     _marker: PhantomData<fn() -> A>,
     /// Carries the `'ctx` lifetime even though `spawner` is `Arc`
@@ -634,12 +671,14 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
         subname: Subname<'ctx>,
         config: A::Config,
         sender: ReplyTo,
+        parent: Option<(u64, MailboxId)>,
     ) -> Self {
         Self {
             spawner,
             subname,
             config: Some(config),
             sender,
+            parent,
             after_init: Vec::new(),
             _marker: PhantomData,
             _ctx: PhantomData,
@@ -707,10 +746,11 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
             subname,
             config,
             sender,
+            parent,
             after_init,
             ..
         } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
-        Spawner::spawn_actor::<A>(spawner, subname, config, after_init, sender)
+        Spawner::spawn_actor::<A>(spawner, subname, config, after_init, sender, parent)
     }
 }

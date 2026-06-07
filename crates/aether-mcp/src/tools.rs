@@ -27,7 +27,7 @@ use aether_data::SchemaType;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
     DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name,
-    tagged_id,
+    mailbox_id_from_path, tagged_id,
 };
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
@@ -669,7 +669,7 @@ impl Mcp {
                        Sends aether.log.tail to the named mailbox and decodes aether.log.tail_result. \
                        Every actor — native or wasm trampoline — serves this kind via the substrate's \
                        framework dispatch arm, so any mailbox is queryable (e.g. \"aether.audio\", \
-                       \"aether.component.trampoline:camera\"). `max` defaults to 100 and clamps to 1000; \
+                       \"aether.component/aether.component.trampoline:camera\"). `max` defaults to 100 and clamps to 1000; \
                        pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
                        `since` (the prior call's `next_since`) to walk past already-seen entries without \
                        double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
@@ -1010,7 +1010,13 @@ impl Mcp {
         Ok(MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
-                mailbox: mailbox_id_from_name(&spec.recipient_name),
+                // ADR-0099 §4: resolve the recipient by the parse → fold,
+                // so a `/`-rendered hosted / nested actor name
+                // (`aether.component/aether.component/aether.component.trampoline:camera`)
+                // reaches its lineage-folded id. A root-cap name is a
+                // single segment and folds to the same id `hash(name)`
+                // gives.
+                mailbox: mailbox_id_from_path(&spec.recipient_name),
             },
             from: None,
             kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
@@ -1317,7 +1323,7 @@ impl ServerHandler for Mcp {
 /// (`engine = None`) carrying a typed kind.
 fn local_envelope<K: Kind + serde::Serialize>(mailbox: &str, kind: &K) -> MailEnvelope {
     MailEnvelope {
-        to: MailboxAddress::local(mailbox_id_from_name(mailbox)),
+        to: MailboxAddress::local(mailbox_id_from_path(mailbox)),
         from: None,
         kind: K::ID,
         correlation_id: None,
@@ -1333,7 +1339,7 @@ fn engine_envelope<K: Kind + serde::Serialize>(
     mailbox: &str,
     kind: &K,
 ) -> MailEnvelope {
-    engine_envelope_by_id(engine, mailbox_id_from_name(mailbox), kind)
+    engine_envelope_by_id(engine, mailbox_id_from_path(mailbox), kind)
 }
 
 /// Like [`engine_envelope`] but addresses the recipient by

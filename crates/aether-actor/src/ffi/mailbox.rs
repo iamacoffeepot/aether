@@ -18,7 +18,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, mailbox_id_from_name, mailbox_id_from_name_pair};
+use aether_data::{ActorId, Kind, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
 use crate::actor::{Actor, HandlesKind};
 use crate::ffi::bridge::MAIL_BRIDGE;
@@ -68,19 +68,24 @@ impl<R> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
 
-    /// Resolve a sibling mailbox addressed by `scope` joined to
-    /// `segment` with the structural `:` separator (ADR-0098), without
-    /// allocating the joined name. Composes the same id as
-    /// `resolve_peer(&format!("{scope}:{segment}"))`, so a cap-owned ext
-    /// trait that reaches a scoped child — a loaded component under its
-    /// trampoline scope — stays allocation-free.
+    /// Resolve a child mailbox of *this* actor, where the child is the
+    /// instanced node `scope:segment` (ADR-0099 §3 — `scope` is the
+    /// child's `NAMESPACE`, `segment` its `:` discriminator). The child's
+    /// id folds that node's `ActorId` onto this actor's lineage carry,
+    /// so a cap that owns a scoped-child facade — the component host
+    /// reaching a loaded component, a socket listener reaching a session
+    /// — composes the registered fold id without allocating a name.
+    ///
+    /// `self.mailbox` is the parent carry: exact for a root-pinned cap
+    /// (depth-1, carry == id), which is every cap that hosts children.
     #[must_use]
     pub fn resolve_peer_scoped<Peer: Actor>(
         &self,
         scope: &str,
         segment: &str,
     ) -> FfiActorMailbox<Peer> {
-        FfiActorMailbox::__new(mailbox_id_from_name_pair(scope, segment).0)
+        let node = ActorId::instanced(scope, segment);
+        FfiActorMailbox::__new(with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)))
     }
 }
 

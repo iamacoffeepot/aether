@@ -163,8 +163,23 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 format!("{subname_prefix}.{n}")
             };
 
-            let full_name = format!("{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            let mailbox_id = aether_data::mailbox_id_from_name(&full_name).0;
+            // ADR-0099 §3: a spawned sibling nests under this trampoline,
+            // so its id folds the sibling's instanced node onto the
+            // trampoline's lineage carry — the same fold the drain-time
+            // `spawn_child::<WasmTrampoline>` runs (it carries the
+            // trampoline's binding carry), so the synchronous prediction
+            // matches the registered id.
+            let Some(trampoline_carry) =
+                caller.data().binding.as_ref().map(|binding| binding.carry())
+            else {
+                tracing::warn!(target: "aether_substrate::component", "spawn_sibling: no binding on the trampoline (cannot fold sibling id)");
+                return 0;
+            };
+            let sibling_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
+            let mailbox_id = aether_data::with_tag(
+                aether_data::Tag::Mailbox,
+                aether_data::fold_lineage(trampoline_carry, sibling_node),
+            );
             caller.data_mut().pending_spawn = Some(PendingSpawn {
                 tag,
                 subname: full_subname,

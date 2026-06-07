@@ -46,12 +46,13 @@ use std::path::Path;
 /// address, so only the load-time name matters here.
 const COMPONENT_NAME: &str = "cam";
 
-/// Built from `WasmTrampoline::NAMESPACE` — the cap-owned single
-/// source of truth post issue 654.
+/// The `/`-rendered lineage a loaded component registers at (ADR-0099
+/// §4): the component host `aether.component` `/`-joined to the
+/// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Actor;
     format!(
-        "{}:{}",
+        "aether.component/{}:{}",
         aether_capabilities::WasmTrampoline::NAMESPACE,
         COMPONENT_NAME,
     )

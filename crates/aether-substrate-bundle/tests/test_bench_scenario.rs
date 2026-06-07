@@ -56,12 +56,13 @@ const PROBE_NAME: &str = "probe";
 /// Full trampoline address the substrate registers under post-issue-634
 /// Phase 4. Mail destined for the loaded probe goes here, not to the
 /// bare `PROBE_NAME` (which isn't a registered mailbox). Built from
-/// `WasmTrampoline::NAMESPACE` — the cap-owned single source of truth
-/// post issue 654.
+/// The `/`-rendered lineage a loaded component registers at (ADR-0099
+/// §4): the component host `aether.component` `/`-joined to the
+/// trampoline node — exactly what `LoadResult.name` reports.
 fn probe_address() -> String {
     use aether_actor::Actor;
     format!(
-        "{}:{}",
+        "aether.component/{}:{}",
         aether_capabilities::WasmTrampoline::NAMESPACE,
         PROBE_NAME,
     )
@@ -323,6 +324,11 @@ fn multi_actor_sibling_spawn() {
         "entry load should resolve to ui.root; got {root_name}",
     );
 
+    // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
+    // Panel registers at the `/`-rendered lineage path — the RootManager's
+    // name with the sibling's trampoline segment appended — and its id is
+    // the lineage fold of that path, not `hash("…trampoline:ui.panel.0")`.
+    let panel_name = format!("{root_name}/aether.component.trampoline:ui.panel.0");
     bench
         .execute(vec![
             // RootManager spawns a Panel sibling (Counter → ui.panel.0).
@@ -333,10 +339,7 @@ fn multi_actor_sibling_spawn() {
             // The spawned Panel broadcasts TickObserved when pinged.
             (
                 "ping_panel",
-                BenchOp::send_mail::<Ping>(
-                    "aether.component.trampoline:ui.panel.0",
-                    &Ping { seq: 1 },
-                ),
+                BenchOp::send_mail::<Ping>(panel_name.as_str(), &Ping { seq: 1 }),
             ),
         ])
         .expect("spawn + ping sequence");

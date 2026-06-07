@@ -127,7 +127,9 @@ pub fn noop_handler() -> Arc<dyn InboxHandler> {
 }
 
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
-use aether_data::{KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType};
+use aether_data::{
+    KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, mailbox_id_from_path,
+};
 
 /// One mail's worth of dispatch metadata handed to an
 /// [`InlineHandler`]. Bundled into a single struct (rather than a
@@ -870,7 +872,24 @@ impl Registry {
     /// after a drop), the entry transitions back to live. Any other
     /// occupied entry is a collision.
     fn insert(&self, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
-        let id = MailboxId::from_name(&name);
+        // Depth-1 / root registrations derive the id from the name
+        // (ADR-0029) — the lineage fold's fixed point.
+        self.insert_with_id(MailboxId::from_name(&name), name, entry)
+    }
+
+    /// ADR-0099 §3: register under an explicit, caller-computed `id`
+    /// (the lineage fold) with `name` retained as the display /
+    /// reverse-map string. `MailboxId = hash(name)` no longer holds for
+    /// a hosted / spawned actor — its id is the fold over its lineage of
+    /// `ActorId`s — so the spawn path passes the folded id here instead
+    /// of letting the name derive it. [`Self::insert`] is the depth-1
+    /// case where the two coincide.
+    fn insert_with_id(
+        &self,
+        id: MailboxId,
+        name: String,
+        entry: MailboxEntry,
+    ) -> Result<MailboxId, NameConflict> {
         if id == MailboxId::NONE || id == MailboxId::CHASSIS_MAILBOX_ID {
             // Sentinel collisions are reserved: NONE shadows the
             // "absent/uninit" id (Option<MailboxId> semantics break if
@@ -1018,6 +1037,31 @@ impl Registry {
         result
     }
 
+    /// ADR-0099 §3: [`Self::try_register_inbox`] but under an explicit,
+    /// caller-computed `id` (the lineage fold) rather than `hash(name)`.
+    /// The spawn path uses this for hosted / nested actors, whose id is
+    /// the fold over their lineage; `name` stays the rendered display /
+    /// reverse-map string. The returned id is `id` on success.
+    pub fn try_register_inbox_with_id(
+        &self,
+        id: MailboxId,
+        name: impl Into<String>,
+        handler: Arc<dyn InboxHandler>,
+    ) -> Result<MailboxId, NameConflict> {
+        let result = self.insert_with_id(
+            id,
+            name.into(),
+            MailboxEntry::Inbox {
+                handler,
+                seize: SeizeCell::default(),
+            },
+        );
+        if result.is_ok() {
+            self.notify_mailbox_change();
+        }
+        result
+    }
+
     /// Issue 838: register a mailbox whose handler runs inline on
     /// the pushing thread. `Mailer::push` brackets the call with
     /// `Received`/`Finished` so the chain's `in_flight` balances
@@ -1123,7 +1167,12 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
-        let id = MailboxId::from_name(name);
+        // ADR-0099 §4: resolve a written name by the parse → fold (the
+        // inverse of the `/`-render), not `hash(name)` — a hosted /
+        // nested actor's id is the lineage fold, so the whole-string hash
+        // would miss it. The depth-1 case (every root cap) folds to the
+        // same id `hash(name)` gives.
+        let id = mailbox_id_from_path(name);
         let inner = self
             .inner
             .read()
@@ -1506,7 +1555,17 @@ fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
     // categorisation duplicates the prefix; if it drifts, every
     // loaded-component test fails immediately because the mailbox
     // categorisation no longer matches.
-    } else if name.starts_with("aether.component.trampoline:") {
+    //
+    // ADR-0099 §4: the name is now the `/`-rendered lineage
+    // (`aether.component/aether.component.trampoline:NAME`, and one more
+    // `/...trampoline:CHILD` segment per nested sibling spawn), so the
+    // trampoline node is the *leaf* segment rather than the whole-string
+    // prefix — match on the last `/`-segment.
+    } else if name
+        .rsplit('/')
+        .next()
+        .is_some_and(|leaf| leaf.starts_with("aether.component.trampoline:"))
+    {
         Some(MailboxCategory::Trampoline)
     } else if name.starts_with("aether.") {
         // Chassis caps and substrate-owned actors live under the

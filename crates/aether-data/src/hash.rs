@@ -6,7 +6,7 @@
 //! `MailboxId`-into-`KindId` slot (or vice versa) hashes to a
 //! different value rather than colliding silently.
 
-use crate::ids::{HandleId, MailboxId, ThreadId, TransformId};
+use crate::ids::{ActorId, HandleId, MailboxId, ThreadId, TransformId};
 use crate::tagged_id::{Tag, with_tag};
 
 /// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
@@ -171,6 +171,62 @@ pub const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> MailboxId
     MailboxId(with_tag(Tag::Mailbox, hash))
 }
 
+/// One lineage step (ADR-0099 §3): fold a child node's [`ActorId`] onto
+/// the parent's rolling `carry`. The carry is the running FNV-1a state
+/// over the lineage of `ActorId`s, root to leaf; a node's [`MailboxId`] is
+/// `with_tag(Mailbox, carry)`. A spawn extends the lineage in O(1) by
+/// one fold step, so an actor carries its whole lineage as a single
+/// `u64`. Folding a child onto its ancestors' running hash — a hash
+/// chain — keeps each node recoverable, unlike a flat hash of a joined
+/// path string.
+///
+/// The depth-1 case is the identity: a root node's carry is its own
+/// `ActorId.0`, and because that value is already `Tag::Mailbox`-tagged,
+/// `with_tag(Mailbox, carry) == ActorId`. So every chassis cap keeps the
+/// exact id it has today; only depth-≥2 actors fold. Harness-specific
+/// composition (a loaded component's `[host, trampoline:name]` lineage)
+/// lives where the host / trampoline `NAMESPACE` consts do, not here —
+/// this primitive is name-agnostic.
+#[must_use]
+pub const fn fold_lineage(parent_carry: u64, child: ActorId) -> u64 {
+    fnv1a_64_fold(parent_carry, &child.0.to_le_bytes())
+}
+
+/// The [`ActorId`] of one rendered path segment (ADR-0099 §4): a bare
+/// `atom` is a singleton node `hash(atom)`; an `atom:discriminator` is
+/// an instanced node `hash(atom:discriminator)`. The inverse of the
+/// per-segment render.
+#[must_use]
+fn segment_actor_id(segment: &str) -> ActorId {
+    match segment.split_once(':') {
+        Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
+        None => ActorId::singleton(segment),
+    }
+}
+
+/// Resolve a rendered `/`-path to its [`MailboxId`] by the ADR-0099 §4
+/// parse → fold (the inverse of the display render): split on `/` into
+/// per-node segments, map each to its [`ActorId`] (`segment_actor_id`),
+/// and chain-fold root → leaf. A `MailboxId` is **never** the hash of a
+/// joined path string — it is this fold over the path's nodes — so
+/// string-addressing callers (the registry's name lookup, the MCP
+/// `recipient_name` surface, the test bench) resolve a hosted / nested
+/// actor through here rather than hashing the whole name. The cold path:
+/// type addressing stays a const fold, and only written paths pay this
+/// parse. A single-segment path (every root cap) folds to that segment's
+/// `ActorId`, identical to [`mailbox_id_from_name`].
+#[must_use]
+pub fn mailbox_id_from_path(path: &str) -> MailboxId {
+    let mut segments = path.split('/');
+    // A non-empty `split` always yields at least one item; default the
+    // empty-string edge case to the empty-segment ActorId.
+    let mut carry = segment_actor_id(segments.next().unwrap_or("")).0;
+    for segment in segments {
+        carry = fold_lineage(carry, segment_actor_id(segment));
+    }
+    MailboxId(with_tag(Tag::Mailbox, carry))
+}
+
 /// ADR-0098: maximum number of segments in a composed mailbox path
 /// (`root:a:b` is depth 3). Mailbox names are registry keys, so an
 /// unbounded scope chain would let a runaway caller bloat the key
@@ -272,6 +328,71 @@ mod tests {
     fn pair_evaluates_in_const() {
         const ID: MailboxId = mailbox_id_from_name_pair("scope", "leaf");
         assert_eq!(ID, mailbox_id_from_name("scope:leaf"));
+    }
+
+    #[test]
+    fn depth_one_fold_is_the_actor_id() {
+        // A root cap's lineage is one node; the fold loop never runs, so
+        // its MailboxId is `with_tag(Mailbox, ActorId.0)`, and since the
+        // ActorId is already Mailbox-tagged that equals today's
+        // name-hash id. Every chassis cap keeps its exact id — zero
+        // rehash at depth 1.
+        let render = ActorId::singleton("aether.render");
+        assert_eq!(
+            MailboxId(with_tag(Tag::Mailbox, render.0)),
+            mailbox_id_from_name("aether.render"),
+        );
+    }
+
+    #[test]
+    fn depth_two_fold_differs_from_a_flat_name_hash() {
+        // A two-node lineage folds the child's ActorId onto the root's
+        // carry; the result is the hash chain, not the hash of any
+        // joined string. So a hosted / nested actor rehashes off its old
+        // flat name — the wire break is real at depth >= 2 (and only
+        // there; depth 1 is the fixed point above). Name-agnostic: the
+        // fold takes ActorIds, never literal harness namespaces.
+        let root = ActorId::singleton("root");
+        let child = ActorId::instanced("child", "7");
+        let folded = MailboxId(with_tag(Tag::Mailbox, fold_lineage(root.0, child)));
+        assert_ne!(folded, mailbox_id_from_name("root:child:7"));
+        assert_ne!(folded, mailbox_id_from_name("child:7"));
+    }
+
+    #[test]
+    fn fold_extends_a_carry_one_node() {
+        // Folding is sequential and non-commutative: a/b differs from
+        // b/a, so position is encoded without a separate depth field.
+        let a = ActorId::singleton("a");
+        let b = ActorId::singleton("b");
+        let ab = fold_lineage(a.0, b);
+        let ba = fold_lineage(b.0, a);
+        assert_ne!(ab, ba);
+    }
+
+    #[test]
+    fn path_resolves_to_the_chain_fold() {
+        // A single-segment path is the depth-1 fixed point — identical to
+        // the name hash, so every root cap resolves unchanged.
+        assert_eq!(mailbox_id_from_path("root"), mailbox_id_from_name("root"));
+
+        // A multi-segment `/`-path folds each node's ActorId root → leaf:
+        // a bare atom is a singleton node, `atom:disc` an instanced one.
+        // This is the inverse of the render (ADR-0099 §4).
+        let s0 = ActorId::singleton("root").0;
+        let s1 = fold_lineage(s0, ActorId::instanced("scope", "7"));
+        let expected = MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(s1, ActorId::singleton("leaf")),
+        ));
+        assert_eq!(mailbox_id_from_path("root/scope:7/leaf"), expected);
+
+        // And it is NOT the flat hash of the joined string — names don't
+        // hash to nested ids.
+        assert_ne!(
+            mailbox_id_from_path("root/scope:7/leaf"),
+            mailbox_id_from_name("root/scope:7/leaf"),
+        );
     }
 
     #[test]

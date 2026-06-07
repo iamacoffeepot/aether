@@ -144,11 +144,12 @@ impl MailBridge {
     /// `Subname::Counter` (the host appends a monotonic discriminator)
     /// vs a caller-supplied name; `subname` is the full prefixed subname
     /// for `Named` or the type-namespace prefix for `Counter`; `config`
-    /// is the encoded `Config` kind. The returned id is
-    /// `hash("aether.component.trampoline:<subname>")`, known
-    /// synchronously; the spawn itself completes just after this call
-    /// (ADR-0097 §4), so a spawn-time failure surfaces asynchronously
-    /// rather than here.
+    /// is the encoded `Config` kind. The returned id is the spawned
+    /// sibling's ADR-0099 §3 lineage fold (the trampoline's carry folded
+    /// with the sibling's node), known synchronously — one fold step on a
+    /// carry the host already holds; the spawn itself completes just
+    /// after this call (ADR-0097 §4), so a spawn-time failure surfaces
+    /// asynchronously rather than here.
     #[must_use]
     pub fn spawn_sibling(&self, tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
         let subname_bytes = subname.as_bytes();

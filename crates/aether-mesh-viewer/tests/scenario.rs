@@ -46,12 +46,13 @@ const COMPONENT_NAME: &str = "mv";
 /// `COMPONENT_NAME` warn-drops as unknown — agents address the
 /// trampoline by its full `aether.component.trampoline:NAME` form,
 /// which is what `LoadResult.name` returns. Built from
-/// `WasmTrampoline::NAMESPACE` — the cap-owned single source of truth
-/// post issue 654.
+/// The `/`-rendered lineage a loaded component registers at (ADR-0099
+/// §4): the component host `aether.component` `/`-joined to the
+/// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Actor;
     format!(
-        "{}:{}",
+        "aether.component/{}:{}",
         aether_capabilities::WasmTrampoline::NAMESPACE,
         COMPONENT_NAME,
     )
