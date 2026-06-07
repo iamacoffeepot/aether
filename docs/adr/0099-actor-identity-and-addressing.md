@@ -25,7 +25,7 @@ This ADR **supersedes ADR-0098** (scoped singletons), which framed the same #136
 
 ## Decision
 
-Four sub-decisions.
+Five sub-decisions.
 
 ### 1. Two identities: ActorId (which actor) and MailboxId (where in the tree)
 
@@ -44,7 +44,7 @@ These are exactly the flat ids the engine computes today. Today's per-actor mail
 
 An actor's lineage is the ordered list of ActorIds from the root down to the actor — one per node on its path. It is a runtime value: an actor receives its lineage when it is created, holds it, and extends it by one node when it spawns a child. Position is not encoded in the type.
 
-The single static, type-level fact about position is whether an actor is **pinned to the root** or **may run as a child**. A root chassis capability (`aether.render`, `aether.fs`, the component host) exists once, at the root; a loaded or spawned actor always has a parent. That marker (iamacoffeepot/aether#1423) is the only thing about lineage the compiler holds; everything else is runtime data threaded through spawn.
+The single static, type-level fact about an actor's **position** is whether it is **pinned to the root** or **may run as a child**. A root chassis capability (`aether.render`, `aether.fs`, the component host) exists once, at the root; a loaded or spawned actor always has a parent. That marker (iamacoffeepot/aether#1423) is the only thing about an actor's position the compiler holds; everything else about lineage is runtime data threaded through spawn. (How a peer *resolves* an actor — statically or through its host — is a separate type-level fact; §5.)
 
 This expresses the per-scope cardinality ADR-0098 introduced on the identity model: a singleton is "exactly one under this parent," enforced because its lineage — and therefore its MailboxId — is unique. A second instance under the same parent folds to the same id and collides at registration (ADR-0029's collision guard). The substrate-global chassis cap is the depth-1 case of the same rule.
 
@@ -84,11 +84,26 @@ atom     := ident ( "." ident )*
 - **`:`** carries an instanced node's discriminator; the segment around it names that node's ActorId, `hash(NAMESPACE:subname)`.
 - **`.`** is cosmetic, within a single namespace ident — `aether.component.trampoline` is one segment.
 
-The loaded camera renders as `aether.component/aether.component.trampoline:camera`: root host, child trampoline scope, instance. Because the string is a rendering, a MailboxId is never computed by hashing it — a written path is resolved by parsing it into segments, mapping each segment to its ActorId, and chain-folding (§3). Type addressing never touches the string: `ctx.actor::<R>()` lowers `R::NAMESPACE` to the target's ActorId at compile time, and the caller's runtime lineage supplies the parent state, so reaching a sibling folds the target's ActorId onto the shared parent carry with no parse. The parse is the cold path, paid only by string-addressed callers — MCP, the CLI, `actor_logs`.
+The loaded camera renders as `aether.component/aether.component.trampoline:camera`: root host, child trampoline scope, instance. Because the string is a rendering, a MailboxId is never computed by hashing it — a written path is resolved by parsing it into segments, mapping each segment to its ActorId, and chain-folding (§3). Type addressing never touches the string at all: `ctx.actor::<R>()` resolves R to its id by R's resolution mode (§5), not by the rendered path. The parse is the cold path, paid only by string-addressed callers — MCP, the CLI, `actor_logs`.
 
 Display spellings can therefore vary — collapsing a repeated root, abbreviating a namespace — without touching the hash, because the lineage array is the single source of truth and the string never feeds resolution. There is no second authoritative form to disagree with the first.
 
-#1364 closes on this model. The bare `ctx.actor::<Camera>()` no longer hashes the bare `NAMESPACE` and misses; it folds Camera's ActorId onto the caller's lineage and lands on the hosted mailbox. The root-pinned marker (§2, #1423) selects the resolution: a root-pinned cap resolves to its ActorId directly (depth-1, frozen), and a child-capable type resolves relative to the caller's scope. The hosted footgun ADR-0098 patched in prose is gone because the id itself encodes the scope.
+#1364 closes on this model, by way of §5. A loaded component is dynamically resolved: `ctx.actor::<Camera>()` reaches the hosted mailbox because Camera's type routes resolution to its host authority, rather than hashing the bare `NAMESPACE` and missing. The footgun ADR-0098 patched in prose is gone because the type carries how it must be resolved, and its host owns the answer.
+
+### 5. Resolution is static by default; an FFI actor resolves dynamically through its host
+
+A peer resolves another actor's MailboxId by one of two paths, chosen by the peer's *type*, not by the caller. The call site is uniform: `ctx.actor::<R>()` asks for R's identifier and gets it; how it is found is R's concern.
+
+- **Static (the default).** R's MailboxId is computed client-side from R's compile-time identity and the caller's lineage carry, with no round-trip — the ADR-0029 path. A root-pinned cap resolves to its ActorId (depth-1, §3); a static actor with a parent resolves relative to the caller's lineage. This is every actor whose identity the caller can reconstruct.
+- **Dynamic (a trait).** R carries a marker — `HostResolved` (name to settle in #1423) — declaring that its identifier is owned by the host it is attached to and cannot be found without consulting that host. An FFI/wasm actor carries it: the host owns its mailbox (ADR-0097 — the guest's mailbox is the trampoline's), so the host is the authority for its identity. The marker names the resolution *mode*, not a host; the type stays scope-agnostic and survives being loaded under any name, which is what separates it from the scope-const-on-the-type the model rejects.
+
+The caller does not choose; R's type does. A plain type resolves statically; a `HostResolved` type routes to its host. Resolve the name — the type decides how.
+
+**The crossing.** Dynamic resolution lowers R to its type-tag (`hash(NAMESPACE)`, the ADR-0096 tag, statically known) and crosses to the host authority, which resolves type-tag → MailboxId: the host owns the delegate's lineage, so it computes the fold (§3) and returns the id. The caller caches it (once per peer, the ADR-0029 caching pattern). This is a resolution host-fn for the dynamic category — ADR-0029 retired the resolve round-trip for actors a caller can resolve client-side, and that holds; the round-trip returns only for the actors a caller provably cannot.
+
+**Symmetric — the delegate principle.** A `HostResolved` actor is a delegate; its host is the authority for its identity in both directions. A peer resolving the delegate consults the host, and the delegate emitting its own identity — its `ReplyTo`, handing its address to a peer — sources it from the host. The guest never mints its own identifier; the authority does.
+
+So the bare type carries neither the trampoline scope nor the load name, and the host that owns both is the one that answers — which is why a loaded component resolves dynamically while a root cap or a reconstructible child resolves statically.
 
 ## Consequences
 
@@ -107,7 +122,8 @@ Display spellings can therefore vary — collapsing a repeated root, abbreviatin
 - **A runtime field on the binding.** Each actor binding gains the rolling fold state (`u64`) and threads it through spawn — new lifecycle plumbing, small but load-bearing.
 - **ADR-0029 generalizes.** `MailboxId = hash(name)` survives as the depth-1 case; the general id is the fold over the lineage. The hashing, width, domain prefix, and no-lookup resolution are untouched.
 - **Sibling spawn nests.** A spawned sibling's lineage extends its spawner's, revising ADR-0097's flat `trampoline:<name>` addressing: the sibling's id folds the spawner's carry with the sibling's ActorId. The id still returns synchronously — one fold step on a carry the trampoline already holds — so ADR-0097's sync-id / async-failure contract stands; only the value changes.
-- **String addressing pays a parse.** MCP / CLI / string callers parse → per-segment ActorId → fold; type addressing stays const. A cold path, but non-zero.
+- **String addressing pays a parse.** MCP / CLI / string callers parse → per-segment ActorId → fold; static type addressing stays const. A cold path, but non-zero.
+- **A resolution host-fn returns for the dynamic category.** ADR-0029's client-side no-lookup holds for actors a caller can resolve itself; an FFI actor, whose identity its host owns, resolves through that host — one round-trip, cached per peer (§5). The round-trip is back only for the case the client-side hash provably cannot cover.
 
 ### Neutral
 
@@ -117,14 +133,14 @@ Display spellings can therefore vary — collapsing a repeated root, abbreviatin
 
 ### Follow-on
 
-- **Implementation** is scoped on iamacoffeepot/aether#1420 and split into PRs: the lineage fold + carry in `aether-data` and the actor binding, with the trampoline re-spell; the root-pinned marker and addressing resolution (#1423); and the migration of name-carrying surfaces.
+- **Implementation** is scoped on iamacoffeepot/aether#1420 and split into PRs: the lineage fold + carry in `aether-data` and the actor binding, with the trampoline re-spell; the resolution-mode markers and dynamic FFI resolution (#1423); and the migration of name-carrying surfaces.
 - **Display-layer ergonomics** — collapsing a repeated namespace root in the rendered path — are free to land later, since the string never feeds the hash.
 
 ## Alternatives considered
 
 - **One flat hash for both questions** (the status quo, `MailboxId = hash(name)`). Rejected: it conflates which-actor with where-in-the-tree, which is #1364, and it cannot encode depth without baking the whole path into one string and losing the constituent identities.
 - **A flat hash of the joined path string for the MailboxId** (`hash("a/b:7/c")`). Rejected: the result is not reverse-mappable to its constituent nodes (you cannot recover what sits at each level), and it cannot be carried incrementally — extending a path means rehashing the whole growing string per spawn. The hash chain gives both reverse-mappable nodes and O(1) extension.
-- **A static scope marker on the child type** (`const SCOPE_ROOT`, `type Scope = Parent`). Rejected: lineage is runtime data — which session, which parent instance — and cannot be a compile-time const. The only static fact is root-pinned vs child-capable (§2); anything more bolts runtime parentage onto a type that must stay scope-agnostic so the same code loads under different parents.
+- **A static scope marker on the child type** (`const SCOPE_ROOT`, `type Scope = Parent`). Rejected: lineage is runtime data — which session, which parent instance — and cannot be a compile-time const; bolting the parent onto a type couples code that must stay scope-agnostic so the same component loads under different parents. The §5 `HostResolved` marker is a different thing — it declares an actor's resolution *mode* (consult the host), names no parent, and so leaves the type scope-agnostic.
 - **Encode the depth or level in the fold.** Rejected as redundant: the fold is sequential and non-commutative over fixed-width (8-byte) node ids, so position is already encoded; there are no cycles and no variable-length node boundary to disambiguate.
 - **A flat `{scope}:{segment}` name join** (ADR-0098, superseded). Rejected: it kept one flat hash, so it inherited the not-reverse-mappable and not-incremental problems, and it left open where the runtime scope name lived (ADR-0098 §7). The rolling-`u64` carry answers that — the lineage rides as the fold state, neither a heavy name on the handle nor a registry round-trip.
 - **Encode spawn lineage only in `ReplyTo`, off the address.** Rejected: who-spawned-whom is exactly where-in-the-tree, which is what a MailboxId must encode. Keeping it only in the causal `ReplyTo` chain is what leaves bare-type addressing landing on the wrong id.
@@ -132,10 +148,10 @@ Display spellings can therefore vary — collapsing a repeated root, abbreviatin
 ## Related
 
 - ADR-0098 — Scoped singletons. **Superseded by this ADR.** Its per-scope-singleton concept is carried forward on the identity model (§2); its flat `{scope}:{segment}` join and its open §7 (where the runtime scope name lives) are replaced by the lineage fold and the rolling carry.
-- ADR-0029 — `MailboxId = hash(name)`. Generalized: the name-hash is the depth-1 case; the general id is the fold over the lineage. Width, domain prefix, and no-lookup resolution unchanged.
+- ADR-0029 — `MailboxId = hash(name)`. Generalized: the name-hash is the depth-1 case; the general id is the fold over the lineage. Width and domain prefix unchanged; client-side no-lookup resolution holds for statically-resolved actors, and a resolve round-trip returns for the dynamic category (§5).
 - ADR-0096 — Multi-actor wasm modules. The actor-type tag it defines is a node's ActorId.
-- ADR-0097 — Wasm sibling spawn. Its spawn mechanism (stage-and-drain, `ReplyTo`, sibling-only, no cascade) stands; this revises a spawned sibling's addressing from flat to nested under the spawner's lineage.
+- ADR-0097 — Wasm sibling spawn. Its spawn mechanism (stage-and-drain, `ReplyTo`, sibling-only, no cascade) stands; this revises a spawned sibling's addressing from flat to nested under the spawner's lineage. The guest's mailbox being the trampoline's makes a loaded/spawned actor a delegate whose identity its host owns — the basis for dynamic resolution (§5).
 - ADR-0079 — Instanced actors and cardinality. An instanced node's discriminator is folded into its ActorId by the `:` separator.
 - ADR-0064 — Type-tagged opaque ids. The depth-1 fixed point relies on `with_tag` being idempotent for a repeated tag.
 - ADR-0080 — Mail tracing and settlement. The causal mail lineage (`ReplyTo`) is a separate lineage, unaffected.
-- iamacoffeepot/aether#1364 — the gap this closes; #1420 — the implementation; #1423 — the root-pinned marker.
+- iamacoffeepot/aether#1364 — the gap this closes; #1420 — the implementation; #1423 — the resolution-mode markers + dynamic resolution.
