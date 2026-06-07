@@ -48,23 +48,13 @@ use aether_actor::local::ActorSlots;
 use std::sync::Weak;
 use std::time::Duration;
 
-/// How to derive the subname for a [`SpawnBuilder::finish`] call. The
-/// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
-/// hashes that string deterministically (ADR-0029) to produce the
-/// returned [`MailboxId`].
-#[derive(Debug, Clone, Copy)]
-pub enum Subname<'a> {
-    /// Listener-allocated monotonic counter. Caller doesn't care which
-    /// id the instance gets — useful for "spawn me one of these per
-    /// connection" patterns where the listener tracks the resulting
-    /// `MailboxId` directly.
-    Counter,
-    /// Caller-supplied subname. Must validate per
-    /// [`validate_namespace_segment`] and must be unique within the
-    /// owning prefix (no `:` separator, no control chars / whitespace,
-    /// ≤ [`aether_actor::NAMESPACE_SEGMENT_MAX_LEN`] bytes).
-    Named(&'a str),
-}
+/// The spawn-subname vocabulary, re-exported from `aether-actor`
+/// (ADR-0097). It's shared between native `spawn_child` and the FFI
+/// guest's `FfiCtx::spawn_child`, so it lives in the actor SDK both
+/// transports depend on; native call sites import it from this path
+/// unchanged. The full mailbox name is `"{A::NAMESPACE}:{subname}"`,
+/// hashed deterministically (ADR-0029) to the returned `MailboxId`.
+pub use aether_actor::Subname;
 
 /// Failure modes for the [`SpawnBuilder::finish`] spawn pipeline.
 /// Returned in the order the lifecycle checks them: validate → owner

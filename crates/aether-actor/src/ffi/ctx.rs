@@ -26,7 +26,7 @@ use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::resolver::Resolver;
 use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{
-    Actor, HandlesKind, Instanced, NamespaceError, Singleton, validate_namespace_segment,
+    Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
 use crate::ffi::FfiActor;
 use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
@@ -100,23 +100,6 @@ impl Resolver for FfiInitCtx<'_> {
     fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
         resolve_mailbox::<K>(name)
     }
-}
-
-/// How a spawned sibling's mailbox name is derived (ADR-0097) — the
-/// guest-side mirror of the substrate's `Subname`. The full mailbox
-/// name is `aether.component.trampoline:<A::NAMESPACE>` for `Counter`
-/// (the host appends its monotonic discriminator) or
-/// `aether.component.trampoline:<A::NAMESPACE>.<name>` for `Named`.
-#[derive(Debug, Clone, Copy)]
-pub enum Subname<'a> {
-    /// Host-allocated monotonic discriminator — "spawn me one of these,
-    /// I'll track the returned `MailboxId`." The fit for per-entity /
-    /// per-connection churn where no human-readable name is needed.
-    Counter,
-    /// Caller-supplied discriminator, appended to the sibling type's
-    /// namespace. Must pass [`validate_namespace_segment`] and be unique
-    /// within the trampoline prefix; retired on drop (ADR-0079).
-    Named(&'a str),
 }
 
 /// Why a synchronous [`FfiCtx::spawn_child`] call failed before the host

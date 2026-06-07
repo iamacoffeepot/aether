@@ -65,7 +65,7 @@ pub mod mailbox;
 pub mod raw;
 
 pub use bridge::{MAIL_BRIDGE, MailBridge, PERSIST_BRIDGE, PersistBridge};
-pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx, SpawnError, Subname};
+pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx, SpawnError};
 pub use mailbox::FfiActorMailbox;
 
 // Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
