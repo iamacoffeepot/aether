@@ -25,7 +25,7 @@ pub mod ctx;
 pub mod sender;
 pub mod slot;
 
-use aether_data::Kind;
+use aether_data::{ActorId, Kind, MailboxId, Tag, with_tag};
 
 /// The symmetric trait every actor implements: the recipient name it
 /// claims. Lifecycle methods (`boot` for native chassis caps, `init`
@@ -75,7 +75,32 @@ pub trait Actor: Sized + Send + 'static {
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
 /// a shared prefix (instanced, name-keyed). ADR-0079.
-pub trait Singleton: Actor {}
+pub trait Singleton: Actor {
+    /// This actor's [`MailboxId`] as seen by a caller whose lineage carry
+    /// is `caller_carry` (ADR-0099 §5). `ctx.actor::<R>()` calls
+    /// `R::resolve(self_carry)` and addresses the result.
+    ///
+    /// The default is the static, root-pinned resolution: the depth-1
+    /// fixed point (§3), this actor's own [`ActorId`] tagged as a mailbox,
+    /// **ignoring the caller's carry** because a root cap sits at the root,
+    /// not below the caller. It equals today's `mailbox_id_from_name(NAMESPACE)`
+    /// because [`with_tag`] is idempotent on an already-`Mailbox`-tagged
+    /// value — so every chassis cap keeps the exact id it has today.
+    ///
+    /// A non-root actor overrides this. A direct child folds the caller's
+    /// carry — `with_tag(Mailbox, fold_lineage(caller_carry, ActorId::singleton(NAMESPACE)))`
+    /// — and a loaded component folds its harness lineage
+    /// (iamacoffeepot/aether#1432). The override is the only carrier of the
+    /// §2 position fact: a root-pinned actor keeps the default, and nothing
+    /// else about position is held at the type level.
+    #[must_use]
+    fn resolve(_caller_carry: u64) -> MailboxId {
+        MailboxId(with_tag(
+            Tag::Mailbox,
+            ActorId::singleton(Self::NAMESPACE).0,
+        ))
+    }
+}
 
 /// Cardinality marker: many instances of this actor type can be live
 /// per substrate, each under its own subname. `R::NAMESPACE` is a
@@ -189,6 +214,7 @@ pub trait HandlesKind<K: Kind>: Actor {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::{fold_lineage, mailbox_id_from_name};
 
     /// Issue 625 (ADR-0079): `#[derive(Singleton)]` and
     /// `#[derive(Instanced)]` are the explicit author-side surface
@@ -216,5 +242,61 @@ mod tests {
         }
         fn requires_instanced<T: Instanced>() {}
         requires_instanced::<PerThing>();
+    }
+
+    /// ADR-0099 §5 static default: a root-pinned singleton's [`Singleton::resolve`]
+    /// ignores the caller's carry and returns the depth-1 fixed point —
+    /// the id `mailbox_id_from_name(NAMESPACE)` yields today, so the
+    /// chassis-cap vocabulary stays frozen (§3).
+    #[test]
+    fn singleton_resolve_default_is_frozen_depth_one() {
+        struct RootCap;
+        impl Actor for RootCap {
+            const NAMESPACE: &'static str = "test.resolve.rootcap";
+        }
+        impl Singleton for RootCap {}
+
+        let frozen = mailbox_id_from_name("test.resolve.rootcap");
+        assert_eq!(
+            RootCap::resolve(0),
+            frozen,
+            "default resolve is the depth-1 id"
+        );
+        assert_eq!(
+            RootCap::resolve(0xDEAD_BEEF),
+            frozen,
+            "a root cap ignores the caller's carry"
+        );
+    }
+
+    /// ADR-0099 §5 own-child path: a non-root singleton overrides
+    /// [`Singleton::resolve`] to fold the caller's carry, so the same type
+    /// resolves to a different mailbox under each parent.
+    #[test]
+    fn singleton_resolve_override_folds_caller_carry() {
+        struct Child;
+        impl Actor for Child {
+            const NAMESPACE: &'static str = "test.resolve.child";
+        }
+        impl Singleton for Child {
+            fn resolve(caller_carry: u64) -> MailboxId {
+                MailboxId(with_tag(
+                    Tag::Mailbox,
+                    fold_lineage(caller_carry, ActorId::singleton(<Self as Actor>::NAMESPACE)),
+                ))
+            }
+        }
+
+        let carry = 0x1234_5678_u64;
+        let expected = MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(carry, ActorId::singleton("test.resolve.child")),
+        ));
+        assert_eq!(Child::resolve(carry), expected, "override folds the carry");
+        assert_ne!(
+            Child::resolve(carry),
+            mailbox_id_from_name("test.resolve.child"),
+            "a folded child id differs from the flat depth-1 hash"
+        );
     }
 }

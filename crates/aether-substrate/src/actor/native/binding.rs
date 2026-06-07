@@ -984,6 +984,52 @@ mod tests {
         assert_eq!(transport.prev_correlation(), 2);
     }
 
+    /// ADR-0099 §5 own-child path through the real `ctx.actor` call site:
+    /// a non-root singleton overrides [`Singleton::resolve`] to fold the
+    /// caller's carry, and `ctx.actor::<R>()` feeds it `self.binding.carry()`.
+    /// A parent at carry `C` addressing this child by bare type lands on
+    /// `fold(C, ActorId::singleton(NAMESPACE))`, not the flat `hash(NAMESPACE)`
+    /// — the miss the lineage fold closes (#1364).
+    #[test]
+    fn ctx_actor_folds_own_child_singleton_onto_caller_carry() {
+        use crate::actor::native::ctx::NativeCtx;
+        use aether_actor::{Actor, Singleton};
+        use aether_data::{ActorId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
+
+        struct OwnChild;
+        impl Actor for OwnChild {
+            const NAMESPACE: &'static str = "test.actor_fold.child";
+        }
+        impl Singleton for OwnChild {
+            fn resolve(caller_carry: u64) -> MailboxId {
+                MailboxId(with_tag(
+                    Tag::Mailbox,
+                    fold_lineage(caller_carry, ActorId::singleton(<Self as Actor>::NAMESPACE)),
+                ))
+            }
+        }
+
+        let (_registry, mailer) = fresh_substrate();
+        let parent_carry = 0x0BAD_F00D_u64;
+        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
+        let ctx = NativeCtx::new(&transport, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+
+        let resolved = ctx.actor::<OwnChild>().mailbox_id();
+        let expected = MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(parent_carry, ActorId::singleton("test.actor_fold.child")),
+        ));
+        assert_eq!(
+            resolved, expected,
+            "ctx.actor feeds self.carry to Singleton::resolve, folding the own-child node"
+        );
+        assert_ne!(
+            resolved,
+            mailbox_id_from_name("test.actor_fold.child"),
+            "the folded own-child id differs from the flat depth-1 hash"
+        );
+    }
+
     /// `install_inbox` is single-claim — a second install panics.
     #[test]
     #[should_panic(expected = "install_inbox called twice")]
