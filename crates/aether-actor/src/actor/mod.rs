@@ -41,29 +41,40 @@ use aether_data::Kind;
 /// across handler invocations (send → return → handle the reply) rather
 /// than by parking a pool worker in-handler.
 pub trait Actor: Sized + Send + 'static {
-    /// The recipient name this actor claims. For native capabilities
-    /// it's the chassis-owned mailbox name (`aether.<name>`); for wasm
-    /// components it's the default name `load_component` registers
-    /// under when the load payload omits an explicit override.
+    /// The recipient name this actor claims **within its scope**
+    /// (ADR-0098). For a root-scoped actor — every chassis capability —
+    /// it is the full mailbox name (`aether.<name>`). For an actor
+    /// hosted inside a parent the full mailbox name is the path
+    /// `"{scope}:{NAMESPACE}"`, so `NAMESPACE` is just the segment: a
+    /// wasm component declaring `NAMESPACE = "camera"` and loaded at its
+    /// default name registers at `aether.component.trampoline:camera`
+    /// under its component-host, not at the bare `"camera"`.
     const NAMESPACE: &'static str;
 }
 
-/// Cardinality marker: only one instance of this actor can be live per
-/// substrate. `R::NAMESPACE` is the full mailbox name, fixed at
-/// compile time. Required by `Ctx::actor::<R>()` so the type → mailbox
-/// lookup is unambiguous — the substrate enforces "at most one
-/// Singleton actor per `R::NAMESPACE`" at registration time, and
-/// senders address by type rather than by name.
+/// Cardinality marker: exactly one instance of this actor is live **per
+/// scope** (ADR-0098). A scope is either the substrate root or a parent
+/// instance, and `R::NAMESPACE` is this actor's segment within it — so
+/// the full mailbox name is `R::NAMESPACE` at the root, or the path
+/// `"{scope}:{R::NAMESPACE}"` when hosted inside a parent. The substrate
+/// enforces "at most one live mailbox per full name" at registration
+/// (ADR-0079); because the scope is part of the name, that is exactly
+/// "one of this actor per scope".
 ///
-/// Chassis caps (including catch-all caps like `BroadcastCapability`) are always
-/// singletons. User components are singletons when their cdylib loads
-/// at the default name (`R::NAMESPACE` from the wasm custom section);
-/// multi-instance loads use `ctx.resolve_actor::<R>(name)` instead and
-/// don't go through the singleton path. ADR-0075 §Decision 1.
+/// Root-scoped singletons — every chassis cap, including catch-alls like
+/// `BroadcastCapability` — have full name `== NAMESPACE`, so a sender
+/// type-addresses them with `ctx.actor::<R>()`. A singleton hosted
+/// inside a parent (a wasm component under its component-host, a
+/// per-session actor under a listener) is reached **scope-relative**,
+/// not through the bare `NAMESPACE`: by its resolved name via
+/// `ctx.resolve_actor::<R>(name)`, or — for a loaded component — the
+/// component-host's `loaded::<R>(name)` helper, which composes the
+/// component-host scope onto the name (`LoadResult.name` is the full
+/// address). Multi-instance loads use the same name-keyed path.
 ///
-/// Mutually exclusive with [`Instanced`] at the type level: an actor
-/// is either one-of-a-kind (singleton, type-keyed) or N-instances
-/// (instanced, name-keyed under a shared namespace prefix). ADR-0079.
+/// Mutually exclusive with [`Instanced`] at the type level: an actor is
+/// either one-of-a-kind within a scope (singleton) or N-instances under
+/// a shared prefix (instanced, name-keyed). ADR-0079.
 pub trait Singleton: Actor {}
 
 /// Cardinality marker: many instances of this actor type can be live
