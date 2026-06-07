@@ -112,26 +112,28 @@ pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
     fnv1a_64_prefixed(&[], bytes)
 }
 
+/// Fold `bytes` into an in-progress FNV-1a 64 hash. `const`-safe so the
+/// id helpers compose several byte runs (a domain prefix, scope
+/// segments, the separators between them) into one hash without
+/// allocating a joined buffer.
+#[must_use]
+const fn fnv1a_64_fold(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
 /// FNV-1a 64 over `prefix ++ payload` without allocating. Equivalent
 /// to `fnv1a_64_bytes(&[prefix, payload].concat())` but `const`-safe.
 /// Used by `mailbox_id_from_name` (prefix `MAILBOX_DOMAIN`) and by
 /// `#[derive(Kind)]` through the macro (prefix `KIND_DOMAIN`).
 #[must_use]
 pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut i = 0;
-    while i < prefix.len() {
-        hash ^= prefix[i] as u64;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-        i += 1;
-    }
-    let mut i = 0;
-    while i < payload.len() {
-        hash ^= payload[i] as u64;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-        i += 1;
-    }
-    hash
+    fnv1a_64_fold(fnv1a_64_fold(0xcbf2_9ce4_8422_2325, prefix), payload)
 }
 
 /// Compute the deterministic `MailboxId` for a mailbox name. ADR-0029
@@ -147,6 +149,80 @@ pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
     ))
 }
 
+/// The `:` that joins a scope/prefix to a segment in a mailbox name.
+/// ADR-0079 instanced subnames (`{NAMESPACE}:{subname}`) and ADR-0098
+/// scoped singletons both compose on it. Structural — forbidden inside
+/// a segment — so the join reverse-parses unambiguously.
+const SCOPE_SEPARATOR: u8 = b':';
+
+/// ADR-0098: the [`MailboxId`] for a scoped mailbox name composed of
+/// `prefix`, the scope separator, and `segment`. Identical to
+/// `mailbox_id_from_name("{prefix}:{segment}")` but `const`-safe and
+/// without allocating the joined string, so scope-relative resolution
+/// stays a no-round-trip const hash. Feeds `MAILBOX_DOMAIN ++ prefix ++
+/// ":" ++ segment` through the same domain-prefixed FNV-1a as
+/// [`mailbox_id_from_name`] and stamps the same `Tag::Mailbox` bits, so
+/// the ADR-0029 hash identity is preserved.
+#[must_use]
+pub const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> MailboxId {
+    let hash = fnv1a_64_prefixed(MAILBOX_DOMAIN, prefix.as_bytes());
+    let hash = fnv1a_64_fold(hash, &[SCOPE_SEPARATOR]);
+    let hash = fnv1a_64_fold(hash, segment.as_bytes());
+    MailboxId(with_tag(Tag::Mailbox, hash))
+}
+
+/// ADR-0098: maximum number of segments in a composed mailbox path
+/// (`root:a:b` is depth 3). Mailbox names are registry keys, so an
+/// unbounded scope chain would let a runaway caller bloat the key
+/// space; composition past this depth is rejected, not hashed.
+pub const MAX_SCOPE_PATH_DEPTH: usize = 8;
+
+/// ADR-0098: maximum total byte length of a composed mailbox path
+/// (segments plus the separators between them). Generous headroom over
+/// [`MAX_SCOPE_PATH_DEPTH`] full-length segments; bounds the registry
+/// key size class alongside the depth cap.
+pub const MAX_SCOPE_PATH_BYTES: usize = 4096;
+
+/// Why [`validate_scope_path`] rejected a path. Each variant carries the
+/// breached limit so a message can render it without re-fetching the
+/// const.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopePathError {
+    /// More than [`MAX_SCOPE_PATH_DEPTH`] segments.
+    TooDeep { limit: usize },
+    /// Composed length over [`MAX_SCOPE_PATH_BYTES`] bytes.
+    TooLong { limit: usize },
+}
+
+/// ADR-0098: check that a scope path — ordered segments joined by the
+/// scope separator — stays within the depth and length caps before it
+/// is composed into a mailbox name. Per-segment rules (printable, no
+/// separator) stay the caller's concern (ADR-0079
+/// `validate_namespace_segment`); this guards the aggregate that
+/// becomes a registry key.
+pub const fn validate_scope_path(segments: &[&str]) -> Result<(), ScopePathError> {
+    if segments.len() > MAX_SCOPE_PATH_DEPTH {
+        return Err(ScopePathError::TooDeep {
+            limit: MAX_SCOPE_PATH_DEPTH,
+        });
+    }
+    let mut total: usize = 0;
+    let mut i = 0;
+    while i < segments.len() {
+        total += segments[i].len();
+        if i + 1 < segments.len() {
+            total += 1;
+        }
+        i += 1;
+    }
+    if total > MAX_SCOPE_PATH_BYTES {
+        return Err(ScopePathError::TooLong {
+            limit: MAX_SCOPE_PATH_BYTES,
+        });
+    }
+    Ok(())
+}
+
 /// ADR-0088 §7: compute the deterministic [`ThreadId`] for an OS thread
 /// name. FNV-1a with the `THREAD_DOMAIN` prefix, ADR-0064 tag bits
 /// stamped into the high nibble. Uniform with [`mailbox_id_from_name`]
@@ -160,4 +236,69 @@ pub const fn thread_id_from_name(name: &str) -> ThreadId {
         Tag::Thread,
         fnv1a_64_prefixed(THREAD_DOMAIN, name.as_bytes()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::String;
+
+    #[test]
+    fn pair_matches_joined_name() {
+        // The identity scope-relative resolution leans on: composing
+        // `prefix` + `:` + `segment` hashes the same as hashing the
+        // already-joined name, so the const path never has to allocate.
+        assert_eq!(
+            mailbox_id_from_name_pair("a", "b"),
+            mailbox_id_from_name("a:b"),
+        );
+        assert_eq!(
+            mailbox_id_from_name_pair("aether.component.trampoline", "camera"),
+            mailbox_id_from_name("aether.component.trampoline:camera"),
+        );
+        // Empty prefix / segment still composes consistently with the
+        // joined form (the separator is always present).
+        assert_eq!(
+            mailbox_id_from_name_pair("", "x"),
+            mailbox_id_from_name(":x")
+        );
+        assert_eq!(
+            mailbox_id_from_name_pair("x", ""),
+            mailbox_id_from_name("x:")
+        );
+    }
+
+    #[test]
+    fn pair_evaluates_in_const() {
+        const ID: MailboxId = mailbox_id_from_name_pair("scope", "leaf");
+        assert_eq!(ID, mailbox_id_from_name("scope:leaf"));
+    }
+
+    #[test]
+    fn scope_path_within_caps_is_ok() {
+        assert_eq!(validate_scope_path(&["a", "b", "c"]), Ok(()));
+        assert_eq!(validate_scope_path(&[]), Ok(()));
+    }
+
+    #[test]
+    fn scope_path_too_deep_is_rejected() {
+        let deep = ["x"; MAX_SCOPE_PATH_DEPTH + 1];
+        assert_eq!(
+            validate_scope_path(&deep),
+            Err(ScopePathError::TooDeep {
+                limit: MAX_SCOPE_PATH_DEPTH,
+            }),
+        );
+    }
+
+    #[test]
+    fn scope_path_too_long_is_rejected() {
+        let big: String = "x".repeat(MAX_SCOPE_PATH_BYTES + 1);
+        assert_eq!(
+            validate_scope_path(&[big.as_str()]),
+            Err(ScopePathError::TooLong {
+                limit: MAX_SCOPE_PATH_BYTES,
+            }),
+        );
+    }
 }
