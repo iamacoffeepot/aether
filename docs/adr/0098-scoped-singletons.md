@@ -58,42 +58,46 @@ The join rule is fixed at `{scope}:{segment}`. The **scope** is the variable, th
 
 Because the scope is part of the full name, "at most one `R` per scope" is identical to "this full name is unique in the registry." ADR-0079 already enforces full-name uniqueness on registration (collision is a hard error; retired names tombstone). Putting the scope in the name means the existing collision check enforces per-scope singleton-ness for free. Two default-name loads of the same component collide at `aether.component.trampoline:camera`; two `PlayerState`s in `session:42` collide at `aether.net.session:42:player`. No `(scope, type)` index is added.
 
-### 4. Resolution takes a scope specifier
+### 4. Resolution: the scope is the receiver
 
-The scope specifier is `None` (root) or `Some(parent)`, and the `Some` case splits by whether the parent is statically addressable:
+A scope is a value you resolve against, not a type parameter you pass. `ctx` is the root scope; any actor handle is its own instance's scope. One verb — `actor` — means "the singleton of this type in this scope," and the scope is whatever you call it on:
 
 ```rust
-// Root scope — unchanged. The parent is the substrate; the name is the bare NAMESPACE.
+// Root scope — unchanged. The scope is the substrate; the name is the bare NAMESPACE.
 ctx.actor::<Render>()                              // → "aether.render"
 
-// Parent is itself a root singleton → its name is a compile-time const,
-// so the whole path resolves from types with no runtime data:
-ctx.actor_in::<ComponentHost, Camera>()           // → "aether.component.trampoline:camera"
+// A handle is a scope. Nest by chaining: ComponentHost is a root singleton,
+// so its name is a compile-time const and the whole path resolves from types:
+ctx.actor::<ComponentHost>().actor::<Camera>()     // → "aether.component.trampoline:camera"
 
-// Parent is a runtime instance → which instance is runtime, so resolution
-// goes through the parent handle, which carries its resolved name forward:
-session_handle.actor::<PlayerState>()             // → "aether.net.session:42:player"
+// A runtime-instance handle is a scope too. Which instance is runtime, so the
+// handle is the seed; the segment below it composes statically:
+session_handle.actor::<PlayerState>()              // → "aether.net.session:42:player"
 ```
 
-Which surface you may use is governed by whether the scope is statically addressable:
+Whether a resolution is a pure const hash or needs runtime data is governed by the scope — the receiver:
 
-- **Statically-scoped** (root, or a singleton nested in a statically-addressable singleton): the entire path is known at compile time, so resolution is a pure const hash — no round-trip, the property that makes `ctx.actor` cheap. The trampoline/default-load case lives here.
-- **Runtime-scoped** (nested in an instance like a session): the instance's subname is runtime data, so resolution starts from the instance's handle. The handle is the carrier of the scope identity.
+- **Statically-scoped** (root, or a singleton nested in a statically-addressable singleton): the entire path is known at compile time, so resolution is a const hash with no round-trip — the property that makes `ctx.actor` cheap. The trampoline/default-load case lives here.
+- **Runtime-scoped** (nested in an instance like a session): the instance's subname is runtime data, so resolution seeds from the instance handle.
 
-We do **not** infer a child's scope from its type. A `Camera` does not declare "my parent is the trampoline" — its scope is asserted by the caller at the resolution site. This keeps the actor type scope-agnostic (the same component can be loaded under different names/parents) and avoids reintroducing a static parent marker on the type (see Alternatives, "Scope const on the child type").
+We do **not** infer a child's scope from its type. A `Camera` does not declare "my parent is the trampoline" — its scope is the receiver the caller resolves against. This keeps the actor type scope-agnostic (the same component can be loaded under different names/parents) and avoids reintroducing a static parent marker on the type (see Alternatives, "Scope const on the child type").
 
-### 5. Nesting: paths compose; resolve downward from the deepest runtime seed
+### 5. Nesting: chain the receiver, with tuple sugar for the single-call case
 
-Children of children extend the path; the data model already covers it (`session:42:room:player` is a player singleton scoped to a room singleton scoped to session 42). Resolution walks it two ways:
+Children of children extend the path; the data model already covers it (`session:42:room:player` is a player singleton scoped to a room singleton scoped to session 42). Two surfaces, same result:
 
 ```rust
-// Tuple form — the explicit chain. Bounded by the tuple arity we impl for.
-ctx.actor_path::<(ComponentHost, Camera)>()
+// Chain — the model. Each .actor steps one scope deeper. Same verb off root or a handle.
+ctx.actor::<A>().actor::<B>().actor::<C>()           // fully static
+session_handle.actor::<Room>().actor::<Player>()      // runtime seed, static below
 
-// Builder form — arbitrary depth, reads as the path, same method off root or a handle:
-ctx.root().child::<A>().child::<B>().child::<C>()    // fully static chain
-session_handle.child::<Room>().child::<Player>()      // runtime seed, static below
+// Tuple sugar — one call for the common nested case. The last type is the target;
+// the leading types are the scope path from the receiver. Bounded by the arity we impl.
+ctx.actor::<(ComponentHost, Camera)>()
+session_handle.actor::<(Room, Player)>()
 ```
+
+Both go through one method, `fn actor<P: ScopePath>(&self) -> FfiActorMailbox<P::Target>`: `ScopePath` is implemented for a bare singleton type (a single segment) and for tuples (a path), so `actor::<R>()` and `actor::<(A, B, C)>()` are the same call shape. The bare comma form `actor::<A, B>()` is not expressible — stable Rust has neither variadic generics nor default type parameters on functions — so the tuple parens are the cost of the single-call sugar, and the chain is the parens-free equivalent.
 
 A path is `[prefix from the seed] + [static singleton segments]`, where the seed is `root` (empty prefix, fully const) or a runtime instance handle (its full runtime name). The resolution rule:
 
@@ -104,9 +108,9 @@ The cost of "the caller declares the chain rather than the framework inferring i
 
 ### 6. Handles stay ids; the name lives in the transient resolver
 
-The path string accumulates only in the **resolver** (the builder, or the const-composition site), on the stack. The terminal step hashes once and yields an `FfiActorMailbox<R>` that carries just the `u64` — handles stay `Copy` and FFI-cheap, the name never lives in the long-lived handle. The only irreducible runtime touch is **seeding** a resolver from a runtime instance, which needs that instance's name. Root-seeded chains need nothing and stay fully const.
+The path string accumulates only in the **resolver** — the intermediate value a `.actor` chain (or a tuple's `ScopePath`) threads on the stack — never in a long-lived handle. The terminal step hashes once and yields an `FfiActorMailbox<R>` carrying just the `u64`, so handles stay `Copy` and FFI-cheap. The only irreducible runtime touch is **seeding** a chain from a runtime instance, which needs that instance's name; root-seeded chains need nothing and stay fully const.
 
-A new const helper composes without allocating a joined string: `mailbox_id_from_name_pair(prefix, segment)` hashes `prefix`, then `:`, then `segment`, mirroring `mailbox_id_from_name` and keeping ADR-0029's hash identity (`hash("a:b")` via the pair helper equals `hash` of the literal `"a:b"`). The builder applies it per `.child` step.
+A new const helper composes without allocating a joined string: `mailbox_id_from_name_pair(prefix, segment)` hashes `prefix`, then `:`, then `segment`, mirroring `mailbox_id_from_name` and keeping ADR-0029's hash identity (the pair helper over `("a", "b")` hashes identically to the literal `"a:b"`). Each step of the chain applies it.
 
 A path-depth and total-length cap bounds names as registry keys (each segment already obeys `NAMESPACE_SEGMENT_MAX_LEN`; the cap bounds the concatenation), erroring rather than letting a runaway chain bloat the key space.
 
@@ -123,7 +127,7 @@ The recommendation leans **C**: handles stay cheap, and registry validation turn
 
 ### Positive
 
-- **#1364 closes with the contract made honest, not patched.** A loaded component is a singleton scoped to its component-host. `ctx.actor::<R>()` reaching the bare `NAMESPACE` is root-scope resolution applied to a non-root actor — the surfaced bug. The correct surface is scope-qualified (`ctx.actor_in::<ComponentHost, R>()`, or the existing `loaded::<R>(name)` for a non-default name). The `Singleton` doc's "senders address by type" becomes precise: by type **within a scope**.
+- **#1364 closes with the contract made honest, not patched.** A loaded component is a singleton scoped to its component-host. `ctx.actor::<R>()` reaching the bare `NAMESPACE` is root-scope resolution applied to a non-root actor — the surfaced bug. The correct surface is scope-qualified (`ctx.actor::<ComponentHost>().actor::<R>()`, the `ctx.actor::<(ComponentHost, R)>()` sugar, or the existing `loaded::<R>(name)` for a non-default name). The `Singleton` doc's "senders address by type" becomes precise: by type **within a scope**.
 - **The "exactly one" guarantee survives nesting.** One `PlayerState` per session is a singleton, enforced by the existing name-collision check, without modelling it as `Instanced` and losing the guarantee.
 - **No new enforcement machinery.** Per-scope uniqueness rides on full-name uniqueness, which already exists. The scope is encoded in the name; the registry does the rest.
 - **Type-addressing stays cheap where it's honest.** Root and fully-static-scoped chains resolve as const hashes with no round-trip — the ADR-0079 property is preserved for exactly the cases where it's true, and dropped only where it was lying.
@@ -131,7 +135,7 @@ The recommendation leans **C**: handles stay cheap, and registry validation turn
 
 ### Negative
 
-- **Two resolution surfaces instead of one.** `ctx.actor` (root), `actor_in` / `actor_path` (static parent), and handle-`.child` (runtime parent) coexist. The static-vs-runtime boundary has to be taught — it is a real property of the scope, not incidental API sprawl, but it is more surface than "one accessor."
+- **The static-vs-runtime boundary has to be taught.** One verb (`actor`) resolves in every scope, but whether a given call is a const hash or needs a runtime seed depends on the receiver, not the signature. That is a real property of the scope, not incidental API sprawl, but it is a rule a reader learns rather than reads off the type.
 - **The caller declares the chain.** No inference means a wrong chain warn-drops (or fails loudly, under §7-C). The honesty cost lands on the caller, deepened by nesting.
 - **A new const-composition primitive.** `mailbox_id_from_name_pair` is additive but is a second hashing entry point that must stay bit-identical to `mailbox_id_from_name` over the joined string (a round-trip test guards it).
 - **§7 is unresolved at proposal time.** The handle-vs-registry choice gates the implementation shape and needs a decision before code.
