@@ -16,7 +16,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Actor, HandlesKind};
-use aether_data::{Kind, MailId, mailbox_id_from_name};
+use aether_data::{Kind, MailId, mailbox_id_from_name, mailbox_id_from_name_pair};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -72,6 +72,20 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     #[must_use]
     pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
+    }
+
+    /// Resolve a sibling mailbox addressed by `scope` joined to
+    /// `segment` with the structural `:` separator (ADR-0098), without
+    /// allocating the joined name. Composes the same id as
+    /// `resolve_peer(&format!("{scope}:{segment}"))`; threads the
+    /// existing `'a` binding ref like [`Self::resolve_peer`].
+    #[must_use]
+    pub fn resolve_peer_scoped<Peer: Actor>(
+        &self,
+        scope: &str,
+        segment: &str,
+    ) -> NativeActorMailbox<'a, Peer> {
+        NativeActorMailbox::__new(mailbox_id_from_name_pair(scope, segment).0, self.binding)
     }
 }
 

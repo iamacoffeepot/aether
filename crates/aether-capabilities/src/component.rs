@@ -69,7 +69,7 @@ pub trait ComponentHostFfiExt {
 
 impl ComponentHostFfiExt for FfiActorMailbox<ComponentHostCapability> {
     fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
-        self.resolve_peer::<R>(&format!("{}:{}", WasmTrampoline::NAMESPACE, name))
+        self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
     }
 }
 
@@ -90,7 +90,7 @@ pub trait ComponentHostNativeExt {
 #[cfg(not(target_arch = "wasm32"))]
 impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
     fn loaded<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.resolve_peer::<R>(&format!("{}:{}", WasmTrampoline::NAMESPACE, name))
+        self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
     }
 }
 
@@ -442,5 +442,48 @@ mod native {
             let mail = Mail::new(recipient, kind, bytes, 1).with_reply_to(ctx.reply_target());
             self.mailer.push(mail);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_actor::{Actor, FfiActorMailbox};
+    use aether_data::mailbox_id_from_name;
+
+    use super::{ComponentHostCapability, ComponentHostFfiExt};
+    use crate::trampoline::WasmTrampoline;
+
+    /// A loaded component is canonically addressed at
+    /// `"{WasmTrampoline::NAMESPACE}:{load-name}"` — the name the load
+    /// path registers it under (see the `LoadResult.name` it returns).
+    /// `loaded` must compose exactly that id, and **not** the bare
+    /// load-name: bare type-addressing a component (`ctx.actor::<R>()`)
+    /// hashes the bare `NAMESPACE` and resolves to a mailbox nothing is
+    /// registered under — the #1364 footgun. This pins the one canonical
+    /// path for a loaded component.
+    #[test]
+    fn loaded_composes_the_canonical_trampoline_address() {
+        // `R` is arbitrary here — the resolved id depends only on the name.
+        let host = FfiActorMailbox::<ComponentHostCapability>::__new(
+            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
+        );
+        let camera = host.loaded::<ComponentHostCapability>("camera");
+
+        let canonical = mailbox_id_from_name(&format!("{}:camera", WasmTrampoline::NAMESPACE));
+        assert_eq!(camera.mailbox_id(), canonical);
+        assert_ne!(camera.mailbox_id(), mailbox_id_from_name("camera"));
+    }
+
+    /// Root singletons (chassis caps) are unchanged by the scoped-name
+    /// composition: the cap's own mailbox id is its bare `NAMESPACE`.
+    #[test]
+    fn root_singleton_id_is_the_bare_namespace() {
+        let host = FfiActorMailbox::<ComponentHostCapability>::__new(
+            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
+        );
+        assert_eq!(
+            host.mailbox_id(),
+            mailbox_id_from_name(ComponentHostCapability::NAMESPACE),
+        );
     }
 }
