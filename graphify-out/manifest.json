@@ -1,0 +1,2592 @@
+{
+  ".claude/hooks/check-host-fn-additions.sh": {
+    "mtime": 1778113322.8348231,
+    "ast_hash": "a8f577e24ef2c32cec5d7475eb5c659e",
+    "semantic_hash": ""
+  },
+  ".claude/hooks/check-no-divider-comments.sh": {
+    "mtime": 1778113322.8348231,
+    "ast_hash": "612861ac6fbdb8d04e5356a11d7c0769",
+    "semantic_hash": ""
+  },
+  ".claude/hooks/check-pr-body.sh": {
+    "mtime": 1780813587.996454,
+    "ast_hash": "013c27814436f78570b825a790d25913",
+    "semantic_hash": ""
+  },
+  ".claude/hooks/check-pre-push.sh": {
+    "mtime": 1780813587.996454,
+    "ast_hash": "63e68f6808047f8a5f19019046d50cd2",
+    "semantic_hash": ""
+  },
+  ".claude/settings.json": {
+    "mtime": 1780813587.996454,
+    "ast_hash": "219a515d8fea750c23010c012296680c",
+    "semantic_hash": ""
+  },
+  ".githooks/pre-push": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "852c5251ca804bc01ec82e6345782f1a",
+    "semantic_hash": ""
+  },
+  ".mcp.json": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "c9e9b30b95abe7c00dce6a3610f68a7b",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor-derive/src/lib.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "118720167780ae803bf2cf268a336600",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor-derive/tests/derive.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "b84f49155beb2b6a28817e36c2fa5436",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/examples/caller.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "11dced0b412d7a57dd67659412cbab39",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/examples/echoer.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "06adb13738642b9c8f217f74131c0770",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/examples/hello.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "fd43f0579f0bb9d3d55f79cd3b8a49c6",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/examples/input_logger.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "2d15ed0a32cedae9e2411f95a4bd652e",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/examples/postcard_echoer.rs": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "6917fc3dac1f62eea4c0aeb272cfc19c",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/ctx/lifecycle.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "47b56d11b0fdaf9f2275d38a4889e4fa",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/ctx/mail_sender.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "7eae022508b0a45a89bc3180d2960452",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/ctx/mod.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "5755e836ba1c0db6f37665dbb21667c5",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/ctx/outbound_reply.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "e96b799e7d3beb59cfdab7b9a4450880",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/ctx/persistence.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "d25b29471e11e83012f06c361438924e",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/ctx/resolver.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "f2041f87c43e307bd63a553bc8089d65",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/mod.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "33fe08f262620a91e0ad580e997a49ae",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/sender.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "4cd3b7e413646ffdfc738f739279cfbf",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/actor/slot.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "9093c1a9b419511d2552b418e7daf4b8",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/cost.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "2d4405e048d874d85d6a6376f8843b56",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/bridge/mail.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "bc46373fd9443002eb2e2519e84b7b77",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/bridge/mod.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "d261dde5522c789f43d92c3cf7baf9ef",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/bridge/persist.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "ee134036e1c84a52b72b3e93ce7f65c1",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/ctx.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "cb1520cf367d4f47de8d01b59bbf0718",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/mailbox.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "7ec2ac0be0a534f7bf0a2f3e273c3f51",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/mod.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "9a2350c3484ad9ebd462314ed500a215",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/ffi/raw.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "b8f5afd9fa616e5671ea2fe97ef671dd",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/lib.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "662921bff9c9b19e1b7747611fde9fd7",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/local.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "07c180eaf67f7f6692f9741f41a7e43b",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/log.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "fee62bf4101f79b94a8e46e186d14412",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/mail/mailbox.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "c4fc70c201d467ecd24e6e1740bb7fdf",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/mail/mod.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "59b8536d62b411d7ed2e0e93c4b95690",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/src/trace_ring.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "69faef5e86e8029976a0d6567e49048e",
+    "semantic_hash": ""
+  },
+  "crates/aether-actor/tests/handlers_manifest.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "ee13b991380e502f117bd9636a246a6c",
+    "semantic_hash": ""
+  },
+  "crates/aether-camera/src/lib.rs": {
+    "mtime": 1778113322.8468137,
+    "ast_hash": "6be5952660174ff488a3b397c5e34fe3",
+    "semantic_hash": ""
+  },
+  "crates/aether-camera/src/runtime.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "af7370ed133e6cb67416138e29e1c56e",
+    "semantic_hash": ""
+  },
+  "crates/aether-camera/tests/scenario.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "fbe435ada03d977e4c7df7a9b5618a10",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/anthropic/api.rs": {
+    "mtime": 1780813588.009279,
+    "ast_hash": "f1617bd401f766c3a6dfc500d602d6c5",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/anthropic/cli.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "5df92d09fbd149a32467a9c3eeae3b56",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/anthropic/error.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "2f199a1d792e400a24cb8d02a42d5b8f",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/anthropic/fixtures/messages_response.json": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "a2725d9e618cbfd9a5806af55c835f8d",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/anthropic/mod.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "bc82d281b8074d297e078e3329594004",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/audio.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "44b5767dac7f68af28f8bfbfd3ac384f",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/component.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "76a509637a6fde5e73e831c288698be9",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/config_env.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "a5026dd3a913f66e4fac977b1606d2da",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/contentgen/adapter.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "a4d79e6445b8aab0970dac88d5356269",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/contentgen/mod.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "21f5a95e4cb8c311bc29cf7e4cf09d97",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/contentgen/shared.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "81cfab4044db52b707cb638c80e1f39b",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/contentgen/staging.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "0b50b42772b35ec6f2f066292180d377",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/contentgen/task_queue.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "f2e7b44711e79c1af1fdcd7c1cf86684",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/dag.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "3b6ab056331da44a0084f3e9cf25d7a5",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/dag/test_support.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "97b589d1a7f3b6268a78434ad8cf994d",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/dag/tests.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "1186d053fd496382072c4d7d40e9a8f1",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/engine/mod.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "35530216295a9a227d4556129effa44a",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/engine/proxy.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "554dd8ece8555229043f652a4ba6b379",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/engine/server.rs": {
+    "mtime": 1780813588.013554,
+    "ast_hash": "33df0de9470728d0d1516573d26aa106",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/fs.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "780ec0b0357eee505cb0e74e1712381c",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/gemini/error.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "65726163832a82418be24a56acf58fc9",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/gemini/fixtures/nanobanana_grounded_response.json": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "1d6565199d86e6b5036297988086a0db",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/gemini/fixtures/nanobanana_v2_response.json": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "c9b84f8bae211b244a41e9a1731160b7",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/gemini/lyria.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "3ade1bddc37d00001577a6aececa53df",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/gemini/mod.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "ed36a9d180ba7d8aabd4f4cdb57ea71d",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/gemini/nanobanana.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "c1b5701a4625604ccf62a52834da4eb3",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/handle.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "b897766003b618f499300ab176323bec",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/http.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "08139f7498b5122d34834f3c272ae402",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/input.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "3678c3fa220c0b9ee78bca5526bd3751",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/inventory.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "1a93d957fa5e6cb5b3e23ed07902e80e",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/lib.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "3d7244cf43a214436f8115ba5efeb8bf",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/lifecycle.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "3d5359fe042189a014e04671060973ba",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/render.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "06fc7c03b20c20798b2141f58ab9f4d4",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/rpc/client.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "9ab3ebf141f16d8907c229bf92d84f94",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/rpc/mod.rs": {
+    "mtime": 1780813588.0178292,
+    "ast_hash": "6d2d82d4d2b63d7a6b3b385d0834d5d0",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/rpc/server.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "9ccdb8a732a270a506d4a6562e390f8b",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/rpc/test_echo.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "76805b20ce4626f1a433fe4ec5a49a7e",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/rpc/wire.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "3b1506ec9cf3a41b64f23845a7e9e54d",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/tcp/listener.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "4b3dbb7a9dddde65e676f79910b5257d",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/tcp/mod.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "1a9caae4c9d3fc4e97d368b6d917a1a4",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/tcp/session.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "dc3ba029c1d2638ad727701a4aa8b0b2",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/test_bench.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "4d09e57a27434b228ac1c0d232962967",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/test_chassis.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "7b3f208219ae8f37bde26963d95f4488",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/trace.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "bf3bdb95b2b8314033e769a3ee4543b1",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/trace_walk.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "6d5bb57a8c33d7867c6342745c347bda",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/trampoline.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "c6f78599572b941fb4bff3e40da7fecf",
+    "semantic_hash": ""
+  },
+  "crates/aether-capabilities/src/window.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "83116ba16dbad625e89a9835753413f7",
+    "semantic_hash": ""
+  },
+  "crates/aether-codec/src/cast.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "089d63d58c2ce54704ba1bdd9cf57458",
+    "semantic_hash": ""
+  },
+  "crates/aether-codec/src/decode.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "f0356b73bbd01de11e87b9daf094f837",
+    "semantic_hash": ""
+  },
+  "crates/aether-codec/src/encode.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "6fb024f93e82a7c2f3a9e97f97b378d2",
+    "semantic_hash": ""
+  },
+  "crates/aether-codec/src/frame.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "3fbcbc3703873cf4c923cef5f0d38b5d",
+    "semantic_hash": ""
+  },
+  "crates/aether-codec/src/lib.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "9f8def0fc76401ea12541469af8c63f5",
+    "semantic_hash": ""
+  },
+  "crates/aether-codec/src/test_fixtures.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "fd024913cc762670ac97ee394fb373e9",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/src/lib.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "448ab5f1e8a75e68dba68b1b64f378a7",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/transform.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "fa7e3bb815f2948bfdf82681844dff2c",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/ui/accepts_multi_input.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "edd185097ba74eeccdc20ab7e9d4c59d",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/ui/accepts_pure_body.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "7318e684ad9b9fef11726943e6742cd4",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/ui/rejects_ctx_param.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "1da5fae7f037a7797bebb56afa187492",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/ui/rejects_host_fn.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "cfc0f61ba6ff0d6da11df0c639f31b8a",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/ui/rejects_nine_inputs.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "70956dcd7325ef0688a86aa1c67979b2",
+    "semantic_hash": ""
+  },
+  "crates/aether-data-derive/tests/ui/rejects_std_time.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "0d9c57c0351ab04bc0d3261fd940f6fc",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/canonical/inputs.rs": {
+    "mtime": 1780813588.0221043,
+    "ast_hash": "d683dedce30e0e8702cf1aa8ebac4e21",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/canonical/labels.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "0a1476a00e22302a034213211a973b2e",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/canonical/mod.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "d7409cba7f755f1aa9ae297516f2dd3d",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/canonical/primitives.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "ea485d0f934f42967eeac5617d3db2d4",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/canonical/schema.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "7475e952293f2f9d1815e0d633ec8719",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/hash.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "52e6dc176865628fa23b51d2135dc158",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/ids.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "0b67951d2f6a7bf55be2cc1ac0ce8caf",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/lib.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "ab512812cfd3b6bb45dbb02ca51ee9df",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/mail.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "f9a400a1b02006187fa5c482700c63f8",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/name_inventory.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "703f097969985edf9ede092cf7557b92",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/schema.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "c393ba6b6be9728e9868f4b24d6bde0a",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/tag_bits.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "c254c5e57c5f951c27582da6adb6ea1e",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/tagged_id.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "12672c54430b278e57165e04aae19fb5",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/transform.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "f44b60a9c821062e265fdb9a2dabddce",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/src/wire_id.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "6c6b9ea68283faf52b9299648a09cd92",
+    "semantic_hash": ""
+  },
+  "crates/aether-data/tests/content_addressed_handles.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "4bd9993bf25b077022442cb6b95e699a",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/src/config.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "9e4b6bd3ee413f0486d5fa5af7538885",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/src/lib.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "5388b6ccb2c97dfbfe27a14029b0e3f4",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/expand.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "9ed933800b0630fb69083265f0c20d02",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/accepts_full_http.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "03bb5bb946eee59a458c917e0bc27cfa",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/accepts_minimal.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "a6faf83d39edcd4fa34f5da47d090502",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/accepts_ms_duration.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "1a3188974562c834c903760d08736582",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/accepts_optional_field.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "a003b2ed13dd42a36b59ade1ecf81336",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/rejects_missing_env_prefix.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "71c9ca72db5a92a895654b6e733d96d3",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/rejects_ms_duration_on_non_duration.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "e078be9865c547ba7e9111c7e3e174ed",
+    "semantic_hash": ""
+  },
+  "crates/aether-derive/tests/ui/rejects_unknown_hint.rs": {
+    "mtime": 1780813588.026379,
+    "ast_hash": "75bc88bb1abdd190ad337468f9d9c1ec",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/src/dag.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "4b7997b83fa3270d187190f6f420ec4a",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/src/descriptors.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "8c81062a5aec5293943fe8ceded6f889",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/src/keycode.rs": {
+    "mtime": 1778113322.8508105,
+    "ast_hash": "d52a5821fdd29586ae21ed0a76ba22e7",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/src/lib.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "f7de8b0b0c94d1f2cadd8e715b86fd4c",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/src/trace.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "425e98a39be1f8e6602623cf77ea7062",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/tests/dag_bundle_roundtrip.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "af3abef563825fa5bf10d95b72fd2ade",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/tests/dag_descriptor_roundtrip.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "9c09ba760d0a153675e06353e1483d87",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/tests/dag_descriptor_with_call_node.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "f987415885a1cab4d76e7e8c0b0a5b8d",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/tests/dag_descriptor_with_transform_node.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "b39df80fc410265f9ed625a47276e180",
+    "semantic_hash": ""
+  },
+  "crates/aether-kinds/tests/dag_error_variant_roundtrip.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "303df60d4104008e2a60e3f856b6bb1f",
+    "semantic_hash": ""
+  },
+  "crates/aether-math/src/aabb.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "4fc182b970c756d593184b1ce984be5a",
+    "semantic_hash": ""
+  },
+  "crates/aether-math/src/lib.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "bbe2b6c73411b4a300469ce6c1468c91",
+    "semantic_hash": ""
+  },
+  "crates/aether-math/src/mat.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "4a7b5bf8fc203ace45bf3fedb46460b8",
+    "semantic_hash": ""
+  },
+  "crates/aether-math/src/quat.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "fe8659fbb12802fb6f8527f85191522a",
+    "semantic_hash": ""
+  },
+  "crates/aether-math/src/test_helpers.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "666286c8af6586d7ee92378931bfd1b5",
+    "semantic_hash": ""
+  },
+  "crates/aether-math/src/vec.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "cd6e2684bda87b07083a8997bde421ca",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/args.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "cb4785f4f07f3fe6651ff081509e9870",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/bin/aether-tunnel.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "88ef1a5add82b41a1ba0d2b9f9a97100",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/main.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "37d7016ec09311419275b7cf2a6b45c0",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/reverse.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "93cb6d5129974cf11cafdcc90d658553",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/rpc.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "b6e5c02a460df7645f0692a7459ddeb2",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/test_chassis.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "3e516ecf2c8937a55b12a5b8f9d162be",
+    "semantic_hash": ""
+  },
+  "crates/aether-mcp/src/tools.rs": {
+    "mtime": 1780813588.0306542,
+    "ast_hash": "171dba58670dd51fe8985318a23d7621",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh-viewer/src/lib.rs": {
+    "mtime": 1778113322.8548074,
+    "ast_hash": "cb8f2f66564f90691f032ca22391fcf9",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh-viewer/src/runtime.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "9a635730c144826d8766c89c86f1a2bc",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh-viewer/tests/scenario.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "bbe966fdb8b1a85e956a95e50c32f810",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/examples/dsl_to_obj.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "e1ac52c2c202e05663bb6de3ab011c3f",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/ast.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "d3cc308633a528ba0b6a812b17d0cabf",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "7c14b7b99b2c375e1706272468f3e1bb",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/invariants.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "3b367eaae8f45be59027ed0b400a3af5",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/merge.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "be0a3bda496a0f668544e2d436136781",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/mesh.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "02d592659420750e3b2dd18f75637bea",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/provenance.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "30b6bc6a4a428e73dd128bd5b26b849b",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/slivers.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "e6a835514a74ddc84b12a3905f801124",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/tjunctions.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "d5229caefe1d845f112b2adabd9c4739",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/twin_edges.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "3636effd7f8d1c3078a277e331358f26",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/cleanup/weld.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "4fba35e5f2db30cd79bd1d846d79bdde",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/debug.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "b5b4af3956ff6fa21b8938098306524d",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/fixed.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "f72f99e5ccafa95ba61faf7eb672ef4f",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/lib.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "8a9a484aebc62dfccbc7bcade882d2f1",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/loop_polygon.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "3e74ea88637089332523c60646166c62",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/mesh.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "96a53744c67436f0dc7504bf254481fa",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/obj.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "eaac6fa68473d9c5632204e076b95729",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/parse.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "54c8ed86b1e725759e903b4cde0404a6",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/plane.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "d619ce59ce91ece47ac883fb41d0d72f",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/point.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "3b3a4bbdbf83cd6841673f52e13a1208",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/polygon.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "263d16bbd885ad29fda3520c80b5a6f9",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/serialize.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "1f195c79d76b6657e7ca229c96bec2d6",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/simplify.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "5865327467e2a486b847f5322f0b1667",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/tessellate.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "d779f0283ed19ce6e2a121f8f3d9f816",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/tessellate/cdt.rs": {
+    "mtime": 1778113322.8588042,
+    "ast_hash": "e86cb18bdce79981099b7128fcdc12fc",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/tessellate/cdt/bowyer_watson.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "96129044cc6c68dac1926259b1083412",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/tessellate/cdt/predicates.rs": {
+    "mtime": 1780813588.0349293,
+    "ast_hash": "21bab99015503317621b0bf3d9ba4c82",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/tessellate/cdt/triangulate.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "92a6bbb5654e3feffc0b1b24a666085a",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/src/test_helpers.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "969bd8195c6d699c1494d5db617861ee",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/tests/mesh_box.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "5dec00735a26a4cee6403c4ff8436659",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/tests/mesh_lathe.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "87f191df625969713aa2edf19dbb4a43",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/tests/mesh_v1_remaining.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "43ffed6c17c0736d9663e49d4eed0210",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/tests/mesh_v2.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "4bc72a5a5bb47eda6507986bd8ea0af3",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/tests/regression.rs": {
+    "mtime": 1778113322.8588042,
+    "ast_hash": "faaea98cf0d98856b54dcf6f2a887f6a",
+    "semantic_hash": ""
+  },
+  "crates/aether-mesh/tests/round_trip.rs": {
+    "mtime": 1778113322.8588042,
+    "ast_hash": "30aff93e15a016bffc73ecf419cbd924",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/desktop.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "9938135bf34dfe8672b11c47edb30c87",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/headless.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "63fb54b542996f8a7b0a5379c7bc99c7",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/hub.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "9a865870a898b8e6db5c74aa9990edc0",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/perf-compare.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "c176bb506db26a28cf6b2a31b001a848",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/perf-plot.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "eb5f943fe6df2ca6767249b9e45ca07a",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/perf-trial.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "d3f464a3b9caa021ce1375da5d50ec82",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/bin/test-bench.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "f742dea38de12001e9a8d193710d5bf4",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/chassis_common.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "bc725a0c49b6be1f87a7c2dd7c824f40",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/chassis_root.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "d8e15a734aec108ed5efcafa30346038",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/cli.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "b58e2d8f048d97e3c5337f8cfef90290",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/desktop/chassis.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "22f34a400aa53877923bb16e3562939b",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/desktop/driver.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "f42d05ebc9d226e0ae0ff8a91f5e5438",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/desktop/mod.rs": {
+    "mtime": 1778120445.4896154,
+    "ast_hash": "89957f32f481dd50604688179ef76f89",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/desktop/render.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "92b5d3fecf9b66680768721ee27922f8",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/headless/chassis.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "60e2a629ca0db4b7b9b88095d5f1c022",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/headless/driver.rs": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "ae880b4378251570760366d069e70528",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/headless/mod.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "d77d082360b41ecadbe79679903b8fa0",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/hub/chassis.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "f64e844dfc168d23b7bda6e8b0b0a0b3",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/hub/mod.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "c7ea511893c246537d44868015b014fe",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/lib.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "cb9710a30489dfa7e458662ca3d1f401",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/perf/harness.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "c8013b139bba2916470962e473a4edc2",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/perf/mod.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "524b211567c401cb9c3110bb2bfeead2",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/perf/report.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "d3ba8bfdaf9329bc1c3057aff67adacb",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/bench.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "bc23480304b6fa1bd3f4a6c08398c979",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/cap.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "08e77fd2981200c7ad3864785ae6cadb",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/chassis.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "540dea1557eb7ce7a44b329b406858b6",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/events.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "1b290ade06ef6c4b619e66f1afd5c859",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/execute.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "b74f6a89730099dfe6f904d7c7a9980e",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/mail_latency.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "9185507a2a9b1ae453d03418c8f4c6dc",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/mod.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "d7bf56288ffb3019fe7d9b609cd0efc2",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/render.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "4df5c3af9f75eb57e35c6601ee82f37a",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/test_helpers.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "6eaff78e67b7e325b0d19b063fb77070",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/src/test_bench/visual.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "9572091cff85eb5c72a8468333e5e663",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/cap_registry.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "2d7436dfac119fdd2b43470dc39d120f",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/cost_table.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "593bc2bf5d92deb237fcb80123152c4b",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/end_to_end.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "963162acc49061701cff80b84654c06d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/engines_cap.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "e9288c54b50a10c80c75bc33ff6afc1d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/input_subscriptions.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "e1fa087336d8c386174128b742aaec04",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/rpc_engine_routing.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "b68839548890a0c35e5ea87611de87e5",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/spawn_args_overlay.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "9229a50aba31ac434d97fd10e8990c7a",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/test_bench_scenario.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "602d4e22a9edc094ca4124682b2c081a",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/tests/typed_config.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "371b7484710f0f05cd6e857497d1bd06",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/mod.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "ac7117f3b8e58ca9c5d4150490e8cbe1",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/monitor.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "b6da4c0ef54ba7317c54f2b729853eb4",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/binding.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "38f4cb432e273fecb229512d6a853d3d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/blob_lifecycle.rs": {
+    "mtime": 1780813588.0434794,
+    "ast_hash": "b0238104d07cbbd383b4e4fd4c7e32fc",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/blob_work.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "4fde22b5930f195c58f1ad71ec9e36a2",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/ctx.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "546690e13ffa1f1a5cb2a9a6af56b162",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/dispatch.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "a3446178f411081a0c97d0cd3efff8f6",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/dispatch_blocking.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "7b8545d9739ee0e7a1cf7976778ed659",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/dispatcher_slot.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "11c2cc57657d85f957c90ef020a41d4e",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/envelope.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "f07d04865f293034e644d8c7ceee70fe",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/mailbox.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "be62634ad0b4138d9f8de24c536d40ee",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/mod.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "4eee59cc08c7988f74d5bbd73388c475",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/spawn.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "632d3ab682b12a7c33186f58b1c19b91",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/native/spawn_thread.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "f6249bc8593089f6978144361ee1010b",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/registry.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "34147c7178bbd328b83fee4e5a3bd62c",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/wasm/component.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "e22f174389e99f7a22597d61356f8aee",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/wasm/host_fns.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "c47db418b85df1282c6259353cabbd02",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/wasm/kind_manifest.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "2bf722131ba7ccc762abb7e389d46570",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/wasm/mod.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "340e5dac071b3cb81164e9935c2547bc",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/actor/wasm/reply_table.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "f64d5f2f6beebba39863bb437360bfda",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/boot.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "3b06cbda1bc418e78d25a3bb19887cdd",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/capture.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "e9fceb29c0eea8cc0eb0db7a2aebf6ca",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/builder.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "7c77ec5f1aff364d787fc4c779d465d4",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/ctx.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "afeb3c5debe5f710d9253d9bacd1aefa",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/error.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "6333080d7655da123292913da42c3dfe",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/frame_loop.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "7d48a760eb6cdc6cb1c55607d20c57b6",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/helpers.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "e1ac0ffe7a4001f02ee34c670881f7bb",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/mod.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "dc3e47567eb273fc28eac6b8c151df49",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/settlement.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "07395d5e5bfb1c91c7602e88e58e9802",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/settlement_counter.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "cfd64903d4d37857647d652c43524f10",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/chassis/settlement_table.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "c3efedd47fa55355e1a80db08ae153d9",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/config.rs": {
+    "mtime": 1780813588.0477543,
+    "ast_hash": "28ce05dfefd96de85180033761494a33",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/dag/executor.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "fb9f657af61fc2de4fd909a063daaf51",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/dag/mod.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "840e3587145fabd5eed14c4309b4f58a",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/dag/state.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "743061ecc10137083ca244d056c1f7ec",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/dag/transform_pool.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "fdaca129ed28a18f103999946f1c7e67",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/dag/transform_registry.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "c49c6bebd38670770a4a704de6bf0b37",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/dag/validator.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "873cca380d841de1d7f5110c75b72051",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/handle_store.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "7ed37a368615e34e5917ec22160a5f4d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/handle_store/meta.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "8fc61d4303e7916d78ed4626ad2dde1d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/lib.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "12c94119410dfc02b6ac2de146d5a326",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/capability.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "216e86fe8d9515f5d5685438290bbd5f",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/cost.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "d0861256029e7ab1a39cbacdcd8feaec",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/helpers.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "95764ef2c2a8849f8704b937ce67f51e",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/mail_ref.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "e6d26e184826990f98e268b4e1f1fc7d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/mailer.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "cd60ebce48cd62550e47d2a33876ea16",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/mod.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "6af5e8175c1d6235c3f9baca654d2de6",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/outbound.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "b26850eb248d6ed5a763fe6f22d52f6d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/registry.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "2cd0d18ce8f8c9756c9bc2e2670bae24",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/mail/ring.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "5daee069fe0af7643b3aa7ec99bcab51",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/render/capture.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "5b09988c7d0bd27bd953802074d37b8a",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/render/mod.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "8b1d938f9deb1baf7230dd9a52c3fcf9",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/render/pipeline.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "4e78bd535be129fae07cf143324c49fb",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/render/targets.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "cdbee975827de8f4569a570fa382cf3c",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/runtime/lifecycle.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "7ff77c07a1c69919337733791cd58259",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/runtime/log_install.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "0aae2e7862ecd7a1624c1950e22afc50",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/runtime/mod.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "8f158e27c8a955fe67e491887564cd52",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/runtime/panic_hook.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "1d4503c47dec10d4df7b5e2006c2e342",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/runtime/thread_name.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "2b136001d0cb8498ae468182ef710c9f",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/runtime/trace.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "82d89af9d78f043136ece634963ea964",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/scheduler/calibrate.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "a64a35aba199c8ae84e574f2ca2dd8bd",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/scheduler/mod.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "4b13bb213cbfa2fe721ee33f13a9bfcf",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/scheduler/pool.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "cb3f35d383d3498af1ef121046dec309",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/scheduler/slot.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "ab9fd80d70d064b8d77e764e8264b611",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/scheduler/spin_park.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "bd71f58ee6661d69e4fc206044240023",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/scheduler/worker_deque.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "318d3b3502218b0b5821f653f9ce530b",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/src/test_util.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "7f8034bd4b6e7113b4891d6d58e7c63d",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/dag_validator.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "f4fc4911d3fb089beee0498ebff59e51",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/handle_store_disk_eviction.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "25ce9d654c81210b12682a7feab6314c",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/handle_store_lockfile.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "d063fa2f47cda53c5a19b214f978a2c9",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/handle_store_persistence.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "f70e590a6232e5360504d2e0937c4db0",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/handle_store_restore.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "aaadf6ddc976a17a32a159eb7bc561ac",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/handle_store_schema_evolution.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "22caa8cc627920408f777375a16e1931",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate/tests/native_actor_macro.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "300d404d308e28bcdf2ea4f994366468",
+    "semantic_hash": ""
+  },
+  "crates/aether-test-fixtures/examples/multi_actor.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "485f9bd078361c25e3457309fe8f58f5",
+    "semantic_hash": ""
+  },
+  "crates/aether-test-fixtures/examples/probe.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "7f7ce602e24e9e72e3334c1357150d4f",
+    "semantic_hash": ""
+  },
+  "crates/aether-test-fixtures/examples/probe_with_config.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "85392916537ccf3223ddc74dc5b03686",
+    "semantic_hash": ""
+  },
+  "crates/aether-test-fixtures/src/lib.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "34c099ffc83b187042f169b1c65130bd",
+    "semantic_hash": ""
+  },
+  "demos/sokoban/src/lib.rs": {
+    "mtime": 1780813588.0520294,
+    "ast_hash": "cac0640b122bd1b30d7595636bb9c1d7",
+    "semantic_hash": ""
+  },
+  "demos/sokoban/tests/scenario.rs": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "62d43b6fe8d5da5ba41936e68751db51",
+    "semantic_hash": ""
+  },
+  "scripts/ensure-tunnel.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "f2f7b3602e2387f84946230f0a4f9e59",
+    "semantic_hash": ""
+  },
+  "scripts/flake-soak.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "bc8f56d49a19258b34c46bc1c0cc51d1",
+    "semantic_hash": ""
+  },
+  "scripts/graphify-graph.sh": {
+    "mtime": 1780813611.376202,
+    "ast_hash": "fe639197ca1d286fcecdcfefd7e1337a",
+    "semantic_hash": ""
+  },
+  "scripts/graphify-normalize.py": {
+    "mtime": 1780813611.376202,
+    "ast_hash": "e3e389bcb264d5aea4ba2d63d7cb3867",
+    "semantic_hash": ""
+  },
+  "scripts/perf-compare.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "a264479657f70bd9497d7929bedf0912",
+    "semantic_hash": ""
+  },
+  "scripts/perf-publish-plots.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "ffa9c36896c653f7ce6815eb454a33f0",
+    "semantic_hash": ""
+  },
+  "scripts/preflight.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "207d2dbd6a910d8738395000d1f1b883",
+    "semantic_hash": ""
+  },
+  "scripts/qodana-local.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "f902564b5b7f3184f9e63adc7ec920c9",
+    "semantic_hash": ""
+  },
+  "scripts/reconcile-board.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "ff1e0a523cc71e8c933dd3b5582d026e",
+    "semantic_hash": ""
+  },
+  "scripts/release-project-init.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "42e9cdeed5c88fccf5639c1d1a3b495a",
+    "semantic_hash": ""
+  },
+  "scripts/setup-githooks.sh": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "c9ed0c01eeffdfcc7299311efe01162f",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-guest/src/lib.rs": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "3b7a1636b1cd091f846f33e70a79075a",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/build.rs": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "30787ebe1c1615a2d90c59926f09ea72",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/results/plot.py": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "3f7e6467fb037d0a439d0254396d0400",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/src/bin/concurrent.rs": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "65b32980dd05354daa5e87275408fb05",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/src/lib.rs": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "55c7f1d8ad8b98d6b38e85a0c3e9f883",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/src/main.rs": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "8f6bd19fcc38e3695eac5ca50b2a1421",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/src/scheduler.rs": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "c47dbbba21bad8c69d7a9aaad2040060",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/cache.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "f02474f9ea0ad24368f6d7c8583ce159",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/claude.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "a7b8bdee7abebb0791a679a690425264",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/compose.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "46b6c714200d1487a15799506a3936ca",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/distills.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "5305c5d7dc89665866203aa9d297210b",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/facts.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "55f5249fe19140a5e0439da1bd783663",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/frontmatter.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "c02550fe17648b2ac97746d06ef76c6b",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/gemini.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "6df7dd90858de53df8bc33f01a6eb18d",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/grader.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "3eac0b51194ffc0db657149de653e68b",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/lenses.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "1bbd58cd3dd049f52ae9c42476eb1a97",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/main.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "a002ba7f94544f7d025350fa18003101",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/observers.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "6c7a7ea51c051c28d22a6da2b9554739",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/pipeline.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "050cfb2221209467316a3cf9a0c28034",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/profiles.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "4f70c5018a25eed4bcdb80acc25a04d0",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/recipes.rs": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "d97f00d0b1e477705df3f462b580a557",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/transforms/distill.rs": {
+    "mtime": 1778113322.8987727,
+    "ast_hash": "12c4b500808110538cb60c2d51154b66",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/transforms/frame.rs": {
+    "mtime": 1778113322.8987727,
+    "ast_hash": "25edd1dccee30a42d4c6dfb5c4942529",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/transforms/generate.rs": {
+    "mtime": 1778113322.8987727,
+    "ast_hash": "4f8c7d31e9c148bb722b9eef915b5555",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/src/transforms/mod.rs": {
+    "mtime": 1778113322.8987727,
+    "ast_hash": "f792b64163eb5e1a857ccc66fa517ab0",
+    "semantic_hash": ""
+  },
+  "spikes/recruit-k-sim/src/main.rs": {
+    "mtime": 1780813588.0648544,
+    "ast_hash": "f63297a7d10c3543750f1e1e4e21783a",
+    "semantic_hash": ""
+  },
+  ".claude/skills/adr/SKILL.md": {
+    "mtime": 1778113322.8348231,
+    "ast_hash": "f9f8782179e6164a09f5aec0d444a481",
+    "semantic_hash": ""
+  },
+  ".claude/skills/approve/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "c0c0eba5cebb091accb46557a78a9c16",
+    "semantic_hash": ""
+  },
+  ".claude/skills/bounce/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "9954d8e18defed9599aaec4bd538f240",
+    "semantic_hash": ""
+  },
+  ".claude/skills/graphify/SKILL.md": {
+    "mtime": 1780814073.968783,
+    "ast_hash": "972e0dd1a716a7585c6f7aa8a0b741b6",
+    "semantic_hash": ""
+  },
+  ".claude/skills/implement/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "d8cac7ad075223168c0dd7c369ff667d",
+    "semantic_hash": ""
+  },
+  ".claude/skills/release-init/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "fa8cc89eb91cdbbf4e4c651e4912fc77",
+    "semantic_hash": ""
+  },
+  ".claude/skills/scope-spinoff/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "9bb2715b386b186494207c1660902b4a",
+    "semantic_hash": ""
+  },
+  ".claude/skills/scope/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "0da194b108f40029e37078cc8403b570",
+    "semantic_hash": ""
+  },
+  ".claude/skills/secretary/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "8622f6b85788567a9b7cdcb211d575a6",
+    "semantic_hash": ""
+  },
+  ".claude/skills/sweep/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "7c5c89dc27abdb43765a3bfe979af63f",
+    "semantic_hash": ""
+  },
+  ".claude/skills/wish/SKILL.md": {
+    "mtime": 1780813588.000729,
+    "ast_hash": "332d2969b9cbadb2ea9b6a31e505bf3e",
+    "semantic_hash": ""
+  },
+  ".github/pull_request_template.md": {
+    "mtime": 1778113322.83882,
+    "ast_hash": "3575a7671bdfa0ac8cae975d064e0693",
+    "semantic_hash": ""
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "f7d2d591440da5d46465bda0c3c21eb8",
+    "semantic_hash": ""
+  },
+  ".github/workflows/docs.yml": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "787eef0ba3deef2604511689cff6189d",
+    "semantic_hash": ""
+  },
+  ".github/workflows/graphify.yml": {
+    "mtime": 1780813611.341529,
+    "ast_hash": "6c8b5c6d725ee2d222e19966fd90bfd3",
+    "semantic_hash": ""
+  },
+  ".github/workflows/issue-labels.yml": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "a727b63c7ea528628affa398b2d1fda1",
+    "semantic_hash": ""
+  },
+  ".github/workflows/perf-compare.yml": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "bc5b4128e0d88c5b0aca33a567378f4b",
+    "semantic_hash": ""
+  },
+  ".github/workflows/pr-title.yml": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "fc58d0e96efe8b961072095146022829",
+    "semantic_hash": ""
+  },
+  ".github/workflows/reconcile-board.yml": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "e0e0cb181d319b8177a53ed70da92872",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1780813611.341529,
+    "ast_hash": "c5c0a78a7447819879c5b0b1efc5792f",
+    "semantic_hash": ""
+  },
+  "CONTRIBUTING.md": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "878d4ee1099e8ac55cc66b1bacd1af23",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1780813588.0050042,
+    "ast_hash": "4ddb821f658968bf7ab6bc5ea40d01f0",
+    "semantic_hash": ""
+  },
+  "crates/aether-substrate-bundle/assets/fonts/OFL.txt": {
+    "mtime": 1780813588.0392044,
+    "ast_hash": "e1a72ae9cb3ae2bc19cf4dea20623042",
+    "semantic_hash": ""
+  },
+  "docs/adr/0001-record-architecture-decisions.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "9715d861c22702e2c8acca20b2580ef1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0002-mail-first-architecture.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "41c3d9e3f2e3d465b8f4961f2b7d7e2e",
+    "semantic_hash": ""
+  },
+  "docs/adr/0003-mail-runtime-spike-findings.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "eae48c84cd5e973711a961f003cb047b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0004-concurrent-scheduler-spike-findings.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "703376c21a508b0b1fac0818b67dec19",
+    "semantic_hash": ""
+  },
+  "docs/adr/0005-mail-typing-system.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "59e952920e1d15e2ee5eff315284b3b5",
+    "semantic_hash": ""
+  },
+  "docs/adr/0006-external-mail-transport.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "e046aee4e605cdf68f7b1d8d84f2624f",
+    "semantic_hash": ""
+  },
+  "docs/adr/0007-schema-driven-mail-at-hub.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "0758a692c5a714199fbbffd2a80d6c72",
+    "semantic_hash": ""
+  },
+  "docs/adr/0008-engine-to-claude-mail.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "6d712a89e4d8ffe0abb5bdcfa4360ec7",
+    "semantic_hash": ""
+  },
+  "docs/adr/0009-hub-supervised-substrate-spawn.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "11ecb6b32576d53e1283c538421ab7a2",
+    "semantic_hash": ""
+  },
+  "docs/adr/0010-runtime-component-loading.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "b670e2bdad8dd521d270734d9b95e562",
+    "semantic_hash": ""
+  },
+  "docs/adr/0011-origin-attribution-on-observation-mail.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "e1aedce529ba0f0343d45758bfea83b1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0012-guest-component-sdk.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "aa4a108f6bc1d7bb3fd4546043b9c412",
+    "semantic_hash": ""
+  },
+  "docs/adr/0013-reply-to-sender-host-fn.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "a4b8a1718fbef865f8ecb3af8d9a2973",
+    "semantic_hash": ""
+  },
+  "docs/adr/0014-component-trait-and-associated-types.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "a3c742fc480106974b25b49ed8e85c6e",
+    "semantic_hash": ""
+  },
+  "docs/adr/0015-component-lifecycle-hooks.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "9df4d58191bb711b494d9b97f69a07d3",
+    "semantic_hash": ""
+  },
+  "docs/adr/0016-persistent-state-across-hot-reload.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "735b34849d54a4ff6f06b53206333dc1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0017-component-sender-handles.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "da72c443bf653d9f2f209a2ff9151d7b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0018-sender-lifetime-scoping.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "acbf819a8a59ea80c42374f9b21a1749",
+    "semantic_hash": ""
+  },
+  "docs/adr/0019-unified-mail-encoding.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "4eb6fec9cf01655af22bb7a096257a1c",
+    "semantic_hash": ""
+  },
+  "docs/adr/0020-symmetric-receive-mail-decode.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "d4b983283fd866762fda29b1a71a22d1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0021-input-stream-subscriptions.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "c5544d38c5345fe2ca8c93b04810878f",
+    "semantic_hash": ""
+  },
+  "docs/adr/0022-drain-on-swap.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "b79f92114a648f60a974287bd0a63db7",
+    "semantic_hash": ""
+  },
+  "docs/adr/0023-engine-logs-mcp-tool.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "0ff75cfb5631f906e823d0a8f359b79b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0024-dual-target-host-fn-ffi.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "baf1d8119ca2c6b0c6e2e8a8bba45a8a",
+    "semantic_hash": ""
+  },
+  "docs/adr/0025-art-direction-and-renderer-scope.md": {
+    "mtime": 1778113322.8787885,
+    "ast_hash": "f5a83ef4d65966740baf60f0edb3db08",
+    "semantic_hash": ""
+  },
+  "docs/adr/0026-primitive-composition-dsl.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "843c9a20c244ff80ccd7857d4cd1d348",
+    "semantic_hash": ""
+  },
+  "docs/adr/0027-component-kinds-typelist.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "3743aeca4f30222fc9a10c7dbc2a9fc3",
+    "semantic_hash": ""
+  },
+  "docs/adr/0028-component-embedded-kind-manifest.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "e356f40c217c58c601a13af0235510b8",
+    "semantic_hash": ""
+  },
+  "docs/adr/0029-name-derived-mailbox-ids.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "81280ccd6163f33a863dd0ee40bb421e",
+    "semantic_hash": ""
+  },
+  "docs/adr/0030-hashed-kind-ids.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "2f69e425b46cefc9c6ea954b3c5da9d8",
+    "semantic_hash": ""
+  },
+  "docs/adr/0031-const-constructible-schema-representation.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "552d0f8231cdda5d488674d625d8b2f7",
+    "semantic_hash": ""
+  },
+  "docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "8017703557f06d1c3000e24d359c1382",
+    "semantic_hash": ""
+  },
+  "docs/adr/0033-handler-driven-inputs-manifest.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "cae3615007c78685a97902e01a263ba8",
+    "semantic_hash": ""
+  },
+  "docs/adr/0034-hub-as-substrate.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "b26795fc7db5fc4d5d93eca50d04a797",
+    "semantic_hash": ""
+  },
+  "docs/adr/0035-substrate-chassis-split.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "18dde69a3f846b2cf17b85606ccd5730",
+    "semantic_hash": ""
+  },
+  "docs/adr/0036-component-mail-handler-profiling.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "9a0100c5b621f9bebe831d6b162d1f60",
+    "semantic_hash": ""
+  },
+  "docs/adr/0037-mail-bubbles-up-to-hub-substrate.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "5282b2e499f4f4e32c5d9dd4746ab81e",
+    "semantic_hash": ""
+  },
+  "docs/adr/0038-actor-per-component-dispatch.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "76d7612479e64b89d2afbf1ff137311e",
+    "semantic_hash": ""
+  },
+  "docs/adr/0039-desktop-midi-synth-and-audio-sink.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "3f26bfd56f9e9e590942fcd89aeff1e4",
+    "semantic_hash": ""
+  },
+  "docs/adr/0040-kind-typed-state-persistence.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "b9f03605e55fac5b6904bd21866a76e0",
+    "semantic_hash": ""
+  },
+  "docs/adr/0041-substrate-file-io-and-namespaces.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "54689e9a3e0adb4f36f35feebd1ab109",
+    "semantic_hash": ""
+  },
+  "docs/adr/0042-synchronous-mail-wait.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "1da5e6dfdd34a54f36f674be97f52f14",
+    "semantic_hash": ""
+  },
+  "docs/adr/0043-substrate-http-egress-net-sink.md": {
+    "mtime": 1780813579.6790833,
+    "ast_hash": "a3343ef03d93f7ded815c6828755e355",
+    "semantic_hash": ""
+  },
+  "docs/adr/0044-component-capabilities-wasm-custom-section.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "02316083fcc86b9fb9ba5c83d5cb8036",
+    "semantic_hash": ""
+  },
+  "docs/adr/0045-computation-dag-and-typed-handles.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "27377c7836be132942d26fdf6566e1e7",
+    "semantic_hash": ""
+  },
+  "docs/adr/0046-content-generation-pipeline-pattern.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "4b2e600ed7f3c0fc67e9c5ea98aada0b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0047-dag-submit-cancel-status.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "94e3e520ba802fbe632538ae94d8850b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0048-transforms-and-content-addressed-handles.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "536195d715574c226e70343f6601874a",
+    "semantic_hash": ""
+  },
+  "docs/adr/0049-persistent-handle-store.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "ff57085f65d18cf8b4b23961fb2b587b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0050-llm-completion-sink.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "b9455aa2d45f0a372603f40f8fd63284",
+    "semantic_hash": ""
+  },
+  "docs/adr/0051-dsl-mesh-vocabulary-v1-pinning.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "843e7dee839f6ecf0181b73c56ffa896",
+    "semantic_hash": ""
+  },
+  "docs/adr/0052-mesh-editor-is-the-dsl.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "8068bcc6a7535c1712639bce58ced227",
+    "semantic_hash": ""
+  },
+  "docs/adr/0053-promote-dsl-mesh-spike-to-crate.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "37710fab95d1e71139e6889052ef1f69",
+    "semantic_hash": ""
+  },
+  "docs/adr/0054-csg-operators-for-the-dsl-mesh.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "0e8f17ea9140bc921aaec94f0d689c22",
+    "semantic_hash": ""
+  },
+  "docs/adr/0055-post-csg-mesh-cleanup-pipeline.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "080efe9582bd4fd34c349aa94288c7e1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0056-cdt-replaces-ear-clipping.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "9d7222a116366e98f050d468c75042a7",
+    "semantic_hash": ""
+  },
+  "docs/adr/0057-canonical-mesh-form-is-ngon-polygons.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "64b3cb13fcdb9db3fa5833e7b72a0639",
+    "semantic_hash": ""
+  },
+  "docs/adr/0058-namespace-chassis-sinks.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "40da82771696996a06a3a6a9e0ef854d",
+    "semantic_hash": ""
+  },
+  "docs/adr/0059-content-hashed-field-tags-for-component-storage.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "79f9bbf95c1c9f5d26592e9f39705928",
+    "semantic_hash": ""
+  },
+  "docs/adr/0060-guest-side-logging-via-mail-sink.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "2c05d850ef4123b1625beafac3f9bac1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0061-canonical-rim-vertex-identity-for-bsp-csg.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "311f65cca48eb5244fecb06580f02204",
+    "semantic_hash": ""
+  },
+  "docs/adr/0062-retire-csg-from-v1-mesh-dsl.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "b301a79549f753aebed258a071bbbd42",
+    "semantic_hash": ""
+  },
+  "docs/adr/0063-fail-fast-on-abnormal-component-lifecycle.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "6059c39b5b99a1a3059c0119a8c94826",
+    "semantic_hash": ""
+  },
+  "docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "0272f36a1283c4f2fd40dc62b7579165",
+    "semantic_hash": ""
+  },
+  "docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "8e8792cc9f86f5953d2b6d834cc912ef",
+    "semantic_hash": ""
+  },
+  "docs/adr/0066-per-component-trunk-rlibs-for-shared-types.md": {
+    "mtime": 1778113322.8827853,
+    "ast_hash": "f81834a5c8af17a616c1dda9f20ec210",
+    "semantic_hash": ""
+  },
+  "docs/adr/0067-test-bench-chassis-and-aether-scenario-runner.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "4fe2de23ec25fb7a3492e749365dccb1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0068-input-subscribers-keyed-by-kindid.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "854309ce4c528df79cdc1995975071a6",
+    "semantic_hash": ""
+  },
+  "docs/adr/0069-data-layer-split-from-mail-transport.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "1de1affde2052b704e3d76555bd8da54",
+    "semantic_hash": ""
+  },
+  "docs/adr/0070-native-capabilities-and-chassis-as-builder.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "b01311aa22e2c10170230744f4f623ad",
+    "semantic_hash": ""
+  },
+  "docs/adr/0071-driver-capabilities-and-chassis-composition.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "b6512bdcd16c2899750cba2955ce3c4d",
+    "semantic_hash": ""
+  },
+  "docs/adr/0072-fold-hub-protocol-into-codec-and-hub.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "499b0262deb365ee83738057825cb95e",
+    "semantic_hash": ""
+  },
+  "docs/adr/0073-substrate-cluster-consolidation.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "76dcb393410a68fde7c213a501966096",
+    "semantic_hash": ""
+  },
+  "docs/adr/0074-unified-actor-model-for-substrate-and-guests.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "6e85d3ce7da3ca592b60492075e64e41",
+    "semantic_hash": ""
+  },
+  "docs/adr/0075-actor-typed-sender-api-and-chassis-cap-marker-split.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "92846aaa8941c52875f9060062462a6a",
+    "semantic_hash": ""
+  },
+  "docs/adr/0076-collapse-cap-facade-pattern.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "0c39b2258b1dbea6a6cbbb7c0a9de53b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0077-actor-aware-logging.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "4c609303007181ebce7f1afe8fe55ffd",
+    "semantic_hash": ""
+  },
+  "docs/adr/0078-chassis-internal-actors-and-process-capability.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "8be2e125e3b8263cb815f307ee28ee13",
+    "semantic_hash": ""
+  },
+  "docs/adr/0079-instanced-actors-as-a-first-class-category.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "4aebd06e72534278a2afbf208afbe5d4",
+    "semantic_hash": ""
+  },
+  "docs/adr/0080-substrate-mail-tracing-and-settlement.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "1ab31bf6d3f8b7cb862e3ceef780859f",
+    "semantic_hash": ""
+  },
+  "docs/adr/0081-decentralized-per-actor-log-storage.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "4b296aca80dd63551d6bfd36a9dcf691",
+    "semantic_hash": ""
+  },
+  "docs/adr/0082-application-declared-lifecycle-sequence.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "a2b5631ead5216a0a474ac84e637ffc5",
+    "semantic_hash": ""
+  },
+  "docs/adr/0083-mail-sender-lineage.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "ba946674cb2feecc8ac1af6e50e048c1",
+    "semantic_hash": ""
+  },
+  "docs/adr/0084-plato-content-generation-on-the-dag.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "78fbcef4e0d3e970052ed90ef43db7bc",
+    "semantic_hash": ""
+  },
+  "docs/adr/0085-noise-aware-perf-comparison.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "1b4648a9da04726eb16fd2bdddbbdcc0",
+    "semantic_hash": ""
+  },
+  "docs/adr/0086-decouple-settlement-from-trace.md": {
+    "mtime": 1780813588.0563045,
+    "ast_hash": "d4419f1fca9b373f5280b3cf44ba8420",
+    "semantic_hash": ""
+  },
+  "docs/adr/0087-blob-unit-of-dispatch.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "f4b907549ea8d246a9da5b0f87d46c38",
+    "semantic_hash": ""
+  },
+  "docs/adr/0088-identifier-reverse-lookup-inventory.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "14ecc6b980bc569a0b6843cc91944e4b",
+    "semantic_hash": ""
+  },
+  "docs/adr/0089-mcp-hub-lifecycle-tunnel.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "2e5fe23c19b51741d878bd4cc85bd64d",
+    "semantic_hash": ""
+  },
+  "docs/adr/0090-application-configuration.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "dede1fecb8585a21faa51d1cd4eb8504",
+    "semantic_hash": ""
+  },
+  "docs/adr/0091-live-kind-schemas-on-the-inventory-cap.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "d0fc68ffb613a1b7cbe94a7a7928fd12",
+    "semantic_hash": ""
+  },
+  "docs/adr/0092-release-branch-workflow.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "df43a2d6be98e5f9312b74c19af3336f",
+    "semantic_hash": ""
+  },
+  "docs/adr/0093-hold-until-resolve-dispatch-primitive.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "6b7060ae4008b22774f5bbb0adf373ea",
+    "semantic_hash": ""
+  },
+  "docs/adr/0094-settlement-obligation-guard.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "844a288ed289437ec87ab68ee5fd6b06",
+    "semantic_hash": ""
+  },
+  "docs/adr/0095-binding-agnostic-guest-payload-delivery.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "6169428c10f4cf283dff75d1237d8473",
+    "semantic_hash": ""
+  },
+  "docs/adr/0096-multi-actor-wasm-modules.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "a64d7e2f40a33b4970337306df144e64",
+    "semantic_hash": ""
+  },
+  "docs/adr/0097-wasm-sibling-spawn.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "2cc1e260c65cf1f5cf04c3fb6f501ba6",
+    "semantic_hash": ""
+  },
+  "docs/adr/TEMPLATE.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "41f99ed6311d5c3d5a561444d87adbbc",
+    "semantic_hash": ""
+  },
+  "docs/guide/SUMMARY.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "95a7fb9648b5881906778901e10a63b5",
+    "semantic_hash": ""
+  },
+  "docs/guide/architecture.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "4483a6753e7691a0453d073edf3bc6aa",
+    "semantic_hash": ""
+  },
+  "docs/guide/foundations/actor-model.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "52428a206bcc0d2e2d613d451022fab3",
+    "semantic_hash": ""
+  },
+  "docs/guide/foundations/invariants.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "ebbd9cd812b831d22f9bab7aaa967cf4",
+    "semantic_hash": ""
+  },
+  "docs/guide/foundations/type-system.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "9658e5466ae640cfb70d10a3c8547385",
+    "semantic_hash": ""
+  },
+  "docs/guide/introduction.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "e9b01cb0738bbdff622fd0745c0a342d",
+    "semantic_hash": ""
+  },
+  "docs/guide/mcp-harness.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "c3afc4e692ab6e3dfe3eb04ca4aab565",
+    "semantic_hash": ""
+  },
+  "docs/guide/philosophy.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "faa4a76771e811c31626ec2b5001528b",
+    "semantic_hash": ""
+  },
+  "docs/guide/recipes.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "08569037a57c7ce4966d98bd481d9ec9",
+    "semantic_hash": ""
+  },
+  "docs/guide/reference.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "ae8dab1db125350c10961a50c1d9345e",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "6de5adcd4b8b85135205ecd03aef5cce",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/components.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "387d3fb6c925739656588f03a88027d5",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/concurrency.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "6e553a092f408aa7f75c00e3651ec84b",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/configuration.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "041320486344a1933a712d065aef381e",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/file-io.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "a173248838c300505f64fc99c5a5f0bd",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/input.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "2b0395bff0b2f63e168eb519808421dd",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/mail-and-kinds.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "b5a1ef366caee6fcba946e28c95b9635",
+    "semantic_hash": ""
+  },
+  "docs/guide/systems/tracing-and-settlement.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "42007732f3f77d6cb9ff67f22db4ea03",
+    "semantic_hash": ""
+  },
+  "docs/release/schema.md": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "495efec3186a4488b343f9b2142707e0",
+    "semantic_hash": ""
+  },
+  "qodana.yaml": {
+    "mtime": 1780813588.0605795,
+    "ast_hash": "511175122a5d42f49c9fa4f672db37da",
+    "semantic_hash": ""
+  },
+  "spikes/aether-mail-spike-host/results/README.md": {
+    "mtime": 1778113322.8867822,
+    "ast_hash": "6ed1eb3368b9298b5b9b69e29a71e398",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/README.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "0c62c6b764481b207b61b66ef27fa10e",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/RUNS.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "15e24c299da2665e4f4fb61d9a1ea461",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/distill/material/brief.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "9dbeb7ef94db7ba4a7d5cfdcf37453aa",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/distill/material/full.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "47cab2ba6b67e3da761d3fdc4b0dc4f1",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/distill/material/terse.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "9607114e453e58ddcaeac9cfcddeb7c7",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/distill/surface/brief.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "7ceefdd36887ba66ed89885d0fdaf32b",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/distill/surface/full.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "d6b68d59c388761f475009c96086c2de",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/distill/surface/terse.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "0d5298b9265289a943e76fc3d4af0345",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/aesthetic/glaze-cobalt-blue.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "adce46a7f85eb34b1aeee896e1e0cd98",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/condition/flawless.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "aabf0529ff29cd9a77f5c42166bb7119",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/lighting/window-morning.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "b5645f9754794e5bbc4072bd5d897301",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/material/glazed-ceramic.md": {
+    "mtime": 1778113322.890779,
+    "ast_hash": "3b1726dc1702b384112c60f88fb20cb5",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/object/teacup.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "fc4bbeb59bf6f2d0f505e4182b076221",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/object/teapot.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "d09f43584c7b3cf73a8334c00300e47c",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/facts/surface/wooden-table.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "8f5b6fda3324292f86179a53638b5eaf",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/lenses/material/feeling.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "1275bd84a8c0651318f05aa93cc98b72",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/lenses/object/rendering-instruction.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "40ba8bdacfe46eb80cfa37e78f3185b1",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/lenses/surface/feeling.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "f4786a825e207fc706dea87c82b62f00",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/observers/quiet-domestic.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "0f2782cd5a82872c49efd93be92a9fee",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/observers/young-fascinated.md": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "c068f3216394b0c37e5de159657bd081",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/all-haiku.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "4da8d5d162fdab0a5976be92420cb5e3",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/all-opus.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "cf1b8d431872b10fcead2717cd11bece",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/all-sonnet.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "68528a5e4af660f8610765a0930805f5",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/controlled-distill-haiku.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "e213cf2cf6e1a5cfba1281d11a5d7fa7",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/controlled-distill-opus.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "3b3375b35021d067d48ce66195e11a40",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/controlled-distill-sonnet.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "f4889d5771f9bd361b13882e4bf0c087",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/mixed-haiku-sonnet.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "0d4bd2593b20dec4d6382c3fabab5fb0",
+    "semantic_hash": ""
+  },
+  "spikes/prompt-pipeline-spike/profiles/opus-sonnet.yaml": {
+    "mtime": 1778113322.8947759,
+    "ast_hash": "e8341b40f13c1eb7e85b08f14f6d4412",
+    "semantic_hash": ""
+  }
+}

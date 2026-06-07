@@ -64,3 +64,4 @@ spikes/*/target/
 # extraction cache, manifest, and other run artifacts are local-only.
 /graphify-out/*
 !/graphify-out/graph.json
+!/graphify-out/manifest.json
