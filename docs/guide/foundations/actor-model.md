@@ -2,7 +2,8 @@
 
 > **Governing ADR:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (the unified actor model — capabilities and
 > components are one model, not two) with [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md) (the lifecycle stages)
-> and [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the `#[actor]` macro). This model is **stable**; it's the
+> and [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the `#[actor]` macro), extended by [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (a wasm module exports several
+> actor types) and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its siblings). This model is **stable**; it's the
 > spine everything else hangs off. Signatures here were read from the current SDK
 > (`aether-actor`) and runtime (`aether-substrate`).
 
@@ -104,13 +105,16 @@ persist state. That's what "the context is the contract" means literally: the me
 you're in determines which context type you hold, and that type determines what
 compiles.
 
-Host matters as well as stage. Resolving, sending, and replying are common to both,
-but a few operations live on one side only: a native capability can spawn child
-actors and shut itself down, while a wasm component currently can't — its lifetime is
-driven from outside, by load, drop, and replace. The concrete context types differ by
-host too — `FfiCtx` in a component, `NativeCtx` in a capability — but you write
-handlers against a shared set of capability traits (`Resolver`, `MailSender`, and
-friends), so the same body works on either.
+Host matters as well as stage. Resolving, sending, and replying are common to both;
+a few operations are host-specific. A native capability can spawn any instanced child
+actor and ask to shut itself down. A component can spawn its **sibling** types — the
+other actors its own module exports
+([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md), and the
+[cardinality](#one-or-many-cardinality) section below) — while its own load, drop, and
+replace are driven from outside. The concrete context types differ by host too —
+`FfiCtx` in a component, `NativeCtx` in a capability — but you write handlers against a
+shared set of capability traits (`Resolver`, `MailSender`, and friends), so the same
+body works on either.
 
 ## Authoring an actor
 
@@ -241,13 +245,21 @@ accepts connections and spawns a session actor per connection with `ctx.spawn_ch
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
 
-Spawning children on demand like that is a **native** facility — `spawn_child` is
-bounded to `Instanced` native actors. A wasm component can't spawn children of its
-own (a current gap, not a principle). It *can* still run as several instances,
-though: load the same wasm under different names and each is an independent actor at
-its own `aether.component.trampoline:<name>`. The loader in fact hosts every
-component behind an instanced trampoline actor, spawned once per load — so even a
-single loaded component is, underneath, one instance of an instanced host.
+`ctx.spawn_child` works on both hosts. A native capability spawns any `Instanced`
+native actor; a wasm component spawns its own **sibling** types — `Instanced` actors
+its module also exports ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)). One wasm crate can export several
+actor types (`export!(RootManager, Panel, …)`), and a running instance stands up a
+sibling just as the listener stands up a session:
+`ctx.spawn_child::<Panel>(Subname::Counter, &config)`. A component spawns within the
+module it was built from; a foreign module comes in through `load_component`, which
+carries its own code and kinds — the boundary is covered in
+[Components & lifecycle](../systems/components.md).
+
+A component can also run as several instances of one type: load the same wasm under
+different names and each is an independent actor at its own
+`aether.component.trampoline:<name>`. The loader in fact hosts every component behind
+an instanced trampoline actor, spawned once per load — so even a single loaded
+component is, underneath, one instance of an instanced host.
 
 ## One model, two hosts
 
