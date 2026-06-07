@@ -10,8 +10,8 @@
 > the **per-scope-singleton concept forward** — a singleton is "exactly
 > one within a scope," enforced by id uniqueness — but replaces the
 > addressing mechanism: an actor's identity splits into an **ActorId**
-> (what code, the flat per-node hash) and a **MailboxId** (where in the
-> tree, a Merkle-chain fold of the node's lineage of ActorIds). The flat
+> (which actor, the flat per-node hash) and a **MailboxId** (where in the
+> tree, a hash chain over the node's lineage of ActorIds). The flat
 > string join is replaced by that fold; §7 is closed by carrying the
 > lineage as a rolling `u64` fold state on the actor's binding (neither
 > a name on the handle nor a registry round-trip). The reasoning below

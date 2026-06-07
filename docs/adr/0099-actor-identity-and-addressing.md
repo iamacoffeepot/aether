@@ -5,13 +5,13 @@
 
 ## Context
 
-`MailboxId = hash(name)` (ADR-0029): an actor's wire identity is the FNV-1a hash of its mailbox name, resolved client-side with no registry lookup. That one id answers two questions at once — *what code is this actor* and *where does it sit in the tree* — and the two come apart as the tree gains depth.
+`MailboxId = hash(name)` (ADR-0029): an actor's wire identity is the FNV-1a hash of its mailbox name, resolved client-side with no registry lookup. That one id answers two questions at once — *which actor is this* and *where does it sit in the tree* — and the two come apart as the tree gains depth.
 
 The split is live in iamacoffeepot/aether#1364. A loaded component declares a `NAMESPACE` and a cardinality (ADR-0079) but runs under the component host's trampoline, registered at `aether.component.trampoline:camera` (ADR-0096 §3). A peer addressing it by bare type — `ctx.actor::<Camera>()` — hashes the bare `NAMESPACE` and reaches nothing, because the actor's id is the hash of its *hosted* name. The bare type names what the actor is; the hosted name also encodes where it lives; one flat hash cannot carry both, so the bare-type call lands on an empty id and warn-drops.
 
 The same conflation caps how deep the tree can go. Multi-actor modules and sibling spawn (ADR-0096/0097) put actors under other actors, and per-scope structure — one settings actor per open document, one player-state per session — nests further. A flat `hash(name)` can encode a position only by baking the whole path into one string and hashing it, which discards the constituent identities: you cannot read back what sits at each level, and extending a path means rehashing the whole string.
 
-The fix is to give an actor two identities — an **ActorId** for what code it is, and a **MailboxId** for where it sits, derived from its lineage. The rest of this ADR defines them, how the lineage produces the second, and how a name renders both.
+The fix is to give an actor two identities — an **ActorId** for which actor it is, and a **MailboxId** for where it sits, derived from its lineage. The rest of this ADR defines them, how the lineage produces the second, and how a name renders both.
 
 Constraints carried in:
 
@@ -27,16 +27,16 @@ This ADR **supersedes ADR-0098** (scoped singletons), which framed the same #136
 
 Four sub-decisions.
 
-### 1. Two identities: ActorId (what code) and MailboxId (where in the tree)
+### 1. Two identities: ActorId (which actor) and MailboxId (where in the tree)
 
 An actor carries two ids, one per question the single `MailboxId` conflated.
 
-**ActorId — what code.** It names a node in isolation: binary-unique, reverse-mappable to the actor it identifies (via the name the registry retains, ADR-0029), and independent of where the node is hosted. Cardinality (ADR-0079) sets how it is computed:
+**ActorId — which actor.** A `NAMESPACE` is universally unique, so its hash names the actor unambiguously across the whole binary. The ActorId names a node in isolation: binary-unique, reverse-mappable to the actor it identifies (via the name the registry retains, ADR-0029), and independent of where the node is hosted. Cardinality (ADR-0079) sets how it is computed:
 
 - A **singleton** node's ActorId is its actor-type tag (ADR-0096), `mailbox_id_from_name(NAMESPACE)`.
 - An **instanced** node's ActorId is `mailbox_id_from_name_pair(NAMESPACE, subname)` — `hash(NAMESPACE:subname)`, the same namespace with the runtime discriminator folded in by the `:` cardinality separator.
 
-These are exactly the flat ids the engine computes today. Today's per-actor mailbox id, read as "what code (which instance)," is the ActorId.
+These are exactly the flat ids the engine computes today. Today's per-actor mailbox id, read as "which actor (which instance)," is the ActorId.
 
 **MailboxId — where in the tree.** A function of the actor's whole lineage, not of its leaf node alone. Two actors of the same code under different parents are different mailboxes; two of the same code under the same parent differ by the discriminator in their ActorId. Mail routes to the MailboxId.
 
@@ -50,7 +50,7 @@ This expresses the per-scope cardinality ADR-0098 introduced on the identity mod
 
 The runtime carries the lineage as a single rolling value rather than a growing array (§3), but the model is an array of ActorIds, root → leaf.
 
-### 3. MailboxId is a Merkle-chain fold of the lineage; root caps are the fixed point
+### 3. MailboxId is a hash chain over the lineage; root caps are the fixed point
 
 The MailboxId is the chained hash of the lineage's ActorIds — each node folded onto the running hash of its ancestors:
 
@@ -61,7 +61,7 @@ for node in lineage[1..]:
 MailboxId = with_tag(Tag::Mailbox, state)
 ```
 
-`fnv1a_64_fold` and `with_tag` are the existing `aether-data::hash` primitives; the fold reuses the same FNV-1a step the id helpers already share. This is a Merkle-style chain — a hash of hashes — rather than a flat hash of the joined path string, and the distinction earns its keep twice:
+`fnv1a_64_fold` and `with_tag` are the existing `aether-data::hash` primitives; the fold reuses the same FNV-1a step the id helpers already share. This is a hash chain — each ActorId folded into the running hash of its ancestors, a hash of hashes — rather than a flat hash of the joined path string, and the distinction earns its keep twice:
 
 - **The nodes stay recoverable.** The lineage is an array of ActorIds, each reverse-mapping to a name, so a path reads back to what sits at every level — a flat `hash("a/b:7/c")` throws that away.
 - **The fold is incremental.** Extending a lineage is one more `fnv1a_64_fold` step on the running state, so an actor carries its lineage as a single `u64` — the fold state — and a spawn extends it in O(1): `child_state = fnv1a_64_fold(parent_state, child_actor_id.0.to_le_bytes())`. That `u64` is the rolling carry on the actor's runtime binding. "Carry your lineage, pass it forward" is one integer, extended one step per spawn — no growing string, no trait value, no per-spawn rehash of a path.
@@ -94,7 +94,7 @@ Display spellings can therefore vary — collapsing a repeated root, abbreviatin
 
 ### Positive
 
-- **Two ids, each answering one question.** ActorId reverse-maps to code (introspection, `actor_logs`, "what is this"); MailboxId routes mail and encodes position. #1364 closes because where-in-the-tree is no longer crammed into what-code.
+- **Two ids, each answering one question.** ActorId reverse-maps to the actor (introspection, `actor_logs`, "which actor is this"); MailboxId routes mail and encodes position. #1364 closes because where-in-the-tree is no longer crammed into which-actor.
 - **The root vocabulary is frozen.** Depth-1 identity keeps every chassis cap's id exactly as today; the wire break touches only the hosted layer.
 - **The tree is recoverable and parseable.** A path reads back to per-level ActorIds, each reverse-mappable to a name, so tooling splits a lineage into named nodes instead of guessing at separators.
 - **Lineage is O(1) to carry and extend.** One `u64`, one fold step per spawn — no growing path string, no per-spawn rehash.
@@ -111,7 +111,7 @@ Display spellings can therefore vary — collapsing a repeated root, abbreviatin
 
 ### Neutral
 
-- **ActorId is ADR-0096's actor-type tag, named.** No new hash for per-code identity — a singleton's ActorId *is* the tag, and an instanced node's ActorId is that tag's namespace with the discriminator folded in.
+- **ActorId is ADR-0096's actor-type tag, named.** No new hash for per-actor identity — a singleton's ActorId *is* the tag, and an instanced node's ActorId is that tag's namespace with the discriminator folded in.
 - **Scope lineage is not mail lineage.** The lineage here is the static spawn/scope tree that determines identity; the causal mail lineage (ADR-0080 `ReplyTo`) is a separate runtime relationship and is untouched. A reply still routes by `ReplyTo`, now a MailboxId derived from the replier's lineage.
 - **`mailbox_id_from_name_pair` keeps its meaning, narrowed.** It computes an instanced node's ActorId (`hash(NAMESPACE:subname)`) — one node, the `:` cardinality discriminator. The lineage fold composes those node ActorIds; the `/`-scope join is the fold, not a second string-hash.
 
@@ -122,8 +122,8 @@ Display spellings can therefore vary — collapsing a repeated root, abbreviatin
 
 ## Alternatives considered
 
-- **One flat hash for both questions** (the status quo, `MailboxId = hash(name)`). Rejected: it conflates what-code with where-in-the-tree, which is #1364, and it cannot encode depth without baking the whole path into one string and losing the constituent identities.
-- **A flat hash of the joined path string for the MailboxId** (`hash("a/b:7/c")`). Rejected: the result is not reverse-mappable to its constituent nodes (you cannot recover what sits at each level), and it cannot be carried incrementally — extending a path means rehashing the whole growing string per spawn. The Merkle chain gives both reverse-mappable nodes and O(1) extension.
+- **One flat hash for both questions** (the status quo, `MailboxId = hash(name)`). Rejected: it conflates which-actor with where-in-the-tree, which is #1364, and it cannot encode depth without baking the whole path into one string and losing the constituent identities.
+- **A flat hash of the joined path string for the MailboxId** (`hash("a/b:7/c")`). Rejected: the result is not reverse-mappable to its constituent nodes (you cannot recover what sits at each level), and it cannot be carried incrementally — extending a path means rehashing the whole growing string per spawn. The hash chain gives both reverse-mappable nodes and O(1) extension.
 - **A static scope marker on the child type** (`const SCOPE_ROOT`, `type Scope = Parent`). Rejected: lineage is runtime data — which session, which parent instance — and cannot be a compile-time const. The only static fact is root-pinned vs child-capable (§2); anything more bolts runtime parentage onto a type that must stay scope-agnostic so the same code loads under different parents.
 - **Encode the depth or level in the fold.** Rejected as redundant: the fold is sequential and non-commutative over fixed-width (8-byte) node ids, so position is already encoded; there are no cycles and no variable-length node boundary to disambiguate.
 - **A flat `{scope}:{segment}` name join** (ADR-0098, superseded). Rejected: it kept one flat hash, so it inherited the not-reverse-mappable and not-incremental problems, and it left open where the runtime scope name lived (ADR-0098 §7). The rolling-`u64` carry answers that — the lineage rides as the fold state, neither a heavy name on the handle nor a registry round-trip.
