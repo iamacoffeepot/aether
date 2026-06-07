@@ -1,6 +1,6 @@
 # ADR-0097: Wasm sibling spawn
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 
 ## Context

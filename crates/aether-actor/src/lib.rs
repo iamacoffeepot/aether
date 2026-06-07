@@ -66,7 +66,7 @@ pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, R
 pub use actor::sender::{MailCtx, Sender};
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Singleton,
+    Actor, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Singleton, Subname,
     validate_namespace_segment,
 };
 pub use local::Local;
@@ -84,7 +84,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 // an extra `ffi::` segment.
 pub use ffi::{
     BootError, ErasedFfiActor, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx,
-    Replaceable,
+    Replaceable, SpawnError,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

@@ -84,9 +84,11 @@ mod native {
     use wasmtime::{Engine, Linker, Module};
 
     use aether_substrate::actor::native::envelope::Envelope;
+    use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+    use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
     use aether_substrate::actor::wasm::kind_manifest;
+    use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::capability::MailboxCaps;
     use aether_substrate::mail::mailer::Mailer;
@@ -126,6 +128,12 @@ mod native {
         /// module has. Stored on the trampoline so a later
         /// `ReplaceComponent` rebuilds the same export.
         pub type_tag: Option<u64>,
+        /// ADR-0097: every exported type's capability group, parsed once
+        /// at load. The trampoline keeps it so a `spawn_child::<Sibling>`
+        /// host-fn request can register the spawned sibling's *own*
+        /// handler set (looked up by actor-type tag), and so each
+        /// spawned sibling carries the same map for its own spawns.
+        pub actor_caps: Vec<ActorInputs>,
     }
 
     /// Per-component trampoline. Holds the wasm `Component`
@@ -162,6 +170,14 @@ mod native {
         /// re-instantiates the same exported type from the new wasm
         /// and re-reads that type's capability group.
         type_tag: Option<u64>,
+        /// ADR-0097: the resident `Module`, retained so a sibling spawn
+        /// re-instantiates it (a cheap `Arc` clone — wasmtime shares the
+        /// compiled code) without a re-compile, and refreshed on replace.
+        module: Module,
+        /// ADR-0097: every exported type's capability group (see
+        /// [`WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
+        /// up its own handler set here by actor-type tag.
+        actor_caps: Vec<ActorInputs>,
     }
 
     #[actor]
@@ -171,7 +187,12 @@ mod native {
         /// Wasm-component senders read this via
         /// `WasmTrampoline::NAMESPACE` (reachable on every target
         /// because the bridge stub emits the always-on `Actor` impl
-        /// at file root).
+        /// at file root). Must stay a string literal — the `#[actor]`
+        /// macro feeds it to `concat!`. ADR-0097: the substrate's
+        /// `TRAMPOLINE_NAMESPACE` mirrors this literal (its `spawn_sibling`
+        /// host fn predicts the spawned mailbox id and can't name this
+        /// capabilities-layer type); the
+        /// `trampoline_namespace_matches_substrate` test guards the match.
         const NAMESPACE: &'static str = "aether.component.trampoline";
 
         fn init(
@@ -234,6 +255,8 @@ mod native {
                 outbound: config.outbound,
                 mailbox,
                 type_tag: config.type_tag,
+                module: config.module,
+                actor_caps: config.actor_caps,
             })
         }
 
@@ -316,49 +339,102 @@ mod native {
         /// dispatch shim do the rest.
         #[fallback]
         fn forward_to_wasm(&mut self, ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
-            let Some(component) = self.component.as_mut() else {
-                tracing::warn!(
-                    target: "aether_capabilities::trampoline",
-                    mailbox = %self.mailbox,
-                    kind = %env.kind_name,
-                    "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
-                );
-                return true;
+            // ADR-0097: deliver the inbound, then drain any sibling spawn
+            // the guest staged during `deliver`. The block scopes the
+            // `&mut component` borrow so `spawn_sibling` can read the
+            // trampoline's other fields afterward.
+            let pending = {
+                let Some(component) = self.component.as_mut() else {
+                    tracing::warn!(
+                        target: "aether_capabilities::trampoline",
+                        mailbox = %self.mailbox,
+                        kind = %env.kind_name,
+                        "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
+                    );
+                    return true;
+                };
+                // Issue iamacoffeepot/aether#722: carry the inbound's
+                // lineage through to the synthetic `Mail`.
+                // `Component::deliver` reads `mail.mail_id` and `mail.root`
+                // to populate `ComponentCtx`'s in-flight cells, so any
+                // guest-triggered `send_mail_p32` / `reply_mail_p32` stamps
+                // `parent_mail = Some(env.mail_id)` and inherits the chain
+                // `root`. Without this, the trampoline's wrapped Mail
+                // defaults to `MailId::NONE` and the guest's outbound looks
+                // like a fresh root.
+                let mail = Mail::new(
+                    self.mailbox,
+                    env.kind,
+                    env.payload.bytes().to_vec(),
+                    env.count,
+                )
+                .with_reply_to(env.sender)
+                .with_lineage(env.mail_id, env.root, env.parent_mail);
+                if let Err(e) = component.deliver(&mail) {
+                    // ADR-0063 fail-fast: a wasm trap (or host-fn error
+                    // returned through `Component::deliver`) kills the
+                    // substrate. Wedge detection (CPU-loop guests) waits
+                    // on a future epoch-deadline ADR — symmetric with
+                    // native actors, which have no wedge guard either
+                    // today.
+                    ctx.fatal_abort(format!(
+                        "component {} (kind {}) trapped: {e}",
+                        self.mailbox, env.kind_name,
+                    ));
+                }
+                component.take_pending_spawn()
             };
-            // Issue iamacoffeepot/aether#722: carry the inbound's
-            // lineage through to the synthetic `Mail`.
-            // `Component::deliver` reads `mail.mail_id` and `mail.root`
-            // to populate `ComponentCtx`'s in-flight cells, so any
-            // guest-triggered `send_mail_p32` / `reply_mail_p32` stamps
-            // `parent_mail = Some(env.mail_id)` and inherits the chain
-            // `root`. Without this, the trampoline's wrapped Mail
-            // defaults to `MailId::NONE` and the guest's outbound looks
-            // like a fresh root.
-            let mail = Mail::new(
-                self.mailbox,
-                env.kind,
-                env.payload.bytes().to_vec(),
-                env.count,
-            )
-            .with_reply_to(env.sender)
-            .with_lineage(env.mail_id, env.root, env.parent_mail);
-            if let Err(e) = component.deliver(&mail) {
-                // ADR-0063 fail-fast: a wasm trap (or host-fn error
-                // returned through `Component::deliver`) kills the
-                // substrate. Wedge detection (CPU-loop guests) waits
-                // on a future epoch-deadline ADR — symmetric with
-                // native actors, which have no wedge guard either
-                // today.
-                ctx.fatal_abort(format!(
-                    "component {} (kind {}) trapped: {e}",
-                    self.mailbox, env.kind_name,
-                ));
+            if let Some(pending) = pending {
+                self.spawn_sibling(ctx, pending);
             }
             true
         }
     }
 
     impl WasmTrampoline {
+        /// ADR-0097: perform the sibling spawn the guest staged via the
+        /// `spawn_sibling` host fn during `Component::deliver`. The
+        /// trampoline runs the typed `spawn_child::<WasmTrampoline>` the
+        /// substrate host fn couldn't (it can't name this type), reusing
+        /// the resident `Module` and registering the spawned sibling's
+        /// own capability group (looked up by actor-type tag). A
+        /// spawn-time failure surfaces here, asynchronously to the guest
+        /// (which already received the `MailboxId`): logged, not fatal.
+        fn spawn_sibling(&self, ctx: &mut NativeCtx<'_>, pending: PendingSpawn) {
+            let capabilities =
+                self.actor_caps
+                    .iter()
+                    .find(|actor| {
+                        actor.namespace.as_deref().is_some_and(|ns| {
+                            aether_data::mailbox_id_from_name(ns).0 == pending.tag
+                        })
+                    })
+                    .map(|actor| actor.capabilities.clone())
+                    .unwrap_or_default();
+            let config = WasmTrampolineConfig {
+                engine: Arc::clone(&self.engine),
+                linker: Arc::clone(&self.linker),
+                module: self.module.clone(),
+                registry: Arc::clone(&self.registry),
+                outbound: Arc::clone(&self.outbound),
+                capabilities,
+                config: pending.config,
+                type_tag: Some(pending.tag),
+                actor_caps: self.actor_caps.clone(),
+            };
+            if let Err(e) = ctx
+                .spawn_child::<Self>(Subname::Named(&pending.subname), config)
+                .finish()
+            {
+                tracing::warn!(
+                    target: "aether_capabilities::trampoline",
+                    parent = %self.mailbox,
+                    subname = %pending.subname,
+                    "sibling spawn failed: {e:?}",
+                );
+            }
+        }
+
         fn handle_replace(&mut self, payload: ReplaceComponent) -> ReplaceResult {
             // `payload.wasm` is the new module bytes; `mailbox_id` is
             // the trampoline's own id (the agent already addressed
@@ -374,37 +450,37 @@ mod native {
                 }
             };
 
-            // ADR-0033 / ADR-0096: parse capabilities from the new wasm
-            // for the SAME exported type this trampoline loaded, so the
-            // reply carries the post-replace handler vocabulary.
-            // `self.type_tag == None` reads the entry type (single-actor
-            // and entry loads). A tag absent from the new module is an
-            // `Err` — the replacement doesn't export the loaded type.
+            // ADR-0033 / ADR-0096 / ADR-0097: parse every exported type's
+            // capability group from the new wasm. `capabilities` is the
+            // group for the type THIS trampoline hosts (entry when
+            // `type_tag` is None), so the reply carries the post-replace
+            // handler vocabulary; the full `actors` set refreshes
+            // `self.actor_caps` below so post-replace sibling spawns see
+            // the new module's types. A tag absent from the new module is
+            // an `Err` — the replacement doesn't export the loaded type.
+            let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
+                Ok(a) => a,
+                Err(error) => return ReplaceResult::Err { error },
+            };
             let capabilities = match self.type_tag {
-                None => match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
-                    Ok(c) => c,
-                    Err(error) => return ReplaceResult::Err { error },
-                },
-                Some(tag) => {
-                    let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
-                        Ok(a) => a,
-                        Err(error) => return ReplaceResult::Err { error },
-                    };
-                    match actors.into_iter().find(|a| {
-                        a.namespace
-                            .as_deref()
-                            .is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
-                    }) {
-                        Some(group) => group.capabilities,
-                        None => {
-                            return ReplaceResult::Err {
-                                error: format!(
-                                    "replace: new module does not export the actor type (tag {tag:#x}) this trampoline loaded"
-                                ),
-                            };
-                        }
+                None => actors
+                    .first()
+                    .map(|a| a.capabilities.clone())
+                    .unwrap_or_default(),
+                Some(tag) => match actors.iter().find(|a| {
+                    a.namespace
+                        .as_deref()
+                        .is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
+                }) {
+                    Some(group) => group.capabilities.clone(),
+                    None => {
+                        return ReplaceResult::Err {
+                            error: format!(
+                                "replace: new module does not export the actor type (tag {tag:#x}) this trampoline loaded"
+                            ),
+                        };
                     }
-                }
+                },
             };
 
             // Run unwire then on_replace on the old instance and lift
@@ -463,6 +539,12 @@ mod native {
                 }
             };
 
+            // ADR-0097: the new module is now resident — retain it (and
+            // the refreshed per-type cap map) so sibling spawns after this
+            // replace re-instantiate the new code, not the old.
+            self.module = module;
+            self.actor_caps = actors;
+
             // ADR-0016 §4: rehydrate the new instance if the old one
             // produced a bundle. A failed rehydrate still installs the
             // new component (the old one is already gone) and surfaces
@@ -504,6 +586,25 @@ mod native {
             CostCells::try_with_mut(|cells| cells.seed(seeded));
 
             ReplaceResult::Ok { capabilities }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use aether_actor::Actor;
+        use aether_substrate::actor::wasm::component::TRAMPOLINE_NAMESPACE;
+
+        /// ADR-0097: the substrate's `TRAMPOLINE_NAMESPACE` — used by the
+        /// `spawn_sibling` host fn to predict a spawned sibling's mailbox
+        /// id — must equal the literal `WasmTrampoline::NAMESPACE` (issue
+        /// 654). The `#[actor]` macro forces the latter to be a literal,
+        /// so they can't share one const; this guards the mirror.
+        #[test]
+        fn trampoline_namespace_matches_substrate() {
+            assert_eq!(
+                <super::WasmTrampoline as Actor>::NAMESPACE,
+                TRAMPOLINE_NAMESPACE,
+            );
         }
     }
 }

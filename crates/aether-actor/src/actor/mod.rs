@@ -80,6 +80,26 @@ pub trait Singleton: Actor {}
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 pub trait Instanced: Actor {}
 
+/// How a spawned child's mailbox subname is derived (ADR-0079). The
+/// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
+/// hashes that string deterministically (ADR-0029) to the returned
+/// `MailboxId`. Shared spawn-addressing vocabulary: native
+/// `spawn_child` and the FFI guest's `FfiCtx::spawn_child` (ADR-0097)
+/// both name children through it, so the two transports name children
+/// the same way.
+#[derive(Debug, Clone, Copy)]
+pub enum Subname<'a> {
+    /// Spawner-allocated monotonic discriminator — "spawn me one of
+    /// these, I'll track the returned `MailboxId`." The fit for
+    /// per-connection / per-entity churn where no human-readable name
+    /// is needed.
+    Counter,
+    /// Caller-supplied subname. Must pass [`validate_namespace_segment`]
+    /// and be unique within the owning prefix (no `:` separator); names
+    /// retire on drop (ADR-0079).
+    Named(&'a str),
+}
+
 /// Validation outcome for namespace segments — both the `NAMESPACE`
 /// const on an [`Instanced`] type (the listener prefix) and the
 /// runtime subname passed to `spawn_child`. Same rules apply at both

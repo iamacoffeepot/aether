@@ -32,7 +32,7 @@ use std::path::Path;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     Delete, DeleteResult, DropComponent, DropResult, FsError, List, ListResult, LoadComponent,
-    LoadResult, MailEnvelope, Read, ReadResult, ReplaceComponent, ReplaceResult, Write,
+    LoadResult, MailEnvelope, Ping, Read, ReadResult, ReplaceComponent, ReplaceResult, Write,
     WriteResult,
 };
 use aether_substrate_bundle::test_bench::{
@@ -279,6 +279,75 @@ fn multi_actor_unknown_export_errors() {
             panic!("unknown export should fail the load, not fall through; loaded {name}")
         }
     }
+}
+
+/// ADR-0097: a loaded `RootManager` spawns a `Panel` sibling at runtime
+/// via `ctx.spawn_child::<Panel>`. Pinging `RootManager` triggers the
+/// spawn; the spawned `Panel` registers at
+/// `aether.component.trampoline:ui.panel.0` (Counter discriminator), and
+/// pinging *it* makes it broadcast a `TickObserved` to the bench
+/// observer — proving the spawned sibling is addressable and dispatches.
+/// The fire-and-settle send blocks until the whole tree (including the
+/// spawned trampoline's init) drains, so the panel is registered before
+/// the second send routes.
+#[test]
+fn multi_actor_sibling_spawn() {
+    let Some(wasm_path) = require_runtime("multi_actor") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let root_name = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { name, .. } => name,
+        LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
+    };
+    assert!(
+        root_name.ends_with(":ui.root"),
+        "entry load should resolve to ui.root; got {root_name}",
+    );
+
+    bench
+        .execute(vec![
+            // RootManager spawns a Panel sibling (Counter → ui.panel.0).
+            (
+                "spawn",
+                BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 }),
+            ),
+            // The spawned Panel broadcasts TickObserved when pinged.
+            (
+                "ping_panel",
+                BenchOp::send_mail::<Ping>(
+                    "aether.component.trampoline:ui.panel.0",
+                    &Ping { seq: 1 },
+                ),
+            ),
+        ])
+        .expect("spawn + ping sequence");
+
+    assert_eq!(
+        bench.count_observed(TICK_OBSERVED),
+        1,
+        "the spawned Panel (ui.panel.0) should have dispatched its ping and broadcast once; \
+         observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
 }
 
 /// Dropping the probe stops further `tick_observed` broadcasts.

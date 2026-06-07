@@ -154,6 +154,38 @@ pub struct ComponentCtx {
     in_flight_mail_id: Cell<MailId>,
     /// ADR-0080 §5 in-flight inbound `root`. See `in_flight_mail_id`.
     in_flight_root: Cell<MailId>,
+    /// ADR-0097: a sibling-spawn request staged by the `spawn_sibling`
+    /// host fn and drained by the trampoline after `receive_p32`
+    /// returns — the same host-fn-stages / host-drains pattern as
+    /// `saved_state`. `None` outside an in-flight spawn. The trampoline
+    /// performs the actual `spawn_child::<WasmTrampoline>`; substrate
+    /// can't name that capabilities-layer type (ADR-0097 §4).
+    pub pending_spawn: Option<PendingSpawn>,
+}
+
+/// The mailbox-name prefix every wasm component (loaded or spawned)
+/// registers under: `aether.component.trampoline:<name>`. The
+/// `spawn_sibling` host fn (ADR-0097) needs this string to predict a
+/// spawned sibling's `MailboxId = hash("{prefix}:{subname}")`
+/// synchronously, and substrate can't name the capabilities-layer
+/// `WasmTrampoline` that owns the canonical declaration
+/// (`WasmTrampoline::NAMESPACE`, issue 654). The `#[actor]` macro
+/// requires that declaration to be a literal, so the two can't share a
+/// const; capabilities' `trampoline_namespace_matches_substrate` test
+/// asserts this mirror stays in lockstep.
+pub const TRAMPOLINE_NAMESPACE: &str = "aether.component.trampoline";
+
+/// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
+/// onto [`ComponentCtx`] for the trampoline to drain and execute.
+/// `tag` selects the exported type at `init_typed_p32`; `subname` is the
+/// full trampoline subname (the spawned instance addresses as
+/// `aether.component.trampoline:<subname>`); `config` is the encoded
+/// `Config` kind handed to the new instance.
+#[derive(Debug, Clone)]
+pub struct PendingSpawn {
+    pub tag: u64,
+    pub subname: String,
+    pub config: Vec<u8>,
 }
 
 impl ComponentCtx {
@@ -181,6 +213,7 @@ impl ComponentCtx {
             correlation_counter: Cell::new(1),
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
+            pending_spawn: None,
         }
     }
 
@@ -976,6 +1009,15 @@ impl Component {
     /// store.
     pub fn take_saved_state(&mut self) -> Option<StateBundle> {
         self.store.data_mut().saved_state.take()
+    }
+
+    /// ADR-0097: drain the sibling-spawn request the guest staged via
+    /// the `spawn_sibling` host fn during the just-returned `receive`.
+    /// The trampoline calls this after `deliver` and performs the
+    /// actual `spawn_child::<WasmTrampoline>`. Destructive — returns
+    /// `None` once drained, and `None` when the guest didn't spawn.
+    pub fn take_pending_spawn(&mut self) -> Option<PendingSpawn> {
+        self.store.data_mut().pending_spawn.take()
     }
 
     /// Extract a failure recorded by `save_state` (size cap, OOB).

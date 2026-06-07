@@ -18,14 +18,17 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, mailbox_id_from_name};
+use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
 use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::resolver::Resolver;
 use crate::actor::sender::{MailCtx, Sender};
-use crate::actor::{Actor, HandlesKind, Singleton};
+use crate::actor::{
+    Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
+};
+use crate::ffi::FfiActor;
 use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
 use crate::ffi::mailbox::FfiActorMailbox;
 use crate::mail::ReplyTo;
@@ -97,6 +100,17 @@ impl Resolver for FfiInitCtx<'_> {
     fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
         resolve_mailbox::<K>(name)
     }
+}
+
+/// Why a synchronous [`FfiCtx::spawn_child`] call failed before the host
+/// staged the request (ADR-0097). Spawn-time failures — a retired or
+/// in-use subname, or the sibling's `init` returning `Err` — surface
+/// asynchronously on the trampoline, not through this `Result`.
+#[derive(Debug, Clone)]
+pub enum SpawnError {
+    /// A [`Subname::Named`] discriminator failed
+    /// [`validate_namespace_segment`].
+    SubnameInvalid(NamespaceError),
 }
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
@@ -182,6 +196,48 @@ impl FfiCtx<'_> {
     pub fn fatal_abort(&self, reason: String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
     }
+
+    /// ADR-0097: spawn a sibling actor type from the same resident
+    /// module — the wasm analogue of native `ctx.spawn_child::<A>`. `A`
+    /// is one of this module's exported `Instanced` types; the SDK
+    /// resolves its actor-type tag (`mailbox_id_from_name(A::NAMESPACE)`)
+    /// and encodes `A::Config`, both at compile time. Returns the new
+    /// instance's [`MailboxId`] synchronously — it is `hash(name)`
+    /// (ADR-0029) — and the instance becomes addressable at
+    /// `aether.component.trampoline:<name>`.
+    ///
+    /// Only synchronous subname validation can `Err` here; a spawn-time
+    /// failure (a retired / in-use subname, or the sibling's `init`
+    /// returning `Err`) is logged on the trampoline and does not come
+    /// back through this `Result` (ADR-0097 §4). The spawned sibling's
+    /// `ReplyTo` is this actor's mailbox, so its replies route here.
+    pub fn spawn_child<A>(
+        &self,
+        subname: Subname<'_>,
+        config: &A::Config,
+    ) -> Result<MailboxId, SpawnError>
+    where
+        A: Instanced + FfiActor,
+    {
+        let tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
+        let (is_counter, full_subname) = match subname {
+            // `Counter`: pass the type-namespace prefix; the host appends
+            // its monotonic discriminator so the name is globally unique.
+            Subname::Counter => (true, String::from(<A as Actor>::NAMESPACE)),
+            // `Named`: form the full prefixed subname here; validate the
+            // caller-supplied segment before it crosses the FFI.
+            Subname::Named(name) => {
+                validate_namespace_segment(name).map_err(SpawnError::SubnameInvalid)?;
+                (
+                    false,
+                    alloc::format!("{}.{}", <A as Actor>::NAMESPACE, name),
+                )
+            }
+        };
+        let config_bytes = config.encode_into_bytes();
+        let id = MAIL_BRIDGE.spawn_sibling(tag, is_counter, &full_subname, &config_bytes);
+        Ok(MailboxId(id))
+    }
 }
 
 impl Resolver for FfiCtx<'_> {
@@ -242,7 +298,7 @@ impl OutboundReply for FfiCtx<'_> {
         self.sender.map(ReplyTo::__from_raw)
     }
 
-    fn origin(&self) -> Option<aether_data::MailboxId> {
+    fn origin(&self) -> Option<MailboxId> {
         None
     }
 

@@ -137,4 +137,34 @@ impl MailBridge {
             );
         }
     }
+
+    /// ADR-0097: stage a sibling-spawn request and return the new
+    /// instance's `MailboxId`. `tag` is the sibling type's actor-type
+    /// tag (`mailbox_id_from_name(NAMESPACE)`); `is_counter` selects
+    /// `Subname::Counter` (the host appends a monotonic discriminator)
+    /// vs a caller-supplied name; `subname` is the full prefixed subname
+    /// for `Named` or the type-namespace prefix for `Counter`; `config`
+    /// is the encoded `Config` kind. The returned id is
+    /// `hash("aether.component.trampoline:<subname>")`, known
+    /// synchronously; the spawn itself completes just after this call
+    /// (ADR-0097 §4), so a spawn-time failure surfaces asynchronously
+    /// rather than here.
+    #[must_use]
+    pub fn spawn_sibling(&self, tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
+        let subname_bytes = subname.as_bytes();
+        // SAFETY: forwards to `raw::spawn_sibling`, whose ABI is
+        // documented at the import site in `ffi/raw.rs`. Both `(ptr,
+        // len)` pairs are derived from references valid for `len` bytes
+        // for the call's duration; the host copies before returning.
+        unsafe {
+            raw::spawn_sibling(
+                tag,
+                u32::from(is_counter),
+                subname_bytes.as_ptr().addr() as u32,
+                subname_bytes.len() as u32,
+                config.as_ptr().addr() as u32,
+                config.len() as u32,
+            )
+        }
+    }
 }
