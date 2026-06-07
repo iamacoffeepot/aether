@@ -1,7 +1,22 @@
 # ADR-0098: Scoped singletons
 
-- **Status:** Proposed
+- **Status:** Superseded by [ADR-0099](0099-actor-identity-and-addressing.md)
 - **Date:** 2026-06-07
+- **Superseded:** 2026-06-07
+
+> **Superseded by ADR-0099 (2026-06-07).** This ADR framed the #1364 gap
+> and proposed a flat `{scope}:{segment}` name join (§2/§6) with an open
+> question about where a runtime scope name lives (§7). ADR-0099 carries
+> the **per-scope-singleton concept forward** — a singleton is "exactly
+> one within a scope," enforced by id uniqueness — but replaces the
+> addressing mechanism: an actor's identity splits into an **ActorId**
+> (what code, the flat per-node hash) and a **MailboxId** (where in the
+> tree, a Merkle-chain fold of the node's lineage of ActorIds). The flat
+> string join is replaced by that fold; §7 is closed by carrying the
+> lineage as a rolling `u64` fold state on the actor's binding (neither
+> a name on the handle nor a registry round-trip). The reasoning below
+> is preserved as the decision as it stood; see ADR-0099 for the model
+> that supersedes it.
 
 ## Context
 
