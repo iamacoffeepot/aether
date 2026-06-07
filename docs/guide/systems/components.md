@@ -3,7 +3,9 @@
 > **Governing ADRs:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (one actor model, two hosts), [ADR-0024](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0024-dual-target-host-fn-ffi.md) (the
 > dual-target FFI convention), [ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md) / [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the kind + handler
 > manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) / [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)
-> (in-place hot-swap). The authoring and loading surface here is **stable** — it's
+> (in-place hot-swap), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
+> selected at load) and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its
+> siblings). The authoring and loading surface here is **stable** — it's
 > what every reference component (`aether-camera`, `aether-mesh-viewer`) is built
 > on, and the signatures were read from the current SDK.
 
@@ -47,6 +49,24 @@ lengths. The exports are **wasm32-only** — a native (host) build of the same c
 carries no FFI symbols, which is why a host-side test of a component drives it
 through the in-process transport rather than the FFI path.
 
+### Several actors in one module
+
+A crate can export more than one actor type ([ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md)):
+
+```rust
+aether_actor::export!(RootManager, Panel, Toolbar);
+```
+
+The module then carries every listed type's code behind one FFI surface, and the
+load path picks which type an instance becomes (below). The first in the list is the
+**entry** type — the one a load instantiates when it says nothing else, and the one
+whose `NAMESPACE` fills the `aether.namespace` section. The `aether.kinds.inputs`
+manifest grows to one handler group per exported type, each tagged with its
+namespace, so the loader and `describe_component` read each type's surface
+separately. Grouping actors that belong together — a subsystem's coordinator and the
+panels it manages, say — into one module is the intended use: it ships and versions
+them as a unit, and lets a running instance spawn its siblings ([below](#spawning-siblings)).
+
 ## Loading, dropping, and the trampoline address
 
 A component enters and leaves a running engine by mail to the `aether.component`
@@ -65,8 +85,18 @@ A loaded component registers at **`aether.component.trampoline:NAME`** — that 
 string is the address you send subsequent mail to. Bare names (`"player"`) are
 *not* registered and warn-drop; always use the name from `LoadResult`.
 
+For a multi-actor module, the load also chooses **which exported type** to
+instantiate: `aether.component.load` takes an optional **export selector** — the
+target type's `NAMESPACE` — and stands up that type, defaulting to the entry type
+when omitted. The selected type's namespace also becomes the default trampoline
+name, so loading the `Panel` export with `export: "ui.panel"` registers it at
+`aether.component.trampoline:ui.panel` and the `LoadResult` reports that type's
+capabilities. A selector naming a type the module doesn't export is a clean load
+error. A single-actor module has only the entry type, so an omitted selector is the
+whole story there.
+
 In practice you drive this through the MCP harness — `load_component(engine_id,
-binary_path, name?)`, `replace_component(...)`, `terminate_substrate(...)` — which
+binary_path, name?, export?)`, `replace_component(...)`, `terminate_substrate(...)` — which
 takes a **path** and reads the bytes for you (tool JSON never carries the wasm
 buffer; the wire kind does). The component's kind vocabulary travels inside the
 wasm's `aether.kinds` custom section ([ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md)), so the loader declares nothing —
@@ -82,6 +112,32 @@ so the substrate stays byte-transparent and never needs the config's Rust type.
 Omit `type Config` and the macro synthesizes `()` and injects the unused argument,
 so a no-config `init` stays terse. A declared config kind shows up in the
 component's advertised capabilities, so `describe_kinds` can resolve its schema.
+
+## Spawning siblings
+
+A running instance can stand up another actor from its **own module** — a *sibling*
+type — without a fresh load ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)). Where a native capability spawns
+any `Instanced` actor with `ctx.spawn_child`, a component spawns one of the
+`Instanced` types its `export!` listed:
+
+```rust
+#[handler]
+fn on_open_panel(&mut self, ctx: &mut FfiCtx<'_>, _: OpenPanel) {
+    // -> Result<MailboxId, SpawnError>: the new instance's address
+    let panel = ctx.spawn_child::<Panel>(Subname::Counter, &PanelConfig { /* … */ });
+}
+```
+
+`Subname::Counter` has the host number the instance — `ui.panel.0`, `.1`, … — for
+when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")` gives
+it a stable name you address by. Either way the new instance lives at
+`aether.component.trampoline:<name>` like any loaded component, and its replies route
+back to the spawner. Spawn stays within the module the instance runs from; a
+different binary comes in through `load_component`, which carries its own code and
+kind vocabulary. This is what lets a wasm crate be a *library* of actors: a UI root
+spawns its panels, a zone manager spawns a per-entity actor for each thing in range —
+all from one resident module, its compiled code shared across the instances while
+each keeps its own state.
 
 ## Hot reload
 
