@@ -57,3 +57,9 @@ spikes/*/target/
 .env
 .env.*
 *.env
+
+# graphify (https://github.com/safishamsi/graphify) output. Only the committed
+# knowledge graph (graphify-out/graph.json) is tracked + verified in CI; the
+# extraction cache, manifest, and other run artifacts are local-only.
+/graphify-out/*
+!/graphify-out/graph.json

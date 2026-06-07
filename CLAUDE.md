@@ -41,6 +41,14 @@ The guest/actor SDK is **`aether-actor`** — the `Actor` / `FfiActor` traits, `
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 
+## Knowledge graph (graphify)
+
+The `/graphify` skill (`.claude/skills/graphify/`, from [graphify](https://github.com/safishamsi/graphify)) maps the repo — code, docs, papers, images — into a queryable knowledge graph. A committed snapshot of the code/doc structure lives at `graphify-out/graph.json`; it is generated **structurally** (tree-sitter AST + markdown headings, no LLM/API calls), so it is deterministic and reproducible offline.
+
+- **Regenerate after a structural change**: `scripts/graphify-graph.sh build`. It runs `graphify update . --no-cluster` then `scripts/graphify-normalize.py`, which rewrites the absolute-path-derived bash `*__entry` node ids to repo-relative form so the JSON is byte-identical across checkouts. Commit the updated `graph.json` alongside the change.
+- **CI gate**: `.github/workflows/graphify.yml` runs `scripts/graphify-graph.sh check` on PRs that touch extracted sources or the graph — it regenerates from a clean `git archive HEAD` and fails if the committed `graph.json` is stale. The graphify version is pinned in `scripts/graphify-graph.sh` (`GRAPHIFY_VERSION`); bump it and rebuild the graph together.
+- Only `graphify-out/graph.json` is tracked; the extraction cache and manifest are gitignored.
+
 ## MCP harness
 
 Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. The harness is the out-of-process **`aether-mcp`** crate: an RPC client that dials the hub's `RpcServerCapability` and relays each tool call as a wire `Call`. The whole stack is fronted by a long-lived **tunnel** (`aether-tunnel`, ADR-0089) so Claude can restart the volatile backends without losing its MCP connection. Three processes, one nested under the other:

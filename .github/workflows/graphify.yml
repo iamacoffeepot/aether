@@ -1,0 +1,56 @@
+name: graphify
+
+# Verifies the committed graphify knowledge graph (graphify-out/graph.json) still
+# matches what graphify generates from the current source. graphify
+# (https://github.com/safishamsi/graphify) extracts the graph structurally — AST
+# via tree-sitter, no LLM/API calls — so regeneration is deterministic and runs
+# offline in CI. scripts/graphify-graph.sh regenerates into a clean checkout and
+# diffs against the committed file; if a PR changed code/docs without rebuilding
+# the graph, this fails. Regenerate locally with `scripts/graphify-graph.sh build`.
+
+on:
+  pull_request:
+    paths:
+      # Anything graphify extracts (code + docs), plus the graph itself and the
+      # generation tooling. tree-sitter covers these source families today.
+      - 'crates/**'
+      - 'demos/**'
+      - 'spikes/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - '.claude/**'
+      - '**/*.md'
+      - 'graphify-out/graph.json'
+      - '.github/workflows/graphify.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'demos/**'
+      - 'spikes/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - '.claude/**'
+      - '**/*.md'
+      - 'graphify-out/graph.json'
+      - '.github/workflows/graphify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-graph:
+    name: Graph up to date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        # `scripts/graphify-graph.sh check` regenerates from `git archive HEAD`
+        # so the working tree's untracked graphify-out can't perturb the result;
+        # full history isn't needed, just the checked-out HEAD tree.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Verify committed graph matches a fresh extraction
+        # GRAPHIFY_VERSION is pinned in the script; uvx fetches that exact
+        # release so a format change in a newer graphify can't drift the graph.
+        run: scripts/graphify-graph.sh check
