@@ -760,6 +760,25 @@ mod native {
 
         use crate::test_chassis::fresh_substrate;
 
+        /// ADR-0099 §3/§5: a real `#[bridge(singleton)]` chassis cap keeps
+        /// the default [`aether_actor::Singleton::resolve`], so its id is the
+        /// depth-1 fixed point — exactly the `mailbox_id_from_name(NAMESPACE)`
+        /// value it had before the lineage fold, regardless of the caller's
+        /// carry. Guards the frozen-vocabulary claim: #1431 must not move any
+        /// root-cap id.
+        #[test]
+        fn render_capability_resolves_to_frozen_depth_one_id() {
+            use aether_actor::Singleton;
+            use aether_data::mailbox_id_from_name;
+
+            let frozen = mailbox_id_from_name(<RenderCapability as Actor>::NAMESPACE);
+            assert_eq!(<RenderCapability as Singleton>::resolve(0), frozen);
+            assert_eq!(
+                <RenderCapability as Singleton>::resolve(0xFFFF_FFFF_FFFF_FFFF),
+                frozen,
+            );
+        }
+
         /// Boots a passive `TestChassis` with a default `RenderCapability`.
         /// Collapses the four-line `Builder::<TestChassis>::new(...)` chain
         /// every render test repeated (issue 795).

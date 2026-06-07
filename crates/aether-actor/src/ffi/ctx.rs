@@ -77,7 +77,7 @@ impl FfiInitCtx<'_> {
     /// addressing the unique instance of receiver actor `R`.
     #[must_use]
     pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0)
+        FfiActorMailbox::__new(R::resolve(self.mailbox).0)
     }
 
     /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
@@ -169,7 +169,7 @@ impl FfiCtx<'_> {
     /// addressing the unique instance of receiver actor `R`.
     #[must_use]
     pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
-        FfiActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0)
+        FfiActorMailbox::__new(R::resolve(self.mailbox).0)
     }
 
     /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]

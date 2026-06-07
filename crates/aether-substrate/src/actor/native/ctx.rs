@@ -374,7 +374,7 @@ impl<'a> NativeCtx<'a> {
     /// addressing the unique instance of receiver actor `R`.
     #[must_use]
     pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
+        NativeActorMailbox::__new(R::resolve(self.binding.carry()).0, self.binding)
     }
 
     //noinspection DuplicatedCode
@@ -858,7 +858,7 @@ impl<'a> NativeInitCtx<'a> {
     /// addressing the unique instance of receiver actor `R`.
     #[must_use]
     pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
+        NativeActorMailbox::__new(R::resolve(self.binding.carry()).0, self.binding)
     }
 
     //noinspection DuplicatedCode
