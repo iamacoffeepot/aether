@@ -4,9 +4,13 @@
 // surface. Growth of this surface should be reviewed as deliberately
 // as any other architectural change.
 
+use core::str::from_utf8;
+
 use wasmtime::{Caller, Linker};
 
-use crate::actor::wasm::component::{ComponentCtx, StateBundle};
+use crate::actor::wasm::component::{
+    ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE,
+};
 use crate::mail::{KindId, MailboxId, ReplyTarget};
 use crate::runtime::log_install;
 
@@ -77,6 +81,96 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let ctx = caller.data();
             ctx.send(MailboxId(recipient), KindId(kind), payload, count);
             0
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0097 — sibling spawn is a synchronous host fn by
+    // design. The mail-sink alternative (spawn-via-mail to
+    // aether.component) was considered and rejected there: it makes the
+    // call site async and loses the native `spawn_child` symmetry. The
+    // host fn only *stages* the request (it can't name the
+    // capabilities-layer WasmTrampoline); the trampoline performs the
+    // spawn after `receive` returns.
+    //
+    // ADR-0097: stage a sibling-spawn request. The guest passes the
+    // sibling's actor-type `tag`, an `is_counter` flag, the subname
+    // (the full prefixed name for `Named`, the type-namespace prefix
+    // for `Counter`), and the encoded `Config` bytes. This host fn
+    // can't perform the spawn itself — `spawn_child::<WasmTrampoline>`
+    // names a capabilities-layer type substrate can't see — so it
+    // stages the request onto the ctx and returns the new instance's
+    // `MailboxId` synchronously (`hash("{TRAMPOLINE_NAMESPACE}:{subname}")`,
+    // ADR-0029). The trampoline drains the request after `receive`
+    // returns and runs the real spawn (ADR-0097 §4). On any host-side
+    // error (no memory, OOB, bad UTF-8, no spawner) it warn-logs and
+    // returns 0 without staging — the sibling simply never appears.
+    linker.func_wrap(
+        "aether",
+        "spawn_sibling_p32",
+        |mut caller: Caller<'_, ComponentCtx>,
+         tag: u64,
+         is_counter: u32,
+         subname_ptr: u32,
+         subname_len: u32,
+         config_ptr: u32,
+         config_len: u32|
+         -> u64 {
+            // Copy subname + config out of guest memory, ending the
+            // immutable borrow before the `data_mut` stage below.
+            let copied = {
+                let Some(memory) = caller
+                    .get_export("memory")
+                    .and_then(wasmtime::Extern::into_memory)
+                else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: guest exports no memory");
+                    return 0;
+                };
+                let data = memory.data(&caller);
+                let read = |ptr: u32, len: u32| -> Option<&[u8]> {
+                    let start = ptr as usize;
+                    let end = start.checked_add(len as usize)?;
+                    (end <= data.len()).then(|| &data[start..end])
+                };
+                let (Some(subname_bytes), Some(config_bytes)) =
+                    (read(subname_ptr, subname_len), read(config_ptr, config_len))
+                else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: subname/config pointer out of bounds");
+                    return 0;
+                };
+                let Ok(subname) = from_utf8(subname_bytes) else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: subname is not valid UTF-8");
+                    return 0;
+                };
+                (subname.to_owned(), config_bytes.to_vec())
+            };
+            let (subname_prefix, config) = copied;
+
+            // `Counter`: append a discriminator from the live Spawner so
+            // the name is globally unique and known synchronously.
+            let full_subname = if is_counter == 0 {
+                subname_prefix
+            } else {
+                let Some(n) = caller
+                    .data()
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.spawner())
+                    .map(|spawner| spawner.next_counter())
+                else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling: no spawner on the binding (counter subname unresolvable)");
+                    return 0;
+                };
+                format!("{subname_prefix}.{n}")
+            };
+
+            let full_name = format!("{TRAMPOLINE_NAMESPACE}:{full_subname}");
+            let mailbox_id = aether_data::mailbox_id_from_name(&full_name).0;
+            caller.data_mut().pending_spawn = Some(PendingSpawn {
+                tag,
+                subname: full_subname,
+                config,
+            });
+            mailbox_id
         },
     )?;
 

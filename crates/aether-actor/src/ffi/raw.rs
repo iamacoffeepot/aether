@@ -62,6 +62,28 @@ unsafe extern "C" {
         message_ptr: u32,
         message_len: u32,
     );
+    /// ADR-0097: spawn a sibling actor type from the same resident
+    /// module. `tag` is the sibling's actor-type tag
+    /// (`mailbox_id_from_name(NAMESPACE)`), used to pick the export at
+    /// `init_typed_p32`. `is_counter` is `1` for `Subname::Counter`
+    /// (the host appends a monotonic discriminator) or `0` for a
+    /// caller-supplied name. `subname_ptr/len` is the full subname for
+    /// `Named` or the type-namespace prefix for `Counter`;
+    /// `config_ptr/len` is the encoded `Config` kind. The host stages
+    /// the request and returns the new instance's `MailboxId`
+    /// (= `hash("aether.component.trampoline:<subname>")`); the spawn
+    /// itself completes just after this returns (ADR-0097 §4). Bytes at
+    /// `(subname_ptr, subname_len)` / `(config_ptr, config_len)` are
+    /// copied out of guest memory before the call returns.
+    #[link_name = "spawn_sibling_p32"]
+    pub fn spawn_sibling(
+        tag: u64,
+        is_counter: u32,
+        subname_ptr: u32,
+        subname_len: u32,
+        config_ptr: u32,
+        config_len: u32,
+    ) -> u64;
 }
 
 /// Host-side stub for the FFI `aether::send_mail` import. Always
@@ -156,4 +178,26 @@ pub unsafe fn log_event(
     _message_len: u32,
 ) {
     panic!("aether-actor: log_event called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::spawn_sibling` import (ADR-0097).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub unsafe fn spawn_sibling(
+    _tag: u64,
+    _is_counter: u32,
+    _subname_ptr: u32,
+    _subname_len: u32,
+    _config_ptr: u32,
+    _config_len: u32,
+) -> u64 {
+    panic!("aether-actor: spawn_sibling called outside the FFI guest");
 }

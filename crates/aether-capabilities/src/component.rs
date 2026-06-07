@@ -237,6 +237,13 @@ mod native {
     }
 
     impl ComponentHostCapability {
+        #[allow(
+            clippy::too_many_lines,
+            reason = "one cohesive load sequence: parse + register kinds, resolve the export, \
+                      compile, name, spawn the trampoline, register caps, announce. Splitting it \
+                      would thread the load payload + registry/engine handles through a helper \
+                      for no clarity gain."
+        )]
         fn handle_load(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) -> LoadResult {
             // 1. Parse + register kind descriptors (ADR-0028).
             let descriptors = match kind_manifest::read_from_bytes(&payload.wasm) {
@@ -264,32 +271,33 @@ mod native {
                 ComponentCapabilities,
                 Option<u64>,
                 Option<String>,
-            ) = match &payload.export {
-                Some(requested) => {
-                    let Some(group) = actors
+            ) = if let Some(requested) = &payload.export {
+                let Some(group) = actors
+                    .iter()
+                    .find(|a| a.namespace.as_deref() == Some(requested.as_str()))
+                else {
+                    let available: Vec<&str> = actors
                         .iter()
-                        .find(|a| a.namespace.as_deref() == Some(requested.as_str()))
-                    else {
-                        let available: Vec<&str> = actors
-                            .iter()
-                            .filter_map(|a| a.namespace.as_deref())
-                            .collect();
-                        return LoadResult::Err {
-                            error: format!(
-                                "export {requested:?} not found in module; exported types: {available:?}"
-                            ),
-                        };
+                        .filter_map(|a| a.namespace.as_deref())
+                        .collect();
+                    return LoadResult::Err {
+                        error: format!(
+                            "export {requested:?} not found in module; exported types: {available:?}"
+                        ),
                     };
-                    (
-                        group.capabilities.clone(),
-                        Some(aether_data::mailbox_id_from_name(requested).0),
-                        Some(requested.clone()),
-                    )
-                }
-                None => match actors.into_iter().next() {
-                    Some(entry) => (entry.capabilities, None, entry.namespace),
-                    None => (ComponentCapabilities::default(), None, None),
-                },
+                };
+                (
+                    group.capabilities.clone(),
+                    Some(aether_data::mailbox_id_from_name(requested).0),
+                    Some(requested.clone()),
+                )
+            } else {
+                let entry = actors.first();
+                (
+                    entry.map(|a| a.capabilities.clone()).unwrap_or_default(),
+                    None,
+                    entry.and_then(|a| a.namespace.clone()),
+                )
             };
 
             // 3. Compile module.
@@ -345,6 +353,10 @@ mod native {
                 // `init_typed_p32`. `None` = entry type (single-actor
                 // modules and unselected loads keep the legacy init path).
                 type_tag,
+                // ADR-0097: the full per-type capability map, so a guest
+                // `spawn_child::<Sibling>` can register the spawned
+                // sibling's own handler set (looked up by actor-type tag).
+                actor_caps: actors,
             };
             let mailbox_id = match ctx
                 .spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config)

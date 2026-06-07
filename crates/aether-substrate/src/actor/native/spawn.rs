@@ -162,6 +162,17 @@ impl Spawner {
         &self.wake_sink
     }
 
+    /// ADR-0097: allocate the next monotonic discriminator from the same
+    /// per-chassis sequence [`Subname::Counter`] draws on. The
+    /// `spawn_sibling` host fn calls this to resolve a wasm
+    /// `Subname::Counter` synchronously — it bakes the value into a
+    /// `Named` subname so the spawned trampoline's `MailboxId` is known
+    /// before the spawn completes (ADR-0097 §4), without double-drawing
+    /// the counter at spawn time.
+    pub fn next_counter(&self) -> u64 {
+        self.counter.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Issue 685: walk every spawned instanced slot, signal shutdown
     /// on its binding, fire one wake so a pool worker picks it up and
     /// runs the close path (drain residual → `unwire` → registry
