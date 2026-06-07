@@ -69,6 +69,40 @@ pub struct NativeCtx<'a> {
     in_flight_root: MailId,
 }
 
+/// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
+/// [`NativeInitCtx`]: both hold the same `binding`, so `actor` /
+/// `resolve_actor` / `actor_at` resolve identically. Emitting them from
+/// one source keeps the two ctxs from drifting and means the bodies are
+/// not a `DuplicatedCode` clone (ADR-0099 §5 / issue 1431).
+macro_rules! native_sender_methods {
+    () => {
+        /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
+        /// addressing the unique instance of receiver actor `R`.
+        #[must_use]
+        pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
+            NativeActorMailbox::__new(R::resolve(self.binding.carry()).0, self.binding)
+        }
+
+        /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
+        /// from a runtime instance name.
+        #[must_use]
+        pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+            NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
+        }
+
+        /// Address an actor by a [`MailboxId`] already in hand — the id a
+        /// `spawn_child` returned, or one a peer handed over. ADR-0099 §3:
+        /// a hosted / nested actor's id is the lineage fold, not
+        /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
+        /// that tracks its children's ids addresses them through this rather
+        /// than re-resolving by name.
+        #[must_use]
+        pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
+            NativeActorMailbox::__new(id.0, self.binding)
+        }
+    };
+}
+
 impl<'a> NativeCtx<'a> {
     /// Internal constructor — the chassis dispatcher trampoline (in
     /// `chassis::builder`) builds these. Cap-side test fixtures in
@@ -370,31 +404,7 @@ impl<'a> NativeCtx<'a> {
         }
     }
 
-    /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`.
-    #[must_use]
-    pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(R::resolve(self.binding.carry()).0, self.binding)
-    }
-
-    //noinspection DuplicatedCode
-    /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
-    /// from a runtime instance name.
-    #[must_use]
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
-    }
-
-    /// Address an actor by a [`MailboxId`] already in hand — the id a
-    /// `spawn_child` returned, or one a peer handed over. ADR-0099 §3:
-    /// a hosted / nested actor's id is the lineage fold, not
-    /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
-    /// that tracks its children's ids addresses them through this rather
-    /// than re-resolving by name.
-    #[must_use]
-    pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(id.0, self.binding)
-    }
+    native_sender_methods!();
 
     /// Reply to an explicit [`ReplyTo`] rather than the inbound's own
     /// sender. The ADR-0093 hold-until-resolve path reaches for this:
@@ -854,31 +864,7 @@ impl<'a> NativeInitCtx<'a> {
             .insert(TypeId::of::<H>(), Box::new(handle));
     }
 
-    /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`.
-    #[must_use]
-    pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(R::resolve(self.binding.carry()).0, self.binding)
-    }
-
-    //noinspection DuplicatedCode
-    /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
-    /// from a runtime instance name.
-    #[must_use]
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
-    }
-
-    /// Address an actor by a [`MailboxId`] already in hand — the id a
-    /// `spawn_child` returned, or one a peer handed over. ADR-0099 §3:
-    /// a hosted / nested actor's id is the lineage fold, not
-    /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
-    /// that tracks its children's ids addresses them through this rather
-    /// than re-resolving by name.
-    #[must_use]
-    pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(id.0, self.binding)
-    }
+    native_sender_methods!();
 }
 
 // Issue 703: NativeInitCtx no longer impls `Sender` / `MailSender`.
