@@ -50,7 +50,6 @@ use aether_actor::HandlesKind;
 use aether_actor::cost::CostCells;
 use aether_actor::local;
 use aether_actor::local::ActorSlots;
-use aether_data::mailbox_id_from_name;
 use aether_kinds::trace::Settled;
 use std::any::Any;
 use std::any::TypeId;
@@ -1349,13 +1348,15 @@ impl<C: Chassis> BuiltChassis<C> {
         &self,
         subname: &str,
     ) -> Option<MailboxId> {
-        let full_name = format!("{}:{}", A::NAMESPACE, subname);
-        let id = MailboxId(mailbox_id_from_name(&full_name).0);
-        let type_id = self.booted.actor_registry.type_id_at(id)?;
-        if type_id != TypeId::of::<A>() {
-            return None;
-        }
-        Some(id)
+        // ADR-0099 §3: a nested actor's id is its lineage fold, not
+        // `hash(NAMESPACE:subname)`, so resolve by the *registered* id —
+        // walk the live instances of `A` and match the subname — rather
+        // than recomputing a flat name-hash that only lands for a
+        // depth-1 (chassis-level) instance.
+        self.resolve_actors::<A>()
+            .into_iter()
+            .find(|(sn, _)| sn == subname)
+            .map(|(_, id)| id)
     }
 
     /// Issue 607 Phase 5 (ADR-0079): enumerate every `Live` instance
@@ -1396,6 +1397,10 @@ impl<C: Chassis> BuiltChassis<C> {
             subname,
             config,
             crate::ReplyTo::NONE,
+            // Chassis-level spawn: a top-level instanced actor with no
+            // parent actor, so it is the depth-1 root of its own lineage
+            // (ADR-0099 §3) and keeps the flat `{NAMESPACE}:{subname}` id.
+            None,
         )
     }
 
@@ -1500,13 +1505,15 @@ impl<C: Chassis> PassiveChassis<C> {
         &self,
         subname: &str,
     ) -> Option<MailboxId> {
-        let full_name = format!("{}:{}", A::NAMESPACE, subname);
-        let id = MailboxId(mailbox_id_from_name(&full_name).0);
-        let type_id = self.booted.actor_registry.type_id_at(id)?;
-        if type_id != TypeId::of::<A>() {
-            return None;
-        }
-        Some(id)
+        // ADR-0099 §3: a nested actor's id is its lineage fold, not
+        // `hash(NAMESPACE:subname)`, so resolve by the *registered* id —
+        // walk the live instances of `A` and match the subname — rather
+        // than recomputing a flat name-hash that only lands for a
+        // depth-1 (chassis-level) instance.
+        self.resolve_actors::<A>()
+            .into_iter()
+            .find(|(sn, _)| sn == subname)
+            .map(|(_, id)| id)
     }
 
     /// Issue 607 Phase 5 (ADR-0079): mirror of
@@ -1540,6 +1547,10 @@ impl<C: Chassis> PassiveChassis<C> {
             subname,
             config,
             crate::ReplyTo::NONE,
+            // Chassis-level spawn: a top-level instanced actor with no
+            // parent actor, so it is the depth-1 root of its own lineage
+            // (ADR-0099 §3) and keeps the flat `{NAMESPACE}:{subname}` id.
+            None,
         )
     }
 
@@ -2161,11 +2172,20 @@ mod tests {
             "spawn_child's after_init mail dispatched as the child's first envelope"
         );
 
-        // Child is Live in the chassis's actor registry.
-        let child_id = MailboxId(mailbox_id_from_name("test.spawn_child.child:0").0);
+        // Child is Live in the chassis's actor registry under the
+        // ADR-0099 §3 lineage fold: the parent is a root cap (depth-1,
+        // carry == id), so the child's id folds the child node's ActorId
+        // onto the parent's id — not the flat `hash(NAMESPACE:subname)`.
+        let child_id = MailboxId(aether_data::with_tag(
+            aether_data::Tag::Mailbox,
+            aether_data::fold_lineage(
+                parent_id.0,
+                aether_data::ActorId::instanced("test.spawn_child.child", "0"),
+            ),
+        ));
         assert!(
             chassis.actor_registry().is_live(child_id),
-            "spawned child should be Live in the actor registry under the deterministic full-name id"
+            "spawned child should be Live in the actor registry under the lineage-folded id"
         );
 
         drop(chassis);
@@ -3365,13 +3385,20 @@ mod tests {
             "grandchild's after_init Ping should dispatch as its first envelope",
         );
 
-        // Grandchild is Live in the registry under the deterministic
-        // full-name id (NAMESPACE = "test.recursive.grandchild",
-        // subname = "only").
-        let grandchild_id = MailboxId(mailbox_id_from_name("test.recursive.grandchild:only").0);
+        // Grandchild is Live under the ADR-0099 §3 lineage fold. The
+        // parent was chassis-spawned (no parent → depth-1, carry == id),
+        // so the grandchild's id folds its node's ActorId onto the
+        // parent's id — not the flat `hash(NAMESPACE:subname)`.
+        let grandchild_id = MailboxId(aether_data::with_tag(
+            aether_data::Tag::Mailbox,
+            aether_data::fold_lineage(
+                parent_id.0,
+                aether_data::ActorId::instanced("test.recursive.grandchild", "only"),
+            ),
+        ));
         assert!(
             chassis.actor_registry().is_live(grandchild_id),
-            "grandchild should be Live in the registry under the deterministic full-name id",
+            "grandchild should be Live in the registry under the lineage-folded id",
         );
 
         // Issue 629 / Phase A: resolve_actor returns the address.

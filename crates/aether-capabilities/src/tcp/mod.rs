@@ -55,6 +55,7 @@ pub use listener::TcpListenerConfig;
 pub use session::TcpSessionConfig;
 
 use aether_actor::{Actor, FfiActorMailbox};
+use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 // Always-on imports — every kind named in the ext-trait helpers
 // must be reachable from wasm too so the `TcpFfiExt` impl
 // compiles under `--target wasm32-unknown-unknown
@@ -69,6 +70,22 @@ use aether_kinds::{
 use aether_kinds::{BindListenerResult, ListListenersResult, ListenerInfo, UnbindListenerResult};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
+
+/// ADR-0099 §3: the `MailboxId` of a tcp session — a grandchild of the
+/// cap (cap → listener → session). The session's lineage is reconstructed
+/// from the path of names and folded: `cap_carry` (the cap's own id —
+/// it is depth-1, so id == carry) carries the listener node, then the
+/// session node. Sessions are therefore *per-listener*: two listeners'
+/// identically-named sessions get distinct ids, where the pre-0099 flat
+/// `hash("aether.tcp.session:NAME")` form collided.
+fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -> u64 {
+    let listener_carry = fold_lineage(
+        cap_carry,
+        ActorId::instanced(TcpListenerActor::NAMESPACE, listener_name),
+    );
+    let session_node = ActorId::instanced(TcpSessionActor::NAMESPACE, session_name);
+    with_tag(Tag::Mailbox, fold_lineage(listener_carry, session_node))
+}
 
 /// Sender-side facade for FFI guests addressing
 /// [`TcpCapability`] through a `ctx.actor::<TcpCapability>()`
@@ -133,13 +150,13 @@ pub trait TcpFfiExt {
     /// `TcpSessionActor`. The session's handler does a blocking write
     /// on the dispatcher thread. Fire-and-forget — failures surface
     /// via the session's close path, not via a reply to this send.
-    fn session_write(&self, session_name: &str, bytes: &[u8]);
+    fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]);
 
     /// Mail `aether.tcp.session_close` to the named `TcpSessionActor`,
     /// asking it to close gracefully. Fire-and-forget; the close
     /// fan-out fires `MonitorNotice` to the parent listener that spawned
     /// the session.
-    fn session_close(&self, session_name: &str);
+    fn session_close(&self, listener_name: &str, session_name: &str);
 
     /// Resolve a typed listener-instance mailbox for the bound
     /// listener named `name`. The full mailbox address is
@@ -154,7 +171,7 @@ pub trait TcpFfiExt {
     /// named `name`. The full mailbox address is
     /// `format!("{}:{}", TcpSessionActor::NAMESPACE, name)`. See
     /// [`Self::listener`] for the `R` parameter shape.
-    fn session<R: Actor>(&self, name: &str) -> FfiActorMailbox<R>;
+    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<R>;
 }
 
 impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
@@ -178,21 +195,28 @@ impl TcpFfiExt for FfiActorMailbox<TcpCapability> {
             .send(&Close::default());
     }
     //noinspection DuplicatedCode
-    fn session_write(&self, session_name: &str, bytes: &[u8]) {
-        self.session::<TcpSessionActor>(session_name)
+    fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
+        self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionWrite {
                 bytes: bytes.to_vec(),
             });
     }
-    fn session_close(&self, session_name: &str) {
-        self.session::<TcpSessionActor>(session_name)
+    fn session_close(&self, listener_name: &str, session_name: &str) {
+        self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionClose::default());
     }
     fn listener<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
-        self.resolve_peer::<R>(&format!("{}:{}", TcpListenerActor::NAMESPACE, name))
+        // ADR-0099 §3: a listener is this cap's child — fold its node
+        // onto the cap's carry (the cap is depth-1, so `self`'s id is
+        // its carry).
+        self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
-        self.resolve_peer::<R>(&format!("{}:{}", TcpSessionActor::NAMESPACE, name))
+    fn session<R: Actor>(&self, listener_name: &str, session_name: &str) -> FfiActorMailbox<R> {
+        FfiActorMailbox::__new(session_mailbox_id(
+            self.mailbox_id().0,
+            listener_name,
+            session_name,
+        ))
     }
 }
 
@@ -221,10 +245,10 @@ pub trait TcpNativeExt {
 
     /// Mail `aether.tcp.session_write { bytes }` to the named
     /// `TcpSessionActor`.
-    fn session_write(&self, session_name: &str, bytes: &[u8]);
+    fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]);
 
     /// Mail `aether.tcp.session_close` to the named `TcpSessionActor`.
-    fn session_close(&self, session_name: &str);
+    fn session_close(&self, listener_name: &str, session_name: &str);
 
     /// Resolve a typed listener-instance mailbox. See
     /// [`TcpFfiExt::listener`] for the addressing rationale; the
@@ -235,7 +259,11 @@ pub trait TcpNativeExt {
 
     /// Resolve a typed session-instance mailbox. See
     /// [`TcpFfiExt::session`] for the addressing rationale.
-    fn session<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R>;
+    fn session<R: Actor>(
+        &self,
+        listener_name: &str,
+        session_name: &str,
+    ) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -260,21 +288,30 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
             .send(&Close::default());
     }
     //noinspection DuplicatedCode
-    fn session_write(&self, session_name: &str, bytes: &[u8]) {
-        self.session::<TcpSessionActor>(session_name)
+    fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
+        self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionWrite {
                 bytes: bytes.to_vec(),
             });
     }
-    fn session_close(&self, session_name: &str) {
-        self.session::<TcpSessionActor>(session_name)
+    fn session_close(&self, listener_name: &str, session_name: &str) {
+        self.session::<TcpSessionActor>(listener_name, session_name)
             .send(&SessionClose::default());
     }
     fn listener<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.resolve_peer::<R>(&format!("{}:{}", TcpListenerActor::NAMESPACE, name))
+        // ADR-0099 §3: fold the listener node onto the cap's carry (the
+        // cap is depth-1, so `self`'s id is its carry).
+        self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.resolve_peer::<R>(&format!("{}:{}", TcpSessionActor::NAMESPACE, name))
+    fn session<R: Actor>(
+        &self,
+        listener_name: &str,
+        session_name: &str,
+    ) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(
+            session_mailbox_id(self.mailbox_id().0, listener_name, session_name),
+            self.binding(),
+        )
     }
 }
 
@@ -478,18 +515,16 @@ mod cap_native {
                 listener_id,
                 PendingUnbind {
                     sender: ctx.reply_target(),
-                    listener_name: mail.listener_name.clone(),
+                    listener_name: mail.listener_name,
                 },
             );
-            // Mail Close to the listener via the SDK typed-send
-            // shortcut. The listener's `on_close_request` handler
-            // calls `ctx.shutdown()`.
-            let full_name = format!(
-                "{}:{}",
-                <TcpListenerActor as aether_actor::Actor>::NAMESPACE,
-                mail.listener_name,
-            );
-            ctx.resolve_actor::<TcpListenerActor>(&full_name)
+            // Mail Close to the listener by its stored id. ADR-0099 §3:
+            // the listener is a spawned child, so its id is the lineage
+            // fold, not `hash(NAMESPACE:name)` — re-resolving by name
+            // would reach a flat id nothing is registered under. The cap
+            // already holds the folded id from the spawn (the
+            // `self.listeners` key), so address it directly.
+            ctx.actor_at::<TcpListenerActor>(listener_id)
                 .send(&Close::default());
         }
 

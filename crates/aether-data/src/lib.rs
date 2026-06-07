@@ -57,11 +57,11 @@ pub mod transform;
 pub mod wire_id;
 pub use hash::{
     HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN,
-    content_addressed_handle_id, fnv1a_64_bytes, fnv1a_64_prefixed, mailbox_id_from_name,
-    mailbox_id_from_name_pair, thread_id_from_name,
+    content_addressed_handle_id, fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage,
+    mailbox_id_from_name, mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name,
 };
 pub use ids::{
-    DagId, HandleId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
+    ActorId, DagId, HandleId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
     type_name_for_type_id,
 };
 pub use mail::{MailId, ReplyTarget, ReplyTo};

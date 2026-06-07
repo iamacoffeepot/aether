@@ -16,7 +16,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Actor, HandlesKind};
-use aether_data::{Kind, MailId, mailbox_id_from_name, mailbox_id_from_name_pair};
+use aether_data::{ActorId, Kind, MailId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -62,6 +62,16 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         aether_data::MailboxId(self.mailbox)
     }
 
+    /// The transport binding this handle dispatches through. Not part of
+    /// the public API; a cap-owned ext facade that composes a
+    /// non-trivial id (e.g. a multi-step lineage fold for a grandchild)
+    /// rewraps it onto the same binding via [`Self::__new`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn binding(&self) -> &'a NativeBinding {
+        self.binding
+    }
+
     /// Resolve a sibling mailbox on the same binding, addressed by
     /// `name`. Same FNV-hash name resolution as
     /// [`NativeCtx::resolve_actor`] — kept as an inherent method so
@@ -74,18 +84,25 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
 
-    /// Resolve a sibling mailbox addressed by `scope` joined to
-    /// `segment` with the structural `:` separator (ADR-0098), without
-    /// allocating the joined name. Composes the same id as
-    /// `resolve_peer(&format!("{scope}:{segment}"))`; threads the
-    /// existing `'a` binding ref like [`Self::resolve_peer`].
+    /// Resolve a child mailbox of *this* actor, where the child is the
+    /// instanced node `scope:segment` (ADR-0099 §3). The child's id folds
+    /// that node's `ActorId` onto this actor's lineage carry, so a cap
+    /// that hosts children — the component host reaching a loaded
+    /// component, a socket listener reaching a session — composes the
+    /// registered fold id without allocating a name. `self.mailbox` is
+    /// the parent carry (exact for a root-pinned cap, depth-1). Threads
+    /// the existing `'a` binding ref like [`Self::resolve_peer`].
     #[must_use]
     pub fn resolve_peer_scoped<Peer: Actor>(
         &self,
         scope: &str,
         segment: &str,
     ) -> NativeActorMailbox<'a, Peer> {
-        NativeActorMailbox::__new(mailbox_id_from_name_pair(scope, segment).0, self.binding)
+        let node = ActorId::instanced(scope, segment);
+        NativeActorMailbox::__new(
+            with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)),
+            self.binding,
+        )
     }
 }
 

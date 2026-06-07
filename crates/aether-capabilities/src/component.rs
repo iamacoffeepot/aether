@@ -410,7 +410,16 @@ mod native {
 
             LoadResult::Ok {
                 mailbox_id,
-                name: format!("{}:{}", WasmTrampoline::NAMESPACE, name),
+                // ADR-0099 §3/§4: report the name the spawn machinery
+                // actually registered — the `/`-rendered lineage
+                // (`aether.component/aether.component.trampoline:NAME`) —
+                // read back from the registry so `LoadResult.name` can
+                // never disagree with the live entry. The id is the
+                // lineage fold, not `hash(name)`.
+                name: self
+                    .registry
+                    .mailbox_name(mailbox_id)
+                    .unwrap_or_else(|| format!("{}:{}", WasmTrampoline::NAMESPACE, name)),
                 capabilities,
             }
         }
@@ -448,29 +457,41 @@ mod native {
 #[cfg(test)]
 mod tests {
     use aether_actor::{Actor, FfiActorMailbox};
-    use aether_data::mailbox_id_from_name;
+    use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 
     use super::{ComponentHostCapability, ComponentHostFfiExt};
     use crate::trampoline::WasmTrampoline;
 
-    /// A loaded component is canonically addressed at
-    /// `"{WasmTrampoline::NAMESPACE}:{load-name}"` — the name the load
-    /// path registers it under (see the `LoadResult.name` it returns).
-    /// `loaded` must compose exactly that id, and **not** the bare
-    /// load-name: bare type-addressing a component (`ctx.actor::<R>()`)
-    /// hashes the bare `NAMESPACE` and resolves to a mailbox nothing is
-    /// registered under — the #1364 footgun. This pins the one canonical
-    /// path for a loaded component.
+    /// A loaded component's id is the ADR-0099 §3 lineage fold over
+    /// `[aether.component, aether.component.trampoline:<name>]`. `loaded`
+    /// composes exactly that — folding the trampoline node's `ActorId`
+    /// onto the component host's carry — so it agrees with the id the
+    /// spawn machinery registers it under. It must **not** resolve the
+    /// bare load-name (`ctx.actor::<R>()` hashing the bare `NAMESPACE`),
+    /// nor the pre-0099 flat `trampoline:<name>` hash — both reach a
+    /// mailbox nothing is registered under (the #1364 footgun). This pins
+    /// the one canonical path for a loaded component.
     #[test]
     fn loaded_composes_the_canonical_trampoline_address() {
-        // `R` is arbitrary here — the resolved id depends only on the name.
+        // `R` is arbitrary here — the resolved id depends only on the
+        // host carry + the trampoline node name.
         let host = FfiActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
         );
         let camera = host.loaded::<ComponentHostCapability>("camera");
 
-        let canonical = mailbox_id_from_name(&format!("{}:camera", WasmTrampoline::NAMESPACE));
+        // The component host is root-pinned (depth-1), so its carry is
+        // its own id; fold the trampoline node onto it.
+        let host_carry = mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0;
+        let node = ActorId::instanced(WasmTrampoline::NAMESPACE, "camera");
+        let canonical = MailboxId(with_tag(Tag::Mailbox, fold_lineage(host_carry, node)));
         assert_eq!(camera.mailbox_id(), canonical);
+
+        // Not the pre-0099 flat name-hash, and not the bare load-name.
+        assert_ne!(
+            camera.mailbox_id(),
+            mailbox_id_from_name(&format!("{}:camera", WasmTrampoline::NAMESPACE)),
+        );
         assert_ne!(camera.mailbox_id(), mailbox_id_from_name("camera"));
     }
 

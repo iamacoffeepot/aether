@@ -28,7 +28,7 @@ establish where everything sits.
 │  │  component-loader, handle-store, dag       │  │
 │  ├────────────────────────────────────────────┤  │
 │  │ wasm runtime -> components (actors)        │  │   ADR-0010/0074
-│  │  aether.component.trampoline:NAME          │  │
+│  │  aether.component/aether.component.trampoline:NAME          │  │
 │  └────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────┘
 ```

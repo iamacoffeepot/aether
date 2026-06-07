@@ -151,6 +151,14 @@ impl OutboundBuffer {
 pub struct NativeBinding {
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
+    /// ADR-0099 §3: this actor's rolling lineage carry — the running
+    /// FNV-1a fold state over its lineage of `ActorId`s, root to leaf.
+    /// `with_tag(Mailbox, carry) == self_mailbox`. `spawn_child` folds a
+    /// child's `ActorId` onto this carry to derive the child's id, so an
+    /// actor passes its whole lineage forward as one `u64`. A root cap
+    /// is the depth-1 fixed point: its carry is its own `ActorId.0`
+    /// (== `self_mailbox.0`), so it keeps the exact id it has today.
+    carry: u64,
     /// The actor's inbox receiver, drained by the dispatcher via
     /// [`Self::recv_blocking`] / [`Self::try_recv`]. Held in a `Mutex`
     /// so the `&self` receiver can take exclusive access. Wrapped in
@@ -235,12 +243,14 @@ impl NativeBinding {
     pub fn new(
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
+        carry: u64,
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
         Self {
             mailer,
             self_mailbox,
+            carry,
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             aborter,
@@ -265,6 +275,10 @@ impl NativeBinding {
         Self::new(
             ctx.mail_send_handle(),
             self_mailbox,
+            // A cap built under a `ChassisCtx` is a root-pinned chassis
+            // capability (depth-1), so its lineage carry is its own
+            // `ActorId.0` == `self_mailbox.0` — it keeps today's id.
+            self_mailbox.0,
             ctx.fatal_aborter(),
             Some(Arc::clone(ctx.spawner_arc())),
         )
@@ -275,7 +289,15 @@ impl NativeBinding {
     /// appropriate for production capabilities, which should go
     /// through [`Self::from_ctx`].
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
-        Self::new(mailer, self_mailbox, Arc::new(PanicAborter), None)
+        // Test bindings never spawn children; seed the carry at the
+        // depth-1 fixed point so `self_mailbox` and the carry agree.
+        Self::new(
+            mailer,
+            self_mailbox,
+            self_mailbox.0,
+            Arc::new(PanicAborter),
+            None,
+        )
     }
 
     /// Install the receiver half of the actor's inbox so the
@@ -300,6 +322,14 @@ impl NativeBinding {
     /// transport's send path.
     pub fn self_mailbox(&self) -> MailboxId {
         self.self_mailbox
+    }
+
+    /// This actor's lineage carry (ADR-0099 §3) — the rolling fold
+    /// state `spawn_child` extends to derive a child's id. Surfaced so
+    /// [`super::ctx::NativeCtx::spawn_child`] can pass it as the parent
+    /// carry the spawn machinery folds the new node's `ActorId` onto.
+    pub fn carry(&self) -> u64 {
+        self.carry
     }
 
     /// Borrow the wired `Mailer`. Surfaced so cross-file producer

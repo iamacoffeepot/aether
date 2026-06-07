@@ -71,8 +71,9 @@ unsafe extern "C" {
     /// `Named` or the type-namespace prefix for `Counter`;
     /// `config_ptr/len` is the encoded `Config` kind. The host stages
     /// the request and returns the new instance's `MailboxId`
-    /// (= `hash("aether.component.trampoline:<subname>")`); the spawn
-    /// itself completes just after this returns (ADR-0097 §4). Bytes at
+    /// (the ADR-0099 §3 lineage fold of the trampoline's carry with the
+    /// sibling's node); the spawn itself completes just after this
+    /// returns (ADR-0097 §4). Bytes at
     /// `(subname_ptr, subname_len)` / `(config_ptr, config_len)` are
     /// copied out of guest memory before the call returns.
     #[link_name = "spawn_sibling_p32"]

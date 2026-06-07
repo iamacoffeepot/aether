@@ -118,7 +118,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
                 "echo",
                 BenchOp::send_and_await(
                     format!(
-                        "{}:probe_with_config",
+                        "aether.component/{}:probe_with_config",
                         aether_capabilities::WasmTrampoline::NAMESPACE
                     ),
                     &ConfigQuery,

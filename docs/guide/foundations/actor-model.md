@@ -215,7 +215,7 @@ What the name maps to depends on the host. For a **capability** the `NAMESPACE` 
 the mailbox — `aether.audio`, `aether.render`, `aether.input` — claimed by the
 chassis at boot, so `ctx.actor::<AudioCapability>()` reaches it directly. For a
 **component** the `NAMESPACE` is only the *default load name*: once loaded, the actor
-is registered at `aether.component.trampoline:<name>` (the name `LoadResult` hands
+is registered at `aether.component/aether.component.trampoline:<name>` (the name `LoadResult` hands
 back, which is the `NAMESPACE` unless the load overrode it). You reach it by that
 registered name, not by hashing the bare `NAMESPACE` — either pass `LoadResult.name`
 to `resolve_actor`, or use the `loaded` helper below.
@@ -257,7 +257,7 @@ carries its own code and kinds — the boundary is covered in
 
 A component can also run as several instances of one type: load the same wasm under
 different names and each is an independent actor at its own
-`aether.component.trampoline:<name>`. The loader in fact hosts every component behind
+`aether.component/aether.component.trampoline:<name>`. The loader in fact hosts every component behind
 an instanced trampoline actor, spawned once per load — so even a single loaded
 component is, underneath, one instance of an instanced host.
 

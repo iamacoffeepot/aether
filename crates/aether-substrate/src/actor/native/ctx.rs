@@ -385,6 +385,17 @@ impl<'a> NativeCtx<'a> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
 
+    /// Address an actor by a [`MailboxId`] already in hand — the id a
+    /// `spawn_child` returned, or one a peer handed over. ADR-0099 §3:
+    /// a hosted / nested actor's id is the lineage fold, not
+    /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
+    /// that tracks its children's ids addresses them through this rather
+    /// than re-resolving by name.
+    #[must_use]
+    pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(id.0, self.binding)
+    }
+
     /// Reply to an explicit [`ReplyTo`] rather than the inbound's own
     /// sender. The ADR-0093 hold-until-resolve path reaches for this:
     /// [`TaskDone::resolve`](super::dispatch_blocking::TaskDone::resolve)
@@ -494,7 +505,16 @@ impl<'a> NativeCtx<'a> {
             target: ReplyTarget::Component(self.binding.self_mailbox()),
             correlation_id: ReplyTo::NO_CORRELATION,
         };
-        super::spawn::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
+        // ADR-0099 §3: the child nests under this actor — its id folds
+        // the new node's `ActorId` onto this actor's lineage carry, and
+        // it registers under this actor's rendered name.
+        super::spawn::SpawnBuilder::new(
+            Arc::clone(spawner),
+            subname,
+            config,
+            sender,
+            Some((self.binding.carry(), self.binding.self_mailbox())),
+        )
     }
 }
 
@@ -847,6 +867,17 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
+    }
+
+    /// Address an actor by a [`MailboxId`] already in hand — the id a
+    /// `spawn_child` returned, or one a peer handed over. ADR-0099 §3:
+    /// a hosted / nested actor's id is the lineage fold, not
+    /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
+    /// that tracks its children's ids addresses them through this rather
+    /// than re-resolving by name.
+    #[must_use]
+    pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(id.0, self.binding)
     }
 }
 
