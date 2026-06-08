@@ -10,9 +10,14 @@ The single path from an issue to an open PR. Pairs with `/scope` and `/approve`:
 Two entry shapes, one skill:
 
 - **Scoped** — `/implement <issue>` — the issue passed `/scope` + `/approve` (`Phase=Ready`, `AgentReady=Yes`). The default release-flow path.
-- **Quick** — `/implement <issue> --quick` — an ad-hoc fix whose issue body already carries a complete, mechanical fix. Skips the board approval gate and goes straight to Executing. This **replaces the retired `/delegate` skill** — same niche (small, mechanical, the body carries the fix), but executed in the main session rather than a dispatched isolated Agent (worktree-isolated Agents proved flaky — see `feedback_delegate_implementation_stop_after_commit`).
+- **Quick** — `/implement <issue> --quick` — an ad-hoc fix whose issue body already carries a complete, mechanical fix. Skips the board approval gate and goes straight to Executing. This **replaces the retired `/delegate` skill** — same niche (small, mechanical, the body carries the fix), and runs in the main session (a `--quick` fix is too small to be worth a worktree hand-off; the hybrid background-agent split below is the sanctioned way to delegate the scoped path — see `feedback_delegate_implementation_stop_after_commit`).
 
-Always runs in the **main session**, never a dispatched Agent. It opens the PR **as a draft**, drives CI green, and holds it in draft for your review. This repo has native GitHub auto-merge on, so a *non-draft* PR that reaches green merges itself — draft is the review gate (see `feedback_green_pr_automerges_before_review`). Landing is the release *process*'s call: an approved release un-drafts the PR so native auto-merge takes it. This skill never issues a merge command and never un-drafts on its own.
+Two ways to run it:
+
+- **In-session (default).** The whole skill runs in the main session — implement, push, drive CI green, hold the draft. Use this for a single issue or when you want tight control over each step.
+- **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh` (which stamps the commit), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or board writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`).
+
+Either mode opens the PR **as a draft**, drives CI green, and holds it in draft for your review. This repo has native GitHub auto-merge on, so a *non-draft* PR that reaches green merges itself — draft is the review gate (see `feedback_green_pr_automerges_before_review`). Landing is the release *process*'s call: an approved release un-drafts the PR so native auto-merge takes it. This skill never issues a merge command and never un-drafts on its own.
 
 ## Invocation
 
