@@ -25,7 +25,6 @@ use std::fmt;
 
 use aether_data::{Kind, KindId};
 use aether_kinds::MailEnvelope;
-use serde::de::DeserializeOwned;
 
 use super::bench::{TestBench, TestBenchError};
 
@@ -168,21 +167,22 @@ impl ExecutionResult {
     }
 
     /// Decode the reply from a [`BenchOp::SendAndAwait`] step as `R`.
-    /// `R` is any postcard-decodable reply kind (`LoadResult`,
-    /// `ReplaceResult`, `WriteResult`, …). Errors with
-    /// [`ExecutionError::NoSuchReply`] if `label` didn't run a
-    /// `SendAndAwait` (or didn't run at all), or
+    /// `R` is any reply kind (`LoadResult`, `ReplaceResult`,
+    /// `WriteResult`, …); the bytes decode through the kind's declared
+    /// codec (cast or postcard) via `Kind::decode_from_bytes`
+    /// (ADR-0100). Errors with [`ExecutionError::NoSuchReply`] if
+    /// `label` didn't run a `SendAndAwait` (or didn't run at all), or
     /// [`ExecutionError::ReplyDecode`] if the bytes don't decode as
     /// `R`.
     pub fn reply<R>(&self, label: &str) -> Result<R, ExecutionError>
     where
-        R: DeserializeOwned,
+        R: Kind,
     {
         match self.inner.get(label) {
             Some(BenchOutput::Replied(bytes)) => {
-                postcard::from_bytes::<R>(bytes).map_err(|e| ExecutionError::ReplyDecode {
+                R::decode_from_bytes(bytes).ok_or_else(|| ExecutionError::ReplyDecode {
                     label: label.to_owned(),
-                    error: e.to_string(),
+                    error: "Kind::decode_from_bytes returned None".to_owned(),
                 })
             }
             _ => Err(ExecutionError::NoSuchReply(label.to_owned())),
@@ -289,5 +289,55 @@ impl TestBench {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cast reply kind with a non-`f32` field — its wire image is the
+    /// raw cast bytes, which a postcard reader would misdecode.
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+    struct CastReply {
+        code: u32,
+        flag: u16,
+        _pad: u16,
+    }
+
+    impl Kind for CastReply {
+        const NAME: &'static str = "test.execute_cast_reply";
+        const ID: KindId = KindId(0xDEAD_BEEF_000A_0001);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            (bytes.len() == size_of::<Self>()).then(|| bytemuck::pod_read_unaligned(bytes))
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            bytemuck::bytes_of(self).to_vec()
+        }
+    }
+
+    /// ADR-0100: the `SendAndAwait` reply accessor decodes the recorded
+    /// bytes through `Kind::decode_from_bytes`, so a cast reply kind
+    /// round-trips uncorrupted (its `u32` / `u16` fields survive). A
+    /// postcard decode would have misread the raw cast image.
+    #[test]
+    fn execution_result_reply_decodes_cast_kind() {
+        let reply = CastReply {
+            code: 0x0A0B_0C0D,
+            flag: 0x1234,
+            _pad: 0,
+        };
+        // The substrate reply path encodes via `Kind::encode_into_bytes`
+        // (ADR-0100), so the recorded bytes are the cast image.
+        let bytes = reply.encode_into_bytes();
+        let result = ExecutionResult {
+            inner: HashMap::from([("reply".to_owned(), BenchOutput::Replied(bytes))]),
+        };
+
+        let decoded: CastReply = result.reply("reply").expect("cast reply decodes");
+        assert_eq!(decoded, reply);
     }
 }

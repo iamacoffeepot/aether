@@ -55,7 +55,6 @@ use aether_substrate::{
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
-use serde::de::DeserializeOwned;
 use std::error;
 use std::thread;
 
@@ -750,7 +749,7 @@ impl TestBench {
     /// `WriteResult`) can't beat the bail-out check.
     fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, TestBenchError>
     where
-        R: DeserializeOwned,
+        R: Kind,
     {
         let event = self.pump_until_event(cid, expected)?;
         Self::decode_reply::<R>(event, expected)
@@ -865,14 +864,20 @@ impl TestBench {
 
     fn decode_reply<R>(event: EgressEvent, expected: &'static str) -> Result<R, TestBenchError>
     where
-        R: DeserializeOwned,
+        R: Kind,
     {
         match event {
             EgressEvent::ToSession {
                 kind_name, payload, ..
-            } => postcard::from_bytes::<R>(&payload).map_err(|e| {
-                TestBenchError::Decode(format!("{expected} decode: {e} (kind={kind_name})"))
-            }),
+            } => {
+                // ADR-0100: decode through the kind's declared codec
+                // (cast or postcard), not a hardcoded postcard path.
+                R::decode_from_bytes(&payload).ok_or_else(|| {
+                    TestBenchError::Decode(format!(
+                        "{expected} decode failed via Kind::decode_from_bytes (kind={kind_name})"
+                    ))
+                })
+            }
             other => Err(TestBenchError::Decode(format!(
                 "expected {expected} reply event, got {other:?}"
             ))),

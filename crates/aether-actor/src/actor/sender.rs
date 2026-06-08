@@ -132,22 +132,13 @@ pub trait MailCtx: Sender {
     /// Reply to the originator of the mail currently being dispatched.
     /// No-op when there's no reply target (broadcast / peer-component
     /// mail). The wire shape (cast or postcard) follows
-    /// `Kind::encode_into_bytes`.
-    ///
-    /// The `serde::Serialize` bound matches the substrate-side
-    /// `Mailer::send_reply` /`HubOutbound::send_reply` requirement —
-    /// reply kinds route through postcard when the target is a Claude
-    /// session or remote engine mailbox, so they must serialize. In
-    /// practice every reply kind in the workspace already derives
-    /// `Serialize` (they all derive `aether_data::Kind` +
-    /// `aether_data::Schema` + `serde::{Serialize, Deserialize}`
-    /// together), so the bound is a documentation move rather than a
-    /// breaking change. The wasm `Ctx::reply` body still encodes via
-    /// `Kind::encode_into_bytes` (cast-or-postcard); the bound is
-    /// satisfied transparently.
+    /// `Kind::encode_into_bytes` (ADR-0100), so a reply needs only
+    /// `K: Kind` — a `Pod`-without-`Serialize` cast kind is repliable.
+    /// Both substrate reply encoders (`Mailer::send_reply`,
+    /// `HubOutbound::send_reply`) route through that same codec.
     ///
     /// Stage 1 shipped the trait method; stage 2 wires native
     /// dispatch onto it (`NativeCtx` routes through the substrate
     /// `Mailer::send_reply` / outbound bridge).
-    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K);
+    fn reply<K: Kind>(&mut self, payload: &K);
 }

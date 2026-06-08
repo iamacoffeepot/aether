@@ -18,8 +18,10 @@
 //! of the inline value; the substrate resolves the handle on dispatch
 //! and substitutes the inline bytes before delivering the mail.
 //!
-//! Wire format (postcard, ADR-0045 §1):
-//! - Inline arm: discriminant 0 + K postcard bytes.
+//! Wire format (ADR-0045 §1, inline arm revised by ADR-0100):
+//! - Inline arm: discriminant 0 + `varint(len)` + `K::encode_into_bytes`
+//!   (`len` bytes) — the kind's own codec image (cast or postcard),
+//!   an opaque length-delimited blob the walker skips by length.
 //! - Handle arm: discriminant 1 + `varint(id)` + `varint(kind_id)`.
 //!
 //! Resolution is structural: the walker reads the schema and skips
@@ -2316,7 +2318,18 @@ fn walk(
             let ref_disc_start = state.pos;
             let disc = state.read_varint()? as u32;
             match disc {
-                0 => walk(inner, state, store),
+                0 => {
+                    // ADR-0100: the inline body is an opaque
+                    // length-prefixed blob (`varint(len)` +
+                    // `K::encode_into_bytes`) — the kind's own codec
+                    // image, cast or postcard. Skip it by length rather
+                    // than re-deriving `K`'s byte layout from `inner`;
+                    // a cast image is not a schema-walkable postcard
+                    // structure.
+                    let len = state.read_varint()? as usize;
+                    state.skip_n(len)?;
+                    Ok(None)
+                }
                 1 => {
                     let id = HandleId(state.read_varint()?);
                     let kind = KindId(state.read_varint()?);
@@ -2338,10 +2351,15 @@ fn walk(
                     match resolved_inner {
                         WalkOutcome::Parked { handle, kind } => Ok(Some((handle, kind))),
                         WalkOutcome::Resolved { payload } => {
-                            // Splice: flush prefix, write Inline arm,
-                            // skip past the Handle wire bytes.
+                            // Splice: flush prefix, write the Inline arm
+                            // (disc 0 + varint(len) + payload, ADR-0100),
+                            // skip past the Handle wire bytes. The
+                            // payload is the resolved inline blob — the
+                            // byte image is identical whether it arrived
+                            // inline or was spliced from a handle here.
                             state.flush_up_to(ref_disc_start);
                             state.out.push(0u8);
+                            push_varint(&mut state.out, payload.len() as u64);
                             state.out.extend_from_slice(&payload);
                             state.prefix_end = after_handle;
                             Ok(None)
@@ -2358,6 +2376,21 @@ fn walk(
             state.skip_varint()?;
             Ok(None)
         }
+    }
+}
+
+/// Append `value` as an unsigned LEB128 varint — the same encoding
+/// postcard uses for the inline arm's `varint(len)` length prefix
+/// (ADR-0100). Mirror of [`State::read_varint`].
+fn push_varint(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
     }
 }
 
@@ -2607,6 +2640,14 @@ mod tests {
         const NAME: &'static str = "test.note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
         const ID: KindId = KindId(0xDEAD_BEEF_0002_0001);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            postcard::from_bytes(bytes).ok()
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            postcard::to_allocvec(self).expect("postcard encode to Vec is infallible")
+        }
     }
 
     /// Postcard-shape `Struct { repr_c: false, fields }` builder
@@ -2647,11 +2688,58 @@ mod tests {
         seq: u32,
     }
 
+    impl Kind for HeldNote {
+        const NAME: &'static str = "test.held_note";
+        const ID: KindId = KindId(0xDEAD_BEEF_0002_0002);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            postcard::from_bytes(bytes).ok()
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            postcard::to_allocvec(self).expect("postcard encode to Vec is infallible")
+        }
+    }
+
     fn held_note_schema() -> SchemaType {
         postcard_struct(vec![
             named("held", SchemaType::Ref(SchemaCell::owned(note_schema()))),
             seq_field(),
         ])
+    }
+
+    /// Cast-shaped walker fixture with non-`f32` fields (`u16`). ADR-0100
+    /// makes its inline body a raw cast image, whose `u16` bytes a
+    /// postcard reader would misread — the walker must treat the inline
+    /// body as an opaque length-prefixed blob, not walk it as postcard.
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Coord {
+        x: u16,
+        y: u16,
+    }
+
+    impl Kind for Coord {
+        const NAME: &'static str = "test.coord";
+        const ID: KindId = KindId(0xDEAD_BEEF_0002_0003);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            (bytes.len() == size_of::<Self>()).then(|| bytemuck::pod_read_unaligned(bytes))
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            bytemuck::bytes_of(self).to_vec()
+        }
+    }
+
+    fn coord_schema() -> SchemaType {
+        SchemaType::Struct {
+            fields: Cow::Owned(vec![
+                named("x", SchemaType::Scalar(Primitive::U16)),
+                named("y", SchemaType::Scalar(Primitive::U16)),
+            ]),
+            repr_c: true,
+        }
     }
 
     #[test]
@@ -2946,6 +3034,43 @@ mod tests {
                 Ref::Handle { .. } => panic!("nested ref must also be resolved"),
             },
             Ref::Handle { .. } => panic!("outer ref must be resolved"),
+        }
+    }
+
+    /// ADR-0100: a handle to a non-`f32` cast kind resolves to an inline
+    /// arm whose body is the raw cast image, and the spliced wire decodes
+    /// on the guest path (`Ref<Coord>::decode → Kind::decode_from_bytes`)
+    /// uncorrupted — the `u16` fields survive because the walker never
+    /// re-interprets the cast image as postcard.
+    #[test]
+    fn walk_handle_ref_resolves_cast_kind_non_f32() {
+        let schema = SchemaType::Ref(SchemaCell::owned(coord_schema()));
+        let store = HandleStore::new(1024);
+
+        let pt = Coord {
+            x: 0x0102,
+            y: 0xF0E1,
+        };
+        let cast_bytes = bytemuck::bytes_of(&pt).to_vec();
+        store.put(HandleId(3), Coord::ID, cast_bytes).unwrap();
+
+        let wire = postcard::to_allocvec(&Ref::<Coord>::handle(3)).unwrap();
+        let outcome = walk_and_resolve(&schema, &wire, &store).unwrap();
+        let resolved = match outcome {
+            WalkOutcome::Resolved { payload } => payload.into_owned(),
+            WalkOutcome::Parked { .. } => panic!("expected resolved"),
+        };
+
+        // The spliced inline arm carries the 4-byte cast image,
+        // length-prefixed: disc 0 + varint(4) + 4 raw bytes.
+        assert_eq!(resolved[0], 0, "spliced Inline discriminant");
+        assert_eq!(resolved[1], 4, "varint length of the 4-byte cast image");
+        assert_eq!(&resolved[2..], bytemuck::bytes_of(&pt));
+
+        let back: Ref<Coord> = postcard::from_bytes(&resolved).unwrap();
+        match back {
+            Ref::Inline(got) => assert_eq!(got, pt, "u16 cast fields survive resolution"),
+            Ref::Handle { .. } => panic!("walker must replace Handle with Inline"),
         }
     }
 

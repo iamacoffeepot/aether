@@ -404,31 +404,19 @@ impl HubOutbound {
         (outbound, rx)
     }
 
-    /// Encode `result` with postcard and route as a reply addressed at
-    /// `sender`. Forks on the sender variant: `Session` routes through
-    /// `egress_to_session`; `EngineMailbox` routes through
-    /// `egress_to_engine_mailbox`; `None` and `Component` are silent
-    /// no-ops (the latter is handled by `Mailer::send_reply` rather
-    /// than the hub). Returns `true` when the encode succeeded and a
-    /// backend method was called; `false` on encode failure or
-    /// non-hub-routed targets. Encode errors log at `error` since
-    /// they signal a postcard contract violation.
+    /// Encode `result` through the kind's declared codec
+    /// (`Kind::encode_into_bytes`, cast or postcard, ADR-0100) and route
+    /// as a reply addressed at `sender`. Forks on the sender variant:
+    /// `Session` routes through `egress_to_session`; `EngineMailbox`
+    /// routes through `egress_to_engine_mailbox`; `None` and `Component`
+    /// are silent no-ops (the latter is handled by `Mailer::send_reply`
+    /// rather than the hub). Returns `true` when a backend method was
+    /// called; `false` on a non-hub-routed target.
     pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
-        K: aether_data::Kind + serde::Serialize,
+        K: aether_data::Kind,
     {
-        let payload = match postcard::to_allocvec(result) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(
-                    target: "aether_substrate::outbound",
-                    kind = K::NAME,
-                    error = %e,
-                    "reply encode failed",
-                );
-                return false;
-            }
-        };
+        let payload = result.encode_into_bytes();
         match sender.target {
             ReplyTarget::Session(token) => {
                 self.egress_to_session(token, K::NAME, payload, None, sender.correlation_id);

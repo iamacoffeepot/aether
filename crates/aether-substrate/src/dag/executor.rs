@@ -1342,11 +1342,13 @@ fn assemble_request(
         let slot = u32::try_from(slot_index).unwrap_or(u32::MAX);
         let from = slot_source.get(&slot)?;
         let handle = *state.handles.get(from)?;
-        // The Handle variant carries no `K`, so any marker type works —
-        // emit the wire `Ref::Handle { id, kind_id }`. The walk-and-
-        // resolve path validates against the *field's* expected type at
-        // dispatch, splicing the stored bytes inline (or parking).
-        let r: Ref<u8> = Ref::Handle {
+        // The Handle variant carries no `K`, so any `Kind` marker works
+        // (`Ref<K>`'s serde needs `K: Kind` post-ADR-0100, and the unit
+        // kind is the zero-cost marker) — emit the wire
+        // `Ref::Handle { id, kind_id }`. The walk-and-resolve path
+        // validates against the *field's* expected type at dispatch,
+        // splicing the stored bytes inline (or parking).
+        let r: Ref<()> = Ref::Handle {
             id: handle.0,
             kind_id: expected_kind.0,
         };

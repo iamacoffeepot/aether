@@ -379,15 +379,20 @@ fn decode_postcard(
             Ok(Value::Object(obj))
         }
         SchemaType::Ref(inner) => {
-            // ADR-0045 typed handle. Wire matches the postcard
-            // enum encoding: discriminant varint, then either the
-            // inner-kind body (Inline = 0) or two varints id +
-            // kind_id (Handle = 1). Render as externally-tagged
-            // JSON to match the encoder's input shape.
+            // ADR-0045 typed handle, inline arm revised by ADR-0100.
+            // Wire matches the postcard enum encoding: discriminant
+            // varint, then either the inline body (Inline = 0) or two
+            // varints id + kind_id (Handle = 1). The inline body is the
+            // inner kind's own codec image, length-prefixed — read the
+            // length, slice it off, and decode it with the same
+            // cast-or-postcard dispatch as a top-level kind. Render as
+            // externally-tagged JSON to match the encoder's input shape.
             let disc = read_varint_u64(cur, path)? as u32;
             match disc {
                 0 => {
-                    let inner_value = decode_postcard(cur, inner, path)?;
+                    let len = read_varint_u64(cur, path)? as usize;
+                    let body = cur.take_slice(len, path)?;
+                    let inner_value = decode_schema(body, inner)?;
                     let mut obj = Map::with_capacity(1);
                     obj.insert("Inline".into(), inner_value);
                     Ok(Value::Object(obj))
@@ -1115,5 +1120,44 @@ mod tests {
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         roundtrip(json!({ "mailbox": 0u64 }), &schema);
+    }
+
+    #[test]
+    fn ref_inline_cast_inner_wire_is_length_prefixed_cast_image() {
+        // ADR-0100: the inline body of a cast inner kind is the raw
+        // cast image, length-prefixed — not a postcard varint image.
+        let inner = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let schema = SchemaType::Ref(SchemaCell::owned(inner.clone()));
+        let value = json!({ "Inline": { "code": 0x0102_0304u32 } });
+
+        let bytes = encode_schema(&value, &schema).expect("encode Inline Ref");
+        // The inner image is exactly what `encode_schema` emits for the
+        // inner kind standalone (the cast image).
+        let body = encode_schema(&json!({ "code": 0x0102_0304u32 }), &inner).expect("encode inner");
+        assert_eq!(body.len(), 4, "u32 cast image is 4 raw bytes");
+        let mut expected = vec![0u8, 4u8];
+        expected.extend_from_slice(&body);
+        assert_eq!(
+            bytes, expected,
+            "inline wire is disc 0 + varint(len) + cast image"
+        );
+
+        // JSON descriptor round-trips through wire and back.
+        let back = decode_schema(&bytes, &schema).expect("decode Inline Ref");
+        assert_eq!(back, value);
+    }
+
+    #[test]
+    fn ref_handle_wire_is_byte_unchanged() {
+        let inner = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let schema = SchemaType::Ref(SchemaCell::owned(inner));
+        let value = json!({ "Handle": { "id": 7u64, "kind_id": 42u64 } });
+
+        let bytes = encode_schema(&value, &schema).expect("encode Handle Ref");
+        // disc 1 + varint(7) + varint(42) — unchanged from ADR-0045.
+        assert_eq!(bytes, vec![1u8, 7u8, 42u8]);
+
+        let back = decode_schema(&bytes, &schema).expect("decode Handle Ref");
+        assert_eq!(back, value);
     }
 }

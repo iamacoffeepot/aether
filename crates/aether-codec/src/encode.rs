@@ -307,18 +307,26 @@ fn encode_postcard(
             Ok(())
         }
         SchemaType::Ref(inner) => {
-            // ADR-0045 typed handle. Externally-tagged JSON matches
-            // the Rust enum: `{"Inline": <inner-K>}` chooses the
-            // inline arm; `{"Handle": {"id": u64, "kind_id": u64}}`
-            // chooses the handle arm. Wire is the postcard enum
-            // encoding — discriminant varint + body, where body is
-            // either the inner kind's postcard bytes (Inline = 0)
-            // or two varints (Handle = 1).
+            // ADR-0045 typed handle, inline arm revised by ADR-0100.
+            // Externally-tagged JSON matches the Rust enum:
+            // `{"Inline": <inner-K>}` chooses the inline arm;
+            // `{"Handle": {"id": u64, "kind_id": u64}}` chooses the
+            // handle arm. Wire is the postcard enum encoding —
+            // discriminant varint + body. The inline body is the inner
+            // kind's own codec image (cast or postcard, dispatched on
+            // `inner`) length-prefixed (`varint(len)` + bytes); the
+            // handle body is two varints.
             let (tag, body) = decode_enum_tag(value, path)?;
             match tag {
                 "Inline" => {
                     write_varint_u64(out, 0);
-                    encode_postcard(body, inner, path, out)
+                    // The inner image is the same bytes `Kind::encode_into_bytes`
+                    // produces for the inner kind — `encode_schema` picks
+                    // cast for a `repr_c: true` struct, postcard otherwise.
+                    let body_bytes = encode_schema(body, inner)?;
+                    write_varint_u64(out, body_bytes.len() as u64);
+                    out.extend_from_slice(&body_bytes);
+                    Ok(())
                 }
                 "Handle" => {
                     write_varint_u64(out, 1);
