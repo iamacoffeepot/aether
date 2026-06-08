@@ -439,7 +439,7 @@ fn dist_dir() -> PathBuf {
 /// #1445 dist tree). Panics with a `cargo xtask dist` hint if the
 /// manifest is absent — the harness can't locate component wasm without
 /// it.
-fn read_component_wasm(stem: &str) -> Vec<u8> {
+pub fn read_component_wasm(stem: &str) -> Vec<u8> {
     let dist = dist_dir();
     let manifest_path = dist.join("manifest.json");
     let raw = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {

@@ -142,7 +142,7 @@ mod native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::mail::{KindId, Mail, MailboxId};
+    use aether_substrate::mail::{KindId, MailboxId};
 
     use crate::input::InputCapability;
     use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
@@ -452,6 +452,22 @@ mod native {
         /// preserving the original `reply_to` so the trampoline's
         /// reply lands at the agent (not the cap). Used for
         /// [`DropComponent`] and [`ReplaceComponent`].
+        ///
+        /// The forward threads the child mail under the cap's current
+        /// in-flight root and bumps that root's `in_flight` count before
+        /// this handler returns (`send_envelope_traced_with_reply_to`),
+        /// so the originating call stays open across the boundary: the
+        /// trampoline's deferred `ctx.reply` streams back under a still-
+        /// open root and settlement fires `ReplyEnd` only after it. A
+        /// bare enqueue would let the cap handler's return settle the
+        /// call before the trampoline replied, dropping the reply (the
+        /// deferred-reply hold-open contract).
+        ///
+        /// Kept a method (not an associated fn) so its two `#[handler]`
+        /// call sites read `self`; the macro-dispatched handlers must
+        /// take `&mut self`, so dropping the receiver here would only
+        /// move the `unused_self` lint onto them.
+        #[allow(clippy::unused_self)]
         fn forward_to_trampoline<P>(
             &self,
             ctx: &mut NativeCtx<'_>,
@@ -472,8 +488,8 @@ mod native {
                     return;
                 }
             };
-            let mail = Mail::new(recipient, kind, bytes, 1).with_reply_to(ctx.reply_target());
-            self.mailer.push(mail);
+            let _ =
+                ctx.send_envelope_traced_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
         }
     }
 }
