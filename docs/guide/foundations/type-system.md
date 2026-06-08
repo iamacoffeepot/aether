@@ -198,8 +198,9 @@ Handle ids are **content-addressed** (the id is derived from the bytes, so two
 producers of the same value get the same handle and the store deduplicates,
 [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)), and the store is **persistent** with a disk budget ([ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) —
 inspect it with `describe_handles`). Handles are how the computation DAG passes
-values between steps without round-tripping them through an actor's memory; see
-[The computation DAG & handles]().
+values between steps without round-tripping them through an actor's memory; the
+store, its tiers, and what persists are their own subject —
+[Handles](../systems/handles.md).
 
 ## Transforms — typed pure functions
 
@@ -209,7 +210,7 @@ its input and output kinds ([ADR-0048](https://github.com/iamacoffeepot/aether/b
 an address, a transform is a typed *edge*: it takes a resolved handle of one kind
 and writes a new handle of another. Inspect the linked set with
 `describe_transforms`. The DAG that wires sources, transforms, and outputs into a
-job is its own subject — [The computation DAG & handles]().
+job is its own subject — [The computation DAG]().
 
 ## Typed ids — the naming layer
 
@@ -251,4 +252,5 @@ built on.
 
 - The contracts these types enforce — [Invariants & guarantees](invariants.md).
 - Addresses vs payloads, in depth — [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
-- Handles and transforms in motion — [The computation DAG & handles]().
+- Handles and the store they live in — [Handles](../systems/handles.md).
+- Transforms and the DAG that runs them — [The computation DAG]().

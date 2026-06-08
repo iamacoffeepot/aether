@@ -39,7 +39,8 @@ registered and warn-drop.
 | **Tracing & settlement** | Watch a mail chain to exact completion; trace subtree returned to the agent. | via `send_mail_traced` | 0080, 0086, 0093, 0094 | Settling (eviction, #1048) |
 | **Logging** | Per-actor log rings, queryable by mailbox name. | — (read via `actor_logs`) | 0077, 0081 | Stable |
 | **Configuration** | Layered app config — derive + overlay + argv/env, dumped via `--config`. | — (boot-time + CLI) | 0090 | Settling (rollout across knobs) |
-| **Computation DAG & handles** | Large/async work as a graph of `Kind → Kind` transforms producing typed handles. | via `submit_dag` / `dag_status` / `dag_cancel` | 0045, 0047, 0048, 0049, 0084 | Stable (pattern); growing |
+| **Handles** | Typed references to substrate-held values; a value travels by reference, not by bytes. | `aether.handle` — `publish` / `release` / `pin` / `describe` | 0045, 0048, 0049 | Stable; lightly exercised |
+| **Computation DAG** | Large/async work as a graph of sink calls + transforms wired by handles. | via `submit_dag` / `dag_status` / `dag_cancel` | 0045, 0047, 0048, 0084 | Stable (pattern); lightly exercised |
 | **HTTP egress** | Outbound network as a capability. | `aether.http` | 0043 | Stable |
 
 ## How to read an explainer (the shape each page follows)

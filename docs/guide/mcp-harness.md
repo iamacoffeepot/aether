@@ -151,5 +151,6 @@ asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DA
 - The ids and schemas the tools hand around — [The type system](foundations/type-system.md).
 - Loading, replacing, and inspecting components — [Components & lifecycle](systems/components.md).
 - Settlement and the trace tree behind `send_mail_traced` — [Tracing & settlement](systems/tracing-and-settlement.md).
-- The computation DAG the `*_dag` tools drive — [The computation DAG & handles]().
+- The computation DAG the `*_dag` tools drive — [The computation DAG]().
+- The handle store `describe_handles` inspects — [Handles](systems/handles.md).
 - The operational reference — ports, env overrides, `restart-hub` — `CLAUDE.md`.
