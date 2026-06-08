@@ -78,6 +78,15 @@ pub mod trace;
 // fetch. No `native` deps — reachable in every feature config.
 pub mod trace_walk;
 pub mod trampoline;
+// First-party native `#[transform]`s (ADR-0048, issue 1464). The
+// link-time inventory submission populates both the headless
+// `TransformRegistry` and `describe_transforms` — both native. Native-
+// only: the DAG executor that runs transforms is non-wasm, and the
+// `#[transform]` inventory entry is itself `cfg(not(wasm32))`-gated, so
+// on a wasm-header-only build the fn would be dead. No wasm consumer
+// runs transforms, so gate the whole module rather than carry it dead.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transforms;
 pub mod window;
 
 #[cfg(feature = "audio")]

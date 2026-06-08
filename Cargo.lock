@@ -84,6 +84,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
+ "aether-math",
  "aether-substrate",
  "bytemuck",
  "clap",
@@ -175,6 +176,7 @@ name = "aether-kinds"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
+ "aether-math",
  "bytemuck",
  "inventory",
  "postcard",
@@ -185,6 +187,8 @@ dependencies = [
 name = "aether-math"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-data",
+ "bytemuck",
  "libm",
 ]
 

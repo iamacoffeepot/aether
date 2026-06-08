@@ -73,6 +73,10 @@ aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# Issue 1464: the `mat4_apply` first-party transform rebuilds a `Mat4`
+# / `Vec4` from the wire `[f32; N]` arrays. Always-on + target-agnostic
+# (no_std), so it rides the wasm-header-only build too.
+aether-math = { path = "../aether-math" }
 serde = { version = "1", default-features = false, features = ["derive"] }
 
 # Native-only: gated behind the `native` feature so wasm builds

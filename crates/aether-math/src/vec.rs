@@ -1,5 +1,7 @@
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
+use bytemuck::{Pod, Zeroable};
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Vec2 {
@@ -15,8 +17,18 @@ pub struct Vec3 {
     pub z: f32,
 }
 
+/// A 4-component `f32` vector, also the substrate's
+/// `aether.math.vec4` wire kind — the output of the `mat4_apply`
+/// native transform (ADR-0048). When read as a homogeneous point the
+/// `w` component carries the projective weight; `Mat4 * Vec4` applies
+/// a column-major transform with no perspective divide.
+///
+/// `#[repr(C)]` + `Pod` makes the kind cast-shaped: its 16 bytes are
+/// the four `f32`s in `x, y, z, w` order, the same layout a wgpu
+/// uniform expects, so it encodes/decodes without serialization.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.math.vec4")]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,
@@ -252,6 +264,20 @@ impl Vec4 {
         }
     }
 
+    /// Construct a `Vec4` from a `[f32; 4]`. Mirror of
+    /// [`Self::to_array`]; the array is `[x, y, z, w]`.
+    #[inline]
+    #[must_use]
+    pub const fn from_array(a: [f32; 4]) -> Self {
+        Self::new(a[0], a[1], a[2], a[3])
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn to_array(self) -> [f32; 4] {
+        [self.x, self.y, self.z, self.w]
+    }
+
     #[inline]
     #[must_use]
     pub fn dot(self, other: Self) -> f32 {
@@ -405,6 +431,13 @@ mod tests {
         let a = [1.0_f32, 2.0, 3.0];
         assert_eq!(Vec3::from_array(a).to_array(), a);
         assert_eq!(Vec3::from_array(a), Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn vec4_from_to_array_round_trip() {
+        let a = [1.0_f32, 2.0, 3.0, 4.0];
+        assert_eq!(Vec4::from_array(a).to_array(), a);
+        assert_eq!(Vec4::from_array(a), Vec4::new(1.0, 2.0, 3.0, 4.0));
     }
 
     #[test]

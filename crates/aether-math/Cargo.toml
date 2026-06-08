@@ -4,6 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# ADR-0048 / issue 1464: `Vec4` is the `aether.math.vec4` wire kind
+# (the `mat4_apply` transform's output), so it derives `Kind`/`Schema`.
+# `aether-data` (no_std + alloc) is acyclic — it does not depend on
+# `aether-math`. The derive routes its `Vec<u8>` encode buffer through
+# `aether-data`'s re-export, so `aether-math` stays `no_std` with no
+# `alloc` of its own.
+aether-data = { path = "../aether-data", features = ["derive"] }
+# `Vec4` is `#[repr(C)]`, so its `Kind` derive takes the cast wire
+# path, which needs `Pod` (`NoUninit` + `AnyBitPattern`). The bytemuck
+# derive supplies it. Same version aether-kinds uses for its cast kinds.
+bytemuck = { version = "1.19", features = ["derive"] }
 libm = "0.2"
 
 [lints]
