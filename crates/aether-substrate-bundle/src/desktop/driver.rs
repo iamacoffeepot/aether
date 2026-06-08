@@ -1129,12 +1129,23 @@ impl DriverRunning for DesktopDriverRunning {
             mut app,
             event_loop,
             triangles_rendered,
-            _boot,
+            // Bound (not `_boot`) so the teardown snapshot below can reach
+            // the handle store; still held to the end of `run()` so the
+            // scheduler joins workers on drop.
+            _boot: boot,
         } = *self;
 
         event_loop
             .run_app(&mut app)
             .map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
+
+        // ADR-0049 §3 boot fast-path (issue #1446): the event loop has
+        // exited cleanly (window closed), so write the `index.bin`
+        // snapshot of the live disk index. The next boot loads it in one
+        // read + decode instead of one `open()` per `.meta` sidecar; a
+        // crash that skips this teardown leaves the directory scan as the
+        // fallback. Best-effort + a no-op when persistence is disabled.
+        boot.handle_store.snapshot_index();
 
         let total = triangles_rendered.load(Ordering::Relaxed);
         let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
