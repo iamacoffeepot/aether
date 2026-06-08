@@ -300,7 +300,15 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
-                    ctx.send(mbox, kind, payload, count);
+                    // Issue iamacoffeepot/aether#1465: `reply` (not
+                    // `send`) so the outgoing reply echoes the inbound
+                    // `correlation` with target `None` — matching native
+                    // `Mailer::send_reply` and the `Session` /
+                    // `EngineMailbox` arms above. `send` would
+                    // fresh-mint a `Component(self)` correlation,
+                    // dropping the originator's id so the reply can't
+                    // be matched home over the RPC `in_flight` table.
+                    ctx.reply(mbox, kind, payload, count, correlation);
                 }
                 ReplyTarget::EngineMailbox {
                     engine_id,

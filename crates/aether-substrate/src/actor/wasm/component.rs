@@ -154,6 +154,19 @@ pub struct ComponentCtx {
     in_flight_mail_id: Cell<MailId>,
     /// ADR-0080 §5 in-flight inbound `root`. See `in_flight_mail_id`.
     in_flight_root: Cell<MailId>,
+    /// Issue iamacoffeepot/aether#1465: lineage-`MailId` counter for
+    /// [`ComponentCtx::reply`]. A reply echoes the inbound correlation
+    /// on its `reply_to` (so it correlates home), but its own trace
+    /// `MailId` needs a fresh identity disjoint from this component's
+    /// `send` mints: `build_tree` keys trace nodes by `MailId`, so a
+    /// reply whose lineage id equaled one of this component's sends
+    /// (both inherit the same inbound root) would collapse two nodes
+    /// into one. This counter starts at [`REPLY_LINEAGE_BASE`] — above
+    /// the `send` correlation space (`mint_correlation`, from `1`) — so
+    /// the two never overlap. It is deliberately separate from
+    /// `correlation_counter`: `prev_correlation_p32` reports a guest's
+    /// own request correlations, and a reply is not one of them.
+    reply_lineage_counter: Cell<u64>,
     /// ADR-0097: a sibling-spawn request staged by the `spawn_sibling`
     /// host fn and drained by the trampoline after `receive_p32`
     /// returns — the same host-fn-stages / host-drains pattern as
@@ -189,6 +202,15 @@ pub struct PendingSpawn {
     pub config: Vec<u8>,
 }
 
+/// Issue iamacoffeepot/aether#1465: starting value of
+/// [`ComponentCtx::reply_lineage_counter`]. Sits at the top half of the
+/// `u64` space, above the `send` correlation counter (which starts at
+/// `1` and increments once per send), so a reply's lineage `MailId`
+/// never collides with one this component minted for a `send`. A run
+/// would need `2^63` sends to reach this base, so the two spaces stay
+/// disjoint in practice.
+const REPLY_LINEAGE_BASE: u64 = 1 << 63;
+
 impl ComponentCtx {
     /// Build a fresh ctx with empty state-migration slots and an
     /// empty sender table. Using this over the struct literal keeps
@@ -214,6 +236,7 @@ impl ComponentCtx {
             correlation_counter: Cell::new(1),
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
+            reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawn: None,
         }
     }
@@ -239,6 +262,18 @@ impl ComponentCtx {
     fn mint_correlation(&self) -> u64 {
         let id = self.correlation_counter.get();
         self.correlation_counter.set(id + 1);
+        id
+    }
+
+    /// Issue iamacoffeepot/aether#1465: hand out the next lineage id for
+    /// a [`Self::reply`]. Drawn from a counter disjoint from
+    /// `mint_correlation` (see [`Self::reply_lineage_counter`]) so a
+    /// reply's trace `MailId` never merges with one of this component's
+    /// own sends, and so it leaves the guest-facing `prev_correlation`
+    /// counter untouched.
+    fn next_reply_lineage(&self) -> u64 {
+        let id = self.reply_lineage_counter.get();
+        self.reply_lineage_counter.set(id + 1);
         id
     }
 
@@ -272,11 +307,64 @@ impl ComponentCtx {
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
         // outbound's MailId from the same correlation that drives
         // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
-        // which uses one counter for both. The in-flight cells were
-        // populated by `Component::deliver` for guest-triggered sends
-        // (and remain `NONE` for substrate-internal call sites that
-        // bypass `deliver`, e.g. test fixtures).
+        // which uses one counter for both.
         let mail_id = MailId::new(self.sender, correlation);
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id);
+    }
+
+    /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
+    /// of [`Self::send`] for the `reply_mail_p32` `ReplyTarget::Component`
+    /// arm. A reply must echo the inbound mail's `correlation` so the
+    /// originating actor (or the RPC server's `in_flight` table) can
+    /// match it home — the ADR-0042 contract the `Session` /
+    /// `EngineMailbox` arms and native `Mailer::send_reply` already
+    /// honor. So it stamps `reply_to = ReplyTo::with_correlation(
+    /// ReplyTarget::None, correlation)` — the echo, with reply-of-a-reply
+    /// target `None` — rather than `send`'s fresh-minted
+    /// `Component(self)`.
+    ///
+    /// It routes through the same [`Self::send_routed`] body as `send`,
+    /// so a guest's reply stays a first-class child of the inbound mail
+    /// in the trace + settlement chain (symmetric with the guest's other
+    /// sends). Two things differ from `send`: the `reply_to` above, and
+    /// the lineage `MailId`, which comes from [`Self::next_reply_lineage`]
+    /// (disjoint from the `send` correlation space) instead of
+    /// `mint_correlation` — a reply is not the component's own outbound
+    /// request, so it must not advance the counter `prev_correlation_p32`
+    /// reports.
+    pub(crate) fn reply(
+        &self,
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        correlation: u64,
+    ) {
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::None, correlation);
+        let mail_id = MailId::new(self.sender, self.next_reply_lineage());
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id);
+    }
+
+    /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
+    /// the inbound lineage, fire the ADR-0080 §2 `Sent` hook, then
+    /// dispatch by recipient class (inline sink, actor inbox, or
+    /// dropped/unknown bubble-up). The caller supplies the `reply_to`
+    /// (fresh `Component(self)` correlation for a send, echoed inbound
+    /// correlation with target `None` for a reply) and the lineage
+    /// `mail_id`.
+    fn send_routed(
+        &self,
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        reply_to: ReplyTo,
+        mail_id: MailId,
+    ) {
+        // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
+        // cells were populated by `Component::deliver` for guest-triggered
+        // sends (and remain `NONE` for substrate-internal call sites that
+        // bypass `deliver`, e.g. test fixtures).
         let parent_mail = match self.in_flight_mail_id.get() {
             id if id == MailId::NONE => None,
             id => Some(id),
@@ -1968,6 +2056,86 @@ mod tests {
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
         assert!(rx.try_recv().is_err(), "no frame should have been sent");
+    }
+
+    /// Issue iamacoffeepot/aether#1465: a wasm component that replies to
+    /// an inbound whose reply target is `ReplyTarget::Component` must
+    /// echo the inbound `correlation` on the outgoing reply, with
+    /// reply-of-a-reply target `None` — the ADR-0042 contract the
+    /// `Session` / `EngineMailbox` arms and native `Mailer::send_reply`
+    /// already honor. Before the fix the Component arm routed through
+    /// `ComponentCtx::send`, which fresh-minted a `Component(self)`
+    /// correlation, so the reply arrived with the wrong correlation and
+    /// target and the RPC server (matching by correlation against its
+    /// `in_flight` table) dropped it. Because the inbound target is a
+    /// peer `Component`, this also exercises the ADR-0042 component→
+    /// component reply-correlation path by construction. Drives the
+    /// `reply_mail_p32` Component arm through a guest and asserts the
+    /// dispatched reply's `ReplyTo`.
+    #[test]
+    fn reply_mail_component_target_echoes_inbound_correlation() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
+        use aether_data::{KindDescriptor, SchemaType};
+
+        // A non-trivial inbound correlation that can't be mistaken for a
+        // fresh `mint_correlation` value (which would start at `1`).
+        const INBOUND_CORRELATION: u64 = 0x5151;
+
+        let registry = Arc::new(Registry::new());
+        // The reply recipient: a capture inbox that records the
+        // dispatched mail's `ReplyTo` (the reply's `sender`).
+        let captured: Arc<Mutex<Vec<ReplyTo>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        let recipient = registry
+            .try_register_inbox(
+                "issue_1465_reply_recipient",
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    // ADR-0094: terminal test capture sink — discharge.
+                    dispatch.discharge();
+                    captured_for_handler.lock().unwrap().push(dispatch.sender);
+                }),
+            )
+            .expect("register reply recipient");
+        // The reply kind must be known so the Component arm's validation
+        // guard (`kind_name(kind).is_some()`) passes.
+        let pong_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: "test.pong".into(),
+                schema: SchemaType::Unit,
+            })
+            .expect("register kind");
+
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let ctx = ComponentCtx::new(
+            M(0),
+            Arc::clone(&registry),
+            mailer,
+            HubOutbound::disconnected(),
+        );
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
+
+        // Inbound whose reply target is a peer component, carrying
+        // `INBOUND_CORRELATION`. The guest's `receive_p32` calls
+        // `reply_mail_p32` with the sender handle the substrate
+        // allocated for this reply target.
+        let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1).with_reply_to(
+            ReplyTo::with_correlation(ReplyTarget::Component(recipient), INBOUND_CORRELATION),
+        );
+        component.deliver(&mail).expect("deliver");
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "reply should have dispatched once");
+        let reply_to = captured[0];
+        assert_eq!(
+            reply_to.correlation_id, INBOUND_CORRELATION,
+            "reply must echo the inbound correlation, not a fresh mint",
+        );
+        assert_eq!(
+            reply_to.target,
+            ReplyTarget::None,
+            "reply-of-a-reply target must be None, matching native send_reply",
+        );
     }
 
     /// ADR-0037 Phase 1 + Phase 2: when a component sends to a mailbox
