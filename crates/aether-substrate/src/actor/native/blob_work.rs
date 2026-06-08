@@ -221,15 +221,17 @@ fn wake_cost_nanos() -> u64 {
 /// - `max_group_work` is `w_max`, the longest pole (how *spreadable* it is
 ///   — no `K` can beat the single fattest group's serial drain),
 /// - `g` is the fresh-group count `G` (can't use more workers than groups),
-/// - `w` is the pool worker count `W` (can't use more workers than exist).
+/// - `w` is the pool worker count `W` (can't use more workers than exist),
+/// - `wake_cost` is the per-handoff wake break-even (nanos) the caller
+///   measured ([`wake_cost_nanos`]); at or below it the blob stays local.
 ///
-/// Below the wake break-even ([`wake_cost_nanos`]) the whole blob is too
+/// Below the wake break-even (`wake_cost`) the whole blob is too
 /// cheap to amortize a sibling wakeup, so `K = 1` (stay local). The divide
 /// rounds to nearest (`+ w_max/2`) so a blob that needs "just over" one
 /// extra worker gets it. Integer-only — the EWMA is fixed-point nanos
 /// (iamacoffeepot/aether#1128), no float on the flush path.
-fn recruit_k(total_work: u64, max_group_work: u64, g: usize, w: usize) -> usize {
-    if total_work <= wake_cost_nanos() || max_group_work == 0 {
+fn recruit_k(total_work: u64, max_group_work: u64, g: usize, w: usize, wake_cost: u64) -> usize {
+    if total_work <= wake_cost || max_group_work == 0 {
         // Below the wake floor (or no measurable pole) — stay local.
         return 1;
     }
@@ -892,6 +894,7 @@ fn recruit_extra(outcome: &FlushOutcome, w: usize) -> usize {
             outcome.max_group_work,
             outcome.fresh_groups,
             w,
+            wake_cost_nanos(),
         );
         k.min(recruit_cap()).saturating_sub(1)
     } else if outcome.fresh_groups >= recruit_min() {
@@ -1316,11 +1319,15 @@ mod tests {
     }
 
     // iamacoffeepot/aether#1178: the cost-aware recruiter. `recruit_k` is a
-    // pure function over `(total_work, max_group_work, G, W)`; the canonical
-    // cases below use work values well clear of the wake floor (now the
-    // box-measured `handoff_cost`, µs-scale, iamacoffeepot/aether#1192) so
-    // they don't depend on it. The one floor-sensitive case reads
-    // `wake_cost_nanos()` directly rather than baking a constant.
+    // pure function over `(total_work, max_group_work, G, W, wake_cost)`. The
+    // canonical cases below pass `wake_cost = 0` to disable the gate and
+    // exercise the divide/clamp directly; the two floor-sensitive cases pass
+    // an explicit `WAKE_FLOOR_NANOS` so the boundary is exact and
+    // box-independent (iamacoffeepot/aether#1434).
+
+    /// Fixed wake break-even for the floor-sensitive `recruit_k` cases, so the
+    /// boundary is exact and independent of the box-measured handoff cost.
+    const WAKE_FLOOR_NANOS: u64 = 10_000;
 
     /// Trivial-wide: many tiny groups whose total work is below the wake
     /// break-even → `K = 1` (stay local, no recruit). This is the cost-aware
@@ -1329,14 +1336,10 @@ mod tests {
     #[test]
     fn recruit_k_trivial_wide_stays_local() {
         // Wide-but-cheap: total work at the wake floor → local regardless of
-        // width. Read the floor from `wake_cost_nanos` (now the box-measured
-        // handoff cost, iamacoffeepot/aether#1192) so this holds on any box
-        // rather than baking the old 4300ns const. The gate is `<=`, so work
-        // *at* the floor stays local.
-        let floor = wake_cost_nanos();
-        assert_eq!(recruit_k(floor, 100, 12, 8), 1);
+        // width. The gate is `<=`, so work *at* the floor stays local.
+        assert_eq!(recruit_k(WAKE_FLOOR_NANOS, 100, 12, 8, WAKE_FLOOR_NANOS), 1);
         // Even a single tiny group is local (clamped by G = 1).
-        assert_eq!(recruit_k(100, 100, 1, 8), 1);
+        assert_eq!(recruit_k(100, 100, 1, 8, WAKE_FLOOR_NANOS), 1);
     }
 
     /// Heavy-narrow: a few heavy groups → `K = G` (recruits the full group
@@ -1346,9 +1349,9 @@ mod tests {
     fn recruit_k_heavy_narrow_recruits_full_width() {
         // 3 groups × 50_000ns each: total 150_000, w_max 50_000 → round(3) = 3,
         // clamped to min(G=3, W=8) = 3.
-        assert_eq!(recruit_k(150_000, 50_000, 3, 8), 3);
+        assert_eq!(recruit_k(150_000, 50_000, 3, 8, 0), 3);
         // Two heavy groups, plenty of workers → 2.
-        assert_eq!(recruit_k(100_000, 50_000, 2, 8), 2);
+        assert_eq!(recruit_k(100_000, 50_000, 2, 8, 0), 2);
     }
 
     /// Balanced-wide: many equal groups → `K = min(G, W)`. `Σw` / `w_max` ≈ G,
@@ -1356,9 +1359,9 @@ mod tests {
     #[test]
     fn recruit_k_balanced_wide_recruits_to_worker_cap() {
         // 20 equal groups of 10_000ns: round(20) = 20, clamped to W = 8.
-        assert_eq!(recruit_k(200_000, 10_000, 20, 8), 8);
+        assert_eq!(recruit_k(200_000, 10_000, 20, 8, 0), 8);
         // Same balance, fewer groups than workers → clamped to G.
-        assert_eq!(recruit_k(60_000, 10_000, 6, 8), 6);
+        assert_eq!(recruit_k(60_000, 10_000, 6, 8, 0), 6);
     }
 
     /// Skewed-wide: one fat pole plus many small groups → `K ≈ total /
@@ -1370,20 +1373,20 @@ mod tests {
         // One 100_000ns pole + 10 × 1_000ns = 110_000 total, w_max 100_000 →
         // round(1.1) = 1, clamped to [1, min(11, 8)] = 1. The fat pole
         // dominates: no parallelism helps.
-        assert_eq!(recruit_k(110_000, 100_000, 11, 8), 1);
+        assert_eq!(recruit_k(110_000, 100_000, 11, 8, 0), 1);
         // A milder skew: 100_000 total over a 30_000ns pole → round(3.33) = 3.
-        assert_eq!(recruit_k(100_000, 30_000, 11, 8), 3);
+        assert_eq!(recruit_k(100_000, 30_000, 11, 8, 0), 3);
     }
 
     /// The wake gate is exact at the boundary: `total_work <= wake_cost_nanos()`
     /// is local, one nano over recruits.
     #[test]
     fn recruit_k_wake_gate_boundary() {
-        let c = wake_cost_nanos();
-        assert_eq!(recruit_k(c, 10, 5, 8), 1, "exactly at the floor: local");
+        let c = WAKE_FLOOR_NANOS;
+        assert_eq!(recruit_k(c, 10, 5, 8, c), 1, "exactly at the floor: local");
         // One nano over the floor with a small pole → recruits.
         assert!(
-            recruit_k(c + 1, 10, 5, 8) > 1,
+            recruit_k(c + 1, 10, 5, 8, c) > 1,
             "just over the floor: recruit"
         );
     }
@@ -1392,9 +1395,9 @@ mod tests {
     #[test]
     fn recruit_k_clamps_to_min_g_w() {
         // Huge Σw, tiny pole, but only 2 groups → clamped to G = 2.
-        assert_eq!(recruit_k(1_000_000, 1, 2, 8), 2);
+        assert_eq!(recruit_k(1_000_000, 1, 2, 8, 0), 2);
         // Same, but only 1 worker → clamped to W = 1.
-        assert_eq!(recruit_k(1_000_000, 1, 50, 1), 1);
+        assert_eq!(recruit_k(1_000_000, 1, 50, 1, 0), 1);
     }
 
     /// `trustworthy_mad`: a steady handler (MAD below the mean) is
