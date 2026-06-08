@@ -1,7 +1,8 @@
 # ADR-0099: Actor identity and addressing
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-07
+- **Accepted:** 2026-06-08 (implementation arc iamacoffeepot/aether#1429 landed)
 
 ## Context
 
@@ -25,7 +26,7 @@ This ADR **supersedes ADR-0098** (scoped singletons), which framed the same #136
 
 ## Decision
 
-Five sub-decisions.
+Six sub-decisions.
 
 ### 1. Two identities: ActorId (which actor) and MailboxId (where in the tree)
 
@@ -82,9 +83,9 @@ atom     := ident ( "." ident )*
 
 - **`/`** separates nodes — one segment per ActorId in the lineage, root → leaf.
 - **`:`** carries an instanced node's discriminator; the segment around it names that node's ActorId, `hash(NAMESPACE:subname)`.
-- **`.`** is cosmetic, within a single namespace ident — `aether.component.trampoline` is one segment.
+- **`.`** is cosmetic, within a single namespace ident — `aether.component` is one segment.
 
-The loaded camera renders as `aether.component/aether.component.trampoline:camera`: root host, child trampoline scope, instance. Because the string is a rendering, a MailboxId is never computed by hashing it — a written path is resolved by parsing it into segments, mapping each segment to its ActorId, and chain-folding (§3). Type addressing never touches the string at all: `ctx.actor::<R>()` resolves R to its id by R's resolution mode (§5), not by the rendered path. The parse is the cold path, paid only by string-addressed callers — MCP, the CLI, `actor_logs`.
+The loaded camera renders as `aether.component/aether.embedded:camera`: root host, child embedding-host class, instance. Because the string is a rendering, a MailboxId is never computed by hashing it — a written path is resolved by parsing it into segments, mapping each segment to its ActorId, and chain-folding (§3). Type addressing never touches the string at all: `ctx.actor::<R>()` resolves R to its id by R's resolution mode (§5), not by the rendered path. The parse is the cold path, paid only by string-addressed callers — MCP, the CLI, `actor_logs`.
 
 Display spellings can therefore vary — collapsing a repeated root, abbreviating a namespace — without touching the hash, because the lineage array is the single source of truth and the string never feeds resolution. There is no second authoritative form to disagree with the first.
 
@@ -144,7 +145,7 @@ This is a second kind of namespace sharing. The chassis render caps share `aethe
 
 ### Follow-on
 
-- **Implementation** is scoped on iamacoffeepot/aether#1420 and split into PRs: the lineage fold + carry in `aether-data` and the actor binding, with the trampoline re-spell; static resolution, with an embeddable component delegating to its host class (§5) under the reserved `aether.embedded` namespace; and the migration of name-carrying surfaces.
+- **Implementation** landed via the iamacoffeepot/aether#1429 arc: the lineage fold + carry in `aether-data` and the actor binding with the trampoline re-spell (#1430), static resolution with an embeddable component delegating to its host class (§5) under the reserved `aether.embedded` namespace (#1431, #1432), and the tcp consumer through the shared resolver (#1433). (Supersedes the earlier #1420 scoping, which was drafted against a prior draft of this ADR.)
 - **Display-layer ergonomics** — collapsing a repeated namespace root in the rendered path — are free to land later, since the string never feeds the hash.
 
 ## Alternatives considered
@@ -166,4 +167,4 @@ This is a second kind of namespace sharing. The chassis render caps share `aethe
 - ADR-0079 — Instanced actors and cardinality. An instanced node's discriminator is folded into its ActorId by the `:` separator.
 - ADR-0064 — Type-tagged opaque ids. The depth-1 fixed point relies on `with_tag` being idempotent for a repeated tag.
 - ADR-0080 — Mail tracing and settlement. The causal mail lineage (`ReplyTo`) is a separate lineage, unaffected.
-- iamacoffeepot/aether#1364 — the gap this closes; #1420 — the implementation; #1423 — static resolution (an embeddable actor delegates to its host class; no registry, no round-trip).
+- iamacoffeepot/aether#1364 — the gap this closes; #1429 — the implementation arc (#1430 lineage fold + carry, #1431 static resolution, #1432 embeddable resolution through the host class, #1433 tcp consumer).
