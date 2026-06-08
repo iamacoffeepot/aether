@@ -441,7 +441,7 @@ impl NativeBinding {
     /// entry is the only reply API native actors reach for.
     pub fn send_reply_for_handler<K>(&self, sender: ReplyTo, payload: &K)
     where
-        K: aether_data::Kind + serde::Serialize,
+        K: aether_data::Kind,
     {
         self.mailer.send_reply(sender, payload);
     }

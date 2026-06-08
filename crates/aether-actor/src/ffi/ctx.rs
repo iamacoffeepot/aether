@@ -303,14 +303,14 @@ impl OutboundReply for FfiCtx<'_> {
     }
 
     //noinspection DuplicatedCode
-    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+    fn reply<K: Kind>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
             MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
         }
     }
 
-    fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
+    fn reply_to<K: Kind>(&mut self, sender: ReplyTo, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
     }
@@ -342,7 +342,7 @@ impl Sender for FfiCtx<'_> {
 
 impl MailCtx for FfiCtx<'_> {
     //noinspection DuplicatedCode
-    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+    fn reply<K: Kind>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
             MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);

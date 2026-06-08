@@ -415,7 +415,7 @@ impl<'a> NativeCtx<'a> {
     /// has no caller behind it). Routes through the same
     /// [`NativeBinding::send_reply_for_handler`] path as
     /// [`MailCtx::reply`].
-    pub fn reply_to_target<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
+    pub fn reply_to_target<K: Kind>(&mut self, sender: ReplyTo, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload);
     }
 
@@ -775,7 +775,7 @@ impl MailCtx for NativeCtx<'_> {
     /// — caps now reach for `ctx.reply(&result)` and the per-mail
     /// ctx already holds both the mailer reference (via the transport)
     /// and the inbound's reply target.
-    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+    fn reply<K: Kind>(&mut self, payload: &K) {
         self.binding.send_reply_for_handler(self.sender, payload);
     }
 }
@@ -960,11 +960,11 @@ impl OutboundReply for NativeCtx<'_> {
         }
     }
 
-    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+    fn reply<K: Kind>(&mut self, payload: &K) {
         self.binding.send_reply_for_handler(self.sender, payload);
     }
 
-    fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
+    fn reply_to<K: Kind>(&mut self, sender: ReplyTo, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload);
     }
 }
@@ -1119,5 +1119,35 @@ mod tests {
         // Avoid an unused-import diagnostic when the compiler
         // dead-code-eliminates the helper.
         let _ = DataKindId(0);
+    }
+
+    /// A cast kind that is `Pod` but derives neither `Serialize` nor
+    /// `Deserialize` — the kind ADR-0100's reply path must accept.
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct CastOnly {
+        code: u32,
+    }
+
+    impl Kind for CastOnly {
+        const NAME: &'static str = "test.cast_only_reply";
+        const ID: KindId = KindId(0xDEAD_BEEF_0009_0001);
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            bytemuck::bytes_of(self).to_vec()
+        }
+    }
+
+    /// Type-level proof (ADR-0100): a `Pod`-without-`Serialize` cast kind
+    /// is repliable through every native reply entry point — the bounds
+    /// relaxed from `K: Kind + serde::Serialize` to `K: Kind`. Never
+    /// called; the compile is the assertion. If a reply bound regains a
+    /// `serde::Serialize` half, this stops compiling.
+    #[allow(dead_code)]
+    fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_>, sender: ReplyTo) {
+        MailCtx::reply(ctx, &CastOnly { code: 1 });
+        OutboundReply::reply(ctx, &CastOnly { code: 2 });
+        OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });
+        ctx.reply_to_target(sender, &CastOnly { code: 4 });
     }
 }

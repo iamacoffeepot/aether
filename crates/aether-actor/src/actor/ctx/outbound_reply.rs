@@ -50,15 +50,10 @@ pub trait OutboundReply: MailSender {
 
     /// Reply to the originator of the mail currently being dispatched.
     /// No-op when there's no reply target. Wire shape (cast or postcard)
-    /// follows `Kind::encode_into_bytes`.
-    ///
-    /// The `serde::Serialize` bound matches the substrate-side
-    /// `Mailer::send_reply` requirement: reply kinds route through
-    /// postcard when the target is a Claude session or remote engine
-    /// mailbox. Every reply kind in the workspace already derives
-    /// `Serialize` so the bound is documentation, not a breaking
-    /// change.
-    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K);
+    /// follows `Kind::encode_into_bytes` (ADR-0100), so a reply needs
+    /// only `K: Kind` — a `Pod`-without-`Serialize` cast kind is
+    /// repliable.
+    fn reply<K: Kind>(&mut self, payload: &K);
 
     /// Reply to an explicit `sender` rather than the dispatcher-stamped
     /// reply target. Used by the parked-sender pattern: caps that stash
@@ -70,5 +65,5 @@ pub trait OutboundReply: MailSender {
     /// Same wire-shape contract as [`Self::reply`]. Native impls route
     /// through `NativeBinding::send_reply_for_handler`; FFI impls route
     /// through [`crate::ffi::bridge::MailBridge::reply_mail`].
-    fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: Self::ReplyHandle, payload: &K);
+    fn reply_to<K: Kind>(&mut self, sender: Self::ReplyHandle, payload: &K);
 }

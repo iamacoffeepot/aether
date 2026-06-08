@@ -280,7 +280,7 @@ impl<K, V> CastEligible for BTreeMap<K, V> {
 /// error, not a recoverable one. Use [`Ref::handle`] instead of
 /// constructing `Handle` directly to pull the id from the kind
 /// system rather than passing it by hand.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ref<K> {
     /// Inline value — the whole `K` payload is on the wire.
     Inline(K),
@@ -332,6 +332,259 @@ impl<K> Ref<K> {
         match self {
             Self::Handle { id, .. } => Some(*id),
             Self::Inline(_) => None,
+        }
+    }
+}
+
+/// Hand-written `serde` for `Ref<K>` (ADR-0100). The inline arm carries
+/// the kind's own codec image — `K::encode_into_bytes`, length-prefixed
+/// — instead of serde-encoding the typed `K`. A cast kind's inline value
+/// stays a cast image, and `Ref<K>` needs only `K: Kind`: no
+/// `Serialize`/`Deserialize` bound on the wrapped kind.
+///
+/// The externally-tagged enum representation is preserved — variant
+/// index 0 = `Inline`, 1 = `Handle` — so a `Ref::Handle` value's wire
+/// bytes are byte-identical to the prior derive and the splice walker's
+/// discriminant semantics are unchanged. Inline wire is
+/// `disc 0 + varint(len) + K::encode_into_bytes` (`len` bytes); handle
+/// wire is `disc 1 + varint(id) + varint(kind_id)`. The handle-store
+/// splice walker and the schema-driven JSON codec share this framing.
+mod ref_serde {
+    use core::fmt;
+    use core::marker::PhantomData;
+
+    use alloc::vec::Vec;
+    use serde::de::{self, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
+    use serde::ser::SerializeStructVariant;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::{Kind, Ref};
+
+    const VARIANTS: &[&str] = &["Inline", "Handle"];
+    const HANDLE_FIELDS: &[&str] = &["id", "kind_id"];
+
+    impl<K: Kind> Serialize for Ref<K> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            match self {
+                Self::Inline(value) => {
+                    let encoded = value.encode_into_bytes();
+                    serializer.serialize_newtype_variant("Ref", 0, "Inline", &InlineBody(&encoded))
+                }
+                Self::Handle { id, kind_id } => {
+                    let mut sv = serializer.serialize_struct_variant("Ref", 1, "Handle", 2)?;
+                    sv.serialize_field("id", id)?;
+                    sv.serialize_field("kind_id", kind_id)?;
+                    sv.end()
+                }
+            }
+        }
+    }
+
+    /// Forces `serialize_bytes` for the inline body so the wire is
+    /// `varint(len) + raw bytes` — the raw `K::encode_into_bytes` image.
+    /// A plain `Vec<u8>` would serialize as a sequence and two-byte any
+    /// `>= 0x80` element, corrupting a cast image.
+    struct InlineBody<'a>(&'a [u8]);
+
+    impl Serialize for InlineBody<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    impl<'de, K: Kind> Deserialize<'de> for Ref<K> {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_enum("Ref", VARIANTS, RefVisitor(PhantomData))
+        }
+    }
+
+    /// Externally-tagged variant discriminant. Binary serializers (the
+    /// postcard wire) read it as `varint` → `visit_u64`; self-describing
+    /// ones read the variant name → `visit_str`.
+    enum VariantTag {
+        Inline,
+        Handle,
+    }
+
+    impl<'de> Deserialize<'de> for VariantTag {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_identifier(VariantTagVisitor)
+        }
+    }
+
+    struct VariantTagVisitor;
+
+    impl Visitor<'_> for VariantTagVisitor {
+        type Value = VariantTag;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("`Inline` or `Handle` variant")
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<VariantTag, E> {
+            match value {
+                0 => Ok(VariantTag::Inline),
+                1 => Ok(VariantTag::Handle),
+                _ => Err(de::Error::invalid_value(
+                    de::Unexpected::Unsigned(value),
+                    &self,
+                )),
+            }
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<VariantTag, E> {
+            match value {
+                "Inline" => Ok(VariantTag::Inline),
+                "Handle" => Ok(VariantTag::Handle),
+                _ => Err(de::Error::unknown_variant(value, VARIANTS)),
+            }
+        }
+    }
+
+    struct RefVisitor<K>(PhantomData<K>);
+
+    impl<'de, K: Kind> Visitor<'de> for RefVisitor<K> {
+        type Value = Ref<K>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a Ref enum (`Inline` or `Handle`)")
+        }
+
+        fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Ref<K>, A::Error> {
+            match data.variant()? {
+                (VariantTag::Inline, variant) => {
+                    let body: InlineBuf = variant.newtype_variant()?;
+                    K::decode_from_bytes(&body.0)
+                        .map(Ref::Inline)
+                        .ok_or_else(|| {
+                            de::Error::custom("Ref::Inline payload failed Kind::decode_from_bytes")
+                        })
+                }
+                (VariantTag::Handle, variant) => {
+                    variant.struct_variant(HANDLE_FIELDS, HandleVisitor(PhantomData))
+                }
+            }
+        }
+    }
+
+    /// Reads the inline body `InlineBody` wrote — a raw byte buffer.
+    struct InlineBuf(Vec<u8>);
+
+    impl<'de> Deserialize<'de> for InlineBuf {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer
+                .deserialize_byte_buf(InlineBufVisitor)
+                .map(InlineBuf)
+        }
+    }
+
+    struct InlineBufVisitor;
+
+    impl<'de> Visitor<'de> for InlineBufVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("the inline Ref byte buffer")
+        }
+
+        fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Vec<u8>, E> {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Vec<u8>, E> {
+            Ok(value)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                out.push(byte);
+            }
+            Ok(out)
+        }
+    }
+
+    struct HandleVisitor<K>(PhantomData<K>);
+
+    impl<'de, K> Visitor<'de> for HandleVisitor<K> {
+        type Value = Ref<K>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a Ref::Handle with `id` and `kind_id`")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Ref<K>, A::Error> {
+            let id = seq
+                .next_element::<u64>()?
+                .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+            let kind_id = seq
+                .next_element::<u64>()?
+                .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+            Ok(Ref::Handle { id, kind_id })
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Ref<K>, A::Error> {
+            let mut id: Option<u64> = None;
+            let mut kind_id: Option<u64> = None;
+            while let Some(key) = map.next_key::<HandleField>()? {
+                match key {
+                    HandleField::Id => {
+                        if id.is_some() {
+                            return Err(de::Error::duplicate_field("id"));
+                        }
+                        id = Some(map.next_value()?);
+                    }
+                    HandleField::KindId => {
+                        if kind_id.is_some() {
+                            return Err(de::Error::duplicate_field("kind_id"));
+                        }
+                        kind_id = Some(map.next_value()?);
+                    }
+                }
+            }
+            let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
+            let kind_id = kind_id.ok_or_else(|| de::Error::missing_field("kind_id"))?;
+            Ok(Ref::Handle { id, kind_id })
+        }
+    }
+
+    enum HandleField {
+        Id,
+        KindId,
+    }
+
+    impl<'de> Deserialize<'de> for HandleField {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_identifier(HandleFieldVisitor)
+        }
+    }
+
+    struct HandleFieldVisitor;
+
+    impl Visitor<'_> for HandleFieldVisitor {
+        type Value = HandleField;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("`id` or `kind_id`")
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<HandleField, E> {
+            match value {
+                0 => Ok(HandleField::Id),
+                1 => Ok(HandleField::KindId),
+                _ => Err(de::Error::invalid_value(
+                    de::Unexpected::Unsigned(value),
+                    &self,
+                )),
+            }
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<HandleField, E> {
+            match value {
+                "id" => Ok(HandleField::Id),
+                "kind_id" => Ok(HandleField::KindId),
+                _ => Err(de::Error::unknown_field(value, HANDLE_FIELDS)),
+            }
         }
     }
 }
@@ -756,6 +1009,14 @@ mod tests {
     impl Kind for TestPod {
         const NAME: &'static str = "test.pod";
         const ID: KindId = KindId(0xDEAD_BEEF_0000_0001);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            __derive_runtime::decode_cast::<Self>(bytes)
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            __derive_runtime::encode_cast::<Self>(self)
+        }
     }
 
     #[repr(C)]
@@ -777,6 +1038,14 @@ mod tests {
     impl Kind for TestStruct {
         const NAME: &'static str = "test.struct";
         const ID: KindId = KindId(0xDEAD_BEEF_0000_0003);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            __derive_runtime::decode_postcard::<Self>(bytes)
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            __derive_runtime::encode_postcard::<Self>(self)
+        }
     }
 
     #[test]
@@ -932,6 +1201,44 @@ mod tests {
     #[test]
     fn ref_is_cast_ineligible() {
         const { assert!(!<Ref<TestStruct> as CastEligible>::ELIGIBLE) };
+    }
+
+    #[test]
+    fn ref_inline_cast_kind_body_is_cast_image() {
+        // ADR-0100: a cast kind's inline body is the raw cast image,
+        // not a varint-postcard image. `TestPod` carries a `u32` field
+        // (`a`), whose cast bytes differ from postcard's varint.
+        let v = TestPod {
+            a: 0x1234_5678,
+            b: 1.5,
+        };
+        let r: Ref<TestPod> = Ref::Inline(v);
+        let bytes =
+            postcard::to_allocvec(&r).expect("test setup: postcard encodes Inline Ref<TestPod>");
+        assert_eq!(bytes[0], 0, "Inline discriminant");
+        assert_eq!(bytes[1], 8, "varint length prefix of the 8-byte cast image");
+        assert_eq!(
+            &bytes[2..],
+            bytemuck::bytes_of(&v),
+            "inline body is the cast image, not a postcard varint image"
+        );
+        let back: Ref<TestPod> =
+            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Inline Ref<TestPod>");
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn ref_handle_cast_kind_roundtrip() {
+        let r: Ref<TestPod> = Ref::Handle {
+            id: 7,
+            kind_id: TestPod::ID.0,
+        };
+        let bytes =
+            postcard::to_allocvec(&r).expect("test setup: postcard encodes Handle Ref<TestPod>");
+        assert_eq!(bytes[0], 1, "Handle discriminant");
+        let back: Ref<TestPod> =
+            postcard::from_bytes(&bytes).expect("test setup: postcard decodes Handle Ref<TestPod>");
+        assert_eq!(back, r);
     }
 
     #[test]

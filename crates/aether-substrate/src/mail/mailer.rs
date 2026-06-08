@@ -428,7 +428,7 @@ impl Mailer {
     /// receive mail.
     pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
-        K: Kind + serde::Serialize,
+        K: Kind,
     {
         match sender.target {
             ReplyTarget::None => false,
@@ -437,18 +437,9 @@ impl Mailer {
                 .as_ref()
                 .is_some_and(|outbound| outbound.send_reply(sender, result)),
             ReplyTarget::Component(mailbox) => {
-                let payload = match postcard::to_allocvec(result) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::error!(
-                            target: "aether_substrate::mailer",
-                            kind = K::NAME,
-                            error = %e,
-                            "reply encode failed",
-                        );
-                        return false;
-                    }
-                };
+                // ADR-0100: encode the reply through the kind's declared
+                // codec (cast or postcard), not a hardcoded postcard path.
+                let payload = result.encode_into_bytes();
                 // ADR-0042: echo the caller's correlation_id onto the
                 // reply envelope so the originating handler can pick
                 // the right reply out of the mpsc by correlation.
@@ -528,21 +519,18 @@ fn route_mail(
                     // The MCP Call path replies via Component (mirrors
                     // the `LogTail`-to-unknown arm below): re-route a
                     // fresh, un-lineaged reply into the target's inbox.
-                    if let Ok(payload) = postcard::to_allocvec(&result) {
-                        let reply_to = ReplyTo::with_correlation(
-                            ReplyTarget::None,
-                            mail.reply_to.correlation_id,
-                        );
-                        route_mail(
-                            Mail::new(target, TraceTailResult::ID, payload, 1)
-                                .with_reply_to(reply_to),
-                            registry,
-                            outbound,
-                            store,
-                            chassis_router,
-                            trace_handle,
-                        );
-                    }
+                    // ADR-0100: encode through the kind's declared codec.
+                    let payload = result.encode_into_bytes();
+                    let reply_to =
+                        ReplyTo::with_correlation(ReplyTarget::None, mail.reply_to.correlation_id);
+                    route_mail(
+                        Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to),
+                        registry,
+                        outbound,
+                        store,
+                        chassis_router,
+                        trace_handle,
+                    );
                 }
                 ReplyTarget::None => {}
             }
@@ -768,9 +756,9 @@ fn route_mail(
                 let err = aether_kinds::LogTailResult::Err {
                     error: format!("mailbox {recipient} not registered on engine"),
                 };
-                if let Ok(payload) = postcard::to_allocvec(&err)
-                    && let ReplyTarget::Component(target) = mail.reply_to.target
-                {
+                // ADR-0100: encode through the kind's declared codec.
+                let payload = err.encode_into_bytes();
+                if let ReplyTarget::Component(target) = mail.reply_to.target {
                     let reply_to =
                         ReplyTo::with_correlation(ReplyTarget::None, mail.reply_to.correlation_id);
                     route_mail(
@@ -1048,6 +1036,14 @@ mod tests {
         const NAME: &'static str = "test.mailer_note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
         const ID: KindId = KindId(0xDEAD_BEEF_0003_0001);
+
+        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+            postcard::from_bytes(bytes).ok()
+        }
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            postcard::to_allocvec(self).expect("postcard encode to Vec is infallible")
+        }
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -1144,6 +1140,53 @@ mod tests {
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), Arc::clone(&store)));
         (registry, mailer, store)
+    }
+
+    /// Cast-shaped reply kind with a non-`f32` field — its
+    /// `encode_into_bytes` is the raw cast image.
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+    struct CastReply {
+        code: u32,
+        flag: u16,
+        _pad: u16,
+    }
+    impl Kind for CastReply {
+        const NAME: &'static str = "test.mailer_cast_reply";
+        const ID: KindId = KindId(0xDEAD_BEEF_0003_0003);
+
+        fn encode_into_bytes(&self) -> Vec<u8> {
+            bytemuck::bytes_of(self).to_vec()
+        }
+    }
+
+    /// ADR-0100: `Mailer::send_reply` to a `Component` target encodes the
+    /// reply through `Kind::encode_into_bytes`. A cast reply kind reaches
+    /// the sink as its raw cast image, not a postcard varint image — and
+    /// a `Pod`-without-`Serialize` kind is repliable at all.
+    #[test]
+    fn send_reply_cast_kind_delivers_cast_image() {
+        let (registry, mailer, _store) = make_mailer();
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
+
+        let reply = CastReply {
+            code: 0x1122_3344,
+            flag: 0xABCD,
+            _pad: 0,
+        };
+        let sent = mailer.send_reply(
+            ReplyTo::with_correlation(ReplyTarget::Component(sink_id), 1),
+            &reply,
+        );
+        assert!(sent, "Component reply target routes");
+
+        let captured = sink.captured.read().unwrap().clone();
+        assert_eq!(
+            captured,
+            vec![bytemuck::bytes_of(&reply).to_vec()],
+            "reply payload is the cast image"
+        );
     }
 
     /// Mail to a sink whose kind has no `Ref` fields takes the
