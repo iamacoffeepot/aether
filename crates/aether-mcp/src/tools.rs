@@ -669,7 +669,7 @@ impl Mcp {
                        Sends aether.log.tail to the named mailbox and decodes aether.log.tail_result. \
                        Every actor — native or wasm trampoline — serves this kind via the substrate's \
                        framework dispatch arm, so any mailbox is queryable (e.g. \"aether.audio\", \
-                       \"aether.component/aether.component.trampoline:camera\"). `max` defaults to 100 and clamps to 1000; \
+                       \"aether.component/aether.embedded:camera\"). `max` defaults to 100 and clamps to 1000; \
                        pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
                        `since` (the prior call's `next_since`) to walk past already-seen entries without \
                        double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
@@ -1012,7 +1012,7 @@ impl Mcp {
                 engine: Some(engine),
                 // ADR-0099 §4: resolve the recipient by the parse → fold,
                 // so a `/`-rendered hosted / nested actor name
-                // (`aether.component/aether.component/aether.component.trampoline:camera`)
+                // (`aether.component/aether.component/aether.embedded:camera`)
                 // reaches its lineage-folded id. A root-cap name is a
                 // single segment and folds to the same id `hash(name)`
                 // gives.
@@ -2722,7 +2722,7 @@ mod tests {
         let envelope = mcp
             .build_mail_envelope(MailSpec {
                 engine_id: engine.0.to_string(),
-                recipient_name: "aether.component.trampoline:test".to_owned(),
+                recipient_name: "aether.embedded:test".to_owned(),
                 kind_name: component_kind.name.clone(),
                 params: Some(serde_json::Value::String("hello".to_owned())),
             })

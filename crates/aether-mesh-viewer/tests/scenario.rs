@@ -44,7 +44,7 @@ const COMPONENT_NAME: &str = "mv";
 /// Full mailbox address the substrate registers for the loaded
 /// component (issue 634 Phase 4 PR 1). Mail to the bare
 /// `COMPONENT_NAME` warn-drops as unknown — agents address the
-/// trampoline by its full `aether.component.trampoline:NAME` form,
+/// trampoline by its full `aether.embedded:NAME` form,
 /// which is what `LoadResult.name` returns. Built from
 /// The `/`-rendered lineage a loaded component registers at (ADR-0099
 /// §4): the component host `aether.component` `/`-joined to the

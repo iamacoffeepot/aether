@@ -1,6 +1,6 @@
 //! `WasmTrampoline` — a `NativeActor` that delegates to a wasm
 //! `Component`. Each loaded wasm component is one trampoline instance
-//! addressed at `aether.component.trampoline:NAME` (issue 634 Phase 4
+//! addressed at `aether.embedded:NAME` (issue 634 Phase 4
 //! PR 1).
 //!
 //! ## Where this lives (issue 654)
@@ -183,17 +183,19 @@ mod native {
     #[actor]
     impl NativeActor for WasmTrampoline {
         type Config = WasmTrampolineConfig;
-        /// Sole declaration of the trampoline namespace (issue 654).
-        /// Wasm-component senders read this via
-        /// `WasmTrampoline::NAMESPACE` (reachable on every target
-        /// because the bridge stub emits the always-on `Actor` impl
-        /// at file root). Must stay a string literal — the `#[actor]`
-        /// macro feeds it to `concat!`. ADR-0097: the substrate's
-        /// `TRAMPOLINE_NAMESPACE` mirrors this literal (its `spawn_sibling`
-        /// host fn predicts the spawned mailbox id and can't name this
-        /// capabilities-layer type); the
+        /// The embedding-host class namespace (ADR-0099 §5/§6),
+        /// **forward-fed** from [`EmbeddedHost`](aether_actor::EmbeddedHost)
+        /// — the sole owner of the `"aether.embedded"` literal. The
+        /// trampoline references the class const rather than re-declaring
+        /// the name, so an embeddable actor's id depends on what the code
+        /// is, not how it is hosted, and the namespace is written only on
+        /// its owner. Reachable on every target because the bridge stub
+        /// emits the always-on `Actor` impl at file root. ADR-0097: the
+        /// substrate's `TRAMPOLINE_NAMESPACE` forward-feeds the same const,
+        /// collapsing the former two-literal mirror into one source; the
         /// `trampoline_namespace_matches_substrate` test guards the match.
-        const NAMESPACE: &'static str = "aether.component.trampoline";
+        const NAMESPACE: &'static str =
+            <aether_actor::EmbeddedHost as aether_actor::Actor>::NAMESPACE;
 
         fn init(
             config: WasmTrampolineConfig,
@@ -283,7 +285,7 @@ mod native {
 
         /// Drop the **wasm component**. Runs the guest's `on_drop`
         /// hook, then drops the `Component`. The trampoline itself
-        /// stays alive — the mailbox `aether.component.trampoline:NAME`
+        /// stays alive — the mailbox `aether.embedded:NAME`
         /// remains addressable and reusable: agents can refill it via
         /// `ReplaceComponent` without minting a new name. To kill
         /// the trampoline (tombstone the subname), terminate the
@@ -591,20 +593,25 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use aether_actor::Actor;
+        use aether_actor::{Actor, EmbeddedHost};
         use aether_substrate::actor::wasm::component::TRAMPOLINE_NAMESPACE;
 
-        /// ADR-0097: the substrate's `TRAMPOLINE_NAMESPACE` — used by the
-        /// `spawn_sibling` host fn to predict a spawned sibling's mailbox
-        /// id — must equal the literal `WasmTrampoline::NAMESPACE` (issue
-        /// 654). The `#[actor]` macro forces the latter to be a literal,
-        /// so they can't share one const; this guards the mirror.
+        /// ADR-0099 §5/§6: both `WasmTrampoline::NAMESPACE` (capabilities)
+        /// and the substrate's `TRAMPOLINE_NAMESPACE` forward-feed the
+        /// embedding-host class const `EmbeddedHost::NAMESPACE` — the sole
+        /// owner of the `"aether.embedded"` literal, which sits below both
+        /// crates. The former two-literal mirror is now one source; this
+        /// guards that the forward-feed stays wired, so an embedded
+        /// component registers under and resolves to the same class
+        /// namespace on both layers.
         #[test]
         fn trampoline_namespace_matches_substrate() {
             assert_eq!(
                 <super::WasmTrampoline as Actor>::NAMESPACE,
-                TRAMPOLINE_NAMESPACE,
+                EmbeddedHost::NAMESPACE,
             );
+            assert_eq!(TRAMPOLINE_NAMESPACE, EmbeddedHost::NAMESPACE);
+            assert_eq!(EmbeddedHost::NAMESPACE, "aether.embedded");
         }
     }
 }

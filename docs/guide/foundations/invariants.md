@@ -123,7 +123,7 @@ actor named — the worst diagnostic shape the runtime offers. Full treatment in
 `"player"`) or a kind name used as a recipient (`aether.audio.note_on` as an
 *address*) matches no registered mailbox and is dropped with a warning, not an
 error. Use the full address: `aether.<name>` for chassis mailboxes, the
-`LoadResult.name` (`aether.component/aether.component.trampoline:NAME`) a loaded component hands
+`LoadResult.name` (`aether.component/aether.embedded:NAME`) a loaded component hands
 back. *Tell:* mail seems to vanish; nothing handles it. Check the address first.
 
 **Don't encode cross-actor sequence by send order.** Per-recipient FIFO is the

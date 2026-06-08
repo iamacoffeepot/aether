@@ -237,7 +237,7 @@ fn resolve_crash_dir(timestamp_unix_ms: u64) -> Option<PathBuf> {
 /// survives as a filename component. Thread names in aether tend to
 /// look like `aether-worker-2` (pool) or `aether.audio` (per-actor
 /// Thread scheduling); only `:` shows up via the trampoline format
-/// `aether.component.trampoline:NAME` and the dispatcher trims it
+/// `aether.embedded:NAME` and the dispatcher trims it
 /// before naming the thread anyway. Keep the routine defensive for
 /// future scheduler shapes.
 fn sanitize_filename(name: &str) -> String {
@@ -570,13 +570,13 @@ mod tests {
 
     /// `sanitize_filename` rewrites `/`, `\`, `:`, and NUL to `-`,
     /// leaves other characters alone. The trampoline-style
-    /// `aether.component.trampoline:NAME` produces a `:`-containing
+    /// `aether.embedded:NAME` produces a `:`-containing
     /// thread name today; the sanitiser keeps the file shape sane.
     #[test]
     fn sanitize_filename_rewrites_path_chars() {
         assert_eq!(
-            sanitize_filename("aether.component.trampoline:camera"),
-            "aether.component.trampoline-camera",
+            sanitize_filename("aether.embedded:camera"),
+            "aether.embedded-camera",
         );
         assert_eq!(sanitize_filename("a/b\\c"), "a-b-c");
         assert_eq!(sanitize_filename("aether.audio"), "aether.audio");

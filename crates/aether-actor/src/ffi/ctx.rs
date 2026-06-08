@@ -204,7 +204,7 @@ impl FfiCtx<'_> {
     /// and encodes `A::Config`, both at compile time. Returns the new
     /// instance's [`MailboxId`] synchronously — it is `hash(name)`
     /// (ADR-0029) — and the instance becomes addressable at
-    /// `aether.component.trampoline:<name>`.
+    /// `aether.embedded:<name>`.
     ///
     /// Only synchronous subname validation can `Err` here; a spawn-time
     /// failure (a retired / in-use subname, or the sibling's `init`

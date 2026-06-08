@@ -66,8 +66,8 @@ pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, R
 pub use actor::sender::{MailCtx, Sender};
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Singleton, Subname,
-    validate_namespace_segment,
+    Actor, EmbeddedHost, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError,
+    Singleton, Subname, validate_namespace_segment,
 };
 pub use local::Local;
 // Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
@@ -154,7 +154,7 @@ pub use aether_data::{
 // derives the explicit author-side surface — `#[bridge]` no longer
 // auto-emits either.
 #[doc(inline)]
-pub use aether_data::{Instanced, Singleton};
+pub use aether_data::{Embeddable, Instanced, Singleton};
 
 /// Wrap one-or-more items in `#[cfg(not(target_arch = "wasm32"))]`.
 /// Issue 552 stage 4's wasm-header-only build of `aether-capabilities`

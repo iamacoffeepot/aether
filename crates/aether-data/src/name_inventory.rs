@@ -53,6 +53,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 
@@ -110,7 +111,7 @@ pub enum ParamKind {
         domain: &'static [u8],
     },
     /// Instances are minted at runtime from an unbounded parameter
-    /// (`aether-instanced-{full_name}`, `aether.component.trampoline:{name}`).
+    /// (`aether-instanced-{full_name}`, `aether.embedded:{name}`).
     /// The template declares the family's existence + shape; individual
     /// instances reverse via the runtime registry, not this map.
     Dynamic,
@@ -128,7 +129,7 @@ pub enum ParamKind {
 /// = one mailbox per loaded component" instead of an opaque `Dynamic`
 /// family. Both axes are stated explicitly on every template — the same
 /// shape may pair with different cardinalities (every instanced actor is
-/// `ParamKind::Dynamic`, but `aether.component.trampoline` is
+/// `ParamKind::Dynamic`, but `aether.embedded` is
 /// `OnePer("component")` while `aether-instanced-{full_name}` is
 /// `Unbounded`).
 #[derive(Clone, Copy)]
@@ -152,15 +153,26 @@ pub enum Cardinality {
 }
 
 /// A name template for an instanced family, collected at link time
-/// (ADR-0088 §4). The `template` carries one `{…}` hole; [`ParamKind`]
-/// says how it is filled (the *shape* axis) and [`Cardinality`] says how
-/// many instances exist (the *cardinality* axis). Owns nothing but
-/// `'static` data so it is const-constructible from `inventory::submit!`.
+/// (ADR-0088 §4). The full pattern is `prefix ++ template` and carries one
+/// `{…}` hole; [`ParamKind`] says how it is filled (the *shape* axis) and
+/// [`Cardinality`] says how many instances exist (the *cardinality* axis).
+/// Owns nothing but `'static` data so it is const-constructible from
+/// `inventory::submit!`.
 pub struct TemplateEntry {
     /// Byte-domain prefix the instantiated names are hashed under
     /// (e.g. [`crate::THREAD_DOMAIN`] for thread-name families).
     pub domain: &'static [u8],
-    /// Pattern with one `{…}` hole, e.g. `"aether-worker-{N}"`.
+    /// A const string prepended to [`template`](Self::template) to form
+    /// the full pattern. Empty (`""`) for a family whose pattern is a
+    /// single literal (`"aether-worker-{N}"`). For an instanced-actor
+    /// family it is the actor's `NAMESPACE`, with `template` the structural
+    /// `":{subname}"` suffix — split so the namespace can be a **const
+    /// path** (a forward-fed `EmbeddedHost::NAMESPACE`, ADR-0099 §5/§6)
+    /// rather than a macro-time literal `concat!` would require.
+    pub prefix: &'static str,
+    /// The hole-bearing tail of the pattern, e.g. `"aether-worker-{N}"`
+    /// (empty prefix) or `":{subname}"` (namespace prefix). Joined to
+    /// [`prefix`](Self::prefix) at the cold read sites.
     pub template: &'static str,
     /// How the hole is filled — the shape axis. Drives
     /// [`build_static_reverse_map`].
@@ -168,6 +180,24 @@ pub struct TemplateEntry {
     /// How many instances the family can have — the cardinality axis.
     /// Manifest metadata only; not read by the reverse-map builder.
     pub cardinality: Cardinality,
+}
+
+impl TemplateEntry {
+    /// The full `prefix ++ template` pattern. Cold path — the reverse-map
+    /// builder and the manifest serializer call it, never the dispatch hot
+    /// path. Borrows `template` directly when `prefix` is empty (the common
+    /// hand-written case) to avoid an allocation.
+    #[must_use]
+    pub fn pattern(&self) -> Cow<'static, str> {
+        if self.prefix.is_empty() {
+            Cow::Borrowed(self.template)
+        } else {
+            let mut full = String::with_capacity(self.prefix.len() + self.template.len());
+            full.push_str(self.prefix);
+            full.push_str(self.template);
+            Cow::Owned(full)
+        }
+    }
 }
 
 inventory::collect!(TemplateEntry);
@@ -273,11 +303,15 @@ pub fn build_static_reverse_map() -> BTreeMap<u64, String> {
     // 4 + 5. Templates: enumerate Bounded / Declared, prehash each
     //        instantiation. Dynamic templates declare shape only.
     for tmpl in template_entries() {
+        // The full pattern is `prefix ++ template` (the prefix is empty for
+        // the enumerable families and non-empty only for instanced-actor
+        // families, which are `Dynamic` and contribute nothing here).
+        let pattern = tmpl.pattern();
         match tmpl.param {
             ParamKind::Bounded { lo, hi } => {
                 for n in lo..=hi {
                     let value = n.to_string();
-                    if let Some(name) = fill_template(tmpl.template, &value)
+                    if let Some(name) = fill_template(&pattern, &value)
                         && let Some(id) = id_for_name(tmpl.domain, &name)
                     {
                         map.insert(id, name);
@@ -289,7 +323,7 @@ pub fn build_static_reverse_map() -> BTreeMap<u64, String> {
                     if entry.domain != domain {
                         continue;
                     }
-                    if let Some(name) = fill_template(tmpl.template, entry.name)
+                    if let Some(name) = fill_template(&pattern, entry.name)
                         && let Some(id) = id_for_name(tmpl.domain, &name)
                     {
                         map.insert(id, name);
@@ -320,6 +354,7 @@ mod tests {
     inventory::submit! {
         TemplateEntry {
             domain: THREAD_DOMAIN,
+            prefix: "",
             template: "aether-test-worker-{N}",
             param: ParamKind::Bounded { lo: 0, hi: 3 },
             cardinality: Cardinality::Bounded(4),
@@ -328,10 +363,42 @@ mod tests {
     inventory::submit! {
         TemplateEntry {
             domain: THREAD_DOMAIN,
+            prefix: "",
             template: "aether-test-root-{NAMESPACE}",
             param: ParamKind::Declared { domain: MAILBOX_DOMAIN },
             cardinality: Cardinality::OnePer("mailbox"),
         }
+    }
+
+    #[test]
+    fn prefixed_template_joins_prefix_and_suffix() {
+        // The instanced-actor split (ADR-0099 §5/§6): a (possibly forward-fed,
+        // const-path) namespace as `prefix`, the structural `:{subname}` as
+        // `template`. `pattern()` joins them and `fill_template` substitutes
+        // through the joined form.
+        let entry = TemplateEntry {
+            domain: MAILBOX_DOMAIN,
+            prefix: "aether.embedded",
+            template: ":{subname}",
+            param: ParamKind::Dynamic,
+            cardinality: Cardinality::OnePer("component"),
+        };
+        assert_eq!(entry.pattern(), "aether.embedded:{subname}");
+        assert_eq!(
+            fill_template(&entry.pattern(), "camera").as_deref(),
+            Some("aether.embedded:camera"),
+        );
+        // An empty prefix borrows the template unchanged (the hand-written,
+        // single-literal case) — no allocation.
+        let lit = TemplateEntry {
+            domain: THREAD_DOMAIN,
+            prefix: "",
+            template: "aether-worker-{N}",
+            param: ParamKind::Bounded { lo: 0, hi: 1 },
+            cardinality: Cardinality::Bounded(2),
+        };
+        assert!(matches!(lit.pattern(), Cow::Borrowed(_)));
+        assert_eq!(lit.pattern(), "aether-worker-{N}");
     }
 
     #[test]
@@ -341,8 +408,8 @@ mod tests {
             Some("aether-worker-7")
         );
         assert_eq!(
-            fill_template("aether.component.trampoline:{name}", "cam").as_deref(),
-            Some("aether.component.trampoline:cam")
+            fill_template("aether.embedded:{name}", "cam").as_deref(),
+            Some("aether.embedded:cam")
         );
         assert_eq!(fill_template("no-hole", "x"), None);
     }
