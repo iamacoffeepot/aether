@@ -78,6 +78,7 @@ const WORKER_TEMPLATE_HI: u64 = 255;
 inventory::submit! {
     TemplateEntry {
         domain: THREAD_DOMAIN,
+        prefix: "",
         template: "aether-worker-{N}",
         param: ParamKind::Bounded { lo: 0, hi: WORKER_TEMPLATE_HI },
         cardinality: Cardinality::Bounded(WORKER_TEMPLATE_HI + 1),
@@ -86,6 +87,7 @@ inventory::submit! {
 inventory::submit! {
     TemplateEntry {
         domain: THREAD_DOMAIN,
+        prefix: "",
         template: "aether-root-{NAMESPACE}",
         param: ParamKind::Declared { domain: MAILBOX_DOMAIN },
         cardinality: Cardinality::OnePer("mailbox"),
@@ -94,6 +96,7 @@ inventory::submit! {
 inventory::submit! {
     TemplateEntry {
         domain: THREAD_DOMAIN,
+        prefix: "",
         template: "aether-instanced-{full_name}",
         param: ParamKind::Dynamic,
         cardinality: Cardinality::Unbounded,

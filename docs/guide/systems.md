@@ -19,7 +19,7 @@ names the **mailbox**; `kind_name` names the **payload shape**. They route
 independently even when they share a prefix. Chassis-owned mailboxes live under
 `aether.<name>` (`aether.render`, `aether.audio`, `aether.fs`, `aether.input`,
 `aether.window`, `aether.component`, `aether.handle`). A loaded wasm component
-registers at `aether.component/aether.component.trampoline:NAME` — use the full address that
+registers at `aether.component/aether.embedded:NAME` — use the full address that
 `LoadResult.name` hands back. **Bare names** (`"camera"`, `"player"`) are not
 registered and warn-drop.
 

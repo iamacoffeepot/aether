@@ -6,7 +6,7 @@
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
 //! Each loaded wasm component runs as an `aether_capabilities::trampoline::WasmTrampoline`
-//! — a `NativeActor` instanced under `aether.component.trampoline:NAME`
+//! — a `NativeActor` instanced under `aether.embedded:NAME`
 //! that delegates incoming mail to the wasm guest via `#[fallback]`
 //! (issue 634 Phase 4; trampoline moved to capabilities by issue 654
 //! so its `Actor::NAMESPACE` is the single cap-owned declaration of

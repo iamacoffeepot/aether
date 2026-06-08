@@ -81,7 +81,7 @@ mailbox:
 `LoadResult::Ok` carries the assigned `mailbox_id`, the **resolved name** (so a
 caller that omitted `name` learns the substrate-defaulted one), and the parsed
 `ComponentCapabilities` (handlers, fallback, doc, config) read from the manifest.
-A loaded component registers at **`aether.component/aether.component.trampoline:NAME`** — that full
+A loaded component registers at **`aether.component/aether.embedded:NAME`** — that full
 string is the address you send subsequent mail to. Bare names (`"player"`) are
 *not* registered and warn-drop; always use the name from `LoadResult`.
 
@@ -90,7 +90,7 @@ instantiate: `aether.component.load` takes an optional **export selector** — t
 target type's `NAMESPACE` — and stands up that type, defaulting to the entry type
 when omitted. The selected type's namespace also becomes the default trampoline
 name, so loading the `Panel` export with `export: "ui.panel"` registers it at
-`aether.component/aether.component.trampoline:ui.panel` and the `LoadResult` reports that type's
+`aether.component/aether.embedded:ui.panel` and the `LoadResult` reports that type's
 capabilities. A selector naming a type the module doesn't export is a clean load
 error. A single-actor module has only the entry type, so an omitted selector is the
 whole story there.
@@ -131,7 +131,7 @@ fn on_open_panel(&mut self, ctx: &mut FfiCtx<'_>, _: OpenPanel) {
 `Subname::Counter` has the host number the instance — `ui.panel.0`, `.1`, … — for
 when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")` gives
 it a stable name you address by. Either way the new instance lives at
-`aether.component/aether.component.trampoline:<name>` like any loaded component, and its replies route
+`aether.component/aether.embedded:<name>` like any loaded component, and its replies route
 back to the spawner. Spawn stays within the module the instance runs from; a
 different binary comes in through `load_component`, which carries its own code and
 kind vocabulary. This is what lets a wasm crate be a *library* of actors: a UI root

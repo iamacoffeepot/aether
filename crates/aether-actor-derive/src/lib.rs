@@ -1185,7 +1185,12 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
             ::aether_data::name_inventory::inventory::submit! {
                 ::aether_data::name_inventory::TemplateEntry {
                     domain: ::aether_data::MAILBOX_DOMAIN,
-                    template: concat!(#namespace_expr, ":{subname}"),
+                    // Split the namespace (prefix) from the structural
+                    // `:{subname}` suffix so a forward-fed const NAMESPACE
+                    // (e.g. `EmbeddedHost::NAMESPACE`, ADR-0099 §5/§6) works —
+                    // `concat!` would reject a non-literal namespace.
+                    prefix: #namespace_expr,
+                    template: ":{subname}",
                     param: ::aether_data::name_inventory::ParamKind::Dynamic,
                     cardinality: #instanced_cardinality,
                 }
@@ -1383,6 +1388,52 @@ pub fn derive_instanced(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     quote! {
         impl #impl_generics ::aether_actor::Instanced for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
+/// `#[derive(Embeddable)]` — marks an **embeddable** actor: an FFI/wasm
+/// component reached by peers as `ctx.actor::<T>()`. Emits the `Singleton`
+/// marker with a `resolve` override that **delegates to the embedding-host
+/// class** (ADR-0099 §5/§6) instead of the depth-1 default:
+///
+/// ```ignore
+/// impl Singleton for T {
+///     fn resolve(_caller_carry: u64) -> MailboxId {
+///         ::aether_capabilities::resolve_embedded(<T as Actor>::NAMESPACE)
+///     }
+/// }
+/// ```
+///
+/// The override ignores the caller's carry — an embeddable component's
+/// address is absolute, rooted at the component host, not relative to the
+/// caller. It folds the component's own `NAMESPACE` as an instance under
+/// the reserved `aether.embedded` class namespace onto the host cap's
+/// carry, landing on the registered mailbox a bare-`NAMESPACE` hash would
+/// miss (iamacoffeepot/aether#1364).
+///
+/// The macro writes **no namespace literal** — it emits a *call* to
+/// `resolve_embedded`, which reads `aether.embedded` only inside its
+/// owner (`aether_actor::EmbeddedHost`) and the `aether.component` host
+/// carry only from `ComponentHostCapability`. The
+/// only string the author writes is `T`'s own `NAMESPACE` (ADR-0099 §5's
+/// read-from-owner rule). Because the emitted path is
+/// `::aether_capabilities::resolve_embedded`, a peer-addressable
+/// embeddable depends on `aether-capabilities` (as `aether-camera` already
+/// does). Use in place of `#[derive(Singleton)]`, not alongside it.
+#[proc_macro_derive(Embeddable)]
+pub fn derive_embeddable(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {
+            fn resolve(_caller_carry: u64) -> ::aether_data::MailboxId {
+                ::aether_capabilities::resolve_embedded(
+                    <#name #ty_generics as ::aether_actor::Actor>::NAMESPACE,
+                )
+            }
+        }
     }
     .into()
 }

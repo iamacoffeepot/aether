@@ -144,7 +144,10 @@ mod native {
             let templates = template_entries()
                 .map(|entry| TemplateEntryWire {
                     domain: entry.domain.to_vec(),
-                    template: entry.template.into(),
+                    // The wire form carries the full `prefix ++ template`
+                    // pattern; the split is an internal const-construction
+                    // detail (ADR-0099 §5/§6 forward-feed).
+                    template: entry.pattern().into_owned(),
                     param: param_kind_wire(&entry.param),
                     cardinality: cardinality_wire(&entry.cardinality),
                 })
@@ -352,7 +355,7 @@ mod native {
         fn manifest_surfaces_one_per_cardinality_for_trampoline() {
             use crate::trampoline::WasmTrampoline;
             use aether_actor::Actor;
-            assert_eq!(WasmTrampoline::NAMESPACE, "aether.component.trampoline");
+            assert_eq!(WasmTrampoline::NAMESPACE, "aether.embedded");
 
             let mut fix = fixture();
             let mut ctx = session_ctx(&fix.transport);
@@ -363,7 +366,7 @@ mod native {
             let trampoline = result
                 .templates
                 .iter()
-                .find(|t| t.template == "aether.component.trampoline:{subname}")
+                .find(|t| t.template == "aether.embedded:{subname}")
                 .expect("manifest should carry the trampoline instanced-family template");
             // Shape axis unchanged (opaque runtime string); cardinality
             // axis now names the entity each instance tracks.

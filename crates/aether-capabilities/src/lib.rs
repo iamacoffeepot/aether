@@ -88,7 +88,7 @@ pub use audio::AudioConfig;
 // part of the same native-only module.
 #[cfg(not(target_arch = "wasm32"))]
 pub use anthropic::{AnthropicCapability, AnthropicConfig};
-pub use component::ComponentHostCapability;
+pub use component::{ComponentHostCapability, resolve_embedded};
 pub use dag::DagCapability;
 // ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
 // provider caps (issue 1014 / 1015) embed these.

@@ -164,22 +164,23 @@ pub struct ComponentCtx {
 }
 
 /// The mailbox-name prefix every wasm component (loaded or spawned)
-/// registers under: `aether.component.trampoline:<name>`. The
-/// `spawn_sibling` host fn (ADR-0097) needs this string to predict a
-/// spawned sibling's `MailboxId = hash("{prefix}:{subname}")`
-/// synchronously, and substrate can't name the capabilities-layer
-/// `WasmTrampoline` that owns the canonical declaration
-/// (`WasmTrampoline::NAMESPACE`, issue 654). The `#[actor]` macro
-/// requires that declaration to be a literal, so the two can't share a
-/// const; capabilities' `trampoline_namespace_matches_substrate` test
-/// asserts this mirror stays in lockstep.
-pub const TRAMPOLINE_NAMESPACE: &str = "aether.component.trampoline";
+/// registers under: `aether.embedded:<name>` — the embedding-host class
+/// namespace (ADR-0099 §5/§6). The `spawn_sibling` host fn (ADR-0097)
+/// needs this string to predict a spawned sibling's
+/// `MailboxId = fold(host_carry, hash("{prefix}:{subname}"))`
+/// synchronously. It **forward-feeds** the sole owner of the literal,
+/// [`EmbeddedHost`](aether_actor::EmbeddedHost), which sits below this
+/// crate, so substrate and the capabilities-layer `WasmTrampoline` now
+/// reference one const instead of mirroring two literals; capabilities'
+/// `trampoline_namespace_matches_substrate` test guards the match.
+pub const TRAMPOLINE_NAMESPACE: &str =
+    <aether_actor::EmbeddedHost as aether_actor::Actor>::NAMESPACE;
 
 /// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
 /// onto [`ComponentCtx`] for the trampoline to drain and execute.
 /// `tag` selects the exported type at `init_typed_p32`; `subname` is the
 /// full trampoline subname (the spawned instance addresses as
-/// `aether.component.trampoline:<subname>`); `config` is the encoded
+/// `aether.embedded:<subname>`); `config` is the encoded
 /// `Config` kind handed to the new instance.
 #[derive(Debug, Clone)]
 pub struct PendingSpawn {

@@ -90,7 +90,8 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// SDK and the derive share a home.
 #[cfg(feature = "derive")]
 pub use aether_actor_derive::{
-    Instanced, Kind, Schema, Singleton, actor, bridge, capability, fallback, handler, local,
+    Embeddable, Instanced, Kind, Schema, Singleton, actor, bridge, capability, fallback, handler,
+    local,
 };
 
 /// Re-exported `#[transform]` attribute macro from `aether-data-derive`

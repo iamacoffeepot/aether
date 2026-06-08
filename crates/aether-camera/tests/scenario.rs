@@ -40,7 +40,7 @@ use std::fs;
 use std::path::Path;
 
 /// Component name passed to `LoadComponent`. The full mailbox address
-/// the substrate registers is `aether.component.trampoline:cam`
+/// the substrate registers is `aether.embedded:cam`
 /// (issue 634 Phase 4 PR 1) — bare `"cam"` is not addressable. Camera
 /// tests don't currently send any mail to the loaded trampoline by
 /// address, so only the load-time name matters here.
@@ -168,7 +168,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
 
     // Drop the only camera the component was bootstrapped with (agents
     // address loaded components at the trampoline's full name,
-    // `aether.component.trampoline:NAME`, per issue 634 Phase 4), then
+    // `aether.embedded:NAME`, per issue 634 Phase 4), then
     // advance and capture.
     //
     // Survivability: the chassis still renders its clear pass after

@@ -2,7 +2,7 @@
 //! from `aether.control`). The wasm-component lifecycle endpoint:
 //! receives [`LoadComponent`] mail and spawns a per-component
 //! [`WasmTrampoline`] (issue 634 Phase 4 PR 1) addressed at
-//! `aether.component.trampoline:NAME`. [`DropComponent`] and
+//! `aether.embedded:NAME`. [`DropComponent`] and
 //! [`ReplaceComponent`] mail flow through the cap as well — it
 //! forwards each to the addressed trampoline preserving the
 //! original `reply_to`, so the trampoline replies directly to the
@@ -92,6 +92,30 @@ impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> 
     fn loaded<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
     }
+}
+
+/// Resolve the [`MailboxId`](aether_data::MailboxId) of the embeddable
+/// component loaded under `name`, by delegating to its embedding-host
+/// **class** (ADR-0099 §5/§6). Folds the class instance node
+/// `aether.embedded:<name>` ([`EmbeddedHost`](aether_actor::EmbeddedHost))
+/// onto the `aether.component` host cap's carry.
+///
+/// This is the composition behind every embeddable actor's
+/// `Singleton::resolve` override (the `#[derive(Embeddable)]` surface):
+/// it names neither the `aether.component` host nor `aether.embedded`
+/// itself — each namespace is read only from its owner
+/// ([`ComponentHostCapability`] supplies the host carry via its own
+/// `resolve`, [`EmbeddedHost`](aether_actor::EmbeddedHost) supplies the
+/// class node). Equal by construction to the by-name verb
+/// [`loaded::<R>(name)`](ComponentHostFfiExt::loaded), which folds the same
+/// node onto the same carry, so bare-type and by-name addressing agree.
+/// Available on every target — a wasm peer resolves an embeddable the same
+/// way a native one does, no transport branch (ADR-0029 client-side
+/// no-lookup).
+#[must_use]
+pub fn resolve_embedded(name: &str) -> aether_data::MailboxId {
+    use aether_actor::{EmbeddedHost, Instanced, Singleton};
+    <EmbeddedHost as Instanced>::resolve(<ComponentHostCapability as Singleton>::resolve(0).0, name)
 }
 
 #[aether_actor::bridge(singleton)]
@@ -185,7 +209,7 @@ mod native {
         /// registers the kinds the wasm declared in its `aether.kinds`
         /// section, picks a final name (caller value > wasm's
         /// `aether.namespace` > `component_N`), spawns a
-        /// [`WasmTrampoline`] under `aether.component.trampoline:NAME`,
+        /// [`WasmTrampoline`] under `aether.embedded:NAME`,
         /// and replies `LoadResult::Ok { mailbox_id, name,
         /// capabilities }` where `name` is the full trampoline
         /// address — agents send subsequent mail to that name.
@@ -332,7 +356,7 @@ mod native {
 
             // 5. Spawn the trampoline. The framework spawn machinery
             // claims the namespace, registers the closure-bound
-            // mailbox at `aether.component.trampoline:NAME`, runs
+            // mailbox at `aether.embedded:NAME`, runs
             // `WasmTrampoline::init` (which instantiates `Component`
             // against the trampoline's binding), and starts the
             // dispatcher thread. The returned id is the trampoline's
@@ -401,7 +425,7 @@ mod native {
             // post-load surface. Mailboxes ship symmetrically with
             // kinds (issue iamacoffeepot/aether#730) — every load adds
             // exactly one trampoline mailbox at
-            // `aether.component.trampoline:NAME`, and the snapshot
+            // `aether.embedded:NAME`, and the snapshot
             // gives the hub the freshly-published name + category.
             self.outbound
                 .egress_kinds_changed(self.registry.list_kind_descriptors());
@@ -412,7 +436,7 @@ mod native {
                 mailbox_id,
                 // ADR-0099 §3/§4: report the name the spawn machinery
                 // actually registered — the `/`-rendered lineage
-                // (`aether.component/aether.component.trampoline:NAME`) —
+                // (`aether.component/aether.embedded:NAME`) —
                 // read back from the registry so `LoadResult.name` can
                 // never disagree with the live entry. The id is the
                 // lineage fold, not `hash(name)`.
@@ -463,7 +487,7 @@ mod tests {
     use crate::trampoline::WasmTrampoline;
 
     /// A loaded component's id is the ADR-0099 §3 lineage fold over
-    /// `[aether.component, aether.component.trampoline:<name>]`. `loaded`
+    /// `[aether.component, aether.embedded:<name>]`. `loaded`
     /// composes exactly that — folding the trampoline node's `ActorId`
     /// onto the component host's carry — so it agrees with the id the
     /// spawn machinery registers it under. It must **not** resolve the

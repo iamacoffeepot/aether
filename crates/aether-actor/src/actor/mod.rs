@@ -25,7 +25,7 @@ pub mod ctx;
 pub mod sender;
 pub mod slot;
 
-use aether_data::{ActorId, Kind, MailboxId, Tag, with_tag};
+use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 /// The symmetric trait every actor implements: the recipient name it
 /// claims. Lifecycle methods (`boot` for native chassis caps, `init`
@@ -47,7 +47,7 @@ pub trait Actor: Sized + Send + 'static {
     /// hosted inside a parent the full mailbox name is the path
     /// `"{scope}:{NAMESPACE}"`, so `NAMESPACE` is just the segment: a
     /// wasm component declaring `NAMESPACE = "camera"` and loaded at its
-    /// default name registers at `aether.component.trampoline:camera`
+    /// default name registers at `aether.embedded:camera`
     /// under its component-host, not at the bare `"camera"`.
     const NAMESPACE: &'static str;
 }
@@ -89,10 +89,10 @@ pub trait Singleton: Actor {
     ///
     /// A non-root actor overrides this. A direct child folds the caller's
     /// carry — `with_tag(Mailbox, fold_lineage(caller_carry, ActorId::singleton(NAMESPACE)))`
-    /// — and a loaded component folds its harness lineage
-    /// (iamacoffeepot/aether#1432). The override is the only carrier of the
-    /// §2 position fact: a root-pinned actor keeps the default, and nothing
-    /// else about position is held at the type level.
+    /// — and an embeddable component delegates to its embedding-host class
+    /// ([`EmbeddedHost`], iamacoffeepot/aether#1432). The override is the only
+    /// carrier of the §2 position fact: a root-pinned actor keeps the default,
+    /// and nothing else about position is held at the type level.
     #[must_use]
     fn resolve(_caller_carry: u64) -> MailboxId {
         MailboxId(with_tag(
@@ -114,7 +114,52 @@ pub trait Singleton: Actor {
 /// address an instance by name through `ctx.resolve_actor::<R>(subname)`.
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
-pub trait Instanced: Actor {}
+pub trait Instanced: Actor {
+    /// This actor's [`MailboxId`] for the instance named `subname`, as seen
+    /// by a caller whose lineage carry is `caller_carry` (ADR-0099 §5).
+    /// Symmetric to [`Singleton::resolve`]: an instanced node folds its
+    /// `ActorId` — `hash(NAMESPACE:subname)` — onto the caller's carry, so
+    /// the same type resolves to a different mailbox under each parent and
+    /// for each subname.
+    ///
+    /// The embedding-host class [`EmbeddedHost`] is the instanced type
+    /// behind every embeddable actor's resolution: a component folds its
+    /// own `NAMESPACE` as an instance under `aether.embedded` onto the
+    /// component-host cap's carry (the composition that supplies that carry
+    /// lives with the host cap — `aether-capabilities`'s `resolve_embedded`).
+    #[must_use]
+    fn resolve(caller_carry: u64, subname: &str) -> MailboxId {
+        MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(caller_carry, ActorId::instanced(Self::NAMESPACE, subname)),
+        ))
+    }
+}
+
+/// The embedding-host class (ADR-0099 §5/§6): the reserved namespace
+/// `aether.embedded` under which every **embeddable** actor — an FFI/wasm
+/// component — resolves, independent of the concrete host that embeds it
+/// (`WasmTrampoline` today, a dynamic-library host tomorrow). This type is
+/// the sole owner of the `"aether.embedded"` literal; concrete hosts
+/// forward-feed `EmbeddedHost::NAMESPACE` rather than re-declaring it, so an
+/// embeddable actor's id depends on what the code is, not how it is hosted,
+/// and the class namespace is read only here (ADR-0099 §5's read-from-owner
+/// rule).
+///
+/// `EmbeddedHost` is [`Instanced`] — one node per embedded component, keyed
+/// by the component's own `NAMESPACE`. An embeddable actor resolves by
+/// folding its name as an instance under this class onto the component-host
+/// cap's carry; the carry is supplied by the composition co-located with the
+/// host cap (`aether-capabilities`'s `resolve_embedded`), which names neither
+/// the `aether.component` host nor `aether.embedded` itself — each is read
+/// only from its owner.
+pub struct EmbeddedHost;
+
+impl Actor for EmbeddedHost {
+    const NAMESPACE: &'static str = "aether.embedded";
+}
+
+impl Instanced for EmbeddedHost {}
 
 /// How a spawned child's mailbox subname is derived (ADR-0079). The
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
@@ -297,6 +342,62 @@ mod tests {
             Child::resolve(carry),
             mailbox_id_from_name("test.resolve.child"),
             "a folded child id differs from the flat depth-1 hash"
+        );
+    }
+
+    /// ADR-0099 §5 instanced default: an [`Instanced`] type's provided
+    /// `resolve` folds its `ActorId::instanced(NAMESPACE, subname)` onto the
+    /// caller's carry — symmetric to the singleton own-child override, but
+    /// keyed by `subname` so each instance under a parent gets its own id.
+    #[test]
+    fn instanced_resolve_default_folds_carry_and_subname() {
+        struct PerThing;
+        impl Actor for PerThing {
+            const NAMESPACE: &'static str = "test.resolve.per_thing";
+        }
+        impl Instanced for PerThing {}
+
+        let carry = 0x0BAD_F00D_u64;
+        let expected = MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(carry, ActorId::instanced("test.resolve.per_thing", "42")),
+        ));
+        assert_eq!(
+            PerThing::resolve(carry, "42"),
+            expected,
+            "folds carry+subname"
+        );
+        assert_ne!(
+            PerThing::resolve(carry, "42"),
+            PerThing::resolve(carry, "43"),
+            "different subnames resolve to different mailboxes"
+        );
+    }
+
+    /// ADR-0099 §5/§6: the embedding-host class [`EmbeddedHost`] owns the
+    /// reserved `aether.embedded` namespace and resolves an embedded instance
+    /// by folding `aether.embedded:<name>` onto the host cap's carry. This is
+    /// the fold `aether-capabilities`'s `resolve_embedded` composes (with the
+    /// component-host carry supplied there).
+    #[test]
+    fn embedded_host_folds_under_reserved_namespace() {
+        assert_eq!(EmbeddedHost::NAMESPACE, "aether.embedded");
+
+        // Stand in for the `aether.component` host cap's depth-1 carry.
+        let host_carry = mailbox_id_from_name("aether.component").0;
+        let expected = MailboxId(with_tag(
+            Tag::Mailbox,
+            fold_lineage(host_carry, ActorId::instanced("aether.embedded", "camera")),
+        ));
+        assert_eq!(
+            EmbeddedHost::resolve(host_carry, "camera"),
+            expected,
+            "embeddable id is the host-class fold"
+        );
+        assert_ne!(
+            EmbeddedHost::resolve(host_carry, "camera"),
+            mailbox_id_from_name("camera"),
+            "the fold differs from the bare-NAMESPACE hash (the #1364 miss)"
         );
     }
 }

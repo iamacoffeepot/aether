@@ -1557,14 +1557,14 @@ fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
     // categorisation no longer matches.
     //
     // ADR-0099 §4: the name is now the `/`-rendered lineage
-    // (`aether.component/aether.component.trampoline:NAME`, and one more
+    // (`aether.component/aether.embedded:NAME`, and one more
     // `/...trampoline:CHILD` segment per nested sibling spawn), so the
     // trampoline node is the *leaf* segment rather than the whole-string
     // prefix — match on the last `/`-segment.
     } else if name
         .rsplit('/')
         .next()
-        .is_some_and(|leaf| leaf.starts_with("aether.component.trampoline:"))
+        .is_some_and(|leaf| leaf.starts_with("aether.embedded:"))
     {
         Some(MailboxCategory::Trampoline)
     } else if name.starts_with("aether.") {
@@ -2214,7 +2214,7 @@ mod tests {
     fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
         let r = Registry::new();
         r.register_inbox("aether.input", noop_handler());
-        r.register_inbox("aether.component.trampoline:cam", noop_handler());
+        r.register_inbox("aether.embedded:cam", noop_handler());
         r.register_inbox("user_thing", noop_handler());
 
         let snap = r.list_mailbox_descriptors();
@@ -2236,10 +2236,7 @@ mod tests {
         };
         assert_eq!(cat("aether.chassis"), MailboxCategory::ChassisSentinel);
         assert_eq!(cat("aether.input"), MailboxCategory::Actor);
-        assert_eq!(
-            cat("aether.component.trampoline:cam"),
-            MailboxCategory::Trampoline
-        );
+        assert_eq!(cat("aether.embedded:cam"), MailboxCategory::Trampoline);
         // User-space names fall outside any of the recognised
         // categories; the hub's downstream renderer treats them as
         // raw tagged ids without a type prefix.

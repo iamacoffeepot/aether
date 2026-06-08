@@ -184,9 +184,9 @@ pub const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> MailboxId
 /// `ActorId.0`, and because that value is already `Tag::Mailbox`-tagged,
 /// `with_tag(Mailbox, carry) == ActorId`. So every chassis cap keeps the
 /// exact id it has today; only depth-≥2 actors fold. Harness-specific
-/// composition (a loaded component's `[host, trampoline:name]` lineage)
-/// lives where the host / trampoline `NAMESPACE` consts do, not here —
-/// this primitive is name-agnostic.
+/// composition (a loaded component's `[host, aether.embedded:name]`
+/// lineage) lives where the host / embedding-host class `NAMESPACE` consts
+/// do, not here — this primitive is name-agnostic.
 #[must_use]
 pub const fn fold_lineage(parent_carry: u64, child: ActorId) -> u64 {
     fnv1a_64_fold(parent_carry, &child.0.to_le_bytes())
@@ -309,8 +309,8 @@ mod tests {
             mailbox_id_from_name("a:b"),
         );
         assert_eq!(
-            mailbox_id_from_name_pair("aether.component.trampoline", "camera"),
-            mailbox_id_from_name("aether.component.trampoline:camera"),
+            mailbox_id_from_name_pair("aether.embedded", "camera"),
+            mailbox_id_from_name("aether.embedded:camera"),
         );
         // Empty prefix / segment still composes consistently with the
         // joined form (the separator is always present).

@@ -285,7 +285,7 @@ fn multi_actor_unknown_export_errors() {
 /// ADR-0097: a loaded `RootManager` spawns a `Panel` sibling at runtime
 /// via `ctx.spawn_child::<Panel>`. Pinging `RootManager` triggers the
 /// spawn; the spawned `Panel` registers at
-/// `aether.component.trampoline:ui.panel.0` (Counter discriminator), and
+/// `aether.embedded:ui.panel.0` (Counter discriminator), and
 /// pinging *it* makes it broadcast a `TickObserved` to the bench
 /// observer — proving the spawned sibling is addressable and dispatches.
 /// The fire-and-settle send blocks until the whole tree (including the
@@ -328,7 +328,7 @@ fn multi_actor_sibling_spawn() {
     // Panel registers at the `/`-rendered lineage path — the RootManager's
     // name with the sibling's trampoline segment appended — and its id is
     // the lineage fold of that path, not `hash("…trampoline:ui.panel.0")`.
-    let panel_name = format!("{root_name}/aether.component.trampoline:ui.panel.0");
+    let panel_name = format!("{root_name}/aether.embedded:ui.panel.0");
     bench
         .execute(vec![
             // RootManager spawns a Panel sibling (Counter → ui.panel.0).
