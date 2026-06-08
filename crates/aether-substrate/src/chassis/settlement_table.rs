@@ -618,8 +618,7 @@ mod tests {
     /// settlement-table races are timing-sensitive under load, so they are
     /// serialized into the `serial-heavy` nextest group
     /// (`.config/nextest.toml`) to avoid oversubscribing cores against one
-    /// another, and selected by `scripts/flake-soak.sh` for fresh-process
-    /// soak repetition.
+    /// another.
     mod heavy {
         use super::*;
 

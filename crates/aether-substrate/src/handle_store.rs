@@ -2951,8 +2951,8 @@ mod tests {
 
     /// Contention-sensitive `get()` concurrency checks (issue #1447).
     /// In `mod heavy` per the repo's heavy-test convention so nextest
-    /// serializes them (the `::heavy::` path → `serial-heavy` group)
-    /// and `flake-soak.sh` can soak them. These are an interim
+    /// serializes them (the `::heavy::` path → `serial-heavy` group).
+    /// These are an interim
     /// stand-in: #1439's handle-store stress harness supersedes them
     /// with measured before/after concurrent-`get()` throughput.
     #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract

@@ -5,8 +5,8 @@
 //! Heavy by construction — it forks a real process and settles across
 //! it — so the test lives in `mod tests::heavy`. nextest's
 //! `test(/::heavy::/)` selector keys on the `::heavy::` path segment to
-//! put it in the `serial-heavy` group (serialized; soaked by
-//! `scripts/flake-soak.sh`), so the marker module needs a parent here.
+//! put it in the `serial-heavy` group (serialized), so the marker module
+//! needs a parent here.
 
 mod fleetbench;
 

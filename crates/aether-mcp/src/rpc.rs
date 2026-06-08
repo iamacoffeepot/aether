@@ -813,8 +813,7 @@ mod tests {
     /// Contention/backoff-sensitive tests live in `mod heavy`: the restart
     /// path races a socket close + same-port re-bind, so it is timing
     /// sensitive — serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
-    /// fresh-process soak repetition.
+    /// (`.config/nextest.toml`).
     mod heavy {
         /// The load-bearing fix (iamacoffeepot/aether#1212): a hub restart
         /// under a live `RpcSession` is healed in place. A first call
