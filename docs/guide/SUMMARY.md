@@ -30,7 +30,8 @@
   - [Audio]()
   - [Tracing & settlement](systems/tracing-and-settlement.md)
   - [Configuration](systems/configuration.md)
-  - [The computation DAG & handles]()
+  - [Handles](systems/handles.md)
+  - [The computation DAG]()
 
 # Building with aether
 
