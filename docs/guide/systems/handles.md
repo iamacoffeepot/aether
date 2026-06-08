@@ -82,10 +82,11 @@ It's a hot in-memory cache over a persistent on-disk tree:
 - **On-disk** is a content-addressed file tree at `AETHER_HANDLE_STORE_DIR`
   (defaulting under the platform data directory), bounded by
   `AETHER_HANDLE_STORE_DISK_BUDGET_BYTES` (default 16 GB) and evicted on a slow
-  background tick. A restart doesn't read it into memory; it loads a sparse index
-  and materializes an entry on first access, so a 50 GB store boots about as fast
-  as an empty one and a disk hit looks exactly like an in-memory miss to the
-  caller.
+  background tick. A restart doesn't read it into memory; it builds a sparse index
+  over the on-disk entries and materializes an entry's bytes on first access. Boot
+  cost tracks how many entries are stored, not their total size, so a store of a few
+  large handles boots about as fast as an empty one while many small entries cost
+  more. A disk hit then looks exactly like an in-memory miss to the caller.
 
 **Two lifecycle dimensions, kept separate.** *Refcount* is in-process and
 transient — who is holding this right now — and resets to zero on restart, where
