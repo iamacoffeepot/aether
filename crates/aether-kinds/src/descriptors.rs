@@ -53,7 +53,7 @@ mod tests {
     use crate::{
         CliSend, CliSendResult, Delete, DeleteResult, DrawTriangle, DropComponent, DropResult,
         Fetch, FetchResult, Key, List, ListResult, LoadComponent, LoadResult, LyriaGenerate,
-        LyriaGenerateResult, MessagesSend, MessagesSendResult, MouseButton, MouseMove,
+        LyriaGenerateResult, Mat4Apply, MessagesSend, MessagesSendResult, MouseButton, MouseMove,
         NanobananaGenerate, NanobananaGenerateResult, NoteOff, NoteOn, Ping, Pong, ProcessExited,
         Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult,
         SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick, UnsubscribeAll,
@@ -375,5 +375,70 @@ mod tests {
         };
         assert!(*nested_repr);
         assert_eq!(nested_fields.len(), 6);
+    }
+
+    #[test]
+    fn mat4_apply_is_registered_cast_schema() {
+        // Issue 1464: the `mat4_apply` transform's input kind. It must
+        // register in the inventory (so the DAG validator and the hub
+        // can encode it) and ride the cast wire path — it composes the
+        // `aether_math` primitives directly (`#[repr(C)]` + `Pod`), so
+        // its schema is a cast struct whose fields are the nested `Mat4`
+        // and `Vec4` cast structs, not flattened `[f32; N]` arrays. A
+        // stray loss of `#[repr(C)]` (flipping it to postcard) is a
+        // wire-format mismatch this catches.
+        let descs = all();
+        let d = descs
+            .iter()
+            .find(|d| d.name == Mat4Apply::NAME)
+            .expect("test setup: Mat4Apply kind is registered in descriptor inventory");
+        let SchemaType::Struct { fields, repr_c } = &d.schema else {
+            panic!("{} should be Struct, got {:?}", Mat4Apply::NAME, d.schema);
+        };
+        assert!(*repr_c, "Mat4Apply must be cast, not postcard");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "matrix");
+        assert_eq!(fields[1].name, "vector");
+
+        // `matrix` is the nested `Mat4` cast struct: one `cols` field
+        // that is a four-element array of the `Vec4` cast struct.
+        let SchemaType::Struct {
+            fields: mat_fields,
+            repr_c: mat_repr_c,
+        } = &fields[0].ty
+        else {
+            panic!(
+                "matrix should be the nested Mat4 Struct, got {:?}",
+                fields[0].ty
+            );
+        };
+        assert!(*mat_repr_c, "Mat4 must be cast");
+        assert_eq!(mat_fields.len(), 1);
+        assert_eq!(mat_fields[0].name, "cols");
+        let SchemaType::Array { element, len } = &mat_fields[0].ty else {
+            panic!("Mat4::cols should be Array");
+        };
+        assert_eq!(*len, 4);
+        assert!(
+            matches!(**element, SchemaType::Struct { repr_c: true, .. }),
+            "Mat4::cols element should be the Vec4 cast Struct, got {element:?}"
+        );
+
+        // `vector` is the nested `Vec4` cast struct: four `f32` scalars.
+        let SchemaType::Struct {
+            fields: vec_fields,
+            repr_c: vec_repr_c,
+        } = &fields[1].ty
+        else {
+            panic!(
+                "vector should be the nested Vec4 Struct, got {:?}",
+                fields[1].ty
+            );
+        };
+        assert!(*vec_repr_c, "Vec4 must be cast");
+        assert_eq!(vec_fields.len(), 4);
+        for f in vec_fields.iter() {
+            assert_eq!(f.ty, SchemaType::Scalar(Primitive::F32));
+        }
     }
 }

@@ -8,6 +8,10 @@ edition.workspace = true
 # traits) lives in `aether-data`. `aether-kinds` is the substrate's
 # vocabulary — concrete kinds + the well-known mailboxes registry.
 aether-data = { path = "../aether-data", features = ["derive"] }
+# ADR-0048 / issue 1464: `Mat4Apply` is a cast-shaped kind composing
+# `aether_math::{Mat4, Vec4}` directly. `aether-math` is acyclic — it
+# depends on `aether-data` but never on `aether-kinds`.
+aether-math = { path = "../aether-math" }
 bytemuck = { version = "1.19", features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 

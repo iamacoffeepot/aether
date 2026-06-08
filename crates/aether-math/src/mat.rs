@@ -4,6 +4,8 @@
 
 use core::ops::Mul;
 
+use bytemuck::{Pod, Zeroable};
+
 use crate::quat::Quat;
 use crate::vec::{Vec3, Vec4};
 
@@ -13,7 +15,7 @@ use crate::vec::{Vec3, Vec4};
 /// transpose. `M * v` applies `M` to `v` in standard left-multiply
 /// convention.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable, aether_data::Schema)]
 pub struct Mat4 {
     pub cols: [Vec4; 4],
 }
@@ -88,6 +90,23 @@ impl Mat4 {
         let mut m = Self::from_rotation_quat(rotation);
         m.cols[3] = Vec4::new(translation.x, translation.y, translation.z, 1.0);
         m
+    }
+
+    /// Rebuild a `Mat4` from a `[f32; 16]` laid out in column-major
+    /// order — the exact inverse of [`Self::to_cols_array`]. The first
+    /// four elements are column 0, the next four column 1, and so on,
+    /// matching the wgpu/GLSL `mat4x4<f32>` uniform layout, so a matrix
+    /// flattened for a mail payload or uniform upload round-trips back
+    /// without transpose.
+    #[inline]
+    #[must_use]
+    pub const fn from_cols_array(a: [f32; 16]) -> Self {
+        Self::from_cols(
+            Vec4::new(a[0], a[1], a[2], a[3]),
+            Vec4::new(a[4], a[5], a[6], a[7]),
+            Vec4::new(a[8], a[9], a[10], a[11]),
+            Vec4::new(a[12], a[13], a[14], a[15]),
+        )
     }
 
     /// Flatten to a `[f32; 16]` in column-major order — the layout
@@ -355,6 +374,27 @@ mod tests {
         assert_eq!(&arr[4..8], &[0.0, 1.0, 0.0, 0.0]);
         assert_eq!(&arr[8..12], &[0.0, 0.0, 1.0, 0.0]);
         assert_eq!(&arr[12..16], &[7.0, 8.0, 9.0, 1.0]);
+    }
+
+    #[test]
+    fn from_cols_array_round_trips_to_cols_array() {
+        let m = Mat4::from_rigid(
+            Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7),
+            Vec3::new(4.0, -2.0, 5.0),
+        );
+        assert_eq!(Mat4::from_cols_array(m.to_cols_array()), m);
+    }
+
+    #[test]
+    fn from_cols_array_reads_column_major() {
+        // Column 3 (the translation column) is elements [12..16].
+        let m = Mat4::from_cols_array([
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            7.0, 8.0, 9.0, 1.0, //
+        ]);
+        assert_eq!(m, Mat4::from_translation(Vec3::new(7.0, 8.0, 9.0)));
     }
 
     #[test]
