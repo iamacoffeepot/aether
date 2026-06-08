@@ -47,6 +47,7 @@ use std::fs;
 use std::io::{Error as IoError, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -523,7 +524,12 @@ struct HandleEntry {
     /// Monotonic counter at last access; lower = older. Bumped on
     /// `put` and `get`. Wraparound at `u64::MAX` is unreachable in
     /// practice (4.6e18 dispatches ≈ 146 years at 1 GHz).
-    last_access: u64,
+    ///
+    /// Atomic so a cache-hit `get` bumps it through a shared `&Inner`
+    /// under the read lock (issue #1447) instead of taking the write
+    /// lock. `Relaxed` is sufficient: it is a monotone recency
+    /// heuristic and eviction reads it under the exclusive write lock.
+    last_access: AtomicU64,
 }
 
 /// FIFO cap on the negative cache (ADR-0049 §3). Protects high-
@@ -539,7 +545,10 @@ struct Inner {
     /// or when the matching parked queue is explicitly cleared.
     parked: HashMap<HandleId, VecDeque<Mail>>,
     total_bytes: usize,
-    access_clock: u64,
+    /// Monotonic source for `HandleEntry::last_access`. Atomic so a
+    /// cache-hit `get` can bump it under a shared `&Inner` read lock
+    /// (issue #1447). `Relaxed` is sufficient — see `bump_clock`.
+    access_clock: AtomicU64,
     next_ephemeral: u64,
     /// Sparse "this handle is on disk but not in memory" index, built
     /// by the boot scan from the `.meta` sidecars (ADR-0049 §3). Lets a
@@ -806,7 +815,7 @@ impl HandleStore {
         if projected > self.max_bytes {
             evict_until_fits(&mut inner, projected - self.max_bytes, self.max_bytes, id)?;
         }
-        let last_access = bump_clock(&mut inner);
+        let last_access = bump_clock(&inner);
         // Clean up the prior entry's bytes accounting (if any). The
         // eviction step skipped this id, so the entry is still in the
         // map.
@@ -821,7 +830,7 @@ impl HandleStore {
                 bytes,
                 refcount,
                 pinned,
-                last_access,
+                last_access: AtomicU64::new(last_access),
             },
         );
         Ok(())
@@ -1183,7 +1192,7 @@ impl HandleStore {
             .inner
             .write()
             .expect("handle store lock poisoned; fail-fast per ADR-0063");
-        let last_access = bump_clock(&mut inner);
+        let last_access = bump_clock(&inner);
         inner.total_bytes += bytes.len();
         inner.entries.insert(
             id,
@@ -1192,7 +1201,7 @@ impl HandleStore {
                 bytes: bytes.clone(),
                 refcount: 0,
                 pinned: disk_entry.pinned,
-                last_access,
+                last_access: AtomicU64::new(last_access),
             },
         );
         Some((disk_entry.kind_id, bytes))
@@ -1585,13 +1594,17 @@ impl HandleStore {
     /// the guard.
     pub fn get(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
         {
-            let mut inner = self
+            // Cache hit runs under the read lock: concurrent gets no
+            // longer serialize against one another (issue #1447). The
+            // recency bump goes through the shared `&Inner` because both
+            // the clock source and `last_access` are atomic.
+            let inner = self
                 .inner
-                .write()
+                .read()
                 .expect("handle store lock poisoned; fail-fast per ADR-0063");
-            let access = bump_clock(&mut inner);
-            if let Some(entry) = inner.entries.get_mut(&id) {
-                entry.last_access = access;
+            if let Some(entry) = inner.entries.get(&id) {
+                let access = bump_clock(&inner);
+                entry.last_access.store(access, Ordering::Relaxed);
                 return Some((entry.kind, entry.bytes.clone()));
             }
         }
@@ -1766,9 +1779,20 @@ fn read_meta_file(path: &Path) -> Option<HandleMeta> {
     postcard::from_bytes::<HandleMeta>(&raw).ok()
 }
 
-fn bump_clock(inner: &mut Inner) -> u64 {
-    inner.access_clock = inner.access_clock.wrapping_add(1);
-    inner.access_clock
+/// Advance the access clock and return the new value. Takes `&Inner`
+/// (not `&mut`) so a cache-hit `get` can bump recency under the read
+/// lock (issue #1447); the write-lock callers (`put`,
+/// `lookup_from_disk`) coerce their `&mut Inner` here for free.
+///
+/// `Relaxed` is sufficient: the clock is a monotone recency heuristic,
+/// no other state is ordered against it, and eviction reads each
+/// `last_access` under the exclusive write lock (which establishes the
+/// happens-before barrier against read-lock-released bumps). The `+ 1`
+/// recovers the post-increment value from `fetch_add`'s pre-increment
+/// return; wraparound at `u64::MAX` is unreachable in practice (see
+/// `HandleEntry::last_access`).
+fn bump_clock(inner: &Inner) -> u64 {
+    inner.access_clock.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Evict LRU entries until at least `need_to_free` bytes have been
@@ -1787,7 +1811,7 @@ fn evict_until_fits(
         .entries
         .iter()
         .filter(|(id, e)| **id != skip && e.refcount == 0 && !e.pinned)
-        .map(|(id, e)| (*id, e.last_access, e.bytes.len()))
+        .map(|(id, e)| (*id, e.last_access.load(Ordering::Relaxed), e.bytes.len()))
         .collect();
     candidates.sort_by_key(|(_, last_access, _)| *last_access);
 
@@ -2698,6 +2722,91 @@ mod tests {
                 Ref::Handle { .. } => panic!("nested ref must also be resolved"),
             },
             Ref::Handle { .. } => panic!("outer ref must be resolved"),
+        }
+    }
+
+    /// Contention-sensitive `get()` concurrency checks (issue #1447).
+    /// In `mod heavy` per the repo's heavy-test convention so nextest
+    /// serializes them (the `::heavy::` path → `serial-heavy` group)
+    /// and `flake-soak.sh` can soak them. These are an interim
+    /// stand-in: #1439's handle-store stress harness supersedes them
+    /// with measured before/after concurrent-`get()` throughput.
+    #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
+    mod heavy {
+        use super::*;
+        use std::sync::Barrier;
+        use std::sync::mpsc;
+
+        /// Many threads hammering cache-hit `get()` on one shared
+        /// `Arc<HandleStore>` must all observe the correct kind +
+        /// bytes with no deadlock or panic. The cache-hit path now
+        /// takes only the read lock, so these run concurrently rather
+        /// than serializing through a write lock.
+        #[test]
+        fn concurrent_cache_hit_gets_return_correct_bytes() {
+            const THREADS: usize = 16;
+            const GETS_PER_THREAD: usize = 2_000;
+
+            let store = Arc::new(HandleStore::new(4096));
+            store
+                .put(HandleId(1), KindId(100), b"payload".to_vec())
+                .unwrap();
+
+            // Release all workers at once to maximize overlap on the
+            // shared read lock.
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        for _ in 0..GETS_PER_THREAD {
+                            let (kind, bytes) = store.get(HandleId(1)).expect("entry present");
+                            assert_eq!(kind, KindId(100));
+                            assert_eq!(&bytes, b"payload");
+                        }
+                    })
+                })
+                .collect();
+
+            for w in workers {
+                w.join().expect("worker thread panicked");
+            }
+        }
+
+        /// A cache-hit `get()` must complete while another thread holds
+        /// the store's read lock — direct proof it takes only the read
+        /// lock (issue #1447). A write-locked `get` would block on the
+        /// outstanding read guard and trip the timeout.
+        #[test]
+        fn cache_hit_get_proceeds_while_read_lock_held() {
+            let store = Arc::new(HandleStore::new(1024));
+            store
+                .put(HandleId(1), KindId(100), b"payload".to_vec())
+                .unwrap();
+
+            // Hold the store's read lock for the duration of the
+            // spawned get. Two concurrent readers are fine; a writer
+            // would block here.
+            let guard = store.inner.read().expect("handle store lock poisoned");
+
+            let (tx, rx) = mpsc::channel();
+            let worker_store = Arc::clone(&store);
+            let worker = thread::spawn(move || {
+                let got = worker_store.get(HandleId(1));
+                tx.send(got).expect("send get result");
+            });
+
+            let got = rx.recv_timeout(Duration::from_secs(10)).expect(
+                "cache-hit get serialized behind the held read lock — write lock on the hot path?",
+            );
+            drop(guard);
+            worker.join().expect("worker thread panicked");
+
+            let (kind, bytes) = got.expect("entry present");
+            assert_eq!(kind, KindId(100));
+            assert_eq!(&bytes, b"payload");
         }
     }
 }
