@@ -31,7 +31,8 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
@@ -40,14 +41,15 @@ use aether_capabilities::rpc::{
 use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
-use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
+use aether_data::{DagId, EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
 use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    ComponentCapabilities, EngineDescriptor, ListEngines, ListEnginesResult, LoadComponent,
-    LoadResult, LogTail, LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine,
-    SpawnEngineResult, TerminateEngine, TerminateEngineResult,
+    Cancel, CancelResult, ComponentCapabilities, DagDescriptor, EngineDescriptor, HandleDescribe,
+    HandleDescribeResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
+    LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status,
+    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -537,6 +539,81 @@ impl FleetBench {
             None => panic!("undecodable DispatchTracedAck"),
         };
         (root, events)
+    }
+
+    /// Submit a computation DAG (ADR-0047) to `engine`'s `aether.dag`
+    /// cap and decode the synchronous [`SubmitResult`]. Validation runs
+    /// on the submit call before any source dispatches, so a bad
+    /// descriptor still comes back as a wire-`Ok` reply carrying
+    /// `SubmitResult::Err` — the asserting [`call`](Self::call) path
+    /// handles both arms identically.
+    pub fn submit_dag(&mut self, engine: EngineId, descriptor: &DagDescriptor) -> SubmitResult {
+        let replies = self.call(
+            Some(engine),
+            "aether.dag",
+            &Submit {
+                descriptor: descriptor.clone(),
+            },
+        );
+        let payload = single_reply(&replies, "Submit");
+        SubmitResult::decode_from_bytes(&payload)
+            .expect("test setup: decoding a SubmitResult reply")
+    }
+
+    /// Query a submitted DAG's [`StatusResult`] (ADR-0047 §6) by its
+    /// substrate-minted [`DagId`].
+    pub fn dag_status(&mut self, engine: EngineId, dag_id: DagId) -> StatusResult {
+        let replies = self.call(Some(engine), "aether.dag", &Status { dag_id });
+        let payload = single_reply(&replies, "Status");
+        StatusResult::decode_from_bytes(&payload)
+            .expect("test setup: decoding a StatusResult reply")
+    }
+
+    /// Cancel an in-flight DAG (ADR-0047 §1) by its [`DagId`] and decode
+    /// the [`CancelResult`]. `Ok.cancelled` is `false` when the DAG had
+    /// already settled (nothing to cancel).
+    pub fn dag_cancel(&mut self, engine: EngineId, dag_id: DagId) -> CancelResult {
+        let replies = self.call(Some(engine), "aether.dag", &Cancel { dag_id });
+        let payload = single_reply(&replies, "Cancel");
+        CancelResult::decode_from_bytes(&payload)
+            .expect("test setup: decoding a CancelResult reply")
+    }
+
+    /// Summarize `engine`'s persistent handle store (ADR-0049 §10),
+    /// capping each top-N list at `max`. The store's `aether.handle` cap
+    /// answers with a [`HandleDescribeResult`].
+    pub fn describe_handles(&mut self, engine: EngineId, max: u32) -> HandleDescribeResult {
+        let replies = self.call(Some(engine), "aether.handle", &HandleDescribe { max });
+        let payload = single_reply(&replies, "HandleDescribe");
+        HandleDescribeResult::decode_from_bytes(&payload)
+            .expect("test setup: decoding a HandleDescribeResult reply")
+    }
+
+    /// Poll [`dag_status`](Self::dag_status) until the DAG reaches a
+    /// terminal status (`Complete` / `Failed`), sleeping between polls.
+    /// Panics past `deadline` — a DAG that never settles is a test bug,
+    /// not a pass. The forked `FsCapability` inbox poll adds ~100ms of
+    /// source latency, so callers pass a generous `deadline` (the
+    /// `CALL_DEADLINE` mirror).
+    pub fn poll_dag(
+        &mut self,
+        engine: EngineId,
+        dag_id: DagId,
+        deadline: Duration,
+    ) -> StatusResult {
+        let start = Instant::now();
+        loop {
+            let status = self.dag_status(engine, dag_id);
+            match status {
+                StatusResult::Complete { .. } | StatusResult::Failed { .. } => return status,
+                StatusResult::Pending | StatusResult::Running { .. } => {}
+            }
+            assert!(
+                start.elapsed() < deadline,
+                "poll_dag: DAG {dag_id:?} did not reach a terminal status within {deadline:?}",
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
