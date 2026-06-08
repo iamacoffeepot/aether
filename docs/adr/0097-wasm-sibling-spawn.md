@@ -1,6 +1,6 @@
 # ADR-0097: Wasm sibling spawn
 
-- **Status:** Accepted
+- **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md) — the spawn *mechanism* stands)
 - **Date:** 2026-06-06
 
 ## Context
@@ -65,7 +65,7 @@ A spawned sibling has independent lifecycle, mirroring native. Children self-clo
 
 ### Neutral
 
-- **Addressing and wire format unchanged.** Spawned siblings live under `aether.component.trampoline:<name>` like every other loaded actor; `MailboxId = hash(name)` holds.
+- **Addressing and wire format unchanged.** Spawned siblings live under `aether.component.trampoline:<name>` like every other loaded actor; `MailboxId = hash(name)` holds. *(Revised by [ADR-0099](0099-actor-identity-and-addressing.md): a spawned sibling now nests under the spawner's lineage — its `MailboxId` is the lineage fold, not `hash(name)` — and the embedding-host node is renamed `aether.embedded`. The spawn mechanism above is unchanged.)*
 - **Foreign instantiation is unchanged** — still `load_component`, still capability-governed.
 
 ### Follow-on
@@ -83,6 +83,7 @@ A spawned sibling has independent lifecycle, mirroring native. Children self-clo
 ## Related
 
 - ADR-0096 — multi-actor wasm modules; this is its deferred runtime follow-on and resolves its open granularity question.
+- ADR-0099 — Actor identity and addressing. Revises this ADR's sibling **addressing**: a spawned sibling nests under the spawner's lineage (its `MailboxId` is the lineage fold, not `hash(name)`) and the embedding-host node is `aether.embedded`. The spawn **mechanism** (stage-and-drain, typed `spawn_child`, sync-id / async-failure, sibling-only, no cascade) stands unchanged.
 - ADR-0079 — instanced actors, cardinality, and the `spawn_child` semantics reused here.
 - ADR-0024 — dual-target `_p32` shims; the contract this extends with a spawn import.
 - ADR-0090 — init-config byte carrier; a spawned sibling's config rides the same path.

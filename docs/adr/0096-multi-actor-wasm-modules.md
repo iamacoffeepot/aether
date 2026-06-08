@@ -1,6 +1,6 @@
 # ADR-0096: Multi-actor wasm modules
 
-- **Status:** Accepted
+- **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md); the actor-type tag here is reused as the ActorId)
 - **Date:** 2026-06-06
 
 ## Context
@@ -55,7 +55,7 @@ Loading a multi-actor module names which exported type the instance becomes. `Lo
 
 ### Neutral
 
-- **Addressing and wire format unchanged.** Loaded actors live under `aether.component.trampoline` as today; `MailboxId = hash(name)` holds.
+- **Addressing and wire format unchanged.** Loaded actors live under `aether.component.trampoline` as today; `MailboxId = hash(name)` holds. *(Revised by [ADR-0099](0099-actor-identity-and-addressing.md): a hosted actor's `MailboxId` is now the lineage fold, not `hash(name)`, and the embedding-host node is renamed `aether.embedded`. The multi-actor-module foundation above is unchanged, and its actor-type tag is reused as the ActorId.)*
 - **The load path gains a type selector.** Single-actor modules keep their current behavior.
 
 ### Follow-on
@@ -71,6 +71,7 @@ Loading a multi-actor module names which exported type the instance becomes. `Lo
 ## Related
 
 - ADR-0079 — Instanced actors as a first-class category; its deferred wasm-side spawn unparks on the sibling-spawn follow-on, which builds on this.
+- ADR-0099 — Actor identity and addressing. Reuses this ADR's **actor-type tag** as the ActorId, and revises the hosted-actor **addressing**: a loaded actor's `MailboxId` is the lineage fold (not `hash(name)`) and the embedding-host node is `aether.embedded`. The multi-actor-module foundation here stands.
 - ADR-0024 — Dual-target `_p32` shims; the contract this extends with an actor-type tag.
 - ADR-0033 — Handler-driven inputs manifest; grows to one handler set per exported type.
 - ADR-0066 — Component and peers share the kind crate; the `runtime` feature emits the cdylib.
