@@ -9,6 +9,8 @@
 //! cheap consistency check against the sibling `.bin`; restore asserts
 //! the lengths agree.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// On-disk `HandleMeta` schema version. Bumping this invalidates all
@@ -72,4 +74,87 @@ pub struct TransformOrigin {
     pub transform_index: u32,
     /// The input handle ids that produced this output, slot-ordered.
     pub input_handle_ids: Vec<u64>,
+}
+
+/// On-disk format version for the `index.bin` boot fast-path snapshot
+/// (ADR-0049 §3). A mismatch on read makes the boot fall through to the
+/// directory scan rather than trusting a stale-format snapshot. Tracked
+/// independently of [`SCHEMA_VERSION`] (the per-entry `.meta` version):
+/// `index.bin` is a derived summary, so its layout can evolve without
+/// touching the authoritative sidecars.
+pub const INDEX_FORMAT_VERSION: u8 = 1;
+
+/// One entry in the [`IndexSnapshot`] boot fast-path summary — a flat
+/// mirror of the in-memory `DiskEntry`, keyed by raw `u64` handle id in
+/// the snapshot map. Ids are raw `u64` (not the typed
+/// [`aether_data::KindId`] newtype) so the on-disk format is a flat
+/// postcard struct independent of the tagged-id serde branch, matching
+/// [`HandleMeta`]'s convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexEntry {
+    /// Schema-hash of the kind type (ADR-0030), raw `u64`. Mirrors the
+    /// `.meta` sidecar's `kind_id`.
+    pub kind_id: u64,
+    /// Length of the sibling `.bin` payload.
+    pub bytes_len: u32,
+    /// Whether the handle was pinned at snapshot time (ADR-0045 §9).
+    pub pinned: bool,
+    /// Millis since the unix epoch at the handle's write time.
+    pub created_at: u64,
+}
+
+/// The whole `index.bin` file: a leading `schema_version` byte followed
+/// by the disk-index summary (ADR-0049 §3). Written atomically on
+/// graceful shutdown by snapshotting the live disk index, and loaded at
+/// boot to populate the index in one read + decode instead of one
+/// `open()` per `.meta` sidecar.
+///
+/// This is a plain postcard struct — deliberately not an aether `Kind`
+/// (no derive, no registry entry, no schema-driven codec): persistence
+/// is substrate-internal (ADR-0049) and the snapshot never crosses the
+/// wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSnapshot {
+    /// Set to [`INDEX_FORMAT_VERSION`] on write; a mismatch on read
+    /// drops the fast path back to the directory scan.
+    pub schema_version: u8,
+    /// The disk-index summary, keyed by raw `u64` handle id.
+    pub entries: HashMap<u64, IndexEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_snapshot_postcard_round_trips() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            0x1111_2222_3333_4444,
+            IndexEntry {
+                kind_id: 0xAAAA,
+                bytes_len: 1024,
+                pinned: true,
+                created_at: 42,
+            },
+        );
+        entries.insert(
+            0x5555_6666_7777_8888,
+            IndexEntry {
+                kind_id: 0xBBBB,
+                bytes_len: 7,
+                pinned: false,
+                created_at: 99,
+            },
+        );
+        let snapshot = IndexSnapshot {
+            schema_version: INDEX_FORMAT_VERSION,
+            entries,
+        };
+        let bytes = postcard::to_allocvec(&snapshot).expect("snapshot encodes");
+        // The leading byte is the version header.
+        assert_eq!(bytes[0], INDEX_FORMAT_VERSION);
+        let decoded: IndexSnapshot = postcard::from_bytes(&bytes).expect("snapshot decodes");
+        assert_eq!(decoded, snapshot);
+    }
 }

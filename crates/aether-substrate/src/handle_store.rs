@@ -61,7 +61,9 @@ use std::env;
 
 pub mod meta;
 
-use meta::{HandleMeta, SCHEMA_VERSION, TransformOrigin};
+use meta::{
+    HandleMeta, INDEX_FORMAT_VERSION, IndexEntry, IndexSnapshot, SCHEMA_VERSION, TransformOrigin,
+};
 
 /// Default byte cap for the handle store.
 pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -241,6 +243,14 @@ impl PersistConfig {
     #[must_use]
     pub fn lock_path(&self) -> PathBuf {
         self.root.join("lock.pid")
+    }
+
+    /// The `index.bin` boot fast-path snapshot under the layout root
+    /// (ADR-0049 §3). Written on graceful shutdown; loaded then deleted
+    /// at boot.
+    #[must_use]
+    pub fn index_path(&self) -> PathBuf {
+        self.root.join("index.bin")
     }
 }
 
@@ -696,7 +706,17 @@ impl HandleStore {
             lock: Mutex::new(None),
             kind_resolver,
         };
-        store.restore_from_disk();
+        // ADR-0049 §3 boot fast-path (issue #1446): try to load the
+        // `index.bin` snapshot a clean shutdown left behind, collapsing
+        // the per-`.meta` directory scan into one read + decode. On any
+        // failure — missing, unreadable, version skew, decode error —
+        // fall through to the directory walk, which stays the
+        // correctness primitive (it scrubs orphans + runs the §6
+        // schema-evolution check). The fast path defers that validation
+        // to lazy materialization (see `lookup_from_disk`).
+        if !store.load_index_bin() {
+            store.restore_from_disk();
+        }
         store
     }
 
@@ -1014,6 +1034,172 @@ impl HandleStore {
         }
     }
 
+    /// Write the `index.bin` boot fast-path snapshot from the live disk
+    /// index (ADR-0049 §3). Called from the chassis driver teardown on
+    /// graceful shutdown — the same graceful point at which `LockGuard`
+    /// removes `lock.pid`. Best-effort: an encode or write failure
+    /// warn-logs and returns, leaving the next boot to fall back to the
+    /// directory scan. No-op when persistence is disabled.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    pub fn snapshot_index(&self) {
+        let Some(cfg) = self.persist.as_ref() else {
+            return;
+        };
+        let entries: HashMap<u64, IndexEntry> = {
+            let inner = self
+                .inner
+                .read()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            inner
+                .disk_index
+                .iter()
+                .map(|(id, e)| {
+                    (
+                        id.0,
+                        IndexEntry {
+                            kind_id: e.kind_id.0,
+                            bytes_len: e.bytes_len,
+                            pinned: e.pinned,
+                            created_at: e.created_at,
+                        },
+                    )
+                })
+                .collect()
+        };
+        let count = entries.len();
+        let snapshot = IndexSnapshot {
+            schema_version: INDEX_FORMAT_VERSION,
+            entries,
+        };
+        let bytes = match postcard::to_allocvec(&snapshot) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: TARGET,
+                    error = %e,
+                    "failed to encode index.bin snapshot; next boot falls back to the directory scan",
+                );
+                return;
+            }
+        };
+        let path = cfg.index_path();
+        if let Err(e) = atomic_write(&path, &bytes) {
+            tracing::warn!(
+                target: TARGET,
+                path = %path.display(),
+                error = %e,
+                "index.bin snapshot write failed; next boot falls back to the directory scan",
+            );
+            return;
+        }
+        tracing::debug!(
+            target: TARGET,
+            indexed = count,
+            "handle store index.bin snapshot written on shutdown",
+        );
+    }
+
+    /// Boot fast-path (ADR-0049 §3): try to populate `disk_index` from a
+    /// previously-written `index.bin` snapshot. Returns `true` when the
+    /// fast path took (the index is populated and `index.bin` deleted so
+    /// a later crash can't replay a stale snapshot); `false` on any
+    /// failure — no persistence, missing / unreadable file, version skew,
+    /// or decode error — so the caller falls back to
+    /// [`Self::restore_from_disk`].
+    ///
+    /// On success this recomputes `total_disk_bytes` from the loaded
+    /// entries' `bytes_len` sum (the same recompute the directory scan
+    /// does), reconciling the approximate ledger across the restart. The
+    /// §6 schema-evolution check is skipped here and deferred to
+    /// [`Self::lookup_from_disk`]: the snapshot exists only after a
+    /// graceful shutdown, so the tree is consistent and the index already
+    /// reflects the live set.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063.
+    fn load_index_bin(&self) -> bool {
+        let Some(cfg) = self.persist.as_ref() else {
+            return false;
+        };
+        let path = cfg.index_path();
+        let Ok(raw) = fs::read(&path) else {
+            // Missing or unreadable — the common cold/crashed-boot case.
+            // Fall back to the scan silently (a fresh store has no
+            // snapshot; a crash left none).
+            return false;
+        };
+        let snapshot = match postcard::from_bytes::<IndexSnapshot>(&raw) {
+            Ok(s) if s.schema_version == INDEX_FORMAT_VERSION => s,
+            Ok(s) => {
+                tracing::warn!(
+                    target: TARGET,
+                    path = %path.display(),
+                    found = s.schema_version,
+                    expected = INDEX_FORMAT_VERSION,
+                    "index.bin version skew; falling back to the directory scan",
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: TARGET,
+                    path = %path.display(),
+                    error = %e,
+                    "index.bin decode failed; falling back to the directory scan",
+                );
+                return false;
+            }
+        };
+        let index: HashMap<HandleId, DiskEntry> = snapshot
+            .entries
+            .into_iter()
+            .map(|(id, e)| {
+                (
+                    HandleId(id),
+                    DiskEntry {
+                        kind_id: KindId(e.kind_id),
+                        bytes_len: e.bytes_len,
+                        pinned: e.pinned,
+                        created_at: e.created_at,
+                    },
+                )
+            })
+            .collect();
+        let count = index.len();
+        let disk_bytes: u64 = index.values().map(|e| u64::from(e.bytes_len)).sum();
+        {
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            inner.disk_index = index;
+            inner.total_disk_bytes = disk_bytes;
+        }
+        // Delete the snapshot so a crash before the next clean shutdown
+        // can't replay a now-stale view (it is rewritten on the next
+        // graceful shutdown).
+        if let Err(e) = fs::remove_file(&path)
+            && e.kind() != ErrorKind::NotFound
+        {
+            tracing::warn!(
+                target: TARGET,
+                path = %path.display(),
+                error = %e,
+                "failed to delete index.bin after load; a crash before the next clean shutdown could replay a stale snapshot",
+            );
+        }
+        tracing::debug!(
+            target: TARGET,
+            indexed = count,
+            "handle store boot fast-path loaded index.bin",
+        );
+        true
+    }
+
     /// Boot scan (ADR-0049 §3): read `pinned.set`, walk `entries/` for
     /// `.meta` sidecars, and populate the sparse `disk_index`. Bytes are
     /// NOT eagerly loaded — disk-resident entries materialize on first
@@ -1163,6 +1349,18 @@ impl HandleStore {
     /// missing is treated as corruption: the index entry is dropped and
     /// the id lands in the negative cache. Returns `None` when there's
     /// no persistence, no index hit, or the id is negatively cached.
+    ///
+    /// The §6 schema-evolution check (ADR-0049) the boot scan runs
+    /// eagerly is deferred to this cold materialization for entries that
+    /// arrived via the `index.bin` fast path (issue #1446, which skips
+    /// the scan): the sibling `.meta` is read and validated against the
+    /// current kind registry, and a stale entry (kind id changed /
+    /// retired since the snapshot, or a version skew) is dropped at
+    /// access time — both files deleted, the ledger decremented, the id
+    /// negative-cached. An unreadable `.meta` skips the check and
+    /// materializes from the index entry (scan-path entries were already
+    /// validated at boot, so re-reading the `.meta` there only confirms a
+    /// match).
     fn lookup_from_disk(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
         let cfg = self.persist.as_ref()?;
         // Read the index entry + negative-cache state under a read lock.
@@ -1176,7 +1374,33 @@ impl HandleStore {
             }
             inner.disk_index.get(&id).cloned()?
         };
-        let (bin_path, _) = entry_paths(&cfg.root, id);
+        let (bin_path, meta_path) = entry_paths(&cfg.root, id);
+        // ADR-0049 §6 deferred schema-evolution check (issue #1446 fast
+        // path). A readable `.meta` is validated against the current
+        // registry; a `Drop` verdict invalidates the entry here rather
+        // than at boot.
+        if let Some(meta) = read_meta_file(&meta_path)
+            && let Validation::Drop(reason) = validate_meta(&meta, self.kind_resolver.as_deref())
+        {
+            let _ = fs::remove_file(&bin_path);
+            let _ = fs::remove_file(&meta_path);
+            let mut inner = self
+                .inner
+                .write()
+                .expect("handle store lock poisoned; fail-fast per ADR-0063");
+            inner.total_disk_bytes = inner
+                .total_disk_bytes
+                .saturating_sub(u64::from(disk_entry.bytes_len));
+            inner.disk_index.remove(&id);
+            inner.note_negative(id);
+            tracing::info!(
+                target: TARGET,
+                handle = %id,
+                reason = %reason,
+                "handle store entry invalidated by schema evolution on materialization; dropped",
+            );
+            return None;
+        }
         let Ok(bytes) = fs::read(&bin_path) else {
             // `.bin` missing but the index said it was there —
             // corruption. Treat as a miss + remember it.
@@ -2808,5 +3032,281 @@ mod tests {
             assert_eq!(kind, KindId(100));
             assert_eq!(&bytes, b"payload");
         }
+    }
+
+    // index.bin boot fast-path tests (issue #1446 / ADR-0049 §3).
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    static FAST_PATH_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    fn fast_path_scratch(tag: &str) -> PathBuf {
+        let pid = process::id();
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+        let n = FAST_PATH_NONCE.fetch_add(1, AtomicOrdering::Relaxed);
+        let path = env::temp_dir().join(format!("aether-index-fastpath-{tag}-{pid}-{millis}-{n}"));
+        fs::create_dir_all(&path).expect("scratch dir creates");
+        path
+    }
+
+    fn fast_path_cleanup(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    fn fast_path_cfg(root: &Path) -> PersistConfig {
+        PersistConfig {
+            root: root.join("v1"),
+            disk_budget_bytes: u64::MAX,
+            eviction_tick_secs: 60,
+        }
+    }
+
+    /// Synthetic bidirectional kind registry for the deferred
+    /// schema-evolution check, mirroring the integration-test fixture.
+    struct FakeKindRegistry {
+        by_name: HashMap<String, KindId>,
+        by_id: HashMap<KindId, String>,
+    }
+
+    impl FakeKindRegistry {
+        fn new(entries: &[(&str, u64)]) -> Self {
+            let mut by_name = HashMap::new();
+            let mut by_id = HashMap::new();
+            for (name, id) in entries {
+                by_name.insert((*name).to_owned(), KindId(*id));
+                by_id.insert(KindId(*id), (*name).to_owned());
+            }
+            Self { by_name, by_id }
+        }
+    }
+
+    impl KindResolver for FakeKindRegistry {
+        fn id_for_name(&self, name: &str) -> Option<KindId> {
+            self.by_name.get(name).copied()
+        }
+        fn name_for_id(&self, id: KindId) -> Option<String> {
+            self.by_id.get(&id).cloned()
+        }
+    }
+
+    /// Step 3: a snapshot of a populated store writes a decodable
+    /// `index.bin` whose entry set matches the live disk index.
+    #[test]
+    fn snapshot_index_writes_decodable_index_bin() {
+        let root = fast_path_scratch("snapshot");
+        let cfg = fast_path_cfg(&root);
+        let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+        store
+            .put_persistent(HandleId(1), KindId(7), vec![0u8; 16], None)
+            .unwrap();
+        store
+            .put_persistent(HandleId(2), KindId(7), vec![0u8; 32], None)
+            .unwrap();
+        store.pin(HandleId(2));
+        store.snapshot_index();
+
+        let path = cfg.index_path();
+        assert!(path.exists(), "index.bin written");
+        let raw = fs::read(&path).unwrap();
+        let snapshot: IndexSnapshot = postcard::from_bytes(&raw).unwrap();
+        assert_eq!(snapshot.schema_version, INDEX_FORMAT_VERSION);
+        assert_eq!(snapshot.entries.len(), 2);
+        let e1 = snapshot.entries.get(&1).expect("id 1 in snapshot");
+        assert_eq!(e1.kind_id, 7);
+        assert_eq!(e1.bytes_len, 16);
+        assert!(!e1.pinned);
+        let e2 = snapshot.entries.get(&2).expect("id 2 in snapshot");
+        assert_eq!(e2.bytes_len, 32);
+        assert!(e2.pinned, "pinned flag carried into the snapshot");
+        fast_path_cleanup(&root);
+    }
+
+    /// Step 4a: a fresh store loads the snapshot via the fast path —
+    /// disk index populated, `index.bin` deleted post-load.
+    #[test]
+    fn fast_path_loads_index_bin_and_deletes_it() {
+        let root = fast_path_scratch("load");
+        let cfg = fast_path_cfg(&root);
+        {
+            let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+            for i in 0..50u64 {
+                store
+                    .put_persistent(HandleId(i + 1), KindId(7), vec![0u8; 8], None)
+                    .unwrap();
+            }
+            store.snapshot_index();
+        }
+        assert!(cfg.index_path().exists(), "snapshot present before reboot");
+        let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+        assert_eq!(restored.disk_index_len(), 50);
+        assert!(
+            !cfg.index_path().exists(),
+            "index.bin deleted after a successful fast-path load",
+        );
+        fast_path_cleanup(&root);
+    }
+
+    /// Step 4b: a corrupt (truncated) `index.bin` falls back to the
+    /// directory scan, which still indexes from the `.meta` sidecars.
+    #[test]
+    fn fast_path_corrupt_index_falls_back_to_scan() {
+        let root = fast_path_scratch("corrupt");
+        let cfg = fast_path_cfg(&root);
+        {
+            let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+            for i in 0..10u64 {
+                store
+                    .put_persistent(HandleId(i + 1), KindId(7), vec![0u8; 8], None)
+                    .unwrap();
+            }
+            store.snapshot_index();
+        }
+        // Truncate the snapshot to just its version byte — the entry map
+        // is gone, so the decode fails.
+        let path = cfg.index_path();
+        let raw = fs::read(&path).unwrap();
+        fs::write(&path, &raw[..1]).unwrap();
+
+        let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg));
+        assert_eq!(
+            restored.disk_index_len(),
+            10,
+            "scan fallback indexed from the .meta sidecars",
+        );
+        fast_path_cleanup(&root);
+    }
+
+    /// Step 4b: a version-skewed `index.bin` (decodes cleanly but the
+    /// header doesn't match) falls back to the directory scan.
+    #[test]
+    fn fast_path_version_skew_falls_back_to_scan() {
+        let root = fast_path_scratch("skew");
+        let cfg = fast_path_cfg(&root);
+        {
+            let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+            for i in 0..10u64 {
+                store
+                    .put_persistent(HandleId(i + 1), KindId(7), vec![0u8; 8], None)
+                    .unwrap();
+            }
+            store.snapshot_index();
+        }
+        // Flip the leading version byte; the rest of the postcard struct
+        // stays valid, so it decodes but trips the version gate.
+        let path = cfg.index_path();
+        let mut raw = fs::read(&path).unwrap();
+        raw[0] = INDEX_FORMAT_VERSION.wrapping_add(1);
+        fs::write(&path, &raw).unwrap();
+
+        let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg));
+        assert_eq!(
+            restored.disk_index_len(),
+            10,
+            "scan fallback indexed despite the version skew",
+        );
+        fast_path_cleanup(&root);
+    }
+
+    /// Step 4c: an absent `index.bin` (no clean shutdown) falls through
+    /// to the directory scan.
+    #[test]
+    fn fast_path_absent_index_uses_scan() {
+        let root = fast_path_scratch("absent");
+        let cfg = fast_path_cfg(&root);
+        {
+            let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+            for i in 0..10u64 {
+                store
+                    .put_persistent(HandleId(i + 1), KindId(7), vec![0u8; 8], None)
+                    .unwrap();
+            }
+            // No snapshot_index() — emulates a crash before clean shutdown.
+        }
+        assert!(!cfg.index_path().exists(), "no snapshot was written");
+        let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg));
+        assert_eq!(restored.disk_index_len(), 10);
+        fast_path_cleanup(&root);
+    }
+
+    /// Step 5: the fast path skips the boot schema-evolution check
+    /// (the entry survives the load), and the deferred check drops a
+    /// schema-stale entry at cold materialization.
+    #[test]
+    fn fast_path_defers_schema_validation_to_materialization() {
+        let root = fast_path_scratch("defer-validate");
+        let cfg = fast_path_cfg(&root);
+        let id = HandleId(0xABCD);
+        {
+            let resolver: Arc<dyn KindResolver> =
+                Arc::new(FakeKindRegistry::new(&[("demo.kind", 0xAAAA)]));
+            let store = HandleStore::with_persist_validated(
+                64 * 1024 * 1024,
+                Some(cfg.clone()),
+                Some(resolver),
+            );
+            store
+                .put_persistent(id, KindId(0xAAAA), b"bytes".to_vec(), None)
+                .unwrap();
+            store.snapshot_index();
+        }
+        // Reboot with the kind's id changed to 0xBBBB for the same name.
+        let resolver: Arc<dyn KindResolver> =
+            Arc::new(FakeKindRegistry::new(&[("demo.kind", 0xBBBB)]));
+        let restored = HandleStore::with_persist_validated(
+            64 * 1024 * 1024,
+            Some(cfg.clone()),
+            Some(resolver),
+        );
+        // Fast path loaded the entry WITHOUT validating it at boot.
+        assert_eq!(
+            restored.disk_index_len(),
+            1,
+            "fast path defers the schema check (entry present after load)",
+        );
+        // Cold materialization runs the deferred §6 check and drops it.
+        assert!(restored.get(id).is_none(), "stale entry dropped on access");
+        assert_eq!(restored.disk_index_len(), 0, "index entry removed");
+        let (bin, meta) = entry_paths(&cfg.root, id);
+        assert!(!bin.exists() && !meta.exists(), "both files deleted");
+        fast_path_cleanup(&root);
+    }
+
+    /// Step 7: end-to-end — write N entries, snapshot, reboot on the
+    /// same dir, and a subsequent `get` materializes from disk.
+    #[test]
+    fn end_to_end_snapshot_reboot_materializes() {
+        let root = fast_path_scratch("e2e");
+        let cfg = fast_path_cfg(&root);
+        let mut expected: HashMap<HandleId, Vec<u8>> = HashMap::new();
+        {
+            let store = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+            for i in 0..32u64 {
+                let id = HandleId(i + 1);
+                let bytes = format!("payload-{i}").into_bytes();
+                store
+                    .put_persistent(id, KindId(7), bytes.clone(), None)
+                    .unwrap();
+                expected.insert(id, bytes);
+            }
+            store.snapshot_index();
+        }
+        let restored = HandleStore::with_persist(64 * 1024 * 1024, Some(cfg.clone()));
+        assert_eq!(restored.disk_index_len(), expected.len());
+        for (id, bytes) in &expected {
+            assert!(
+                !restored.contains_in_memory(*id),
+                "not eagerly materialized"
+            );
+            let (kind, got) = restored.get(*id).expect("materializes from disk");
+            assert_eq!(kind, KindId(7));
+            assert_eq!(&got, bytes);
+            assert!(restored.contains_in_memory(*id), "now in memory");
+        }
+        assert!(
+            !cfg.index_path().exists(),
+            "index.bin consumed by the fast-path load",
+        );
+        fast_path_cleanup(&root);
     }
 }
