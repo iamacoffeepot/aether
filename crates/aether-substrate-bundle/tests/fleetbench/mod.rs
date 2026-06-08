@@ -40,8 +40,10 @@ use aether_capabilities::rpc::{
 use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
-use aether_data::{EngineId, Kind, KindId, MailboxId, Uuid, mailbox_id_from_path};
+use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
+use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
+use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
     ComponentCapabilities, EngineDescriptor, ListEngines, ListEnginesResult, LoadComponent,
     LoadResult, LogTail, LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine,
@@ -459,6 +461,82 @@ impl FleetBench {
                 Err(_) => return,
             }
         }
+    }
+
+    /// Like [`load`](Self::load) but threads a typed init-config into the
+    /// component: `config` is encoded into the `LoadComponent.config`
+    /// carrier the guest decodes as its `FfiActor::Config` (ADR-0090).
+    /// Returns the registered ADR-0099 lineage address. Used by
+    /// components whose typed `Config` cannot decode from the empty
+    /// carrier the empty-config [`load`](Self::load) sends.
+    pub fn load_with_config<C>(&mut self, engine: EngineId, stem: &str, config: &C) -> String
+    where
+        C: Kind + Serialize,
+    {
+        let wasm = read_component_wasm(stem);
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &LoadComponent {
+                wasm,
+                name: None,
+                config: config.encode_into_bytes(),
+                export: None,
+            },
+        );
+        let payload = single_reply(&replies, "LoadComponent");
+        match LoadResult::decode_from_bytes(&payload) {
+            Some(LoadResult::Ok { name, .. }) => name,
+            Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
+            None => panic!("undecodable LoadResult"),
+        }
+    }
+
+    /// Route a one-entry traced batch (`DispatchTraced`) to a forked
+    /// engine's `aether.trace` mailbox and return the chassis-root
+    /// [`MailId`] every dispatched envelope inherited plus the reply
+    /// envelopes collected across the settlement window. Mirrors
+    /// `aether-mcp`'s `send_mail_traced`, minus the round-2 trace-tree
+    /// stitch: Tier-A asserts settlement (the [`call`](Self::call) read
+    /// already spans it — the server holds the wire `Call` open until
+    /// chain settlement) and the collected replies, not the
+    /// reconstructed tree.
+    ///
+    /// The leading `ReplyEvent` is the trace cap's synchronous
+    /// `DispatchTracedAck::Ok` — its ordering is well-defined (the trace
+    /// handler replies before the dispatched children run), so it is
+    /// split off and decoded for the `root`, and the trailing events are
+    /// the dispatched mail's correlated replies. Panics on an
+    /// `Err`/undecodable ack, mirroring [`single_reply`].
+    pub fn send_traced<K>(
+        &mut self,
+        engine: EngineId,
+        recipient: &str,
+        mail: &K,
+    ) -> (MailId, Vec<MailEnvelope>)
+    where
+        K: Kind + Serialize,
+    {
+        let batch = DispatchTraced {
+            mails: vec![TracedEnvelope {
+                recipient_name: recipient.to_owned(),
+                kind_name: K::NAME.to_owned(),
+                payload: mail.encode_into_bytes(),
+                count: 1,
+            }],
+        };
+        let mut events = self.call(Some(engine), TRACE_MAILBOX_NAME, &batch);
+        assert!(
+            !events.is_empty(),
+            "send_traced expected a DispatchTracedAck reply event, got none"
+        );
+        let ack = events.remove(0);
+        let root = match DispatchTracedAck::decode_from_bytes(&ack.payload) {
+            Some(DispatchTracedAck::Ok { root }) => root,
+            Some(DispatchTracedAck::Err { error }) => panic!("send_traced batch rejected: {error}"),
+            None => panic!("undecodable DispatchTracedAck"),
+        };
+        (root, events)
     }
 }
 
