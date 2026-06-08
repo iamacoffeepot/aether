@@ -1,0 +1,5 @@
+# `cargo xtask <cmd>` runs the repo build-task crate. `dist` packages the
+# component wasm + chassis bins into `dist/` with a typed manifest; see
+# xtask/src/main.rs.
+[alias]
+xtask = "run --package xtask --"

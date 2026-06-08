@@ -149,34 +149,12 @@ run_step "cargo doc --workspace --no-deps (rustdoc lints denied)" \
     env RUSTDOCFLAGS="-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
     cargo doc --workspace --no-deps
 
-# Wasm32 component cross-build mirrors CI's pre-test step. Component
-# crates are discovered structurally (issue #439): cdylib lib target
-# AND a dep on `aether-actor`.
-echo "  -> wasm32 component cross-build"
-comp_pkgs=$(cargo metadata --format-version=1 --no-deps |
-    jq -r '.packages[]
-        | select(.targets[]?.kind | (. // []) | contains(["cdylib"]))
-        | select([.dependencies[]?.name] | contains(["aether-actor"]))
-        | .name' || true)
-if [[ -n "${comp_pkgs:-}" ]]; then
-    while IFS= read -r pkg; do
-        [[ -z "$pkg" ]] && continue
-        echo "     . $pkg"
-        cargo build --target wasm32-unknown-unknown -p "$pkg" --quiet
-    done <<< "$comp_pkgs"
-else
-    echo "     (no component crates discovered)"
-fi
-
-# ADR-0090 c1 (issue 1256): `aether-test-fixtures` carries cdylib
-# component artifacts as `[[example]]`s rather than at the package
-# level (so a typed-config fixture can live next to the original
-# probe without a per-fixture member crate). The cdylib-discovery
-# query above looks at `targets[].kind`, which is `["example"]` for
-# example targets — even with `crate-type = ["cdylib"]` — so the
-# crate is invisible to the structural sweep. Build it explicitly.
-echo "     . aether-test-fixtures (examples)"
-cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples --quiet
+# Wasm32 component cross-build mirrors CI's pre-test step. `xtask dist`
+# discovers component crates structurally (cdylib lib + example targets
+# gated on the `aether-actor` dep, issue #439) and cross-builds each
+# per-package. `--no-bins` keeps the preflight fast path wasm-only.
+run_step "cargo xtask dist --no-bins (component wasm cross-build)" \
+    cargo xtask dist --no-bins
 
 # Final, slowest step. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a
 # missing wasm artifact fails loudly rather than skipping silently.

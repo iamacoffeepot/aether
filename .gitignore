@@ -1,4 +1,7 @@
 /target
+# Packaged artifact tree written by `cargo xtask dist` (component wasm +
+# chassis bins + manifest.json). Regenerated each build, never committed.
+/dist/
 # Spike crates under spikes/ are standalone Cargo workspaces with
 # their own target dirs (per ADR-0003 §Consequences).
 spikes/*/target/
