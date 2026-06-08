@@ -587,8 +587,7 @@ mod tests {
     /// Contention/backoff-sensitive tests live in `mod heavy`: they exercise
     /// the worker dispatch / wake path, so they are serialized into the
     /// `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
-    /// oversubscribing cores against one another, and selected by
-    /// `scripts/flake-soak.sh` for fresh-process soak repetition.
+    /// oversubscribing cores against one another.
     mod heavy {
         use super::*;
 

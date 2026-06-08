@@ -290,8 +290,7 @@ fn depth_chain_settles_every_root() {
 /// Contention/backoff-sensitive tests live in `mod heavy`: these settlement
 /// scenarios drive a multi-worker pool whose park/wake backoff path
 /// oversubscribes cores under the full suite, so they are serialized into the
-/// `serial-heavy` nextest group (`.config/nextest.toml`) and selected by
-/// `scripts/flake-soak.sh` for fresh-process soak repetition. Each delegates
+/// `serial-heavy` nextest group (`.config/nextest.toml`). Each delegates
 /// to the scenario body declared at module scope.
 mod heavy {
     #[test]

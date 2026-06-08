@@ -1163,8 +1163,7 @@ fn transform_skips_invoke_on_cache_hit() {
 /// Contention/backoff-sensitive tests live in `mod heavy`: they drive the
 /// live actor dispatch / parking / settlement path through a multi-worker
 /// pool, so they are serialized into the `serial-heavy` nextest group
-/// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
-/// fresh-process soak repetition. Each delegates to the scenario body
+/// (`.config/nextest.toml`). Each delegates to the scenario body
 /// declared at module scope.
 mod heavy {
     #[test]

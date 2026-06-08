@@ -985,8 +985,7 @@ mod tests {
     /// Contention/backoff-sensitive tests live in `mod heavy`: heartbeat
     /// eviction / alive reporting ride timer + dispatcher threads and are
     /// timing-sensitive under load, so they are serialized into the
-    /// `serial-heavy` nextest group (`.config/nextest.toml`) and selected by
-    /// `scripts/flake-soak.sh` for fresh-process soak repetition.
+    /// `serial-heavy` nextest group (`.config/nextest.toml`).
     mod heavy {
         use super::*;
 

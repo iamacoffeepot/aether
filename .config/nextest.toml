@@ -9,13 +9,12 @@ final-status-level = "slow"
 # deadline — passing in isolation but wedging the full suite. This group
 # runs them single-file (at most one at a time) so they never contend with
 # one another, while the thousands of lightweight tests keep saturating the
-# rest. `test(/::heavy::/)` matches the `mod heavy` path segment. The same
-# `mod heavy` set is the soak selector in `scripts/flake-soak.sh`.
+# rest. `test(/::heavy::/)` matches the `mod heavy` path segment.
 [test-groups]
 serial-heavy = { max-threads = 1 }
 
 # Profiles don't inherit overrides, so the assignment is repeated for the
-# `default` and `ci` profiles (the soak profile intentionally omits it).
+# `default` and `ci` profiles.
 [[profile.default.overrides]]
 filter = "test(/::heavy::/)"
 test-group = "serial-heavy"
@@ -39,13 +38,3 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 [[profile.ci.overrides]]
 filter = "package(=aether-data-derive) | package(=aether-derive)"
 slow-timeout = { period = "300s", terminate-after = 1 }
-
-# Repeat-run ("soak") flake detection for concurrent tests, driven by
-# `scripts/flake-soak.sh` with nextest `--stress-count`. Each repeat is a
-# fresh process. `fail-fast = false` so one flaky test doesn't hide the
-# rest of the marked set. Profiles don't inherit, so the timeout is
-# repeated here to bound a hung run at high counts.
-[profile.flake-soak]
-fail-fast = false
-final-status-level = "fail"
-slow-timeout = { period = "60s", terminate-after = 1 }

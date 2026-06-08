@@ -2332,8 +2332,7 @@ mod tests {
     /// teardown drives `unwire` across pooled spawned actors through the
     /// worker park/wake path, which loses wakes under oversubscription, so
     /// they are serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
-    /// fresh-process soak repetition.
+    /// (`.config/nextest.toml`).
     mod heavy {
         use super::*;
 

@@ -868,8 +868,7 @@ mod tests {
     /// Contention/backoff-sensitive tests live in `mod heavy`: the SSE timing
     /// assertion and the restart-pid race are timing-sensitive under load, so
     /// they are serialized into the `serial-heavy` nextest group
-    /// (`.config/nextest.toml`) and selected by `scripts/flake-soak.sh` for
-    /// fresh-process soak repetition. Each delegates to its `run_*` body.
+    /// (`.config/nextest.toml`). Each delegates to its `run_*` body.
     mod heavy {
         #[tokio::test]
         async fn sse_get_streams_incrementally_without_buffering() {
