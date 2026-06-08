@@ -40,11 +40,12 @@ use aether_capabilities::rpc::{
 use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
-use aether_data::{EngineId, Kind, KindId, Uuid, mailbox_id_from_path};
+use aether_data::{EngineId, Kind, KindId, MailboxId, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::{
-    EngineDescriptor, ListEngines, ListEnginesResult, LoadComponent, LoadResult, SpawnEngine,
-    SpawnEngineResult, TerminateEngine,
+    ComponentCapabilities, EngineDescriptor, ListEngines, ListEnginesResult, LoadComponent,
+    LoadResult, LogTail, LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine,
+    SpawnEngineResult, TerminateEngine, TerminateEngineResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -101,6 +102,18 @@ pub struct CallRecord {
 #[derive(serde::Deserialize)]
 struct ManifestView {
     components: BTreeMap<String, String>,
+}
+
+/// The three `LoadResult::Ok` fields a loaded component exposes:
+/// the assigned trampoline `mailbox_id` (the [`replace`](FleetBench::replace)
+/// target), the rendered ADR-0099 lineage `addr`, and the advertised
+/// receive-side `capabilities`. Returned by
+/// [`load_full`](FleetBench::load_full) for the lifecycle rows that need
+/// the mailbox id the thin [`load`](FleetBench::load) delegate discards.
+pub struct Loaded {
+    pub mailbox_id: MailboxId,
+    pub addr: String,
+    pub capabilities: ComponentCapabilities,
 }
 
 /// A booted hub chassis plus a connected, handshaken raw-frame client.
@@ -191,8 +204,20 @@ impl FleetBench {
     /// ADR-0099 lineage address
     /// (`aether.component/aether.embedded:<NAMESPACE>`). Loads with no
     /// init-config — the `LoadComponent.config` carrier is empty, which a
-    /// `Config = ()` component decodes uniformly.
+    /// `Config = ()` component decodes uniformly. A thin delegate over
+    /// [`load_full`](Self::load_full) for callers that need only the
+    /// address.
     pub fn load(&mut self, engine: EngineId, stem: &str) -> String {
+        self.load_full(engine, stem).addr
+    }
+
+    /// Load the `<stem>` component and surface all three `LoadResult::Ok`
+    /// fields as a [`Loaded`]: the assigned trampoline `mailbox_id` (the
+    /// [`replace`](Self::replace) target), the rendered lineage `addr`,
+    /// and the advertised `capabilities`. The lifecycle rows that drive a
+    /// replace or re-address the loaded mailbox need the mailbox id the
+    /// thin [`load`](Self::load) delegate drops.
+    pub fn load_full(&mut self, engine: EngineId, stem: &str) -> Loaded {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
             Some(engine),
@@ -206,10 +231,100 @@ impl FleetBench {
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { name, .. }) => name,
+            Some(LoadResult::Ok {
+                mailbox_id,
+                name,
+                capabilities,
+            }) => Loaded {
+                mailbox_id,
+                addr: name,
+                capabilities,
+            },
             Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
             None => panic!("undecodable LoadResult"),
         }
+    }
+
+    /// Terminate `engine` through the asserting [`call`](Self::call)
+    /// path — the agent-facing `terminate_substrate`, distinct from the
+    /// `Drop`-only best-effort
+    /// [`terminate_quietly`](Self::terminate_quietly). The engines cap
+    /// removes the fleet entry synchronously before it replies, so a
+    /// follow-up [`list_engines`](Self::list_engines) reflects the
+    /// eviction with no heartbeat-eviction wait. Drops `engine` from the
+    /// teardown set so `Drop` doesn't double-terminate it.
+    pub fn terminate(&mut self, engine: EngineId) {
+        let replies = self.call(
+            None,
+            "aether.engine",
+            &TerminateEngine {
+                engine_id: engine.0.to_string(),
+            },
+        );
+        let payload = single_reply(&replies, "TerminateEngine");
+        match TerminateEngineResult::decode_from_bytes(&payload) {
+            Some(TerminateEngineResult::Ok) => {}
+            Some(TerminateEngineResult::Err { error }) => {
+                panic!("terminate of {engine:?} failed: {error}")
+            }
+            None => panic!("undecodable TerminateEngineResult"),
+        }
+        self.spawned.retain(|e| *e != engine);
+    }
+
+    /// Replace the component bound to `mailbox_id` on `engine` with the
+    /// `<stem>` wasm (ADR-0022 in-place swap) and return the swapped
+    /// binary's advertised capabilities. The trampoline keeps its
+    /// load-time name across replace, so targeting the captured
+    /// `mailbox_id` rebinds the same lineage address to the new instance.
+    pub fn replace(
+        &mut self,
+        engine: EngineId,
+        mailbox_id: MailboxId,
+        stem: &str,
+    ) -> ComponentCapabilities {
+        let wasm = read_component_wasm(stem);
+        let replies = self.call(
+            Some(engine),
+            "aether.component",
+            &ReplaceComponent {
+                mailbox_id,
+                wasm,
+                drain_timeout_ms: None,
+                config: Vec::new(),
+            },
+        );
+        let payload = single_reply(&replies, "ReplaceComponent");
+        match ReplaceResult::decode_from_bytes(&payload) {
+            Some(ReplaceResult::Ok { capabilities }) => capabilities,
+            Some(ReplaceResult::Err { error }) => panic!("replace with {stem:?} failed: {error}"),
+            None => panic!("undecodable ReplaceResult"),
+        }
+    }
+
+    /// Tail `recipient`'s per-actor `ActorLogRing` (ADR-0081) on
+    /// `engine`. `since: None` reads from the oldest retained entry;
+    /// `Some(n)` returns only entries with `sequence > n` (the per-actor
+    /// cursor). `max: 0` resolves to the substrate-default cap. The
+    /// framework dispatch loop answers `LogTail` for every native actor
+    /// and wasm trampoline, so `recipient` is any live mailbox path.
+    pub fn log_tail(
+        &mut self,
+        engine: EngineId,
+        recipient: &str,
+        since: Option<u64>,
+    ) -> LogTailResult {
+        let replies = self.call(
+            Some(engine),
+            recipient,
+            &LogTail {
+                max: 0,
+                min_level: None,
+                since,
+            },
+        );
+        let payload = single_reply(&replies, "LogTail");
+        LogTailResult::decode_from_bytes(&payload).expect("undecodable LogTailResult")
     }
 
     /// Route a mail to a recipient on a forked substrate and return the
