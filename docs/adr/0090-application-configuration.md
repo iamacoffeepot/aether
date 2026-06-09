@@ -1,6 +1,6 @@
 # ADR-0090: Application Configuration
 
-- **Status:** Proposed
+- **Status:** Accepted (config-file source deferred)
 - **Date:** 2026-05-27
 
 ## Context

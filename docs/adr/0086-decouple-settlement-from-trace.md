@@ -1,6 +1,6 @@
 # ADR-0086: Decouple settlement from the trace pipeline; decentralize trace to per-actor rings
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-23
 
 ## Context

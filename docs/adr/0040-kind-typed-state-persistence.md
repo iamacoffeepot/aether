@@ -1,6 +1,6 @@
 # ADR-0040: Kind-typed state persistence
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-23
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0069: Data layer split from mail transport
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-30
 
 ## Context

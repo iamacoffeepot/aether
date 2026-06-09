@@ -1,7 +1,9 @@
 # ADR-0036: Per-handler latency sampling and the `profile_component` MCP tool
 
-- **Status:** Proposed
+- **Status:** Superseded
 - **Date:** 2026-04-20
+
+> **Note (2026-06-09):** The `profile_component` design was never built; the need is met by the `actor_cost` MCP tool / per-handler EWMA instrumentation (issue 1128, PR #1184). No prior ADR recorded this; this status does.
 
 ## Context
 

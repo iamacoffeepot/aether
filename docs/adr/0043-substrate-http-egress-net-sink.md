@@ -1,6 +1,6 @@
 # ADR-0043: Substrate HTTP egress via net sink
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-24
 
 > **Update (2026-05-06, issue #612):** the mailbox originally named `aether.net` was renamed to `aether.http` (and `NetCapability` → `HttpCapability`, `NetError` → `HttpError`, `AETHER_NET_*` → `AETHER_HTTP_*`) to free `aether.net` for the socket-based capability introduced by ADR-0079. Body below preserves the original names as a historical record.

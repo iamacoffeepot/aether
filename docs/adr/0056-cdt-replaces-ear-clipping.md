@@ -1,6 +1,6 @@
 # ADR-0056: Constrained Delaunay triangulation replaces ear-clipping
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-26
 - **Amends:** ADR-0055
 

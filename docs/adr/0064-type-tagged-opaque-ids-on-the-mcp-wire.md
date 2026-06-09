@@ -1,6 +1,6 @@
 # ADR-0064: Type-tagged opaque ids on the MCP wire
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-28
 
 ## Context

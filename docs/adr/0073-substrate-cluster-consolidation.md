@@ -1,6 +1,6 @@
 # ADR-0073: Substrate cluster consolidation and naming convention
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-02
 
 ## Context

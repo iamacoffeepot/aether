@@ -1,6 +1,6 @@
 # ADR-0079: Instanced actors as a first-class category
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-06
 - **Amended:** 2026-05-09 — Section 6 retired the `on_close` name in favour of `unwire`, added the symmetric `wire` hook, and recorded the rationale for moving away from `Drop`'s reserved Rust semantics.
 

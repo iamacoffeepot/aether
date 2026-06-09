@@ -1,6 +1,6 @@
 # ADR-0050: Per-provider content-gen caps
 
-- **Status:** Proposed
+- **Status:** Accepted (anthropic + gemini shipped; the openai amendment is deferred/unbuilt)
 - **Date:** 2026-04-25
 - **Revised:** 2026-05-19 (iamacoffeepot/aether#1001) — rewritten from a single `llm` sink to per-provider caps (`aether.anthropic`, `aether.gemini`) with per-API kinds, matching iamacoffeepot/aether#989. CLI is now a sibling kind; media outputs return file paths; retired broadcast-sink cost telemetry removed (issue #775).
 - **Revised:** 2026-05-29 — added the `aether.openai` image cap (image→image `edit` + text→image `generate` via `gpt-image-1`) as a third instance of the per-provider / per-API pattern, in lieu of a separate ADR. A per-API ADR would fragment one decision across many docs; this ADR is the home for "how a provider API becomes a substrate cap," so a new provider amends it rather than spawning a sibling.

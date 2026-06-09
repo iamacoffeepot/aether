@@ -1,7 +1,9 @@
 # ADR-0060: Guest-side logging via mail sink
 
-- **Status:** Proposed
+- **Status:** Superseded by ADR-0081
 - **Date:** 2026-04-27
+
+> **Note (2026-06-09):** The guest mail-sink logging machinery was replaced by ADR-0081's per-actor rings (`aether.trace.tail`); ADR-0081 didn't formally name 0060, so this records it.
 
 ## Context
 

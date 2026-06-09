@@ -1,6 +1,6 @@
 # ADR-0081: Decentralized per-actor log storage
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-19
 - **Supersedes parts of:** ADR-0023, ADR-0077
 

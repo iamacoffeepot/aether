@@ -1,6 +1,6 @@
 # ADR-0094: Settlement-obligation guard for owned dispatch
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 
 Amends **ADR-0080 §2 / §12** (and the post-ADR-0086 settlement model). It does not change the settlement *semantics* — `(in_flight == 0 && held_open == 0)` is still the exact settled signal, the producer-site `Sent`/`Finished` brackets are unchanged — it adds a **debug-build runtime check** that enforces the §2 "every `OwnedDispatch` must have `Finished` recorded" obligation at its weakest seam, and names the **transfer-vs-discharge** vocabulary every hand-rolled drain must now follow.

@@ -1,6 +1,6 @@
 # ADR-0048: Native transforms and content-addressed handle ids (Phase 3 of ADR-0045)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-25
 - **Revised:** 2026-05-20 — re-scoped from wasm `Func::call` transforms to **native transforms only** before implementation. The original draft made a transform a wasm export the substrate called via `wasmtime::Func::call`, carried across the load boundary in an `aether.dag.transforms` custom section. That design predated the unified actor model (ADR-0074) settling and inverted the engine's native/wasm relationship — it made a bespoke wasm calling convention the primary transform mechanism. This revision makes transforms native pure Rust functions and defers wasm transforms to a future ADR with an explicit forcing function. See §"Why native, why defer wasm" and the reworked Alternatives.
 

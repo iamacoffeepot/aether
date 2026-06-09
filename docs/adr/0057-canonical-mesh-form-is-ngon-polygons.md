@@ -1,8 +1,10 @@
 # ADR-0057: N-gon polygons are the canonical mesh form
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-26
 - **Amends:** ADR-0055, ADR-0056
+
+> **Realization (2026-06-09):** The polygon-edge wireframe ships as thin triangles (`polygon_outline_triangles`) rather than the planned `aether.draw_line` kind.
 
 ## Context
 
