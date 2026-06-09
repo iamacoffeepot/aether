@@ -84,14 +84,15 @@ use aether_kinds::{
 };
 use aether_math::{Mat4, Vec3};
 
+use crate::arena::{Arena, HH, HW, SUB};
 use crate::{OCTIMETERS_PER_TILE, SetGranularity, SetWalkable, TILE_BITS, Teleport};
 
 /// Walkable map dimensions, in tiles.
-const GRID_W: i32 = 16;
-const GRID_H: i32 = 16;
+pub(crate) const GRID_W: i32 = 16;
+pub(crate) const GRID_H: i32 = 16;
 /// Tile count, for fixed-size pathfinding scratch arrays.
 #[allow(clippy::cast_sign_loss)]
-const GRID_TILES: usize = (GRID_W * GRID_H) as usize;
+pub(crate) const GRID_TILES: usize = (GRID_W * GRID_H) as usize;
 
 /// Ground speed: octimeters/tick the mover travels toward its committed
 /// cell. `8` ≈ 1.9 m/s at a 60 Hz tick. Independent of the cell size.
@@ -221,29 +222,12 @@ struct TileMap {
 }
 
 impl TileMap {
+    /// An open arena — every tile walkable. The hazard game plays on open
+    /// ground; walls can still be added at runtime via [`SetWalkable`].
     fn new() -> Self {
-        let mut map = Self {
+        Self {
             blocked: vec![false; GRID_TILES],
-        };
-        // A concentric-ring maze: three nested square rings at offsets 2, 4
-        // and 6 from the open border, each sealed but for a single doorway.
-        // The doorways alternate sides (bottom / top / bottom), so the only
-        // route between the open center room and the border spirals the long
-        // way around every ring — real work for the click-to-move pathfinder.
-        // The mover spawns in the center room.
-        for &(lo, hi) in &[(2, 13), (4, 11), (6, 9)] {
-            for c in lo..=hi {
-                map.blocked[Self::idx(c, lo)] = true; // top edge
-                map.blocked[Self::idx(c, hi)] = true; // bottom edge
-                map.blocked[Self::idx(lo, c)] = true; // left edge
-                map.blocked[Self::idx(hi, c)] = true; // right edge
-            }
         }
-        // One doorway per ring, alternating sides to force the spiral.
-        for &(dx, dz) in &[(8, 13), (8, 4), (8, 9)] {
-            map.blocked[Self::idx(dx, dz)] = false;
-        }
-        map
     }
 
     /// Build a map with exactly the listed tiles blocked, for tests that need
@@ -330,6 +314,12 @@ pub struct Locomotion {
     cam_pitch: f32,
     /// Which arrow keys are held, orbiting the camera each tick.
     cam_held: CamHeld,
+    /// The hazard game: tiles telegraph then turn lethal on a deterministic
+    /// schedule.
+    arena: Arena,
+    /// Whether to draw the orange warning telegraph. Off is a hardcore mode —
+    /// only the red strikes (and the blue refuge) show. Toggled with `O`.
+    show_warnings: bool,
 }
 
 #[actor]
@@ -357,6 +347,8 @@ impl FfiActor for Locomotion {
             cam_yaw: 0.0,
             cam_pitch: CAMERA_PITCH,
             cam_held: CamHeld::default(),
+            arena: Arena::new(),
+            show_warnings: true,
         })
     }
 
@@ -375,6 +367,7 @@ impl FfiActor for Locomotion {
     #[handler]
     fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
         self.orbit_camera();
+        self.arena.tick();
         self.advance();
     }
 
@@ -406,10 +399,25 @@ impl FfiActor for Locomotion {
 
     #[handler]
     fn on_key(&mut self, _ctx: &mut FfiCtx<'_>, key: Key) {
-        if key.code == keycode::KEY_TAB {
-            self.cycle_granularity();
-        } else {
-            self.set_held(key.code, true);
+        match key.code {
+            keycode::KEY_TAB => self.cycle_granularity(),
+            keycode::KEY_O => {
+                self.show_warnings = !self.show_warnings;
+                tracing::info!(show_warnings = self.show_warnings, "locomotion warnings");
+            }
+            keycode::KEY_K => {
+                tracing::info!(speed_percent = self.arena.speed_up(), "hazard speed");
+            }
+            keycode::KEY_J => {
+                tracing::info!(speed_percent = self.arena.speed_down(), "hazard speed");
+            }
+            keycode::KEY_M => {
+                tracing::info!(wall_thickness = self.arena.walls_thicker(), "hazard walls");
+            }
+            keycode::KEY_N => {
+                tracing::info!(wall_thickness = self.arena.walls_thinner(), "hazard walls");
+            }
+            _ => self.set_held(key.code, true),
         }
     }
 
@@ -675,7 +683,7 @@ impl Locomotion {
     /// only floats in the system live here, at the render boundary; they
     /// never feed back into the sim.
     fn render_triangles(&self) -> Vec<DrawTriangle> {
-        let mut out = Vec::with_capacity((GRID_W * GRID_H * 2) as usize + 512);
+        let mut out = Vec::with_capacity((GRID_W * GRID_H * 2) as usize + 2048);
         for tz in 0..GRID_H {
             for tx in 0..GRID_W {
                 let color = if !self.map.walkable(tx, tz) {
@@ -689,13 +697,26 @@ impl Locomotion {
                 push_quad(&mut out, tx as f32 + 0.5, tz as f32 + 0.5, 0.48, 0.0, color);
             }
         }
+        // Hazard overlay at sub-cell resolution, laid just above the floor.
+        let sub = SUB as f32;
+        let half = 0.5 / sub;
+        for sz in 0..HH {
+            for sx in 0..HW {
+                if let Some(color) = self.arena.subcell_color(sx, sz, self.show_warnings) {
+                    let cx = (sx as f32 + 0.5) / sub;
+                    let cz = (sz as f32 + 0.5) / sub;
+                    push_quad(&mut out, cx, cz, half, 0.02, color);
+                }
+            }
+        }
         // Click-to-move destination: the exact cell the mover will rest in,
-        // sized to the active granularity, laid just above the floor.
+        // sized to the active granularity. Laid above the hazard overlay
+        // (which sits at 0.02) so the selector never z-fights the paint.
         if let Some((dx, dz)) = self.dest {
             let cell_metres = self.cell as f32 / OCTIMETERS_PER_TILE as f32;
             let cx = dx as f32 / OCTIMETERS_PER_TILE as f32;
             let cz = dz as f32 / OCTIMETERS_PER_TILE as f32;
-            push_quad(&mut out, cx, cz, cell_metres * 0.5, 0.02, DEST_COLOR);
+            push_quad(&mut out, cx, cz, cell_metres * 0.5, 0.06, DEST_COLOR);
         }
         let ax = self.mover.x as f32 / OCTIMETERS_PER_TILE as f32;
         let az = self.mover.z as f32 / OCTIMETERS_PER_TILE as f32;

@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "runtime")]
 pub mod runtime;
 
+#[cfg(feature = "runtime")]
+mod arena;
+
 /// Octimeters per tile: `1 tile = 1 meter = 256 octimeters`.
 pub const OCTIMETERS_PER_TILE: i32 = 256;
 
