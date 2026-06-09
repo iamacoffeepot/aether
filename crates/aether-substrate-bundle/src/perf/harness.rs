@@ -26,7 +26,7 @@ use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
 use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
-use aether_kinds::{SubscribeInput, SubscribeInputResult, Tick};
+use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, Subname};
 
 use crate::perf::report::LatencySection;
@@ -1132,16 +1132,16 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 continue;
             }
 
-            // Wire the source into the platform `Tick` stream so
-            // `advance` delivers a tick to it each frame (ADR-0021).
-            let sub_req = SubscribeInput {
-                kind: Tick::ID,
-                mailbox: ticksrc_id(),
+            // Subscribe the source to the `Tick` lifecycle stage so
+            // `advance` broadcasts a tick to it each frame (ADR-0082).
+            let sub_req = LifecycleSubscribe {
+                stage: Tick::ID.0,
+                mailbox: ticksrc_id().0,
             }
             .encode_into_bytes();
-            match tb.send_bytes_and_await("aether.input", SubscribeInput::ID, sub_req) {
-                Ok(reply) => match SubscribeInputResult::decode_from_bytes(&reply) {
-                    Some(SubscribeInputResult::Ok) => {}
+            match tb.send_bytes_and_await("aether.lifecycle", LifecycleSubscribe::ID, sub_req) {
+                Ok(reply) => match LifecycleSubscribeResult::decode_from_bytes(&reply) {
+                    Some(LifecycleSubscribeResult::Ok) => {}
                     other => {
                         tracing::warn!(target: "aether_perf", topo = %topo.name, ?other, "Tick subscribe failed");
                         continue;

@@ -87,9 +87,10 @@ pub struct HeadlessTimerCapability {
 pub struct HeadlessTimerRunning {
     queue: Arc<Mailer>,
     /// `aether.lifecycle` mailbox id, cached at boot. Each tick fires
-    /// one `LifecycleAdvance` here; the lifecycle driver broadcasts
-    /// the current stage (Tick) to its subscriber set, including
-    /// `aether.input` per the chassis's `initial_subscribers`.
+    /// one `LifecycleAdvance` here; the lifecycle driver broadcasts the
+    /// current stage (Tick) directly to its stage subscriber set
+    /// (issue 1490 retired the `Tick → aether.input` relay; components
+    /// subscribe `Tick` on `aether.lifecycle`).
     lifecycle_mailbox: MailboxId,
     /// Kind id of [`LifecycleAdvance`], pre-resolved so the timer
     /// loop body stays alloc-free per tick.

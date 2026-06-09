@@ -3,28 +3,29 @@
 > **Governing ADRs:** [ADR-0021](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0021-input-stream-subscriptions.md)
 > (publish/subscribe routing), [ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)
 > (subscribers keyed by `KindId`). The model — subscribe by kind, fan out to
-> every subscriber — is **stable**. One stream, `Tick`, is also a frame
-> lifecycle stage; what *drives its cadence* lives in the lifecycle state
-> machine (its own page) — this page covers how you receive it and the rest.
+> every subscriber — is **stable**. This page covers the input interrupts
+> (key, mouse, window-size). The per-frame `Tick` is a frame-lifecycle stage:
+> a component subscribes it on `aether.lifecycle`, not here — the lifecycle
+> state machine (its own page) owns it.
 
-The substrate owns the window, the keyboard, the mouse, and the per-frame clock.
-The events they produce — a key down, the cursor moving, a resize, a tick —
-reach actors as ordinary mail through one mailbox, `aether.input`, on a
-publish/subscribe model. An actor that wants a stream **subscribes** to it; the
-substrate fans each event out to every subscriber. Nothing is pushed at an actor
-that didn't ask; a stream with no subscribers is dropped at the source.
+The substrate owns the window, the keyboard, and the mouse. The events they
+produce — a key down, the cursor moving, a resize — reach actors as ordinary
+mail through one mailbox, `aether.input`, on a publish/subscribe model. An actor
+that wants a stream **subscribes** to it; the substrate fans each event out to
+every subscriber. Nothing is pushed at an actor that didn't ask; a stream with
+no subscribers is dropped at the source.
 
 When you author a component, this is how it feels the world — you subscribe to
-`Tick` to advance each frame, to `Key` to react to input, to `WindowSize` to
-track the viewport. When you drive over MCP, input normally originates at the
-platform layer, but you can inject a synthetic event by mailing its kind to
-`aether.input`, which fans it out to whoever subscribed.
+`Key` to react to keystrokes, to `MouseMove` to follow the cursor, to
+`WindowSize` to track the viewport. When you drive over MCP, input normally
+originates at the platform layer, but you can inject a synthetic event by mailing
+its kind to `aether.input`, which fans it out to whoever subscribed.
 
 ## Why it exists
 
-Several actors can want the same input at once. A renderer, a physics step, and
-a telemetry collector might all advance on `Tick`; a debug overlay might watch
-keystrokes alongside the component reacting to them. Routing input to a single
+Several actors can want the same input at once. A gameplay actor and a debug
+overlay might both watch keystrokes; a HUD and a renderer might both want resize
+events. Routing input to a single
 owner would force the extra listeners to fan out through that one — the
 incidental coupling the mail-first design exists to avoid. So the substrate keeps
 a subscriber *set* per stream and broadcasts to every member, the same shape
@@ -50,15 +51,13 @@ the `InputCapability` actor — the sole owner of the subscriber table
 | `aether.mouse_move` | cursor movement |
 | `aether.mouse_button` | a mouse-button press |
 | `aether.window_size` | a resize |
-| `aether.lifecycle.tick` | each frame — see below |
 
-**`Tick` is a lifecycle stage you happen to subscribe to here.** Its kind name is
-`aether.lifecycle.tick`, not `aether.input.*`, because the per-frame advance is
-the substrate's lifecycle state machine — that's what emits a tick each frame.
-But you subscribe to it through `aether.input` exactly like the other streams,
-and it fans out the same way, so from a component's seat `Tick` is just another
-stream. The cadence behind it — when a frame advances, and what it waits on — is
-the lifecycle page's subject, not this one.
+**`Tick` lives on the lifecycle, not here.** The per-frame advance is the
+substrate's frame-lifecycle state machine (`aether.lifecycle.tick`), so a
+component subscribes the `Tick` stage directly on `aether.lifecycle` —
+`ctx.actor::<LifecycleCapability>().subscribe(Tick::ID, me)` (ADR-0082), the same
+subscribe shape as the input streams below. `Key`, `MouseMove`, and the rest are
+genuine input interrupts and stay on `aether.input`.
 
 **Subscribe and unsubscribe are mail.** Three control kinds on `aether.input`:
 
@@ -95,7 +94,7 @@ with mail allowed. Address the cap by type and name the kind:
 fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
     let me = MailboxId(ctx.mailbox_id());
     let input = ctx.actor::<InputCapability>();
-    input.subscribe(Tick::ID, me);
+    input.subscribe(Key::ID, me);
     input.subscribe(WindowSize::ID, me);
 }
 ```
@@ -104,20 +103,22 @@ Then handle each stream as its kind, like any other mail:
 
 ```rust
 #[handler]
-fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) { /* advance a frame */ }
+fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) { /* react to a keystroke */ }
 ```
 
-The reference `aether-camera` subscribes `Tick` and `WindowSize` this way and
-advances its cameras on each. You don't unsubscribe on the way out — the host
-clears your subscriptions when the component drops.
+The reference `aether-camera` subscribes `WindowSize` this way to track the
+viewport, and subscribes the `Tick` and `Render` lifecycle stages on
+`aether.lifecycle` to advance and submit each frame. You don't unsubscribe on the
+way out — the host clears your subscriptions when the component drops.
 
 **From an agent over MCP.** Input originates at the platform layer, so the usual
 way you see it is through a subscribed component's behavior or its logs. To drive
 a component without a real keyboard — in a test, or on the headless chassis — mail
 the event's kind straight to `aether.input` (`aether.key`, `aether.mouse_move`,
 …) and the cap fans it out to subscribers just as a platform event would. The
-per-frame `Tick` is the exception: its cadence is the lifecycle driver's job, not
-something you pump by hand.
+per-frame `Tick` is not an input stream: it is a frame-lifecycle stage on
+`aether.lifecycle`, advanced by the lifecycle driver, so you don't pump it
+through `aether.input` by hand.
 
 ## How to extend or reuse it
 

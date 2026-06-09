@@ -2,6 +2,12 @@
 
 - **Status:** Proposed
 - **Date:** 2026-04-30
+- **Updated 2026-06-09 (issue 1490):** `Tick` is no longer keyed as an input
+  subscriber. It is a frame-lifecycle stage (ADR-0082) subscribed on
+  `aether.lifecycle`; the `KindId`-keyed `aether.input` subscriber map now
+  covers only the genuine input interrupts (`Key`, `KeyRelease`, `MouseMove`,
+  `MouseButton`, `WindowSize`). The keying mechanism this ADR introduces is
+  unchanged — only `Tick`'s membership in the set.
 
 ## Context
 

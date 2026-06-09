@@ -273,22 +273,27 @@ impl FfiActor for CameraComponent {
         })
     }
 
-    /// Issue 640 / 1378: subscribe to the input streams the camera
-    /// advances against (`Tick`, `WindowSize`) plus the `Render`
-    /// lifecycle stage it submits on. `wire` (post-init, mail-allowed)
-    /// is the placement — `init`'s ctx is `Resolver`-only and can't mail.
+    /// Subscribe the lifecycle stages the camera advances against
+    /// (`Tick`, `Render`) on `aether.lifecycle`, plus the `WindowSize`
+    /// input interrupt on `aether.input`. `wire` (post-init,
+    /// mail-allowed) is the placement — `init`'s ctx is `Resolver`-only
+    /// and can't mail.
+    ///
+    /// `Tick` and `Render` are frame-lifecycle stages (ADR-0082), so they
+    /// ride `aether.lifecycle`; `WindowSize` is a genuine input interrupt
+    /// (ADR-0021), so it stays on `aether.input`.
     ///
     /// On a chassis whose lifecycle graph omits `Render` (headless), the
-    /// cap replies `Err(UnsupportedStage)` to this fire-and-forget
+    /// cap replies `Err(UnsupportedStage)` to that fire-and-forget
     /// subscribe; the reply warn-drops and the camera simply never
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         let me = MailboxId(ctx.mailbox_id());
-        let input = ctx.actor::<InputCapability>();
-        input.subscribe(Tick::ID, me);
-        input.subscribe(WindowSize::ID, me);
-        ctx.actor::<LifecycleCapability>().subscribe(Render::ID, me);
+        ctx.actor::<InputCapability>().subscribe(WindowSize::ID, me);
+        let lifecycle = ctx.actor::<LifecycleCapability>();
+        lifecycle.subscribe(Tick::ID, me);
+        lifecycle.subscribe(Render::ID, me);
     }
 
     /// Advance every camera's per-mode state each tick. Inactive cameras

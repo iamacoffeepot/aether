@@ -536,9 +536,9 @@ mod native {
         /// on the chassis side.
         pub graph: LifecycleGraphData,
         /// Initial `(stage_kind, mailbox)` pairs to populate the
-        /// subscriber table at boot. Chassis builders use this to wire
-        /// the relay (e.g. `(Tick::ID, aether.input)`) without
-        /// round-tripping a `LifecycleSubscribe` mail. Each pair must
+        /// subscriber table at boot — a chassis builder can pre-subscribe
+        /// a mailbox to a stage this way without round-tripping a
+        /// `LifecycleSubscribe` mail. Each pair must
         /// reference a stage kind declared by `graph` — the boot path
         /// verifies this and returns `BootError` otherwise, so
         /// misconfiguration fails fast at chassis-build.

@@ -83,8 +83,8 @@ fn require_wgpu_only() -> bool {
 }
 
 /// A freshly-loaded probe's trampoline mailbox accepts the kinds the
-/// probe declares `#[handler]`s for (`Tick`, `SetRender`) and rejects
-/// kinds it doesn't (`Ping`).
+/// probe declares `#[handler]`s for (`Tick`, `Key`, `SetRender`) and
+/// rejects kinds it doesn't (`Ping`).
 #[test]
 fn cap_registry_reports_accepted_kinds() {
     let Some(wasm_path) = require_runtime("probe") else {

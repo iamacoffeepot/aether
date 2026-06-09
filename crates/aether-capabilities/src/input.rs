@@ -1,6 +1,11 @@
 //! `aether.input` cap. Owns the ADR-0021 publish/subscribe routing
-//! table for substrate input streams (`Tick`, `Key`, `KeyRelease`,
+//! table for substrate input streams (`Key`, `KeyRelease`,
 //! `MouseMove`, `MouseButton`, `WindowSize`).
+//!
+//! `Tick` is not an input stream: it is a frame-lifecycle stage
+//! (`aether.lifecycle.tick`) a component subscribes directly on
+//! `aether.lifecycle` via `ctx.actor::<LifecycleCapability>()`
+//! (ADR-0082). The input cap carries only genuine input interrupts.
 //!
 //! Issue 640 collapsed the last `Arc<RwLock<HashMap<...>>>` cross-thread
 //! share. The cap is the sole owner of the subscriber table, held as a
@@ -27,8 +32,8 @@ use aether_data::{KindId, MailboxId};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::SubscribeInputResult;
 use aether_kinds::{
-    Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, Tick, UnsubscribeAll,
-    UnsubscribeInput, WindowSize,
+    Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, UnsubscribeAll, UnsubscribeInput,
+    WindowSize,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
@@ -108,7 +113,7 @@ impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
 #[aether_actor::bridge(singleton)]
 mod native {
     use super::{
-        Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, SubscribeInputResult, Tick,
+        Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, SubscribeInputResult,
         UnsubscribeAll, UnsubscribeInput, WindowSize,
     };
     use aether_actor::actor;
@@ -137,7 +142,7 @@ mod native {
     /// 1. **Subscribe / Unsubscribe / `UnsubscribeAll`** — mutates the
     ///    table on `&mut self`. Reply target: the original sender.
     ///
-    /// 2. **Input events** (`Tick`, `Key`, `KeyRelease`, `MouseMove`,
+    /// 2. **Input events** (`Key`, `KeyRelease`, `MouseMove`,
     ///    `MouseButton`, `WindowSize`) — pushed by the chassis driver
     ///    after each platform event; the cap fans out one mail per
     ///    subscriber. Fire-and-forget; no reply.
@@ -215,12 +220,6 @@ mod native {
             for set in self.subscribers.values_mut() {
                 set.remove(&payload.mailbox);
             }
-        }
-
-        /// Per-frame tick fan-out (ADR-0021). Empty payload.
-        #[handler]
-        fn on_tick(&mut self, ctx: &mut NativeCtx<'_>, payload: Tick) {
-            self.fanout(ctx, &payload);
         }
 
         /// Key-press fan-out.

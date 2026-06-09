@@ -155,9 +155,9 @@ pub struct TestBench {
 
     /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
     /// fires one `LifecycleAdvance` here per requested tick; the
-    /// lifecycle driver broadcasts `Tick` to `aether.input` (relayed
-    /// via the chassis's `initial_subscribers`) and the rest of the
-    /// subscriber set per ADR-0082.
+    /// lifecycle driver broadcasts the `Tick` stage directly to its
+    /// stage subscriber set per ADR-0082 (issue 1490 retired the
+    /// `Tick → aether.input` relay).
     lifecycle_mailbox: MailboxId,
     /// Kind id of [`LifecycleAdvance`], pre-resolved so the advance
     /// loop body stays alloc-free per tick.
@@ -940,10 +940,11 @@ impl TestBench {
     fn run_frame(&mut self, dispatch_tick: bool) -> Result<(), TestBenchError> {
         if dispatch_tick {
             // ADR-0082 PR 3b: TestBench pushes `LifecycleAdvance` to the
-            // lifecycle driver, which broadcasts Tick to `aether.input`
-            // (relayed via the chassis's `initial_subscribers`) plus any
-            // other subscribers. The chain rooted at this advance's
-            // `MailId` covers the whole subtree — input fanout,
+            // lifecycle driver, which broadcasts the `Tick` stage directly
+            // to its stage subscribers (issue 1490 retired the
+            // `Tick → aether.input` relay; components subscribe `Tick` on
+            // `aether.lifecycle`). The chain rooted at this advance's
+            // `MailId` covers the whole subtree — the stage fanout,
             // subscriber handlers, the tick_observed broadcasts those
             // subscribers emit, the broadcast cap's egress to outbound.
             //
@@ -1198,7 +1199,7 @@ mod tests {
     #[test]
     fn tick_fanout_propagates_chassis_root_lineage() {
         use aether_data::{Kind as DataKind, MailId};
-        use aether_kinds::SubscribeInput;
+        use aether_kinds::LifecycleSubscribe;
         use aether_substrate::mail::registry::MailDispatch;
         use std::sync::Mutex;
 
@@ -1238,22 +1239,22 @@ mod tests {
             }),
         );
 
-        // Subscribe the closure mailbox to Tick (goes through the
-        // input cap's on_subscribe handler), then advance one tick.
-        // The advance calls `push_chassis_root_mail` for the tick
-        // (issue 723), which mints a fresh chassis-root MailId and
-        // fires `Sent`. The input cap's `on_tick` reads `ctx.in_flight_*`
-        // and threads them through `ctx.fanout` to every subscriber.
-        // Sequencing both through `execute` settles the subscribe
-        // before the tick fires.
+        // Subscribe the closure mailbox to the `Tick` lifecycle stage
+        // (goes through the lifecycle cap's on_subscribe handler), then
+        // advance one tick. The advance issues a `LifecycleAdvance` whose
+        // chain root the lifecycle cap threads through
+        // `broadcast_to_subscribers` (`send_envelope_traced`) to every
+        // stage subscriber (issue 723 lineage, ADR-0082 §6). Sequencing
+        // both through `execute` settles the subscribe before the tick
+        // fires.
         tb.execute(vec![
             (
                 "subscribe",
                 BenchOp::send_mail(
-                    "aether.input",
-                    &SubscribeInput {
-                        kind: Tick::ID,
-                        mailbox: subscriber_mbox,
+                    "aether.lifecycle",
+                    &LifecycleSubscribe {
+                        stage: Tick::ID.0,
+                        mailbox: subscriber_mbox.0,
                     },
                 ),
             ),
