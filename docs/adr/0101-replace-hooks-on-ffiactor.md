@@ -35,6 +35,10 @@ Make `on_replace` / `on_rehydrate` default-no-op methods on `FfiActor`, beside `
 
 ADR-0016 gated state migration behind an opt-in to spare stateless components a cost. That cost is two no-op wasm exports, the `wire` / `unwire` cost already accepted everywhere. This ADR revises that one decision: the replace hooks join the other lifecycle hooks as `FfiActor` defaults. ADR-0016's state-bundle protocol stands unchanged.
 
+### Principle this sets
+
+Lifecycle hooks live on `FfiActor` (and `NativeActor`) as default-no-op methods, overridden when an actor cares. `wire`, `unwire`, and now `on_replace` / `on_rehydrate` all take that shape. The only required entry points are `init` (the constructor — it returns `Self`, so it cannot be a no-op) and `receive` (dispatch). `Replaceable` was the single hook gated behind an opt-in subtrait, and it retires. A future lifecycle hook is added the same way — a defaulted method on the actor trait, never an opt-in subtrait or an `export!` flag. An audit at this ADR's writing confirmed those two were the only hooks off the pattern.
+
 ## Consequences
 
 ### Positive
