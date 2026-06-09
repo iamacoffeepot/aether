@@ -208,7 +208,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     //
     // Size cap is enforced before the guest memory is read — an
     // oversized request records an error and aborts without touching
-    // memory. A subsequent `save_state` in the same `on_replace` call
+    // memory. A subsequent `save_state` in the same `on_dehydrate` call
     // overwrites; this matches ADR-0016 §2's "zero or one times" clause
     // for the success path and doesn't change behavior on error.
     linker.func_wrap(

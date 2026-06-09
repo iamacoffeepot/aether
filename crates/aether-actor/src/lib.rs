@@ -31,7 +31,8 @@
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     [`export!`] macro emits as a `static`.
 //!   - [`ffi`] — FFI binding layer: [`ffi::bridge`] dispatch ZSTs +
-//!     [`FfiActor`] trait + [`Replaceable`] hook trait +
+//!     [`FfiActor`] trait (with the `on_dehydrate` / `on_rehydrate`
+//!     hot-swap hooks, ADR-0101) +
 //!     [`FfiActorMailbox`] for the actor-typed sender chain +
 //!     the [`export!`] macro that pins `init` / `receive` /
 //!     lifecycle FFI exports plus the `aether.kinds.inputs` /
@@ -84,7 +85,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 // an extra `ffi::` segment.
 pub use ffi::{
     BootError, ErasedFfiActor, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx,
-    Replaceable, SpawnError,
+    SpawnError,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

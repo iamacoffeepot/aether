@@ -60,6 +60,15 @@ crate-type = ["cdylib"]
 name = "multi_actor"
 crate-type = ["cdylib"]
 
+# ADR-0101 stateful-replace fixture: a multi-actor module
+# (`export!(Counter, Sidecar)`) whose entry `Counter` overrides the
+# `on_dehydrate` / `on_rehydrate` hooks so its counter survives a
+# `replace_component` swap. Proves multi-actor hot-swap state continuity
+# now that the hooks are FfiActor defaults.
+[[example]]
+name = "stateful_replace"
+crate-type = ["cdylib"]
+
 # Issue 1472: DAG `Source` fixture. Replies a fixed `Mat4Apply` operand
 # on `Mat4SourceTrigger`, feeding the `mat4_apply` transform downstream.
 # Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/mat4_source.wasm

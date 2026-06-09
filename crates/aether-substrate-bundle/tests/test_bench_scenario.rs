@@ -40,7 +40,7 @@ use aether_substrate_bundle::test_bench::{
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
     visual::{decode_png, differs_from_background},
 };
-use aether_test_fixtures::SetRender;
+use aether_test_fixtures::{Bump, CountQuery, CountReport, SetRender};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the
@@ -554,6 +554,119 @@ fn replace_component_preserves_mailbox_identity() {
          baseline={post_replace_baseline}, final={post_replace}; \
          observed kinds: {:?}",
         bench.observed_kinds(),
+    );
+}
+
+/// ADR-0101: a multi-actor module's entry export carries state across
+/// `replace_component` through the `on_dehydrate` / `on_rehydrate`
+/// hooks, now `FfiActor` defaults rather than an opt-in subtrait. Loads
+/// the `stateful_replace` fixture (`export!(Counter, Sidecar)`), bumps
+/// the entry `Counter`'s in-memory count to 3, replaces the wasm at the
+/// same mailbox id with the same binary, then re-queries the count.
+/// Because the boxed `ErasedFfiActor` now forwards the hooks, the count
+/// survives the swap — before this change the multi-actor arm shipped
+/// the hooks as no-ops and the replacement booted fresh at 0.
+#[test]
+fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
+    use aether_actor::Actor;
+
+    const FIXTURE_NAME: &str = "stateful_replace";
+
+    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+        return;
+    };
+    let addr = format!(
+        "aether.component/{}:{FIXTURE_NAME}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    // Load the entry export (Counter) and capture its mailbox id.
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let mailbox_id = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
+    };
+
+    // Bump the counter to 3, then read it back. `send_mail` is
+    // fire-and-settle, so the three bumps land before the query.
+    let pre = bench
+        .execute(vec![
+            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+        ])
+        .expect("bump + query sequence");
+    let pre_count = pre
+        .reply::<CountReport>("query")
+        .expect("decode pre-replace CountReport");
+    assert_eq!(
+        pre_count,
+        CountReport { count: 3 },
+        "three bumps should leave the counter at 3 before the replace",
+    );
+
+    // Replace the wasm at the same mailbox id with the same binary.
+    // `on_dehydrate` saves the count on the old instance; `on_rehydrate`
+    // restores it on the new one.
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
+    let swapped = bench
+        .execute(vec![(
+            "swap",
+            BenchOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    match swapped
+        .reply::<ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+    {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
+
+    // The new instance booted fresh (init count = 0) and then rehydrated
+    // from the saved bundle. Query it: the count must still be 3.
+    let post = bench
+        .execute(vec![(
+            "query",
+            BenchOp::send_and_await(addr.as_str(), &CountQuery),
+        )])
+        .expect("post-replace query sequence");
+    let post_count = post
+        .reply::<CountReport>("query")
+        .expect("decode post-replace CountReport");
+    assert_eq!(
+        post_count,
+        CountReport { count: 3 },
+        "the counter must survive the multi-actor replace via on_dehydrate / on_rehydrate; \
+         got {post_count:?} (0 means the hooks did not run through the boxed instance)",
     );
 }
 

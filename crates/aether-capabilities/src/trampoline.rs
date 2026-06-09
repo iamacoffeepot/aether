@@ -283,8 +283,8 @@ mod native {
             }
         }
 
-        /// Drop the **wasm component**. Runs the guest's `on_drop`
-        /// hook, then drops the `Component`. The trampoline itself
+        /// Drop the **wasm component**. Runs the guest's `unwire`
+        /// pre-shutdown hook, then drops the `Component`. The trampoline itself
         /// stays alive — the mailbox `aether.embedded:NAME`
         /// remains addressable and reusable: agents can refill it via
         /// `ReplaceComponent` without minting a new name. To kill
@@ -321,7 +321,7 @@ mod native {
         /// Replace the wasm component with a fresh module. ADR-0022 +
         /// ADR-0038 splice invariants hold because the trampoline's
         /// inbox is the framework binding, which outlives the
-        /// `Component` swap. `on_replace` runs on the old instance,
+        /// `Component` swap. `on_dehydrate` runs on the old instance,
         /// `take_saved_state` lifts any rehydration bundle, the new
         /// module instantiates against the same binding, and
         /// `on_rehydrate` runs on the fresh side.
@@ -485,7 +485,7 @@ mod native {
                 },
             };
 
-            // Run unwire then on_replace on the old instance and lift
+            // Run unwire then on_dehydrate on the old instance and lift
             // any saved-state bundle. If the trampoline is currently
             // empty (post-DropComponent — load-after-drop refill),
             // there's no prior wasm to drain; the new instance starts
@@ -494,7 +494,7 @@ mod native {
             // swap.
             let saved = if let Some(mut old) = self.component.take() {
                 old.unwire();
-                old.on_replace();
+                old.on_dehydrate();
                 if let Some(err) = old.take_save_error() {
                     // Restore the old component so the trampoline isn't
                     // accidentally emptied by a save-state failure.
@@ -502,8 +502,8 @@ mod native {
                     return ReplaceResult::Err { error: err };
                 }
                 let saved = old.take_saved_state();
-                // Old component drops at end of scope — its `on_drop`
-                // hook runs as part of `Drop`.
+                // Old component drops at end of scope — the `Component`'s
+                // own `Drop` releases the wasm store.
                 drop(old);
                 saved
             } else {

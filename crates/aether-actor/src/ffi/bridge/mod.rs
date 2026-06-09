@@ -9,7 +9,7 @@
 //!   mints one so a handler can match a reply to the request it sent —
 //!   it's mail-level metadata.
 //! - [`PersistBridge`] — migration-bundle deposit
-//!   (`save_state`), used during `on_replace` only.
+//!   (`save_state`), used during `on_dehydrate` only.
 //!
 //! Each ZST has a process-wide `static` instance (`MAIL_BRIDGE`,
 //! `PERSIST_BRIDGE`) so callers borrow
