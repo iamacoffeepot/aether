@@ -52,12 +52,12 @@ mod tests {
 
     use crate::{
         CliSend, CliSendResult, Delete, DeleteResult, DrawTriangle, DropComponent, DropResult,
-        Fetch, FetchResult, Key, List, ListResult, LoadComponent, LoadResult, LyriaGenerate,
-        LyriaGenerateResult, Mat4Apply, MessagesSend, MessagesSendResult, MouseButton, MouseMove,
-        NanobananaGenerate, NanobananaGenerateResult, NoteOff, NoteOn, Ping, Pong, ProcessExited,
-        Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult,
-        SubscribeInput, SubscribeInputResult, Terminate, TerminateResult, Tick, UnsubscribeAll,
-        UnsubscribeInput, Write, WriteResult,
+        Fetch, FetchResult, Key, LifecycleUnsubscribeAll, List, ListResult, LoadComponent,
+        LoadResult, LyriaGenerate, LyriaGenerateResult, Mat4Apply, MessagesSend,
+        MessagesSendResult, MouseButton, MouseMove, NanobananaGenerate, NanobananaGenerateResult,
+        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, ReplaceComponent,
+        ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput, SubscribeInputResult,
+        Terminate, TerminateResult, Tick, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -110,6 +110,7 @@ mod tests {
         assert!(names.contains(&SubscribeInput::NAME));
         assert!(names.contains(&UnsubscribeInput::NAME));
         assert!(names.contains(&UnsubscribeAll::NAME));
+        assert!(names.contains(&LifecycleUnsubscribeAll::NAME));
         assert!(names.contains(&SubscribeInputResult::NAME));
         assert!(names.contains(&NoteOn::NAME));
         assert!(names.contains(&NoteOff::NAME));

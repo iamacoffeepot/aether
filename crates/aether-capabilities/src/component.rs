@@ -30,9 +30,9 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{Actor, FfiActorMailbox};
-#[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::UnsubscribeAll;
 use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_kinds::{LifecycleUnsubscribeAll, UnsubscribeAll};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -130,7 +130,9 @@ mod native {
     use aether_kinds::{ComponentCapabilities, LoadResult};
     use wasmtime::{Engine, Linker, Module};
 
-    use super::{DropComponent, LoadComponent, ReplaceComponent, UnsubscribeAll};
+    use super::{
+        DropComponent, LifecycleUnsubscribeAll, LoadComponent, ReplaceComponent, UnsubscribeAll,
+    };
 
     use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -145,6 +147,7 @@ mod native {
     use aether_substrate::mail::{KindId, MailboxId};
 
     use crate::input::InputCapability;
+    use crate::lifecycle::LifecycleCapability;
     use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
     /// Configuration for [`ComponentHostCapability`]. `engine` and
@@ -227,18 +230,28 @@ mod native {
         /// trampoline's [`WasmTrampoline::on_drop_component`] handler
         /// replies `DropResult::Ok` and shuts itself down.
         ///
+        /// Before forwarding, purges the dying trampoline's mailbox from
+        /// every fan-out subscriber table so no cap keeps firing at a
+        /// dropped mailbox: `aether.input`'s input-stream tables (via
+        /// [`UnsubscribeAll`]) and `aether.lifecycle`'s per-stage tables
+        /// (via [`LifecycleUnsubscribeAll`]).
+        ///
         /// # Agent
         /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
         /// trampoline's id from the `LoadResult.mailbox_id` field.
         #[handler]
         fn on_drop_component(&mut self, ctx: &mut NativeCtx<'_>, payload: DropComponent) {
-            // Cap-side cleanup: ask the input cap to drop the dying
-            // trampoline from every fan-out set. Mail rather than
-            // direct mutation post-issue-640 — `aether.input` is the
-            // sole owner of the subscriber table.
+            // Cap-side cleanup: ask each owning cap to drop the dying
+            // trampoline from its fan-out sets. Mail rather than direct
+            // mutation post-issue-640 — each cap is the sole owner of its
+            // own subscriber table.
             ctx.actor::<InputCapability>().send(&UnsubscribeAll {
                 mailbox: payload.mailbox_id,
             });
+            ctx.actor::<LifecycleCapability>()
+                .send(&LifecycleUnsubscribeAll {
+                    mailbox: payload.mailbox_id.0,
+                });
             self.forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
         }
 
