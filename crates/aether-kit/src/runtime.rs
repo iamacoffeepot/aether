@@ -61,7 +61,7 @@
 //! - [`SetWalkable`] — toggle a tile's walkability.
 //! - [`SetGranularity`] — set the movement-cell size (same dial as `Tab`).
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
@@ -463,12 +463,12 @@ impl Locomotion {
         // Snap the click onto the active movement grid (the same one manual
         // movement rests on); A* paths to the tile that division sits in.
         let dest = (snap_rest(click_x, self.cell), snap_rest(click_z, self.cell));
-        let start = (self.mover.x >> TILE_BITS, self.mover.z >> TILE_BITS);
+        let start_tile = (self.mover.x >> TILE_BITS, self.mover.z >> TILE_BITS);
         let goal = (dest.0 >> TILE_BITS, dest.1 >> TILE_BITS);
-        let Some(tiles) = astar(&self.map, start, goal) else {
+        let Some(tiles) = astar(&self.map, start_tile, goal) else {
             return;
         };
-        self.path = smooth_path(start, &tiles, dest);
+        self.path = smooth_path(&self.map, (self.mover.x, self.mover.z), &tiles, dest);
         self.target_x = None;
         self.target_z = None;
     }
@@ -608,31 +608,105 @@ fn astar(map: &TileMap, start: (i32, i32), goal: (i32, i32)) -> Option<VecDeque<
     None
 }
 
-/// Turn the A* tile path (the steps after `start`) into octimeter
-/// waypoints, collapsing straight runs: only tiles where the direction
-/// changes become waypoints (at their centers), and the path always ends
-/// on the snapped sub-tile `dest`. Collapsing the colinear middle keeps an
-/// off-center straight line from bulging up to the tile-center row and back.
+/// Smooth the A* tile path into the fewest octimeter waypoints that still
+/// clear every wall — string-pulling by line of sight. The candidate points
+/// are the actual sub-tile `start` (the mover's position), each interior
+/// tile's center, and the snapped sub-tile `dest`. Walking them, each one is
+/// dropped whenever the next is directly visible from the current anchor, so
+/// a stretch with nothing in the way collapses to a single straight segment
+/// and a corner survives only where a wall genuinely sits between the anchor
+/// and the point past it. Anchoring on the real start/dest (not tile centers)
+/// is what keeps an off-center straight line from kinking through a center.
 fn smooth_path(
+    map: &TileMap,
     start: (i32, i32),
     tiles: &VecDeque<(i32, i32)>,
     dest: (i32, i32),
 ) -> VecDeque<(i32, i32)> {
-    let dir = |a: (i32, i32), b: (i32, i32)| ((b.0 - a.0).signum(), (b.1 - a.1).signum());
-    let mut full = Vec::with_capacity(tiles.len() + 1);
-    full.push(start);
-    full.extend(tiles.iter().copied());
+    // Candidates: start, every tile center *before* the goal tile, then dest
+    // (which replaces the goal tile's center — it sits inside that tile).
+    let mut pts = Vec::with_capacity(tiles.len() + 1);
+    pts.push(start);
+    let interior = tiles.len().saturating_sub(1);
+    pts.extend(
+        tiles
+            .iter()
+            .take(interior)
+            .map(|&(tx, tz)| (tile_center_octimeters(tx), tile_center_octimeters(tz))),
+    );
+    pts.push(dest);
+
     let mut path = VecDeque::new();
-    for i in 1..full.len().saturating_sub(1) {
-        if dir(full[i - 1], full[i]) != dir(full[i], full[i + 1]) {
-            path.push_back((
-                tile_center_octimeters(full[i].0),
-                tile_center_octimeters(full[i].1),
-            ));
+    let mut anchor = pts[0];
+    for i in 1..pts.len() - 1 {
+        // Keep pts[i] only when the point past it is occluded from the anchor —
+        // then it's a real corner. Otherwise the anchor can see straight past
+        // it, so drop it.
+        if !los(map, anchor, pts[i + 1]) {
+            path.push_back(pts[i]);
+            anchor = pts[i];
         }
     }
     path.push_back(dest);
     path
+}
+
+/// Whether the straight segment between two octimeter points crosses only
+/// walkable tiles — an integer grid traversal (Amanatides–Woo) over the
+/// 1-tile interaction grid. Steps from boundary to boundary, comparing the
+/// two axes' distances by cross-multiplication so it stays integer-only and
+/// deterministic. Diagonal corner crossings are allowed (only the entered
+/// tile is checked), matching `astar`'s 8-connected moves.
+fn los(map: &TileMap, a: (i32, i32), b: (i32, i32)) -> bool {
+    let (mut x, mut z) = (a.0 >> TILE_BITS, a.1 >> TILE_BITS);
+    let (xe, ze) = (b.0 >> TILE_BITS, b.1 >> TILE_BITS);
+    if !map.walkable(x, z) {
+        return false;
+    }
+    let (step_x, step_z) = ((b.0 - a.0).signum(), (b.1 - a.1).signum());
+    let adx = i64::from((b.0 - a.0).abs());
+    let adz = i64::from((b.1 - a.1).abs());
+    // Octimeters from the start point to the next tile boundary on each axis;
+    // each crossing then advances that axis's accumulator by one whole tile.
+    let mut cx = match step_x {
+        1 => i64::from(((x + 1) << TILE_BITS) - a.0),
+        -1 => i64::from(a.0 - (x << TILE_BITS)),
+        _ => 0,
+    };
+    let mut cz = match step_z {
+        1 => i64::from(((z + 1) << TILE_BITS) - a.1),
+        -1 => i64::from(a.1 - (z << TILE_BITS)),
+        _ => 0,
+    };
+    let tile = i64::from(OCTIMETERS_PER_TILE);
+    while x != xe || z != ze {
+        // Step the axis whose next boundary is nearer (t = c / ad, compared as
+        // cx·adz vs cz·adx); on an exact tie cross the corner diagonally. An
+        // axis already at its end never steps.
+        let (take_x, take_z) = if x == xe {
+            (false, true)
+        } else if z == ze {
+            (true, false)
+        } else {
+            match (cx * adz).cmp(&(cz * adx)) {
+                Ordering::Less => (true, false),
+                Ordering::Greater => (false, true),
+                Ordering::Equal => (true, true),
+            }
+        };
+        if take_x {
+            x += step_x;
+            cx += tile;
+        }
+        if take_z {
+            z += step_z;
+            cz += tile;
+        }
+        if !map.walkable(x, z) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Advance a point toward `target` by up to `speed` octimeters *along the
@@ -668,7 +742,6 @@ fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
 /// Move `cur` toward `target` by at most `step` octimeters, never
 /// overshooting.
 fn approach(cur: i32, target: i32, step: i32) -> i32 {
-    use core::cmp::Ordering;
     match cur.cmp(&target) {
         Ordering::Less => (cur + step).min(target),
         Ordering::Greater => (cur - step).max(target),
@@ -737,25 +810,52 @@ mod tests {
     }
 
     #[test]
-    fn smooth_path_collapses_a_straight_run_to_just_the_dest() {
-        // A straight tile run leaves no intermediate tile-center waypoints —
-        // only the sub-tile dest — so an off-center straight line stays
-        // straight instead of bulging to the center row and back.
+    fn smooth_path_collapses_open_space_to_a_straight_line() {
+        // With nothing between start and dest, line-of-sight smoothing drops
+        // every interior tile center: the mover walks one straight segment to
+        // the sub-tile dest, with no kink through a center.
+        let map = TileMap::new();
         let tiles: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (11, 8), (12, 8), (13, 8)].into();
+        let start = (tile_center_octimeters(8), tile_center_octimeters(8));
         let dest = (13 * OCTIMETERS_PER_TILE + 100, 8 * OCTIMETERS_PER_TILE + 80);
-        assert_eq!(smooth_path((8, 8), &tiles, dest), VecDeque::from([dest]));
+        assert_eq!(
+            smooth_path(&map, start, &tiles, dest),
+            VecDeque::from([dest])
+        );
     }
 
     #[test]
-    fn smooth_path_keeps_the_corner_of_an_l() {
-        // An L-shaped path keeps the turn tile (as a center) plus the dest.
-        let tiles: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (10, 7), (10, 6)].into();
-        let dest = (10 * OCTIMETERS_PER_TILE + 50, 6 * OCTIMETERS_PER_TILE + 50);
-        let corner = (tile_center_octimeters(10), tile_center_octimeters(8));
-        assert_eq!(
-            smooth_path((8, 8), &tiles, dest),
-            VecDeque::from([corner, dest])
-        );
+    fn smooth_path_keeps_a_corner_around_the_wall() {
+        // When the wall genuinely sits between start and dest, smoothing keeps
+        // the corner(s) it must, and every segment the mover walks stays
+        // wall-clear.
+        let map = TileMap::new();
+        let (start_tile, goal_tile) = ((9, 6), (2, 6));
+        let start = (tile_center_octimeters(9), tile_center_octimeters(6));
+        let dest = (tile_center_octimeters(2), tile_center_octimeters(6));
+        assert!(!los(&map, start, dest), "direct line should cross the wall");
+        let tiles = astar(&map, start_tile, goal_tile).expect("reachable");
+        let path = smooth_path(&map, start, &tiles, dest);
+        assert!(path.len() >= 2, "a detour must retain at least one corner");
+        assert_eq!(path.back().copied(), Some(dest));
+        let mut anchor = start;
+        for &wp in &path {
+            assert!(
+                los(&map, anchor, wp),
+                "segment {anchor:?} -> {wp:?} crosses a wall"
+            );
+            anchor = wp;
+        }
+    }
+
+    #[test]
+    fn los_is_clear_in_the_open_and_blocked_through_the_wall() {
+        let map = TileMap::new();
+        let center = |tx, tz| (tile_center_octimeters(tx), tile_center_octimeters(tz));
+        // Open row east of the wall.
+        assert!(los(&map, center(8, 8), center(13, 8)));
+        // Straight across the wall — tile (6, 6) is blocked.
+        assert!(!los(&map, center(9, 6), center(2, 6)));
     }
 
     #[test]
