@@ -417,8 +417,8 @@ mod free_dispatch_tests {
         (mailer, rx)
     }
 
-    fn build_envelope<K: Kind + serde::Serialize>(payload: &K, reply_to: ReplyTo) -> Envelope {
-        let bytes = postcard::to_allocvec(payload).expect("postcard encode");
+    fn build_envelope<K: Kind>(payload: &K, reply_to: ReplyTo) -> Envelope {
+        let bytes = payload.encode_into_bytes();
         Envelope::disarmed(
             KindId(<K as Kind>::ID.0),
             <K as Kind>::NAME.to_owned(),

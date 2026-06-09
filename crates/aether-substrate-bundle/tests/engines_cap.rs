@@ -124,7 +124,7 @@ fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
 
 /// Drive one request kind at `aether.engine`, reply-to the sink, and
 /// block until `probe` returns a recorded reply (or `deadline` passes).
-fn drive<K: Kind + serde::Serialize, T>(
+fn drive<K: Kind, T>(
     mailer: &Arc<Mailer>,
     request: &K,
     deadline: Duration,

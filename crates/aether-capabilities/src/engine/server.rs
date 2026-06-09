@@ -653,11 +653,7 @@ mod tests {
     /// Drive one request kind at `aether.engine`, reply-to the sink,
     /// and block until `probe` sees a recorded reply (or the deadline
     /// passes).
-    fn drive<K: Kind + serde::Serialize, T>(
-        mailer: &Arc<Mailer>,
-        request: &K,
-        probe: impl Fn() -> Option<T>,
-    ) -> T {
+    fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, probe: impl Fn() -> Option<T>) -> T {
         let server = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
         let sink = mailbox_id_from_name(<ReplySink as Actor>::NAMESPACE);
         mailer.push(
@@ -766,7 +762,7 @@ mod tests {
     /// so the assertion runs only after the cap has processed the
     /// earlier mail (single-threaded actor, in-order mailbox). Returns
     /// the engine list the cap reports afterward.
-    fn push_then_list<K: Kind + serde::Serialize>(
+    fn push_then_list<K: Kind>(
         mailer: &Arc<Mailer>,
         cells: &ReplyCells,
         fire: &K,

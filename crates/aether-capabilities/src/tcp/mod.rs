@@ -641,9 +641,9 @@ mod cap_native {
             ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
         }
 
-        /// Push a postcard-encoded mail at the cap's mailbox via the
-        /// registered sink handler, then wait for the next outbound
-        /// reply on `rx` and decode as `R`.
+        /// Push an encoded mail (via the kind's `encode_into_bytes`) at
+        /// the cap's mailbox via the registered sink handler, then wait
+        /// for the next outbound reply on `rx` and decode as `R`.
         fn drive_and_decode<K, R>(
             registry: &Arc<Registry>,
             rx: &mpsc::Receiver<EgressEvent>,
@@ -651,7 +651,7 @@ mod cap_native {
             mail: &K,
         ) -> R
         where
-            K: Kind + serde::Serialize,
+            K: Kind,
             R: DeserializeOwned,
         {
             let id = registry
@@ -660,7 +660,7 @@ mod cap_native {
             let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("cap entry") else {
                 panic!("expected mailbox entry");
             };
-            let bytes = postcard::to_allocvec(mail).expect("encode");
+            let bytes = mail.encode_into_bytes();
             handler.enqueue(OwnedDispatch::disarmed(
                 K::ID,
                 K::NAME.to_owned(),
