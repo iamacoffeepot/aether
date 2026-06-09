@@ -1,7 +1,8 @@
 # ADR-0101: Replace hooks on FfiActor
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
+- **Accepted:** 2026-06-09 (implemented by iamacoffeepot/aether#1480)
 
 ## Context
 
