@@ -112,8 +112,7 @@ impl FfiActor for CameraComponent {
     fn init<C: Resolver>(ctx: &mut C) -> Result<Self, BootError> { /* build state */ }
 
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {              // post-init, mail allowed
-        let me = MailboxId(ctx.mailbox_id());
-        ctx.actor::<InputCapability>().subscribe(Tick::ID, me);
+        ctx.actor::<LifecycleCapability>().subscribe::<Tick>(); // subscribe the calling actor
     }
 
     #[handler]

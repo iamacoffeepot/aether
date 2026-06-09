@@ -51,7 +51,6 @@ use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_data::{Kind, MailboxId};
 use aether_kinds::{DrawTriangle, Key, KeyRelease, Render, Tick, Vertex, keycode};
 
 use crate::{OCTIMETERS_PER_TILE, SetGranularity, SetWalkable, TILE_BITS, Teleport};
@@ -205,13 +204,12 @@ impl FfiActor for Locomotion {
     }
 
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        let me = MailboxId(ctx.mailbox_id());
         let input = ctx.actor::<InputCapability>();
-        input.subscribe(Key::ID, me);
-        input.subscribe(KeyRelease::ID, me);
+        input.subscribe::<Key>();
+        input.subscribe::<KeyRelease>();
         let lifecycle = ctx.actor::<LifecycleCapability>();
-        lifecycle.subscribe(Tick::ID, me);
-        lifecycle.subscribe(Render::ID, me);
+        lifecycle.subscribe::<Tick>();
+        lifecycle.subscribe::<Render>();
     }
 
     #[handler]

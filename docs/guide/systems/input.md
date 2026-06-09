@@ -55,22 +55,30 @@ the `InputCapability` actor — the sole owner of the subscriber table
 **`Tick` lives on the lifecycle, not here.** The per-frame advance is the
 substrate's frame-lifecycle state machine (`aether.lifecycle.tick`), so a
 component subscribes the `Tick` stage directly on `aether.lifecycle` —
-`ctx.actor::<LifecycleCapability>().subscribe(Tick::ID, me)` (ADR-0082), the same
+`ctx.actor::<LifecycleCapability>().subscribe::<Tick>()` (ADR-0082), the same
 subscribe shape as the input streams below. `Key`, `MouseMove`, and the rest are
 genuine input interrupts and stay on `aether.input`.
 
-**Subscribe and unsubscribe are mail.** Three control kinds on `aether.input`:
+**Subscribe and unsubscribe are mail.** Control kinds on `aether.input`:
 
-- `aether.input.subscribe { kind, mailbox }` — add `mailbox` to the set for
-  `kind`. Idempotent (it's a set). Replies `aether.input.subscribe_result`
-  (`Ok` / `Err { error }`).
+- `aether.input.subscribe_self { kind }` — subscribe the *sending* actor to
+  `kind`. The cap reads the subscriber off the inbound's host-stamped `Source`
+  (ADR-0083), so the caller names neither the kind id nor its own mailbox. This
+  is the common form. Idempotent. Replies `aether.input.subscribe_result`
+  (`Ok` / `Err { error }`); a sender with no local mailbox (an external session
+  or another engine) gets `Err`.
+- `aether.input.unsubscribe_self { kind }` — the reflexive unsubscribe twin.
+- `aether.input.subscribe { kind, mailbox }` — add an *explicit* `mailbox` to
+  the set for `kind`. The rare cross-mailbox form. Idempotent; same reply.
 - `aether.input.unsubscribe { kind, mailbox }` — remove it. Idempotent; same
   reply.
 - `aether.input.unsubscribe_all { mailbox }` — drop `mailbox` from every stream.
   No reply; this is what the component host fires on drop.
 
-A subscribe is validated: the mailbox must name a live, dispatchable actor — a
-dropped or unknown id is rejected with `Err`.
+A named (`subscribe` / `unsubscribe`) subscribe is validated: the mailbox must
+name a live, dispatchable actor — a dropped or unknown id is rejected with
+`Err`. The reflexive (`*_self`) forms need no such check: the host-stamped
+`Source` already names the live sending actor.
 
 **Fan-out, and the empty case.** A driver pushes each platform event as a single
 mail to `aether.input`; the cap then sends one copy per subscriber, carrying the
@@ -88,16 +96,19 @@ keep receiving fan-out.
 
 **From a component — subscribe in `wire`.** `init` can't send mail (its context
 is resolver-only), so subscriptions go in the `wire` hook, which runs post-init
-with mail allowed. Address the cap by type and name the kind:
+with mail allowed. Address the cap by type and name the stream as a type
+parameter — the cap subscribes the calling actor:
 
 ```rust
 fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-    let me = MailboxId(ctx.mailbox_id());
     let input = ctx.actor::<InputCapability>();
-    input.subscribe(Key::ID, me);
-    input.subscribe(WindowSize::ID, me);
+    input.subscribe::<Key>();
+    input.subscribe::<WindowSize>();
 }
 ```
+
+To subscribe a *different* mailbox (the rare cross-mailbox case) use the named
+form: `input.subscribe_for::<Key>(other_mailbox)`.
 
 Then handle each stream as its kind, like any other mail:
 

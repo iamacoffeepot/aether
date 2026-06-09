@@ -270,6 +270,35 @@ pub struct LifecycleSubscribe {
     pub mailbox: u64,
 }
 
+/// Reflexive counterpart of [`LifecycleSubscribe`]: subscribe the
+/// *sending* actor to a lifecycle stage broadcast, with no explicit
+/// `mailbox` field. The cap resolves the subscriber from the inbound
+/// envelope's host-stamped `Source` (ADR-0083) via
+/// `ctx.source_mailbox()`, so the subscriber cannot be forged and the
+/// op is gated to in-process actors by construction — an external
+/// session or another engine has no local mailbox and gets an `Err`
+/// reply, pushing it onto the named [`LifecycleSubscribe`] form. This
+/// is the common "subscribe me" case; `stage` carries the same
+/// [`KindId`](aether_data::KindId) as [`LifecycleSubscribe`]. Substrate
+/// replies with [`LifecycleSubscribeResult`].
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.subscribe_self")]
+pub struct LifecycleSubscribeSelf {
+    pub stage: u64,
+}
+
 /// Unsubscribe counterpart of [`LifecycleSubscribe`]. Idempotent on
 /// "not currently subscribed."
 #[repr(C)]
@@ -289,6 +318,30 @@ pub struct LifecycleSubscribe {
 pub struct LifecycleUnsubscribe {
     pub stage: u64,
     pub mailbox: u64,
+}
+
+/// Reflexive counterpart of [`LifecycleUnsubscribe`]: unsubscribe the
+/// *sending* actor from a lifecycle stage, with no explicit `mailbox`
+/// field. The cap resolves the subscriber from the inbound envelope's
+/// host-stamped `Source` (ADR-0083), the same gating as
+/// [`LifecycleSubscribeSelf`]. Idempotent on "not currently
+/// subscribed." Substrate replies with [`LifecycleSubscribeResult`].
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.unsubscribe_self")]
+pub struct LifecycleUnsubscribeSelf {
+    pub stage: u64,
 }
 
 /// `aether.lifecycle.unsubscribe_all` — remove `mailbox` from every
@@ -1313,6 +1366,22 @@ mod control_plane {
         pub mailbox: aether_data::MailboxId,
     }
 
+    /// `aether.input.subscribe_self` — reflexive counterpart of
+    /// [`SubscribeInput`]: subscribe the *sending* actor to the input
+    /// stream for `kind`, with no explicit `mailbox` field. The cap
+    /// resolves the subscriber from the inbound envelope's host-stamped
+    /// `Source` (ADR-0083) via `ctx.source_mailbox()`, so the
+    /// subscriber cannot be forged and the op is gated to in-process
+    /// actors by construction — an external session or another engine
+    /// has no local mailbox and gets an `Err` reply, pushing it onto
+    /// the named [`SubscribeInput`] form. This is the common
+    /// "subscribe me" case. Reply: `SubscribeInputResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.input.subscribe_self")]
+    pub struct SubscribeInputSelf {
+        pub kind: aether_data::KindId,
+    }
+
     /// `aether.input.unsubscribe` — remove `mailbox` from the
     /// subscriber set for `kind`. Idempotent: unsubscribing a mailbox
     /// that isn't subscribed is still `Ok`. Reply:
@@ -1322,6 +1391,19 @@ mod control_plane {
     pub struct UnsubscribeInput {
         pub kind: aether_data::KindId,
         pub mailbox: aether_data::MailboxId,
+    }
+
+    /// `aether.input.unsubscribe_self` — reflexive counterpart of
+    /// [`UnsubscribeInput`]: unsubscribe the *sending* actor from the
+    /// input stream for `kind`, with no explicit `mailbox` field. The
+    /// cap resolves the subscriber from the inbound envelope's
+    /// host-stamped `Source` (ADR-0083), the same gating as
+    /// [`SubscribeInputSelf`]. Idempotent on "not currently
+    /// subscribed." Reply: `SubscribeInputResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.input.unsubscribe_self")]
+    pub struct UnsubscribeInputSelf {
+        pub kind: aether_data::KindId,
     }
 
     /// Reply to subscribe / unsubscribe / `unsubscribe_all` (ADR-0021 §2).
@@ -2940,7 +3022,15 @@ mod tests {
             "aether.lifecycle.advance_complete"
         );
         assert_eq!(LifecycleSubscribe::NAME, "aether.lifecycle.subscribe");
+        assert_eq!(
+            LifecycleSubscribeSelf::NAME,
+            "aether.lifecycle.subscribe_self"
+        );
         assert_eq!(LifecycleUnsubscribe::NAME, "aether.lifecycle.unsubscribe");
+        assert_eq!(
+            LifecycleUnsubscribeSelf::NAME,
+            "aether.lifecycle.unsubscribe_self"
+        );
         assert_eq!(
             LifecycleUnsubscribeAll::NAME,
             "aether.lifecycle.unsubscribe_all"
@@ -2963,7 +3053,9 @@ mod tests {
         assert_eq!(DropResult::NAME, "aether.component.drop_result");
         assert_eq!(ReplaceResult::NAME, "aether.component.replace_result");
         assert_eq!(SubscribeInput::NAME, "aether.input.subscribe");
+        assert_eq!(SubscribeInputSelf::NAME, "aether.input.subscribe_self");
         assert_eq!(UnsubscribeInput::NAME, "aether.input.unsubscribe");
+        assert_eq!(UnsubscribeInputSelf::NAME, "aether.input.unsubscribe_self");
         assert_eq!(SubscribeInputResult::NAME, "aether.input.subscribe_result");
         assert_eq!(CaptureFrame::NAME, "aether.render.capture_frame");
         assert_eq!(
