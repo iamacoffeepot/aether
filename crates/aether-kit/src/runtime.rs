@@ -17,12 +17,17 @@
 //!
 //! # Camera and picking
 //!
-//! This actor owns a fixed overhead orthographic camera: it publishes the
-//! `view_proj` to `aether.render` each frame and reuses the same bounds to
-//! map a click pixel to a world tile (a linear map — no matrix inverse).
-//! A click runs `astar` (8-connected, iterative) from the current tile to
-//! the clicked one, smooths the result, and follows it; any WASD press
-//! cancels the path and hands back to manual control.
+//! This actor owns a perspective camera that trails the mover at a fixed
+//! three-quarter overhead angle: it publishes the `view_proj` to
+//! `aether.render` each frame and casts a ray from the click pixel through
+//! that same camera onto the ground plane to find the world tile. A click
+//! runs `astar` (8-connected, iterative) from the current tile to the
+//! clicked one, smooths the result, and follows it; any WASD press cancels
+//! the path and hands back to manual control.
+//!
+//! The mover is drawn as a capped-cylinder capsule at human dimensions
+//! (1.8 m tall, 0.3 m radius), shaded against a fixed light so it reads as
+//! a solid 3D body standing on the ground.
 //!
 //! # Movement granularity
 //!
@@ -61,6 +66,7 @@
 //! - [`SetWalkable`] — toggle a tile's walkability.
 //! - [`SetGranularity`] — set the movement-cell size (same dial as `Tab`).
 
+use core::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -113,21 +119,31 @@ const PRESET_COLORS: [(f32, f32, f32); 5] = [
     (0.55, 0.45, 0.95),
 ];
 
-/// World half-height of the overhead orthographic view, in metres —
-/// sized to frame the grid with a margin. Half-width is this times the
-/// window aspect.
-const CAMERA_HALF_EXTENT: f32 = 9.0;
-/// Eye height above the ground for the overhead camera. Orthographic
-/// projection is translation-invariant along the view axis, so this only
-/// needs to sit inside the near/far planes.
-const CAMERA_EYE_HEIGHT: f32 = 10.0;
+/// Vertical field of view of the follow camera.
+const CAMERA_FOV_Y: f32 = PI / 3.0;
+/// Pitch of the camera below the horizontal, in radians (~52°) — a
+/// three-quarter overhead angle that reads as 3D while keeping the ground
+/// legible.
+const CAMERA_PITCH: f32 = 0.9;
+/// Distance from the camera target (the mover) to the eye, in metres.
+const CAMERA_DISTANCE: f32 = 12.0;
+/// Height above the ground the camera looks at — roughly the mover's
+/// mid-height, so the capsule sits centred in frame.
+const CAMERA_TARGET_HEIGHT: f32 = 0.9;
 const CAMERA_Z_NEAR: f32 = 0.1;
 const CAMERA_Z_FAR: f32 = 100.0;
 /// Aspect used until the first `WindowSize` arrives.
 const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
-/// World-space center of the grid (metres), the camera target.
-const GRID_CENTER_X: f32 = GRID_W as f32 / 2.0;
-const GRID_CENTER_Z: f32 = GRID_H as f32 / 2.0;
+
+/// Player capsule (a capped cylinder) at human dimensions: 1.8 m tall,
+/// 0.3 m radius. The bottom cap rests on the ground (`y = 0`).
+const PLAYER_HEIGHT: f32 = 1.8;
+const PLAYER_RADIUS: f32 = 0.3;
+
+/// Direction the scene light travels. The capsule bakes a simple Lambert
+/// shade against it into vertex colours so it reads as a solid 3D form
+/// (the render pipeline carries no lighting of its own).
+const LIGHT_DIR: Vec3 = Vec3::new(-0.4, -1.0, -0.3);
 
 /// The controllable mover. Position is octimeters on the world XZ plane.
 #[derive(Debug, Clone, Copy, Default)]
@@ -455,28 +471,35 @@ impl Locomotion {
         }
     }
 
-    /// Overhead orthographic `view_proj` framing the grid, looking straight
-    /// down world `-Y` at the XZ ground. Up is world `-Z`, so screen-up is
-    /// `-Z` and screen-right is `+X`.
-    fn view_proj(&self) -> [f32; 16] {
-        let half_w = CAMERA_HALF_EXTENT * self.aspect();
-        let proj = Mat4::orthographic_rh(
-            -half_w,
-            half_w,
-            -CAMERA_HALF_EXTENT,
-            CAMERA_HALF_EXTENT,
-            CAMERA_Z_NEAR,
-            CAMERA_Z_FAR,
+    /// World-space eye and target for the follow camera: it looks at a point
+    /// just above the mover and sits `CAMERA_DISTANCE` behind (`+Z`) and above
+    /// it at `CAMERA_PITCH`, so the view trails the mover as it walks.
+    fn camera_eye_target(&self) -> (Vec3, Vec3) {
+        let to_metres = |oct: i32| oct as f32 / OCTIMETERS_PER_TILE as f32;
+        let target = Vec3::new(
+            to_metres(self.mover.x),
+            CAMERA_TARGET_HEIGHT,
+            to_metres(self.mover.z),
         );
-        let center = Vec3::new(GRID_CENTER_X, 0.0, GRID_CENTER_Z);
-        let eye = Vec3::new(GRID_CENTER_X, CAMERA_EYE_HEIGHT, GRID_CENTER_Z);
-        let view = Mat4::look_at_rh(eye, center, Vec3::new(0.0, 0.0, -1.0));
+        let offset = Vec3::new(
+            0.0,
+            CAMERA_DISTANCE * CAMERA_PITCH.sin(),
+            CAMERA_DISTANCE * CAMERA_PITCH.cos(),
+        );
+        (target + offset, target)
+    }
+
+    /// Perspective `view_proj` for the follow camera.
+    fn view_proj(&self) -> [f32; 16] {
+        let (eye, target) = self.camera_eye_target();
+        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let proj = Mat4::perspective_rh(CAMERA_FOV_Y, self.aspect(), CAMERA_Z_NEAR, CAMERA_Z_FAR);
         (proj * view).to_cols_array()
     }
 
-    /// Map the cached cursor pixel to a world octimeter position through the
-    /// same ortho bounds the camera uses — a linear map, no matrix inverse.
-    /// `None` if off-grid or before the first window size.
+    /// Cast a ray from the cursor pixel through the follow camera onto the
+    /// ground plane (`y = 0`) and return the hit as an octimeter position.
+    /// `None` if it misses the grid or before the first window size.
     #[allow(clippy::cast_possible_truncation)]
     fn pick_world(&self) -> Option<(i32, i32)> {
         let (w, h) = self.window;
@@ -486,13 +509,23 @@ impl Locomotion {
         let (px, py) = self.cursor;
         let ndc_x = (px / w as f32).mul_add(2.0, -1.0);
         let ndc_y = (py / h as f32).mul_add(-2.0, 1.0);
-        let world_x = (ndc_x * CAMERA_HALF_EXTENT).mul_add(self.aspect(), GRID_CENTER_X);
-        let world_z = ndc_y.mul_add(-CAMERA_HALF_EXTENT, GRID_CENTER_Z);
-        if !TileMap::in_bounds(world_x.floor() as i32, world_z.floor() as i32) {
+
+        let (eye, target) = self.camera_eye_target();
+        // Camera basis, matching `look_at_rh`: `fwd` points into the scene,
+        // `right` and `up` span the image plane.
+        let fwd = (target - eye).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd);
+        // Ray direction through the pixel for a vertical FOV of `CAMERA_FOV_Y`.
+        let tan = (CAMERA_FOV_Y * 0.5).tan();
+        let dir = fwd + right * (ndc_x * tan * self.aspect()) + up * (ndc_y * tan);
+
+        let (hit_x, hit_z) = intersect_ground(eye, dir)?;
+        if !TileMap::in_bounds(hit_x.floor() as i32, hit_z.floor() as i32) {
             return None;
         }
         let to_octimeters = |metres: f32| (metres * OCTIMETERS_PER_TILE as f32) as i32;
-        Some((to_octimeters(world_x), to_octimeters(world_z)))
+        Some((to_octimeters(hit_x), to_octimeters(hit_z)))
     }
 
     /// Pathfind to the clicked tile and follow it, finishing on the
@@ -557,11 +590,11 @@ impl Locomotion {
     }
 
     /// Ground grid (checkerboard, blocked tiles red) at `y = 0` plus the
-    /// mover quad — tinted by granularity — just above it. The only float
-    /// in the system lives here, at the render boundary; it never feeds
-    /// back into the sim.
+    /// player capsule — tinted by granularity, shaded — standing on it. The
+    /// only floats in the system live here, at the render boundary; they
+    /// never feed back into the sim.
     fn render_triangles(&self) -> Vec<DrawTriangle> {
-        let mut out = Vec::with_capacity((GRID_W * GRID_H * 2 + 2) as usize);
+        let mut out = Vec::with_capacity((GRID_W * GRID_H * 2) as usize + 512);
         for tz in 0..GRID_H {
             for tx in 0..GRID_W {
                 let color = if !self.map.walkable(tx, tz) {
@@ -577,7 +610,7 @@ impl Locomotion {
         }
         let ax = self.mover.x as f32 / OCTIMETERS_PER_TILE as f32;
         let az = self.mover.z as f32 / OCTIMETERS_PER_TILE as f32;
-        push_quad(&mut out, ax, az, 0.25, 0.10, mover_color(self.cell));
+        push_capsule(&mut out, ax, az, mover_color(self.cell));
         out
     }
 }
@@ -813,9 +846,125 @@ fn push_quad(
     });
 }
 
+/// Intersect the ray `eye + t·dir` (`t ≥ 0`) with the ground plane `y = 0`,
+/// returning the world `(x, z)` of the hit, or `None` when the ray points away
+/// from the ground (so it never crosses it in front of the eye, which sits
+/// above the plane).
+fn intersect_ground(eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
+    if dir.y >= 0.0 {
+        return None;
+    }
+    let t = -eye.y / dir.y;
+    Some((dir.x.mul_add(t, eye.x), dir.z.mul_add(t, eye.z)))
+}
+
+/// Append a shaded capsule (a capped cylinder) standing on the ground at
+/// `(cx, cz)`, in metres, tinted `base`. Built as a stack of horizontal rings
+/// from the bottom pole to the top pole — two hemisphere caps of
+/// [`PLAYER_RADIUS`] joined by a cylinder — each pair of rings bridged by a
+/// band of triangles. Per-vertex normals carry a Lambert shade against
+/// [`LIGHT_DIR`] baked into the colour, so the form reads as solid 3D under a
+/// pipeline that has no lighting of its own.
+fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: (f32, f32, f32)) {
+    /// Vertices around each ring.
+    const RADIAL: usize = 16;
+    /// Rings per hemisphere cap (pole to equator inclusive of the equator).
+    const CAP_RINGS: usize = 6;
+
+    let radius = PLAYER_RADIUS;
+    let cylinder_height = 2.0f32.mul_add(-radius, PLAYER_HEIGHT);
+    let bottom_center = radius;
+    let top_center = radius + cylinder_height;
+
+    // Each ring is `RADIAL` (position, normal) pairs. A ring at latitude `phi`
+    // (−π/2 at the bottom pole, +π/2 at the top) sits at height `center + r·sin
+    // φ` with horizontal radius `r·cos φ`; the normal is the outward direction
+    // `(cos φ·cos θ, sin φ, cos φ·sin θ)`, already unit length.
+    let ring = |center_y: f32, phi: f32| -> [(Vec3, Vec3); RADIAL] {
+        let (s, c) = (phi.sin(), phi.cos());
+        let y = radius.mul_add(s, center_y);
+        let mut verts = [(Vec3::ZERO, Vec3::ZERO); RADIAL];
+        for (j, v) in verts.iter_mut().enumerate() {
+            let theta = TAU * j as f32 / RADIAL as f32;
+            let (ct, st) = (theta.cos(), theta.sin());
+            let normal = Vec3::new(c * ct, s, c * st);
+            let rc = radius * c;
+            let pos = Vec3::new(rc.mul_add(ct, cx), y, rc.mul_add(st, cz));
+            *v = (pos, normal);
+        }
+        verts
+    };
+
+    // Bottom cap (pole → equator) then top cap (equator → pole). The bottom
+    // equator and the top equator bound the cylinder body, so the band between
+    // them is the cylinder wall.
+    let mut rings: Vec<[(Vec3, Vec3); RADIAL]> = Vec::with_capacity(2 * CAP_RINGS);
+    for i in 0..CAP_RINGS {
+        let phi = -FRAC_PI_2 * (1.0 - i as f32 / (CAP_RINGS - 1) as f32);
+        rings.push(ring(bottom_center, phi));
+    }
+    for i in 0..CAP_RINGS {
+        let phi = FRAC_PI_2 * (i as f32 / (CAP_RINGS - 1) as f32);
+        rings.push(ring(top_center, phi));
+    }
+
+    let to_light = (LIGHT_DIR * -1.0).normalize();
+    let shade = |normal: Vec3| {
+        let lambert = normal.dot(to_light).max(0.0);
+        let f = 0.65f32.mul_add(lambert, 0.35);
+        (base.0 * f, base.1 * f, base.2 * f)
+    };
+    let vert = |p: Vec3, rgb: (f32, f32, f32)| Vertex {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        r: rgb.0,
+        g: rgb.1,
+        b: rgb.2,
+    };
+
+    for band in 0..rings.len() - 1 {
+        let (lo, hi) = (rings[band], rings[band + 1]);
+        for j in 0..RADIAL {
+            let k = (j + 1) % RADIAL;
+            let (l0, hi0, l1, hi1) = (lo[j], hi[j], lo[k], hi[k]);
+            out.push(DrawTriangle {
+                verts: [
+                    vert(l0.0, shade(l0.1)),
+                    vert(hi0.0, shade(hi0.1)),
+                    vert(hi1.0, shade(hi1.1)),
+                ],
+            });
+            out.push(DrawTriangle {
+                verts: [
+                    vert(l0.0, shade(l0.1)),
+                    vert(hi1.0, shade(hi1.1)),
+                    vert(l1.0, shade(l1.1)),
+                ],
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intersect_ground_hits_below_and_misses_above() {
+        // Straight down from 5 m up lands at the eye's ground footprint.
+        let hit = intersect_ground(Vec3::new(2.0, 5.0, 3.0), Vec3::new(0.0, -1.0, 0.0));
+        assert_eq!(hit, Some((2.0, 3.0)));
+        // A 45° downward ray travels one metre out per metre of drop.
+        let (hx, hz) = intersect_ground(Vec3::new(0.0, 4.0, 0.0), Vec3::new(0.0, -1.0, -1.0))
+            .expect("downward ray hits the ground");
+        assert!(
+            hx.abs() < 1e-4 && (hz + 4.0).abs() < 1e-4,
+            "got ({hx}, {hz})"
+        );
+        // A ray angled upward never reaches the ground ahead of the eye.
+        assert!(intersect_ground(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.5, -1.0)).is_none());
+    }
 
     #[test]
     fn tile_centers_stay_reachable_at_every_granularity() {
