@@ -17,9 +17,11 @@
 #      cargo registry + analysis caches, so only the FIRST run pays the
 #      ~minutes of bootstrap; later runs are warm.
 #
-# It runs the same linter image, profile, and `--fail-threshold 0` as
+# It runs the same linter image, profile, and fail-threshold as
 # `.github/workflows/ci.yml`'s Qodana job, reading the same
-# `qodana.yaml` (linter, profile, excludes, bootstrap). Findings match
+# `qodana.yaml` (linter, profile, excludes, bootstrap, `failThreshold`
+# — the single source of truth both this run and CI inherit). Findings
+# match
 # CI: validated against main run 26928217340, local reproduced 19 of 22
 # findings exactly (RsUnnecessaryQualifications, DuplicatedCode,
 # RsUnusedImport, CargoUnusedDependency all matched).
@@ -69,6 +71,20 @@ if ! docker info >/dev/null 2>&1; then
     echo "    colima start --cpu 6 --memory 12" >&2
     exit 1
 fi
+
+# Serialize concurrent runs. The project / cache / results volumes are
+# fixed shared names, so a second run syncing into $proj_vol mid-scan
+# would clobber the first (parallel implement-agent pre-flights, or a
+# manual run alongside one). Take an exclusive lock for the rest of the
+# script; others queue instead of corrupting the volume. An atomic
+# `mkdir` lock — not `flock`, which isn't standard on the macOS host —
+# released on any exit via the trap.
+lock_dir="${TMPDIR:-/tmp}/aether-qodana.lock.d"
+while ! mkdir "$lock_dir" 2>/dev/null; do
+    echo "qodana-local: another scan holds the lock ($lock_dir); waiting ..."
+    sleep 5
+done
+trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 
 docker volume create "$proj_vol"   >/dev/null
 docker volume create "$cache_vol"  >/dev/null
@@ -120,8 +136,7 @@ docker run --rm -u root \
     -v "$cache_vol":/data/cache \
     -v "$results_vol":/data/results \
     ${QODANA_TOKEN:+-e QODANA_TOKEN="$QODANA_TOKEN"} \
-    "$image" \
-    --fail-threshold 0
+    "$image"
 scan_status=$?
 set -e
 
