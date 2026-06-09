@@ -84,7 +84,7 @@ fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
 /// returning the `(kind, payload)` of the single `ReplyEvent` seen in
 /// between (these calls each yield exactly one event then end). Panics
 /// on a `ReplyEnd::Err` or a missing event.
-fn call_round_trip<K: Kind + serde::Serialize>(
+fn call_round_trip<K: Kind>(
     stream: &mut TcpStream,
     cid: u64,
     engine: Option<EngineId>,

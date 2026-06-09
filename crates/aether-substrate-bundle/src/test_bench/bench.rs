@@ -32,14 +32,15 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use aether_capabilities::trace_walk::TreeWalk;
-use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
+use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty};
 #[cfg(test)]
 use aether_kinds::Tick;
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
-// `encode_struct` is used for control kinds (postcard-shape); cast-
-// shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
+// `push_to_mailbox` encodes any sent kind through the descriptor-aware
+// `Kind::encode_into_bytes` (cast or postcard per the kind's shape);
+// `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Actor;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
 use aether_substrate::chassis::settlement::{
@@ -720,10 +721,10 @@ impl TestBench {
     /// `aether.window.set_mode`, etc.).
     fn push_to_mailbox<K>(&self, mailbox: MailboxId, mail: &K, cid: u64)
     where
-        K: Kind + serde::Serialize,
+        K: Kind,
     {
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
-        let payload = encode_struct(mail);
+        let payload = mail.encode_into_bytes();
         self.queue
             .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
     }

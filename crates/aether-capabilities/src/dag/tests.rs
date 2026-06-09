@@ -110,17 +110,12 @@ fn session(corr: u64) -> ReplyTo {
 /// Enqueue an already-encoded request kind at `mailbox_name` with a
 /// session reply target. Drives the request through the cap's live
 /// dispatcher thread.
-fn enqueue<K: Kind + serde::Serialize>(
-    registry: &Registry,
-    mailbox_name: &str,
-    payload: &K,
-    sender: ReplyTo,
-) {
+fn enqueue<K: Kind>(registry: &Registry, mailbox_name: &str, payload: &K, sender: ReplyTo) {
     let id = registry.lookup(mailbox_name).expect("mailbox registered");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
         panic!("expected inbox mailbox for {mailbox_name}");
     };
-    let bytes = postcard::to_allocvec(payload).expect("encode request");
+    let bytes = payload.encode_into_bytes();
     handler.enqueue(OwnedDispatch::disarmed(
         K::ID,
         K::NAME.to_owned(),

@@ -1321,7 +1321,7 @@ impl ServerHandler for Mcp {
 
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
 /// (`engine = None`) carrying a typed kind.
-fn local_envelope<K: Kind + serde::Serialize>(mailbox: &str, kind: &K) -> MailEnvelope {
+fn local_envelope<K: Kind>(mailbox: &str, kind: &K) -> MailEnvelope {
     MailEnvelope {
         to: MailboxAddress::local(mailbox_id_from_path(mailbox)),
         from: None,
@@ -1334,11 +1334,7 @@ fn local_envelope<K: Kind + serde::Serialize>(mailbox: &str, kind: &K) -> MailEn
 /// Build a `MailEnvelope` addressed at a mailbox on a specific
 /// substrate (`engine = Some`) carrying a typed kind — the hub routes
 /// it through to that engine's proxy.
-fn engine_envelope<K: Kind + serde::Serialize>(
-    engine: EngineId,
-    mailbox: &str,
-    kind: &K,
-) -> MailEnvelope {
+fn engine_envelope<K: Kind>(engine: EngineId, mailbox: &str, kind: &K) -> MailEnvelope {
     engine_envelope_by_id(engine, mailbox_id_from_path(mailbox), kind)
 }
 
@@ -1347,11 +1343,7 @@ fn engine_envelope<K: Kind + serde::Serialize>(
 /// 3b) discovers recipients as ids embedded in `Sent` events, never as
 /// names — a `MailboxId` is a one-way name hash, so there's no name to
 /// reconstruct.
-fn engine_envelope_by_id<K: Kind + serde::Serialize>(
-    engine: EngineId,
-    mailbox: MailboxId,
-    kind: &K,
-) -> MailEnvelope {
+fn engine_envelope_by_id<K: Kind>(engine: EngineId, mailbox: MailboxId, kind: &K) -> MailEnvelope {
     MailEnvelope {
         to: MailboxAddress {
             engine: Some(engine),
@@ -2437,6 +2429,45 @@ mod tests {
         }
         .encode_into_bytes();
         assert_eq!(actual, expected);
+    }
+
+    /// A cast-only kind — `#[repr(C)]` + `bytemuck::Pod`, no
+    /// `serde::Serialize` impl (`LifecycleSubscribe`) — rides the send
+    /// builders, which bound `K: Kind` (not `K: Kind + Serialize`) and
+    /// encode via the descriptor-aware `encode_into_bytes`. The payload
+    /// is the kind's cast image (length == `size_of`, distinct from a
+    /// postcard varint encode of these `u64`s) and round-trips through
+    /// `Kind::decode_from_bytes`. Compiling at all is the bound check:
+    /// the old `serde::Serialize` bound would reject this kind.
+    #[test]
+    fn send_builders_encode_a_cast_only_kind() {
+        let mail = aether_kinds::LifecycleSubscribe {
+            stage: u64::MAX,
+            mailbox: 0x0102_0304_0506_0708,
+        };
+        let cast_bytes = mail.encode_into_bytes();
+        assert_eq!(
+            cast_bytes.len(),
+            size_of::<aether_kinds::LifecycleSubscribe>(),
+            "cast image is the fixed struct size, not a postcard varint encode",
+        );
+
+        let local = local_envelope("aether.lifecycle", &mail);
+        assert_eq!(local.kind, aether_kinds::LifecycleSubscribe::ID);
+        assert_eq!(local.payload, cast_bytes);
+        assert_eq!(
+            aether_kinds::LifecycleSubscribe::decode_from_bytes(&local.payload),
+            Some(mail),
+        );
+
+        let engine = EngineId(Uuid::from_u128(0x1232_dead_beef));
+        let by_id = engine_envelope_by_id(engine, mailbox_id_from_name("aether.lifecycle"), &mail);
+        assert_eq!(by_id.kind, aether_kinds::LifecycleSubscribe::ID);
+        assert_eq!(by_id.payload, cast_bytes);
+        assert_eq!(
+            aether_kinds::LifecycleSubscribe::decode_from_bytes(&by_id.payload),
+            Some(mail),
+        );
     }
 
     /// `submit_dag` with a `payload_path` that doesn't exist returns a
