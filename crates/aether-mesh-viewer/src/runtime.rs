@@ -1,6 +1,7 @@
 //! Mesh viewer runtime. Loads a mesh file from the substrate's I/O
 //! surface (ADR-0041), parses it into `DrawTriangle`s, and replays the
-//! cached list to the `"aether.render"` sink every tick.
+//! cached list to the `"aether.render"` sink each frame on the `Render`
+//! lifecycle stage.
 //!
 //! Dispatches on the file extension echoed back on `aether.fs.read_result`:
 //!
@@ -28,15 +29,15 @@
 //! 3. On reply, the cached triangle list is replaced atomically. Any
 //!    parse or mesh failure leaves the prior cache intact (silent
 //!    drop; errors surface via `engine_logs`).
-//! 4. Every `aether.lifecycle.tick` re-emits the cached triangles to
-//!    `"aether.render"`.
+//! 4. Every `aether.lifecycle.render` stage re-emits the cached
+//!    triangles to `"aether.render"`.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyTo, Resolver, actor};
 use aether_capabilities::fs::FsMailboxExt;
-use aether_capabilities::input::InputMailboxExt;
-use aether_capabilities::{FsCapability, InputCapability, RenderCapability};
+use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Tick, Vertex};
+use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Render, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -101,22 +102,32 @@ impl FfiActor for MeshViewer {
     }
 
     //noinspection DuplicatedCode
-    /// Issue 640: subscribe to `Tick` so the cached triangles re-emit
-    /// per frame. Lives in `wire` (post-init, mail-allowed); `init`
-    /// itself is `Resolver`-only.
+    /// Issue 640 / 1378: subscribe to the `Render` lifecycle stage so the
+    /// cached triangles re-emit once per frame, after the `Tick` chain
+    /// has settled (ADR-0082 §11). The viewer has no per-tick compute —
+    /// it only re-emits — so it subscribes `Render` alone, not `Tick`.
+    /// Lives in `wire` (post-init, mail-allowed); `init` is
+    /// `Resolver`-only.
+    ///
+    /// On a chassis whose lifecycle graph omits `Render` (headless), the
+    /// cap replies `Err(UnsupportedStage)` to this fire-and-forget
+    /// subscribe; the reply warn-drops and the viewer simply never
+    /// receives `Render` and never submits — a no-op there, where the
+    /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<InputCapability>()
-            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
+        ctx.actor::<LifecycleCapability>()
+            .subscribe(Render::ID, MailboxId(ctx.mailbox_id()));
     }
 
-    /// Re-emits every cached triangle to the render sink.
+    /// Re-emits every cached triangle to the render sink on the `Render`
+    /// stage.
     ///
     /// # Agent
     /// Substrate-driven; do not send manually. If no triangles render
     /// after a `load`, the file failed to read / parse / mesh — check
     /// `engine_logs`.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
         if !self.triangles.is_empty() {
             ctx.actor::<RenderCapability>().send_many(&self.triangles);
         }

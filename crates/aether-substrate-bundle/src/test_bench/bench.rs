@@ -33,7 +33,6 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use aether_capabilities::trace_walk::TreeWalk;
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty};
-#[cfg(test)]
 use aether_kinds::Tick;
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
@@ -967,45 +966,60 @@ impl TestBench {
             // settlement). Reuses the same reply-correlated loopback wait
             // (`pump_until_reply`) the `advance()` / `capture()` API
             // methods already use, rather than a bespoke channel.
-            let cid = self.fresh_correlation_id();
-            // Mint a chassis-root `LifecycleAdvance` (so the trace
-            // pipeline tracks the broadcast subtree and `on_settled`
-            // fires) that *also* carries this bench's session as the
-            // reply target — the driver routes `LifecycleAdvanceComplete`
-            // there via `on_settled`'s `ctx.reply_to`. `push_chassis_root_mail`
-            // doesn't take a reply target, so the chassis-root push is
-            // open-coded here (mint id → record `Sent` → push with both
-            // lineage and reply-to), mirroring its three steps.
-            let advance_root =
-                MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
-            self.queue.record_sent(
-                advance_root,
-                advance_root,
-                None,
-                MailboxId::CHASSIS_MAILBOX_ID,
-                self.lifecycle_mailbox,
-                self.kind_lifecycle_advance,
-            );
-            let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
-            self.queue.push(
-                Mail::new(
+            // ADR-0082 §11 / issue 1378: the frame graph is `Tick →
+            // Render → Tick`, so one requested tick drives a full
+            // two-stage cycle. Each iteration pushes one `LifecycleAdvance`
+            // (broadcasting the cap's current stage) and blocks on its
+            // `LifecycleAdvanceComplete` reply, reading `next` to learn the
+            // cap's resolved next stage; the loop exits once it returns to
+            // `Tick` (cycle complete) or reaches a terminal (`next == 0`).
+            // The reply gate is exactly the #999 fix below — emitted only
+            // after the cap clears `pending`, so the next iteration's
+            // advance never races the overlap guard.
+            loop {
+                let cid = self.fresh_correlation_id();
+                // Mint a chassis-root `LifecycleAdvance` (so the trace
+                // pipeline tracks the broadcast subtree and `on_settled`
+                // fires) that *also* carries this bench's session as the
+                // reply target — the driver routes `LifecycleAdvanceComplete`
+                // there via `on_settled`'s `ctx.reply_to`. `push_chassis_root_mail`
+                // doesn't take a reply target, so the chassis-root push is
+                // open-coded here (mint id → record `Sent` → push with both
+                // lineage and reply-to), mirroring its three steps.
+                let advance_root =
+                    MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
+                self.queue.record_sent(
+                    advance_root,
+                    advance_root,
+                    None,
+                    MailboxId::CHASSIS_MAILBOX_ID,
                     self.lifecycle_mailbox,
                     self.kind_lifecycle_advance,
-                    encode_empty::<aether_kinds::LifecycleAdvance>(),
-                    1,
-                )
-                .with_lineage(advance_root, advance_root, None)
-                .with_reply_to(reply_to),
-            );
-            // Block until the driver replies `LifecycleAdvanceComplete`
-            // for this advance. A `Timeout` here means the chain never
-            // settled (a genuine in_flight leak in some downstream cap)
-            // or the driver never replied — same fail-loud disposition
-            // the prior `SettlementTimeout` had.
-            self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(
-                cid,
-                "LifecycleAdvanceComplete",
-            )?;
+                );
+                let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+                self.queue.push(
+                    Mail::new(
+                        self.lifecycle_mailbox,
+                        self.kind_lifecycle_advance,
+                        encode_empty::<aether_kinds::LifecycleAdvance>(),
+                        1,
+                    )
+                    .with_lineage(advance_root, advance_root, None)
+                    .with_reply_to(reply_to),
+                );
+                // Block until the driver replies `LifecycleAdvanceComplete`
+                // for this advance. A `Timeout` here means the chain never
+                // settled (a genuine in_flight leak in some downstream cap)
+                // or the driver never replied — same fail-loud disposition
+                // the prior `SettlementTimeout` had.
+                let complete = self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(
+                    cid,
+                    "LifecycleAdvanceComplete",
+                )?;
+                if complete.next == <Tick as Kind>::ID.0 || complete.next == 0 {
+                    break;
+                }
+            }
         }
         // ADR-0082 §6 / PR 3c: the advance settlement above already
         // waited for the whole frame chain (Tick → component →

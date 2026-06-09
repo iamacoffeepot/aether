@@ -105,12 +105,15 @@ pub struct InitCaps;
 pub struct InitComponents;
 
 /// Lifecycle stage broadcast — render stage (ADR-0082 §1). Fires every
-/// frame between [`Tick`] and [`Present`] on chassis that declare a
-/// render state in their lifecycle graph (today: desktop). Render
-/// capabilities subscribe to integrate frame state submitted during
-/// the preceding Tick stage. Headless / hub chassis omit this state
-/// from their graph; subscribing on a chassis that doesn't declare it
-/// rejects fail-fast at wire time per ADR-0082 §7.
+/// frame after the whole [`Tick`] chain has settled (ADR-0080 §6) on
+/// chassis that declare a render state in their lifecycle graph (today:
+/// desktop and `test_bench`). Render-producing actors compute their
+/// per-frame state on [`Tick`] and submit it to `aether.render` here, on
+/// `Render` — so a submission integrates the fully-settled cross-actor
+/// state of the frame rather than racing other actors' Tick handlers.
+/// Headless / hub chassis omit this state from their graph; subscribing
+/// on a chassis that doesn't declare it rejects fail-fast at wire time
+/// per ADR-0082 §7.
 #[repr(C)]
 #[derive(
     Copy,
