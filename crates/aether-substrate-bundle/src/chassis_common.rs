@@ -29,7 +29,7 @@ use aether_capabilities::{
     fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
-use aether_kinds::{Shutdown, Tick};
+use aether_kinds::{Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, dump_config, known_keys};
@@ -181,6 +181,48 @@ pub fn tick_only_lifecycle_config() -> LifecycleConfig {
     }
 }
 
+/// Build the two-stage frame lifecycle config the display-driving
+/// chassis share (ADR-0082 §11, issue 1378): `Tick → Render → Tick`
+/// (looping), with the `Quit` escape to a `Shutdown` terminal on the
+/// `Tick` stage. The chassis drives a full `Tick → Render` cycle per
+/// frame; `Render` broadcasts only after the entire `Tick` chain has
+/// settled (ADR-0080 §6), so a render producer's `on_render` runs once
+/// every actor's per-frame `Tick` compute is done — no submitting
+/// against half-updated cross-actor state.
+///
+/// Same `initial_subscribers` relay as [`tick_only_lifecycle_config`]
+/// (`Tick → aether.input`), so the existing `InputCapability::on_tick`
+/// fan-out keeps routing `Tick` to component subscribers. Desktop and
+/// `test_bench` adopt this graph; headless stays
+/// [`tick_only_lifecycle_config`] (its render cap is a no-op, so a
+/// `Render` stage would settle to no GPU work). `Present` is deferred —
+/// it would be an empty-subscriber broadcast whose only role is a
+/// `Quit → Shutdown` drain edge, and no chassis routes OS-close through
+/// `Quit` mail yet.
+///
+/// # Panics
+/// Panics if the (compile-time-fixed) graph fails to build — it can't,
+/// the shape is structurally valid; the `expect` documents the
+/// invariant.
+#[must_use]
+pub fn frame_lifecycle_config() -> LifecycleConfig {
+    let graph = LifecycleGraphData::builder()
+        .state::<Tick>()
+        .next::<Render>()
+        .quit::<Shutdown>()
+        .state::<Render>()
+        .next::<Tick>()
+        .terminal::<Shutdown>()
+        .start::<Tick>()
+        .build()
+        .expect("frame lifecycle graph is structurally valid");
+    let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
+    LifecycleConfig {
+        graph,
+        initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
+    }
+}
+
 /// Args every full-stack chassis hands to [`with_common_caps`]. Kept
 /// as a flat struct (no defaults) so an added cap forces the chassis
 /// builders to acknowledge it.
@@ -244,6 +286,47 @@ pub fn maybe_with_rpc_server<C: Chassis>(
 #[cfg(test)]
 mod tests {
     use super::chassis_known_keys;
+
+    #[test]
+    fn frame_lifecycle_graph_is_tick_render_with_shutdown_terminal() {
+        // ADR-0082 §11 / issue 1378: the display-driving chassis graph is
+        // `Tick → Render → Tick` (looping) with the `Quit` escape to a
+        // `Shutdown` terminal on the `Tick` stage. The graph's edge
+        // accessors are `pub(crate)` to `aether-capabilities`, so this
+        // crate-boundary check reads the public `Debug` (start + the
+        // non-terminal state kinds + terminals) plus the preserved
+        // `initial_subscribers` relay.
+        use aether_data::Kind;
+        use aether_kinds::{Render, Shutdown, Tick};
+
+        let cfg = super::frame_lifecycle_config();
+        let graph_dbg = format!("{:?}", cfg.graph);
+        let tick = format!("{:?}", <Tick as Kind>::ID);
+        let render = format!("{:?}", <Render as Kind>::ID);
+        let shutdown = format!("{:?}", <Shutdown as Kind>::ID);
+
+        // Start state is Tick.
+        assert!(
+            graph_dbg.contains(&format!("start: {tick}")),
+            "expected start Tick in {graph_dbg}",
+        );
+        // Both Tick and Render are non-terminal states.
+        assert!(
+            graph_dbg.contains(&render),
+            "expected a Render state in {graph_dbg}",
+        );
+        // Shutdown is the sole terminal.
+        assert!(
+            graph_dbg.contains(&format!("terminals: [{shutdown}]")),
+            "expected Shutdown terminal in {graph_dbg}",
+        );
+
+        // The `Tick → aether.input` relay is preserved, identical to the
+        // tick-only config, so the InputCapability fan-out keeps routing
+        // Tick to component subscribers.
+        assert_eq!(cfg.initial_subscribers.len(), 1);
+        assert_eq!(cfg.initial_subscribers[0].0, <Tick as Kind>::ID);
+    }
 
     #[test]
     fn chassis_known_keys_includes_scheduler_hot_path_knobs() {

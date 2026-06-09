@@ -187,6 +187,15 @@ The actor framework's per-actor boot sequence (`claim → init → wire → spaw
 
 Initialisation has the symmetric split: actor-framework `init` is the per-actor "construct your state" callback before mail can arrive; `InitCaps` / `InitComponents` stage broadcasts (§5) are mail that arrives once the actor is fully wired and the driver enters its loop. Use `init` for "load-bearing state that must exist before any handler runs"; use an `InitCaps` / `InitComponents` handler for cross-actor wiring that depends on peers being ready (e.g. a cap that needs to send the hub its kind manifest after the hub cap has wired its receive side).
 
+### 13. Realization — per-chassis frame graphs (issue 1378)
+
+The concrete per-chassis graphs shipped after the lifecycle cap landed (#1380 / #1383). This section records what each chassis declares, versus the `Tick → Render → Present` shape sketched in §1.
+
+- **Desktop + test_bench** declare a two-stage `Tick → Render → Tick` graph (looping), with the `Quit` escape to a `Shutdown` terminal on the `Tick` stage (`frame_lifecycle_config` in `aether-substrate-bundle::chassis_common`). The chassis drives a full `Tick → Render` cycle per frame: it issues `LifecycleAdvance` repeatedly, gating each on the cap's `LifecycleAdvanceComplete` reply (emitted only after the cap clears its pending-advance guard, so the back-to-back advances never race it — the same reply-gate the test-bench loop uses for iamacoffeepot/aether#999), until `next` returns to `Tick`. GPU submit + present runs after the `Render` chain settles. The render-producing actors (`aether-camera`, `aether-mesh-viewer`) compute on `Tick` and submit to `aether.render` on `Render`, so a submission integrates the fully-settled cross-actor state of the frame.
+- **Headless** stays tick-only (`tick_only_lifecycle_config`). Its render cap is a no-op (it discards `DrawTriangle` / `aether.camera`), so a `Render` stage would settle to no GPU work. The camera / mesh-viewer subscribe `Render` unconditionally in `wire`; on headless that subscribe gets `Err(UnsupportedStage)` (§7), which warn-drops on the fire-and-forget path — the component simply never receives `Render` and never submits, a no-op there.
+- **`Present` is deferred.** It would be an empty-subscriber broadcast whose only role is a home for a `Quit → Shutdown` drain edge, but no chassis routes OS-close through `Quit` mail today (desktop's `WindowEvent::CloseRequested` calls `event_loop.exit()` directly), so the edge has no consumer. `Present` re-enters alongside graceful `Quit → Shutdown` shutdown (see Follow-up work).
+- **No new ADR / no kind rename.** The stage reuses the already-shipped `aether.lifecycle.render` kind; the `Render` rustdoc in `aether-kinds` is tightened to the producer-submits-on-`Render` model.
+
 ## Consequences
 
 ### Positive

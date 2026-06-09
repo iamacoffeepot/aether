@@ -45,9 +45,10 @@ use std::collections::HashMap;
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
-use aether_capabilities::{InputCapability, RenderCapability};
+use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{Camera, Tick, WindowSize};
+use aether_kinds::{Camera, Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 
 use crate::{
@@ -272,28 +273,48 @@ impl FfiActor for CameraComponent {
         })
     }
 
-    /// Issue 640: subscribe to the input streams the camera advances
-    /// against. `wire` (post-init, mail-allowed) is the placement —
-    /// `init`'s ctx is `Resolver`-only and can't mail.
+    /// Issue 640 / 1378: subscribe to the input streams the camera
+    /// advances against (`Tick`, `WindowSize`) plus the `Render`
+    /// lifecycle stage it submits on. `wire` (post-init, mail-allowed)
+    /// is the placement — `init`'s ctx is `Resolver`-only and can't mail.
+    ///
+    /// On a chassis whose lifecycle graph omits `Render` (headless), the
+    /// cap replies `Err(UnsupportedStage)` to this fire-and-forget
+    /// subscribe; the reply warn-drops and the camera simply never
+    /// receives `Render` and never submits — a no-op there, where the
+    /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         let me = MailboxId(ctx.mailbox_id());
         let input = ctx.actor::<InputCapability>();
         input.subscribe(Tick::ID, me);
         input.subscribe(WindowSize::ID, me);
+        ctx.actor::<LifecycleCapability>().subscribe(Render::ID, me);
     }
 
-    /// Advance every camera's per-mode state, then publish the active
-    /// camera's `view_proj` to `"aether.render"`. Inactive cameras
-    /// still tick (so orbit yaw keeps accumulating); only the active
-    /// one writes to the sink.
+    /// Advance every camera's per-mode state each tick. Inactive cameras
+    /// still tick (so orbit yaw keeps accumulating); the active camera's
+    /// `view_proj` is submitted later, on the `Render` stage, once every
+    /// actor's per-frame Tick compute has settled (ADR-0082 §11).
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
         for cam in self.cameras.values_mut() {
             cam.mode.tick();
         }
+    }
+
+    /// Publish the active camera's `view_proj` to `"aether.render"`. Runs
+    /// on the `Render` lifecycle stage — after the whole `Tick` chain has
+    /// settled — so the submitted view matches the fully-integrated
+    /// per-frame state (issue 1378). Publishing pauses while no camera is
+    /// active.
+    ///
+    /// # Agent
+    /// Lifecycle-driven; not useful to send manually.
+    #[handler]
+    fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
         if let Some(name) = &self.active
             && let Some(cam) = self.cameras.get(name)
         {

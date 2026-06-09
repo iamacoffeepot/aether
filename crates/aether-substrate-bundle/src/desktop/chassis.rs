@@ -33,8 +33,8 @@ use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server,
-    tick_only_lifecycle_config, with_common_caps,
+    CommonBoot, PersistOverride, chassis_known_keys, frame_lifecycle_config, maybe_with_rpc_server,
+    with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
@@ -454,7 +454,7 @@ impl DesktopChassis {
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         builder.driver(driver).build()
     }

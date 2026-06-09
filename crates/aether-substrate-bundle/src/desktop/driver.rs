@@ -27,9 +27,9 @@ use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
-    CaptureFrameResult, FocusWindow, FocusWindowResult, Key, KeyRelease, MouseButton, MouseMove,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode,
-    WindowSize, keycode,
+    CaptureFrameResult, FocusWindow, FocusWindowResult, Key, KeyRelease, LifecycleAdvanceComplete,
+    MouseButton, MouseMove, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    SetWindowTitleResult, Tick, WindowMode, WindowSize, keycode,
 };
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{
@@ -43,9 +43,9 @@ use aether_substrate::chassis::settlement::{
 };
 use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
-    HubOutbound, Mailer, SharedActorSlots, SubstrateBoot,
+    HubOutbound, Mailer, ReplyTarget, ReplyTo, SharedActorSlots, SubstrateBoot,
     chassis::frame_loop,
-    mail::{MailId, MailboxId},
+    mail::{Mail, MailId, MailboxId},
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -81,6 +81,20 @@ pub struct App {
     /// relay, then waits for settlement before submitting the frame.
     lifecycle_mailbox: MailboxId,
     kind_lifecycle_advance: aether_data::KindId,
+    /// `aether.lifecycle.advance_reply` inbox claimed at boot (issue
+    /// 1378). The per-frame `Tick → Render` cycle pushes each
+    /// `LifecycleAdvance` with this mailbox as its `Component` reply
+    /// target, then synchronously drains the receiver for the cap's
+    /// `LifecycleAdvanceComplete` reply. The reply is emitted only after
+    /// the cap clears its pending-advance guard (ADR-0082 §6), so gating
+    /// the next advance on it — rather than on the raw settlement channel
+    /// — keeps the back-to-back advances from racing the cap's overlap
+    /// guard (the same reply-gate the test-bench frame loop uses,
+    /// iamacoffeepot/aether#999).
+    lifecycle_reply_inbox: Receiver<Envelope>,
+    /// Mailbox id of [`Self::lifecycle_reply_inbox`], used as the
+    /// `Component` reply target stamped onto each `LifecycleAdvance`.
+    lifecycle_reply_mailbox: MailboxId,
     kind_key: aether_data::KindId,
     kind_key_release: aether_data::KindId,
     kind_mouse_button: aether_data::KindId,
@@ -464,6 +478,69 @@ impl App {
             .push_chassis_root_mail(correlation, recipient, kind, payload, count)
     }
 
+    /// Mint a chassis-root `LifecycleAdvance` and push it to the
+    /// `aether.lifecycle` cap with [`Self::lifecycle_reply_mailbox`] as
+    /// its `Component` reply target (issue 1378). Open-codes the
+    /// chassis-root push (`push_chassis_root_mail` doesn't carry a reply
+    /// target): mint id → record `Sent` for the trace subtree → push with
+    /// both the chassis-root lineage and the reply-to. Returns the minted
+    /// chain root so the caller can subscribe its settlement.
+    fn push_lifecycle_advance(&self) -> MailId {
+        let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
+        if correlation == 0 {
+            correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
+        }
+        let advance_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation);
+        self.queue.record_sent(
+            advance_root,
+            advance_root,
+            None,
+            MailboxId::CHASSIS_MAILBOX_ID,
+            self.lifecycle_mailbox,
+            self.kind_lifecycle_advance,
+        );
+        let reply_to = ReplyTo::with_correlation(
+            ReplyTarget::Component(self.lifecycle_reply_mailbox),
+            correlation,
+        );
+        self.queue.push(
+            Mail::new(
+                self.lifecycle_mailbox,
+                self.kind_lifecycle_advance,
+                encode_empty::<aether_kinds::LifecycleAdvance>(),
+                1,
+            )
+            .with_lineage(advance_root, advance_root, None)
+            .with_reply_to(reply_to),
+        );
+        advance_root
+    }
+
+    /// Block (bounded) for the `LifecycleAdvanceComplete` reply to the
+    /// just-issued `LifecycleAdvance`, returning its `next` stage kind id
+    /// (issue 1378). The reply lands on [`Self::lifecycle_reply_inbox`]
+    /// and is emitted by the cap *after* it clears its pending-advance
+    /// guard, so the caller can safely issue the next advance once this
+    /// returns. The settlement wait the caller runs first guarantees the
+    /// reply is imminent; the generous timeout is a wedge backstop, not
+    /// the normal path. `None` on timeout (no reply after settlement) so
+    /// the caller can fail-fast.
+    fn recv_lifecycle_advance_next(&self) -> Option<u64> {
+        loop {
+            let env = self
+                .lifecycle_reply_inbox
+                .recv_timeout(FRAME_SETTLEMENT_CAP)
+                .ok()?;
+            if env.kind == <LifecycleAdvanceComplete as Kind>::ID {
+                return LifecycleAdvanceComplete::decode_from_bytes(env.payload.bytes())
+                    .map(|complete| complete.next);
+            }
+            // Any other kind on this dedicated reply inbox is unexpected
+            // (nothing else targets it); drop and keep waiting for the
+            // advance reply rather than mis-gating the cycle.
+        }
+    }
+
     fn apply_window_mode(
         &mut self,
         mode: WindowMode,
@@ -800,44 +877,67 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.occluded && pending_capture.is_none() {
                     return;
                 }
-                // ADR-0082 §6 / PR 3c: redraw fires `LifecycleAdvance`
-                // to the lifecycle driver, which broadcasts Tick to
-                // `aether.input` (via the chassis's `initial_subscribers`
-                // relay) plus any other subscribers. Components emit
-                // their `DrawTriangle` / `aether.camera` mail into render
-                // as descendants of this advance's chain root. Waiting
-                // for that root to settle before submit guarantees the
-                // frame's geometry is integrated — the causal-completion
-                // replacement for the retired `drain_frame_bound_or_abort`
-                // pending-counter poll.
-                let advance_root = self.push_chassis_root(
-                    self.lifecycle_mailbox,
-                    self.kind_lifecycle_advance,
-                    encode_empty::<aether_kinds::LifecycleAdvance>(),
-                    1,
-                );
+                // Publish the live window size once per frame so
+                // `WindowSize` subscribers (the camera's aspect tracking)
+                // read it during the Tick stage.
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
                     if size.width != 0 && size.height != 0 {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                if let Some(registry) = self.queue.settlement_registry() {
-                    let rx = registry.subscribe_settlement(advance_root);
-                    // A frame chain that doesn't settle is a wedged
-                    // dispatcher — same fail-fast disposition the old
-                    // drain barrier had (ADR-0063). Escalating-patience
-                    // wait (issue #1305) replaces the bare wall-clock:
-                    // a starved-but-healthy chain resolves before the
-                    // cumulative cap, a genuine wedge exhausts it.
-                    if let WaitOutcome::Wedged(wedge) = await_internal_signal(
-                        &rx,
-                        "desktop.frame_advance",
-                        frame_loop::DRAIN_BUDGET,
-                        FRAME_SETTLEMENT_CAP,
-                        TerminalDisposition::Abort,
-                    ) {
-                        lifecycle::fatal_abort(&self.outbound, wedge.reason());
+                // ADR-0082 §11 / issue 1378: drive one full `Tick → Render`
+                // cycle. Each `LifecycleAdvance` broadcasts the cap's
+                // current stage; components emit their `DrawTriangle` /
+                // `aether.camera` mail into render as descendants of that
+                // advance's chain root. We wait for the broadcast root to
+                // settle (ADR-0080 §6 — the causal-completion replacement
+                // for the retired `drain_frame_bound_or_abort` poll), then
+                // read `LifecycleAdvanceComplete.next` to learn the cap's
+                // resolved next stage and loop until it returns to `Tick`
+                // (one full cycle) or reaches a terminal. Reading the reply
+                // — not the raw settlement channel — gates the next advance
+                // on the cap having cleared its pending-advance guard, so
+                // the back-to-back advances never race it
+                // (iamacoffeepot/aether#999). GPU submit + present below
+                // runs after the `Render` chain settles, so every actor's
+                // per-frame Tick compute and Render submission is
+                // integrated before readback.
+                loop {
+                    let advance_root = self.push_lifecycle_advance();
+                    if let Some(registry) = self.queue.settlement_registry() {
+                        let rx = registry.subscribe_settlement(advance_root);
+                        // A frame chain that doesn't settle is a wedged
+                        // dispatcher — same fail-fast disposition the old
+                        // drain barrier had (ADR-0063). Escalating-patience
+                        // wait (issue #1305) replaces the bare wall-clock:
+                        // a starved-but-healthy chain resolves before the
+                        // cumulative cap, a genuine wedge exhausts it.
+                        if let WaitOutcome::Wedged(wedge) = await_internal_signal(
+                            &rx,
+                            "desktop.frame_advance",
+                            frame_loop::DRAIN_BUDGET,
+                            FRAME_SETTLEMENT_CAP,
+                            TerminalDisposition::Abort,
+                        ) {
+                            lifecycle::fatal_abort(&self.outbound, wedge.reason());
+                        }
+                    }
+                    match self.recv_lifecycle_advance_next() {
+                        // Back at Tick (cycle complete) or a terminal
+                        // (`next == 0`) — stop and present.
+                        Some(next) if next == <Tick as Kind>::ID.0 || next == 0 => break,
+                        // Mid-cycle (Tick → Render) — keep advancing.
+                        Some(_) => {}
+                        // Settlement fired but the reply never arrived —
+                        // a wedge in the reply path; fail-fast like the
+                        // settlement wait above.
+                        None => lifecycle::fatal_abort(
+                            &self.outbound,
+                            "desktop.frame_advance: LifecycleAdvanceComplete reply did not \
+                             arrive after settlement"
+                                .to_owned(),
+                        ),
                     }
                 }
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -1072,6 +1172,13 @@ impl DriverCapability for DesktopDriverCapability {
         let lifecycle_mailbox =
             mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
+
+        // Issue 1378: claim a dedicated inbox for the cap's
+        // `LifecycleAdvanceComplete` replies. The per-frame `Tick →
+        // Render` cycle stamps this as the `Component` reply target on
+        // each `LifecycleAdvance` and drains the receiver synchronously
+        // to gate the next advance (see `recv_lifecycle_advance_next`).
+        let lifecycle_reply_claim = ctx.claim_mailbox("aether.lifecycle.advance_reply")?;
         let _ = kind_tick; // PR 3b retired direct Tick push; the
         // chassis still resolves the kind id via `boot.registry` for
         // compatibility but the redraw handler no longer reads it.
@@ -1081,6 +1188,8 @@ impl DriverCapability for DesktopDriverCapability {
             input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             lifecycle_mailbox,
             kind_lifecycle_advance,
+            lifecycle_reply_inbox: lifecycle_reply_claim.receiver,
+            lifecycle_reply_mailbox: lifecycle_reply_claim.id,
             kind_key,
             kind_key_release,
             kind_mouse_button,
