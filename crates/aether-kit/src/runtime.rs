@@ -87,6 +87,12 @@ const GRID_TILES: usize = (GRID_W * GRID_H) as usize;
 /// cell. `8` ≈ 1.9 m/s at a 60 Hz tick. Independent of the cell size.
 const SPEED_OCTIMETERS_PER_TICK: i32 = 8;
 
+/// Per-axis speed for a diagonal manual move: `SPEED_OCTIMETERS_PER_TICK / √2`
+/// rounded (`round(8/√2) = 6`), so holding two directions at once covers the
+/// same ground per tick as holding one — no √2 diagonal speed-up. Click-to-move
+/// gets the same normalization continuously from `step_toward`.
+const SPEED_DIAGONAL_OCTIMETERS_PER_TICK: i32 = 6;
+
 /// Movement-cell presets `Tab` cycles, coarsest (a full tile, classic
 /// tile stepping) to finest (one tick of travel, effectively continuous).
 const CELL_PRESETS: [i32; 5] = [
@@ -415,8 +421,15 @@ impl Locomotion {
             self.path.clear();
         }
         let Some(&(wx, wz)) = self.path.front() else {
-            self.advance_x();
-            self.advance_z();
+            // Manual cell-movement. A diagonal (both axes held) gets the
+            // reduced per-axis speed so it doesn't outrun a cardinal move.
+            let speed = if self.held.dir_x() != 0 && self.held.dir_z() != 0 {
+                SPEED_DIAGONAL_OCTIMETERS_PER_TICK
+            } else {
+                SPEED_OCTIMETERS_PER_TICK
+            };
+            self.advance_x(speed);
+            self.advance_z(speed);
             return;
         };
         let (nx, nz) = step_toward(
@@ -502,10 +515,10 @@ impl Locomotion {
         self.target_z = None;
     }
 
-    /// Advance the X axis one tick: commit to the next cell when idle and a
-    /// direction is held (if its tile is walkable), then glide toward the
-    /// committed target and clear on arrival.
-    fn advance_x(&mut self) {
+    /// Advance the X axis one tick at `speed`: commit to the next cell when
+    /// idle and a direction is held (if its tile is walkable), then glide
+    /// toward the committed target and clear on arrival.
+    fn advance_x(&mut self, speed: i32) {
         if self.target_x.is_none() {
             let dir = self.held.dir_x();
             if dir != 0 {
@@ -517,14 +530,14 @@ impl Locomotion {
             }
         }
         if let Some(target) = self.target_x {
-            self.mover.x = approach(self.mover.x, target, SPEED_OCTIMETERS_PER_TICK);
+            self.mover.x = approach(self.mover.x, target, speed);
             if self.mover.x == target {
                 self.target_x = None;
             }
         }
     }
 
-    fn advance_z(&mut self) {
+    fn advance_z(&mut self, speed: i32) {
         if self.target_z.is_none() {
             let dir = self.held.dir_z();
             if dir != 0 {
@@ -536,7 +549,7 @@ impl Locomotion {
             }
         }
         if let Some(target) = self.target_z {
-            self.mover.z = approach(self.mover.z, target, SPEED_OCTIMETERS_PER_TICK);
+            self.mover.z = approach(self.mover.z, target, speed);
             if self.mover.z == target {
                 self.target_z = None;
             }
@@ -738,34 +751,36 @@ fn los(map: &TileMap, a: (i32, i32), b: (i32, i32)) -> bool {
     true
 }
 
-/// Advance a point toward `target` by up to `speed` octimeters *along the
-/// straight line to it*, splitting the step between the two axes so the
-/// move tracks the line instead of running diagonally and then squaring
-/// off (the axis-by-axis "L" that two independent [`approach`] calls would
-/// trace on any non-cardinal, non-45° segment). The major axis takes a full
-/// step; the minor axis takes the proportional, rounded share. Snaps exactly
-/// onto `target` once within one step. Integer-only and recomputed from the
-/// live delta each tick, so it stays deterministic and rounding never
-/// accumulates.
+/// Advance a point `speed` octimeters *along the straight line to* `target` —
+/// the same Euclidean distance per tick in every direction (so a diagonal
+/// doesn't run √2 faster than a cardinal). Each axis moves its share of the
+/// step scaled by the true direction `(dx, dz) / |(dx, dz)|`, rounded to the
+/// nearest octimeter, and the move snaps exactly onto `target` once within one
+/// step. Integer-only via `isqrt` and recomputed from the live delta each
+/// tick, so it stays deterministic and rounding never accumulates.
+#[allow(clippy::cast_possible_truncation)]
 fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
-    let (dx, dz) = (target.0 - cur.0, target.1 - cur.1);
-    let major = dx.abs().max(dz.abs());
-    if major <= speed {
+    let dx = i64::from(target.0 - cur.0);
+    let dz = i64::from(target.1 - cur.1);
+    let dist = (dx * dx + dz * dz).isqrt();
+    let speed = i64::from(speed);
+    if dist <= speed {
         return target;
     }
-    let minor = dx.abs().min(dz.abs());
-    let step_minor = (speed * minor + major / 2) / major;
-    if dx.abs() >= dz.abs() {
-        (
-            cur.0 + dx.signum() * speed,
-            cur.1 + dz.signum() * step_minor,
-        )
-    } else {
-        (
-            cur.0 + dx.signum() * step_minor,
-            cur.1 + dz.signum() * speed,
-        )
-    }
+    // Round speed·d / dist to nearest, away from zero on a tie.
+    let round_div = |num: i64| {
+        let half = dist / 2;
+        if num >= 0 {
+            (num + half) / dist
+        } else {
+            (num - half) / dist
+        }
+    };
+    // |speed·d / dist| ≤ speed, so the result fits an i32 axis step.
+    (
+        cur.0 + round_div(speed * dx) as i32,
+        cur.1 + round_div(speed * dz) as i32,
+    )
 }
 
 /// Move `cur` toward `target` by at most `step` octimeters, never
@@ -952,11 +967,11 @@ mod tests {
             // Perpendicular distance of p from the line start→target.
             let (px, pz) = (i64::from(p.0 - start.0), i64::from(p.1 - start.1));
             let perp = (dx * pz - dz * px).abs() as f64 / len;
-            // Hugs the line within a sixteenth of a tile (≈ 6 cm) — two orders
-            // of magnitude tighter than the axis-by-axis L this replaces, which
+            // Hugs the line within an eighth of a tile (≈ 12 cm) — an order of
+            // magnitude tighter than the axis-by-axis L this replaces, which
             // peels off by the segment's whole minor extent (here 640).
             assert!(
-                perp <= f64::from(OCTIMETERS_PER_TILE / 16),
+                perp <= f64::from(OCTIMETERS_PER_TILE / 8),
                 "strayed {perp} octimeters from the line at {p:?}"
             );
         }
@@ -964,14 +979,23 @@ mod tests {
     }
 
     #[test]
-    fn step_toward_keeps_a_pure_diagonal_pure() {
-        // A 45° segment still moves both axes a full step each tick — the
-        // continuous-glide diagonal must not regress.
-        let start = (1000, 1000);
-        let target = (1000 - 320, 1000 + 320);
-        assert_eq!(
-            step_toward(start, target, SPEED_OCTIMETERS_PER_TICK),
-            (1000 - 8, 1000 + 8)
+    fn step_toward_speed_is_uniform_across_directions() {
+        // A diagonal step covers the same ground per tick as a cardinal one —
+        // no √2 speed-up. The cardinal move takes the full speed on one axis;
+        // the 45° diagonal splits it so the Euclidean distance still ≈ speed.
+        let speed = SPEED_OCTIMETERS_PER_TICK;
+        let origin = (1000, 1000);
+
+        let cardinal = step_toward(origin, (1000 + 320, 1000), speed);
+        assert_eq!(cardinal, (1000 + speed, 1000), "cardinal moves full speed");
+
+        let diagonal = step_toward(origin, (1000 - 320, 1000 + 320), speed);
+        let (mx, mz) = (diagonal.0 - 1000, diagonal.1 - 1000);
+        assert_eq!(-mx, mz, "the 45° split is symmetric across the axes");
+        let moved = (f64::from(mx * mx + mz * mz)).sqrt();
+        assert!(
+            (moved - f64::from(speed)).abs() <= 1.0,
+            "diagonal distance {moved} should be ≈ {speed}, not {speed}·√2"
         );
     }
 
