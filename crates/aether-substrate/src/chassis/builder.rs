@@ -2487,6 +2487,84 @@ mod tests {
                 );
             }
         }
+
+        /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
+        /// `None` rather than a downcast that succeeds against the wrong
+        /// type. Two instanced types live under different namespaces; a
+        /// lookup with one type at the other's id mismatches and returns
+        /// None.
+        #[test]
+        fn resolve_actor_returns_none_on_type_mismatch() {
+            use crate::actor::native::spawn::Subname;
+            use aether_actor::Instanced;
+
+            struct Foo;
+            impl Actor for Foo {
+                const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
+            }
+            impl Instanced for Foo {}
+            impl NativeActor for Foo {
+                type Config = ();
+                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                    Ok(Self)
+                }
+            }
+            impl NativeDispatch for Foo {
+                fn __aether_dispatch_envelope(
+                    &mut self,
+                    _ctx: &mut NativeCtx<'_>,
+                    _kind: KindId,
+                    _payload: &[u8],
+                ) -> Option<()> {
+                    None
+                }
+            }
+
+            struct Bar;
+            impl Actor for Bar {
+                const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
+            }
+            impl Instanced for Bar {}
+            impl NativeActor for Bar {
+                type Config = ();
+                fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                    Ok(Self)
+                }
+            }
+            impl NativeDispatch for Bar {
+                fn __aether_dispatch_envelope(
+                    &mut self,
+                    _ctx: &mut NativeCtx<'_>,
+                    _kind: KindId,
+                    _payload: &[u8],
+                ) -> Option<()> {
+                    None
+                }
+            }
+
+            let (registry, mailer) = fresh_substrate();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .build_passive()
+                .expect("empty chassis boots");
+
+            let _ = chassis
+                .spawn_actor::<Foo>(Subname::Named("only"), ())
+                .finish()
+                .expect("spawn foo");
+
+            // Resolving with the same subname but the wrong type returns
+            // None — the namespaces differ so the hashed full names differ
+            // and Bar's "only" is just not present. (The TypeId guard
+            // would catch a hash collision.)
+            assert!(chassis.resolve_actor::<Bar>("only").is_none());
+
+            // resolve_actors::<Bar>() is empty because no Bar instances
+            // were spawned, even though a Foo with the same subname exists.
+            assert_eq!(chassis.resolve_actors::<Bar>().len(), 0);
+            assert_eq!(chassis.resolve_actors::<Foo>().len(), 1);
+
+            drop(chassis);
+        }
     }
 
     /// Issue 607 Phase 4b verify: a `ctx.monitor(target)` registration
@@ -3099,84 +3177,6 @@ mod tests {
         // Counter for unused warning. (`_id_a` / `_id_b` retain their
         // names elsewhere; this guard keeps the compiler happy.)
         let _ = AtomicU32::new(0).load(AtomicOrdering::SeqCst);
-
-        drop(chassis);
-    }
-
-    /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
-    /// `None` rather than a downcast that succeeds against the wrong
-    /// type. Two instanced types live under different namespaces; a
-    /// lookup with one type at the other's id mismatches and returns
-    /// None.
-    #[test]
-    fn resolve_actor_returns_none_on_type_mismatch() {
-        use crate::actor::native::spawn::Subname;
-        use aether_actor::Instanced;
-
-        struct Foo;
-        impl Actor for Foo {
-            const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
-        }
-        impl Instanced for Foo {}
-        impl NativeActor for Foo {
-            type Config = ();
-            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self)
-            }
-        }
-        impl NativeDispatch for Foo {
-            fn __aether_dispatch_envelope(
-                &mut self,
-                _ctx: &mut NativeCtx<'_>,
-                _kind: KindId,
-                _payload: &[u8],
-            ) -> Option<()> {
-                None
-            }
-        }
-
-        struct Bar;
-        impl Actor for Bar {
-            const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
-        }
-        impl Instanced for Bar {}
-        impl NativeActor for Bar {
-            type Config = ();
-            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self)
-            }
-        }
-        impl NativeDispatch for Bar {
-            fn __aether_dispatch_envelope(
-                &mut self,
-                _ctx: &mut NativeCtx<'_>,
-                _kind: KindId,
-                _payload: &[u8],
-            ) -> Option<()> {
-                None
-            }
-        }
-
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .build_passive()
-            .expect("empty chassis boots");
-
-        let _ = chassis
-            .spawn_actor::<Foo>(Subname::Named("only"), ())
-            .finish()
-            .expect("spawn foo");
-
-        // Resolving with the same subname but the wrong type returns
-        // None — the namespaces differ so the hashed full names differ
-        // and Bar's "only" is just not present. (The TypeId guard
-        // would catch a hash collision.)
-        assert!(chassis.resolve_actor::<Bar>("only").is_none());
-
-        // resolve_actors::<Bar>() is empty because no Bar instances
-        // were spawned, even though a Foo with the same subname exists.
-        assert_eq!(chassis.resolve_actors::<Bar>().len(), 0);
-        assert_eq!(chassis.resolve_actors::<Foo>().len(), 1);
 
         drop(chassis);
     }
