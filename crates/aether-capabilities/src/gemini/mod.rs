@@ -756,7 +756,7 @@ mod native {
             test_mailer_and_rx,
         };
         use aether_actor::Actor;
-        use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
+        use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
         use aether_kinds::{
             AspectRatio, GeminiError, ImageSize, LyriaGenerate, LyriaGenerateResult,
             NanobananaGenerate, NanobananaGenerateResult,
@@ -771,8 +771,8 @@ mod native {
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
         use std::{env, fs, process};
 
-        fn session_sender() -> ReplyTo {
-            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
+        fn session_sender() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
         }
 
         /// Thin alias over the shared `decode_session_reply`.

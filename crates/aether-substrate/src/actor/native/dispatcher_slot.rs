@@ -84,7 +84,7 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
+use crate::mail::{KindId, Mail, MailboxId, Source};
 use crate::scheduler::{
     BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail,
     time_budget,
@@ -304,7 +304,7 @@ where
         local::with_stamped(&self.slots, || {
             let mut close_ctx = NativeCtx::new(
                 &self.binding,
-                ReplyTo::NONE,
+                Source::NONE,
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );

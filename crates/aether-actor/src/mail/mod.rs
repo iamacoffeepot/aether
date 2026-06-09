@@ -4,7 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 //! Mail layer of the actor SDK: the inbound `Mail` envelope,
-//! `PriorState` bundle, and `ReplyTo` opaque handle live here in
+//! `PriorState` bundle, and `ReplyHandle` opaque handle live here in
 //! `mod.rs` (pure decoders, no transport coupling). The
 //! [`Mailbox<K>`](mailbox) addressing token lives in
 //! the [`mailbox`] submodule.
@@ -29,8 +29,8 @@ use crate::mail::mailbox::KindId;
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
 /// component-originated mail (no Claude session involved) and for
-/// broadcast-origin mail. `Mail::reply_to()` returns `None` in this
-/// case; `ReplyTo` is only constructable via the `Mail` accessor.
+/// broadcast-origin mail. `Mail::reply_handle()` returns `None` in this
+/// case; `ReplyHandle` is only constructable via the `Mail` accessor.
 pub const NO_REPLY_HANDLE: u32 = u32::MAX;
 
 /// Opaque per-instance handle identifying the reply destination for
@@ -46,14 +46,14 @@ pub const NO_REPLY_HANDLE: u32 = u32::MAX;
 /// guarantees the handle stays valid for the lifetime of the
 /// receiving component instance.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ReplyTo {
+pub struct ReplyHandle {
     pub(crate) raw: u32,
 }
 
-impl ReplyTo {
+impl ReplyHandle {
     /// Not part of the public API; the `Ctx` reply path round-trips
     /// the raw handle through here so siblings outside `mail.rs` can
-    /// reconstruct a `ReplyTo` without touching the private field.
+    /// reconstruct a `ReplyHandle` without touching the private field.
     /// Sentinel handling is the caller's responsibility — this
     /// constructor accepts any `u32`.
     #[doc(hidden)]
@@ -162,16 +162,19 @@ impl<'a> Mail<'a> {
         self.byte_len
     }
 
-    /// Reply handle for the session that originated this mail. `None`
-    /// for component-to-component mail and broadcast-origin mail;
-    /// `Some(ReplyTo)` when the inbound came from a Claude session and
-    /// can be answered via `Ctx::reply`.
+    /// Reply handle for the inbound mail. `None` for broadcast-origin
+    /// mail (and any sender the substrate stamped `SourceAddr::None`);
+    /// `Some(ReplyHandle)` when the inbound carries an answerable
+    /// source — a Claude session, a remote engine's mailbox, or a
+    /// local component (the substrate's `deliver()` allocates a handle
+    /// for `Component`-origin mail too, so component-to-component mail
+    /// is answerable via `Ctx::reply`).
     #[must_use]
-    pub fn reply_to(&self) -> Option<ReplyTo> {
+    pub fn reply_handle(&self) -> Option<ReplyHandle> {
         if self.sender == NO_REPLY_HANDLE {
             None
         } else {
-            Some(ReplyTo { raw: self.sender })
+            Some(ReplyHandle { raw: self.sender })
         }
     }
 
@@ -518,14 +521,16 @@ mod tests {
         // SAFETY: no pointer is dereferenced (`bytes()` and friends
         // are not called); we only inspect the sentinel `sender`.
         let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, NO_REPLY_HANDLE) };
-        assert!(mail.reply_to().is_none());
+        assert!(mail.reply_handle().is_none());
     }
 
     #[test]
     fn mail_sender_some_for_real_handle() {
         // SAFETY: no pointer is dereferenced; we only inspect `sender`.
         let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42) };
-        let s = mail.reply_to().expect("non-sentinel handle yields Some");
+        let s = mail
+            .reply_handle()
+            .expect("non-sentinel handle yields Some");
         assert_eq!(s.raw(), 42);
     }
 

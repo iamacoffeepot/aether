@@ -24,7 +24,7 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
-use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
+use aether_substrate::mail::{Mail, Source, SourceAddr};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -134,7 +134,7 @@ fn drive<K: Kind, T>(
     let sink = mailbox_id_from_name(<ReplySink as Actor>::NAMESPACE);
     mailer.push(
         Mail::new(server, K::ID, request.encode_into_bytes(), 1)
-            .with_reply_to(ReplyTo::with_correlation(ReplyTarget::Component(sink), 1)),
+            .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
     );
     let until = Instant::now() + deadline;
     loop {

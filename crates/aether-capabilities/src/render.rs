@@ -755,7 +755,7 @@ mod native {
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
-        use aether_substrate::mail::{KindId, ReplyTo};
+        use aether_substrate::mail::{KindId, Source};
         use std::thread;
 
         use crate::test_chassis::fresh_substrate;
@@ -802,7 +802,7 @@ mod native {
                 kind,
                 "test.kind".to_owned(),
                 None,
-                ReplyTo::NONE,
+                Source::NONE,
                 MailRef::from(payload.to_vec()),
                 1,
                 MailId::NONE,

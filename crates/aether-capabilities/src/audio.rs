@@ -73,7 +73,7 @@ mod native {
     use crossbeam_queue::ArrayQueue;
 
     use aether_actor::{MailCtx, actor};
-    use aether_data::{MailboxId, ReplyTarget, ReplyTo};
+    use aether_data::{MailboxId, Source, SourceAddr};
     use aether_kinds::SetMasterGainResult;
 
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -669,9 +669,9 @@ mod native {
     /// sessions and substrate-internal pushes (which shouldn't reach the
     /// audio cap in practice) collapse to id `0`, sharing one voice
     /// slot per (instrument, pitch).
-    fn sender_mailbox_id(sender: ReplyTo) -> MailboxId {
-        match sender.target {
-            ReplyTarget::EngineMailbox { mailbox_id, .. } => mailbox_id,
+    fn sender_mailbox_id(sender: Source) -> MailboxId {
+        match sender.addr {
+            SourceAddr::EngineMailbox { mailbox_id, .. } => mailbox_id,
             _ => MailboxId(0),
         }
     }

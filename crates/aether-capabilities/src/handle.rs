@@ -225,7 +225,7 @@ mod native {
         use aether_substrate::mail::registry;
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
-        use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{MailRef, Source, SourceAddr};
 
         fn fresh_substrate() -> (
             Arc<HandleStore>,
@@ -245,8 +245,8 @@ mod native {
             (store, mailer, registry, rx)
         }
 
-        fn session_reply_to() -> ReplyTo {
-            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
+        fn session_reply_to() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
         }
 
         /// End-to-end through the cap: boot it via `with_actor`, push a

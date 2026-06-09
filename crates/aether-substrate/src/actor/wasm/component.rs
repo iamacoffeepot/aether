@@ -21,7 +21,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{MailboxEntry, Registry};
-use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, ReplyTarget, ReplyTo};
+use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
 // ADR-0095: the substrate delivers every host→guest payload — mail, init
@@ -298,11 +298,11 @@ impl ComponentCtx {
         // ADR-0042: mint a fresh correlation_id for this send and
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
-        // outgoing `ReplyTo.correlation_id`; the reply's echo
+        // outgoing `Source.correlation_id`; the reply's echo
         // (auto-routed by `Mailer::send_reply`) carries it back so a
         // handler can match the reply to this send.
         let correlation = self.mint_correlation();
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Component(self.sender), correlation);
+        let reply_to = Source::with_correlation(SourceAddr::Component(self.sender), correlation);
 
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
         // outbound's MailId from the same correlation that drives
@@ -313,13 +313,13 @@ impl ComponentCtx {
     }
 
     /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
-    /// of [`Self::send`] for the `reply_mail_p32` `ReplyTarget::Component`
+    /// of [`Self::send`] for the `reply_mail_p32` `SourceAddr::Component`
     /// arm. A reply must echo the inbound mail's `correlation` so the
     /// originating actor (or the RPC server's `in_flight` table) can
     /// match it home — the ADR-0042 contract the `Session` /
     /// `EngineMailbox` arms and native `Mailer::send_reply` already
-    /// honor. So it stamps `reply_to = ReplyTo::with_correlation(
-    /// ReplyTarget::None, correlation)` — the echo, with reply-of-a-reply
+    /// honor. So it stamps `reply_to = Source::with_correlation(
+    /// SourceAddr::None, correlation)` — the echo, with reply-of-a-reply
     /// target `None` — rather than `send`'s fresh-minted
     /// `Component(self)`.
     ///
@@ -340,7 +340,7 @@ impl ComponentCtx {
         count: u32,
         correlation: u64,
     ) {
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::None, correlation);
+        let reply_to = Source::with_correlation(SourceAddr::None, correlation);
         let mail_id = MailId::new(self.sender, self.next_reply_lineage());
         self.send_routed(recipient, kind, payload, count, reply_to, mail_id);
     }
@@ -358,7 +358,7 @@ impl ComponentCtx {
         kind: MailKind,
         payload: Vec<u8>,
         count: u32,
-        reply_to: ReplyTo,
+        reply_to: Source,
         mail_id: MailId,
     ) {
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
@@ -390,7 +390,7 @@ impl ComponentCtx {
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any
                 // sink cares about (ADR-0011), and the same mailbox id
-                // rides on `reply_to.target` so sink handlers that want
+                // rides on `reply_to.addr` so sink handlers that want
                 // to reply (ADR-0041's io sink is the motivating case)
                 // can route `*Result` back to this component via
                 // `Mailer::send_reply`.
@@ -459,7 +459,7 @@ impl ComponentCtx {
         // - Dropped: warn-drops in `route_mail`.
         // - Unknown (ADR-0037): bubbles up to the hub-substrate via
         //   `MailToHubSubstrate`; the `source_mailbox_id` it carries is
-        //   recovered from `reply_to.target` when it's a Component
+        //   recovered from `reply_to.addr` when it's a Component
         //   variant (warn-drops otherwise).
         self.queue.push(
             Mail::new(recipient, kind, payload, count)
@@ -934,10 +934,10 @@ impl Component {
     /// the per-instance `ReplyTable` for every inbound that has a
     /// meaningful reply target — a Claude session (non-NIL
     /// `SessionToken`), a remote engine mailbox, or a peer component
-    /// (`reply_to.target = ReplyTarget::Component(_)` populated by
+    /// (`reply_to.addr = SourceAddr::Component(_)` populated by
     /// `ComponentCtx::send` / `NativeBinding::send_mail`).
     /// Broadcast-origin and system-generated mail pass
-    /// `NO_REPLY_HANDLE` so the guest's `mail.reply_to()` accessor
+    /// `NO_REPLY_HANDLE` so the guest's `mail.reply_handle()` accessor
     /// returns `None`.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
         // ADR-0042: carry the incoming correlation through to the
@@ -945,24 +945,24 @@ impl Component {
         // outgoing reply. Session / engine mail that didn't originate
         // a correlation carries 0 — fine, echo of 0 is a no-op.
         let correlation = mail.reply_to.correlation_id;
-        let entry = match &mail.reply_to.target {
-            ReplyTarget::Session(token) => {
-                Some(ReplyEntry::new(ReplyTarget::Session(*token), correlation))
+        let entry = match &mail.reply_to.addr {
+            SourceAddr::Session(token) => {
+                Some(ReplyEntry::new(SourceAddr::Session(*token), correlation))
             }
-            ReplyTarget::EngineMailbox {
+            SourceAddr::EngineMailbox {
                 engine_id,
                 mailbox_id,
             } => Some(ReplyEntry::new(
-                ReplyTarget::EngineMailbox {
+                SourceAddr::EngineMailbox {
                     engine_id: *engine_id,
                     mailbox_id: *mailbox_id,
                 },
                 correlation,
             )),
-            ReplyTarget::Component(m) => {
-                Some(ReplyEntry::new(ReplyTarget::Component(*m), correlation))
+            SourceAddr::Component(m) => {
+                Some(ReplyEntry::new(SourceAddr::Component(*m), correlation))
             }
-            ReplyTarget::None => None,
+            SourceAddr::None => None,
         };
         let handle = match entry {
             Some(e) => self.store.data_mut().reply_table.allocate(e),
@@ -1958,13 +1958,13 @@ mod tests {
     #[test]
     fn deliver_with_real_token_allocates_session_handle() {
         use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
         use aether_data::{SessionToken, Uuid};
 
         let mut component = instantiate(&wat_stores_sender());
         let token = SessionToken(Uuid::from_u128(0xaaaa));
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-            .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
+            .with_reply_to(Source::to(SourceAddr::Session(token)));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
         assert_ne!(observed, NO_REPLY_HANDLE);
@@ -1977,14 +1977,14 @@ mod tests {
     #[test]
     fn deliver_with_component_reply_target_allocates_component_handle() {
         use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
 
         let mut component = instantiate(&wat_stores_sender());
         // ADR-0017 / issue #644: component-origin mail (peer-to-peer
-        // send sets `reply_to.target = Component(sender)`) gets a
+        // send sets `reply_to.addr = Component(sender)`) gets a
         // Component-variant handle.
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-            .with_reply_to(ReplyTo::to(ReplyTarget::Component(M(7))));
+            .with_reply_to(Source::to(SourceAddr::Component(M(7))));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
         assert_ne!(observed, NO_REPLY_HANDLE);
@@ -2023,7 +2023,7 @@ mod tests {
 
     #[test]
     fn reply_mail_emits_session_addressed_frame() {
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
         use aether_data::{SessionToken, Uuid};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
@@ -2031,7 +2031,7 @@ mod tests {
 
         let token = SessionToken(Uuid::from_u128(0xbeef));
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-            .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
+            .with_reply_to(Source::to(SourceAddr::Session(token)));
         component.deliver(&mail).expect("deliver");
 
         let event = rx.try_recv().expect("outbound egress queued");
@@ -2060,7 +2060,7 @@ mod tests {
     }
 
     /// Issue iamacoffeepot/aether#1465: a wasm component that replies to
-    /// an inbound whose reply target is `ReplyTarget::Component` must
+    /// an inbound whose reply target is `SourceAddr::Component` must
     /// echo the inbound `correlation` on the outgoing reply, with
     /// reply-of-a-reply target `None` — the ADR-0042 contract the
     /// `Session` / `EngineMailbox` arms and native `Mailer::send_reply`
@@ -2072,10 +2072,10 @@ mod tests {
     /// peer `Component`, this also exercises the ADR-0042 component→
     /// component reply-correlation path by construction. Drives the
     /// `reply_mail_p32` Component arm through a guest and asserts the
-    /// dispatched reply's `ReplyTo`.
+    /// dispatched reply's `Source`.
     #[test]
     fn reply_mail_component_target_echoes_inbound_correlation() {
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
         use aether_data::{KindDescriptor, SchemaType};
 
         // A non-trivial inbound correlation that can't be mistaken for a
@@ -2084,8 +2084,8 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         // The reply recipient: a capture inbox that records the
-        // dispatched mail's `ReplyTo` (the reply's `sender`).
-        let captured: Arc<Mutex<Vec<ReplyTo>>> = Arc::new(Mutex::new(Vec::new()));
+        // dispatched mail's `Source` (the reply's `sender`).
+        let captured: Arc<Mutex<Vec<Source>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
         let recipient = registry
             .try_register_inbox(
@@ -2121,7 +2121,7 @@ mod tests {
         // `reply_mail_p32` with the sender handle the substrate
         // allocated for this reply target.
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1).with_reply_to(
-            ReplyTo::with_correlation(ReplyTarget::Component(recipient), INBOUND_CORRELATION),
+            Source::with_correlation(SourceAddr::Component(recipient), INBOUND_CORRELATION),
         );
         component.deliver(&mail).expect("deliver");
 
@@ -2133,8 +2133,8 @@ mod tests {
             "reply must echo the inbound correlation, not a fresh mint",
         );
         assert_eq!(
-            reply_to.target,
-            ReplyTarget::None,
+            reply_to.addr,
+            SourceAddr::None,
             "reply-of-a-reply target must be None, matching native send_reply",
         );
     }
@@ -2143,7 +2143,7 @@ mod tests {
     /// id the local registry doesn't know, `ctx.send` defers to the
     /// mailer, which emits an upstream `MailToHubSubstrate` frame
     /// carrying the sender's mailbox id so the hub can build a
-    /// `ReplyTo::EngineMailbox` for the receiving component.
+    /// `Source::EngineMailbox` for the receiving component.
     #[test]
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();

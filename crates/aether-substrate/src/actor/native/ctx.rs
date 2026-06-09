@@ -30,7 +30,7 @@ use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::registry::MonitorError;
-use crate::mail::ReplyTo;
+use crate::mail::Source;
 use crate::mail::mailer::Mailer;
 use crate::runtime::trace::SettlementHold;
 
@@ -39,7 +39,7 @@ use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
 use crate::actor::native::dispatch_blocking::{DispatchId, TaskCompletionWake, TaskDone};
 use crate::actor::native::spawn_thread;
-use crate::mail::{Mail, ReplyTarget};
+use crate::mail::{Mail, SourceAddr};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
@@ -54,7 +54,7 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 /// `ctx.reply(...)`).
 pub struct NativeCtx<'a> {
     binding: &'a Arc<NativeBinding>,
-    sender: ReplyTo,
+    source: Source,
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
     /// Outbound `send` paths read this to stamp `parent_mail` on
     /// child mail (so the receiver inherits the right parent in the
@@ -111,13 +111,13 @@ impl<'a> NativeCtx<'a> {
     /// it's `pub` rather than `pub(crate)`.
     pub fn new(
         binding: &'a Arc<NativeBinding>,
-        sender: ReplyTo,
+        sender: Source,
         in_flight_mail_id: MailId,
         in_flight_root: MailId,
     ) -> Self {
         Self {
             binding,
-            sender,
+            source: sender,
             in_flight_mail_id,
             in_flight_root,
         }
@@ -190,7 +190,7 @@ impl<'a> NativeCtx<'a> {
     /// the worker spawns** (so `HoldOpen` precedes this handler's
     /// `Finished` and the #716 premature-settlement window is closed by
     /// construction), then parked in the per-actor in-flight ledger
-    /// alongside the originating [`ReplyTo`] — it outlives the worker
+    /// alongside the originating [`Source`] — it outlives the worker
     /// (which holds nothing) and releases only when the completion is
     /// resolved. `MailId::NONE` for [`Self::in_flight_root`] skips the
     /// hold cleanly (no chain to hold), matching `spawn_inherit`.
@@ -258,7 +258,7 @@ impl<'a> NativeCtx<'a> {
     pub fn dispatch_blocking_resumed<O, F>(
         &mut self,
         hold: SettlementHold,
-        reply_to: ReplyTo,
+        reply_to: Source,
         f: F,
     ) -> DispatchId
     where
@@ -275,7 +275,7 @@ impl<'a> NativeCtx<'a> {
     pub fn dispatch_blocking_resumed_with<O, C, F>(
         &mut self,
         hold: SettlementHold,
-        reply_to: ReplyTo,
+        reply_to: Source,
         cx: C,
         f: F,
     ) -> DispatchId
@@ -383,30 +383,33 @@ impl<'a> NativeCtx<'a> {
     /// The reply target for the mail currently being dispatched.
     /// Useful when a handler wants to inspect the originator (audit
     /// trails, multi-tenant routing) without going through
-    /// [`MailCtx::reply`]. `target == ReplyTarget::None` means the
+    /// [`MailCtx::reply`]. `target == SourceAddr::None` means the
     /// inbound was broadcast or peer-component mail with no reply
     /// destination.
     #[must_use]
-    pub fn reply_target(&self) -> ReplyTo {
-        self.sender
+    pub fn reply_target(&self) -> Source {
+        self.source
     }
 
-    /// Local-component origin of the mail currently being dispatched,
+    /// Immediate-sender mailbox of the mail currently being dispatched,
     /// or `None` for mail with no local sender (broadcast,
-    /// substrate-generated, hub-bubbled). Issue #581's `LogCapability`
-    /// reads this to populate `LogEntry::origin` from the envelope
-    /// rather than the payload.
+    /// substrate-generated, hub-bubbled). This is the *immediate*
+    /// sender (one hop, the addressing layer's `Source`), not the chain
+    /// origin — the origin lives in the tracing layer (`root` /
+    /// `parent_mail`, ADR-0080). Issue #581's `LogCapability` reads this
+    /// to populate `LogEntry::origin` from the envelope rather than the
+    /// payload.
     #[must_use]
-    pub fn origin(&self) -> Option<MailboxId> {
-        match self.sender.target {
-            ReplyTarget::Component(id) => Some(id),
+    pub fn source_mailbox(&self) -> Option<MailboxId> {
+        match self.source.addr {
+            SourceAddr::Component(id) => Some(id),
             _ => None,
         }
     }
 
     native_sender_methods!();
 
-    /// Reply to an explicit [`ReplyTo`] rather than the inbound's own
+    /// Reply to an explicit [`Source`] rather than the inbound's own
     /// sender. The ADR-0093 hold-until-resolve path reaches for this:
     /// [`TaskDone::resolve`](super::dispatch_blocking::TaskDone::resolve)
     /// re-replies through the *originating* caller's reply target
@@ -415,7 +418,7 @@ impl<'a> NativeCtx<'a> {
     /// has no caller behind it). Routes through the same
     /// [`NativeBinding::send_reply_for_handler`] path as
     /// [`MailCtx::reply`].
-    pub fn reply_to_target<K: Kind>(&mut self, sender: ReplyTo, payload: &K) {
+    pub fn reply_to_target<K: Kind>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload);
     }
 
@@ -485,9 +488,9 @@ impl<'a> NativeCtx<'a> {
     }
 
     /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a
-    /// child of the calling actor. The new actor's [`ReplyTo`]
+    /// child of the calling actor. The new actor's [`Source`]
     /// stamps the calling actor's mailbox so any reply addressed to
-    /// `ReplyTarget::Component` routes back here.
+    /// `SourceAddr::Component` routes back here.
     ///
     /// Returns a [`SpawnBuilder`](crate::SpawnBuilder) the caller chains
     /// `after_init` / `finish` against. Mirrors the chassis-level
@@ -511,9 +514,9 @@ impl<'a> NativeCtx<'a> {
             .binding
             .spawner()
             .expect("NativeCtx::spawn_child requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
-        let sender = ReplyTo {
-            target: ReplyTarget::Component(self.binding.self_mailbox()),
-            correlation_id: ReplyTo::NO_CORRELATION,
+        let sender = Source {
+            addr: SourceAddr::Component(self.binding.self_mailbox()),
+            correlation_id: Source::NO_CORRELATION,
         };
         // ADR-0099 §3: the child nests under this actor — its id folds
         // the new node's `ActorId` onto this actor's lineage carry, and
@@ -630,7 +633,7 @@ impl NativeCtx<'_> {
     }
 
     /// Re-dispatch variant of [`Self::send_envelope_traced`] that pins the
-    /// child mail's `reply_to` to the supplied [`ReplyTo`] instead of
+    /// child mail's `reply_to` to the supplied [`Source`] instead of
     /// stamping the default `(Component(self_mailbox), auto_correlation)`.
     /// The minted [`MailId`] and the chain's `in_flight` accounting are
     /// unchanged — only the recipient's
@@ -656,7 +659,7 @@ impl NativeCtx<'_> {
         recipient: MailboxId,
         kind: KindId,
         bytes: &[u8],
-        reply_to: ReplyTo,
+        reply_to: Source,
     ) -> MailId {
         self.binding.push_envelope_buffered_with_reply_to(
             recipient.0,
@@ -776,7 +779,7 @@ impl MailCtx for NativeCtx<'_> {
     /// ctx already holds both the mailer reference (via the transport)
     /// and the inbound's reply target.
     fn reply<K: Kind>(&mut self, payload: &K) {
-        self.binding.send_reply_for_handler(self.sender, payload);
+        self.binding.send_reply_for_handler(self.source, payload);
     }
 }
 
@@ -940,31 +943,31 @@ impl MailSender for NativeCtx<'_> {
 }
 
 impl OutboundReply for NativeCtx<'_> {
-    type ReplyHandle = ReplyTo;
+    type ReplyHandle = Source;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher
-    /// builds a `ReplyTo` for every inbound (broadcast / no-reply mail
-    /// rides as `ReplyTarget::None` inside the wrapper). The
-    /// always-Some invariant is preserved by [`Self::origin`] /
-    /// [`Self::reply`] inspecting the inner `ReplyTarget`; the trait's
+    /// builds a `Source` for every inbound (broadcast / no-reply mail
+    /// rides as `SourceAddr::None` inside the wrapper). The
+    /// always-Some invariant is preserved by [`Self::source_mailbox`] /
+    /// [`Self::reply`] inspecting the inner `SourceAddr`; the trait's
     /// `Option<Self::ReplyHandle>` shape exists for the FFI side,
     /// where a guest genuinely sees no reply target.
-    fn reply_target(&self) -> Option<ReplyTo> {
-        Some(self.sender)
+    fn reply_target(&self) -> Option<Source> {
+        Some(self.source)
     }
 
-    fn origin(&self) -> Option<MailboxId> {
-        match self.sender.target {
-            ReplyTarget::Component(id) => Some(id),
+    fn source_mailbox(&self) -> Option<MailboxId> {
+        match self.source.addr {
+            SourceAddr::Component(id) => Some(id),
             _ => None,
         }
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {
-        self.binding.send_reply_for_handler(self.sender, payload);
+        self.binding.send_reply_for_handler(self.source, payload);
     }
 
-    fn reply_to<K: Kind>(&mut self, sender: ReplyTo, payload: &K) {
+    fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload);
     }
 }
@@ -1144,7 +1147,7 @@ mod tests {
     /// called; the compile is the assertion. If a reply bound regains a
     /// `serde::Serialize` half, this stops compiling.
     #[allow(dead_code)]
-    fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_>, sender: ReplyTo) {
+    fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_>, sender: Source) {
         MailCtx::reply(ctx, &CastOnly { code: 1 });
         OutboundReply::reply(ctx, &CastOnly { code: 2 });
         OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });

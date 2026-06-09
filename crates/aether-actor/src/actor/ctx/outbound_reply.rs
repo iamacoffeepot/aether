@@ -26,9 +26,9 @@ use crate::actor::ctx::mail_sender::MailSender;
 /// reply handles invalidate on teardown.
 pub trait OutboundReply: MailSender {
     /// Per-impl reply-handle type. The wasm-side ctx pins this to
-    /// [`crate::mail::ReplyTo`] (an opaque `u32` host-supplied
+    /// [`crate::mail::ReplyHandle`] (an opaque `u32` host-supplied
     /// handle); substrate's `NativeCtx` pins it to
-    /// `aether_data::ReplyTo` (the structured `target + correlation_id`
+    /// `aether_data::Source` (the structured `addr + correlation_id`
     /// that `Mailer::send_reply` consumes). The two shapes carry
     /// different information — issue 663 declines to unify them on a
     /// single concrete type and instead lets each impl surface its
@@ -41,12 +41,15 @@ pub trait OutboundReply: MailSender {
     /// component, remote engine mailbox).
     fn reply_target(&self) -> Option<Self::ReplyHandle>;
 
-    /// Local-component origin of the mail currently being dispatched,
+    /// Immediate-sender mailbox of the mail currently being dispatched,
     /// or `None` for mail with no local sender (broadcast,
-    /// substrate-generated, hub-bubbled). Useful for caps that want
-    /// to attribute work to the originating component without going
-    /// through the reply path.
-    fn origin(&self) -> Option<MailboxId>;
+    /// substrate-generated, hub-bubbled). This is the *immediate*
+    /// sender (one hop, the addressing layer's `Source`), not the chain
+    /// origin — the origin lives in the tracing layer (`root` /
+    /// `parent_mail`, ADR-0080). Useful for caps that want to attribute
+    /// work to the sending component without going through the reply
+    /// path.
+    fn source_mailbox(&self) -> Option<MailboxId>;
 
     /// Reply to the originator of the mail currently being dispatched.
     /// No-op when there's no reply target. Wire shape (cast or postcard)

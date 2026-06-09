@@ -239,7 +239,7 @@ mod native {
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::Registry;
-        use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{Source, SourceAddr};
         use aether_substrate::runtime::thread_name::register;
         use serde::de::DeserializeOwned;
         use std::sync::Arc;
@@ -276,7 +276,7 @@ mod native {
         }
 
         fn session_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
-            let sender = ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())));
+            let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
             NativeCtx::new(
                 transport,
                 sender,

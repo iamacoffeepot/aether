@@ -12,7 +12,7 @@
 
 use std::sync::mpsc;
 
-use aether_substrate::ReplyTo;
+use aether_substrate::Source;
 
 /// Events the tick loop consumes. Single-producer / single-consumer
 /// in practice — the chassis-control handler is the only producer,
@@ -23,7 +23,7 @@ pub enum ChassisEvent {
     /// `aether.test_bench.advance { ticks }`. The tick loop runs
     /// `ticks` full cycles (Tick fanout → drain → render or capture)
     /// then replies with `AdvanceResult::Ok { ticks_completed }`.
-    Advance { reply_to: ReplyTo, ticks: u32 },
+    Advance { reply_to: Source, ticks: u32 },
     /// `aether.render.capture_frame`. The `PendingCapture` itself
     /// was pushed into `CaptureQueue` by the chassis-control
     /// handler; this event just wakes the loop so the next idle

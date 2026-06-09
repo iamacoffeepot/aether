@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use aether_data::{EngineId, KindDescriptor, KindId, MailboxDescriptor, MailboxId, SessionToken};
 
-use crate::mail::{ReplyTarget, ReplyTo};
+use crate::mail::{Source, SourceAddr};
 
 // Issue 776 retired the substrate-local `LogEntry` + `LogLevel`
 // types alongside the `EgressBackend::egress_log_batch` method. Log
@@ -29,7 +29,7 @@ use crate::mail::{ReplyTarget, ReplyTo};
 // in its substrate-side ring and served via the `aether.log.read` /
 // `aether.log.read_result` kinds (the `aether_kinds::LogEntry` wire
 // shape is the only `LogEntry` left in the workspace). The cap reads
-// `ctx.origin()` directly off the mail envelope, so no substrate-side
+// `ctx.source_mailbox()` directly off the mail envelope, so no substrate-side
 // helper type is needed.
 
 /// Pluggable egress backend the substrate calls through `HubOutbound`.
@@ -278,7 +278,7 @@ impl EgressBackend for RecordingBackend {
 /// to `EngineToHub` frames and writes them to a TCP socket).
 ///
 /// `send_reply<K>` is a substrate-side encoding convenience — it does
-/// the postcard encoding and dispatches based on `ReplyTarget`. Sinks
+/// the postcard encoding and dispatches based on `SourceAddr`. Sinks
 /// and capture handlers call it without caring which backend is wired.
 pub struct HubOutbound {
     backend: OnceLock<Arc<dyn EgressBackend>>,
@@ -412,17 +412,17 @@ impl HubOutbound {
     /// are silent no-ops (the latter is handled by `Mailer::send_reply`
     /// rather than the hub). Returns `true` when a backend method was
     /// called; `false` on a non-hub-routed target.
-    pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
+    pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
     where
         K: aether_data::Kind,
     {
         let payload = result.encode_into_bytes();
-        match sender.target {
-            ReplyTarget::Session(token) => {
+        match sender.addr {
+            SourceAddr::Session(token) => {
                 self.egress_to_session(token, K::NAME, payload, None, sender.correlation_id);
                 true
             }
-            ReplyTarget::EngineMailbox {
+            SourceAddr::EngineMailbox {
                 engine_id,
                 mailbox_id,
             } => {
@@ -436,7 +436,7 @@ impl HubOutbound {
                 );
                 true
             }
-            ReplyTarget::None | ReplyTarget::Component(_) => false,
+            SourceAddr::None | SourceAddr::Component(_) => false,
         }
     }
 }

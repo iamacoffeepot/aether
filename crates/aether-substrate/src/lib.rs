@@ -90,7 +90,7 @@ pub use mail::outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend,
 };
 pub use mail::registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Registry};
-pub use mail::{KindId, Mail, MailKind, MailRef, MailboxId, ReplyTarget, ReplyTo};
+pub use mail::{KindId, Mail, MailKind, MailRef, MailboxId, Source, SourceAddr};
 pub use runtime::panic_hook::init_panic_hook;
 
 /// Well-known mailbox name for substrate-level diagnostic events

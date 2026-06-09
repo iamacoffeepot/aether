@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use aether_data::{Kind, ReplyTo};
+use aether_data::{Kind, Source};
 use aether_kinds::descriptors;
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::actor::native::ctx::NativeCtx;
@@ -91,7 +91,7 @@ where
 /// Build a `(Arc<Mailer>, Receiver<EgressEvent>)` pair where the
 /// mailer's outbound is wired to a loopback channel whose receiver
 /// the caller can drain. Mirrors [`fresh_substrate`] but exposes the
-/// egress side for tests that need to observe `ReplyTarget::Session`
+/// egress side for tests that need to observe `SourceAddr::Session`
 /// sends (the cap-level reply path used by `aether.fs` / `aether.http`
 /// / `aether.audio`). The registry is bare — no kind descriptors —
 /// so tests can register only what they exercise.
@@ -119,7 +119,7 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// original caller through the framework-held reply target) and
 /// `tasks.on_complete(ctx)`.
 ///
-/// The driving `NativeCtx` carries no inbound reply target ([`ReplyTo::NONE`]):
+/// The driving `NativeCtx` carries no inbound reply target ([`Source::NONE`]):
 /// the completion's reply routes through the reply target captured at
 /// dispatch and parked in the framework's in-flight ledger, not this ctx.
 pub fn drive_task_completion<A>(
@@ -143,7 +143,7 @@ pub fn drive_task_completion<A>(
     };
     let mut ctx = NativeCtx::new(
         binding,
-        ReplyTo::NONE,
+        Source::NONE,
         aether_data::MailId::NONE,
         aether_data::MailId::NONE,
     );

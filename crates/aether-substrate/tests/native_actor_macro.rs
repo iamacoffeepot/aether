@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
-use aether_data::{Kind, ReplyTo};
+use aether_data::{Kind, Source};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::TaskDone;
 use aether_substrate::handle_store::HandleStore;
@@ -143,7 +143,7 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         <K as Kind>::ID,
         K::NAME.to_owned(),
         None,
-        ReplyTo::NONE,
+        Source::NONE,
         MailRef::from(bytes),
         1,
         MailId::NONE,
@@ -244,7 +244,7 @@ fn seize_and_run_dispatches_seed_in_place() {
         <Greet as Kind>::ID,
         Greet::NAME.to_owned(),
         None,
-        ReplyTo::NONE,
+        Source::NONE,
         MailRef::from(payload),
         1,
         MailId::NONE,
@@ -491,7 +491,7 @@ impl NativeActor for TaskRouteCap {
             .a_value
             .store(done.output().value, AtomicOrdering::SeqCst);
         self.obs.a_calls.fetch_add(1, AtomicOrdering::SeqCst);
-        // No caller behind these test dispatches (ReplyTo::NONE), so the
+        // No caller behind these test dispatches (Source::NONE), so the
         // re-reply is a no-op; resolve still consumes the TaskDone and
         // releases the hold (avoiding the drop-without-resolve assert).
         done.resolve(ctx);

@@ -31,11 +31,11 @@ pub use aether_data::{KindId, MailId, MailboxId};
 /// Reply-routing types. Canonical home is `aether-data` (ADR-0076) —
 /// `aether-actor`'s `Dispatch` trait references them in its signature
 /// without taking an `aether-actor`-internal dep, and the location
-/// avoids a name clash with `aether-actor`'s wasm-side `ReplyTo` (a
+/// avoids a name clash with `aether-actor`'s wasm-side `Source` (a
 /// distinct `u32` FFI handle). This module re-exports them so
-/// existing `aether_substrate::mail::{ReplyTo, ReplyTarget}` call
+/// existing `aether_substrate::mail::{Source, SourceAddr}` call
 /// sites compile unchanged.
-pub use aether_data::{ReplyTarget, ReplyTo};
+pub use aether_data::{Source, SourceAddr};
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The
 /// typed facade over this is ADR-0005 (mail typing system) and ADR-0019
@@ -63,7 +63,7 @@ pub type MailKind = KindId;
 ///
 /// Pre-issue-#644 a redundant `from_component: Option<MailboxId>`
 /// also rode here, set by `with_origin` to the same id
-/// `reply_to.target = Component(_)` already carried.
+/// `reply_to.addr = Component(_)` already carried.
 #[derive(Debug)]
 pub struct Mail {
     pub recipient: MailboxId,
@@ -77,7 +77,7 @@ pub struct Mail {
     /// sites that move bytes off-engine.
     pub payload: MailRef,
     pub count: u32,
-    pub reply_to: ReplyTo,
+    pub reply_to: Source,
     /// ADR-0080 §1: this mail's identity. The producer mints it from
     /// `MailId::new(producer_mailbox, producer_per_actor_correlation)`
     /// before pushing through `Mailer`. PR 2 stamps it inert (no
@@ -109,7 +109,7 @@ impl Mail {
             kind,
             payload: payload.into(),
             count,
-            reply_to: ReplyTo::NONE,
+            reply_to: Source::NONE,
             mail_id: MailId::NONE,
             root: MailId::NONE,
             parent_mail: None,
@@ -121,9 +121,9 @@ impl Mail {
     /// when delivering bubbled-up mail (ADR-0037 Phase 2), and
     /// `ComponentCtx::send` / `NativeBinding::send_mail` for
     /// peer-to-peer component sends (target = `Component(sender)`).
-    /// Other mail paths leave the default `ReplyTo::None`.
+    /// Other mail paths leave the default `Source::None`.
     #[must_use]
-    pub fn with_reply_to(mut self, reply_to: ReplyTo) -> Self {
+    pub fn with_reply_to(mut self, reply_to: Source) -> Self {
         self.reply_to = reply_to;
         self
     }

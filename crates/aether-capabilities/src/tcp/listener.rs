@@ -183,7 +183,7 @@ mod listener_native {
 
         /// Sidecar wake. Drain every pending accepted connection and
         /// spawn a `TcpSessionActor` per stream. Each session is a
-        /// child of this listener (parent `ReplyTo` stamps as our own
+        /// child of this listener (parent `Source` stamps as our own
         /// mailbox), so on session close the close fan-out reaches
         /// us via the standard monitor path.
         ///

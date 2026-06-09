@@ -595,7 +595,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         local::with_stamped(&resources.slots, || {
             let mut wire_ctx = crate::actor::native::NativeCtx::new(
                 &resources.transport,
-                aether_data::ReplyTo::NONE,
+                aether_data::Source::NONE,
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
@@ -1396,7 +1396,7 @@ impl<C: Chassis> BuiltChassis<C> {
             Arc::clone(&self.booted.spawner),
             subname,
             config,
-            crate::ReplyTo::NONE,
+            crate::Source::NONE,
             // Chassis-level spawn: a top-level instanced actor with no
             // parent actor, so it is the depth-1 root of its own lineage
             // (ADR-0099 §3) and keeps the flat `{NAMESPACE}:{subname}` id.
@@ -1546,7 +1546,7 @@ impl<C: Chassis> PassiveChassis<C> {
             Arc::clone(&self.booted.spawner),
             subname,
             config,
-            crate::ReplyTo::NONE,
+            crate::Source::NONE,
             // Chassis-level spawn: a top-level instanced actor with no
             // parent actor, so it is the depth-1 root of its own lineage
             // (ADR-0099 §3) and keeps the flat `{NAMESPACE}:{subname}` id.

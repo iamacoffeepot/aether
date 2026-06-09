@@ -563,7 +563,7 @@ mod native {
             test_mailer_and_rx,
         };
         use aether_actor::Actor;
-        use aether_data::{Kind, MailboxId, ReplyTarget, ReplyTo, SessionToken, Uuid};
+        use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
         use aether_kinds::{
             AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
         };
@@ -577,8 +577,8 @@ mod native {
         use std::sync::mpsc::Receiver;
         use std::time::Duration;
 
-        fn session_sender() -> ReplyTo {
-            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
+        fn session_sender() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
         }
 
         fn user_msg(text: &str) -> Vec<Message> {

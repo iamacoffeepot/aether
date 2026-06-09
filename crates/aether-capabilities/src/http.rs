@@ -595,7 +595,7 @@ mod native {
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
-        use aether_substrate::mail::ReplyTo;
+        use aether_substrate::mail::Source;
 
         use crate::test_chassis::{TestChassis, fresh_substrate};
         use aether_substrate::mail::registry;
@@ -687,12 +687,12 @@ mod native {
             }
         }
 
-        use aether_data::{ReplyTarget, SessionToken, Uuid};
+        use aether_data::{SessionToken, SourceAddr, Uuid};
 
         use aether_substrate::mail::outbound::EgressEvent;
 
-        fn session_sender() -> ReplyTo {
-            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
+        fn session_sender() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
         }
 
         use crate::test_chassis::test_mailer_and_rx;

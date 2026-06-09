@@ -32,7 +32,7 @@
 //! 4. Every `aether.lifecycle.render` stage re-emits the cached
 //!    triangles to `"aether.render"`.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyTo, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyHandle, Resolver, actor};
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
@@ -71,10 +71,10 @@ pub struct MeshViewer {
     /// requester. Stashing the handle here lets the `MeshLoadResult`
     /// route back to whoever sent the `LoadMesh` (the
     /// parked-sender pattern; the handle stays valid for the instance
-    /// lifetime per the SDK `ReplyTo` contract). `None` when the load
+    /// lifetime per the SDK `ReplyHandle` contract). `None` when the load
     /// was fire-and-forget (no reply target) or when no load is in
     /// flight.
-    pending_reply: Option<ReplyTo>,
+    pending_reply: Option<ReplyHandle>,
 }
 
 /// Mesh viewer component.

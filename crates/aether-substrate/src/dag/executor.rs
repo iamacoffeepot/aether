@@ -504,7 +504,7 @@ impl Executor {
             // the submit chain (ADR-0047 §1: sources dispatch async
             // *after* the submit ack, so the submit reply settles
             // independently of the DAG's execution). The reply still
-            // routes back to this cap via the ReplyTarget::Component tag
+            // routes back to this cap via the SourceAddr::Component tag
             // the binding stamps; the minted MailId's correlation keys
             // the table.
             let mail_id = ctx.send_envelope_as_root(mailbox, kind_id, &payload);

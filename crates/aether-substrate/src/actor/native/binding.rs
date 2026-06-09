@@ -48,7 +48,7 @@ use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
-use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, ReplyTarget, ReplyTo};
+use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::runtime::trace::SettlementHold;
 
@@ -81,7 +81,7 @@ struct PendingMail {
     kind: u64,
     payload: PendingPayload,
     count: u32,
-    reply_to: ReplyTo,
+    reply_to: Source,
     mail_id: MailId,
     root: MailId,
     parent_mail: Option<MailId>,
@@ -139,7 +139,7 @@ impl OutboundBuffer {
 ///
 /// - [`Self::send_mail`] — mints a fresh correlation id (atomic
 ///   monotonic counter), wraps the bytes in a [`Mail`] with
-///   `ReplyTarget::Component(self.self_mailbox)` so any reply
+///   `SourceAddr::Component(self.self_mailbox)` so any reply
 ///   routes back here, and pushes through the shared
 ///   `Arc<Mailer>`.
 /// - [`Self::prev_correlation`] — reads the atomic counter.
@@ -215,7 +215,7 @@ pub struct NativeBinding {
     /// ADR-0093: the hold-until-resolve in-flight ledger. Maps a
     /// [`DispatchId`](super::dispatch_blocking::DispatchId) minted by
     /// [`super::ctx::NativeCtx::dispatch_blocking`] to its held
-    /// `(SettlementHold, ReplyTo, context)` plus the worker's eventual
+    /// `(SettlementHold, Source, context)` plus the worker's eventual
     /// output. The actor thread writes the entry at dispatch and reads +
     /// removes it when the completion-wake lands; the worker thread fills
     /// the output slot once. `Mutex` only for `&self` interior
@@ -227,7 +227,7 @@ pub struct NativeBinding {
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
     /// `MailboxClaim` returned (the substrate routes replies back
-    /// to it via the `ReplyTarget::Component(self_mailbox)` tag the
+    /// to it via the `SourceAddr::Component(self_mailbox)` tag the
     /// transport stamps onto outbound mail). The inbox is installed
     /// separately via [`Self::install_inbox`] so capabilities that
     /// build the transport before pulling the receiver out of their
@@ -437,9 +437,9 @@ impl NativeBinding {
     /// `self.mailer.send_reply(sender, &result)` did. Issue 665
     /// retired the FFI-shaped `reply_mail` stub the prior
     /// `MailTransport` impl carried — it took `sender: u32`, a wasm
-    /// handle shape that doesn't fit native's [`ReplyTo`]. This typed
+    /// handle shape that doesn't fit native's [`Source`]. This typed
     /// entry is the only reply API native actors reach for.
-    pub fn send_reply_for_handler<K>(&self, sender: ReplyTo, payload: &K)
+    pub fn send_reply_for_handler<K>(&self, sender: Source, payload: &K)
     where
         K: aether_data::Kind,
     {
@@ -458,7 +458,7 @@ impl NativeBinding {
 impl NativeBinding {
     /// Push a typed payload at `recipient`. Mints a fresh correlation
     /// id (atomic monotonic counter), wraps the bytes in a [`Mail`]
-    /// with `ReplyTarget::Component(self.self_mailbox)` so any reply
+    /// with `SourceAddr::Component(self.self_mailbox)` so any reply
     /// routes back here, and pushes through the shared
     /// `Arc<Mailer>`. Returns `0` (channel-send failures collapse to
     /// the same scalar — there is no FFI surface here to differentiate).
@@ -530,7 +530,7 @@ impl NativeBinding {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to =
-            ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
+            Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation);
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // ADR-0080 §2 producer hook: emit `Sent` before pushing the
@@ -597,7 +597,7 @@ impl NativeBinding {
 
     /// Re-dispatcher variant of [`Self::push_envelope_buffered`] that
     /// accepts an explicit `reply_to` instead of stamping the default
-    /// `ReplyTo::with_correlation(ReplyTarget::Component(self_mailbox),
+    /// `Source::with_correlation(SourceAddr::Component(self_mailbox),
     /// auto_correlation)`. The minted [`MailId`] and the `in_flight`
     /// settlement increment are unaffected — they still use this
     /// actor's correlation counter — only the recipient's
@@ -629,11 +629,11 @@ impl NativeBinding {
         count: u32,
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
-        reply_to_override: Option<ReplyTo>,
+        reply_to_override: Option<Source>,
     ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let reply_to = reply_to_override.unwrap_or_else(|| {
-            ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation)
+            Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation)
         });
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
@@ -863,7 +863,7 @@ impl NativeBinding {
     pub(crate) fn dispatch_insert(
         &self,
         hold: SettlementHold,
-        reply_to: ReplyTo,
+        reply_to: Source,
         context: Box<dyn Any + Send>,
     ) -> super::dispatch_blocking::DispatchId {
         self.inflight
@@ -1012,7 +1012,7 @@ mod tests {
         let (_registry, mailer) = fresh_substrate();
         let parent_carry = 0x0BAD_F00D_u64;
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
-        let ctx = NativeCtx::new(&transport, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+        let ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
 
         let resolved = ctx.actor::<OwnChild>().mailbox_id();
         let expected = MailboxId(with_tag(

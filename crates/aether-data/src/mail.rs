@@ -1,10 +1,10 @@
-//! Reply-routing types shared by every mail-bearing surface (ADR-0008,
-//! ADR-0037, ADR-0042). Lives in `aether-data` so the `Dispatch` trait
-//! in `aether-actor` (which references `ReplyTo` in its signature) can
-//! name them without depending on `aether-actor`-internal modules,
-//! AND to avoid a name clash with `aether-actor`'s wasm-side `ReplyTo`
-//! — that one is a `u32` FFI handle distinct in shape from this
-//! substrate-side dispatch type. ADR-0076 documents the split.
+//! Mail-sender types shared by every mail-bearing surface (ADR-0008,
+//! ADR-0037, ADR-0042, ADR-0083). Lives in `aether-data` so the
+//! `Dispatch` trait in `aether-actor` (which references `Source` in its
+//! signature) can name them without depending on `aether-actor`-internal
+//! modules. The wasm-side `aether_actor::mail::ReplyHandle` is a `u32`
+//! FFI handle distinct in shape from this substrate-side `Source` type;
+//! ADR-0076 and ADR-0083 document the split.
 //!
 //! `aether-substrate` re-exports these from `aether_substrate::mail`
 //! so existing call sites compile unchanged.
@@ -85,22 +85,26 @@ impl MailId {
     }
 }
 
-/// Where a reply-bearing mail should route when the recipient
-/// answers. Strictly a routing hint: mail is pushed at a recipient,
-/// not sent from a mailbox.
+/// The addressable mailbox of a mail's *immediate* sender — where a
+/// reply routes. Strictly an addressing hint: mail is pushed at a
+/// recipient, and the substrate auto-stamps this to the sending
+/// actor's own mailbox on every send, so it changes every hop
+/// (ADR-0083). It is the immediate sender, not the chain origin; the
+/// origin lives in the tracing layer (`root` / `parent_mail`,
+/// ADR-0080), where it is observable but deliberately not addressable.
 ///
 /// `None` is the default — broadcast / substrate-generated mail with
-/// no meaningful reply target. `Session` tags mail that arrived from
-/// a Claude MCP session, so replies route back to that session
+/// no identifiable sender. `Session` tags mail that arrived from a
+/// Claude MCP session, so replies route back to that session
 /// (ADR-0008). `EngineMailbox` tags mail bubbled up from a component
 /// on another engine, so replies route to the originating engine's
-/// mailbox (ADR-0037 Phase 2). `Component` tags sink-bound mail that
-/// a local component pushed through `ComponentCtx::send`, so sink
-/// reply paths (ADR-0041's io sink is the motivating case) can route
-/// the `*Result` back to the component via the mailer rather than
-/// the hub.
+/// mailbox (ADR-0037 Phase 2). `Component` tags mailbox-bound mail
+/// that a local component pushed through `ComponentCtx::send`, so
+/// reply paths (ADR-0041's io capability is the motivating case) can
+/// route the `*Result` back to the component via the mailer rather
+/// than the hub.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ReplyTarget {
+pub enum SourceAddr {
     None,
     Session(SessionToken),
     EngineMailbox {
@@ -110,60 +114,67 @@ pub enum ReplyTarget {
     Component(MailboxId),
 }
 
-/// Reply-routing info for a substrate-side `Mail`. `target` describes
-/// where a reply goes; `correlation_id` is an opaque `u64` the
-/// original sender attached so it can identify its specific request
-/// among replies of the same kind. The mailer auto-echoes
-/// `correlation_id` when constructing a reply via `send_reply`, so
-/// reply-bearing sinks don't need per-sink echo code. `0` means "no
-/// correlation"; waits with `expected_correlation == 0` match any
-/// correlation (backward-compat and for non-correlating callers like
-/// broadcasts and input mail).
+/// The immediate sender of a substrate-side `Mail` — the addressing
+/// layer's "who sent this" (ADR-0083). `addr` is the sender's
+/// addressable mailbox (where a reply goes); `correlation_id` is an
+/// opaque `u64` the original sender attached so it can identify its
+/// specific request among replies of the same kind. The mailer
+/// auto-echoes `correlation_id` when constructing a reply via
+/// `send_reply`, so reply-bearing capabilities don't need per-handler
+/// echo code. `0` means "no correlation"; waits with
+/// `expected_correlation == 0` match any correlation (backward-compat
+/// and for non-correlating callers like broadcasts and input mail).
+///
+/// `Source` is the *immediate* sender, one hop, re-stamped to the
+/// sending actor's own mailbox on every send — it is not the chain
+/// origin. The thing a reader imagines "persists through the chain" is
+/// the origin, and it does persist, in the tracing layer (`root` /
+/// `parent_mail`, ADR-0080), not here. Addressing is deliberately
+/// one-hop; the chain origin is observable, not addressable.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ReplyTo {
-    pub target: ReplyTarget,
+pub struct Source {
+    pub addr: SourceAddr,
     pub correlation_id: u64,
 }
 
-impl ReplyTo {
+impl Source {
     /// Sentinel for no correlation. Using the explicit constant makes
     /// call sites self-documenting; a plain `0` in code comments as
     /// "why zero?" whereas `NO_CORRELATION` makes the intent obvious.
     pub const NO_CORRELATION: u64 = 0;
 
-    /// `ReplyTo` with no target and no correlation.
+    /// `Source` with no addr and no correlation.
     pub const NONE: Self = Self {
-        target: ReplyTarget::None,
+        addr: SourceAddr::None,
         correlation_id: Self::NO_CORRELATION,
     };
 
-    /// Reply target alone, no correlation. Short form for mail paths
+    /// Sender addr alone, no correlation. Short form for mail paths
     /// that want to address a reply but don't participate in the
     /// ADR-0042 correlation scheme (the hub's inbound session mail
     /// today — a future change could have sessions carry correlation
     /// when the MCP `send_mail` tool grows to expose it).
     #[must_use]
-    pub fn to(target: ReplyTarget) -> Self {
+    pub fn to(addr: SourceAddr) -> Self {
         Self {
-            target,
+            addr,
             correlation_id: Self::NO_CORRELATION,
         }
     }
 
-    /// Target + correlation. The common sync-wrapper shape.
+    /// Addr + correlation. The common sync-wrapper shape.
     #[must_use]
-    pub fn with_correlation(target: ReplyTarget, correlation_id: u64) -> Self {
+    pub fn with_correlation(addr: SourceAddr, correlation_id: u64) -> Self {
         Self {
-            target,
+            addr,
             correlation_id,
         }
     }
 
-    /// Whether the reply target is `None`. Existing callers that were
-    /// pattern-matching on the pre-refactor `ReplyTo::None` variant
-    /// use this instead.
+    /// Whether the sender addr is `None`. Callers that would otherwise
+    /// pattern-match on the `SourceAddr::None` variant use this instead.
     #[must_use]
     pub fn is_none(&self) -> bool {
-        matches!(self.target, ReplyTarget::None)
+        matches!(self.addr, SourceAddr::None)
     }
 }

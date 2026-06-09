@@ -18,7 +18,7 @@
 //! `aether_substrate::actor::native::binding::NativeBinding`.
 //!
 //! Public surface:
-//!   - [`Mail`], [`PriorState`], [`ReplyTo`], [`KindId`] —
+//!   - [`Mail`], [`PriorState`], [`ReplyHandle`], [`KindId`] —
 //!     transport-free types: pure decode / phantom typing.
 //!   - [`Mailbox`] — pure addressing token (`mailbox_id`, `kind_id`)
 //!     after issue 665 dropped the `T: MailTransport` parameter; sends
@@ -78,7 +78,7 @@ pub use local::Local;
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
-pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
+pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 
 // FFI surface promoted to the crate root so consumers see
 // `aether_actor::FfiCtx<'_>` / `aether_actor::FfiActor` / etc. without

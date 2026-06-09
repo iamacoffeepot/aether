@@ -1,7 +1,8 @@
 # ADR-0083: Mail sender vs origin — naming the lineage, retiring `ReplyTo`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-19
+- **Amended 2026-06-09:** the wire type is named `Source`, not `Sender`. `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, impl'd across `FfiCtx` / `NativeCtx`); `Source` keeps the addressing type distinct from both that trait and the tracing vocabulary (`origin` / `root`). The §1 rename table, §Alternatives, and the accessor name (`source_mailbox()`) below reflect the corrected name.
 - **Builds on:** ADR-0013 / ADR-0017 (reply_mail), ADR-0037 (cross-engine bubble), ADR-0042 (correlation ids), ADR-0080 (mail tracing + settlement lineage)
 
 ## Context
@@ -18,15 +19,15 @@ Mail in aether is *pushed* at a recipient — there is no "from" address; a mail
 
 A pure naming + model-documentation change. No behavior changes.
 
-### 1. Rename the wire type to `Sender`
+### 1. Rename the wire type to `Source`
 
 | Today (`aether-data`) | Renamed |
 |---|---|
-| `ReplyTo { target, correlation_id }` | `Sender { addr, correlation_id }` |
-| `ReplyTarget` (`None` / `Session` / `EngineMailbox` / `Component`) | `SenderAddr` (same variants) |
-| `ReplyTo::NONE` / `::to(..)` / `::with_correlation(..)` | `Sender::NONE` / `::to(..)` / `::with_correlation(..)` |
+| `ReplyTo { target, correlation_id }` | `Source { addr, correlation_id }` |
+| `ReplyTarget` (`None` / `Session` / `EngineMailbox` / `Component`) | `SourceAddr` (same variants) |
+| `ReplyTo::NONE` / `::to(..)` / `::with_correlation(..)` | `Source::NONE` / `::to(..)` / `::with_correlation(..)` |
 
-`Sender` names the *relationship* ("who sent this"); replying is the derived use, not the identity. `SenderAddr::None` reads correctly for broadcast / system mail (no identifiable sender). Field/constructor renames follow mechanically.
+`Source` names the *relationship* ("who sent this"); replying is the derived use, not the identity. `SourceAddr::None` reads correctly for broadcast / system mail (no identifiable sender). Field/constructor renames follow mechanically.
 
 ### 2. Rename the guest handle to `ReplyHandle`
 
@@ -36,20 +37,20 @@ A pure naming + model-documentation change. No behavior changes.
 | `Mail::reply_to() -> Option<ReplyTo>` | `Mail::reply_handle() -> Option<ReplyHandle>` |
 | `Ctx::reply(handle, ..)` | unchanged |
 
-The guest's "reply" verb is correct — from a component's seat, the use *is* replying, and the handle *is* a reply capability. The rename only removes the collision with the wire type. The substrate-side `ReplyEntry` (`reply_table.rs`) stays on the reply side; its `target` field renames to `addr: SenderAddr` for consistency with §1.
+The guest's "reply" verb is correct — from a component's seat, the use *is* replying, and the handle *is* a reply capability. The rename only removes the collision with the wire type. The substrate-side `ReplyEntry` (`reply_table.rs`) stays on the reply side; its `target` field renames to `addr: SourceAddr` for consistency with §1.
 
 ### 3. Codify the sender/origin lineage split
 
 State it once, in the types' doc comments and here:
 
-- **Addressing layer — `Sender`.** The *immediate* sender. One hop. Re-stamped to the sending actor's own mailbox on every send; auto-bound, never an arbitrary target. This is what a reply routes to.
+- **Addressing layer — `Source`.** The *immediate* sender. One hop. Re-stamped to the sending actor's own mailbox on every send; auto-bound, never an arbitrary target. This is what a reply routes to. The substrate accessor is `ctx.source_mailbox()`.
 - **Tracing layer — `root` + `parent_mail` (ADR-0080).** `root` is the chain *origin*; `parent_mail` is the immediate causal parent. The full lineage is observable here.
 
-`Sender` is not the origin. The thing a reader imagines "persists through the chain" is the origin, and it does persist — in tracing, not addressing. Addressing is deliberately one-hop; the chain origin is observable, not addressable.
+`Source` is not the origin. The thing a reader imagines "persists through the chain" is the origin, and it does persist — in tracing, not addressing. Addressing is deliberately one-hop; the chain origin is observable, not addressable.
 
 ### 4. Addressing stays one-hop; "message the sender" is not a capability
 
-A `ReplyHandle` is an **unforgeable, one-shot reply capability** to a specific origin: the guest receives an opaque handle (not a `MailboxId`), can reply to any correspondent it has actually received from (handles are stashable for the instance lifetime), but cannot fabricate a target or address a mailbox that never wrote to it. Replies themselves carry `Sender::None` (terminal — "nobody replies to a reply", `crates/aether-substrate/src/mail/mailer.rs:383`).
+A `ReplyHandle` is an **unforgeable, one-shot reply capability** to a specific origin: the guest receives an opaque handle (not a `MailboxId`), can reply to any correspondent it has actually received from (handles are stashable for the instance lifetime), but cannot fabricate a target or address a mailbox that never wrote to it. Replies themselves carry `SourceAddr::None` (terminal — "nobody replies to a reply", `crates/aether-substrate/src/mail/mailer.rs:383`).
 
 There is intentionally **no reusable sender address** exposed to components and **no API to address the chain origin**. A component that wants an ongoing two-way exchange must have the peer's `MailboxId` as *data* (in the payload), not derive it from the inbound. Deep "result flows back to the originator" pipelines use the **DAG executor** (observers deliver terminal handles to named recipients), not reply-chain-walking — which per-hop addressing structurally would not support anyway. Adding a reusable sender-address, or origin-addressing, is a separate and deliberate capability decision; it is out of scope here precisely because it re-opens the cross-chain-redirect surface this model avoids.
 
@@ -60,8 +61,8 @@ This is a source rename only. Postcard / cast encoding is structural (by field l
 ## Consequences
 
 ### Positive
-- The name matches the semantics: `Sender` says "immediate, changes per hop," instead of `ReplyTo` falsely promising a retained redirect.
-- The two-types-one-name collision is gone (`Sender` wire-side, `ReplyHandle` guest-side).
+- The name matches the semantics: `Source` says "immediate, changes per hop," instead of `ReplyTo` falsely promising a retained redirect.
+- The two-types-one-name collision is gone (`Source` wire-side, `ReplyHandle` guest-side).
 - The sender-vs-origin lineage split is named and discoverable, mapping onto aether's addressing/tracing layers.
 
 ### Negative
@@ -73,10 +74,10 @@ This is a source rename only. Postcard / cast encoding is structural (by field l
 
 ## Alternatives considered
 
-- **`Source` instead of `Sender`.** Equally clear. `Sender` chosen because it names the relationship directly — the immediate sender — and keeps `origin` / `root` as the distinct tracing vocabulary, so "sender = immediate, origin = chain root" lands without conflating the two.
+- **`Sender` instead of `Source`.** Rejected — `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, re-exported at `aether_actor::Sender` and impl'd across `FfiCtx` / `NativeCtx`). A wire struct sharing that name re-creates exactly the two-types-one-name confusion this ADR sets out to remove. `Source` is chosen because it names the relationship directly — the immediate sender — while staying distinct from both that trait and the tracing vocabulary (`origin` / `root`), so "source = immediate, origin = chain root" lands without conflating the two.
 - **Keep `ReplyTo`, just document it.** Rejected — the name actively mis-signals a retained redirect. A doc fixes one reader; the name keeps misleading the next.
 - **Promote `origin` into addressing** (let a node address the chain root directly). Rejected — re-enables cross-chain reply redirects, the abuse surface this model deliberately avoids. Origin stays in tracing: observable, not addressable.
 
 ## Migration
 
-One mechanical rename PR (IDE rename refactor over the wire `ReplyTo`/`ReplyTarget` and guest `ReplyTo` surface). Fold in the stale `Mail::reply_to()` doc fix: its rustdoc says component-to-component mail has no reply handle, but `deliver()` allocates one for `Component`-origin mail (`crates/aether-substrate/src/actor/wasm/component.rs:536-538`). Rebuild wasm components (source recompile; ABI unchanged). No wire migration, no data migration.
+One mechanical rename PR (compiler-driven rename over the wire `ReplyTo`/`ReplyTarget` and guest `ReplyTo` surface). Fold in the stale `Mail::reply_handle()` doc fix: the old rustdoc claimed component-to-component mail has no reply handle, but `deliver()` allocates one for `Component`-origin mail (`crates/aether-substrate/src/actor/wasm/component.rs`). Rebuild wasm components (source recompile; ABI unchanged). No wire migration, no data migration.

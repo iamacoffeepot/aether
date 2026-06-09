@@ -11,7 +11,7 @@ use wasmtime::{Caller, Linker};
 use crate::actor::wasm::component::{
     ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE,
 };
-use crate::mail::{KindId, MailboxId, ReplyTarget};
+use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
@@ -283,8 +283,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // own reply to the request it sent out of a busy inbox.
             let correlation = entry.correlation_id;
             let kind = KindId(kind);
-            match entry.target {
-                ReplyTarget::Session(token) => {
+            match entry.addr {
+                SourceAddr::Session(token) => {
                     let Some(kind_name) = ctx.registry.kind_name(kind) else {
                         return REPLY_KIND_NOT_FOUND;
                     };
@@ -292,7 +292,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     ctx.outbound
                         .egress_to_session(token, &kind_name, payload, origin, correlation);
                 }
-                ReplyTarget::Component(mbox) => {
+                SourceAddr::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
                     // have passed a bogus one and we'd rather return
                     // a meaningful status than silently enqueue mail
@@ -310,7 +310,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // be matched home over the RPC `in_flight` table.
                     ctx.reply(mbox, kind, payload, count, correlation);
                 }
-                ReplyTarget::EngineMailbox {
+                SourceAddr::EngineMailbox {
                     engine_id,
                     mailbox_id,
                 } => {
@@ -333,7 +333,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                         correlation,
                     );
                 }
-                ReplyTarget::None => {
+                SourceAddr::None => {
                     // Shouldn't happen — `ReplyEntry`s only get
                     // allocated for mail with a real reply target.
                     // Treat as unknown-handle to avoid silent drops.

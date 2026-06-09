@@ -44,7 +44,7 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = 4;
 /// exclusion — but the thunk is `Send` so the embedding cap (a
 /// `NativeActor`, which is `Send + 'static`) can hold the queue in its
 /// state. Everything the thunk closes over (`work`, the captured
-/// `SettlementHold`, the `ReplyTo`) is already `Send`.
+/// `SettlementHold`, the `Source`) is already `Send`.
 type PendingDispatch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
 
 /// Cap-level rate-limit + queue over the substrate's hold-until-resolve
@@ -128,9 +128,7 @@ impl TaskQueue {
 #[cfg(test)]
 mod tests {
     use super::TaskQueue;
-    use aether_data::{
-        Kind, KindId, MailId, MailboxId, ReplyTarget, ReplyTo, mailbox_id_from_name,
-    };
+    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use std::sync::Arc;
@@ -180,9 +178,9 @@ mod tests {
         }
     }
 
-    fn session_reply_to(corr: u64) -> ReplyTo {
-        ReplyTo::with_correlation(
-            ReplyTarget::Session(aether_data::SessionToken(aether_data::Uuid::nil())),
+    fn session_reply_to(corr: u64) -> Source {
+        Source::with_correlation(
+            SourceAddr::Session(aether_data::SessionToken(aether_data::Uuid::nil())),
             corr,
         )
     }
@@ -261,7 +259,7 @@ mod tests {
         // First completion: drains the queued request, dispatching it.
         // `in_flight` stays 1 (one freed, one dispatched), pending empties.
         {
-            let mut ctx = NativeCtx::new(&binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             q.on_complete(&mut ctx);
         }
         assert_eq!(
@@ -278,7 +276,7 @@ mod tests {
 
         // Second completion: nothing queued, so the slot frees.
         {
-            let mut ctx = NativeCtx::new(&binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             q.on_complete(&mut ctx);
         }
         assert_eq!(

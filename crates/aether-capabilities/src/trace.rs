@@ -132,7 +132,7 @@ mod native {
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::MailDispatch;
-        use aether_substrate::mail::{ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{Source, SourceAddr};
         use std::sync::mpsc::Receiver;
         use std::time::Duration;
 
@@ -173,7 +173,7 @@ mod native {
         /// transport, anchoring the in-flight + reply-to fields to a
         /// session sender so the ack reply egresses as `ToSession`.
         fn chassis_root_ctx(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_> {
-            let sender = ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())));
+            let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
             NativeCtx::new(transport, sender, inbound, inbound)
         }
 
