@@ -7,11 +7,22 @@
 
 //! [`Locomotion`] — tile-grid movement on a fixed-point ground plane.
 //!
-//! Holds one controllable mover on a walkable tile map. Held WASD / arrow
-//! keys drive it; the mover advances each [`Tick`] and the map + mover
-//! re-render each [`Render`] pulse. The whole step is a pure fixed-point
-//! function of `(state, held keys)`, so it is deterministic — the
-//! precondition for a future server-authoritative split.
+//! Holds one controllable mover on a walkable tile map, driven two ways:
+//! held WASD / arrow keys (manual cell-movement), or a mouse click that
+//! pathfinds to the clicked tile and walks it (click-to-move). The mover
+//! advances each [`Tick`] and the scene re-renders each [`Render`] pulse.
+//! The whole step is a pure fixed-point function of `(state, input)`, so
+//! it is deterministic — the precondition for a server-authoritative
+//! split.
+//!
+//! # Camera and picking
+//!
+//! This actor owns a fixed overhead orthographic camera: it publishes the
+//! `view_proj` to `aether.render` each frame and reuses the same bounds to
+//! map a click pixel to a world tile (a linear map — no matrix inverse).
+//! A click runs `astar` (8-connected, iterative) from the current tile to
+//! the clicked one, smooths the result, and follows it; any WASD press
+//! cancels the path and hands back to manual control.
 //!
 //! # Movement granularity
 //!
@@ -41,27 +52,46 @@
 //!
 //! - [`Key`] / [`KeyRelease`] — set / clear a held direction (WASD or
 //!   arrows); `Tab` (press) cycles the movement granularity.
+//! - [`MouseMove`] / [`MouseButton`] — track the cursor; a click paths to
+//!   that tile. [`WindowSize`] feeds the camera aspect and picking.
 //! - [`Tick`] — advance the mover one step.
-//! - [`Render`] — emit the ground grid + the mover to `aether.render`.
+//! - [`Render`] — publish the camera + emit the ground grid and mover to
+//!   `aether.render`.
 //! - [`Teleport`] — jump the mover to a tile center.
 //! - [`SetWalkable`] — toggle a tile's walkability.
 //! - [`SetGranularity`] — set the movement-cell size (same dial as `Tab`).
+
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, VecDeque};
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{DrawTriangle, Key, KeyRelease, Render, Tick, Vertex, keycode};
+use aether_kinds::{
+    Camera, DrawTriangle, Key, KeyRelease, MouseButton, MouseMove, Render, Tick, Vertex,
+    WindowSize, keycode,
+};
+use aether_math::{Mat4, Vec3};
 
 use crate::{OCTIMETERS_PER_TILE, SetGranularity, SetWalkable, TILE_BITS, Teleport};
 
 /// Walkable map dimensions, in tiles.
 const GRID_W: i32 = 16;
 const GRID_H: i32 = 16;
+/// Tile count, for fixed-size pathfinding scratch arrays.
+#[allow(clippy::cast_sign_loss)]
+const GRID_TILES: usize = (GRID_W * GRID_H) as usize;
 
 /// Ground speed: octimeters/tick the mover travels toward its committed
 /// cell. `8` ≈ 1.9 m/s at a 60 Hz tick. Independent of the cell size.
 const SPEED_OCTIMETERS_PER_TICK: i32 = 8;
+
+/// Per-axis speed for a diagonal manual move: `SPEED_OCTIMETERS_PER_TICK / √2`
+/// rounded (`round(8/√2) = 6`), so holding two directions at once covers the
+/// same ground per tick as holding one — no √2 diagonal speed-up. Click-to-move
+/// gets the same normalization continuously from `step_toward`.
+const SPEED_DIAGONAL_OCTIMETERS_PER_TICK: i32 = 6;
 
 /// Movement-cell presets `Tab` cycles, coarsest (a full tile, classic
 /// tile stepping) to finest (one tick of travel, effectively continuous).
@@ -82,6 +112,22 @@ const PRESET_COLORS: [(f32, f32, f32); 5] = [
     (0.30, 0.72, 0.88),
     (0.55, 0.45, 0.95),
 ];
+
+/// World half-height of the overhead orthographic view, in metres —
+/// sized to frame the grid with a margin. Half-width is this times the
+/// window aspect.
+const CAMERA_HALF_EXTENT: f32 = 9.0;
+/// Eye height above the ground for the overhead camera. Orthographic
+/// projection is translation-invariant along the view axis, so this only
+/// needs to sit inside the near/far planes.
+const CAMERA_EYE_HEIGHT: f32 = 10.0;
+const CAMERA_Z_NEAR: f32 = 0.1;
+const CAMERA_Z_FAR: f32 = 100.0;
+/// Aspect used until the first `WindowSize` arrives.
+const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
+/// World-space center of the grid (metres), the camera target.
+const GRID_CENTER_X: f32 = GRID_W as f32 / 2.0;
+const GRID_CENTER_Z: f32 = GRID_H as f32 / 2.0;
 
 /// The controllable mover. Position is octimeters on the world XZ plane.
 #[derive(Debug, Clone, Copy, Default)]
@@ -119,12 +165,41 @@ struct TileMap {
 
 impl TileMap {
     fn new() -> Self {
-        let mut blocked = vec![false; (GRID_W * GRID_H) as usize];
-        // A short wall to feel collision + wall-sliding against.
-        for tz in 4..10 {
-            blocked[Self::idx(6, tz)] = true;
+        let mut map = Self {
+            blocked: vec![false; GRID_TILES],
+        };
+        // A concentric-ring maze: three nested square rings at offsets 2, 4
+        // and 6 from the open border, each sealed but for a single doorway.
+        // The doorways alternate sides (bottom / top / bottom), so the only
+        // route between the open center room and the border spirals the long
+        // way around every ring — real work for the click-to-move pathfinder.
+        // The mover spawns in the center room.
+        for &(lo, hi) in &[(2, 13), (4, 11), (6, 9)] {
+            for c in lo..=hi {
+                map.blocked[Self::idx(c, lo)] = true; // top edge
+                map.blocked[Self::idx(c, hi)] = true; // bottom edge
+                map.blocked[Self::idx(lo, c)] = true; // left edge
+                map.blocked[Self::idx(hi, c)] = true; // right edge
+            }
         }
-        Self { blocked }
+        // One doorway per ring, alternating sides to force the spiral.
+        for &(dx, dz) in &[(8, 13), (8, 4), (8, 9)] {
+            map.blocked[Self::idx(dx, dz)] = false;
+        }
+        map
+    }
+
+    /// Build a map with exactly the listed tiles blocked, for tests that need
+    /// a specific scenario rather than the demo maze.
+    #[cfg(test)]
+    fn from_blocked(cells: &[(i32, i32)]) -> Self {
+        let mut map = Self {
+            blocked: vec![false; GRID_TILES],
+        };
+        for &(tx, tz) in cells {
+            map.blocked[Self::idx(tx, tz)] = true;
+        }
+        map
     }
 
     fn in_bounds(tx: i32, tz: i32) -> bool {
@@ -180,6 +255,15 @@ pub struct Locomotion {
     /// when that axis is at rest on a cell center and free to re-commit.
     target_x: Option<i32>,
     target_z: Option<i32>,
+    /// Cached window size (logical pixels) for the camera aspect and
+    /// click-to-tile picking.
+    window: (u32, u32),
+    /// Cached cursor position (logical pixels), updated on mouse move.
+    cursor: (f32, f32),
+    /// Click-to-move waypoint positions (octimeters) still to reach, in
+    /// order — tile centers, then the snapped sub-tile destination. Empty
+    /// when under manual (WASD) control.
+    path: VecDeque<(i32, i32)>,
 }
 
 #[actor]
@@ -200,6 +284,9 @@ impl FfiActor for Locomotion {
             cell: CELL_PRESETS[0],
             target_x: None,
             target_z: None,
+            window: (0, 0),
+            cursor: (0.0, 0.0),
+            path: VecDeque::new(),
         })
     }
 
@@ -207,6 +294,9 @@ impl FfiActor for Locomotion {
         let input = ctx.actor::<InputCapability>();
         input.subscribe::<Key>();
         input.subscribe::<KeyRelease>();
+        input.subscribe::<MouseButton>();
+        input.subscribe::<MouseMove>();
+        input.subscribe::<WindowSize>();
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();
         lifecycle.subscribe::<Render>();
@@ -214,14 +304,33 @@ impl FfiActor for Locomotion {
 
     #[handler]
     fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
-        self.advance_x();
-        self.advance_z();
+        self.advance();
     }
 
     #[handler]
     fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
-        let triangles = self.render_triangles();
-        ctx.actor::<RenderCapability>().send_many(&triangles);
+        let render = ctx.actor::<RenderCapability>();
+        // This actor owns the overhead camera: publish the view each frame
+        // (latest-wins), then the geometry.
+        render.send(&Camera {
+            view_proj: self.view_proj(),
+        });
+        render.send_many(&self.render_triangles());
+    }
+
+    #[handler]
+    fn on_mouse_move(&mut self, _ctx: &mut FfiCtx<'_>, mail: MouseMove) {
+        self.cursor = (mail.x, mail.y);
+    }
+
+    #[handler]
+    fn on_window_size(&mut self, _ctx: &mut FfiCtx<'_>, mail: WindowSize) {
+        self.window = (mail.width, mail.height);
+    }
+
+    #[handler]
+    fn on_mouse_button(&mut self, _ctx: &mut FfiCtx<'_>, _mail: MouseButton) {
+        self.click_to_move();
     }
 
     #[handler]
@@ -272,8 +381,8 @@ impl FfiActor for Locomotion {
 }
 
 impl Locomotion {
-    /// W / arrows map to a held direction. W is "forward" (`-Z`, away from
-    /// a default camera); tune the signs at the keyboard.
+    /// W / arrows map to a held direction. W is "forward" (`-Z`, toward the
+    /// top of the overhead view).
     fn set_held(&mut self, code: u32, down: bool) {
         match code {
             keycode::KEY_W | keycode::KEY_UP => self.held.neg_z = down,
@@ -305,10 +414,111 @@ impl Locomotion {
         tracing::info!(cell_octimeters = self.cell, "locomotion granularity");
     }
 
-    /// Advance the X axis one tick: commit to the next cell when idle and a
-    /// direction is held (if its tile is walkable), then glide toward the
-    /// committed target and clear on arrival.
-    fn advance_x(&mut self) {
+    /// One tick of movement: follow an active click-to-move path, else fall
+    /// back to manual cell-movement. Any held direction cancels the path.
+    fn advance(&mut self) {
+        if self.held.dir_x() != 0 || self.held.dir_z() != 0 {
+            self.path.clear();
+        }
+        let Some(&(wx, wz)) = self.path.front() else {
+            // Manual cell-movement. A diagonal (both axes held) gets the
+            // reduced per-axis speed so it doesn't outrun a cardinal move.
+            let speed = if self.held.dir_x() != 0 && self.held.dir_z() != 0 {
+                SPEED_DIAGONAL_OCTIMETERS_PER_TICK
+            } else {
+                SPEED_OCTIMETERS_PER_TICK
+            };
+            self.advance_x(speed);
+            self.advance_z(speed);
+            return;
+        };
+        let (nx, nz) = step_toward(
+            (self.mover.x, self.mover.z),
+            (wx, wz),
+            SPEED_OCTIMETERS_PER_TICK,
+        );
+        self.mover.x = nx;
+        self.mover.z = nz;
+        if self.mover.x == wx && self.mover.z == wz {
+            self.path.pop_front();
+        }
+    }
+
+    /// Window aspect (width / height), falling back before the first
+    /// `WindowSize`.
+    fn aspect(&self) -> f32 {
+        let (w, h) = self.window;
+        if w == 0 || h == 0 {
+            DEFAULT_ASPECT
+        } else {
+            w as f32 / h as f32
+        }
+    }
+
+    /// Overhead orthographic `view_proj` framing the grid, looking straight
+    /// down world `-Y` at the XZ ground. Up is world `-Z`, so screen-up is
+    /// `-Z` and screen-right is `+X`.
+    fn view_proj(&self) -> [f32; 16] {
+        let half_w = CAMERA_HALF_EXTENT * self.aspect();
+        let proj = Mat4::orthographic_rh(
+            -half_w,
+            half_w,
+            -CAMERA_HALF_EXTENT,
+            CAMERA_HALF_EXTENT,
+            CAMERA_Z_NEAR,
+            CAMERA_Z_FAR,
+        );
+        let center = Vec3::new(GRID_CENTER_X, 0.0, GRID_CENTER_Z);
+        let eye = Vec3::new(GRID_CENTER_X, CAMERA_EYE_HEIGHT, GRID_CENTER_Z);
+        let view = Mat4::look_at_rh(eye, center, Vec3::new(0.0, 0.0, -1.0));
+        (proj * view).to_cols_array()
+    }
+
+    /// Map the cached cursor pixel to a world octimeter position through the
+    /// same ortho bounds the camera uses — a linear map, no matrix inverse.
+    /// `None` if off-grid or before the first window size.
+    #[allow(clippy::cast_possible_truncation)]
+    fn pick_world(&self) -> Option<(i32, i32)> {
+        let (w, h) = self.window;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (px, py) = self.cursor;
+        let ndc_x = (px / w as f32).mul_add(2.0, -1.0);
+        let ndc_y = (py / h as f32).mul_add(-2.0, 1.0);
+        let world_x = (ndc_x * CAMERA_HALF_EXTENT).mul_add(self.aspect(), GRID_CENTER_X);
+        let world_z = ndc_y.mul_add(-CAMERA_HALF_EXTENT, GRID_CENTER_Z);
+        if !TileMap::in_bounds(world_x.floor() as i32, world_z.floor() as i32) {
+            return None;
+        }
+        let to_octimeters = |metres: f32| (metres * OCTIMETERS_PER_TILE as f32) as i32;
+        Some((to_octimeters(world_x), to_octimeters(world_z)))
+    }
+
+    /// Pathfind to the clicked tile and follow it, finishing on the
+    /// movement-cell division nearest the click rather than the tile center —
+    /// so click precision tracks the current granularity.
+    fn click_to_move(&mut self) {
+        let Some((click_x, click_z)) = self.pick_world() else {
+            return;
+        };
+        // Snap the click onto the active movement grid (the same one manual
+        // movement rests on); A* paths to the tile that division sits in.
+        let dest = (snap_rest(click_x, self.cell), snap_rest(click_z, self.cell));
+        let start_tile = (self.mover.x >> TILE_BITS, self.mover.z >> TILE_BITS);
+        let goal = (dest.0 >> TILE_BITS, dest.1 >> TILE_BITS);
+        let Some(tiles) = astar(&self.map, start_tile, goal) else {
+            return;
+        };
+        self.path = smooth_path(&self.map, (self.mover.x, self.mover.z), &tiles, dest);
+        self.target_x = None;
+        self.target_z = None;
+    }
+
+    /// Advance the X axis one tick at `speed`: commit to the next cell when
+    /// idle and a direction is held (if its tile is walkable), then glide
+    /// toward the committed target and clear on arrival.
+    fn advance_x(&mut self, speed: i32) {
         if self.target_x.is_none() {
             let dir = self.held.dir_x();
             if dir != 0 {
@@ -320,14 +530,14 @@ impl Locomotion {
             }
         }
         if let Some(target) = self.target_x {
-            self.mover.x = approach(self.mover.x, target, SPEED_OCTIMETERS_PER_TICK);
+            self.mover.x = approach(self.mover.x, target, speed);
             if self.mover.x == target {
                 self.target_x = None;
             }
         }
     }
 
-    fn advance_z(&mut self) {
+    fn advance_z(&mut self, speed: i32) {
         if self.target_z.is_none() {
             let dir = self.held.dir_z();
             if dir != 0 {
@@ -339,7 +549,7 @@ impl Locomotion {
             }
         }
         if let Some(target) = self.target_z {
-            self.mover.z = approach(self.mover.z, target, SPEED_OCTIMETERS_PER_TICK);
+            self.mover.z = approach(self.mover.z, target, speed);
             if self.mover.z == target {
                 self.target_z = None;
             }
@@ -381,10 +591,201 @@ fn mover_color(cell: i32) -> (f32, f32, f32) {
         .map_or((0.20, 0.62, 0.95), |i| PRESET_COLORS[i])
 }
 
+/// 8-connected A* on the walkable tile grid. Returns the waypoint tiles
+/// from just past `start` through `goal`, or `None` if unreachable.
+/// Iterative and bounded by the grid — never recursive.
+fn astar(map: &TileMap, start: (i32, i32), goal: (i32, i32)) -> Option<VecDeque<(i32, i32)>> {
+    if !map.walkable(goal.0, goal.1) {
+        return None;
+    }
+    // Octile distance: cardinal = 10, diagonal = 14 (≈ 10·√2). Used as both
+    // step cost and heuristic so a straight run is strictly cheaper than an
+    // equal-length diagonal zigzag — paths hug the direct route.
+    let octile = |a: (i32, i32), b: (i32, i32)| {
+        let dx = (a.0 - b.0).abs();
+        let dy = (a.1 - b.1).abs();
+        let lo = dx.min(dy);
+        14 * lo + 10 * (dx.max(dy) - lo)
+    };
+    let mut g_score = [i32::MAX; GRID_TILES];
+    let mut came_from: [Option<(i32, i32)>; GRID_TILES] = [None; GRID_TILES];
+    let mut open = BinaryHeap::new();
+    g_score[TileMap::idx(start.0, start.1)] = 0;
+    // Heap key (f, h, tile): ties in f break toward the smaller h (closer to
+    // the goal), which keeps the path from drifting off the straight line.
+    let h0 = octile(start, goal);
+    open.push(Reverse((h0, h0, start)));
+    while let Some(Reverse((_, _, cur))) = open.pop() {
+        if cur == goal {
+            let mut path = VecDeque::new();
+            let mut node = goal;
+            while node != start {
+                path.push_front(node);
+                node = came_from[TileMap::idx(node.0, node.1)]?;
+            }
+            return Some(path);
+        }
+        let cur_g = g_score[TileMap::idx(cur.0, cur.1)];
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let nb = (cur.0 + dx, cur.1 + dz);
+                if !map.walkable(nb.0, nb.1) {
+                    continue;
+                }
+                let step = if dx != 0 && dz != 0 { 14 } else { 10 };
+                let nb_g = cur_g + step;
+                let i = TileMap::idx(nb.0, nb.1);
+                if nb_g < g_score[i] {
+                    g_score[i] = nb_g;
+                    came_from[i] = Some(cur);
+                    let h = octile(nb, goal);
+                    open.push(Reverse((nb_g + h, h, nb)));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Smooth the A* tile path into the fewest octimeter waypoints that still
+/// clear every wall — string-pulling by line of sight. The candidate points
+/// are the actual sub-tile `start` (the mover's position), each interior
+/// tile's center, and the snapped sub-tile `dest`. Walking them, each one is
+/// dropped whenever the next is directly visible from the current anchor, so
+/// a stretch with nothing in the way collapses to a single straight segment
+/// and a corner survives only where a wall genuinely sits between the anchor
+/// and the point past it. Anchoring on the real start/dest (not tile centers)
+/// is what keeps an off-center straight line from kinking through a center.
+fn smooth_path(
+    map: &TileMap,
+    start: (i32, i32),
+    tiles: &VecDeque<(i32, i32)>,
+    dest: (i32, i32),
+) -> VecDeque<(i32, i32)> {
+    // Candidates: start, every tile center *before* the goal tile, then dest
+    // (which replaces the goal tile's center — it sits inside that tile).
+    let mut pts = Vec::with_capacity(tiles.len() + 1);
+    pts.push(start);
+    let interior = tiles.len().saturating_sub(1);
+    pts.extend(
+        tiles
+            .iter()
+            .take(interior)
+            .map(|&(tx, tz)| (tile_center_octimeters(tx), tile_center_octimeters(tz))),
+    );
+    pts.push(dest);
+
+    let mut path = VecDeque::new();
+    let mut anchor = pts[0];
+    for i in 1..pts.len() - 1 {
+        // Keep pts[i] only when the point past it is occluded from the anchor —
+        // then it's a real corner. Otherwise the anchor can see straight past
+        // it, so drop it.
+        if !los(map, anchor, pts[i + 1]) {
+            path.push_back(pts[i]);
+            anchor = pts[i];
+        }
+    }
+    path.push_back(dest);
+    path
+}
+
+/// Whether the straight segment between two octimeter points crosses only
+/// walkable tiles — an integer grid traversal (Amanatides–Woo) over the
+/// 1-tile interaction grid. Steps from boundary to boundary, comparing the
+/// two axes' distances by cross-multiplication so it stays integer-only and
+/// deterministic. Diagonal corner crossings are allowed (only the entered
+/// tile is checked), matching `astar`'s 8-connected moves.
+fn los(map: &TileMap, a: (i32, i32), b: (i32, i32)) -> bool {
+    let (mut x, mut z) = (a.0 >> TILE_BITS, a.1 >> TILE_BITS);
+    let (xe, ze) = (b.0 >> TILE_BITS, b.1 >> TILE_BITS);
+    if !map.walkable(x, z) {
+        return false;
+    }
+    let (step_x, step_z) = ((b.0 - a.0).signum(), (b.1 - a.1).signum());
+    let adx = i64::from((b.0 - a.0).abs());
+    let adz = i64::from((b.1 - a.1).abs());
+    // Octimeters from the start point to the next tile boundary on each axis;
+    // each crossing then advances that axis's accumulator by one whole tile.
+    let mut cx = match step_x {
+        1 => i64::from(((x + 1) << TILE_BITS) - a.0),
+        -1 => i64::from(a.0 - (x << TILE_BITS)),
+        _ => 0,
+    };
+    let mut cz = match step_z {
+        1 => i64::from(((z + 1) << TILE_BITS) - a.1),
+        -1 => i64::from(a.1 - (z << TILE_BITS)),
+        _ => 0,
+    };
+    let tile = i64::from(OCTIMETERS_PER_TILE);
+    while x != xe || z != ze {
+        // Step the axis whose next boundary is nearer (t = c / ad, compared as
+        // cx·adz vs cz·adx); on an exact tie cross the corner diagonally. An
+        // axis already at its end never steps.
+        let (take_x, take_z) = if x == xe {
+            (false, true)
+        } else if z == ze {
+            (true, false)
+        } else {
+            match (cx * adz).cmp(&(cz * adx)) {
+                Ordering::Less => (true, false),
+                Ordering::Greater => (false, true),
+                Ordering::Equal => (true, true),
+            }
+        };
+        if take_x {
+            x += step_x;
+            cx += tile;
+        }
+        if take_z {
+            z += step_z;
+            cz += tile;
+        }
+        if !map.walkable(x, z) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Advance a point `speed` octimeters *along the straight line to* `target` —
+/// the same Euclidean distance per tick in every direction (so a diagonal
+/// doesn't run √2 faster than a cardinal). Each axis moves its share of the
+/// step scaled by the true direction `(dx, dz) / |(dx, dz)|`, rounded to the
+/// nearest octimeter, and the move snaps exactly onto `target` once within one
+/// step. Integer-only via `isqrt` and recomputed from the live delta each
+/// tick, so it stays deterministic and rounding never accumulates.
+#[allow(clippy::cast_possible_truncation)]
+fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
+    let dx = i64::from(target.0 - cur.0);
+    let dz = i64::from(target.1 - cur.1);
+    let dist = (dx * dx + dz * dz).isqrt();
+    let speed = i64::from(speed);
+    if dist <= speed {
+        return target;
+    }
+    // Round speed·d / dist to nearest, away from zero on a tie.
+    let round_div = |num: i64| {
+        let half = dist / 2;
+        if num >= 0 {
+            (num + half) / dist
+        } else {
+            (num - half) / dist
+        }
+    };
+    // |speed·d / dist| ≤ speed, so the result fits an i32 axis step.
+    (
+        cur.0 + round_div(speed * dx) as i32,
+        cur.1 + round_div(speed * dz) as i32,
+    )
+}
+
 /// Move `cur` toward `target` by at most `step` octimeters, never
 /// overshooting.
 fn approach(cur: i32, target: i32, step: i32) -> i32 {
-    use core::cmp::Ordering;
     match cur.cmp(&target) {
         Ordering::Less => (cur + step).min(target),
         Ordering::Greater => (cur - step).max(target),
@@ -426,6 +827,176 @@ mod tests {
                 assert_eq!(snap_rest(center, cell), center, "cell={cell} tile={tile}");
             }
         }
+    }
+
+    /// A single wall column at x=6, z=4..9 — a focused scenario for the
+    /// pathfinding tests, independent of the demo maze.
+    fn wall_column() -> TileMap {
+        TileMap::from_blocked(&[(6, 4), (6, 5), (6, 6), (6, 7), (6, 8), (6, 9)])
+    }
+
+    #[test]
+    fn astar_routes_around_the_wall() {
+        // A path from the right of a wall to the left must detour around —
+        // never through it — and stay a contiguous 8-connected walk ending on
+        // the goal.
+        let map = wall_column();
+        let start = (8, 8);
+        let goal = (2, 7);
+        let path = astar(&map, start, goal).expect("goal is reachable");
+        assert_eq!(path.back().copied(), Some(goal));
+        let mut prev = start;
+        for &step in &path {
+            assert!(map.walkable(step.0, step.1), "stepped onto a blocked tile");
+            let d = (step.0 - prev.0).abs().max((step.1 - prev.1).abs());
+            assert_eq!(d, 1, "non-adjacent hop {prev:?} -> {step:?}");
+            prev = step;
+        }
+    }
+
+    #[test]
+    fn astar_returns_none_for_blocked_goal() {
+        assert!(astar(&wall_column(), (8, 8), (6, 6)).is_none());
+    }
+
+    #[test]
+    fn maze_is_fully_connected_from_spawn() {
+        // The demo maze must have no walled-off pockets: every open tile is
+        // reachable from the spawn room by cardinal steps (so click-to-move
+        // can always find a route). Guards against a doorway typo sealing a
+        // ring.
+        let map = TileMap::new();
+        let spawn = (GRID_W / 2, GRID_H / 2);
+        assert!(map.walkable(spawn.0, spawn.1), "spawn tile must be open");
+        let mut seen = [false; GRID_TILES];
+        let mut queue = VecDeque::from([spawn]);
+        seen[TileMap::idx(spawn.0, spawn.1)] = true;
+        let mut reached = 0;
+        while let Some((x, z)) = queue.pop_front() {
+            reached += 1;
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, nz) = (x + dx, z + dz);
+                if map.walkable(nx, nz) && !seen[TileMap::idx(nx, nz)] {
+                    seen[TileMap::idx(nx, nz)] = true;
+                    queue.push_back((nx, nz));
+                }
+            }
+        }
+        let open = (0..GRID_W)
+            .flat_map(|x| (0..GRID_H).map(move |z| (x, z)))
+            .filter(|&(x, z)| map.walkable(x, z))
+            .count();
+        assert_eq!(reached, open, "maze has an unreachable open region");
+    }
+
+    #[test]
+    fn smooth_path_collapses_open_space_to_a_straight_line() {
+        // With nothing between start and dest, line-of-sight smoothing drops
+        // every interior tile center: the mover walks one straight segment to
+        // the sub-tile dest, with no kink through a center.
+        let map = TileMap::from_blocked(&[]);
+        let tiles: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (11, 8), (12, 8), (13, 8)].into();
+        let start = (tile_center_octimeters(8), tile_center_octimeters(8));
+        let dest = (13 * OCTIMETERS_PER_TILE + 100, 8 * OCTIMETERS_PER_TILE + 80);
+        assert_eq!(
+            smooth_path(&map, start, &tiles, dest),
+            VecDeque::from([dest])
+        );
+    }
+
+    #[test]
+    fn smooth_path_keeps_a_corner_around_the_wall() {
+        // When the wall genuinely sits between start and dest, smoothing keeps
+        // the corner(s) it must, and every segment the mover walks stays
+        // wall-clear.
+        let map = wall_column();
+        let (start_tile, goal_tile) = ((9, 6), (2, 6));
+        let start = (tile_center_octimeters(9), tile_center_octimeters(6));
+        let dest = (tile_center_octimeters(2), tile_center_octimeters(6));
+        assert!(!los(&map, start, dest), "direct line should cross the wall");
+        let tiles = astar(&map, start_tile, goal_tile).expect("reachable");
+        let path = smooth_path(&map, start, &tiles, dest);
+        assert!(path.len() >= 2, "a detour must retain at least one corner");
+        assert_eq!(path.back().copied(), Some(dest));
+        let mut anchor = start;
+        for &wp in &path {
+            assert!(
+                los(&map, anchor, wp),
+                "segment {anchor:?} -> {wp:?} crosses a wall"
+            );
+            anchor = wp;
+        }
+    }
+
+    #[test]
+    fn los_is_clear_in_the_open_and_blocked_through_the_wall() {
+        let map = wall_column();
+        let center = |tx, tz| (tile_center_octimeters(tx), tile_center_octimeters(tz));
+        // Open row east of the wall.
+        assert!(los(&map, center(8, 8), center(13, 8)));
+        // Straight across the wall — tile (6, 6) is blocked.
+        assert!(!los(&map, center(9, 6), center(2, 6)));
+    }
+
+    #[test]
+    fn astar_keeps_a_straight_line_straight() {
+        // A horizontal target in open space must be a pure eastward run —
+        // octile cost forbids the equal-length diagonal zigzag a uniform cost
+        // would allow.
+        let path = astar(&TileMap::from_blocked(&[]), (8, 8), (13, 8)).expect("reachable");
+        let expected: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (11, 8), (12, 8), (13, 8)].into();
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn step_toward_tracks_the_straight_line() {
+        // A shallow sub-tile segment (slope ≠ 0, 1, ∞) must be followed as a
+        // straight line, not an axis-by-axis L. Walk it tick by tick and
+        // assert every intermediate point stays hard against the ideal line
+        // from start to target — and that it lands exactly on the target.
+        let start = (8 * OCTIMETERS_PER_TILE + 128, 8 * OCTIMETERS_PER_TILE + 128);
+        let target = (5 * OCTIMETERS_PER_TILE + 64, 11 * OCTIMETERS_PER_TILE);
+        let (dx, dz) = (i64::from(target.0 - start.0), i64::from(target.1 - start.1));
+        let len = ((dx * dx + dz * dz) as f64).sqrt();
+        let mut p = start;
+        for _ in 0..10_000 {
+            if p == target {
+                break;
+            }
+            p = step_toward(p, target, SPEED_OCTIMETERS_PER_TICK);
+            // Perpendicular distance of p from the line start→target.
+            let (px, pz) = (i64::from(p.0 - start.0), i64::from(p.1 - start.1));
+            let perp = (dx * pz - dz * px).abs() as f64 / len;
+            // Hugs the line within an eighth of a tile (≈ 12 cm) — an order of
+            // magnitude tighter than the axis-by-axis L this replaces, which
+            // peels off by the segment's whole minor extent (here 640).
+            assert!(
+                perp <= f64::from(OCTIMETERS_PER_TILE / 8),
+                "strayed {perp} octimeters from the line at {p:?}"
+            );
+        }
+        assert_eq!(p, target, "did not converge onto the target");
+    }
+
+    #[test]
+    fn step_toward_speed_is_uniform_across_directions() {
+        // A diagonal step covers the same ground per tick as a cardinal one —
+        // no √2 speed-up. The cardinal move takes the full speed on one axis;
+        // the 45° diagonal splits it so the Euclidean distance still ≈ speed.
+        let speed = SPEED_OCTIMETERS_PER_TICK;
+        let origin = (1000, 1000);
+
+        let cardinal = step_toward(origin, (1000 + 320, 1000), speed);
+        assert_eq!(cardinal, (1000 + speed, 1000), "cardinal moves full speed");
+
+        let diagonal = step_toward(origin, (1000 - 320, 1000 + 320), speed);
+        let (mx, mz) = (diagonal.0 - 1000, diagonal.1 - 1000);
+        assert_eq!(-mx, mz, "the 45° split is symmetric across the axes");
+        let moved = f64::from(mx * mx + mz * mz).sqrt();
+        assert!(
+            (moved - f64::from(speed)).abs() <= 1.0,
+            "diagonal distance {moved} should be ≈ {speed}, not {speed}·√2"
+        );
     }
 
     #[test]

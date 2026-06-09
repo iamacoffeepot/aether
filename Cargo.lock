@@ -191,6 +191,7 @@ dependencies = [
  "aether-capabilities",
  "aether-data",
  "aether-kinds",
+ "aether-math",
  "inventory",
  "serde",
  "tracing",
