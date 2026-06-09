@@ -15,7 +15,7 @@ Two entry shapes, one skill:
 Two ways to run it:
 
 - **In-session (default).** The whole skill runs in the main session — implement, push, drive CI green, hold the draft. Use this for a single issue or when you want tight control over each step.
-- **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh` (which stamps the commit), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or board writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`).
+- **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh --qodana` (which stamps the commit; `--qodana` runs the same qodana scan CI gates on, needs colima up), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or board writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`).
 
 Either mode opens the PR **as a draft**, drives CI green, and holds it in draft for your review. This repo has native GitHub auto-merge on, so a *non-draft* PR that reaches green merges itself — draft is the review gate (see `feedback_green_pr_automerges_before_review`). Landing is the release *process*'s call: an approved release un-drafts the PR so native auto-merge takes it. This skill never issues a merge command and never un-drafts on its own.
 
@@ -71,7 +71,7 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
    - `cargo nextest run --workspace`
    - `cargo doc --workspace --no-deps`
    - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-component` dep)
-   - `scripts/preflight.sh` if present (writes the stamp file expected by the pre-push hook)
+   - `scripts/preflight.sh --qodana` if present (writes the stamp file expected by the pre-push hook). Pass `--qodana` on this push path so the pre-flight runs the same qodana scan CI gates on before the PR opens — it needs colima/docker up and adds ~3.3min; a non-clean qodana exit (findings over `failThreshold`, or the Qodana-for-Rust EAP tooling crash) classifies as a build-env failure → `Stalled` (handle as a `--no-verify` push only for a confirmed EAP flake, never to skip real findings)
 
 4. Push the branch and open the PR:
    ```bash

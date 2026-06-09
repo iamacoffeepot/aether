@@ -132,24 +132,23 @@ aether_actor::export!(CameraComponent);                    // required; emits wa
 
 `scripts/preflight.sh` runs the CI-equivalent local checks (fmt + clippy + doc + nextest + wasm32 component cross-build) over the workspace and, on success, stamps `.git/aether-preflight-passed` with the HEAD sha so a re-push of the same commit short-circuits. The pre-push git hook (`.githooks/pre-push`) invokes it automatically against the changed-file set. Enable once per clone: `scripts/setup-githooks.sh` (sets `core.hooksPath -> .githooks`).
 
+The qodana scan is **opt-in** via `scripts/preflight.sh --qodana` (or `PREFLIGHT_QODANA=1`) — it runs `scripts/qodana-local.sh` as the last step, needs colima/docker up, and adds ~3.3min, so the default fast loop skips it. The implement-agent push path passes `--qodana` to match the CI qodana gate before opening a PR (see § "Qodana pre-flight").
+
 Exception classes that skip the Rust pre-flight (only when *every* changed path matches the class):
 
 - **Docs-only**: `docs/**` or `*.md` at the root.
 - **CI / repo-config-only**: `.github/**`, `.claude/**`, `.githooks/**`, `scripts/**`, `qodana.{yaml,sarif.json}`, `.mcp.json`, `.gitignore`, `.gitattributes`, or `{rust-toolchain,rustfmt,clippy}.toml`.
 
-A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of `git push` / `gh pr create`. If HEAD has no matching stamp it blocks and prompts Claude to run `scripts/preflight.sh` plus `mcp__rustrover__get_file_problems` over each changed `.rs` file (the qodana-equivalent the shell-only git hook can't reach). Bypass either layer with `git push --no-verify`.
+A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of `git push` / `gh pr create`. If HEAD has no matching stamp it blocks and prompts Claude to run `scripts/preflight.sh` (with `--qodana` on the implement-agent push path). Bypass either layer with `git push --no-verify`.
 
 ## Qodana pre-flight (local)
 
-Qodana gates merges via the `ci-pass` aggregator. Run the **same scan CI submits**, locally, with `scripts/qodana-local.sh` (issue 1099). The naive `qodana scan` times out because it bind-mounts the repo over colima's virtiofs and Qodana's `cargo metadata` pass does thousands of small reads there; the script sidesteps that the way CI does — it syncs the working tree into a Docker named volume (the VM's native fs) and keeps a persistent cache volume for the bootstrapped toolchain + analysis caches. Same linter image / `qodana.recommended` profile / `--fail-threshold 0` as the CI job, reading the same `qodana.yaml`.
+Qodana gates merges via the `ci-pass` aggregator. Run the **same scan CI submits**, locally, with `scripts/qodana-local.sh` (issue 1099). The naive `qodana scan` times out because it bind-mounts the repo over colima's virtiofs and Qodana's `cargo metadata` pass does thousands of small reads there; the script sidesteps that the way CI does — it syncs the working tree into a Docker named volume (the VM's native fs) and keeps a persistent cache volume for the bootstrapped toolchain + analysis caches. Same linter image / `qodana.recommended` profile / fail-threshold as the CI job, reading the same `qodana.yaml` — `failThreshold: 2` lives there as the single source both the CI job and the local run inherit (neither passes a `--fail-threshold` CLI override). `scripts/preflight.sh --qodana` runs it as a pre-flight step; concurrent runs serialize on a lockfile (the volumes are fixed shared names).
 
 - **Run it**: `colima start` first (the script won't auto-boot a cold VM), then `scripts/qodana-local.sh`. ~3.3min warm; SARIF + HTML report land in `./.qodana-local/` (gitignored). Exit code is Qodana's gate (non-zero = findings). `--rebuild-cache` drops the cache volume.
 - **Fidelity**: validated against a main CI run — local reproduced 19/22 findings exactly (`RsUnnecessaryQualifications`, `DuplicatedCode`, `RsUnusedImport`, `CargoUnusedDependency` all matched). The one offline gap is `NewCrateVersionAvailable` (queries crates.io; needs `QODANA_TOKEN`) — export the token to close it, else it stays CI-only. Note `CargoUnusedDependency` **does** run locally.
 
-For a quick single-file check without spinning up the container, RustRover's inspector rehosts most of the same checks:
-
-- **Agent-side**: `mcp__rustrover__get_file_problems` (`errorsOnly: false`) returns the problem set for one file. Iterate it over `git diff --name-only` for a fast pre-commit pass on Qodana-touched files. RustRover MCP has no project-wide runner — use `scripts/qodana-local.sh` (or the IDE's `Code → Inspect Code…`) for whole-project.
-- **Per-file in-IDE**: the gutter + Problems tool window surface the same inspection ids (`RsUnnecessaryParentheses`, `RsApproxConstant`, `DuplicatedCode`, …).
+The authoritative local qodana gate is `scripts/preflight.sh --qodana` (or `scripts/qodana-local.sh` directly) — the same scan CI runs, working from any checkout including a `.claude/worktrees/` worktree. RustRover's IDE inspector is **not** the qodana pre-flight: it analyzes the IDE's open project (the main checkout, not the worktree diff an implement agent validates) and rehosts only a subset of the checks. Reach for RustRover MCP for rename / symbol / refactor work; for the qodana gate use qodana-local.
 
 Re-baselining (`qodana.sarif.json`) is done by downloading the `qodana-report` workflow artifact from a CI run.
 

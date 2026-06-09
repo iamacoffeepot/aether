@@ -208,11 +208,14 @@ jobs:
           # the prior approach (iamacoffeepot/aether#911) is now
           # unnecessary.
           #
-          # --fail-threshold 0 pins the action to fail on any finding
-          # instead of relying on the action's default threshold,
-          # which could shift across version bumps
-          # (iamacoffeepot/aether#941).
-          args: --linter qodana-rust -u root --fail-threshold 0
+          # The fail-threshold lives in qodana.yaml (`failThreshold`),
+          # the single source of truth both this job and
+          # scripts/qodana-local.sh inherit — so the local pre-flight
+          # gate and CI can never disagree. It stays explicit there
+          # (not the action's default, which could shift across version
+          # bumps — iamacoffeepot/aether#941), so no --fail-threshold
+          # CLI override here, which would shadow the yaml value.
+          args: --linter qodana-rust -u root
           # We own restore/save (steps above + below); qodana-action's
           # built-in cache save runs root-owned and trips tar exit 2.
           use-caches: false

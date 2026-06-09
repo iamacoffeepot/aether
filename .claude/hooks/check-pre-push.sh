@@ -2,17 +2,12 @@
 # Pre-flight gate for Claude-driven `git push` / `gh pr create` Bash calls.
 #
 # The git pre-push hook (.githooks/pre-push) does the same gating for any
-# pusher (CLI, IDE, Claude). What this Claude-side hook adds:
-#
-#   1. Earlier failure. The check fires before `git push` starts uploading,
-#      so a stale tree fails in milliseconds instead of after a slow push +
-#      pre-push pre-flight cycle.
-#
-#   2. The RustRover MCP nudge. The git hook can only run shell-callable
-#      checks (fmt / clippy / doc / nextest / wasm32). The qodana-equivalent
-#      surface lives in RustRover's IDE inspector, callable as the
-#      `mcp__rustrover__get_file_problems` MCP tool from Claude. This hook
-#      reminds Claude to run that tool over the diff before pushing.
+# pusher (CLI, IDE, Claude). What this Claude-side hook adds: earlier
+# failure — the check fires before `git push` starts uploading, so a stale
+# tree fails in milliseconds instead of after a slow push + pre-push
+# pre-flight cycle. (Qodana is no longer a separate nudge: it runs inside
+# `scripts/preflight.sh --qodana`, which the implement-agent push path
+# passes; see CLAUDE.md § "Qodana pre-flight".)
 #
 # Reads the Bash tool-call JSON from stdin (Claude Code PreToolUse hook
 # protocol). Exits 0 to allow, 2 to block (stdout body returns to Claude).
@@ -72,20 +67,7 @@ if [[ -f "$stamp_file" ]]; then
     fi
 fi
 
-# No matching stamp. Compute the diff vs origin/main so the message tells
-# Claude exactly which files to inspect.
-if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    base=$(git merge-base HEAD origin/main 2>/dev/null \
-        || git rev-parse origin/main)
-else
-    base=$(git rev-parse HEAD~1 2>/dev/null || echo "$head_sha")
-fi
-rust_files=()
-while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    [[ "$f" =~ \.rs$ ]] && rust_files+=("$f")
-done < <(git diff --name-only "$base..HEAD" 2>/dev/null || true)
-
+# No matching stamp — tell Claude to run the pre-flight.
 {
     echo "[claude pre-push] no pre-flight stamp for HEAD ($head_sha)."
     echo
@@ -93,21 +75,15 @@ done < <(git diff --name-only "$base..HEAD" 2>/dev/null || true)
     echo
     echo "    scripts/preflight.sh"
     echo
-    if [[ ${#rust_files[@]} -gt 0 ]]; then
-        echo "Then run \`mcp__rustrover__get_file_problems\` over each changed .rs"
-        echo "file (the qodana-equivalent that preflight.sh can't run locally)."
-        echo "IMPORTANT: pass \`errorsOnly: false\` — the default is errors-only"
-        echo "and Qodana CI flags NOTICE-level findings (Duplicated code"
-        echo "fragment, Unnecessary path prefix) that get missed otherwise:"
-        echo
-        for f in "${rust_files[@]}"; do
-            echo "    - $f"
-        done
-        echo
-    fi
+    echo "On the implement-agent push path (about to open a CI-checked PR),"
+    echo "pass --qodana so the pre-flight also runs the same qodana scan CI"
+    echo "gates on:"
+    echo
+    echo "    scripts/preflight.sh --qodana"
+    echo
     echo "Once preflight.sh exits 0 the stamp updates and the push proceeds."
-    echo "To bypass deliberately (e.g. emergency docs push), re-run the push"
-    echo "with --no-verify."
+    echo "To bypass deliberately (e.g. emergency docs push, or a known"
+    echo "Qodana-for-Rust EAP tooling flake), re-run the push with --no-verify."
 } >&2
 
 exit 2

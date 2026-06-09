@@ -3,8 +3,10 @@
 #
 # Mirrors the CI gates (.github/workflows/ci.yml) that are feasible
 # to run locally: fmt + clippy + doc + nextest + wasm32 component
-# cross-build. Qodana is omitted (running `qodana scan` locally is
-# blocked by colima virtiofs; see CLAUDE.md § "Qodana pre-flight").
+# cross-build. Qodana is opt-in (--qodana / PREFLIGHT_QODANA=1): it
+# adds ~3.3min and needs colima/docker up, so the fast human loop
+# skips it; the implement-agent push path passes --qodana to match the
+# CI gate before opening a PR (see CLAUDE.md § "Qodana pre-flight").
 #
 # On success, writes `.git/aether-preflight-passed` with the current
 # HEAD sha + unix timestamp. The pre-push hook (.githooks/pre-push)
@@ -16,6 +18,8 @@
 #                                              # (used by .githooks/pre-push)
 #   scripts/preflight.sh --force               # ignore exception classes,
 #                                              # run the full check set
+#   scripts/preflight.sh --qodana              # also run the qodana-local
+#                                              # scan (or set PREFLIGHT_QODANA=1)
 
 set -euo pipefail
 
@@ -31,6 +35,9 @@ HEAD_AT_START="$(git rev-parse HEAD)"
 force=0
 explicit=0
 explicit_files=()
+# Opt-in qodana: default off (fast human loop); the implement-agent push
+# path passes --qodana, or set PREFLIGHT_QODANA=1.
+qodana=${PREFLIGHT_QODANA:-0}
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --files)
@@ -43,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force)
             force=1
+            shift
+            ;;
+        --qodana)
+            qodana=1
             shift
             ;;
         -h|--help)
@@ -156,11 +167,21 @@ run_step "cargo doc --workspace --no-deps (rustdoc lints denied)" \
 run_step "cargo xtask dist --no-bins (component wasm cross-build)" \
     cargo xtask dist --no-bins
 
-# Final, slowest step. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a
+# Slowest Rust step. AETHER_REQUIRE_RUNTIME=1 mirrors CI so a
 # missing wasm artifact fails loudly rather than skipping silently.
 run_step "cargo nextest run --workspace --all-features --profile ci" \
     env AETHER_REQUIRE_RUNTIME=1 \
     cargo nextest run --workspace --all-features --profile ci
+
+# Opt-in (--qodana / PREFLIGHT_QODANA=1), and last — it adds ~3.3min and
+# needs colima/docker up. Same scan CI runs (qodana-local.sh reads
+# qodana.yaml, incl. failThreshold). A non-clean exit — findings over the
+# threshold, or the Qodana-for-Rust EAP internal crash — fails the
+# pre-flight; bypass a known tooling flake with `git push --no-verify`.
+if (( qodana )); then
+    run_step "scripts/qodana-local.sh (qodana scan, opt-in)" \
+        scripts/qodana-local.sh
+fi
 
 stamp_pass
 echo "[preflight] OK."

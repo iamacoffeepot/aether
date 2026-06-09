@@ -9,6 +9,13 @@ linter: jetbrains/qodana-rust:2026.1-eap
 profile:
   name: qodana.recommended
 
+# Quality gate: the scan fails when the finding count exceeds this.
+# Bumped 0 -> 2 so a small number of findings get swept at end-of-release
+# rather than blocking each push. Single source of truth — both the CI
+# Qodana job and scripts/qodana-local.sh inherit it (neither passes a
+# --fail-threshold CLI override, which would shadow this value).
+failThreshold: 2
+
 # Paths Qodana shouldn't analyse.
 exclude:
   # Crate-version-upgrade nags are off project-wide: bumping a dependency
