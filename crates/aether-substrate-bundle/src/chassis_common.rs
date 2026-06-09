@@ -14,7 +14,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aether_actor::Actor;
 use aether_capabilities::anthropic::AnthropicConfigLayer;
 use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
@@ -28,7 +27,6 @@ use aether_capabilities::{
     InputCapability, InputConfig, InventoryCapability, LifecycleConfig, TcpCapability,
     fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
 };
-use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
 use aether_kinds::{Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
@@ -153,9 +151,9 @@ pub enum PersistOverride {
 
 /// Build the standard single-stage lifecycle config every Tick-driven
 /// chassis shares today (ADR-0082 PR 3b): a `Tick` self-loop with a
-/// `Quit` escape to a `Shutdown` terminal, relaying `Tick` to
-/// `aether.input` so the existing `InputCapability::on_tick` fan-out
-/// keeps routing to component subscribers. Headless / `test_bench` /
+/// `Quit` escape to a `Shutdown` terminal. Components subscribe the
+/// `Tick` stage directly on `aether.lifecycle` (ADR-0082 §7/§11), so
+/// the config wires no initial subscribers. Headless / `test_bench` /
 /// desktop all use this identical shape; a chassis that adds
 /// `Render` / `Present` stages (ADR-0082 §11) builds its own graph
 /// instead.
@@ -174,10 +172,9 @@ pub fn tick_only_lifecycle_config() -> LifecycleConfig {
         .start::<Tick>()
         .build()
         .expect("tick-only lifecycle graph is structurally valid");
-    let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
     LifecycleConfig {
         graph,
-        initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
+        initial_subscribers: vec![],
     }
 }
 
@@ -200,9 +197,9 @@ pub fn tick_only_lifecycle_config() -> LifecycleConfig {
 /// this drain edge; per-stage component subscription lands when a
 /// producer needs a post-`Render` hook.
 ///
-/// Same `initial_subscribers` relay as [`tick_only_lifecycle_config`]
-/// (`Tick → aether.input`), so the existing `InputCapability::on_tick`
-/// fan-out keeps routing `Tick` to component subscribers. Desktop and
+/// Like [`tick_only_lifecycle_config`], components subscribe the `Tick`
+/// (and `Render`) stage directly on `aether.lifecycle` (ADR-0082
+/// §7/§11), so the config wires no initial subscribers. Desktop and
 /// `test_bench` adopt this graph; headless stays
 /// [`tick_only_lifecycle_config`] (its render cap is a no-op, so a
 /// `Render` / `Present` stage would settle to no GPU work).
@@ -225,10 +222,9 @@ pub fn frame_lifecycle_config() -> LifecycleConfig {
         .start::<Tick>()
         .build()
         .expect("frame lifecycle graph is structurally valid");
-    let input_mailbox = DataMailboxId(mailbox_id_from_name(InputCapability::NAMESPACE).0);
     LifecycleConfig {
         graph,
-        initial_subscribers: vec![(<Tick as Kind>::ID, input_mailbox)],
+        initial_subscribers: vec![],
     }
 }
 
@@ -304,8 +300,8 @@ mod tests {
         // The graph's edge accessors (`next` / `quit` per state) are
         // `pub(crate)` to `aether-capabilities`, so this crate-boundary
         // check reads the public `Debug` (start + the non-terminal state
-        // kinds + terminals) plus the preserved `initial_subscribers`
-        // relay. Quit-edge *placement* (on `Present`, not `Tick`) is
+        // kinds + terminals) plus the now-empty `initial_subscribers`
+        // set. Quit-edge *placement* (on `Present`, not `Tick`) is
         // verified at the cap-unit layer (`lifecycle.rs` `resolve_edge`
         // tests, which can read `state().quit`) and end-to-end by the
         // `test_bench` quit-drain scenario.
@@ -339,11 +335,11 @@ mod tests {
             "expected Shutdown terminal in {graph_dbg}",
         );
 
-        // The `Tick → aether.input` relay is preserved, identical to the
-        // tick-only config, so the InputCapability fan-out keeps routing
-        // Tick to component subscribers.
-        assert_eq!(cfg.initial_subscribers.len(), 1);
-        assert_eq!(cfg.initial_subscribers[0].0, <Tick as Kind>::ID);
+        // No initial subscribers: components subscribe the `Tick` stage
+        // directly on `aether.lifecycle` (ADR-0082 §7/§11); the boot-time
+        // `Tick → aether.input` relay retired with the input cap's
+        // `on_tick` fan-out.
+        assert!(cfg.initial_subscribers.is_empty());
     }
 
     #[test]

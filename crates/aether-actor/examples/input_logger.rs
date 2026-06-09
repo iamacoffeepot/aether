@@ -1,6 +1,8 @@
 //! Smoke component for ADR-0021 input subscriptions. Observes the
-//! four substrate-published input kinds (Tick / Key / `MouseMove` /
-//! `MouseButton`) and counts each dispatch.
+//! substrate-published input kinds (Key / `MouseMove` / `MouseButton`)
+//! and counts each dispatch. `Tick` is a frame-lifecycle stage
+//! (`aether.lifecycle`, ADR-0082), not an input stream, so it is not
+//! part of this input-streams demo.
 //!
 //! Pre-issue-775 the example emitted a `demo.input_observed { stream,
 //! code }` to `hub.claude.broadcast` so the driving Claude session
@@ -21,7 +23,7 @@
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::InputCapability;
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput, Tick};
+use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput};
 
 pub struct InputLogger;
 
@@ -39,13 +41,10 @@ impl FfiActor for InputLogger {
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
         let me = MailboxId(ctx.mailbox_id());
         let input = ctx.actor::<InputCapability>();
-        for kind in [Tick::ID, Key::ID, MouseMove::ID, MouseButton::ID] {
+        for kind in [Key::ID, MouseMove::ID, MouseButton::ID] {
             input.send(&SubscribeInput { kind, mailbox: me });
         }
     }
-
-    #[handler]
-    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {}
 
     #[handler]
     fn on_key(&mut self, _ctx: &mut FfiCtx<'_>, _key: Key) {}

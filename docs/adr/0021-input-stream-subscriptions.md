@@ -13,6 +13,14 @@
   cap-side manifest pass both retired. Kind names also rehomed from
   `aether.control.subscribe_input` to `aether.input.subscribe` per
   issue 638 Phase 2.
+- **Updated 2026-06-09 (issue 1490):** `Tick` leaves the input-stream set.
+  It is a frame-lifecycle stage (`aether.lifecycle.tick`, ADR-0082), so a
+  component subscribes it on `aether.lifecycle` via `LifecycleCapability`, not
+  on `aether.input`. `InputCapability` now carries only genuine input
+  interrupts (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `WindowSize`);
+  the boot-time `Tick → aether.input` relay and the cap's `on_tick` fan-out
+  retired. A third-party component subscribing `Tick` via `InputMailboxExt`
+  moves the one-line subscribe to `LifecycleCapability`.
 
 ## Context
 

@@ -22,9 +22,10 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
-use aether_capabilities::InputCapability;
+use aether_capabilities::LifecycleCapability;
+use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_data::{Kind, MailboxId, Schema};
-use aether_kinds::{SubscribeInput, Tick};
+use aether_kinds::Tick;
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -58,10 +59,8 @@ impl FfiActor for Caller {
 
     //noinspection DuplicatedCode
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<InputCapability>().send(&SubscribeInput {
-            kind: Tick::ID,
-            mailbox: MailboxId(ctx.mailbox_id()),
-        });
+        ctx.actor::<LifecycleCapability>()
+            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
     }
 
     #[handler]

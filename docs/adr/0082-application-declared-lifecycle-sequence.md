@@ -35,6 +35,20 @@
 >   `Tick → Render → Present` graph and per-stage component subscription land
 >   with iamacoffeepot/aether#1378.
 
+> **Amendment (2026-06-09, issue 1490).** The §12 `Tick → aether.input`
+> initial-subscriber relay retired. A component subscribes the `Tick` stage
+> directly on `aether.lifecycle` —
+> `ctx.actor::<LifecycleCapability>().subscribe(Tick::ID, me)` — the same site as
+> every other stage; both `tick_only_lifecycle_config` and
+> `frame_lifecycle_config` wire no initial subscribers, and `InputCapability` no
+> longer carries `Tick`. This separates input *interrupts* (key / mouse /
+> window-size, on `aether.input`, ADR-0021/0068) from frame *stages* (`Tick` /
+> `Render` / `Present`, on `aether.lifecycle`). A third-party component that
+> subscribes `Tick` via `InputMailboxExt` moves the one-line subscribe to
+> `LifecycleCapability`; the `aether.lifecycle.tick` kind id is unchanged, so
+> there is no load-time error — an un-migrated subscriber silently stops
+> receiving ticks.
+
 ## Context
 
 The chassis lifecycle today — `init` → repeated (`tick` → `render` → `present`) → `shutdown` — is encoded in hand-written driver code per chassis (`crates/aether-substrate-bundle/src/{desktop,headless,hub,test_bench}/`). ADR-0074 §Decision 5 layered a single `FRAME_BARRIER: bool` const on every actor to mark "drains within the per-frame barrier vs runs free," and that const is the only first-class structure naming the frame. Everything else — what stages exist, what they emit, what order they fire — is implicit.

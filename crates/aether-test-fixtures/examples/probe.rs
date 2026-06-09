@@ -30,12 +30,19 @@
 //! kinds moved to the sibling lib so integration tests can import
 //! them without reaching into a cdylib.
 
+// `on_key` only re-broadcasts the inbound payload, so it doesn't touch
+// `self`; it keeps `&mut self` to match the `#[handler]` dispatch ABI.
+#![allow(clippy::unused_self)]
+
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
-use aether_capabilities::{InputCapability, RenderCapability};
+use aether_capabilities::lifecycle::LifecycleMailboxExt;
+use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{DrawTriangle, Tick, Vertex};
-use aether_test_fixtures::{SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
+use aether_kinds::{DrawTriangle, Key, Tick, Vertex};
+use aether_test_fixtures::{
+    KeyObserved, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved,
+};
 
 pub struct Probe {
     tick_count: u64,
@@ -59,9 +66,15 @@ impl FfiActor for Probe {
     //noinspection DuplicatedCode
     /// Issue 640: explicit subscribe in `wire`; init is `Resolver`-only
     /// post-issue-703 and can't mail.
+    ///
+    /// `Tick` is a frame-lifecycle stage, so it subscribes on
+    /// `aether.lifecycle` (ADR-0082); `Key` is a genuine input interrupt,
+    /// so it subscribes on `aether.input` (ADR-0021) — the input-stream
+    /// path the round-trip scenarios exercise (issue 1490).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<InputCapability>()
-            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
+        let me = MailboxId(ctx.mailbox_id());
+        ctx.actor::<LifecycleCapability>().subscribe(Tick::ID, me);
+        ctx.actor::<InputCapability>().subscribe(Key::ID, me);
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running
@@ -103,6 +116,23 @@ impl FfiActor for Probe {
                 verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],
             });
         }
+    }
+
+    /// Broadcasts a `key_observed` for each `Key` input dispatch, so the
+    /// ADR-0021 input round-trip scenarios can count `aether.input`
+    /// fan-out deliveries (subscribe / unsubscribe / drop-clears) on a
+    /// genuine input interrupt.
+    ///
+    /// # Agent
+    /// Not sent manually; the substrate's input fan-out fires it for
+    /// every `aether.input`-subscribed mailbox when a key is pressed.
+    /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
+    #[handler]
+    fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) {
+        ctx.send_to_named::<KeyObserved>(
+            TEST_BENCH_OBSERVER_MAILBOX_NAME,
+            &KeyObserved { code: key.code },
+        );
     }
 
     /// Updates the stored render state. Subsequent ticks paint the

@@ -36,6 +36,20 @@ pub struct TickObserved {
     pub count: u64,
 }
 
+/// Broadcast payload the probe emits on each `Key` input dispatch,
+/// carrying the pressed key `code`. Lets the ADR-0021 input round-trip
+/// scenarios count `aether.input` fan-out deliveries the same way
+/// [`TickObserved`] counts lifecycle ticks — `Key` is a genuine input
+/// interrupt, so it exercises the `aether.input` subscribe / unsubscribe
+/// / drop-clears path that `Tick` no longer does (issue 1490).
+#[derive(
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+)]
+#[kind(name = "aether.test_fixture.key_observed")]
+pub struct KeyObserved {
+    pub code: u32,
+}
+
 /// Driver kind: scenarios send this to flip a probe fixture's render
 /// state. `visible == 0` halts the per-tick draw; any other value
 /// enables it. Cast-shape so encoding is just a memcpy of four
