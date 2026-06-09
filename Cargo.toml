@@ -13,6 +13,7 @@ members = [
     "crates/aether-derive",
     "crates/aether-mesh",
     "crates/aether-camera",
+    "crates/aether-kit",
     "crates/aether-capabilities",
     "crates/aether-mcp",
     "crates/aether-mesh-viewer",
