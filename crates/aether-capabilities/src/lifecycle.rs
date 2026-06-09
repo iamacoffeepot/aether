@@ -40,7 +40,9 @@ use std::marker::PhantomData;
 use aether_actor::FfiActorMailbox;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_kinds::trace::Settled;
-use aether_kinds::{LifecycleAdvance, LifecycleSubscribe, LifecycleUnsubscribe, Quit};
+use aether_kinds::{
+    LifecycleAdvance, LifecycleSubscribe, LifecycleUnsubscribe, LifecycleUnsubscribeAll, Quit,
+};
 // Reply types ride only the native handler bodies (via `super::`), so they
 // elide on wasm where `mod native` is compiled out.
 #[cfg(not(target_arch = "wasm32"))]
@@ -484,7 +486,8 @@ mod native {
 
     use super::{
         LifecycleAdvance, LifecycleAdvanceComplete, LifecycleGraphData, LifecycleStateData,
-        LifecycleSubscribe, LifecycleSubscribeResult, LifecycleUnsubscribe, Quit, Settled,
+        LifecycleSubscribe, LifecycleSubscribeResult, LifecycleUnsubscribe,
+        LifecycleUnsubscribeAll, Quit, Settled,
     };
 
     /// Internal state-advance decision produced by `on_advance` before
@@ -702,6 +705,29 @@ mod native {
                 }
             };
             ctx.reply(&result);
+        }
+
+        /// Remove `mailbox` from every lifecycle stage's subscriber set.
+        /// Issued by `ComponentHostCapability` on `DropComponent` so a
+        /// dropped trampoline doesn't keep receiving stage-broadcast mail
+        /// — the lifecycle-family counterpart of
+        /// [`InputCapability::on_unsubscribe_all`](crate::input::InputCapability),
+        /// which the same drop path notifies for `aether.input`. No
+        /// mailbox-validation: the trampoline's mailbox is already torn
+        /// down by the time this fires; we accept any id and purge it from
+        /// every stage. No reply.
+        ///
+        /// # Agent
+        /// `LifecycleUnsubscribeAll { mailbox }`. Idempotent.
+        #[handler]
+        fn on_unsubscribe_all(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            payload: LifecycleUnsubscribeAll,
+        ) {
+            for set in self.subscribers.values_mut() {
+                set.remove(&DataMailboxId(payload.mailbox));
+            }
         }
 
         /// Lifecycle escape signal (ADR-0082 §3). Sets `quit_pending =
@@ -1171,6 +1197,44 @@ mod native {
                 "cooldown should suppress the second warn"
             );
         }
+
+        #[test]
+        fn on_unsubscribe_all_purges_mailbox_from_every_stage() {
+            // A dropped trampoline's mailbox must leave every stage's
+            // subscriber set in one shot (the drop-cleanup contract,
+            // mirroring `InputCapability::on_unsubscribe_all`), while
+            // co-subscribers on a shared stage survive.
+            use aether_substrate::actor::native::binding::NativeBinding;
+
+            let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
+            let dropped = DataMailboxId(0xDEAD);
+            let survivor = DataMailboxId(0xBEEF);
+            let render = <Render as Kind>::ID;
+            let present = <Present as Kind>::ID;
+            cap.subscribers.entry(render).or_default().insert(dropped);
+            cap.subscribers.entry(render).or_default().insert(survivor);
+            cap.subscribers.entry(present).or_default().insert(dropped);
+
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&cap.mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = NativeCtx::new(&transport, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            cap.on_unsubscribe_all(&mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
+
+            assert!(
+                !cap.subscribers[&render].contains(&dropped),
+                "dropped mailbox must leave the Render stage"
+            );
+            assert!(
+                !cap.subscribers[&present].contains(&dropped),
+                "dropped mailbox must leave the Present stage"
+            );
+            assert!(
+                cap.subscribers[&render].contains(&survivor),
+                "co-subscribers on a shared stage must survive the purge"
+            );
+        }
     }
 }
 
@@ -1311,6 +1375,7 @@ mod tests {
         fn assert_singleton<R: Singleton>() {}
         assert_handles::<LifecycleCapability, LifecycleSubscribe>();
         assert_handles::<LifecycleCapability, LifecycleUnsubscribe>();
+        assert_handles::<LifecycleCapability, LifecycleUnsubscribeAll>();
         assert_singleton::<LifecycleCapability>();
     }
 }

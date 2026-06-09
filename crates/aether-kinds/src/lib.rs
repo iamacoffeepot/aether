@@ -291,6 +291,33 @@ pub struct LifecycleUnsubscribe {
     pub mailbox: u64,
 }
 
+/// `aether.lifecycle.unsubscribe_all` — remove `mailbox` from every
+/// lifecycle stage's subscriber set. Issued by
+/// `ComponentHostCapability` on `DropComponent` so the lifecycle cap's
+/// per-stage broadcast doesn't keep firing at a dropped trampoline —
+/// the lifecycle-family counterpart of [`UnsubscribeAll`] for
+/// `aether.input`. Idempotent: a mailbox with no stage subscriptions
+/// is still a no-op. Fire-and-forget; no reply. Cast-shape (Pod), one
+/// `mailbox` field, matching the sibling lifecycle kinds' raw-`u64`
+/// shape.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.lifecycle.unsubscribe_all")]
+pub struct LifecycleUnsubscribeAll {
+    pub mailbox: u64,
+}
+
 /// Reply to [`LifecycleSubscribe`] / [`LifecycleUnsubscribe`].
 /// `Err` carries the stage kind id and a human-readable reason —
 /// fail-fast subscribe per ADR-0082 §7. Same shape and rationale as
@@ -2914,6 +2941,10 @@ mod tests {
         );
         assert_eq!(LifecycleSubscribe::NAME, "aether.lifecycle.subscribe");
         assert_eq!(LifecycleUnsubscribe::NAME, "aether.lifecycle.unsubscribe");
+        assert_eq!(
+            LifecycleUnsubscribeAll::NAME,
+            "aether.lifecycle.unsubscribe_all"
+        );
         assert_eq!(
             LifecycleSubscribeResult::NAME,
             "aether.lifecycle.subscribe_result"
