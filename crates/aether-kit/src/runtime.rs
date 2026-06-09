@@ -390,8 +390,13 @@ impl Locomotion {
             self.advance_z();
             return;
         };
-        self.mover.x = approach(self.mover.x, wx, SPEED_OCTIMETERS_PER_TICK);
-        self.mover.z = approach(self.mover.z, wz, SPEED_OCTIMETERS_PER_TICK);
+        let (nx, nz) = step_toward(
+            (self.mover.x, self.mover.z),
+            (wx, wz),
+            SPEED_OCTIMETERS_PER_TICK,
+        );
+        self.mover.x = nx;
+        self.mover.z = nz;
         if self.mover.x == wx && self.mover.z == wz {
             self.path.pop_front();
         }
@@ -630,6 +635,36 @@ fn smooth_path(
     path
 }
 
+/// Advance a point toward `target` by up to `speed` octimeters *along the
+/// straight line to it*, splitting the step between the two axes so the
+/// move tracks the line instead of running diagonally and then squaring
+/// off (the axis-by-axis "L" that two independent [`approach`] calls would
+/// trace on any non-cardinal, non-45° segment). The major axis takes a full
+/// step; the minor axis takes the proportional, rounded share. Snaps exactly
+/// onto `target` once within one step. Integer-only and recomputed from the
+/// live delta each tick, so it stays deterministic and rounding never
+/// accumulates.
+fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
+    let (dx, dz) = (target.0 - cur.0, target.1 - cur.1);
+    let major = dx.abs().max(dz.abs());
+    if major <= speed {
+        return target;
+    }
+    let minor = dx.abs().min(dz.abs());
+    let step_minor = (speed * minor + major / 2) / major;
+    if dx.abs() >= dz.abs() {
+        (
+            cur.0 + dx.signum() * speed,
+            cur.1 + dz.signum() * step_minor,
+        )
+    } else {
+        (
+            cur.0 + dx.signum() * step_minor,
+            cur.1 + dz.signum() * speed,
+        )
+    }
+}
+
 /// Move `cur` toward `target` by at most `step` octimeters, never
 /// overshooting.
 fn approach(cur: i32, target: i32, step: i32) -> i32 {
@@ -731,6 +766,48 @@ mod tests {
         let path = astar(&TileMap::new(), (8, 8), (13, 8)).expect("reachable");
         let expected: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (11, 8), (12, 8), (13, 8)].into();
         assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn step_toward_tracks_the_straight_line() {
+        // A shallow sub-tile segment (slope ≠ 0, 1, ∞) must be followed as a
+        // straight line, not an axis-by-axis L. Walk it tick by tick and
+        // assert every intermediate point stays hard against the ideal line
+        // from start to target — and that it lands exactly on the target.
+        let start = (8 * OCTIMETERS_PER_TILE + 128, 8 * OCTIMETERS_PER_TILE + 128);
+        let target = (5 * OCTIMETERS_PER_TILE + 64, 11 * OCTIMETERS_PER_TILE);
+        let (dx, dz) = (i64::from(target.0 - start.0), i64::from(target.1 - start.1));
+        let len = ((dx * dx + dz * dz) as f64).sqrt();
+        let mut p = start;
+        for _ in 0..10_000 {
+            if p == target {
+                break;
+            }
+            p = step_toward(p, target, SPEED_OCTIMETERS_PER_TICK);
+            // Perpendicular distance of p from the line start→target.
+            let (px, pz) = (i64::from(p.0 - start.0), i64::from(p.1 - start.1));
+            let perp = (dx * pz - dz * px).abs() as f64 / len;
+            // Hugs the line within a sixteenth of a tile (≈ 6 cm) — two orders
+            // of magnitude tighter than the axis-by-axis L this replaces, which
+            // peels off by the segment's whole minor extent (here 640).
+            assert!(
+                perp <= f64::from(OCTIMETERS_PER_TILE / 16),
+                "strayed {perp} octimeters from the line at {p:?}"
+            );
+        }
+        assert_eq!(p, target, "did not converge onto the target");
+    }
+
+    #[test]
+    fn step_toward_keeps_a_pure_diagonal_pure() {
+        // A 45° segment still moves both axes a full step each tick — the
+        // continuous-glide diagonal must not regress.
+        let start = (1000, 1000);
+        let target = (1000 - 320, 1000 + 320);
+        assert_eq!(
+            step_toward(start, target, SPEED_OCTIMETERS_PER_TICK),
+            (1000 - 8, 1000 + 8)
+        );
     }
 
     #[test]
