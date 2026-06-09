@@ -34,12 +34,11 @@ use winit::event_loop::EventLoop;
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::chassis_common::{
     CommonBoot, PersistOverride, chassis_known_keys, frame_lifecycle_config, maybe_with_rpc_server,
-    with_common_caps,
+    resolve_persist_state, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
 use aether_substrate::config::{ConfigError, validate_env};
-use aether_substrate::handle_store::PersistConfig;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::env;
@@ -283,23 +282,9 @@ impl DesktopEnv {
 
         let workers = cli_workers.or_else(parse_workers_env);
 
-        // Persistence overlay: parallel to headless (issue 1258). The
-        // chassis-bin vote is `persist_enabled=true` (desktop opts into
-        // on-disk persistence per ADR-0049 §9).
-        let persist_argv_set = persist.dir.is_some()
-            || persist.persist_disable.is_some()
-            || persist.disk_budget_bytes.is_some()
-            || persist.eviction_tick_secs.is_some();
-        let persist_state = if persist_argv_set {
-            PersistOverride::Argv(PersistConfig::from_argv_then_env(
-                true,
-                persist.dir.clone(),
-                persist.persist_disable,
-                persist.numeric_layer(),
-            ))
-        } else {
-            PersistOverride::EnvOnly
-        };
+        // Persistence overlay shared with headless (issue 1258); desktop
+        // opts into on-disk persistence per ADR-0049 §9.
+        let persist_state = resolve_persist_state(&persist);
         let handle_store_max_bytes = persist.max_bytes;
 
         Ok(Self {

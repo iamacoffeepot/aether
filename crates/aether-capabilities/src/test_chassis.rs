@@ -11,9 +11,13 @@
 //! 786 lives here too — same six sites all wanted the same
 //! `(Arc<Registry>, Arc<Mailer>)` seed for `Builder::new`.
 
+use std::env::temp_dir;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_data::{Kind, Source};
 use aether_kinds::descriptors;
@@ -176,4 +180,47 @@ where
                 .expect("test: reply payload decodes via postcard");
         }
     }
+}
+
+/// Decode the *next* egress as a `ToSession` reply of kind `K`. Strict
+/// sibling of [`decode_session_reply`]: it asserts the immediately
+/// following egress is a `ToSession` carrying `K`, rather than reading
+/// past bubble-ups. For cap tests whose handler re-replies exactly once.
+pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
+where
+    K: Kind + DeserializeOwned,
+{
+    let event = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("test: egress event arrives within 1s deadline");
+    let EgressEvent::ToSession {
+        kind_name, payload, ..
+    } = event
+    else {
+        panic!("expected ToSession egress, got {event:?}");
+    };
+    assert_eq!(kind_name, K::NAME);
+    postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
+}
+
+/// Manual tempdir under the system temp root, namespaced by `prefix` and
+/// `tag` plus the pid and a nanosecond nonce so concurrent tests never
+/// collide. Avoids pulling in the `tempfile` crate; the caller cleans up
+/// via [`cleanup`] after asserting.
+pub fn scratch_dir(prefix: &str, tag: &str) -> PathBuf {
+    let pid = process::id();
+    let nonce: u64 = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
+        // Nanosecond clock fits comfortably in u64 for the next ~584 years.
+        #[allow(clippy::cast_possible_truncation)]
+        let nanos = d.as_nanos() as u64;
+        nanos
+    });
+    let path = temp_dir().join(format!("{prefix}-{tag}-{pid}-{nonce}"));
+    fs::create_dir_all(&path).expect("test setup: scratch dir creates");
+    path
+}
+
+/// Remove a [`scratch_dir`] tree, ignoring errors (best-effort teardown).
+pub fn cleanup(path: &Path) {
+    let _ = fs::remove_dir_all(path);
 }

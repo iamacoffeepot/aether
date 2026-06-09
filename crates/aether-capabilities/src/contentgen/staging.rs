@@ -78,26 +78,11 @@ pub fn stage_gen_output_under(root: &Path, bytes: &[u8], ext: &str) -> Result<St
 mod tests {
     use super::{GEN_PREFIX, stage_gen_output_under};
     use crate::fs::{FileAdapter, LocalFileAdapter};
-    use std::env::temp_dir;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_chassis::{cleanup, scratch_dir};
+    use std::path::PathBuf;
 
     fn scratch_root(tag: &str) -> PathBuf {
-        let pid = process::id();
-        let nonce: u64 = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-            #[allow(clippy::cast_possible_truncation)]
-            let nanos = d.as_nanos() as u64;
-            nanos
-        });
-        let path = temp_dir().join(format!("aether-gen-stage-{tag}-{pid}-{nonce}"));
-        fs::create_dir_all(&path).expect("test setup: scratch dir creates");
-        path
-    }
-
-    fn cleanup(path: &Path) {
-        let _ = fs::remove_dir_all(path);
+        scratch_dir("aether-gen-stage", tag)
     }
 
     #[test]

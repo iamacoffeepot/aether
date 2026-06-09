@@ -53,6 +53,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::cost::ewma_step;
+
 use crate::config::{KnobKind, KnobRecord};
 
 /// Discovery records for the handoff-cost calibration knob (ADR-0090
@@ -127,7 +129,7 @@ impl HandoffEwma {
     fn fold(&self, sample: u64) {
         let mut mean = self.mean.load(Ordering::Relaxed);
         loop {
-            let next = ewma_step(mean, sample);
+            let next = ewma_step(mean, sample, EWMA_SHIFT);
             match self
                 .mean
                 .compare_exchange_weak(mean, next, Ordering::Relaxed, Ordering::Relaxed)
@@ -146,18 +148,6 @@ impl HandoffEwma {
     #[cfg(test)]
     fn samples(&self) -> u64 {
         self.samples.load(Ordering::Relaxed)
-    }
-}
-
-/// One constant-α EWMA step toward `sample`: `current + ((sample − current) >> k)`,
-/// computed on the signed difference so a falling cost converges as fast as
-/// a rising one. Integer-only — the `>> k` is the power-of-two α. Mirrors
-/// `aether_actor::cost`'s step.
-fn ewma_step(current: u64, sample: u64) -> u64 {
-    if sample >= current {
-        current + ((sample - current) >> EWMA_SHIFT)
-    } else {
-        current - ((current - sample) >> EWMA_SHIFT)
     }
 }
 

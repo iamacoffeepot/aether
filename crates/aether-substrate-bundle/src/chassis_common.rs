@@ -37,6 +37,8 @@ use aether_substrate::scheduler::SCHEDULER_KNOBS;
 use confique::Config as _;
 use confique::meta::Meta;
 
+use crate::cli::PersistOverlay;
+
 /// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
 /// the bare-shadowed knobs the chassis bins read inline
 /// (`AETHER_WORKERS`, `AETHER_TICK_HZ`, `AETHER_RPC_PORT`, the desktop
@@ -147,6 +149,29 @@ pub enum PersistOverride {
     EnvOnly,
     /// Argv overlay resolved: use this verbatim.
     Argv(Option<PersistConfig>),
+}
+
+/// Resolve the handle-store persistence overlay the desktop and headless
+/// chassis share (issue 1258). When argv sets any persistence field, the
+/// chassis-bin vote `persist_enabled = true` rides into an argv-then-env
+/// resolved [`PersistConfig`]; otherwise persistence falls through to
+/// env-only resolution at build time (ADR-0049 §9).
+#[must_use]
+pub fn resolve_persist_state(persist: &PersistOverlay) -> PersistOverride {
+    let persist_argv_set = persist.dir.is_some()
+        || persist.persist_disable.is_some()
+        || persist.disk_budget_bytes.is_some()
+        || persist.eviction_tick_secs.is_some();
+    if persist_argv_set {
+        PersistOverride::Argv(PersistConfig::from_argv_then_env(
+            true,
+            persist.dir.clone(),
+            persist.persist_disable,
+            persist.numeric_layer(),
+        ))
+    } else {
+        PersistOverride::EnvOnly
+    }
 }
 
 /// Build the standard single-stage lifecycle config every Tick-driven

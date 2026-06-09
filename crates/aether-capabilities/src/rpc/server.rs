@@ -935,6 +935,29 @@ mod tests {
         (chassis, stream)
     }
 
+    /// Boot a chassis with the deferred-echo actor + trace dispatch
+    /// behind the RPC server, connect a client, and complete the
+    /// handshake. Shared by the deferred-reply settlement tests. Returns
+    /// `(chassis, stream)`; both must stay alive for the listener.
+    fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, TcpStream) {
+        use crate::rpc::test_echo::DeferredEchoActor;
+        use crate::trace::TraceDispatchCapability;
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<DeferredEchoActor>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+        let mut stream = connect_to_rpc_server(&chassis, timeout);
+        complete_handshake(&mut stream);
+        (chassis, stream)
+    }
+
     /// Lift the published `RpcServerHandle`'s `local_port`, open a
     /// `TcpStream`, set `read_timeout`. Shared by every test whose
     /// boot path is more elaborate than `boot_with_rpc_server_only`.
@@ -1202,23 +1225,10 @@ mod tests {
     fn call_deferred_echo_settles_after_reply() {
         use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
         use crate::rpc::wire::{MailEnvelope, MailboxAddress};
-        use crate::trace::TraceDispatchCapability;
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
 
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<DeferredEchoActor>(())
-            .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                peer_kind: test_peer_kind(),
-            })
-            .build_passive()
-            .expect("caps boot");
-
-        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
-        complete_handshake(&mut stream);
+        let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(5));
 
         let payload = postcard::to_allocvec(&DeferredEchoRequest { value: 99 })
             .expect("test setup: DeferredEchoRequest serializes via postcard");
@@ -1297,19 +1307,7 @@ mod tests {
         use aether_kinds::MailEnvelope as TracedEnvelope;
         use aether_kinds::trace::DispatchTraced;
 
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<DeferredEchoActor>(())
-            .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                peer_kind: test_peer_kind(),
-            })
-            .build_passive()
-            .expect("caps boot");
-
-        let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(10));
-        complete_handshake(&mut stream);
+        let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(10));
 
         // Build a batched DispatchTraced with two DeferredEchoRequest
         // envelopes, addressed at the deferred-echo actor by name (the

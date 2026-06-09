@@ -157,15 +157,7 @@ mod tests {
     impl Kind for Answer {
         const NAME: &'static str = "test.task_queue.answer";
         const ID: KindId = KindId(0xD15B_0CC2_0000_0001);
-        fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-            if bytes.len() != size_of::<Self>() {
-                return None;
-            }
-            Some(bytemuck::pod_read_unaligned(bytes))
-        }
-        fn encode_into_bytes(&self) -> Vec<u8> {
-            bytemuck::bytes_of(self).to_vec()
-        }
+        aether_data::pod_kind_codec!();
     }
 
     /// A synthetic chain root for a request — the value the cap handler

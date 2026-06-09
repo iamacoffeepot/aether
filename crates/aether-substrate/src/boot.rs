@@ -150,7 +150,7 @@ impl SubstrateBootBuilder<'_> {
     /// issue 1258). When chassis bins have parsed argv overlays, they
     /// resolve `PersistConfig::from_argv_then_env(...)` themselves and
     /// hand the result in here, bypassing the env-only resolution baked
-    /// into [`crate::handle_store::HandleStore::from_env_persistent`].
+    /// into [`HandleStore::from_env_persistent`].
     /// `None` means "argv said persistence is off". When not called,
     /// env-only resolution runs.
     #[must_use]

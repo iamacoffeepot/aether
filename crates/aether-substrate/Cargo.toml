@@ -73,8 +73,6 @@ png = { version = "0.18", optional = true }
 # Audio-only deps; gated by the `audio` feature. Desktop enables it,
 # headless and hub do not.
 cpal = { version = "0.17", optional = true }
-# ADR-0080 trace queue (always on — substrate-wide tracing).
-crossbeam-queue = "0.3"
 # Issue 635 PR B worker-pool ready queue. MPMC channel — std mpsc is
 # single-consumer so it can't load-balance across pool workers. Still
 # used for settlement/capture one-shots + the close-done signal; the

@@ -28,6 +28,7 @@ use aether_data::canonical::canonical_kind_bytes;
 use aether_data::{Kind, Schema, SchemaType};
 use aether_kinds::{Bundle, DagDescriptor, DagError, Edge, Node, NodeId};
 
+use crate::dag::kind_id_for_schema;
 use crate::dag::transform_registry::TransformRegistry;
 use crate::mail::{CapabilityRegistry, KindId, MailboxEntry, MailboxId, Registry};
 
@@ -494,14 +495,7 @@ fn consumer_slot_kind(
 /// registered kind matches (the schema names a kind this substrate
 /// doesn't know — still a mismatch, just without a precise id to name).
 fn declared_kind_id(mailboxes: &Registry, schema: &SchemaType) -> KindId {
-    let target = canonical_kind_bytes("", schema);
-    mailboxes
-        .list_kind_descriptors()
-        .into_iter()
-        .find(|d| canonical_kind_bytes("", &d.schema) == target)
-        .map_or(KindId(0), |d| {
-            mailboxes.kind_id(&d.name).unwrap_or(KindId(0))
-        })
+    kind_id_for_schema(mailboxes, schema)
 }
 
 /// Does `id` resolve to a live (non-dropped) mailbox in the routing

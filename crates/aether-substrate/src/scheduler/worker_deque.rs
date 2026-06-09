@@ -18,7 +18,7 @@
 //! ([`time_budget`]) trips — then the backlog spills so a *heavy* cascade
 //! parallelises across idle workers. The budget is **adaptive**
 //! (iamacoffeepot/aether#1182): a small multiple of the measured
-//! cross-worker handoff cost ([`super::calibrate::handoff_cost`]) — the
+//! cross-worker handoff cost ([`handoff_cost`]) — the
 //! thing the valve out-amortises — so it tracks the hardware instead of a
 //! one-box constant (the prior fixed 12µs sat at `≈ 6 ×` this box's ~2µs
 //! handoff). `AETHER_LOCAL_TIME_BUDGET_US` still overrides. Duration is the
@@ -214,7 +214,7 @@ pub fn mail_budget() -> Option<u32> {
 ///
 /// `6` reproduces the #1174-tuned default on the box it was tuned on: that
 /// 12µs sits at `≈ 6 ×` this box's measured ~2µs handoff
-/// ([`super::calibrate::handoff_cost`]). On a slower box (a more expensive
+/// ([`handoff_cost`]). On a slower box (a more expensive
 /// handoff) the budget scales up — more inlining is worth it before paying
 /// the steeper handoff — and on a faster box it scales down, so the
 /// trivial-vs-heavy discrimination tracks the hardware instead of a
@@ -243,7 +243,7 @@ const MAX_ADAPTIVE_BUDGET: Duration = Duration::from_micros(60);
 /// value pins the budget and `0` disables the valve (pure inline-cascade,
 /// bounded only by `hard_cap`). Unset (the default), the budget is
 /// **derived from the measured handoff cost**: `derive_budget` of
-/// [`super::calibrate::handoff_cost`] — `BUDGET_HANDOFF_MULTIPLIER ×` the
+/// [`handoff_cost`] — `BUDGET_HANDOFF_MULTIPLIER ×` the
 /// boot-probed, live-refined cross-worker handoff on this box, clamped to
 /// the safety rails. Reading the live estimate (rather than a boot
 /// snapshot) keeps the budget tracking the *operating* handoff cost the

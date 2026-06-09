@@ -411,7 +411,7 @@ impl<'a> NativeCtx<'a> {
 
     /// Reply to an explicit [`Source`] rather than the inbound's own
     /// sender. The ADR-0093 hold-until-resolve path reaches for this:
-    /// [`TaskDone::resolve`](super::dispatch_blocking::TaskDone::resolve)
+    /// [`TaskDone::resolve`]
     /// re-replies through the *originating* caller's reply target
     /// (captured at dispatch, parked in the in-flight ledger), not the
     /// completion-wake's sender (the worker thread's loopback mail, which
@@ -637,7 +637,7 @@ impl NativeCtx<'_> {
     /// stamping the default `(Component(self_mailbox), auto_correlation)`.
     /// The minted [`MailId`] and the chain's `in_flight` accounting are
     /// unchanged — only the recipient's
-    /// [`aether_actor::actor::ctx::OutboundReply::reply_target`]
+    /// [`OutboundReply::reply_target`]
     /// view changes.
     ///
     /// Use this when a cap is **forwarding** another actor's call rather
