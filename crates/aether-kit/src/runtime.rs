@@ -992,7 +992,7 @@ mod tests {
         let diagonal = step_toward(origin, (1000 - 320, 1000 + 320), speed);
         let (mx, mz) = (diagonal.0 - 1000, diagonal.1 - 1000);
         assert_eq!(-mx, mz, "the 45° split is symmetric across the axes");
-        let moved = (f64::from(mx * mx + mz * mz)).sqrt();
+        let moved = f64::from(mx * mx + mz * mz).sqrt();
         assert!(
             (moved - f64::from(speed)).abs() <= 1.0,
             "diagonal distance {moved} should be ≈ {speed}, not {speed}·√2"
