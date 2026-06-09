@@ -350,9 +350,9 @@ impl MailCtx for FfiCtx<'_> {
     }
 }
 
-/// Narrowed capability handle for shutdown hooks (`on_replace`,
-/// `on_drop`). Outbound mail still works through [`Sender`]; the
-/// reply / resolve surfaces are intentionally absent.
+/// Narrowed capability handle for the `on_dehydrate` save hook.
+/// Outbound mail still works through [`Sender`]; the reply / resolve
+/// surfaces are intentionally absent.
 pub struct FfiDropCtx<'a> {
     _borrow: PhantomData<&'a ()>,
 }

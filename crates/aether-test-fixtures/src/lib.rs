@@ -149,6 +149,54 @@ pub struct Vec4Observed {
     pub input: Ref<Vec4>,
 }
 
+/// Driver kind for the stateful multi-actor replace fixture (ADR-0101):
+/// each `Bump` increments the fixture's in-memory counter by one.
+/// Postcard-shaped unit struct.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.bump")]
+pub struct Bump;
+
+/// Query kind for the stateful replace fixture: request the live counter.
+/// The fixture replies with a `CountReport`. Postcard-shaped unit struct.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.count_query")]
+pub struct CountQuery;
+
+/// Reply to `CountQuery`, and the wire shape of the state bundle the
+/// fixture saves in `on_dehydrate` / restores in `on_rehydrate`. A test
+/// asserts this value survives a `replace_component` swap via the
+/// ADR-0101 hooks (now `FfiActor` defaults, no opt-in).
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.test_fixtures.count_report")]
+pub struct CountReport {
+    pub count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use aether_data::{Kind, Ref};

@@ -1817,7 +1817,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     init_method = Some(f);
                 } else if matches!(
                     name.as_str(),
-                    "wire" | "unwire" | "on_replace" | "on_rehydrate"
+                    "wire" | "unwire" | "on_dehydrate" | "on_rehydrate"
                 ) {
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
@@ -2006,6 +2006,19 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             }
             fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_>) {
                 <#self_ty as ::aether_actor::FfiActor>::unwire(self, __aether_ctx);
+            }
+            fn erased_on_dehydrate(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::FfiDropCtx<'_>,
+            ) {
+                <#self_ty as ::aether_actor::FfiActor>::on_dehydrate(self, __aether_ctx);
+            }
+            fn erased_on_rehydrate(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_prior: ::aether_actor::PriorState<'_>,
+            ) {
+                <#self_ty as ::aether_actor::FfiActor>::on_rehydrate(self, __aether_ctx, __aether_prior);
             }
         }
 

@@ -1,14 +1,14 @@
 //! [`Persistence`] — `replace_component` migration-bundle deposit.
 //!
-//! Per-stage capability trait under the issue 663 refactor. Drop ctxs
-//! impl this; runtime and init ctxs deliberately do not (init has no
-//! prior bundle to consume; runtime saves are conceptually deferred to
-//! the `on_replace` hook so the substrate can hand the bundle to the
-//! replacement instance).
+//! Per-stage capability trait under the issue 663 refactor. The
+//! `on_dehydrate` ctx impls this; runtime and init ctxs deliberately
+//! do not (init has no prior bundle to consume; runtime saves are
+//! deferred to the `on_dehydrate` hook so the substrate can hand the
+//! bundle to the replacement instance).
 //!
-//! `save_state` is meaningful in `on_replace`. Calling it from
-//! `on_drop` is technically accepted by the host fn, but the bytes
-//! are then discarded (ADR-0016 §5 — plain drops have no successor).
+//! `save_state` is meaningful in `on_dehydrate`, the save-side
+//! hot-swap hook the substrate runs immediately before a
+//! `replace_component` splice.
 //!
 //! `save_state_kind` is the typed-state convenience (ADR-0040): the
 //! bundle is framed as `[0..8)` little-endian `K::ID` followed by the
@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 
 use aether_data::{Kind, Schema};
 
-/// Migration-bundle deposit surface for shutdown hooks. Init / runtime
-/// ctxs deliberately don't implement this.
+/// Migration-bundle deposit surface for the `on_dehydrate` save hook.
+/// Init / runtime ctxs deliberately don't implement this.
 ///
 /// The trait has no associated types — `save_state` is a pure byte
 /// deposit and the host fn signature is identical across transports.
@@ -38,10 +38,8 @@ pub trait Persistence {
     /// which are component bugs. ADR-0015's trap containment ensures
     /// the panic doesn't stall teardown on the substrate side.
     ///
-    /// May be called zero or one times per `on_replace`; a second
-    /// call overwrites. Calling from `on_drop` is legal but the
-    /// bundle is discarded on plain drops — `drop_component` has no
-    /// successor to hand it to (ADR-0016 §5).
+    /// May be called zero or one times per `on_dehydrate`; a second
+    /// call overwrites.
     fn save_state(&mut self, version: u32, bytes: &[u8]);
 
     /// Persist a typed kind value across `replace_component`

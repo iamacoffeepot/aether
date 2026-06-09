@@ -104,7 +104,7 @@ pub struct ComponentCtx {
     /// substrate routes either over `HubOutbound` or back through
     /// `Mailer` based on the variant.
     pub reply_table: ReplyTable,
-    /// Set by the `save_state` host fn during `on_replace`. The
+    /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
     /// rehydration reads from a scratch offset written by the
@@ -112,7 +112,7 @@ pub struct ComponentCtx {
     pub saved_state: Option<StateBundle>,
     /// Set by the `save_state` host fn when it rejects a call (1 MiB
     /// cap exceeded, OOB pointer). ADR-0016 §4: a failing save aborts
-    /// the replace; the substrate checks this after `on_replace` and
+    /// the replace; the substrate checks this after `on_dehydrate` and
     /// surfaces the message back up the control plane.
     pub save_state_error: Option<String>,
     /// Set by the `init_failed_p32` host fn when the guest's `init`
@@ -517,7 +517,7 @@ pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 /// it as the exact slice length so a parser bug or a corrupted frame
 /// can't read past the substrate-written bytes into adjacent linear
 /// memory. ADR-0015 + issue 584 add optional `wire`, `unwire`,
-/// `on_replace`, and `on_rehydrate` exports; the substrate calls
+/// `on_dehydrate`, and `on_rehydrate` exports; the substrate calls
 /// them at the right lifecycle moments when present and silently
 /// skips when absent (no-op trait defaults compile down to no symbol
 /// under LTO, so components that don't override stay
@@ -541,11 +541,11 @@ pub struct Component {
     /// `WasmTrampoline::wire` invokes [`Self::wire`] post-registration.
     wire: Option<TypedFunc<u64, u32>>,
     /// Issue 584 Phase 2b: pre-shutdown mail-allowed hook. Called by
-    /// the trampoline (via [`Self::unwire`]) before `on_replace` on
+    /// the trampoline (via [`Self::unwire`]) before `on_dehydrate` on
     /// the dying instance, or before the `Component` value drops on a
     /// `DropComponent`.
     unwire: Option<TypedFunc<u64, u32>>,
-    on_replace: Option<TypedFunc<(), u32>>,
+    on_dehydrate: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
     /// ADR-0095: the guest's generic delivery allocator
     /// (`realloc_p32`, `cabi_realloc`-shaped). Every payload — mail, config,
@@ -852,18 +852,19 @@ impl Component {
         }
 
         // ADR-0015 hook exports are optional. A component whose
-        // `Replaceable::on_replace` is the default no-op still emits
-        // the symbol via `export!`, but a raw-FFI guest without the
-        // macro won't. Either way: look it up, store `None` if
-        // missing. (Issue 584 Phase 3 retired `on_drop` — `unwire` is
-        // the pre-shutdown hook now.)
-        let on_replace = instance
-            .get_typed_func::<(), u32>(&mut store, "on_replace")
+        // `FfiActor::on_dehydrate` is the default no-op still emits the
+        // symbol via `export!`, but a raw-FFI guest without the macro
+        // won't. Either way: look it up, store `None` if missing.
+        // (Issue 584 Phase 3 retired `on_drop` — `unwire` is the
+        // pre-shutdown hook now.) Named save/restore-side so the two
+        // locals don't read as a `de`/`re` minimal pair.
+        let save_hook = instance
+            .get_typed_func::<(), u32>(&mut store, "on_dehydrate")
             .ok();
         // ADR-0016: `on_rehydrate` takes `(version, ptr, len)` — the
         // substrate writes the state bytes into a delivery region (ADR-0095,
         // via `call_on_rehydrate`), then calls the shim with `(version, ptr, len)`.
-        let on_rehydrate = instance
+        let restore_hook = instance
             .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32")
             .ok();
         // Issue 584 Phase 2b: optional wire/unwire exports. Both take
@@ -893,8 +894,8 @@ impl Component {
             receive,
             wire,
             unwire,
-            on_replace,
-            on_rehydrate,
+            on_dehydrate: save_hook,
+            on_rehydrate: restore_hook,
             realloc,
             small_ptr,
             large_ptr,
@@ -1066,7 +1067,7 @@ impl Component {
     }
 
     /// Issue 584 Phase 2b (ADR-0079 amended): pre-shutdown mail-allowed
-    /// hook. Invoked by the trampoline before `on_replace` on the
+    /// hook. Invoked by the trampoline before `on_dehydrate` on the
     /// dying instance, or before the `Component` value drops on a
     /// `DropComponent`. Same trap containment as the other hooks —
     /// a guest panic doesn't stall teardown.
@@ -1078,22 +1079,22 @@ impl Component {
         }
     }
 
-    /// Invoke the guest's `on_replace` hook if it exports one.
+    /// Invoke the guest's `on_dehydrate` hook if it exports one.
     /// Wasmtime traps (guest panics, unreachable) are caught and
     /// logged rather than propagated — per ADR-0015, a panicking
     /// hook must not stall teardown.
-    pub fn on_replace(&mut self) {
-        if let Some(f) = self.on_replace.clone()
+    pub fn on_dehydrate(&mut self) {
+        if let Some(f) = self.on_dehydrate.clone()
             && let Err(e) = f.call(&mut self.store, ())
         {
-            tracing::error!(target: "aether_substrate::component", error = %e, "on_replace hook trapped");
+            tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
         }
     }
 
     /// Extract the state bundle the guest deposited via `save_state`
-    /// during `on_replace`. Returns `None` if `save_state` was never
+    /// during `on_dehydrate`. Returns `None` if `save_state` was never
     /// called (component doesn't implement migration, or the hook is
-    /// a no-op). Called by the control plane *after* `on_replace`
+    /// a no-op). Called by the control plane *after* `on_dehydrate`
     /// runs on the old instance — the bundle has to outlive the
     /// store.
     pub fn take_saved_state(&mut self) -> Option<StateBundle> {
@@ -1123,7 +1124,7 @@ impl Component {
     /// bundle is silently discarded when no handler claims it).
     ///
     /// ADR-0016 §4 specifies that a trap here aborts the replace, so errors are
-    /// propagated rather than contained (unlike `on_replace` / `unwire`). A
+    /// propagated rather than contained (unlike `on_dehydrate` / `unwire`). A
     /// region that can't be allocated, or a bundle past the deliverable ceiling,
     /// propagates as an `Err` too.
     pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> wasmtime::Result<()> {
@@ -1297,7 +1298,7 @@ mod tests {
         Component::instantiate(&engine, &linker, &module, ctx(), config_bytes, None)
     }
 
-    /// WAT where `on_replace` writes 0x11 to offset 200 — same pattern
+    /// WAT where `on_dehydrate` writes 0x11 to offset 200 — same pattern
     /// as `control.rs` test shape but kept local so component tests
     /// stay standalone. (Issue 584 Phase 3 retired the legacy
     /// `on_drop` companion hook; pre-shutdown coverage rides
@@ -1307,7 +1308,7 @@ mod tests {
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "on_replace") (result i32)
+            (func (export "on_dehydrate") (result i32)
                 i32.const 200
                 i32.const 0x11
                 i32.store
@@ -1493,7 +1494,7 @@ mod tests {
 
     /// WAT whose `unwire` traps. Tests that `Component::unwire`
     /// contains the trap (logs but doesn't propagate), same pattern
-    /// as `on_replace`'s trap-is-contained behaviour.
+    /// as `on_dehydrate`'s trap-is-contained behaviour.
     const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -1503,7 +1504,7 @@ mod tests {
                 unreachable))
     "#;
 
-    /// ADR-0016 save-side: `on_replace` calls `save_state` with a
+    /// ADR-0016 save-side: `on_dehydrate` calls `save_state` with a
     /// version and 4 bytes at offset 300 (`0xDE 0xAD 0xBE 0xEF`).
     const WAT_SAVES_STATE: &str = r#"
         (module
@@ -1513,7 +1514,7 @@ mod tests {
             (data (i32.const 300) "\de\ad\be\ef")
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "on_replace") (result i32)
+            (func (export "on_dehydrate") (result i32)
                 (drop (call $save_state
                     (i32.const 7)    ;; version
                     (i32.const 300)  ;; ptr
@@ -1521,7 +1522,7 @@ mod tests {
                 i32.const 0))
     "#;
 
-    /// ADR-0016 save-side: `on_replace` attempts a save larger than
+    /// ADR-0016 save-side: `on_dehydrate` attempts a save larger than
     /// the 1 MiB cap. The host fn records the error on the ctx and
     /// returns status 3 (too-large). The guest drops the return.
     const WAT_SAVES_TOO_LARGE: &str = r#"
@@ -1531,7 +1532,7 @@ mod tests {
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "on_replace") (result i32)
+            (func (export "on_dehydrate") (result i32)
                 (drop (call $save_state
                     (i32.const 1)            ;; version
                     (i32.const 0)            ;; ptr
@@ -1612,18 +1613,18 @@ mod tests {
     }
 
     #[test]
-    fn on_replace_invokes_export_and_writes_marker() {
+    fn on_dehydrate_invokes_export_and_writes_marker() {
         let mut component = instantiate(WAT_HOOKS);
         assert_eq!(component.read_u32(200), 0);
-        component.on_replace();
+        component.on_dehydrate();
         assert_eq!(component.read_u32(200), 0x11);
     }
 
     #[test]
-    fn on_replace_on_component_without_export_is_noop() {
+    fn on_dehydrate_on_component_without_export_is_noop() {
         let mut component = instantiate(WAT_NO_HOOKS);
         // Just needs to not panic. No marker to check.
-        component.on_replace();
+        component.on_dehydrate();
     }
 
     /// ADR-0090 / ADR-0095: `Component::instantiate` places `config_bytes` in a
@@ -1747,10 +1748,10 @@ mod tests {
     }
 
     #[test]
-    fn on_replace_save_state_populates_bundle() {
+    fn on_dehydrate_save_state_populates_bundle() {
         let mut component = instantiate(WAT_SAVES_STATE);
         assert!(component.take_saved_state().is_none());
-        component.on_replace();
+        component.on_dehydrate();
         let bundle = component.take_saved_state().expect("bundle saved");
         assert_eq!(bundle.version, 7);
         assert_eq!(bundle.bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
@@ -1785,7 +1786,7 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: `Component::unwire` invokes the guest's
-    /// `unwire` export. Trampoline calls this before `on_replace`
+    /// `unwire` export. Trampoline calls this before `on_dehydrate`
     /// on the dying instance, or before the `Component` value drops
     /// on a `DropComponent`.
     #[test]
@@ -1815,7 +1816,7 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: `unwire` traps are contained the same way
-    /// `on_replace` traps are — logged but not propagated (per
+    /// `on_dehydrate` traps are — logged but not propagated (per
     /// ADR-0015, panicking hooks must not stall teardown).
     #[test]
     fn unwire_trap_is_contained() {
@@ -1826,7 +1827,7 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: a component without a `wire` / `unwire`
-    /// export is a no-op (matches the `on_replace` pattern).
+    /// export is a no-op (matches the `on_dehydrate` pattern).
     #[test]
     fn unwire_on_component_without_export_is_noop() {
         let mut component = instantiate(WAT_NO_HOOKS);
@@ -1899,9 +1900,9 @@ mod tests {
     }
 
     #[test]
-    fn on_replace_save_state_without_export_leaves_bundle_empty() {
+    fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
         let mut component = instantiate(WAT_NO_HOOKS);
-        component.on_replace();
+        component.on_dehydrate();
         assert!(component.take_saved_state().is_none());
         assert!(component.take_save_error().is_none());
     }
@@ -1909,7 +1910,7 @@ mod tests {
     #[test]
     fn save_state_over_cap_records_error_and_no_bundle() {
         let mut component = instantiate(WAT_SAVES_TOO_LARGE);
-        component.on_replace();
+        component.on_dehydrate();
         let err = component.take_save_error().expect("error recorded");
         assert!(err.contains("exceeds"), "got: {err}");
         assert!(component.take_saved_state().is_none());
