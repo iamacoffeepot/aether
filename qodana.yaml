@@ -11,6 +11,10 @@ profile:
 
 # Paths Qodana shouldn't analyse.
 exclude:
+  # Crate-version-upgrade nags are off project-wide: bumping a dependency
+  # on a linter's say-so is a supply-chain risk, so version bumps stay a
+  # deliberate human decision rather than a quality-gate finding.
+  - name: NewCrateVersionAvailable
   - name: All
     paths:
       - target

@@ -241,10 +241,10 @@ mod native {
         use aether_substrate::mail::registry::Registry;
         use aether_substrate::mail::{Source, SourceAddr};
         use aether_substrate::runtime::thread_name::register;
-        use serde::de::DeserializeOwned;
         use std::sync::Arc;
         use std::sync::mpsc::Receiver;
-        use std::time::Duration;
+
+        use crate::test_chassis::decode_reply;
 
         /// Cap + loopback mailer + transport wired so `ctx.reply`
         /// egresses as a `ToSession` event the test can decode. Mirrors
@@ -283,20 +283,6 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             )
-        }
-
-        fn decode_reply<K: aether_data::Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-            let event = rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("test: egress event arrives within 1s deadline");
-            let EgressEvent::ToSession {
-                kind_name, payload, ..
-            } = event
-            else {
-                panic!("expected ToSession egress, got {event:?}");
-            };
-            assert_eq!(kind_name, K::NAME);
-            postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
         }
 
         /// The served manifest carries a known chassis mailbox name

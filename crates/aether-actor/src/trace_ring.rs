@@ -5,7 +5,7 @@
 //! (`record_sent` / `record_received` / `record_finished`) push the
 //! mail-graph events for the current actor into its ring; a coordinator
 //! reconstructs a trace tree on demand by fanning out
-//! [`aether_kinds::trace::TraceTail`] across live actors and stitching
+//! [`TraceTail`] across live actors and stitching
 //! the per-ring slices by lineage keys.
 //!
 //! The ring stores only the mail-graph events — `Sent` lands in the

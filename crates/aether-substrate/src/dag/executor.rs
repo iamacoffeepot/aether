@@ -41,7 +41,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use aether_data::canonical::canonical_kind_bytes;
 use aether_data::{
     DagId, HandleId, KindId, MailId, MailboxId, Ref, SchemaType, Tag, TransformId,
     content_addressed_handle_id, with_tag,
@@ -52,6 +51,7 @@ use aether_kinds::{
 };
 
 use crate::actor::native::NativeCtx;
+use crate::dag::kind_id_for_schema;
 use crate::dag::state::{CallBuffer, DagState, DagStatus};
 use crate::dag::transform_pool::{TransformOutcome, TransformPool};
 use crate::dag::transform_registry::TransformRegistry;
@@ -1367,14 +1367,7 @@ fn assemble_request(
 /// stored kind equals the slot type.
 fn slot_inner_kind_id(registry: &Registry, cell: &aether_data::SchemaCell) -> KindId {
     let inner: &SchemaType = cell;
-    let target = canonical_kind_bytes("", inner);
-    registry
-        .list_kind_descriptors()
-        .into_iter()
-        .find(|d| canonical_kind_bytes("", &d.schema) == target)
-        .map_or(KindId(0), |d| {
-            registry.kind_id(&d.name).unwrap_or(KindId(0))
-        })
+    kind_id_for_schema(registry, inner)
 }
 
 #[cfg(test)]

@@ -159,6 +159,29 @@ pub trait Kind {
     }
 }
 
+/// Emit the `Kind::decode_from_bytes` / `encode_into_bytes` pair for a
+/// hand-rolled `Kind` impl over a `#[repr(C)]` + `bytemuck::Pod` type.
+///
+/// Use inside an `impl Kind for T` block whose `NAME` / `ID` are set by
+/// hand — a fixed const id for a test fixture, or an internal kind kept
+/// out of the `#[derive(Kind)]` inventory submission. The emitted bodies
+/// route through the same cast-shape codec
+/// ([`__derive_runtime::decode_cast`] / [`__derive_runtime::encode_cast`])
+/// that `#[derive(Kind)]` generates, so the wire shape matches a derived
+/// kind byte-for-byte.
+#[macro_export]
+macro_rules! pod_kind_codec {
+    () => {
+        fn decode_from_bytes(bytes: &[u8]) -> ::core::option::Option<Self> {
+            $crate::__derive_runtime::decode_cast::<Self>(bytes)
+        }
+
+        fn encode_into_bytes(&self) -> $crate::__derive_runtime::Vec<u8> {
+            $crate::__derive_runtime::encode_cast::<Self>(self)
+        }
+    };
+}
+
 /// `Kind` impl for the unit type. Lets `()` ride the same
 /// `Kind::decode_from_bytes` / `Kind::encode_into_bytes` shim path as
 /// real kinds, which is what makes the `FfiActor::Config = ()` default

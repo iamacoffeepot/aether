@@ -249,7 +249,7 @@ pub struct NamespaceRoots {
         config(
             env = "AETHER_SAVE_DIR",
             cli_long = "save-dir",
-            parse = parse_dir
+            parse = native::parse_dir
         )
     )]
     pub save: PathBuf,
@@ -258,7 +258,7 @@ pub struct NamespaceRoots {
         config(
             env = "AETHER_ASSETS_DIR",
             cli_long = "assets-dir",
-            parse = parse_dir
+            parse = native::parse_dir
         )
     )]
     pub assets: PathBuf,
@@ -267,7 +267,7 @@ pub struct NamespaceRoots {
         config(
             env = "AETHER_CONFIG_DIR",
             cli_long = "config-dir",
-            parse = parse_dir
+            parse = native::parse_dir
         )
     )]
     pub config: PathBuf,
@@ -416,20 +416,10 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     }
 }
 
-// The derive's emitted Layer + Overlay + `from_env` shims live at the
-// file root (same scope as the `NamespaceRoots` struct itself). The
-// `parse_dir` helper they reference must therefore also live at file
-// root; the legacy bridge-mod-local helper is re-exported via the
-// re-export below.
-//
-// The Layer type re-export is no longer needed — the derive emits
-// `NamespaceRootsLayer` at this very scope.
-
-// `parse_dir` is reachable from the derive-emitted Layer fields via
-// the file-root scope. The bridge mod re-exports its definitions
-// (`parse_dir`, `EmptyDir`) so the prior layout doesn't need to move.
-#[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
-use native::parse_dir;
+// The derive emits the Layer + Overlay + `from_env` shims at this scope
+// (`NamespaceRootsLayer` alongside the `NamespaceRoots` struct). Their
+// field parsers name `native::parse_dir` by its full path, so the bridge
+// mod's helper stays put — no file-root re-export needed.
 
 #[aether_actor::bridge(singleton)]
 mod native {
@@ -690,8 +680,6 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use std::env::temp_dir;
-
         use super::super::{
             AdapterRegistry, Delete, FileAdapter, FsError, List, LocalFileAdapter, NamespaceRoots,
             Read, Write,
@@ -706,16 +694,13 @@ mod native {
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::Source;
 
-        use crate::test_chassis::{TestChassis, fresh_substrate};
+        use crate::test_chassis::{
+            TestChassis, cleanup, decode_reply, fresh_substrate, scratch_dir,
+        };
         use aether_substrate::mail::SourceAddr;
         use aether_substrate::mail::registry;
-        use serde::de::DeserializeOwned;
         use std::fs;
-        use std::process;
         use std::sync::mpsc::Receiver;
-        use std::time::Duration;
-        use std::time::SystemTime;
-        use std::time::UNIX_EPOCH;
 
         // ADR-0090: the confique migration is byte-identical to the prior
         // `env_or_default` reader. These exercise resolution without
@@ -776,25 +761,8 @@ mod native {
             }
         }
 
-        /// Manual tempdir helper to avoid pulling in the `tempfile`
-        /// crate. Caller cleans up via [`cleanup`] after the test asserts.
         fn scratch_root(tag: &str) -> PathBuf {
-            let pid = process::id();
-            let nonce: u64 = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                // Nanosecond clock fits comfortably in u64 for the next ~584 years.
-                .map_or(0, |d| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let nanos = d.as_nanos() as u64;
-                    nanos
-                });
-            let path = temp_dir().join(format!("aether-io-cap-{tag}-{pid}-{nonce}"));
-            fs::create_dir_all(&path).expect("test setup: scratch dir creates");
-            path
-        }
-
-        fn cleanup(path: &Path) {
-            let _ = fs::remove_dir_all(path);
+            scratch_dir("aether-io-cap", tag)
         }
 
         fn roots_under(root: &Path) -> NamespaceRoots {
@@ -1034,20 +1002,6 @@ mod native {
         }
 
         use crate::test_chassis::test_mailer_and_rx;
-
-        fn decode_reply<K: aether_data::Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-            let event = rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("test: egress event arrives within 1s deadline");
-            let EgressEvent::ToSession {
-                kind_name, payload, ..
-            } = event
-            else {
-                panic!("expected ToSession egress, got {event:?}");
-            };
-            assert_eq!(kind_name, K::NAME);
-            postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
-        }
 
         /// Boot the cap against a fresh tempdir; assert the mailbox
         /// is registered.

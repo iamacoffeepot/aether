@@ -103,12 +103,13 @@ impl CostCell {
             let mean = self.mean.load(Ordering::Relaxed);
             // Signed delta folded with a symmetric shift so the EWMA
             // tracks both rising and falling costs without float.
-            let next_mean = ewma_step(mean, sample);
+            let next_mean = ewma_step(mean, sample, EWMA_SHIFT);
             self.mean.store(next_mean, Ordering::Relaxed);
 
             let dev = sample.abs_diff(next_mean);
             let mad = self.mad.load(Ordering::Relaxed);
-            self.mad.store(ewma_step(mad, dev), Ordering::Relaxed);
+            self.mad
+                .store(ewma_step(mad, dev, EWMA_SHIFT), Ordering::Relaxed);
         }
         self.samples
             .store(prior.saturating_add(1), Ordering::Relaxed);
@@ -135,14 +136,16 @@ impl CostCell {
 }
 
 /// One constant-α EWMA step toward `sample`: `current + (sample −
-/// current) >> k`, computed on the signed difference so a falling cost
-/// converges as fast as a rising one. Integer-only — the `>> k` is the
-/// power-of-two α.
-fn ewma_step(current: u64, sample: u64) -> u64 {
+/// current) >> shift`, computed on the signed difference so a falling
+/// cost converges as fast as a rising one. Integer-only — the
+/// `>> shift` is the power-of-two α. Shared with the substrate
+/// scheduler's handoff calibration, which folds with its own shift.
+#[must_use]
+pub fn ewma_step(current: u64, sample: u64, shift: u32) -> u64 {
     if sample >= current {
-        current + ((sample - current) >> EWMA_SHIFT)
+        current + ((sample - current) >> shift)
     } else {
-        current - ((current - sample) >> EWMA_SHIFT)
+        current - ((current - sample) >> shift)
     }
 }
 

@@ -27,12 +27,11 @@ use aether_data::Kind;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::handle_store::PersistConfig;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server,
+    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server, resolve_persist_state,
     tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
@@ -142,25 +141,9 @@ impl HeadlessEnv {
         let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
         let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
-        // Persistence overlay: the cap accepts the full argv-then-env
-        // overlay shape (dir + persist_disable + numeric layer). The
-        // chassis-bin verdict is `persist_enabled=true` (headless opts
-        // into on-disk persistence per ADR-0049 §9); the cap layer
-        // applies the argv → env → default precedence.
-        let persist_argv_set = persist.dir.is_some()
-            || persist.persist_disable.is_some()
-            || persist.disk_budget_bytes.is_some()
-            || persist.eviction_tick_secs.is_some();
-        let persist_state = if persist_argv_set {
-            PersistOverride::Argv(PersistConfig::from_argv_then_env(
-                true,
-                persist.dir.clone(),
-                persist.persist_disable,
-                persist.numeric_layer(),
-            ))
-        } else {
-            PersistOverride::EnvOnly
-        };
+        // Persistence overlay shared with desktop (issue 1258); headless
+        // opts into on-disk persistence per ADR-0049 §9.
+        let persist_state = resolve_persist_state(&persist);
         let handle_store_max_bytes = persist.max_bytes;
         // Chassis-wide knobs: argv-then-env shadow (ad-hoc, lifted to
         // confique in unit e1). `cli.tick_hz` wins when `Some`, falls

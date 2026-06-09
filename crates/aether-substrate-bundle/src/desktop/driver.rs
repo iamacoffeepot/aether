@@ -158,9 +158,9 @@ pub struct App {
     /// window occludes) — the case `aether.window.focus` most needs,
     /// since the loop is otherwise parked until a winit event arrives.
     window_inbox: Receiver<Envelope>,
-    /// Per-actor [`aether_actor::local::ActorSlots`] carried out of the
+    /// Per-actor [`local::ActorSlots`] carried out of the
     /// [`aether_substrate::MailboxClaim`] this driver produced at boot.
-    /// Stamped into TLS via [`aether_actor::local::with_stamped`] around
+    /// Stamped into TLS via [`local::with_stamped`] around
     /// the bespoke `aether.window` inbox drain so framework-built-in
     /// dispatch arms (`aether.log.tail` / `aether.trace.tail` /
     /// `aether.cost.tail`) reach the driver's per-actor `Local<T>`
@@ -373,7 +373,7 @@ fn resolve_fullscreen(
 /// serves these kinds — see the issue body for the contract.
 ///
 /// Caller invariant: must run inside a `local::with_stamped` block
-/// against the driver's [`aether_actor::local::ActorSlots`] so the
+/// against the driver's [`local::ActorSlots`] so the
 /// log / trace arms reach the driver's per-actor ring. Factored out of
 /// [`App::dispatch_window_envelope`] so the unit test directly drives
 /// the routing shape without standing up a winit `App`.
@@ -738,7 +738,7 @@ impl App {
     /// else warns and drops.
     ///
     /// The whole drain is wrapped in
-    /// [`aether_actor::local::with_stamped`] against
+    /// [`local::with_stamped`] against
     /// [`Self::actor_slots`] so the framework arms reach this driver's
     /// per-actor `ActorLogRing` / `ActorTraceRing` (the same property
     /// `DispatcherSlot::run_cycle` opens for every standard actor).

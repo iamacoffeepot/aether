@@ -21,3 +21,24 @@ pub mod state;
 pub mod transform_pool;
 pub mod transform_registry;
 pub mod validator;
+
+use aether_data::SchemaType;
+use aether_data::canonical::canonical_kind_bytes;
+
+use crate::mail::{KindId, Registry};
+
+/// Best-effort registered kind id for a schema: searches the registered
+/// kind vocabulary for a descriptor whose schema canonically matches
+/// `schema` and returns its id, falling back to `KindId(0)` when no
+/// registered kind matches (the schema names a kind this substrate
+/// doesn't know — still a usable answer, just without a precise id).
+pub(crate) fn kind_id_for_schema(registry: &Registry, schema: &SchemaType) -> KindId {
+    let target = canonical_kind_bytes("", schema);
+    registry
+        .list_kind_descriptors()
+        .into_iter()
+        .find(|d| canonical_kind_bytes("", &d.schema) == target)
+        .map_or(KindId(0), |d| {
+            registry.kind_id(&d.name).unwrap_or(KindId(0))
+        })
+}
