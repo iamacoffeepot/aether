@@ -1292,6 +1292,87 @@ mod tests {
         );
     }
 
+    /// iamacoffeepot/aether#1489: a `Quit` mail drives the frame
+    /// lifecycle to its `Shutdown` terminal, finishing the in-flight
+    /// `Tick → Render → Present` frame first because the quit edge lives
+    /// on `Present` (ADR-0082 §3). This is the CI-runnable coverage for
+    /// the drain — the desktop winit `CloseRequested` / ctrlc bridges
+    /// that push the `Quit` are MCP-smoke territory, but the `Quit →
+    /// Present → Shutdown` graph behaviour they depend on is exercised
+    /// here without a live window (the bench shares the same
+    /// `frame_lifecycle_config` graph desktop uses).
+    ///
+    /// Registers an inline mailbox subscribed to the `Shutdown` stage,
+    /// sends `Quit` to `aether.lifecycle`, then advances one frame. The
+    /// run-frame loop drives the whole `Tick → Render → Present →
+    /// Shutdown` chain in that single advance once `quit_pending` is set
+    /// (each stage breaks the loop only at `Tick` cycle-complete or the
+    /// `next == 0` terminal), so observing the `Shutdown` broadcast at the
+    /// subscriber proves the quit was consumed at `Present` and that
+    /// `Shutdown` fired + settled.
+    #[test]
+    fn quit_drains_frame_then_broadcasts_shutdown() {
+        use aether_data::Kind as DataKind;
+        use aether_kinds::{LifecycleSubscribe, Quit, Shutdown};
+        use aether_substrate::mail::registry::MailDispatch;
+        use std::sync::Mutex;
+
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+
+        // Record the kind id of every mail the observer receives. The
+        // lifecycle cap broadcasts the `Shutdown` stage to its
+        // subscribers when it reaches the terminal; `register_inline` is
+        // the right variant (immediate work, no downstream enqueue) so
+        // the producer-side settlement bracket stays on the broadcast
+        // call site — the same shape the Tick-fanout test above relies on.
+        let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_handler = Arc::clone(&observed);
+        let observer_mailbox = tb.registry.register_inline(
+            "issue_1489_shutdown_observer",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                observed_for_handler
+                    .lock()
+                    .expect("test setup: observed mutex is never poisoned")
+                    .push(dispatch.kind.0);
+            }),
+        );
+
+        // Subscribe to Shutdown, set the quit flag, then advance one
+        // frame — `execute` settles each step before the next, so the
+        // subscription and `quit_pending` are both in place when the
+        // advance fires.
+        tb.execute(vec![
+            (
+                "subscribe_shutdown",
+                BenchOp::send_mail(
+                    "aether.lifecycle",
+                    &LifecycleSubscribe {
+                        stage: <Shutdown as DataKind>::ID.0,
+                        mailbox: observer_mailbox.0,
+                    },
+                ),
+            ),
+            ("quit", BenchOp::send_mail("aether.lifecycle", &Quit {})),
+            ("advance", BenchOp::advance(1)),
+        ])
+        .expect("subscribe + quit + advance");
+
+        let observed = observed
+            .lock()
+            .expect("test setup: observed mutex is never poisoned");
+        assert!(
+            observed.contains(&<Shutdown as DataKind>::ID.0),
+            "Shutdown broadcast never reached the subscriber — quit was not drained to the \
+             terminal; observed kind ids: {observed:?}",
+        );
+    }
+
     /// Issue 607 Phase 3 verify: spawn an instanced actor through
     /// `TestBench::spawn_actor`, exercise `Subname::Counter` +
     /// `Subname::Named`, assert returned `MailboxId` matches the

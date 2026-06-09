@@ -106,6 +106,14 @@ pub enum UserEvent {
     /// occluded window sits undrained until an unrelated winit event
     /// nudges the loop.
     WindowMail,
+    /// A SIGINT/SIGTERM was observed by the signal-watcher thread
+    /// (iamacoffeepot/aether#1489). Carries no work itself — it only
+    /// wakes the loop so `about_to_wait` observes the shutdown flag and
+    /// runs the `Quit`-push path, mirroring `WindowMail`. Needed because
+    /// an async-signal-safe handler can't poke winit, and a parked
+    /// (`ControlFlow::Wait`, occluded) loop otherwise never runs
+    /// `about_to_wait` to see the flag.
+    Quit,
 }
 
 /// Marker type for the desktop chassis. Carries no fields — the
@@ -447,9 +455,11 @@ impl DesktopChassis {
             anthropic,
             gemini,
         };
-        // ADR-0082 §1 / PR 3b: desktop's lifecycle is the shared Tick-
-        // only graph today. A future PR adds `Render` / `Present`
-        // states so the render cap subscribes per ADR-0082 §11.
+        // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
+        // `Tick → Render → Present → Tick` frame graph, with the `Quit`
+        // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
+        // in-flight frame before shutting down (see the driver's
+        // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)

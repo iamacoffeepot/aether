@@ -17,7 +17,7 @@
 //! every passive in reverse boot order via `BootedPassives::Drop`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use aether_actor::Actor;
@@ -28,7 +28,7 @@ use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
     CaptureFrameResult, FocusWindow, FocusWindowResult, Key, KeyRelease, LifecycleAdvanceComplete,
-    MouseButton, MouseMove, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    MouseButton, MouseMove, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, Tick, WindowMode, WindowSize, keycode,
 };
 use aether_substrate::actor::native::envelope::Envelope;
@@ -49,7 +49,7 @@ use aether_substrate::{
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -184,6 +184,22 @@ pub struct App {
     /// `MailId` for the trace observer to root a tree on. Symmetric
     /// with the per-actor counter on `NativeBinding`.
     chassis_correlation: AtomicU64,
+    /// True once a graceful-shutdown `Quit` has been pushed to
+    /// `aether.lifecycle` (iamacoffeepot/aether#1489), via either
+    /// `WindowEvent::CloseRequested` or an observed SIGINT/SIGTERM.
+    /// Guards [`App::request_quit`] so the `Quit` mail is pushed exactly
+    /// once, and bypasses the `RedrawRequested` occlusion early-return so
+    /// the shutdown frame still drives the lifecycle to its `Shutdown`
+    /// terminal even on a minimized/hidden window.
+    quit_requested: bool,
+    /// SIGINT/SIGTERM shutdown flag, flipped by the signal-watcher
+    /// installed in [`DesktopDriverCapability::boot`]
+    /// (iamacoffeepot/aether#1489). Polled at the top of
+    /// [`ApplicationHandler::about_to_wait`]; on first observation the
+    /// driver runs the same `Quit`-push path as `CloseRequested`. A
+    /// struct field (mirroring headless's flag) so the watcher and the
+    /// winit loop share one source of truth.
+    shutdown: Arc<AtomicBool>,
 }
 
 /// Translate a winit `KeyCode` into the engine's stable named-key u32
@@ -456,6 +472,87 @@ fn occluded_capture_disposition(
     })
 }
 
+/// Install a SIGINT/SIGTERM → graceful-shutdown bridge for the desktop
+/// chassis (iamacoffeepot/aether#1489). On the first delivered signal it
+/// flips `shutdown` (the flag [`App::about_to_wait`] polls) and sends
+/// [`UserEvent::Quit`] through `proxy` to wake a parked
+/// (`ControlFlow::Wait`, occluded) loop — the loop then runs
+/// `about_to_wait`, observes the flag, and drives the lifecycle to
+/// `Shutdown` (the desktop analogue of headless's tick-loop flag poll).
+///
+/// Unlike headless's `signal_hook::flag::register` — which is
+/// async-signal-safe but can only flip a bool — the desktop loop must be
+/// *woken*, and `EventLoopProxy::send_event` is not async-signal-safe.
+/// So a dedicated watcher thread blocks on the signal stream and does
+/// both the flag flip and the proxy wake; it doesn't freeze the winit
+/// loop (a separate thread), so the constraint that ruled this out for
+/// the single-threaded headless tick loop doesn't apply here. SIGTERM
+/// joins SIGINT so supervisors / `kill` (no `-9`) / CI cancellation also
+/// run teardown. Best-effort: a failed install warn-logs and leaves
+/// shutdown to `WindowEvent::CloseRequested` only.
+#[cfg(unix)]
+fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
+    use std::thread;
+
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let shutdown = Arc::clone(shutdown);
+    let mut signals = match Signals::new([SIGINT, SIGTERM]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::boot",
+                error = %e,
+                "desktop: shutdown signal handler install failed; \
+                 only window-close will trigger graceful shutdown",
+            );
+            return;
+        }
+    };
+    // Infra thread: it blocks on the OS signal stream and holds no
+    // settlement/trace contract — the work it triggers (the `Quit` push)
+    // happens later, on the winit main thread, through the normal mail
+    // path. A separate thread (not the single-threaded winit loop), so
+    // it never freezes the loop.
+    #[allow(clippy::disallowed_methods)]
+    let spawned = thread::Builder::new()
+        .name("aether-desktop-signal".into())
+        .spawn(move || {
+            // The first signal begins graceful shutdown; the iterator
+            // only ends if the underlying fd closes (it doesn't for the
+            // thread's lifetime), so a single `next()` is the whole job.
+            if signals.forever().next().is_some() {
+                shutdown.store(true, Ordering::SeqCst);
+                let _ = proxy.send_event(UserEvent::Quit);
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(
+            target: "aether_substrate::boot",
+            error = %e,
+            "desktop: shutdown signal-watcher thread failed to spawn; \
+             only window-close will trigger graceful shutdown",
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
+    let shutdown = Arc::clone(shutdown);
+    if let Err(e) = ctrlc::set_handler(move || {
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = proxy.send_event(UserEvent::Quit);
+    }) {
+        tracing::error!(
+            target: "aether_substrate::boot",
+            error = %e,
+            "desktop: ctrl-c handler install failed; \
+             only window-close will trigger graceful shutdown",
+        );
+    }
+}
+
 impl App {
     /// ADR-0080 §6 chassis-source push helper (issue
     /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
@@ -476,6 +573,36 @@ impl App {
         }
         self.queue
             .push_chassis_root_mail(correlation, recipient, kind, payload, count)
+    }
+
+    /// Begin graceful shutdown (iamacoffeepot/aether#1489). Pushes a
+    /// chassis-root [`Quit`] mail to `aether.lifecycle` (which sets the
+    /// cap's `quit_pending`), marks `quit_requested`, and pokes a redraw
+    /// so the `RedrawRequested` advance loop runs. The cap consumes the
+    /// quit at its `Present` stage (ADR-0082 §3) — so the in-flight
+    /// `Tick → Render → Present` frame finishes composing — then advances
+    /// to the `Shutdown` terminal; the advance loop's terminal break
+    /// drives `event_loop.exit()` (settle-then-exit, ADR-0082 §11).
+    ///
+    /// Idempotent on `quit_requested`: the bridges (`CloseRequested`, the
+    /// signal flag, `UserEvent::Quit`) can all fire, but `Quit` is pushed
+    /// once. The set flag also bypasses the `RedrawRequested` occlusion
+    /// early-return so a shutdown requested on a hidden/minimized window
+    /// still drives the lifecycle to `Shutdown`.
+    fn request_quit(&mut self) {
+        if self.quit_requested {
+            return;
+        }
+        self.quit_requested = true;
+        self.push_chassis_root(
+            self.lifecycle_mailbox,
+            <Quit as Kind>::ID,
+            encode_empty::<Quit>(),
+            1,
+        );
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// Mint a chassis-root `LifecycleAdvance` and push it to the
@@ -850,6 +977,16 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
+            UserEvent::Quit => {
+                // iamacoffeepot/aether#1489: the signal-watcher thread
+                // flips the shutdown flag and sends this to wake a parked
+                // (`ControlFlow::Wait`, occluded) loop. The flag-poll in
+                // `about_to_wait` does the actual `Quit`-push; this arm is
+                // the wake only, mirroring `WindowMail`.
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
         }
     }
 
@@ -859,7 +996,13 @@ impl ApplicationHandler<UserEvent> for App {
     #[allow(clippy::too_many_lines)]
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            // iamacoffeepot/aether#1489: route OS-close through `Quit`
+            // mail rather than tearing winit down directly, so the
+            // lifecycle drains the in-flight frame and broadcasts
+            // `Shutdown` before the loop exits. `request_quit` pushes the
+            // `Quit` and pokes the redraw; the advance loop below drives
+            // to the terminal and calls `event_loop.exit()` there.
+            WindowEvent::CloseRequested => self.request_quit(),
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size);
@@ -874,7 +1017,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 let pending_capture = self.capture_queue.take();
-                if self.occluded && pending_capture.is_none() {
+                // iamacoffeepot/aether#1489: a quit-driven frame must run
+                // even when occluded so the lifecycle reaches `Shutdown`;
+                // the `!self.quit_requested` clause bypasses the
+                // power-save early-return for the shutdown frame.
+                if self.occluded && pending_capture.is_none() && !self.quit_requested {
                     return;
                 }
                 // Publish the live window size once per frame so
@@ -886,23 +1033,26 @@ impl ApplicationHandler<UserEvent> for App {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                // ADR-0082 §11 / issue 1378: drive one full `Tick → Render`
-                // cycle. Each `LifecycleAdvance` broadcasts the cap's
-                // current stage; components emit their `DrawTriangle` /
-                // `aether.camera` mail into render as descendants of that
-                // advance's chain root. We wait for the broadcast root to
-                // settle (ADR-0080 §6 — the causal-completion replacement
-                // for the retired `drain_frame_bound_or_abort` poll), then
-                // read `LifecycleAdvanceComplete.next` to learn the cap's
+                // ADR-0082 §11 / issues 1378 + 1489: drive one full
+                // `Tick → Render → Present` cycle. Each `LifecycleAdvance`
+                // broadcasts the cap's current stage; components emit their
+                // `DrawTriangle` / `aether.camera` mail into render as
+                // descendants of that advance's chain root. We wait for the
+                // broadcast root to settle (ADR-0080 §6 — the
+                // causal-completion replacement for the retired
+                // `drain_frame_bound_or_abort` poll), then read
+                // `LifecycleAdvanceComplete.next` to learn the cap's
                 // resolved next stage and loop until it returns to `Tick`
-                // (one full cycle) or reaches a terminal. Reading the reply
-                // — not the raw settlement channel — gates the next advance
-                // on the cap having cleared its pending-advance guard, so
-                // the back-to-back advances never race it
-                // (iamacoffeepot/aether#999). GPU submit + present below
-                // runs after the `Render` chain settles, so every actor's
-                // per-frame Tick compute and Render submission is
-                // integrated before readback.
+                // (one full cycle) or reaches the `Shutdown` terminal
+                // (`next == 0`, set after a `Quit` was consumed at
+                // `Present`). Reading the reply — not the raw settlement
+                // channel — gates the next advance on the cap having
+                // cleared its pending-advance guard, so the back-to-back
+                // advances never race it (iamacoffeepot/aether#999). GPU
+                // submit + present below runs after the `Render` chain
+                // settles, so every actor's per-frame Tick compute and
+                // Render submission is integrated before readback.
+                let mut reached_terminal = false;
                 loop {
                     let advance_root = self.push_lifecycle_advance();
                     if let Some(registry) = self.queue.settlement_registry() {
@@ -924,10 +1074,17 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     match self.recv_lifecycle_advance_next() {
-                        // Back at Tick (cycle complete) or a terminal
-                        // (`next == 0`) — stop and present.
-                        Some(next) if next == <Tick as Kind>::ID.0 || next == 0 => break,
-                        // Mid-cycle (Tick → Render) — keep advancing.
+                        // Terminal reached (`next == 0`): the `Shutdown`
+                        // broadcast has fired and settled. Present this
+                        // last frame, then `event_loop.exit()` below
+                        // (settle-then-exit, ADR-0082 §11).
+                        Some(0) => {
+                            reached_terminal = true;
+                            break;
+                        }
+                        // Back at Tick (cycle complete) — stop and present.
+                        Some(next) if next == <Tick as Kind>::ID.0 => break,
+                        // Mid-cycle (Tick → Render → Present) — keep advancing.
                         Some(_) => {}
                         // Settlement fired but the reply never arrived —
                         // a wedge in the reply path; fail-fast like the
@@ -995,6 +1152,18 @@ impl ApplicationHandler<UserEvent> for App {
                     );
                 }
                 self.frame += 1;
+                // iamacoffeepot/aether#1489: the lifecycle reached its
+                // `Shutdown` terminal and broadcast it (the advance loop
+                // gates on settlement, so every `Shutdown` subscriber's
+                // graceful-cleanup chain has drained). The final frame is
+                // now presented — exit winit. `run_app` returns and the
+                // chassis runs each passive's teardown + per-actor
+                // `unwire` in reverse boot order. Don't request another
+                // redraw on this path.
+                if reached_terminal {
+                    event_loop.exit();
+                    return;
+                }
                 if !self.occluded
                     && let Some(w) = &self.window
                 {
@@ -1059,8 +1228,18 @@ impl ApplicationHandler<UserEvent> for App {
     /// driver itself the cap for `aether.window`, so the per-frame
     /// drain happens here instead of riding through `EventLoopProxy`
     /// from a separate dispatcher thread.
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_window_inbox();
+        // iamacoffeepot/aether#1489: poll the SIGINT/SIGTERM flag the
+        // signal-watcher flips. On first observation, run the same
+        // graceful-shutdown path `CloseRequested` uses. Force
+        // `ControlFlow::Poll` so the loop keeps turning until the
+        // shutdown frame drives the lifecycle to its `Shutdown` terminal,
+        // even if the window was occluded (which had set `Wait`).
+        if self.shutdown.load(Ordering::Relaxed) && !self.quit_requested {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            self.request_quit();
+        }
     }
 }
 
@@ -1173,6 +1352,14 @@ impl DriverCapability for DesktopDriverCapability {
             mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
+        // iamacoffeepot/aether#1489: install the SIGINT/SIGTERM →
+        // graceful-shutdown bridge. The flag is shared with `App`
+        // (`about_to_wait` polls it); the watcher sends `UserEvent::Quit`
+        // via this proxy to wake a parked loop. Minted here while
+        // `event_loop` is still owned by the capability.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        install_shutdown_handler(&shutdown, event_loop.create_proxy());
+
         // Issue 1378: claim a dedicated inbox for the cap's
         // `LifecycleAdvanceComplete` replies. The per-frame `Tick →
         // Render` cycle stamps this as the `Component` reply target on
@@ -1216,6 +1403,8 @@ impl DriverCapability for DesktopDriverCapability {
             // 0 is the "no correlation" sentinel; mirror NativeBinding's
             // start-at-1 convention.
             chassis_correlation: AtomicU64::new(1),
+            quit_requested: false,
+            shutdown,
         };
 
         Ok(DesktopDriverRunning {

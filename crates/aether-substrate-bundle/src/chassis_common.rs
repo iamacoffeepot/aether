@@ -29,7 +29,7 @@ use aether_capabilities::{
     fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_data::{Kind, MailboxId as DataMailboxId, mailbox_id_from_name};
-use aether_kinds::{Render, Shutdown, Tick};
+use aether_kinds::{Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, dump_config, known_keys};
@@ -181,24 +181,31 @@ pub fn tick_only_lifecycle_config() -> LifecycleConfig {
     }
 }
 
-/// Build the two-stage frame lifecycle config the display-driving
-/// chassis share (ADR-0082 §11, issue 1378): `Tick → Render → Tick`
-/// (looping), with the `Quit` escape to a `Shutdown` terminal on the
-/// `Tick` stage. The chassis drives a full `Tick → Render` cycle per
-/// frame; `Render` broadcasts only after the entire `Tick` chain has
-/// settled (ADR-0080 §6), so a render producer's `on_render` runs once
-/// every actor's per-frame `Tick` compute is done — no submitting
-/// against half-updated cross-actor state.
+/// Build the three-stage frame lifecycle config the display-driving
+/// chassis share (ADR-0082 §11, issues 1378 + 1489):
+/// `Tick → Render → Present → Tick` (looping), with the `Quit` escape to
+/// a `Shutdown` terminal on the `Present` stage. The chassis drives a
+/// full `Tick → Render → Present` cycle per frame; `Render` broadcasts
+/// only after the entire `Tick` chain has settled (ADR-0080 §6), so a
+/// render producer's `on_render` runs once every actor's per-frame
+/// `Tick` compute is done — no submitting against half-updated
+/// cross-actor state.
+///
+/// The `Quit` escape lives on `Present`, not `Tick`: a `quit_pending`
+/// flag set mid-frame is consumed only once the cap reaches `Present`,
+/// so the in-flight frame has broadcast its full `Tick → Render →
+/// Present` cycle before the lifecycle advances to `Shutdown` (ADR-0082
+/// §3 "drain the frame before exit"). `Present` is a chassis-GPU-work
+/// ordering point with an empty subscriber set today — it exists to host
+/// this drain edge; per-stage component subscription lands when a
+/// producer needs a post-`Render` hook.
 ///
 /// Same `initial_subscribers` relay as [`tick_only_lifecycle_config`]
 /// (`Tick → aether.input`), so the existing `InputCapability::on_tick`
 /// fan-out keeps routing `Tick` to component subscribers. Desktop and
 /// `test_bench` adopt this graph; headless stays
 /// [`tick_only_lifecycle_config`] (its render cap is a no-op, so a
-/// `Render` stage would settle to no GPU work). `Present` is deferred —
-/// it would be an empty-subscriber broadcast whose only role is a
-/// `Quit → Shutdown` drain edge, and no chassis routes OS-close through
-/// `Quit` mail yet.
+/// `Render` / `Present` stage would settle to no GPU work).
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
@@ -209,9 +216,11 @@ pub fn frame_lifecycle_config() -> LifecycleConfig {
     let graph = LifecycleGraphData::builder()
         .state::<Tick>()
         .next::<Render>()
-        .quit::<Shutdown>()
         .state::<Render>()
+        .next::<Present>()
+        .state::<Present>()
         .next::<Tick>()
+        .quit::<Shutdown>()
         .terminal::<Shutdown>()
         .start::<Tick>()
         .build()
@@ -288,21 +297,26 @@ mod tests {
     use super::chassis_known_keys;
 
     #[test]
-    fn frame_lifecycle_graph_is_tick_render_with_shutdown_terminal() {
-        // ADR-0082 §11 / issue 1378: the display-driving chassis graph is
-        // `Tick → Render → Tick` (looping) with the `Quit` escape to a
-        // `Shutdown` terminal on the `Tick` stage. The graph's edge
-        // accessors are `pub(crate)` to `aether-capabilities`, so this
-        // crate-boundary check reads the public `Debug` (start + the
-        // non-terminal state kinds + terminals) plus the preserved
-        // `initial_subscribers` relay.
+    fn frame_lifecycle_graph_is_tick_render_present_with_shutdown_terminal() {
+        // ADR-0082 §11 / issues 1378 + 1489: the display-driving chassis
+        // graph is `Tick → Render → Present → Tick` (looping) with the
+        // `Quit` escape to a `Shutdown` terminal on the `Present` stage.
+        // The graph's edge accessors (`next` / `quit` per state) are
+        // `pub(crate)` to `aether-capabilities`, so this crate-boundary
+        // check reads the public `Debug` (start + the non-terminal state
+        // kinds + terminals) plus the preserved `initial_subscribers`
+        // relay. Quit-edge *placement* (on `Present`, not `Tick`) is
+        // verified at the cap-unit layer (`lifecycle.rs` `resolve_edge`
+        // tests, which can read `state().quit`) and end-to-end by the
+        // `test_bench` quit-drain scenario.
         use aether_data::Kind;
-        use aether_kinds::{Render, Shutdown, Tick};
+        use aether_kinds::{Present, Render, Shutdown, Tick};
 
         let cfg = super::frame_lifecycle_config();
         let graph_dbg = format!("{:?}", cfg.graph);
         let tick = format!("{:?}", <Tick as Kind>::ID);
         let render = format!("{:?}", <Render as Kind>::ID);
+        let present = format!("{:?}", <Present as Kind>::ID);
         let shutdown = format!("{:?}", <Shutdown as Kind>::ID);
 
         // Start state is Tick.
@@ -310,10 +324,14 @@ mod tests {
             graph_dbg.contains(&format!("start: {tick}")),
             "expected start Tick in {graph_dbg}",
         );
-        // Both Tick and Render are non-terminal states.
+        // Tick, Render, and Present are all non-terminal states.
         assert!(
             graph_dbg.contains(&render),
             "expected a Render state in {graph_dbg}",
+        );
+        assert!(
+            graph_dbg.contains(&present),
+            "expected a Present state in {graph_dbg}",
         );
         // Shutdown is the sole terminal.
         assert!(
