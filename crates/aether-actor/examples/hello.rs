@@ -24,7 +24,6 @@
 use aether_actor::{BootError, FfiActor, FfiCtx, KindId, Resolver, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
-use aether_data::{Kind, MailboxId};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
@@ -84,8 +83,7 @@ impl FfiActor for Hello {
 
     //noinspection DuplicatedCode
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<LifecycleCapability>()
-            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
+        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
     /// Emits the configured triangle to the render sink every tick.

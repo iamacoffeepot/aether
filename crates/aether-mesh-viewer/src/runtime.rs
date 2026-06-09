@@ -36,7 +36,6 @@ use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyHandle, Reso
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
-use aether_data::{Kind, MailboxId};
 use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Render, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -115,8 +114,7 @@ impl FfiActor for MeshViewer {
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<LifecycleCapability>()
-            .subscribe(Render::ID, MailboxId(ctx.mailbox_id()));
+        ctx.actor::<LifecycleCapability>().subscribe::<Render>();
     }
 
     /// Re-emits every cached triangle to the render sink on the `Render`

@@ -24,7 +24,7 @@
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_data::{Kind, MailboxId, Schema};
+use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
 use bytemuck::{Pod, Zeroable};
 
@@ -59,8 +59,7 @@ impl FfiActor for Caller {
 
     //noinspection DuplicatedCode
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        ctx.actor::<LifecycleCapability>()
-            .subscribe(Tick::ID, MailboxId(ctx.mailbox_id()));
+        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 
     #[handler]

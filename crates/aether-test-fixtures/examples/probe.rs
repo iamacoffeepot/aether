@@ -38,7 +38,6 @@ use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_data::{Kind, MailboxId};
 use aether_kinds::{DrawTriangle, Key, Tick, Vertex};
 use aether_test_fixtures::{
     KeyObserved, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved,
@@ -72,9 +71,8 @@ impl FfiActor for Probe {
     /// so it subscribes on `aether.input` (ADR-0021) — the input-stream
     /// path the round-trip scenarios exercise (issue 1490).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        let me = MailboxId(ctx.mailbox_id());
-        ctx.actor::<LifecycleCapability>().subscribe(Tick::ID, me);
-        ctx.actor::<InputCapability>().subscribe(Key::ID, me);
+        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.actor::<InputCapability>().subscribe::<Key>();
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running

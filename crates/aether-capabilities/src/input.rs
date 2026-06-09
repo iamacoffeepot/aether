@@ -28,12 +28,12 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::FfiActorMailbox;
-use aether_data::{KindId, MailboxId};
+use aether_data::{Kind, MailboxId};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::SubscribeInputResult;
 use aether_kinds::{
-    Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, UnsubscribeAll, UnsubscribeInput,
-    WindowSize,
+    Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, SubscribeInputSelf, UnsubscribeAll,
+    UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
@@ -44,11 +44,12 @@ pub use native::InputConfig;
 /// Sender-side facade for callers addressing [`InputCapability`] via
 /// `ctx.actor::<InputCapability>()`.
 ///
-/// Lifts the cap-shaped operations (`subscribe(kind, mailbox)`,
-/// `unsubscribe(kind, mailbox)`, `unsubscribe_all(mailbox)`) one
-/// indirection above the raw `.send(&SubscribeInput { .. })` so
-/// component code stops reconstructing the kind struct at every call
-/// site. Same shape and rationale as [`crate::fs::FsMailboxExt`]
+/// Lifts the cap-shaped operations (`subscribe::<K>()`,
+/// `subscribe_for::<K>(mailbox)`, the `unsubscribe` twins,
+/// `unsubscribe_all(mailbox)`) one indirection above the raw
+/// `.send(&SubscribeInput { .. })` so component code stops
+/// reconstructing the kind struct at every call site. Same shape and
+/// rationale as [`crate::fs::FsMailboxExt`]
 /// (issue 580) and [`crate::component::ComponentHostFfiExt`] (issue
 /// 654) — the cap module owns receive-side ([`InputCapability`]) AND
 /// send-side ([`InputMailboxExt`]) so future kind additions land both
@@ -71,13 +72,29 @@ pub use native::InputConfig;
 /// still works for any `K` the cap declares via `HandlesKind<K>`,
 /// since `send` is an inherent method on the underlying mailbox type.
 pub trait InputMailboxExt {
-    /// Mail `aether.input.subscribe { kind, mailbox }` to the cap.
-    /// Add `mailbox` to the subscriber set for `kind`. Idempotent.
-    fn subscribe(&self, kind: KindId, mailbox: MailboxId);
+    /// Mail `aether.input.subscribe_self { kind }` to the cap —
+    /// subscribe the *calling* actor to the input stream for `K` (e.g.
+    /// `Key` / `MouseMove` / `WindowSize`). The cap resolves the
+    /// subscriber from the inbound's host-stamped `Source` (ADR-0083),
+    /// so the call site spells out neither the kind id nor its own
+    /// mailbox. This is the common form. Idempotent.
+    fn subscribe<K: Kind>(&self);
+
+    /// Mail `aether.input.subscribe { kind, mailbox }` to the cap. Add
+    /// an *explicit* `mailbox` to the subscriber set for `K`. The rare
+    /// cross-mailbox form; [`subscribe`](Self::subscribe) covers the
+    /// self case. Idempotent.
+    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId);
+
+    /// Mail `aether.input.unsubscribe_self { kind }` to the cap —
+    /// unsubscribe the *calling* actor from the input stream for `K`.
+    /// Reflexive twin of [`subscribe`](Self::subscribe). Idempotent.
+    fn unsubscribe<K: Kind>(&self);
 
     /// Mail `aether.input.unsubscribe { kind, mailbox }` to the cap.
-    /// Remove `mailbox` from the subscriber set for `kind`. Idempotent.
-    fn unsubscribe(&self, kind: KindId, mailbox: MailboxId);
+    /// Remove an *explicit* `mailbox` from the subscriber set for `K`.
+    /// Idempotent.
+    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId);
 
     /// Mail `aether.input.unsubscribe_all { mailbox }` to the cap.
     /// Remove `mailbox` from every input stream's subscriber set;
@@ -86,11 +103,23 @@ pub trait InputMailboxExt {
 }
 
 impl InputMailboxExt for FfiActorMailbox<InputCapability> {
-    fn subscribe(&self, kind: KindId, mailbox: MailboxId) {
-        self.send(&SubscribeInput { kind, mailbox });
+    fn subscribe<K: Kind>(&self) {
+        self.send(&SubscribeInputSelf { kind: K::ID });
     }
-    fn unsubscribe(&self, kind: KindId, mailbox: MailboxId) {
-        self.send(&UnsubscribeInput { kind, mailbox });
+    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+        self.send(&SubscribeInput {
+            kind: K::ID,
+            mailbox,
+        });
+    }
+    fn unsubscribe<K: Kind>(&self) {
+        self.send(&UnsubscribeInputSelf { kind: K::ID });
+    }
+    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+        self.send(&UnsubscribeInput {
+            kind: K::ID,
+            mailbox,
+        });
     }
     fn unsubscribe_all(&self, mailbox: MailboxId) {
         self.send(&UnsubscribeAll { mailbox });
@@ -99,11 +128,23 @@ impl InputMailboxExt for FfiActorMailbox<InputCapability> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
-    fn subscribe(&self, kind: KindId, mailbox: MailboxId) {
-        self.send(&SubscribeInput { kind, mailbox });
+    fn subscribe<K: Kind>(&self) {
+        self.send(&SubscribeInputSelf { kind: K::ID });
     }
-    fn unsubscribe(&self, kind: KindId, mailbox: MailboxId) {
-        self.send(&UnsubscribeInput { kind, mailbox });
+    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+        self.send(&SubscribeInput {
+            kind: K::ID,
+            mailbox,
+        });
+    }
+    fn unsubscribe<K: Kind>(&self) {
+        self.send(&UnsubscribeInputSelf { kind: K::ID });
+    }
+    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+        self.send(&UnsubscribeInput {
+            kind: K::ID,
+            mailbox,
+        });
     }
     fn unsubscribe_all(&self, mailbox: MailboxId) {
         self.send(&UnsubscribeAll { mailbox });
@@ -114,7 +155,7 @@ impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
 mod native {
     use super::{
         Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, SubscribeInputResult,
-        UnsubscribeAll, UnsubscribeInput, WindowSize,
+        SubscribeInputSelf, UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
     };
     use aether_actor::actor;
     use aether_actor::actor::ctx::OutboundReply;
@@ -187,6 +228,40 @@ mod native {
             ctx.reply(&result);
         }
 
+        /// Subscribe the *sending* actor to an input stream (ADR-0021,
+        /// ADR-0083). Resolves the subscriber from the inbound
+        /// envelope's host-stamped `Source` via
+        /// [`source_mailbox`](NativeCtx::source_mailbox) rather than a
+        /// caller-supplied mailbox, so the subscriber cannot be forged
+        /// and the reflexive op is gated to in-process actors by
+        /// construction — a sender with no local mailbox (an external
+        /// session or another engine) gets an `Err` reply and is
+        /// subscribed to nothing. The host stamp already names a live
+        /// component mailbox, so no [`validate_subscriber_mailbox`]
+        /// pass is needed on this path.
+        ///
+        /// # Agent
+        /// `SubscribeInputSelf { kind }`.
+        #[handler]
+        fn on_subscribe_self(&mut self, ctx: &mut NativeCtx<'_>, payload: SubscribeInputSelf) {
+            let result = match ctx.source_mailbox() {
+                Some(mailbox) => {
+                    self.subscribers
+                        .entry(payload.kind)
+                        .or_default()
+                        .insert(mailbox);
+                    SubscribeInputResult::Ok
+                }
+                None => SubscribeInputResult::Err {
+                    error: "aether.input.subscribe_self requires a local component sender; an \
+                            external session or remote engine must use aether.input.subscribe \
+                            with an explicit mailbox"
+                        .to_string(),
+                },
+            };
+            ctx.reply(&result);
+        }
+
         /// Unsubscribe a mailbox from an input stream (ADR-0021).
         ///
         /// # Agent
@@ -202,6 +277,33 @@ mod native {
                     SubscribeInputResult::Ok
                 }
                 Err(error) => SubscribeInputResult::Err { error },
+            };
+            ctx.reply(&result);
+        }
+
+        /// Unsubscribe the *sending* actor from an input stream
+        /// (ADR-0021, ADR-0083). Resolves the subscriber from the
+        /// inbound's host-stamped `Source`, mirroring
+        /// [`Self::on_subscribe_self`]. `None` (no local sender) replies
+        /// `Err`. Idempotent on "not currently subscribed."
+        ///
+        /// # Agent
+        /// `UnsubscribeInputSelf { kind }`.
+        #[handler]
+        fn on_unsubscribe_self(&mut self, ctx: &mut NativeCtx<'_>, payload: UnsubscribeInputSelf) {
+            let result = match ctx.source_mailbox() {
+                Some(mailbox) => {
+                    if let Some(set) = self.subscribers.get_mut(&payload.kind) {
+                        set.remove(&mailbox);
+                    }
+                    SubscribeInputResult::Ok
+                }
+                None => SubscribeInputResult::Err {
+                    error: "aether.input.unsubscribe_self requires a local component sender; an \
+                            external session or remote engine must use aether.input.unsubscribe \
+                            with an explicit mailbox"
+                        .to_string(),
+                },
             };
             ctx.reply(&result);
         }
@@ -283,6 +385,72 @@ mod native {
             Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
             Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
             None => Err(format!("unknown mailbox id {id:?}")),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use aether_substrate::actor::native::binding::NativeBinding;
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::{MailId, Source, SourceAddr};
+
+        fn test_cap() -> InputCapability {
+            InputCapability {
+                registry: Arc::new(Registry::new()),
+                subscribers: HashMap::new(),
+            }
+        }
+
+        fn test_mailer() -> Arc<Mailer> {
+            Arc::new(Mailer::new(
+                Arc::new(Registry::new()),
+                Arc::new(HandleStore::new(1024)),
+            ))
+        }
+
+        /// A `subscribe_self` carrying a `Component` source lands *that*
+        /// mailbox in the stream set (ADR-0083: the cap reads the
+        /// subscriber off the host-stamped envelope, not a payload field).
+        #[test]
+        fn subscribe_self_subscribes_the_component_source() {
+            let mut cap = test_cap();
+            let key = <Key as Kind>::ID;
+            let sender = MailboxId(0x00C0_FFEE);
+
+            let transport = Arc::new(NativeBinding::new_for_test(test_mailer(), MailboxId(0)));
+            let source = Source::to(SourceAddr::Component(sender));
+            let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
+            cap.on_subscribe_self(&mut ctx, SubscribeInputSelf { kind: key });
+
+            assert!(
+                cap.subscribers
+                    .get(&key)
+                    .is_some_and(|s| s.contains(&sender)),
+                "a Component-source subscribe_self lands that mailbox in the stream set"
+            );
+        }
+
+        /// A `subscribe_self` from a non-`Component` source (an external
+        /// session) replies `Err` and subscribes nothing — the reflexive
+        /// form is gated to in-process actors by construction.
+        #[test]
+        fn subscribe_self_rejects_non_component_source() {
+            use aether_data::{SessionToken, Uuid};
+
+            let mut cap = test_cap();
+            let key = <Key as Kind>::ID;
+
+            let transport = Arc::new(NativeBinding::new_for_test(test_mailer(), MailboxId(0)));
+            let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
+            let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
+            cap.on_subscribe_self(&mut ctx, SubscribeInputSelf { kind: key });
+
+            assert!(
+                cap.subscribers.get(&key).is_none_or(BTreeSet::is_empty),
+                "a non-Component source subscribes nothing"
+            );
         }
     }
 }

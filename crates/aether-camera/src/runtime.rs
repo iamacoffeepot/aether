@@ -47,7 +47,6 @@ use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_data::{Kind, MailboxId};
 use aether_kinds::{Camera, Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 
@@ -289,11 +288,10 @@ impl FfiActor for CameraComponent {
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        let me = MailboxId(ctx.mailbox_id());
-        ctx.actor::<InputCapability>().subscribe(WindowSize::ID, me);
+        ctx.actor::<InputCapability>().subscribe::<WindowSize>();
         let lifecycle = ctx.actor::<LifecycleCapability>();
-        lifecycle.subscribe(Tick::ID, me);
-        lifecycle.subscribe(Render::ID, me);
+        lifecycle.subscribe::<Tick>();
+        lifecycle.subscribe::<Render>();
     }
 
     /// Advance every camera's per-mode state each tick. Inactive cameras

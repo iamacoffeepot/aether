@@ -27,10 +27,11 @@
 
 use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_camera::{CameraTopdownSet, TopdownParams};
+use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_data::{Kind, MailboxId, Schema};
-use aether_kinds::{DrawTriangle, Key, SubscribeInput, Tick, Vertex, keycode};
+use aether_data::{Kind, Schema};
+use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
 use bytemuck::{Pod, Zeroable};
 
 const PLAYER_HALF: f32 = 0.25;
@@ -178,15 +179,11 @@ impl FfiActor for Sokoban {
     /// (post-init, mail-allowed) is the placement — `init`'s ctx is
     /// `Resolver`-only.
     fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
-        let me = MailboxId(ctx.mailbox_id());
         // `Tick` is a frame-lifecycle stage (`aether.lifecycle`,
         // ADR-0082); `Key` is a genuine input interrupt (`aether.input`,
         // ADR-0021).
-        ctx.actor::<LifecycleCapability>().subscribe(Tick::ID, me);
-        ctx.actor::<InputCapability>().send(&SubscribeInput {
-            kind: Key::ID,
-            mailbox: me,
-        });
+        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.actor::<InputCapability>().subscribe::<Key>();
     }
 
     #[handler]
