@@ -17,13 +17,16 @@
 //!
 //! # Camera and picking
 //!
-//! This actor owns a perspective camera that trails the mover at a fixed
-//! three-quarter overhead angle: it publishes the `view_proj` to
+//! This actor owns a perspective camera that trails the mover at a
+//! three-quarter overhead angle the arrow keys orbit (yaw freely, pitch
+//! within a slice above the horizon): it publishes the `view_proj` to
 //! `aether.render` each frame and casts a ray from the click pixel through
-//! that same camera onto the ground plane to find the world tile. A click
-//! runs `astar` (8-connected, iterative) from the current tile to the
-//! clicked one, smooths the result, and follows it; any WASD press cancels
-//! the path and hands back to manual control.
+//! that same camera onto the ground plane to find the world tile — so
+//! picking stays correct at any orbit angle. A click runs `astar`
+//! (8-connected, iterative) from the current tile to the clicked one,
+//! smooths the result, and follows it, highlighting the exact destination
+//! cell along the way; any WASD press cancels the path and hands back to
+//! manual control.
 //!
 //! The mover is drawn as a capped-cylinder capsule at human dimensions
 //! (1.8 m tall, 0.3 m radius), shaded against a fixed light so it reads as
@@ -55,8 +58,9 @@
 //!
 //! # Mail surface
 //!
-//! - [`Key`] / [`KeyRelease`] — set / clear a held direction (WASD or
-//!   arrows); `Tab` (press) cycles the movement granularity.
+//! - [`Key`] / [`KeyRelease`] — WASD set / clear a held movement direction;
+//!   the arrow keys orbit the camera; `Tab` (press) cycles the movement
+//!   granularity.
 //! - [`MouseMove`] / [`MouseButton`] — track the cursor; a click paths to
 //!   that tile. [`WindowSize`] feeds the camera aspect and picking.
 //! - [`Tick`] — advance the mover one step.
@@ -121,10 +125,20 @@ const PRESET_COLORS: [(f32, f32, f32); 5] = [
 
 /// Vertical field of view of the follow camera.
 const CAMERA_FOV_Y: f32 = PI / 3.0;
-/// Pitch of the camera below the horizontal, in radians (~52°) — a
+/// Starting pitch of the camera above the horizontal, in radians (~52°) — a
 /// three-quarter overhead angle that reads as 3D while keeping the ground
-/// legible.
+/// legible. The arrow keys orbit from here within [`CAMERA_PITCH_MIN`]..=
+/// [`CAMERA_PITCH_MAX`].
 const CAMERA_PITCH: f32 = 0.9;
+/// Pitch clamp: the eye always stays in a slice above the horizon (never at
+/// or below it, never straight overhead — `look_at` degenerates as the view
+/// axis nears world `Y`).
+const CAMERA_PITCH_MIN: f32 = 0.15;
+const CAMERA_PITCH_MAX: f32 = 1.45;
+/// Arrow-key orbit rates, radians per tick. Left/right sweep yaw, up/down
+/// raise/lower pitch — tuned slow for a gentle, controllable orbit.
+const CAMERA_YAW_SPEED: f32 = 0.0135;
+const CAMERA_PITCH_SPEED: f32 = 0.0067;
 /// Distance from the camera target (the mover) to the eye, in metres.
 const CAMERA_DISTANCE: f32 = 12.0;
 /// Height above the ground the camera looks at — roughly the mover's
@@ -134,6 +148,10 @@ const CAMERA_Z_NEAR: f32 = 0.1;
 const CAMERA_Z_FAR: f32 = 100.0;
 /// Aspect used until the first `WindowSize` arrives.
 const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
+
+/// Highlight tint for the click-to-move destination cell — the exact region
+/// the mover will come to rest in.
+const DEST_COLOR: (f32, f32, f32) = (0.20, 0.95, 0.65);
 
 /// Player capsule (a capped cylinder) at human dimensions: 1.8 m tall,
 /// 0.3 m radius. The bottom cap rests on the ground (`y = 0`).
@@ -171,6 +189,29 @@ impl Held {
 
     fn dir_z(self) -> i32 {
         i32::from(self.pos_z) - i32::from(self.neg_z)
+    }
+}
+
+/// Which arrow keys are currently held, driving the camera orbit.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default)]
+struct CamHeld {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+}
+
+impl CamHeld {
+    /// Yaw direction: right sweeps one way, left the other.
+    fn yaw_dir(self) -> f32 {
+        f32::from(self.right) - f32::from(self.left)
+    }
+
+    /// Pitch direction: up raises the camera (more overhead), down lowers it
+    /// toward the horizon.
+    fn pitch_dir(self) -> f32 {
+        f32::from(self.up) - f32::from(self.down)
     }
 }
 
@@ -280,6 +321,15 @@ pub struct Locomotion {
     /// order — tile centers, then the snapped sub-tile destination. Empty
     /// when under manual (WASD) control.
     path: VecDeque<(i32, i32)>,
+    /// Click-to-move destination (octimeter center of the rest cell), shown
+    /// as a highlight while a path is active. `None` under manual control.
+    dest: Option<(i32, i32)>,
+    /// Camera orbit angles around the mover: `cam_yaw` is the azimuth (0 puts
+    /// the eye behind, `+Z`), `cam_pitch` the elevation above the horizon.
+    cam_yaw: f32,
+    cam_pitch: f32,
+    /// Which arrow keys are held, orbiting the camera each tick.
+    cam_held: CamHeld,
 }
 
 #[actor]
@@ -303,6 +353,10 @@ impl FfiActor for Locomotion {
             window: (0, 0),
             cursor: (0.0, 0.0),
             path: VecDeque::new(),
+            dest: None,
+            cam_yaw: 0.0,
+            cam_pitch: CAMERA_PITCH,
+            cam_held: CamHeld::default(),
         })
     }
 
@@ -320,6 +374,7 @@ impl FfiActor for Locomotion {
 
     #[handler]
     fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
+        self.orbit_camera();
         self.advance();
     }
 
@@ -397,16 +452,33 @@ impl FfiActor for Locomotion {
 }
 
 impl Locomotion {
-    /// W / arrows map to a held direction. W is "forward" (`-Z`, toward the
-    /// top of the overhead view).
+    /// WASD moves the mover (W is `-Z`, world-forward); the arrow keys orbit
+    /// the camera instead of moving.
     fn set_held(&mut self, code: u32, down: bool) {
         match code {
-            keycode::KEY_W | keycode::KEY_UP => self.held.neg_z = down,
-            keycode::KEY_S | keycode::KEY_DOWN => self.held.pos_z = down,
-            keycode::KEY_A | keycode::KEY_LEFT => self.held.neg_x = down,
-            keycode::KEY_D | keycode::KEY_RIGHT => self.held.pos_x = down,
+            keycode::KEY_W => self.held.neg_z = down,
+            keycode::KEY_S => self.held.pos_z = down,
+            keycode::KEY_A => self.held.neg_x = down,
+            keycode::KEY_D => self.held.pos_x = down,
+            keycode::KEY_LEFT => self.cam_held.left = down,
+            keycode::KEY_RIGHT => self.cam_held.right = down,
+            keycode::KEY_UP => self.cam_held.up = down,
+            keycode::KEY_DOWN => self.cam_held.down = down,
             _ => {}
         }
+    }
+
+    /// Orbit the camera one tick from the held arrow keys: sweep yaw freely,
+    /// raise/lower pitch within the above-horizon clamp.
+    fn orbit_camera(&mut self) {
+        let (yaw, pitch) = step_camera(
+            self.cam_yaw,
+            self.cam_pitch,
+            self.cam_held.yaw_dir(),
+            self.cam_held.pitch_dir(),
+        );
+        self.cam_yaw = yaw;
+        self.cam_pitch = pitch;
     }
 
     /// Advance to the next [`CELL_PRESETS`] size (wrapping).
@@ -435,6 +507,7 @@ impl Locomotion {
     fn advance(&mut self) {
         if self.held.dir_x() != 0 || self.held.dir_z() != 0 {
             self.path.clear();
+            self.dest = None;
         }
         let Some(&(wx, wz)) = self.path.front() else {
             // Manual cell-movement. A diagonal (both axes held) gets the
@@ -457,6 +530,9 @@ impl Locomotion {
         self.mover.z = nz;
         if self.mover.x == wx && self.mover.z == wz {
             self.path.pop_front();
+            if self.path.is_empty() {
+                self.dest = None;
+            }
         }
     }
 
@@ -472,8 +548,9 @@ impl Locomotion {
     }
 
     /// World-space eye and target for the follow camera: it looks at a point
-    /// just above the mover and sits `CAMERA_DISTANCE` behind (`+Z`) and above
-    /// it at `CAMERA_PITCH`, so the view trails the mover as it walks.
+    /// just above the mover and orbits it on a sphere of radius
+    /// `CAMERA_DISTANCE` at the current `cam_yaw` / `cam_pitch`, so the view
+    /// trails the mover as it walks and the arrow keys swing it around.
     fn camera_eye_target(&self) -> (Vec3, Vec3) {
         let to_metres = |oct: i32| oct as f32 / OCTIMETERS_PER_TILE as f32;
         let target = Vec3::new(
@@ -481,10 +558,13 @@ impl Locomotion {
             CAMERA_TARGET_HEIGHT,
             to_metres(self.mover.z),
         );
+        // `yaw = 0` puts the eye behind the mover (`+Z`); higher pitch lifts it
+        // toward straight overhead.
+        let horizontal = CAMERA_DISTANCE * self.cam_pitch.cos();
         let offset = Vec3::new(
-            0.0,
-            CAMERA_DISTANCE * CAMERA_PITCH.sin(),
-            CAMERA_DISTANCE * CAMERA_PITCH.cos(),
+            horizontal * self.cam_yaw.sin(),
+            CAMERA_DISTANCE * self.cam_pitch.sin(),
+            horizontal * self.cam_yaw.cos(),
         );
         (target + offset, target)
     }
@@ -544,6 +624,7 @@ impl Locomotion {
             return;
         };
         self.path = smooth_path(&self.map, (self.mover.x, self.mover.z), &tiles, dest);
+        self.dest = Some(dest);
         self.target_x = None;
         self.target_z = None;
     }
@@ -607,6 +688,14 @@ impl Locomotion {
                 // Slightly under-fill the tile so grid lines show.
                 push_quad(&mut out, tx as f32 + 0.5, tz as f32 + 0.5, 0.48, 0.0, color);
             }
+        }
+        // Click-to-move destination: the exact cell the mover will rest in,
+        // sized to the active granularity, laid just above the floor.
+        if let Some((dx, dz)) = self.dest {
+            let cell_metres = self.cell as f32 / OCTIMETERS_PER_TILE as f32;
+            let cx = dx as f32 / OCTIMETERS_PER_TILE as f32;
+            let cz = dz as f32 / OCTIMETERS_PER_TILE as f32;
+            push_quad(&mut out, cx, cz, cell_metres * 0.5, 0.02, DEST_COLOR);
         }
         let ax = self.mover.x as f32 / OCTIMETERS_PER_TILE as f32;
         let az = self.mover.z as f32 / OCTIMETERS_PER_TILE as f32;
@@ -826,6 +915,18 @@ fn approach(cur: i32, target: i32, step: i32) -> i32 {
     }
 }
 
+/// Advance the camera orbit one tick. `yaw_dir` / `pitch_dir` are the held
+/// direction signs (`-1`, `0`, `+1`); yaw wraps freely while pitch stays
+/// clamped to a slice above the horizon so the view never dips below it or
+/// reaches the degenerate straight-overhead pose.
+fn step_camera(yaw: f32, pitch: f32, yaw_dir: f32, pitch_dir: f32) -> (f32, f32) {
+    let yaw = yaw_dir.mul_add(CAMERA_YAW_SPEED, yaw).rem_euclid(TAU);
+    let pitch = pitch_dir
+        .mul_add(CAMERA_PITCH_SPEED, pitch)
+        .clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
+    (yaw, pitch)
+}
+
 /// Append a flat axis-aligned quad (two triangles) on the XZ plane.
 fn push_quad(
     out: &mut Vec<DrawTriangle>,
@@ -964,6 +1065,33 @@ mod tests {
         );
         // A ray angled upward never reaches the ground ahead of the eye.
         assert!(intersect_ground(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.5, -1.0)).is_none());
+    }
+
+    #[test]
+    fn camera_orbit_clamps_pitch_above_the_horizon_and_wraps_yaw() {
+        // Holding "down" forever floors pitch at the above-horizon minimum;
+        // holding "up" ceils it below the straight-overhead maximum — the view
+        // can never dip below the horizon or hit the degenerate top-down pose.
+        let (mut yaw, mut pitch) = (0.0, CAMERA_PITCH);
+        for _ in 0..10_000 {
+            (yaw, pitch) = step_camera(yaw, pitch, 0.0, -1.0);
+        }
+        assert!(
+            (pitch - CAMERA_PITCH_MIN).abs() < 1e-5,
+            "pitch floored: {pitch}"
+        );
+        for _ in 0..10_000 {
+            (yaw, pitch) = step_camera(yaw, pitch, 0.0, 1.0);
+        }
+        assert!(
+            (pitch - CAMERA_PITCH_MAX).abs() < 1e-5,
+            "pitch ceiled: {pitch}"
+        );
+        // Yaw wraps into [0, τ) rather than growing without bound.
+        for _ in 0..10_000 {
+            (yaw, pitch) = step_camera(yaw, pitch, 1.0, 0.0);
+        }
+        assert!((0.0..TAU).contains(&yaw), "yaw stayed wrapped: {yaw}");
     }
 
     #[test]
