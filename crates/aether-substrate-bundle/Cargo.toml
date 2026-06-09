@@ -128,6 +128,11 @@ ctrlc = "3"
 # so per-fixture cdylibs live as `[[example]]`s; the lib rlib carries
 # the shared `Kind` definitions.
 aether-test-fixtures = { path = "../aether-test-fixtures" }
+# iamacoffeepot/aether#1472: the FleetBench Transform-DAG test builds a
+# descriptor with `output_kind_id == Vec4::ID` and casts the observer's
+# surfaced 16 bytes back to a `Vec4` for the `M·v` assertion, so it names
+# `aether_math::Vec4` directly.
+aether-math = { path = "../aether-math" }
 # iamacoffeepot/aether#1037: the cap-registry replace test swaps the
 # probe wasm for the camera wasm (a distinct handler set) and asserts
 # the registry reflects the new accept-set. `default-features = false`
