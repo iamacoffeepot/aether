@@ -19,6 +19,10 @@ crate-type = ["rlib"]
 
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+# Issue 1472: `Vec4Observed { input: Ref<Vec4> }` carries the
+# `aether.math.vec4` kind in its `Ref` slot, so the shared lib needs
+# `Vec4`. `aether-math` is `no_std`, keeping this rlib `no_std`.
+aether-math = { path = "../aether-math" }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 
@@ -54,6 +58,20 @@ crate-type = ["cdylib"]
 # module carrying both; an unmodified host loads the entry type.
 [[example]]
 name = "multi_actor"
+crate-type = ["cdylib"]
+
+# Issue 1472: DAG `Source` fixture. Replies a fixed `Mat4Apply` operand
+# on `Mat4SourceTrigger`, feeding the `mat4_apply` transform downstream.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/mat4_source.wasm
+[[example]]
+name = "mat4_source"
+crate-type = ["cdylib"]
+
+# Issue 1472: DAG `Observer` fixture. Resolves the transform's
+# `Ref<Vec4>` output and surfaces the value via `aether.fs.write` so the
+# FleetBench test can read it back and assert `M·v`.
+[[example]]
+name = "vec4_observer"
 crate-type = ["cdylib"]
 
 [lints]
