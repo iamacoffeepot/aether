@@ -31,7 +31,7 @@ use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
-use crate::mail::{Mail, MailRef, ReplyTarget, ReplyTo};
+use crate::mail::{Mail, MailRef, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
 use aether_data::{HandleId, Kind, KindId};
@@ -426,17 +426,17 @@ impl Mailer {
     /// closure-bound mailbox's id would produce a
     /// `ReplyEntry::Component` pointing at an entry that can't itself
     /// receive mail.
-    pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
+    pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,
     {
-        match sender.target {
-            ReplyTarget::None => false,
-            ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => self
+        match sender.addr {
+            SourceAddr::None => false,
+            SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => self
                 .outbound
                 .as_ref()
                 .is_some_and(|outbound| outbound.send_reply(sender, result)),
-            ReplyTarget::Component(mailbox) => {
+            SourceAddr::Component(mailbox) => {
                 // ADR-0100: encode the reply through the kind's declared
                 // codec (cast or postcard), not a hardcoded postcard path.
                 let payload = result.encode_into_bytes();
@@ -444,7 +444,7 @@ impl Mailer {
                 // reply envelope so the originating handler can pick
                 // the right reply out of the mpsc by correlation.
                 // Reply target is None — nobody replies to a reply.
-                let reply_to = ReplyTo::with_correlation(ReplyTarget::None, sender.correlation_id);
+                let reply_to = Source::with_correlation(SourceAddr::None, sender.correlation_id);
                 self.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
                 true
             }
@@ -509,20 +509,20 @@ fn route_mail(
                 },
                 |request| trace_handle.chassis_host_tail(&request),
             );
-            match mail.reply_to.target {
-                ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => {
+            match mail.reply_to.addr {
+                SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
                     if let Some(outbound) = outbound {
                         outbound.send_reply(mail.reply_to, &result);
                     }
                 }
-                ReplyTarget::Component(target) => {
+                SourceAddr::Component(target) => {
                     // The MCP Call path replies via Component (mirrors
                     // the `LogTail`-to-unknown arm below): re-route a
                     // fresh, un-lineaged reply into the target's inbox.
                     // ADR-0100: encode through the kind's declared codec.
                     let payload = result.encode_into_bytes();
                     let reply_to =
-                        ReplyTo::with_correlation(ReplyTarget::None, mail.reply_to.correlation_id);
+                        Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
                     route_mail(
                         Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to),
                         registry,
@@ -532,7 +532,7 @@ fn route_mail(
                         trace_handle,
                     );
                 }
-                ReplyTarget::None => {}
+                SourceAddr::None => {}
             }
         } else if let Some(router) = chassis_router {
             router(mail);
@@ -708,15 +708,15 @@ fn route_mail(
             {
                 // ADR-0037 Phase 2: carry the local sending
                 // component's mailbox id so the hub can build a
-                // `ReplyTo::EngineMailbox { engine_id, mailbox_id }`
+                // `Source::EngineMailbox { engine_id, mailbox_id }`
                 // for the receiving component. `None` for mail
                 // with no local component origin (substrate-generated).
                 // Recovered from
-                // `reply_to.target = Component(_)` set by
+                // `reply_to.addr = Component(_)` set by
                 // `ComponentCtx::send` / `NativeBinding::send_mail`
                 // (issue #644).
-                let source_mailbox_id = match mail.reply_to.target {
-                    ReplyTarget::Component(id) => Some(id),
+                let source_mailbox_id = match mail.reply_to.addr {
+                    SourceAddr::Component(id) => Some(id),
                     _ => None,
                 };
                 // ADR-0042: carry the correlation through the bubble-
@@ -758,9 +758,9 @@ fn route_mail(
                 };
                 // ADR-0100: encode through the kind's declared codec.
                 let payload = err.encode_into_bytes();
-                if let ReplyTarget::Component(target) = mail.reply_to.target {
+                if let SourceAddr::Component(target) = mail.reply_to.addr {
                     let reply_to =
-                        ReplyTo::with_correlation(ReplyTarget::None, mail.reply_to.correlation_id);
+                        Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
                     route_mail(
                         Mail::new(
                             target,
@@ -917,7 +917,7 @@ mod tests {
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         mailer.push(
             Mail::new(unknown, <LogTail as Kind>::ID, vec![], 1).with_reply_to(
-                ReplyTo::with_correlation(ReplyTarget::Component(recorder_id), 0xCAFE),
+                Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE),
             ),
         );
 
@@ -953,7 +953,7 @@ mod tests {
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         // Arbitrary non-`LogTail` kind id — the reply branch must not fire.
         mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 1).with_reply_to(
-            ReplyTo::with_correlation(ReplyTarget::Component(recorder_id), 0xCAFE),
+            Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE),
         ));
 
         assert!(
@@ -1001,8 +1001,8 @@ mod tests {
                 request.encode_into_bytes(),
                 1,
             )
-            .with_reply_to(ReplyTo::with_correlation(
-                ReplyTarget::Component(recorder_id),
+            .with_reply_to(Source::with_correlation(
+                SourceAddr::Component(recorder_id),
                 0xCAFE,
             )),
         );
@@ -1176,7 +1176,7 @@ mod tests {
             _pad: 0,
         };
         let sent = mailer.send_reply(
-            ReplyTo::with_correlation(ReplyTarget::Component(sink_id), 1),
+            Source::with_correlation(SourceAddr::Component(sink_id), 1),
             &reply,
         );
         assert!(sent, "Component reply target routes");

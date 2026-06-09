@@ -64,7 +64,7 @@ pub use ids::{
     ActorId, DagId, HandleId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
     type_name_for_type_id,
 };
-pub use mail::{MailId, ReplyTarget, ReplyTo};
+pub use mail::{MailId, Source, SourceAddr};
 #[cfg(not(target_arch = "wasm32"))]
 pub use name_inventory::{
     NameEntry, ParamKind, TemplateEntry, build_static_reverse_map, fill_template, id_for_name,

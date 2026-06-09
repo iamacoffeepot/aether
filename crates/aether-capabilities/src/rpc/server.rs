@@ -48,7 +48,7 @@ mod server_native {
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::mail::ReplyTarget;
+    use aether_substrate::mail::SourceAddr;
     use aether_substrate::mail::mailer::Mailer;
     use std::collections::HashMap;
     use std::io::{self, BufReader};
@@ -440,8 +440,8 @@ mod server_native {
 
             let envelope = MailEnvelope {
                 to: MailboxAddress::local(self.self_mailbox),
-                from: match env.sender.target {
-                    ReplyTarget::Component(id) => Some(MailboxAddress::local(id)),
+                from: match env.sender.addr {
+                    SourceAddr::Component(id) => Some(MailboxAddress::local(id)),
                     _ => None,
                 },
                 kind: env.kind,
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     /// iamacoffeepot/aether#1321 regression: a `Call` routed through the
-    /// RPC server tags its reply `ReplyTarget::Component(rpc_server)`, so
+    /// RPC server tags its reply `SourceAddr::Component(rpc_server)`, so
     /// a capability that replies via `HubOutbound::send_reply` (which
     /// only routes `Session` / `EngineMailbox`) drops the reply silently —
     /// the same drop #1316/#1319 fixed for the desktop driver. The

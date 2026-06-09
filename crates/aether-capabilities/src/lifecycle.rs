@@ -482,7 +482,7 @@ mod native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::{MailId, MailboxId, ReplyTo};
+    use aether_substrate::mail::{MailId, MailboxId, Source};
 
     use super::{
         LifecycleAdvance, LifecycleAdvanceComplete, LifecycleGraphData, LifecycleStateData,
@@ -597,7 +597,7 @@ mod native {
         /// True if the settling broadcast is a terminal state.
         is_terminal: bool,
         /// Original chassis sender of the [`LifecycleAdvance`] mail.
-        reply_to: ReplyTo,
+        reply_to: Source,
         /// When this advance was issued. Drives the `advance_timeout`
         /// force-complete fallback (iamacoffeepot/aether#1048).
         started: Instant,
@@ -1158,7 +1158,7 @@ mod native {
                 completed_kind: <Render as Kind>::ID,
                 next_kind: <Present as Kind>::ID,
                 is_terminal: false,
-                reply_to: ReplyTo::NONE,
+                reply_to: Source::NONE,
                 started: Instant::now(),
             });
             // Zero timeout: any elapsed >= 0 trips immediately.
@@ -1219,7 +1219,7 @@ mod native {
                 Arc::clone(&cap.mailer),
                 MailboxId(0),
             ));
-            let mut ctx = NativeCtx::new(&transport, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
             cap.on_unsubscribe_all(&mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
 
             assert!(

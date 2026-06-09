@@ -704,10 +704,10 @@ mod native {
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
-        use aether_substrate::mail::ReplyTo;
+        use aether_substrate::mail::Source;
 
         use crate::test_chassis::{TestChassis, fresh_substrate};
-        use aether_substrate::mail::ReplyTarget;
+        use aether_substrate::mail::SourceAddr;
         use aether_substrate::mail::registry;
         use serde::de::DeserializeOwned;
         use std::fs;
@@ -766,7 +766,7 @@ mod native {
                 }
             }
 
-            fn ctx(&self, sender: ReplyTo) -> NativeCtx<'_> {
+            fn ctx(&self, sender: Source) -> NativeCtx<'_> {
                 NativeCtx::new(
                     &self.transport,
                     sender,
@@ -1029,8 +1029,8 @@ mod native {
             Arc::new(r)
         }
 
-        fn session_sender() -> ReplyTo {
-            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
+        fn session_sender() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
         }
 
         use crate::test_chassis::test_mailer_and_rx;

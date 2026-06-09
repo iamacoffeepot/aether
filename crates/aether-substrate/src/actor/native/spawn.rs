@@ -37,7 +37,7 @@ use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_interna
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
-use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
+use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
@@ -300,7 +300,7 @@ impl Spawner {
         subname: Subname<'_>,
         config: A::Config,
         after_init_mail: Vec<Envelope>,
-        sender_for_init: ReplyTo,
+        sender_for_init: Source,
         parent: Option<(u64, MailboxId)>,
     ) -> Result<MailboxId, SpawnError>
     where
@@ -542,7 +542,7 @@ impl Spawner {
         local::with_stamped(&slots, || {
             let mut wire_ctx = crate::actor::native::NativeCtx::new(
                 &transport,
-                ReplyTo::NONE,
+                Source::NONE,
                 MailId::NONE,
                 MailId::NONE,
             );
@@ -645,7 +645,7 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
     spawner: Arc<Spawner>,
     subname: Subname<'ctx>,
     config: Option<A::Config>,
-    sender: ReplyTo,
+    sender: Source,
     /// ADR-0099 §3: the spawning actor's lineage `(carry, id)`, or
     /// `None` for a top-level chassis-level spawn. `Some` nests the
     /// child — its id folds the new node's `ActorId` onto the parent
@@ -670,7 +670,7 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
         spawner: Arc<Spawner>,
         subname: Subname<'ctx>,
         config: A::Config,
-        sender: ReplyTo,
+        sender: Source,
         parent: Option<(u64, MailboxId)>,
     ) -> Self {
         Self {

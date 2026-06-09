@@ -68,7 +68,7 @@ mod server_native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::{ReplyTarget, ReplyTo};
+    use aether_substrate::mail::{Source, SourceAddr};
     use std::collections::HashMap;
     use std::convert::Infallible;
     use std::env;
@@ -383,7 +383,7 @@ mod server_native {
         #[handler]
         fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
             let reply_to = ctx.reply_target();
-            let ReplyTarget::Component(reply_target) = reply_to.target else {
+            let SourceAddr::Component(reply_target) = reply_to.addr else {
                 // A routed call always carries a Component reply-to
                 // (the originating RpcServerCapability). Without one
                 // there's nowhere to stream the reply or the
@@ -499,7 +499,7 @@ mod server_native {
                 CallSettled::Err { error }.encode_into_bytes(),
                 1,
             )
-            .with_reply_to(ReplyTo::with_correlation(ReplyTarget::None, correlation)),
+            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
         );
     }
 
@@ -625,7 +625,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
+    use aether_substrate::mail::{Mail, Source, SourceAddr};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -658,7 +658,7 @@ mod tests {
         let sink = mailbox_id_from_name(<ReplySink as Actor>::NAMESPACE);
         mailer.push(
             Mail::new(server, K::ID, request.encode_into_bytes(), 1)
-                .with_reply_to(ReplyTo::with_correlation(ReplyTarget::Component(sink), 1)),
+                .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

@@ -31,7 +31,7 @@ use crate::actor::{
 use crate::ffi::FfiActor;
 use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
 use crate::ffi::mailbox::FfiActorMailbox;
-use crate::mail::ReplyTo;
+use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use alloc::string::String;
 
@@ -138,12 +138,12 @@ impl FfiCtx<'_> {
     }
 
     /// Not part of the public API; called only by the `#[actor]`
-    /// dispatcher. Accepts `None` or `Some(ReplyTo)` — the dispatcher
-    /// passes `mail.reply_to()` verbatim so component-origin and
+    /// dispatcher. Accepts `None` or `Some(ReplyHandle)` — the dispatcher
+    /// passes `mail.reply_handle()` verbatim so component-origin and
     /// broadcast mail (which have no reply target) land as `None`.
     #[doc(hidden)]
-    pub fn __set_reply_to(&mut self, sender: Option<ReplyTo>) {
-        self.sender = sender.map(ReplyTo::raw);
+    pub fn __set_reply_to(&mut self, sender: Option<ReplyHandle>) {
+        self.sender = sender.map(ReplyHandle::raw);
     }
 
     /// Reply with an explicit `sender` + cached `KindId<K>`. Sits
@@ -154,15 +154,15 @@ impl FfiCtx<'_> {
     /// postcard reply path; FFI's `reply_mail` only ships bytes via
     /// [`Kind::encode_into_bytes`], so the bound is over-strict for
     /// guest-side cast kinds).
-    pub fn reply_kind<K: Kind>(&self, sender: ReplyTo, kind: KindId<K>, payload: &K) {
+    pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.reply_mail(sender.raw(), kind.raw(), &bytes, 1);
     }
 
     /// Reply target for the mail currently being dispatched. Mirrors
     /// [`OutboundReply::reply_target`].
-    pub fn reply_target(&self) -> Option<ReplyTo> {
-        self.sender.map(ReplyTo::__from_raw)
+    pub fn reply_target(&self) -> Option<ReplyHandle> {
+        self.sender.map(ReplyHandle::__from_raw)
     }
 
     /// Singleton sender shortcut. Returns a typed [`FfiActorMailbox`]
@@ -210,7 +210,7 @@ impl FfiCtx<'_> {
     /// failure (a retired / in-use subname, or the sibling's `init`
     /// returning `Err`) is logged on the trampoline and does not come
     /// back through this `Result` (ADR-0097 §4). The spawned sibling's
-    /// `ReplyTo` is this actor's mailbox, so its replies route here.
+    /// `Source` is this actor's mailbox, so its replies route here.
     pub fn spawn_child<A>(
         &self,
         subname: Subname<'_>,
@@ -292,13 +292,13 @@ impl MailSender for FfiCtx<'_> {
 }
 
 impl OutboundReply for FfiCtx<'_> {
-    type ReplyHandle = ReplyTo;
+    type ReplyHandle = ReplyHandle;
 
-    fn reply_target(&self) -> Option<ReplyTo> {
-        self.sender.map(ReplyTo::__from_raw)
+    fn reply_target(&self) -> Option<ReplyHandle> {
+        self.sender.map(ReplyHandle::__from_raw)
     }
 
-    fn origin(&self) -> Option<MailboxId> {
+    fn source_mailbox(&self) -> Option<MailboxId> {
         None
     }
 
@@ -310,7 +310,7 @@ impl OutboundReply for FfiCtx<'_> {
         }
     }
 
-    fn reply_to<K: Kind>(&mut self, sender: ReplyTo, payload: &K) {
+    fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
     }

@@ -376,7 +376,7 @@ mod cap_native {
     }
 
     struct PendingUnbind {
-        sender: aether_data::ReplyTo,
+        sender: aether_data::Source,
         listener_name: String,
     }
 
@@ -599,7 +599,7 @@ mod cap_native {
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::OwnedDispatch;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
-        use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{MailRef, Source, SourceAddr};
         use serde::de::DeserializeOwned;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
@@ -637,8 +637,8 @@ mod cap_native {
             (registry, rx, chassis)
         }
 
-        fn session_reply() -> ReplyTo {
-            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
+        fn session_reply() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
         }
 
         /// Push an encoded mail (via the kind's `encode_into_bytes`) at

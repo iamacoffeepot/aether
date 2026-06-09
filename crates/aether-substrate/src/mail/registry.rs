@@ -29,7 +29,7 @@ use rustc_hash::FxHashMap;
 use aether_kinds::trace::Nanos;
 
 use crate::handle_store::schema_contains_ref;
-use crate::mail::{KindId, MailId, MailRef, MailboxId, ReplyTo};
+use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::SeizeHandle;
 use std::error;
 
@@ -50,7 +50,7 @@ use std::error;
 pub(crate) type SeizeCell = Arc<OnceLock<SeizeHandle>>;
 
 /// Test-only helper that builds a [`MailDispatch`] with empty
-/// `origin` / `ReplyTo::NONE` / `MailId::NONE` defaults from the
+/// `origin` / `Source::NONE` / `MailId::NONE` defaults from the
 /// minimum positional args. Used by chassis and capability tests
 /// that drive a registered handler synchronously without going
 /// through the full `Mail` → `Mailer::push` path.
@@ -65,7 +65,7 @@ pub(crate) fn test_dispatch<'a>(
         kind,
         kind_name,
         origin: None,
-        sender: ReplyTo::NONE,
+        sender: Source::NONE,
         payload,
         count,
         mail_id: MailId::NONE,
@@ -78,7 +78,7 @@ pub(crate) fn test_dispatch<'a>(
 /// poke an `Inbox` handler directly through
 /// [`InboxHandler::enqueue`] — the trait's owned-dispatch contract
 /// makes the borrowed [`test_dispatch`] unsuitable. Same defaults
-/// (empty origin, `ReplyTo::NONE`, `MailId::NONE`).
+/// (empty origin, `Source::NONE`, `MailId::NONE`).
 ///
 /// Issue iamacoffeepot/aether#848 PR 2: added alongside the
 /// [`OwnedDispatch`] migration so cap-side dispatcher tests stay
@@ -94,7 +94,7 @@ pub(crate) fn test_owned_dispatch(
         kind,
         kind_name.to_owned(),
         None,
-        ReplyTo::NONE,
+        Source::NONE,
         MailRef::from(payload.to_vec()),
         count,
         MailId::NONE,
@@ -158,7 +158,7 @@ pub struct MailDispatch<'a> {
     pub origin: Option<&'a str>,
     /// Remote reply target of the mail (ADR-0008 / ADR-0037 /
     /// ADR-0042). Carries the correlation id for reply-routing.
-    pub sender: ReplyTo,
+    pub sender: Source,
     /// Payload bytes (the kind's encoded representation per ADR-0019).
     pub payload: &'a [u8],
     /// Kind-implied item count.
@@ -308,7 +308,7 @@ pub struct OwnedDispatch {
     pub origin: Option<String>,
     /// Remote reply target of the mail (ADR-0008 / ADR-0037 /
     /// ADR-0042). Carries the correlation id for reply-routing.
-    pub sender: ReplyTo,
+    pub sender: Source,
     /// Payload bytes (the kind's encoded representation per ADR-0019),
     /// held as a [`MailRef`] (ADR-0087, iamacoffeepot/aether#1104).
     /// Phase 1 only ever carries `MailRef::Owned` — handlers move it
@@ -370,7 +370,7 @@ impl OwnedDispatch {
         kind: KindId,
         kind_name: String,
         origin: Option<String>,
-        sender: ReplyTo,
+        sender: Source,
         payload: MailRef,
         count: u32,
         mail_id: MailId,
@@ -419,7 +419,7 @@ impl OwnedDispatch {
         kind: KindId,
         kind_name: String,
         origin: Option<String>,
-        sender: ReplyTo,
+        sender: Source,
         payload: MailRef,
         count: u32,
         mail_id: MailId,
@@ -1600,7 +1600,7 @@ mod tests {
             KindId(7),
             "aether.window.set_mode".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(vec![1u8, 2, 3]),
             1,
             MailId::new(MailboxId(42), 9),
@@ -1625,7 +1625,7 @@ mod tests {
             KindId(7),
             "aether.window.set_mode".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(Vec::new()),
             1,
             MailId::new(MailboxId(1), 1),
@@ -1646,7 +1646,7 @@ mod tests {
             KindId(7),
             "aether.fs.read".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(Vec::new()),
             1,
             MailId::new(MailboxId(2), 2),
@@ -1668,7 +1668,7 @@ mod tests {
             KindId(7),
             "aether.fs.write".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(Vec::new()),
             1,
             MailId::new(MailboxId(3), 3),
@@ -1690,7 +1690,7 @@ mod tests {
             KindId(7),
             "aether.tick".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(Vec::new()),
             1,
             MailId::NONE,
@@ -1714,7 +1714,7 @@ mod tests {
             KindId(7),
             "aether.tick".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(vec![9u8]),
             1,
             MailId::new(MailboxId(4), 4),
@@ -1746,7 +1746,7 @@ mod tests {
             KindId(7),
             "aether.rpc.inbound_ready".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(Vec::new()),
             1,
             MailId::NONE,
@@ -1784,7 +1784,7 @@ mod tests {
             KindId(11),
             "aether.audio.note_on".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(vec![0u8]),
             1,
             MailId::new(MailboxId(5), 5),
@@ -1892,7 +1892,7 @@ mod tests {
             KindId(0),
             "aether.tick".to_owned(),
             Some("physics".to_owned()),
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(Vec::new()),
             3,
             MailId::NONE,
@@ -2393,7 +2393,7 @@ mod tests {
             KindId(0),
             "aether.audio.note_on".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(vec![1, 2, 3]),
             1,
             MailId::NONE,
@@ -2407,7 +2407,7 @@ mod tests {
             KindId(0),
             "aether.audio.note_on".to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(vec![4, 5, 6, 7]),
             1,
             MailId::NONE,
@@ -2448,7 +2448,7 @@ mod tests {
             KindId(42),
             "aether.fs.write".to_owned(),
             Some("aether.fs".to_owned()),
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(vec![0xAB, 0xCD]),
             1,
             MailId::NONE,

@@ -404,7 +404,7 @@ mod tests {
         mail_id: MailId,
         root: MailId,
         parent_mail: Option<MailId>,
-        sender: aether_data::ReplyTo,
+        sender: aether_data::Source,
     }
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {

@@ -15,7 +15,7 @@
 //!
 //! - [`DispatchId`] — a `Copy` correlation token minted per dispatch.
 //! - [`TaskDone`] — a move-only completion that carries the worker's
-//!   output, the originating [`ReplyTo`], the held [`SettlementHold`],
+//!   output, the originating [`Source`], the held [`SettlementHold`],
 //!   and an opt-in context `C`. Its consuming [`TaskDone::resolve`]
 //!   re-replies through the carried reply target **first**, then drops
 //!   the hold (`Sent` before `Release`, ADR-0080 §12). Dropping a
@@ -47,7 +47,7 @@ use std::sync::Mutex;
 
 use aether_data::{Kind, KindId};
 
-use crate::mail::ReplyTo;
+use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
 
 use super::ctx::NativeCtx;
@@ -117,7 +117,7 @@ struct InflightEntry {
     hold: SettlementHold,
     /// The originating caller's reply target, captured at dispatch. The
     /// re-reply routes through this.
-    reply_to: ReplyTo,
+    reply_to: Source,
     /// The opt-in completion context (`()` for the bare
     /// [`dispatch_blocking`](NativeCtx::dispatch_blocking)). Boxed so
     /// heterogeneous `C`s share one table type; downcast in
@@ -164,7 +164,7 @@ impl InflightTable {
 }
 
 /// A move-only dispatch completion (ADR-0093 §3-§4). Carries the
-/// worker's `output`, the originating [`ReplyTo`], the held
+/// worker's `output`, the originating [`Source`], the held
 /// [`SettlementHold`], and an opt-in context `C` (unit by default).
 ///
 /// Move-only by construction — no `Clone` / `Copy` — so the held state
@@ -183,7 +183,7 @@ pub struct TaskDone<O, C = ()> {
     /// resolved `TaskDone` carries `None` here; an un-resolved one
     /// carries `Some` and `Drop` trips the assertion.
     hold: Option<SettlementHold>,
-    reply_to: ReplyTo,
+    reply_to: Source,
     /// Set true by every `resolve*` path before it consumes `self`, so
     /// `Drop` can tell a resolved completion (clean) from a dropped-
     /// without-resolve one (the lost-reply bug).
@@ -279,7 +279,7 @@ impl InflightTable {
     fn insert(
         &mut self,
         hold: SettlementHold,
-        reply_to: ReplyTo,
+        reply_to: Source,
         context: Box<dyn Any + Send>,
     ) -> DispatchId {
         let id = self.mint_id();
@@ -368,7 +368,7 @@ impl InflightTable {
     pub(crate) fn dispatch_insert(
         &mut self,
         hold: SettlementHold,
-        reply_to: ReplyTo,
+        reply_to: Source,
         context: Box<dyn Any + Send>,
     ) -> DispatchId {
         self.insert(hold, reply_to, context)
@@ -410,7 +410,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use aether_data::{MailId, MailboxId, ReplyTarget, ReplyTo, mailbox_id_from_name};
+    use aether_data::{MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
 
     use crate::actor::native::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
@@ -452,7 +452,7 @@ mod tests {
 
     /// Forward every dispatched envelope onto `tx` so a test can observe
     /// the routed reply. The reply lands at the caller's
-    /// `ReplyTarget::Component(sink)` mailbox.
+    /// `SourceAddr::Component(sink)` mailbox.
     fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
         Arc::new(move |dispatch: OwnedDispatch| {
             // ADR-0094: terminal test consumer — discharge before the
@@ -501,7 +501,7 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         // The original caller: a registered inbox we observe the re-reply
-        // landing on (the reply routes to ReplyTarget::Component(caller)).
+        // landing on (the reply routes to SourceAddr::Component(caller)).
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
         let caller = registry.register_inbox("test.dispatch_blocking.caller", forward_to(reply_tx));
 
@@ -517,7 +517,7 @@ mod tests {
         registry.register_inbox("test.dispatch_blocking.actor", forward_to(wake_tx));
 
         let root = root_id(1);
-        let caller_reply_to = ReplyTo::with_correlation(ReplyTarget::Component(caller), 77);
+        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
 
         // The dispatching handler: eager-acquire the hold, spawn the
         // worker, return.
@@ -544,7 +544,7 @@ mod tests {
 
         // The completion handler runs: rebuild the TaskDone and resolve.
         {
-            let mut ctx = NativeCtx::new(&binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             let done = ctx
                 .take_task_done::<Answer, ()>(id)
                 .expect("the dispatch is in the ledger");
@@ -602,7 +602,7 @@ mod tests {
         registry.register_inbox("test.dispatch_resumed.actor", forward_to(wake_tx));
 
         let accept_root = root_id(1);
-        let caller_reply_to = ReplyTo::with_correlation(ReplyTarget::Component(caller), 77);
+        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
 
         // "Accept": acquire the hold on the accept root + capture the
         // caller, as a TaskQueue does when buffering an over-limit request.
@@ -623,7 +623,7 @@ mod tests {
         let id = {
             let mut ctx = NativeCtx::new(
                 &binding,
-                ReplyTo::with_correlation(ReplyTarget::None, 99),
+                Source::with_correlation(SourceAddr::None, 99),
                 MailId::NONE,
                 other_root,
             );
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(landed, id);
 
         {
-            let mut ctx = NativeCtx::new(&binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             let done = ctx
                 .take_task_done::<Answer, ()>(id)
                 .expect("the resumed dispatch is in the ledger");
@@ -691,7 +691,7 @@ mod tests {
         registry.register_inbox("test.dispatch_blocking.actor2", forward_to(wake_tx));
 
         let root = root_id(2);
-        let caller_reply_to = ReplyTo::with_correlation(ReplyTarget::Component(caller), 5);
+        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 5);
 
         {
             let mut ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, root);
@@ -702,7 +702,7 @@ mod tests {
 
         let id = await_wake(&wake_rx);
         {
-            let mut ctx = NativeCtx::new(&binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             let done = ctx
                 .take_task_done::<u64, u64>(id)
                 .expect("the dispatch is in the ledger");
@@ -744,7 +744,7 @@ mod tests {
             output: 1,
             context: (),
             hold: Some(hold),
-            reply_to: ReplyTo::NONE,
+            reply_to: Source::NONE,
             resolved: false,
         };
         // The drop releases the hold (verified indirectly: the chain
@@ -769,7 +769,7 @@ mod tests {
                 output: 1,
                 context: (),
                 hold: Some(hold),
-                reply_to: ReplyTo::NONE,
+                reply_to: Source::NONE,
                 resolved: false,
             };
             drop(done);

@@ -48,7 +48,7 @@ mod native {
         ///
         /// Reply through `ctx.mailer().send_reply` (the `Mailer`, the
         /// complete router) rather than `HubOutbound::send_reply`, which
-        /// silently drops `ReplyTarget::Component` — the local-RPC-server
+        /// silently drops `SourceAddr::Component` — the local-RPC-server
         /// reply target an MCP-spawned engine tags (iamacoffeepot/aether#1321,
         /// matching the desktop driver fix in #1319).
         // `&self` keeps the dispatch ABI (ADR-0033 / ADR-0038); the

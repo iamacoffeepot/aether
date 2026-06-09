@@ -945,7 +945,7 @@ mod engine {
     /// `RpcServerCapability` dispatches it into its local actor system.
     /// Any reply streams back through the proxy and routes to whoever
     /// sent this `ForwardEnvelope` — the proxy keys reply correlation
-    /// off the inbound mail's `ReplyTo`.
+    /// off the inbound mail's `Source`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.forward")]
     pub struct ForwardEnvelope {
@@ -1982,7 +1982,7 @@ mod control_plane {
     // its contents, and a multi-MB upload should not round-trip its
     // bytes. Components needing strict per-op correlation (same URL
     // fired back-to-back, non-idempotent POST) lean on ADR-0042's
-    // per-ReplyTo correlation ids via `prev_correlation_p32` rather
+    // per-Source correlation ids via `prev_correlation_p32` rather
     // than a per-kind field.
 
     /// HTTP method carried on `Fetch`. Enumerating at the schema

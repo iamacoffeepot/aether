@@ -5,7 +5,7 @@
 //! These were defined in `aether-hub-protocol` until ADR-0071 phase 7c
 //! moved them here. The hub channel still ships them on the wire, so
 //! `aether-hub-protocol` re-exports — anything that only needs the
-//! newtypes (substrate-core's `ReplyTarget`, the reply-table, the
+//! newtypes (substrate-core's `SourceAddr`, the reply-table, the
 //! egress backend trait) reaches for `aether_data::EngineId` etc.
 //! without pulling in the framing crate.
 //!

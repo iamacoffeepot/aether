@@ -13,11 +13,11 @@
 //!   handshake's `HelloAck` identity is kept on `conn.server`.
 //! - **`on_forward`** ([`ForwardEnvelope`]) wraps the `mailbox`,
 //!   `kind`, and `payload` into an RPC `Call` and writes it down the
-//!   connection. The inbound mail's `ReplyTo` is parked under the
+//!   connection. The inbound mail's `Source` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
 //! - **`on_inbound_ready`** ([`RpcInboundReady`]) is the reader
 //!   sidecar's wake: it drains `conn.inbound`, lifting `ReplyEvent`
-//!   frames back to the parked `ReplyTo` (correlation preserved,
+//!   frames back to the parked `Source` (correlation preserved,
 //!   mirroring `Mailer::send_reply`), dropping the `in_flight` entry on
 //!   `ReplyEnd`, and self-shutting-down on `Bye`.
 //!
@@ -59,7 +59,7 @@ mod proxy_native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::{ReplyTarget, ReplyTo};
+    use aether_substrate::mail::{Source, SourceAddr};
     use std::collections::HashMap;
     use std::io::ErrorKind;
     use std::process::Child;
@@ -159,10 +159,10 @@ mod proxy_native {
         /// `.server` holds the substrate's `HelloAck` identity (the
         /// kind manifest P4's describe handler will read).
         conn: RpcConnection,
-        /// wire `cid` → the `ReplyTo` of the `ForwardEnvelope` that
+        /// wire `cid` → the `Source` of the `ForwardEnvelope` that
         /// opened the call. `ReplyEvent` frames route back here;
         /// `ReplyEnd` clears the entry.
-        in_flight: HashMap<u64, ReplyTo>,
+        in_flight: HashMap<u64, Source>,
         /// The forked child substrate, when the engines cap spawned it
         /// (see [`EngineProxyConfig::spawned`]). `Drop` SIGKILLs +
         /// reaps it; `None` once taken or for an adopted substrate.
@@ -558,7 +558,7 @@ mod proxy_native {
                 );
                 return;
             };
-            let ReplyTarget::Component(target) = reply_to.target else {
+            let SourceAddr::Component(target) = reply_to.addr else {
                 // The `ForwardEnvelope` arrived with no `Component`
                 // reply target (broadcast / `None`) — there's nowhere
                 // local to route the reply.
@@ -566,7 +566,7 @@ mod proxy_native {
             };
             self.mailer.push(
                 Mail::new(target, envelope.kind, envelope.payload, 1).with_reply_to(
-                    ReplyTo::with_correlation(ReplyTarget::None, reply_to.correlation_id),
+                    Source::with_correlation(SourceAddr::None, reply_to.correlation_id),
                 ),
             );
         }
@@ -589,7 +589,7 @@ mod proxy_native {
                 );
                 return;
             };
-            let ReplyTarget::Component(target) = reply_to.target else {
+            let SourceAddr::Component(target) = reply_to.addr else {
                 return;
             };
             let settled = match result {
@@ -605,8 +605,8 @@ mod proxy_native {
                     settled.encode_into_bytes(),
                     1,
                 )
-                .with_reply_to(ReplyTo::with_correlation(
-                    ReplyTarget::None,
+                .with_reply_to(Source::with_correlation(
+                    SourceAddr::None,
                     reply_to.correlation_id,
                 )),
             );
@@ -737,7 +737,7 @@ mod tests {
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_substrate::Subname;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-    use aether_substrate::mail::{Mail, ReplyTarget, ReplyTo};
+    use aether_substrate::mail::{Mail, Source, SourceAddr};
     use std::io::BufReader;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -806,7 +806,7 @@ mod tests {
 
         // Forge a `ForwardEnvelope` at the proxy, reply-to the sink.
         // `mailer.push` directly (rather than through an actor send) so
-        // the test controls the `ReplyTo` the proxy parks.
+        // the test controls the `Source` the proxy parks.
         let fwd = aether_kinds::ForwardEnvelope {
             mailbox: echo_mailbox,
             kind: <TestEchoRequest as Kind>::ID,
@@ -821,8 +821,8 @@ mod tests {
                     .expect("test setup: ForwardEnvelope serializes via postcard"),
                 1,
             )
-            .with_reply_to(ReplyTo::with_correlation(
-                ReplyTarget::Component(sink_mailbox),
+            .with_reply_to(Source::with_correlation(
+                SourceAddr::Component(sink_mailbox),
                 777,
             )),
         );

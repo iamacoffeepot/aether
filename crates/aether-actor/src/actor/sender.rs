@@ -121,7 +121,7 @@ pub trait Sender {
 ///
 /// Note: Stage 1 deliberately omits a `sender()` accessor. The
 /// wasm-side reply handle (opaque `u32`) and the substrate-side
-/// `aether_data::ReplyTo` (target + correlation) carry different
+/// `aether_data::Source` (addr + correlation) carry different
 /// shapes — no single return type fits both transports honestly.
 /// The two sides converge through the implicit reply path
 /// ([`Self::reply`]) that knows internally which shape it holds.

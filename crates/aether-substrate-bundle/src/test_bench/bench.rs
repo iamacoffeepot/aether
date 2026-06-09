@@ -46,7 +46,7 @@ use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
 };
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
+    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, Source, SourceAddr,
     SubstrateBoot,
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
@@ -166,7 +166,7 @@ pub struct TestBench {
     frame: u64,
     next_correlation_id: AtomicU64,
     /// Stable session identity for reply addressing. The substrate
-    /// echoes this on every reply addressed to `ReplyTarget::Session`,
+    /// echoes this on every reply addressed to `SourceAddr::Session`,
     /// so the loopback receiver can recognise its own replies.
     session: SessionToken,
 
@@ -203,7 +203,7 @@ pub struct TestBench {
 
 /// Fixed UUID used as the `SessionToken` for in-process replies.
 /// Any non-zero literal works — the substrate just echoes whatever
-/// it's handed in `ReplyTarget::Session`. Spelled out as a constant
+/// it's handed in `SourceAddr::Session`. Spelled out as a constant
 /// so the boot path is reproducible and the value shows up in logs.
 const TESTBENCH_SESSION_UUID: u128 = 0x7E57_BE7C_C0FF_EE15_AE7E_7BE7_5E55_1077;
 
@@ -568,7 +568,7 @@ impl TestBench {
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, TestBenchError> {
         let cid = self.fresh_correlation_id();
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         self.queue
             .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
@@ -635,7 +635,7 @@ impl TestBench {
             .lookup(recipient_name)
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         self.queue
             .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
@@ -722,7 +722,7 @@ impl TestBench {
     where
         K: Kind,
     {
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         let payload = mail.encode_into_bytes();
         self.queue
             .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
@@ -997,7 +997,7 @@ impl TestBench {
                     self.lifecycle_mailbox,
                     self.kind_lifecycle_advance,
                 );
-                let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+                let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
                 self.queue.push(
                     Mail::new(
                         self.lifecycle_mailbox,

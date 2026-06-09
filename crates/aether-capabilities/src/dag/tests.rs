@@ -39,7 +39,7 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
-use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
+use aether_substrate::mail::{MailRef, Source, SourceAddr};
 
 use super::DagCapability;
 use super::test_support::{
@@ -100,9 +100,9 @@ fn boot_call_fixture(
 
 /// A distinct session reply target per `corr` so multiple in-flight
 /// requests don't collide.
-fn session(corr: u64) -> ReplyTo {
-    ReplyTo::with_correlation(
-        ReplyTarget::Session(SessionToken(Uuid::from_u128(u128::from(corr)))),
+fn session(corr: u64) -> Source {
+    Source::with_correlation(
+        SourceAddr::Session(SessionToken(Uuid::from_u128(u128::from(corr)))),
         corr,
     )
 }
@@ -110,7 +110,7 @@ fn session(corr: u64) -> ReplyTo {
 /// Enqueue an already-encoded request kind at `mailbox_name` with a
 /// session reply target. Drives the request through the cap's live
 /// dispatcher thread.
-fn enqueue<K: Kind>(registry: &Registry, mailbox_name: &str, payload: &K, sender: ReplyTo) {
+fn enqueue<K: Kind>(registry: &Registry, mailbox_name: &str, payload: &K, sender: Source) {
     let id = registry.lookup(mailbox_name).expect("mailbox registered");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry") else {
         panic!("expected inbox mailbox for {mailbox_name}");

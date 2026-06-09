@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use aether_data::SessionToken;
 
-use crate::mail::{MailboxId, ReplyTarget};
+use crate::mail::{MailboxId, SourceAddr};
 
 /// Sentinel passed to the guest's `receive` shim when the inbound
 /// mail has no reply target (broadcast origin — ADR-0013 §1). A
@@ -31,28 +31,28 @@ use crate::mail::{MailboxId, ReplyTarget};
 pub const NO_REPLY_HANDLE: u32 = u32::MAX;
 
 /// What a reply handle resolves to on the substrate side. The guest
-/// sees only the opaque `u32` — the `target` variant lets `reply_mail`
+/// sees only the opaque `u32` — the `addr` variant lets `reply_mail`
 /// pick the right outbound route, and `correlation_id` carries the
 /// ADR-0042 correlation from the inbound mail so the reply's echo
 /// happens automatically when `reply_mail` constructs the outbound
-/// `ReplyTo`.
+/// `Source`.
 ///
-/// Invariant: `target` is never `ReplyTarget::None` — the table only
-/// allocates entries for mail that had a meaningful reply target.
+/// Invariant: `addr` is never `SourceAddr::None` — the table only
+/// allocates entries for mail that had a meaningful sender addr.
 /// The shared enum stays convenient (same shape as envelope-level
-/// `ReplyTo.target`), at the cost of a dead `None` variant here.
+/// `Source.addr`), at the cost of a dead `None` variant here.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ReplyEntry {
-    pub target: ReplyTarget,
+    pub addr: SourceAddr,
     pub correlation_id: u64,
 }
 
 impl ReplyEntry {
-    /// Short constructor: `target` + `correlation_id`.
+    /// Short constructor: `addr` + `correlation_id`.
     #[must_use]
-    pub fn new(target: ReplyTarget, correlation_id: u64) -> Self {
+    pub fn new(addr: SourceAddr, correlation_id: u64) -> Self {
         Self {
-            target,
+            addr,
             correlation_id,
         }
     }
@@ -62,13 +62,13 @@ impl ReplyEntry {
     /// correlation.
     #[must_use]
     pub fn session(token: SessionToken) -> Self {
-        Self::new(ReplyTarget::Session(token), 0)
+        Self::new(SourceAddr::Session(token), 0)
     }
 
     /// Back-compat shim for `ReplyEntry::Component(mailbox)`.
     #[must_use]
     pub fn component(mailbox: MailboxId) -> Self {
-        Self::new(ReplyTarget::Component(mailbox), 0)
+        Self::new(SourceAddr::Component(mailbox), 0)
     }
 }
 
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn allocate_preserves_correlation_id() {
         let mut t = ReplyTable::new();
-        let entry = ReplyEntry::new(ReplyTarget::Session(token(5)), 0xCAFE_BABE);
+        let entry = ReplyEntry::new(SourceAddr::Session(token(5)), 0xCAFE_BABE);
         let h = t.allocate(entry);
         let got = t.resolve(h).expect("resolves");
         assert_eq!(got.correlation_id, 0xCAFE_BABE);

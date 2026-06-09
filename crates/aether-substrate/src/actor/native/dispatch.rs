@@ -33,7 +33,7 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, MailboxId, ReplyTo};
+use crate::mail::{KindId, MailboxId, Source};
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
@@ -163,7 +163,7 @@ pub fn dispatch_cost_tail_if_matching(
 /// resolves to the driver's per-actor ring.
 pub fn dispatch_log_tail_if_matching_free(
     mailer: &Mailer,
-    reply_to: ReplyTo,
+    reply_to: Source,
     env: &Envelope,
 ) -> bool {
     if env.kind.0 != <LogTail as Kind>::ID.0 {
@@ -191,7 +191,7 @@ pub fn dispatch_log_tail_if_matching_free(
 /// [`dispatch_log_tail_if_matching_free`] for the caller invariant.
 pub fn dispatch_trace_tail_if_matching_free(
     mailer: &Mailer,
-    reply_to: ReplyTo,
+    reply_to: Source,
     env: &Envelope,
 ) -> bool {
     if env.kind.0 != <TraceTail as Kind>::ID.0 {
@@ -222,7 +222,7 @@ pub fn dispatch_trace_tail_if_matching_free(
 /// from `binding.self_mailbox()`).
 pub fn dispatch_cost_tail_if_matching_free(
     mailer: &Mailer,
-    reply_to: ReplyTo,
+    reply_to: Source,
     self_mailbox: MailboxId,
     env: &Envelope,
 ) -> bool {
@@ -397,7 +397,7 @@ mod free_dispatch_tests {
     use crate::mail::mailer::Mailer;
     use crate::mail::outbound::{EgressEvent, HubOutbound};
     use crate::mail::registry::Registry;
-    use crate::mail::{MailRef, ReplyTarget};
+    use crate::mail::{MailRef, SourceAddr};
     use aether_actor::local::{ActorSlots, with_stamped};
     use aether_data::{MailId, SessionToken};
     use aether_kinds::SetWindowTitle;
@@ -417,7 +417,7 @@ mod free_dispatch_tests {
         (mailer, rx)
     }
 
-    fn build_envelope<K: Kind>(payload: &K, reply_to: ReplyTo) -> Envelope {
+    fn build_envelope<K: Kind>(payload: &K, reply_to: Source) -> Envelope {
         let bytes = payload.encode_into_bytes();
         Envelope::disarmed(
             KindId(<K as Kind>::ID.0),
@@ -444,7 +444,7 @@ mod free_dispatch_tests {
     fn dispatch_log_tail_free_replies_on_match() {
         let (mailer, rx) = fresh_substrate_with_outbound();
         let session = SessionToken::NIL;
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0x1272_4242);
+        let reply_to = Source::with_correlation(SourceAddr::Session(session), 0x1272_4242);
         let env = build_envelope(
             &LogTail {
                 max: 10,
@@ -487,7 +487,7 @@ mod free_dispatch_tests {
     fn dispatch_log_tail_free_skips_non_match() {
         let (mailer, rx) = fresh_substrate_with_outbound();
         let session = SessionToken::NIL;
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0);
+        let reply_to = Source::with_correlation(SourceAddr::Session(session), 0);
         // Build an envelope of a different kind (`SetWindowTitle`); the
         // arm must early-return `false` and emit nothing.
         let env = build_envelope(
@@ -514,7 +514,7 @@ mod free_dispatch_tests {
         let (mailer, rx) = fresh_substrate_with_outbound();
         let self_mbx = MailboxId(0x1272_AAAA);
         let session = SessionToken::NIL;
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0xCAFE);
+        let reply_to = Source::with_correlation(SourceAddr::Session(session), 0xCAFE);
 
         let trace_env = build_envelope(
             &TraceTail {

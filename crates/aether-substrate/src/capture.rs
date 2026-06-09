@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Receiver;
 
-use crate::mail::{Mail, ReplyTo};
+use crate::mail::{Mail, Source};
 use crate::runtime::trace::SettlementHold;
 
 /// One pending capture request. Carries the reply handle so the
@@ -48,7 +48,7 @@ use crate::runtime::trace::SettlementHold;
 /// a settlement registry (in which case the driver renders
 /// immediately, preserving pre-fix behaviour on test fixtures).
 pub struct PendingCapture {
-    pub reply_to: ReplyTo,
+    pub reply_to: Source,
     pub after_mails: Vec<Mail>,
     pub pre_settlements: Vec<Receiver<()>>,
     /// ADR-0086 §12 settlement hold: held from `on_capture_frame` accept
@@ -123,12 +123,12 @@ impl CaptureQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ReplyTarget;
+    use crate::SourceAddr;
     use crate::runtime::trace::TraceHandle;
     use aether_data::{MailId, SessionToken, Uuid};
 
-    fn reply_to(u: u128) -> ReplyTo {
-        ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(u))))
+    fn reply_to(u: u128) -> Source {
+        Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(u))))
     }
 
     fn pending(u: u128) -> PendingCapture {

@@ -43,7 +43,7 @@ use aether_substrate::chassis::settlement::{
 };
 use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
-    HubOutbound, Mailer, ReplyTarget, ReplyTo, SharedActorSlots, SubstrateBoot,
+    HubOutbound, Mailer, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
@@ -111,12 +111,12 @@ pub struct App {
     /// redraw we `take()` any pending capture and, if present, use
     /// `render_and_capture`, then reply to the sender via
     /// `queue.send_reply` (the `Mailer`, which routes every
-    /// `ReplyTarget` — see `outbound`).
+    /// `SourceAddr` — see `outbound`).
     capture_queue: CaptureQueue,
     /// Hub outbound — held for log egress to the hub and
     /// `lifecycle::fatal_abort`. NOT used for chassis replies:
     /// `HubOutbound::send_reply` only routes `Session` / `EngineMailbox`
-    /// targets and silently drops `ReplyTarget::Component`, but mail
+    /// targets and silently drops `SourceAddr::Component`, but mail
     /// dispatched by this engine's own `RpcServerCapability` (every
     /// hub/MCP call lands via the proxy → local RPC server) carries a
     /// `Component(rpc_server)` reply target. Replies go through
@@ -628,8 +628,8 @@ impl App {
             self.lifecycle_mailbox,
             self.kind_lifecycle_advance,
         );
-        let reply_to = ReplyTo::with_correlation(
-            ReplyTarget::Component(self.lifecycle_reply_mailbox),
+        let reply_to = Source::with_correlation(
+            SourceAddr::Component(self.lifecycle_reply_mailbox),
             correlation,
         );
         self.queue.push(
@@ -827,7 +827,7 @@ impl App {
             // `FocusWindow` is a unit payload — nothing to decode.
             // Reply through `self.queue.send_reply` (the `Mailer`),
             // never `self.outbound` (`HubOutbound` drops
-            // `ReplyTarget::Component`, iamacoffeepot/aether#1316).
+            // `SourceAddr::Component`, iamacoffeepot/aether#1316).
             let result = self.apply_window_focus();
             self.queue.send_reply(env.sender, &result);
         } else {
@@ -867,7 +867,7 @@ impl App {
     /// Here we take the parked entry, drain its `after_mails` (parity with
     /// the `RedrawRequested` service arm), reply `Err` via the `Mailer`
     /// (`self.queue.send_reply`, never `self.outbound` — `HubOutbound`
-    /// drops `ReplyTarget::Component`, iamacoffeepot/aether#1316), then let
+    /// drops `SourceAddr::Component`, iamacoffeepot/aether#1316), then let
     /// the request drop *after* the reply so the ADR-0086 §12 settlement
     /// hold's `Release` fires post-reply (iamacoffeepot/aether#1273).
     ///
@@ -1541,7 +1541,7 @@ mod tests {
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::Registry;
-        use aether_substrate::mail::{MailRef, ReplyTarget, ReplyTo};
+        use aether_substrate::mail::{MailRef, Source, SourceAddr};
 
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
@@ -1558,7 +1558,7 @@ mod tests {
         };
         let bytes = postcard::to_allocvec(&request).expect("encode LogTail");
         let session = SessionToken::NIL;
-        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(session), 0x99);
+        let reply_to = Source::with_correlation(SourceAddr::Session(session), 0x99);
         let env = Envelope::disarmed(
             KindId(<LogTail as Kind>::ID.0),
             <LogTail as Kind>::NAME.to_owned(),
@@ -1612,7 +1612,7 @@ mod tests {
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::outbound::HubOutbound;
         use aether_substrate::mail::registry::Registry;
-        use aether_substrate::mail::{MailRef, ReplyTo};
+        use aether_substrate::mail::{MailRef, Source};
 
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
@@ -1630,7 +1630,7 @@ mod tests {
             KindId(<SetWindowTitle as Kind>::ID.0),
             <SetWindowTitle as Kind>::NAME.to_owned(),
             None,
-            ReplyTo::NONE,
+            Source::NONE,
             MailRef::from(payload),
             1,
             MailId::NONE,
@@ -1717,9 +1717,9 @@ mod tests {
     #[test]
     fn occluded_capture_disposition_selects_failfast_only_when_occluded_and_parked() {
         use aether_data::MailId;
-        use aether_substrate::ReplyTarget;
+        use aether_substrate::SourceAddr;
         use aether_substrate::capture::PendingCapture;
-        use aether_substrate::mail::ReplyTo;
+        use aether_substrate::mail::Source;
         use aether_substrate::runtime::trace::TraceHandle;
 
         fn parked() -> PendingCapture {
@@ -1727,7 +1727,7 @@ mod tests {
             // no-op; the test exercises branch selection, not settlement.
             let hold = TraceHandle::new().acquire_settlement_hold(MailId::NONE);
             PendingCapture {
-                reply_to: ReplyTo::to(ReplyTarget::Session(aether_data::SessionToken::NIL)),
+                reply_to: Source::to(SourceAddr::Session(aether_data::SessionToken::NIL)),
                 after_mails: Vec::new(),
                 pre_settlements: Vec::new(),
                 hold,
