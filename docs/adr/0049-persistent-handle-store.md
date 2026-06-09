@@ -1,6 +1,6 @@
 # ADR-0049: Persistent handle store across substrate restart
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-25
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0065: Typed Id Newtypes and First-Class Type Ids in the Schema
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-28
 
 ## Context

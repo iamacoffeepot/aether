@@ -1,6 +1,6 @@
 # ADR-0089: Claude-managed MCP/hub lifecycle tunnel
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-26
 
 ## Context

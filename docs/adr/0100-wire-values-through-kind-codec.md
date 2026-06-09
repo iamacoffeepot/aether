@@ -1,6 +1,6 @@
 # ADR-0100: Wire values through the kind codec
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Revises:** ADR-0045 §1 (the `Ref<K>` inline-arm wire encoding)
 

@@ -1,6 +1,6 @@
 # ADR-0091: Live kind schemas on the inventory cap
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-28
 
 ## Context

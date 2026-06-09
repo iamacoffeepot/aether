@@ -1,6 +1,6 @@
 # ADR-0063: Fail Fast on Abnormal Component Lifecycle
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-28
 
 ## Context

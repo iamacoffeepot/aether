@@ -1,6 +1,6 @@
 # ADR-0045: Computation DAG and typed handles
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-24
 
 ## Context

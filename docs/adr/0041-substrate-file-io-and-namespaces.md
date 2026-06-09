@@ -1,6 +1,6 @@
 # ADR-0041: Substrate file I/O with namespaced adapters
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-23
 
 > **Amendment (issue #633, 2026-05-08).** The mailbox was renamed from `aether.io` to `aether.fs` and the eight kinds from `aether.io.*` to `aether.fs.*`. The new name matches `std::fs` muscle memory and disambiguates from network IO (`aether.tcp`, `aether.http`). The decision rationale, four-kind shape, namespace-prefix-with-adapter design, and configuration layering below are unchanged — read every `aether.io` reference in the body as `aether.fs`. The ADR title and filename keep "file io" because that still describes the v1 adapter and the broader storage abstraction.

@@ -1,6 +1,6 @@
 # ADR-0085: Noise-aware perf comparison for scheduler changes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-22
 
 ## Context

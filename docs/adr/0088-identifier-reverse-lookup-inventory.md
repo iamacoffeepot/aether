@@ -1,6 +1,6 @@
 # ADR-0088: Reverse-lookup identifier inventory with name templates
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-24
 
 ## Context

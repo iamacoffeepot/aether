@@ -1,6 +1,6 @@
 # ADR-0078: Chassis-internal actors, with `ProcessCapability` as the first
 
-- **Status:** Proposed
+- **Status:** Accepted (Phase 1 shipped; Phase 2 — ServerSocketCapability/framing — deferred)
 - **Date:** 2026-05-06
 
 ## Context

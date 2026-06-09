@@ -1,6 +1,6 @@
 # ADR-0066: Per-component trunk rlibs for shared types
 
-- **Status:** Proposed
+- **Status:** Accepted (ownership realized; the crate-split mechanism was revised to the runtime-feature model by ADR-0075 / ADR-0096)
 - **Date:** 2026-04-29
 
 ## Context

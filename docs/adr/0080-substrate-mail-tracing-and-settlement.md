@@ -1,6 +1,6 @@
 # ADR-0080: Substrate-wide mail tracing with settlement detection as the primary consumer
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-09
 - **Revised:** 2026-05-21 (iamacoffeepot/aether#1054) — §11 storage rewrite. The time + count-cap maps below are superseded by a fixed-size **ring buffer** of POD slots keyed on an observer-assigned ingest sequence; retention becomes size-bounded (a hard memory ceiling) and explicit eviction is removed (the ring wraps and overwrites). See §11's amendment.
 - **Revised:** 2026-05-20 (iamacoffeepot/aether#1031) — §6 settlement-reliability resolution. The deferred "one-batch quiescence window" follow-on (§6) was explored for the first non-idempotent consumer — the DAG `Call` node's bundle-close (ADR-0047) — and **rejected** in favour of an explicit **hold contract**: a handler that will send chain mail after it returns holds a `SettlementHold` on the root until its last send (synchronous in-handler replies need nothing — their `Sent` precedes their `Finished`; `spawn_inherit` workers hold automatically). Under that contract `(in_flight == 0 && held_open == 0)` is an **exact** settlement signal — the counter does not transiently reach zero with work still coming — so `Settled` fires once and is not merely a hint. The window would not have worked anyway: it is redundant for synchronous replies and cannot bridge a multi-second async reply. See §6's amended resolution.
