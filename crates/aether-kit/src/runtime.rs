@@ -159,12 +159,41 @@ struct TileMap {
 
 impl TileMap {
     fn new() -> Self {
-        let mut blocked = vec![false; (GRID_W * GRID_H) as usize];
-        // A short wall to feel collision + wall-sliding against.
-        for tz in 4..10 {
-            blocked[Self::idx(6, tz)] = true;
+        let mut map = Self {
+            blocked: vec![false; GRID_TILES],
+        };
+        // A concentric-ring maze: three nested square rings at offsets 2, 4
+        // and 6 from the open border, each sealed but for a single doorway.
+        // The doorways alternate sides (bottom / top / bottom), so the only
+        // route between the open center room and the border spirals the long
+        // way around every ring — real work for the click-to-move pathfinder.
+        // The mover spawns in the center room.
+        for &(lo, hi) in &[(2, 13), (4, 11), (6, 9)] {
+            for c in lo..=hi {
+                map.blocked[Self::idx(c, lo)] = true; // top edge
+                map.blocked[Self::idx(c, hi)] = true; // bottom edge
+                map.blocked[Self::idx(lo, c)] = true; // left edge
+                map.blocked[Self::idx(hi, c)] = true; // right edge
+            }
         }
-        Self { blocked }
+        // One doorway per ring, alternating sides to force the spiral.
+        for &(dx, dz) in &[(8, 13), (8, 4), (8, 9)] {
+            map.blocked[Self::idx(dx, dz)] = false;
+        }
+        map
+    }
+
+    /// Build a map with exactly the listed tiles blocked, for tests that need
+    /// a specific scenario rather than the demo maze.
+    #[cfg(test)]
+    fn from_blocked(cells: &[(i32, i32)]) -> Self {
+        let mut map = Self {
+            blocked: vec![false; GRID_TILES],
+        };
+        for &(tx, tz) in cells {
+            map.blocked[Self::idx(tx, tz)] = true;
+        }
+        map
     }
 
     fn in_bounds(tx: i32, tz: i32) -> bool {
@@ -785,12 +814,18 @@ mod tests {
         }
     }
 
+    /// A single wall column at x=6, z=4..9 — a focused scenario for the
+    /// pathfinding tests, independent of the demo maze.
+    fn wall_column() -> TileMap {
+        TileMap::from_blocked(&[(6, 4), (6, 5), (6, 6), (6, 7), (6, 8), (6, 9)])
+    }
+
     #[test]
     fn astar_routes_around_the_wall() {
-        // The default map has a wall at x=6, z=4..9. A path from the right
-        // of it to the left must detour around — never through it — and stay
-        // a contiguous 8-connected walk ending on the goal.
-        let map = TileMap::new();
+        // A path from the right of a wall to the left must detour around —
+        // never through it — and stay a contiguous 8-connected walk ending on
+        // the goal.
+        let map = wall_column();
         let start = (8, 8);
         let goal = (2, 7);
         let path = astar(&map, start, goal).expect("goal is reachable");
@@ -806,7 +841,37 @@ mod tests {
 
     #[test]
     fn astar_returns_none_for_blocked_goal() {
-        assert!(astar(&TileMap::new(), (8, 8), (6, 6)).is_none());
+        assert!(astar(&wall_column(), (8, 8), (6, 6)).is_none());
+    }
+
+    #[test]
+    fn maze_is_fully_connected_from_spawn() {
+        // The demo maze must have no walled-off pockets: every open tile is
+        // reachable from the spawn room by cardinal steps (so click-to-move
+        // can always find a route). Guards against a doorway typo sealing a
+        // ring.
+        let map = TileMap::new();
+        let spawn = (GRID_W / 2, GRID_H / 2);
+        assert!(map.walkable(spawn.0, spawn.1), "spawn tile must be open");
+        let mut seen = [false; GRID_TILES];
+        let mut queue = VecDeque::from([spawn]);
+        seen[TileMap::idx(spawn.0, spawn.1)] = true;
+        let mut reached = 0;
+        while let Some((x, z)) = queue.pop_front() {
+            reached += 1;
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, nz) = (x + dx, z + dz);
+                if map.walkable(nx, nz) && !seen[TileMap::idx(nx, nz)] {
+                    seen[TileMap::idx(nx, nz)] = true;
+                    queue.push_back((nx, nz));
+                }
+            }
+        }
+        let open = (0..GRID_W)
+            .flat_map(|x| (0..GRID_H).map(move |z| (x, z)))
+            .filter(|&(x, z)| map.walkable(x, z))
+            .count();
+        assert_eq!(reached, open, "maze has an unreachable open region");
     }
 
     #[test]
@@ -814,7 +879,7 @@ mod tests {
         // With nothing between start and dest, line-of-sight smoothing drops
         // every interior tile center: the mover walks one straight segment to
         // the sub-tile dest, with no kink through a center.
-        let map = TileMap::new();
+        let map = TileMap::from_blocked(&[]);
         let tiles: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (11, 8), (12, 8), (13, 8)].into();
         let start = (tile_center_octimeters(8), tile_center_octimeters(8));
         let dest = (13 * OCTIMETERS_PER_TILE + 100, 8 * OCTIMETERS_PER_TILE + 80);
@@ -829,7 +894,7 @@ mod tests {
         // When the wall genuinely sits between start and dest, smoothing keeps
         // the corner(s) it must, and every segment the mover walks stays
         // wall-clear.
-        let map = TileMap::new();
+        let map = wall_column();
         let (start_tile, goal_tile) = ((9, 6), (2, 6));
         let start = (tile_center_octimeters(9), tile_center_octimeters(6));
         let dest = (tile_center_octimeters(2), tile_center_octimeters(6));
@@ -850,7 +915,7 @@ mod tests {
 
     #[test]
     fn los_is_clear_in_the_open_and_blocked_through_the_wall() {
-        let map = TileMap::new();
+        let map = wall_column();
         let center = |tx, tz| (tile_center_octimeters(tx), tile_center_octimeters(tz));
         // Open row east of the wall.
         assert!(los(&map, center(8, 8), center(13, 8)));
@@ -860,10 +925,10 @@ mod tests {
 
     #[test]
     fn astar_keeps_a_straight_line_straight() {
-        // A horizontal target in open space (right of the wall) must be a
-        // pure eastward run — octile cost forbids the equal-length diagonal
-        // zigzag a uniform cost would allow.
-        let path = astar(&TileMap::new(), (8, 8), (13, 8)).expect("reachable");
+        // A horizontal target in open space must be a pure eastward run —
+        // octile cost forbids the equal-length diagonal zigzag a uniform cost
+        // would allow.
+        let path = astar(&TileMap::from_blocked(&[]), (8, 8), (13, 8)).expect("reachable");
         let expected: VecDeque<(i32, i32)> = [(9, 8), (10, 8), (11, 8), (12, 8), (13, 8)].into();
         assert_eq!(path, expected);
     }
