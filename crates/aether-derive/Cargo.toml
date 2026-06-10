@@ -14,9 +14,9 @@ edition.workspace = true
 proc-macro = true
 
 [dependencies]
-proc-macro2 = "1"
-quote = "1"
-syn = { version = "2", features = ["full"] }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
 
 [dev-dependencies]
 # trybuild compile-pass / compile-fail fixtures under tests/ui/. Each
@@ -31,8 +31,8 @@ trybuild = "1"
 # wasmtime per fixture binary — the speedup this issue tracks.
 aether-substrate = { path = "../aether-substrate", default-features = false }
 aether-derive = { path = "." }
-confique = { version = "0.4", default-features = false }
-clap = { version = "4", features = ["derive"] }
+confique = { workspace = true }
+clap = { workspace = true }
 
 [lints]
 workspace = true

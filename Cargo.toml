@@ -44,6 +44,31 @@ edition = "2024"
 # surfaces reach for the same major.
 clap = { version = "4", features = ["derive"] }
 
+# High-fanout shared deps (iamacoffeepot/aether#1526). Promoted to the
+# workspace table so the single-version property is structural — members
+# inherit with `{ workspace = true }` and extend per-member `features` /
+# `optional` locally. The no_std/wasm members need defaults off
+# (postcard's `heapless-cas`, serde's / tracing's `std`), and edition
+# 2024 only lets a member disable defaults when the workspace entry does
+# — so these carry `default-features = false` and the native consumers
+# re-add the default features they rely on (`heapless-cas`, `std`,
+# `attributes`) on their own declaration, keeping Cargo.lock byte-stable.
+anyhow = "1"
+bytemuck = { version = "1.19", default-features = false }
+confique = { version = "0.4", default-features = false }
+cpal = "0.17"
+inventory = "0.3"
+png = "0.18"
+postcard = { version = "1.1", default-features = false }
+proc-macro2 = "1"
+quote = "1"
+serde = { version = "1", default-features = false }
+serde_json = "1"
+syn = { version = "2", features = ["full"] }
+tracing = { version = "0.1", default-features = false }
+wasmtime = "44"
+wgpu = "29.0.1"
+
 [workspace.lints.rust]
 # Phase 5 of iamacoffeepot/aether#913 swept ~244 RsUnnecessaryQualifications
 # findings across the workspace. Enabling rustc's matching lint here at

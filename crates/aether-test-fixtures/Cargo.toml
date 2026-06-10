@@ -23,8 +23,8 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether.math.vec4` kind in its `Ref` slot, so the shared lib needs
 # `Vec4`. `aether-math` is `no_std`, keeping this rlib `no_std`.
 aether-math = { path = "../aether-math" }
-bytemuck = { version = "1", default-features = false, features = ["derive"] }
-serde = { version = "1", default-features = false, features = ["derive"] }
+bytemuck = { workspace = true, default-features = false, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -38,7 +38,7 @@ aether-capabilities = { path = "../aether-capabilities", default-features = fals
 # Issue #581: the probe emits `tracing::info!` on the first tick; the
 # actor-aware subscriber installed by `export!()` buffers + drains it
 # to LogCapability.
-tracing = { version = "0.1", default-features = false }
+tracing = { workspace = true, default-features = false }
 
 # ADR-0090 c1 reference fixture: the pre-1256 probe, now an example
 # cdylib. Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/probe.wasm

@@ -76,12 +76,12 @@ aether-kinds = { path = "../aether-kinds" }
 # / `Vec4` from the wire `[f32; N]` arrays. Always-on + target-agnostic
 # (no_std), so it rides the wasm-header-only build too.
 aether-math = { path = "../aether-math" }
-serde = { version = "1", default-features = false, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive"] }
 
 # Native-only: gated behind the `native` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
-bytemuck = { version = "1.19", optional = true }
+bytemuck = { workspace = true, optional = true }
 # ADR-0090 unit g (iamacoffeepot/aether#1264): the `Config` derive
 # emits per-cap `*Overlay` structs (`#[derive(clap::Args)]`) next to
 # the domain struct, retiring the hand-rolled overlays that used to
@@ -92,13 +92,13 @@ clap = { workspace = true, optional = true }
 # `*Layer` structs (e.g. `HttpConfigLayer`) that back each cap's
 # `*Config::from_env`. `default-features = false` keeps it env-only —
 # no TOML/YAML file parsers until ADR-0090's config-file step.
-confique = { version = "0.4", default-features = false, optional = true }
+confique = { workspace = true, optional = true }
 dirs = { version = "6", optional = true }
-postcard = { version = "1.1", optional = true, features = ["alloc"] }
+postcard = { workspace = true, optional = true, features = ["alloc", "heapless-cas"] }
 # JSON request/response bodies for the content-gen provider APIs
 # (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
-serde_json = { version = "1", optional = true }
-tracing = { version = "0.1", optional = true }
+serde_json = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
 # `v4` random-name generation for `save://gen/<uuid>.{png,wav}` output
@@ -112,14 +112,14 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 # the substrate previously held in its `ControlPlane` struct. Same
 # version aether-substrate uses; chassis builds get a single wasmtime
 # in the dep tree.
-wasmtime = { version = "44", optional = true }
-wgpu = { version = "29.0.1", optional = true }
-cpal = { version = "0.17", optional = true }
+wasmtime = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+cpal = { workspace = true, optional = true }
 crossbeam-queue = { version = "0.3", optional = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
-bytemuck = { version = "1.19", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true

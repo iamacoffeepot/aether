@@ -12,13 +12,13 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_math::{Mat4, Vec4}` directly. `aether-math` is acyclic — it
 # depends on `aether-data` but never on `aether-kinds`.
 aether-math = { path = "../aether-math" }
-bytemuck = { version = "1.19", features = ["derive"] }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+bytemuck = { workspace = true, features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [dev-dependencies]
 # ADR-0041 I/O kind roundtrip tests exercise the postcard wire
 # directly (the mail-path `encode_struct` helper wraps this).
-postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
 
 # Issue #243: descriptors.rs::all() iterates the substrate-native
 # `inventory` slot to materialize the descriptor list. inventory's
@@ -27,7 +27,7 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # builds needs `inventory` reachable. Wasm-only consumers don't (the
 # derive's `cfg(not(target_arch = "wasm32"))` gate skips emission).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-inventory = "0.3"
+inventory = { workspace = true }
 
 [lints]
 workspace = true

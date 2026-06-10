@@ -39,7 +39,7 @@ aether-data = { path = "../aether-data" }
 # re-exports `aether-data-derive`'s `#[derive(Kind, Schema)]`.
 aether-derive = { path = "../aether-derive" }
 aether-kinds = { path = "../aether-kinds" }
-bytemuck = "1.19"
+bytemuck = { workspace = true }
 # ADR-0090: typed, layered config resolution. Backs the env-shaped
 # `*Layer` structs (`PersistConfig`, the DAG `Caps` + `ExecutorConfig`)
 # that resolve each chassis-resolved config's `from_env`.
@@ -48,24 +48,24 @@ bytemuck = "1.19"
 # native-only crate (wasmtime feature-gated since iamacoffeepot/aether#1275
 # but default-on), so this is a plain dep, not feature-gated like the
 # capabilities crate's confique.
-confique = { version = "0.4", default-features = false }
+confique = { workspace = true }
 # ADR-0049 on-disk handle store: resolve the default persistence root
 # (`dirs::data_dir()/aether/handles`). Same crate the fs cap uses.
 dirs = "6"
-postcard = { version = "1.1", features = ["alloc"] }
-serde = { version = "1", features = ["derive"] }
+postcard = { workspace = true, features = ["alloc", "heapless-cas"] }
+serde = { workspace = true, features = ["derive", "std"] }
 # ADR-0081 §4 crash dump: serialize the panicking actor's ring as
 # JSONL on a panic-hook write path. Read-side consumers (operator
 # `jq` queries) match.
-serde_json = "1"
-tracing = "0.1"
+serde_json = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wasmtime = { version = "44", optional = true }
+wasmtime = { workspace = true, optional = true }
 # Render-only deps; gated by the `render` feature. Headless + hub
 # don't enable the feature, so wgpu's transitive graph stays out of
 # their builds.
-wgpu = { version = "29.0.1", optional = true }
-png = { version = "0.18", optional = true }
+wgpu = { workspace = true, optional = true }
+png = { workspace = true, optional = true }
 # Issue 635 PR B worker-pool ready queue. MPMC channel — std mpsc is
 # single-consumer so it can't load-balance across pool workers. Still
 # used for settlement/capture one-shots + the close-done signal; the
@@ -106,7 +106,7 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # needs aether-kinds in scope (integration tests see only the lib +
 # dev-deps, not the lib's regular deps).
 aether-kinds = { path = "../aether-kinds" }
-bytemuck = { version = "1.19", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true

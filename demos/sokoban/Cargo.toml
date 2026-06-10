@@ -23,7 +23,7 @@ aether-capabilities = { path = "../../crates/aether-capabilities", default-featu
 aether-camera = { path = "../../crates/aether-camera", default-features = false }
 aether-kinds = { path = "../../crates/aether-kinds" }
 aether-data = { path = "../../crates/aether-data", features = ["derive"] }
-bytemuck = { version = "1", default-features = false, features = ["derive"] }
+bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 
 # Integration tests boot a `TestBench`, load the demo's own wasm
 # artifact, and assert mail-flow + render properties via direct

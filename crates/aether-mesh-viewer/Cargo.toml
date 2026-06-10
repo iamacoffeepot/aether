@@ -40,17 +40,17 @@ aether-capabilities = { path = "../aether-capabilities", default-features = fals
 aether-kinds = { path = "../aether-kinds" }
 aether-mesh = { path = "../aether-mesh" }
 aether-math = { path = "../aether-math" }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # ADR-0060: tracing facade reaches the substrate's `aether.log` via
 # the SDK's `MailSubscriber` (installed by `export!`).
-tracing = { version = "0.1", default-features = false }
+tracing = { workspace = true, default-features = false }
 
 # Issue #243: every crate that derives `Kind` needs `inventory` reachable
 # on native builds so the `aether.kinds` substrate descriptor list picks
 # up its types. Wasm guests skip the submission via the derive's
 # `cfg(not(target_arch = "wasm32"))` gate.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-inventory = "0.3"
+inventory = { workspace = true }
 
 # Integration tests boot a `TestBench`, load this crate's own wasm
 # artifact, and assert mail-flow + render properties via direct
