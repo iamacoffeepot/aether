@@ -23,7 +23,7 @@ jobs:
 
             // Meta-scopes: cross-cutting work that isn't a single crate.
             // No `crate:*` label is applied for these.
-            const META_SCOPES = ['ci', 'docs', 'adr', 'qodana', 'repo', 'release', 'workflow'];
+            const META_SCOPES = ['ci', 'docs', 'adr', 'qodana', 'repo', 'release', 'workflow', 'guide'];
 
             // {type}({scope}): <subject>  OR  {type}({scope}/{subfeat}): <subject>
             const titleRegex = new RegExp(
