@@ -44,7 +44,6 @@
 //! the same drain tail ([`Self::drain_after_seed`]).
 
 use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -59,17 +58,28 @@ use std::sync::PoisonError;
 /// `ActorSlots` uses `RefCell` internally because the dedicated-thread
 /// dispatcher path only ever reaches it from one OS thread. Worker-pool
 /// dispatch can have *different* worker threads hit the same slot
-/// across cycles — but the [`SlotState`] machine guarantees only one
-/// worker is in `Running` at a time. That serialization makes the
-/// `RefCell` accesses sound; this wrapper is the safety story.
+/// across cycles, so the wrapper has to make those accesses sound.
+///
+/// The root guarantor is the actor [`Mutex`](DispatcherSlot::actor):
+/// every read of the inner `ActorSlots` happens inside
+/// [`DispatcherSlot::drain_after_seed`], which holds that lock for the
+/// whole drain. The lock provides both the mutual exclusion (one
+/// dispatcher body at a time) and the happens-before edge that
+/// publishes one body's `RefCell` mutations to the next. The
+/// [`SlotState`] machine is the *scheduling filter* layered above it —
+/// it keeps the common case to a single un-contended worker — but it is
+/// not the exclusion on its own: in the post-`mark_idle` recheck window
+/// a worker can dispatch an envelope without holding `Running` while a
+/// second worker legitimately enters `drain_after_seed`, so only the
+/// actor `Mutex` actually serializes the `ActorSlots` access there.
 #[repr(transparent)]
 struct PooledSlots(Box<ActorSlots>);
 
-// SAFETY: see the doc-comment on `PooledSlots`. The SlotState
-// machine's `Idle → Ready → Running → Idle` invariant ensures at most
-// one worker thread holds an active reference to the inner
-// `ActorSlots` at any time, so the inner `RefCell` is effectively
-// single-threaded across the Pooled dispatch path.
+// SAFETY: see the doc-comment on `PooledSlots`. Every access to the
+// inner `ActorSlots` is made under the actor `Mutex` held across
+// `DispatcherSlot::drain_after_seed`, which serializes the `RefCell`
+// accesses and establishes the happens-before edge between successive
+// dispatch bodies regardless of which worker thread runs them.
 unsafe impl Sync for PooledSlots {}
 
 impl Deref for PooledSlots {
@@ -101,11 +111,14 @@ where
 {
     /// The slot's atomic state machine. Shared with the `WakeHandle`.
     pub(crate) state: Arc<SlotState>,
-    /// The actor itself. The state machine guarantees only one worker
-    /// is in `Running` at a time, so the `Mutex` is uncontested in
-    /// production — used here over `UnsafeCell` only for the simpler
-    /// safety story. `Option` so the `Closed` finalize path can take
-    /// the box and run `unwire` on the consumed actor.
+    /// The actor itself. This `Mutex` is the root mutual-exclusion +
+    /// happens-before guarantor for a slot's dispatch: every drain runs
+    /// under it (see [`Self::drain_after_seed`]), so two workers that
+    /// reach the slot — e.g. a recheck-window dispatch racing a fresh
+    /// `seize_and_run` — serialize here rather than relying on
+    /// [`SlotState`] alone, which is the scheduling filter above it.
+    /// `Option` so the `Closed` finalize path can take the box and run
+    /// `unwire` on the consumed actor.
     actor: Mutex<Option<Box<A>>>,
     /// Per-actor binding (inbox + shutdown flag + reply machinery).
     binding: Arc<NativeBinding>,
@@ -113,12 +126,6 @@ where
     /// envelope dispatch. Wrapped in [`PooledSlots`] for the `Sync`
     /// safety story — see that type's doc-comment.
     slots: PooledSlots,
-    /// Per-actor inbox-pending counter, decremented after every
-    /// successful dispatch. `None` for singleton caps (ADR-0082 retired
-    /// the frame-bound drain that was the singleton consumer); `Some`
-    /// for instanced actors, where `Spawner::shutdown_instanced` reads
-    /// it to coordinate teardown (issue 685).
-    pending: Option<Arc<AtomicU64>>,
     /// Chassis-level actor registry. Used by [`Self::finalize_registry`]
     /// to drain `monitors_of[id]` and prune `monitoring[id]` from each
     /// target on shutdown.
@@ -165,7 +172,6 @@ where
         actor: Box<A>,
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
-        pending: Option<Arc<AtomicU64>>,
         actor_registry: Arc<ActorRegistry>,
         mailer: Arc<Mailer>,
         self_id: MailboxId,
@@ -175,7 +181,6 @@ where
             actor: Mutex::new(Some(actor)),
             binding,
             slots: PooledSlots(slots),
-            pending,
             actor_registry,
             mailer,
             self_id,
@@ -214,12 +219,12 @@ where
     // happen to, but the surface mirrors the owning dispatch loop.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
-        // iamacoffeepot/aether#1160: count this envelope against the
+        // iamacoffeepot/aether#1160: note this envelope against the
         // worker's local-drain burst *before* running the handler, so a
-        // blob this handler produces (scheduled at `ctx` drop below) sees
-        // the current envelope in the keep-local budget. Off a pool worker
-        // / in the default-preserving config this is a single `Cell`
-        // increment (no clock).
+        // blob this handler produces (scheduled at `ctx` drop below) is
+        // measured against a burst start that already covers this handler.
+        // With the time valve on, the burst's first mail anchors the start
+        // (one clock read per burst); with it off, this is a no-op.
         burst_note_mail(time_budget());
         let inbound_mail_id = env.mail_id;
         // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
@@ -292,9 +297,6 @@ where
         // discharge site — every wasm component and native actor (issue
         // 634 Phase 4) drains through here.
         env.discharge();
-        if let Some(p) = &self.pending {
-            p.fetch_sub(1, Ordering::AcqRel);
-        }
     }
 
     /// The close hook in the slot teardown sequence. Wraps `actor.unwire`

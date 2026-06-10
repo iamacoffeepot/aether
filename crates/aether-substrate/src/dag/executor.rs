@@ -68,17 +68,17 @@ use std::thread;
 const TARGET: &str = "aether::dag::executor";
 
 /// Env override for the completed-DAG retention window (ADR-0047 §7).
-/// Default [`DEFAULT_RETENTION_COMPLETE_MS`].
+/// Default [`DEFAULT_RETENTION_COMPLETE_MILLIS`].
 pub const ENV_RETENTION_COMPLETE_MS: &str = "AETHER_DAG_RETENTION_COMPLETE_MS";
 /// Env override for the failed-DAG retention window (ADR-0047 §7).
-/// Default [`DEFAULT_RETENTION_FAILED_MS`].
+/// Default [`DEFAULT_RETENTION_FAILED_MILLIS`].
 pub const ENV_RETENTION_FAILED_MS: &str = "AETHER_DAG_RETENTION_FAILED_MS";
 /// Env override for the per-`Call` settlement timeout (ADR-0047 §4 —
-/// never-settling caps). Default [`DEFAULT_CALL_TIMEOUT_MS`].
+/// never-settling caps). Default [`DEFAULT_CALL_TIMEOUT_MILLIS`].
 pub const ENV_CALL_TIMEOUT_MS: &str = "AETHER_DAG_CALL_TIMEOUT_MS";
 /// Env override for the default per-`Transform` wall-clock deadline
 /// (ADR-0048 §3/§6). A `Node::Transform.timeout_ms` overrides per node.
-/// Default [`DEFAULT_TRANSFORM_TIMEOUT_MS`].
+/// Default [`DEFAULT_TRANSFORM_TIMEOUT_MILLIS`].
 pub const ENV_TRANSFORM_TIMEOUT_MS: &str = "AETHER_TRANSFORM_TIMEOUT_MS";
 /// Env override for the transform output-byte cap (ADR-0048 §6).
 /// Default [`DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES`].
@@ -88,17 +88,17 @@ pub const ENV_TRANSFORM_MAX_OUTPUT_BYTES: &str = "AETHER_TRANSFORM_MAX_OUTPUT_BY
 pub const ENV_TRANSFORM_POOL_THREADS: &str = "AETHER_TRANSFORM_POOL_THREADS";
 
 /// Default completed-DAG retention before reaping (ADR-0047 §7).
-pub const DEFAULT_RETENTION_COMPLETE_MS: u64 = 60_000;
+pub const DEFAULT_RETENTION_COMPLETE_MILLIS: u64 = 60_000;
 /// Default failed-DAG retention before reaping (ADR-0047 §7).
-pub const DEFAULT_RETENTION_FAILED_MS: u64 = 300_000;
+pub const DEFAULT_RETENTION_FAILED_MILLIS: u64 = 300_000;
 /// Default per-`Call` settlement timeout — bounds a cap that never
 /// settles (never replies or streams forever). On expiry the `Call`
 /// node fails (ADR-0047 §4).
-pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
+pub const DEFAULT_CALL_TIMEOUT_MILLIS: u64 = 30_000;
 /// Default per-`Transform` wall-clock deadline (ADR-0048 §3/§6). A
 /// native thread can't be preempted, so on expiry the executor fails
 /// the node + orphans the runaway thread.
-pub const DEFAULT_TRANSFORM_TIMEOUT_MS: u64 = 30_000;
+pub const DEFAULT_TRANSFORM_TIMEOUT_MILLIS: u64 = 30_000;
 /// Default transform output-byte cap (ADR-0048 §6). Encoded output
 /// exceeding this hard-fails the node.
 pub const DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -111,15 +111,15 @@ pub const DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug)]
 pub struct ExecutorConfig {
     /// Per-`Call` settlement timeout in ms (ADR-0047 §4).
-    pub call_timeout_ms: u64,
+    pub call_timeout_millis: u64,
     /// Default per-`Transform` wall-clock deadline in ms (ADR-0048 §3/§6).
-    pub transform_timeout_ms: u64,
+    pub transform_timeout_millis: u64,
     /// Transform output-byte cap (ADR-0048 §6).
     pub transform_max_output_bytes: u64,
     /// Completed-DAG retention window in ms (ADR-0047 §7).
-    pub retention_complete_ms: u64,
+    pub retention_complete_millis: u64,
     /// Failed/cancelled-DAG retention window in ms (ADR-0047 §7).
-    pub retention_failed_ms: u64,
+    pub retention_failed_millis: u64,
     /// Transform compute-pool thread count (ADR-0048 §3). Resolved at
     /// [`ExecutorConfig::from_env`] from available parallelism when unset.
     pub pool_threads: usize,
@@ -128,11 +128,11 @@ pub struct ExecutorConfig {
 impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
-            call_timeout_ms: DEFAULT_CALL_TIMEOUT_MS,
-            transform_timeout_ms: DEFAULT_TRANSFORM_TIMEOUT_MS,
+            call_timeout_millis: DEFAULT_CALL_TIMEOUT_MILLIS,
+            transform_timeout_millis: DEFAULT_TRANSFORM_TIMEOUT_MILLIS,
             transform_max_output_bytes: DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES,
-            retention_complete_ms: DEFAULT_RETENTION_COMPLETE_MS,
-            retention_failed_ms: DEFAULT_RETENTION_FAILED_MS,
+            retention_complete_millis: DEFAULT_RETENTION_COMPLETE_MILLIS,
+            retention_failed_millis: DEFAULT_RETENTION_FAILED_MILLIS,
             pool_threads: default_pool_threads(),
         }
     }
@@ -165,11 +165,11 @@ impl ExecutorConfig {
             .load()
             .expect("ExecutorConfigLayer defaults are well-formed");
         Self {
-            call_timeout_ms: layer.call_timeout_ms,
-            transform_timeout_ms: layer.transform_timeout_ms,
+            call_timeout_millis: layer.call_timeout_millis,
+            transform_timeout_millis: layer.transform_timeout_millis,
             transform_max_output_bytes: layer.transform_max_output_bytes,
-            retention_complete_ms: layer.retention_complete_ms,
-            retention_failed_ms: layer.retention_failed_ms,
+            retention_complete_millis: layer.retention_complete_millis,
+            retention_failed_millis: layer.retention_failed_millis,
             // Runtime-computed default (not a literal confique can hold):
             // unset *or* unparseable → available parallelism (clamped ≥ 1).
             // A parseable value (incl `0`) is honoured verbatim — the prior
@@ -197,16 +197,16 @@ fn default_pool_threads() -> usize {
 struct ExecutorConfigLayer {
     #[config(
         env = "AETHER_DAG_CALL_TIMEOUT_MS",
-        parse_env = parse_call_timeout_ms,
+        parse_env = parse_call_timeout_millis,
         default = 30_000u64
     )]
-    call_timeout_ms: u64,
+    call_timeout_millis: u64,
     #[config(
         env = "AETHER_TRANSFORM_TIMEOUT_MS",
-        parse_env = parse_transform_timeout_ms,
+        parse_env = parse_transform_timeout_millis,
         default = 30_000u64
     )]
-    transform_timeout_ms: u64,
+    transform_timeout_millis: u64,
     #[config(
         env = "AETHER_TRANSFORM_MAX_OUTPUT_BYTES",
         parse_env = parse_transform_max_output_bytes,
@@ -215,16 +215,16 @@ struct ExecutorConfigLayer {
     transform_max_output_bytes: u64,
     #[config(
         env = "AETHER_DAG_RETENTION_COMPLETE_MS",
-        parse_env = parse_retention_complete_ms,
+        parse_env = parse_retention_complete_millis,
         default = 60_000u64
     )]
-    retention_complete_ms: u64,
+    retention_complete_millis: u64,
     #[config(
         env = "AETHER_DAG_RETENTION_FAILED_MS",
-        parse_env = parse_retention_failed_ms,
+        parse_env = parse_retention_failed_millis,
         default = 300_000u64
     )]
-    retention_failed_ms: u64,
+    retention_failed_millis: u64,
     /// Held as the raw string so `ExecutorConfig::from_env` can apply the
     /// soft `.parse().ok()` then fall back to available parallelism on an
     /// unset *or* unparseable value (a confique numeric field would
@@ -242,17 +242,17 @@ struct ExecutorConfigLayer {
 // variants land with the ADR-0090 §4 validation pass; hence the per-fn
 // `unnecessary_wraps` allow.
 
-/// Parse the per-`Call` timeout; unparseable → [`DEFAULT_CALL_TIMEOUT_MS`].
+/// Parse the per-`Call` timeout; unparseable → [`DEFAULT_CALL_TIMEOUT_MILLIS`].
 #[allow(clippy::unnecessary_wraps)]
-fn parse_call_timeout_ms(s: &str) -> Result<u64, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_CALL_TIMEOUT_MS))
+fn parse_call_timeout_millis(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_CALL_TIMEOUT_MILLIS))
 }
 
 /// Parse the transform deadline; unparseable →
-/// [`DEFAULT_TRANSFORM_TIMEOUT_MS`].
+/// [`DEFAULT_TRANSFORM_TIMEOUT_MILLIS`].
 #[allow(clippy::unnecessary_wraps)]
-fn parse_transform_timeout_ms(s: &str) -> Result<u64, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_TRANSFORM_TIMEOUT_MS))
+fn parse_transform_timeout_millis(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_TRANSFORM_TIMEOUT_MILLIS))
 }
 
 /// Parse the transform output cap; unparseable →
@@ -263,17 +263,17 @@ fn parse_transform_max_output_bytes(s: &str) -> Result<u64, Infallible> {
 }
 
 /// Parse the completed-DAG retention; unparseable →
-/// [`DEFAULT_RETENTION_COMPLETE_MS`].
+/// [`DEFAULT_RETENTION_COMPLETE_MILLIS`].
 #[allow(clippy::unnecessary_wraps)]
-fn parse_retention_complete_ms(s: &str) -> Result<u64, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_RETENTION_COMPLETE_MS))
+fn parse_retention_complete_millis(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_RETENTION_COMPLETE_MILLIS))
 }
 
 /// Parse the failed-DAG retention; unparseable →
-/// [`DEFAULT_RETENTION_FAILED_MS`].
+/// [`DEFAULT_RETENTION_FAILED_MILLIS`].
 #[allow(clippy::unnecessary_wraps)]
-fn parse_retention_failed_ms(s: &str) -> Result<u64, Infallible> {
-    Ok(s.parse().unwrap_or(DEFAULT_RETENTION_FAILED_MS))
+fn parse_retention_failed_millis(s: &str) -> Result<u64, Infallible> {
+    Ok(s.parse().unwrap_or(DEFAULT_RETENTION_FAILED_MILLIS))
 }
 
 /// What a landed reply correlates to (ADR-0047 §4). Sources resolve a
@@ -317,7 +317,7 @@ struct InFlightTransform {
     output_kind_id: KindId,
     deadline: Instant,
     /// The deadline expressed in millis, for the timeout diagnostic.
-    timeout_ms: u64,
+    timeout_millis: u64,
 }
 
 /// The DAG executor. Holds every live + recently-terminal DAG plus the
@@ -373,12 +373,12 @@ impl Executor {
             pending: HashMap::new(),
             in_flight_calls: HashMap::new(),
             in_flight_transforms: HashMap::new(),
-            call_timeout: Duration::from_millis(config.call_timeout_ms),
-            transform_timeout: Duration::from_millis(config.transform_timeout_ms),
+            call_timeout: Duration::from_millis(config.call_timeout_millis),
+            transform_timeout: Duration::from_millis(config.transform_timeout_millis),
             transform_max_output_bytes: usize::try_from(config.transform_max_output_bytes)
                 .unwrap_or(usize::MAX),
-            retention_complete: Duration::from_millis(config.retention_complete_ms),
-            retention_failed: Duration::from_millis(config.retention_failed_ms),
+            retention_complete: Duration::from_millis(config.retention_complete_millis),
+            retention_failed: Duration::from_millis(config.retention_failed_millis),
             transform_registry: Arc::new(TransformRegistry::from_inventory()),
             transform_pool,
         }
@@ -724,7 +724,7 @@ impl Executor {
             KindId(<DagTransformDone as aether_data::Kind>::ID.0),
         );
         let timeout = node_timeout.map_or(self.transform_timeout, Duration::from_millis);
-        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let timeout_millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         self.in_flight_transforms.insert(
             job_id,
             InFlightTransform {
@@ -734,7 +734,7 @@ impl Executor {
                 content_id,
                 output_kind_id,
                 deadline: Instant::now() + timeout,
-                timeout_ms,
+                timeout_millis,
             },
         );
     }
@@ -1228,13 +1228,13 @@ impl Executor {
             .in_flight_transforms
             .iter()
             .filter(|(_, t)| now >= t.deadline)
-            .map(|(job, t)| (*job, t.dag_id, t.node_id, t.timeout_ms))
+            .map(|(job, t)| (*job, t.dag_id, t.node_id, t.timeout_millis))
             .collect();
-        for (job_id, dag_id, node_id, timeout_ms) in timed_out_transforms {
+        for (job_id, dag_id, node_id, timeout_millis) in timed_out_transforms {
             self.in_flight_transforms.remove(&job_id);
             self.transform_pool.forget(job_id);
             if let Some(state) = self.dags.get_mut(&dag_id) {
-                state.mark_failed(node_id, format!("timeout: {timeout_ms}ms"));
+                state.mark_failed(node_id, format!("timeout: {timeout_millis}ms"));
             }
         }
 
@@ -1373,11 +1373,12 @@ fn slot_inner_kind_id(registry: &Registry, cell: &aether_data::SchemaCell) -> Ki
 #[cfg(test)]
 mod config_tests {
     use super::{
-        DEFAULT_CALL_TIMEOUT_MS, DEFAULT_RETENTION_COMPLETE_MS, DEFAULT_RETENTION_FAILED_MS,
-        DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES, DEFAULT_TRANSFORM_TIMEOUT_MS, ExecutorConfig,
-        ExecutorConfigLayer, default_pool_threads, parse_call_timeout_ms,
-        parse_retention_complete_ms, parse_retention_failed_ms, parse_transform_max_output_bytes,
-        parse_transform_timeout_ms,
+        DEFAULT_CALL_TIMEOUT_MILLIS, DEFAULT_RETENTION_COMPLETE_MILLIS,
+        DEFAULT_RETENTION_FAILED_MILLIS, DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES,
+        DEFAULT_TRANSFORM_TIMEOUT_MILLIS, ExecutorConfig, ExecutorConfigLayer,
+        default_pool_threads, parse_call_timeout_millis, parse_retention_complete_millis,
+        parse_retention_failed_millis, parse_transform_max_output_bytes,
+        parse_transform_timeout_millis,
     };
 
     // ADR-0090: the confique migration is byte-identical to the prior
@@ -1387,30 +1388,30 @@ mod config_tests {
 
     #[test]
     fn parse_numbers_soft_fall_back_to_defaults() {
-        assert_eq!(parse_call_timeout_ms("100").unwrap(), 100);
+        assert_eq!(parse_call_timeout_millis("100").unwrap(), 100);
         assert_eq!(
-            parse_call_timeout_ms("nope").unwrap(),
-            DEFAULT_CALL_TIMEOUT_MS
+            parse_call_timeout_millis("nope").unwrap(),
+            DEFAULT_CALL_TIMEOUT_MILLIS
         );
-        assert_eq!(parse_transform_timeout_ms("200").unwrap(), 200);
+        assert_eq!(parse_transform_timeout_millis("200").unwrap(), 200);
         assert_eq!(
-            parse_transform_timeout_ms("nope").unwrap(),
-            DEFAULT_TRANSFORM_TIMEOUT_MS
+            parse_transform_timeout_millis("nope").unwrap(),
+            DEFAULT_TRANSFORM_TIMEOUT_MILLIS
         );
         assert_eq!(parse_transform_max_output_bytes("4096").unwrap(), 4096);
         assert_eq!(
             parse_transform_max_output_bytes("nope").unwrap(),
             DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES
         );
-        assert_eq!(parse_retention_complete_ms("300").unwrap(), 300);
+        assert_eq!(parse_retention_complete_millis("300").unwrap(), 300);
         assert_eq!(
-            parse_retention_complete_ms("nope").unwrap(),
-            DEFAULT_RETENTION_COMPLETE_MS
+            parse_retention_complete_millis("nope").unwrap(),
+            DEFAULT_RETENTION_COMPLETE_MILLIS
         );
-        assert_eq!(parse_retention_failed_ms("400").unwrap(), 400);
+        assert_eq!(parse_retention_failed_millis("400").unwrap(), 400);
         assert_eq!(
-            parse_retention_failed_ms("nope").unwrap(),
-            DEFAULT_RETENTION_FAILED_MS
+            parse_retention_failed_millis("nope").unwrap(),
+            DEFAULT_RETENTION_FAILED_MILLIS
         );
     }
 
@@ -1423,15 +1424,24 @@ mod config_tests {
             .load()
             .expect("defaults load");
         let default = ExecutorConfig::default();
-        assert_eq!(layer.call_timeout_ms, DEFAULT_CALL_TIMEOUT_MS);
-        assert_eq!(layer.call_timeout_ms, default.call_timeout_ms);
-        assert_eq!(layer.transform_timeout_ms, DEFAULT_TRANSFORM_TIMEOUT_MS);
+        assert_eq!(layer.call_timeout_millis, DEFAULT_CALL_TIMEOUT_MILLIS);
+        assert_eq!(layer.call_timeout_millis, default.call_timeout_millis);
+        assert_eq!(
+            layer.transform_timeout_millis,
+            DEFAULT_TRANSFORM_TIMEOUT_MILLIS
+        );
         assert_eq!(
             layer.transform_max_output_bytes,
             DEFAULT_TRANSFORM_MAX_OUTPUT_BYTES
         );
-        assert_eq!(layer.retention_complete_ms, DEFAULT_RETENTION_COMPLETE_MS);
-        assert_eq!(layer.retention_failed_ms, DEFAULT_RETENTION_FAILED_MS);
+        assert_eq!(
+            layer.retention_complete_millis,
+            DEFAULT_RETENTION_COMPLETE_MILLIS
+        );
+        assert_eq!(
+            layer.retention_failed_millis,
+            DEFAULT_RETENTION_FAILED_MILLIS
+        );
         // Pool threads has no literal default — the layer field is `None`
         // when unset, resolved to available parallelism in `from_env`.
         assert_eq!(layer.pool_threads, None);

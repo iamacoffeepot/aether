@@ -59,7 +59,10 @@ impl<R> FfiActorMailbox<R> {
 
     /// Resolve a sibling mailbox on the same transport, addressed by
     /// `name`. Same FNV-hash name resolution as
-    /// [`crate::ffi::FfiCtx::resolve_actor`] — kept as an inherent
+    /// [`crate::ffi::FfiCtx::resolve_actor`] — `name` must be the peer's
+    /// **full registered name** (flat ADR-0029 hash). A caller that needs
+    /// a lineage-folded child id (ADR-0099 §3) uses
+    /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent
     /// method so cap-owned ext traits (which only have a mailbox in
     /// hand, not a ctx) can hand back peer handles without rethreading
     /// the ctx.

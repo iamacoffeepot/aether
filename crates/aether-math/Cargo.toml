@@ -14,7 +14,7 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `Vec4` is `#[repr(C)]`, so its `Kind` derive takes the cast wire
 # path, which needs `Pod` (`NoUninit` + `AnyBitPattern`). The bytemuck
 # derive supplies it. Same version aether-kinds uses for its cast kinds.
-bytemuck = { version = "1.19", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 libm = "0.2"
 
 [lints]

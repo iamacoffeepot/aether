@@ -129,6 +129,7 @@ pub fn noop_handler() -> Arc<dyn InboxHandler> {
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{
     KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, mailbox_id_from_path,
+    validate_scope_path,
 };
 
 /// One mail's worth of dispatch metadata handed to an
@@ -1167,6 +1168,15 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
+        // ADR-0098 wire boundary: `name` is user-controlled (the MCP
+        // `recipient_name` surface resolves here), so cap its scope depth
+        // / byte size before it folds to a registry key. An over-cap name
+        // is a resolution miss, not a key-space bloat.
+        let segments: Vec<&str> = name.split('/').collect();
+        if let Err(err) = validate_scope_path(&segments) {
+            tracing::warn!(name, ?err, "scope path over cap; resolution miss");
+            return None;
+        }
         // ADR-0099 §4: resolve a written name by the parse → fold (the
         // inverse of the `/`-render), not `hash(name)` — a hosted /
         // nested actor's id is the lineage fold, so the whole-string hash
@@ -1934,6 +1944,25 @@ mod tests {
         let r = Registry::new();
         assert!(r.lookup("nope").is_none());
         assert!(r.entry(MailboxId(42)).is_none());
+    }
+
+    #[test]
+    fn lookup_over_depth_scope_path_is_resolution_miss() {
+        let r = Registry::new();
+        // One segment past `MAX_SCOPE_PATH_DEPTH`: rejected before the fold.
+        let name = (0..=aether_data::MAX_SCOPE_PATH_DEPTH)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(r.lookup(&name).is_none());
+    }
+
+    #[test]
+    fn lookup_over_bytes_scope_path_is_resolution_miss() {
+        let r = Registry::new();
+        // Single segment longer than the byte cap (depth stays 1).
+        let name = "a".repeat(aether_data::MAX_SCOPE_PATH_BYTES + 1);
+        assert!(r.lookup(&name).is_none());
     }
 
     #[test]

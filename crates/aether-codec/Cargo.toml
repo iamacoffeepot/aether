@@ -24,9 +24,9 @@ path = "src/lib.rs"
 
 [dependencies]
 aether-data = { path = "../aether-data" }
-postcard = { version = "1.1", features = ["alloc"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+postcard = { workspace = true, features = ["alloc", "heapless-cas"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Round-trip tests in this crate encode JSON params via the schema
@@ -37,7 +37,7 @@ serde_json = "1"
 # callers don't need any of this — only pulled in for `cargo test`.
 aether-kinds = { path = "../aether-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
-bytemuck = { version = "1.19", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 # Issue 1561: the schema-driven round-trip property
 # (`decode_schema(encode_schema(v)) == v`) over a generated `SchemaType`
 # tree + a matching `serde_json::Value`. Dev-only; never in a release build.

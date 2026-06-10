@@ -463,21 +463,6 @@ mod tests {
         thread::park_timeout(Duration::from_millis(0));
     }
 
-    /// Shutdown signalled while a worker is in `acquire` resolves to
-    /// `Shutdown` rather than hanging.
-    #[test]
-    fn acquire_resolves_shutdown() {
-        let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(50)));
-        let c2 = Arc::clone(&coord);
-        let worker =
-            thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
-        // Let it cycle into the park, then signal + unpark.
-        thread::sleep(Duration::from_millis(20));
-        coord.set_shutdown();
-        worker.thread().unpark();
-        assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
-    }
-
     /// Contention/backoff-sensitive tests live in `mod heavy`: they exercise
     /// the spin-then-park backoff path, so they are serialized into the
     /// `serial-heavy` nextest group (`.config/nextest.toml`) to avoid
@@ -485,6 +470,21 @@ mod tests {
     mod heavy {
         use super::*;
         use crate::scheduler::calibrate;
+
+        /// Shutdown signalled while a worker is in `acquire` resolves to
+        /// `Shutdown` rather than hanging.
+        #[test]
+        fn acquire_resolves_shutdown() {
+            let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(50)));
+            let c2 = Arc::clone(&coord);
+            let worker =
+                thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
+            // Let it cycle into the park, then signal + unpark.
+            thread::sleep(Duration::from_millis(20));
+            coord.set_shutdown();
+            worker.thread().unpark();
+            assert!(worker.join().unwrap(), "acquire should resolve Shutdown");
+        }
 
         /// Part 2 (iamacoffeepot/aether#1182): a genuine parked-worker wake
         /// folds one live `notify → wake` sample into the handoff estimate. A

@@ -1,0 +1,5 @@
+error: #[actor] impl NativeActor for X accepts only `const NAMESPACE: &'static str = …` — the `Actor` super-trait carries no other authorable const
+  --> tests/ui/rejects_stray_const_native.rs:30:5
+   |
+30 |     const BUFFER_CAPACITY: usize = 64;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

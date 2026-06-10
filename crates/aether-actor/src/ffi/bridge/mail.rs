@@ -71,8 +71,8 @@ impl MailBridge {
     /// to the right Claude session, sibling component, or remote
     /// engine mailbox.
     ///
-    /// Not `#[must_use]`: the trait surfaces (`OutboundReply::reply`,
-    /// `MailCtx::reply`) are fire-and-forget by contract — see the
+    /// Not `#[must_use]`: the trait surface (`OutboundReply::reply`)
+    /// is fire-and-forget by contract — see the
     /// matching rationale on `send_mail`.
     #[allow(
         clippy::must_use_candidate,

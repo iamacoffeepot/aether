@@ -41,7 +41,6 @@
 mod invariants;
 mod merge;
 pub(crate) mod mesh;
-pub mod provenance;
 mod slivers;
 mod tjunctions;
 mod twin_edges;

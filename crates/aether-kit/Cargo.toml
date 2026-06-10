@@ -31,16 +31,16 @@ aether-capabilities = { path = "../aether-capabilities", default-features = fals
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail
 # (out-of-bounds teleport, etc.). Default-features-off per the SDK pattern.
-tracing = { version = "0.1", default-features = false }
+tracing = { workspace = true, default-features = false }
 
 # Every crate that derives `Kind` needs `inventory` reachable on native
 # builds so the `aether.kinds` descriptor list picks up its types. Wasm
 # guests skip the submission via the derive's cfg gate.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-inventory = "0.3"
+inventory = { workspace = true }
 
 [lints]
 workspace = true

@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::DEFAULT_TIMEOUT_MS;
+use super::DEFAULT_TIMEOUT_MILLIS;
 use crate::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
 /// Sentinel returned when the `claude` binary isn't on PATH so the cap
@@ -45,7 +45,7 @@ impl Default for ClaudeCliAdapter {
     fn default() -> Self {
         Self {
             binary: String::from("claude"),
-            timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
+            timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
         }
     }
 }
@@ -127,9 +127,9 @@ impl ClaudeCliAdapter {
                         // JoinHandle detaches the thread; its buffer is moot.
                         let _ = child.kill();
                         let _ = child.wait();
-                        let elapsed_ms =
+                        let elapsed_millis =
                             u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-                        return Err(format!("{TIMEOUT_SENTINEL}{elapsed_ms}"));
+                        return Err(format!("{TIMEOUT_SENTINEL}{elapsed_millis}"));
                     }
                     thread::sleep(POLL_INTERVAL);
                 }
@@ -205,46 +205,52 @@ mod tests {
         assert_eq!(err, CLI_NOT_FOUND);
     }
 
-    /// A subprocess that outlives the deadline is killed + reaped and
-    /// surfaces as `TIMEOUT_SENTINEL` carrying the elapsed ms — well
-    /// under the child's nominal 5s sleep. The adapter always invokes
-    /// `<binary> --print --model <model> ...`, so the stand-in must be a
-    /// script that ignores its args and sleeps. We write a tiny shell
-    /// script to a temp file and point the adapter at it.
-    #[cfg(unix)]
-    #[test]
-    fn slow_binary_times_out_and_is_reaped() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::{env, fs, process};
+    /// Real subprocess spawn + reap under a 50ms deadline, so it lives in
+    /// `mod heavy` for the `serial-heavy` nextest group (issue 1522).
+    mod heavy {
+        use super::*;
 
-        let mut script = env::temp_dir();
-        script.push(format!("aether-cli-timeout-{}.sh", process::id()));
-        // Ignore every arg, sleep 5s. A ~50ms deadline must fire first.
-        fs::write(&script, "#!/bin/sh\nsleep 5\n").expect("write stand-in script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
-            .expect("chmod stand-in script");
+        /// A subprocess that outlives the deadline is killed + reaped and
+        /// surfaces as `TIMEOUT_SENTINEL` carrying the elapsed ms — well
+        /// under the child's nominal 5s sleep. The adapter always invokes
+        /// `<binary> --print --model <model> ...`, so the stand-in must be a
+        /// script that ignores its args and sleeps. We write a tiny shell
+        /// script to a temp file and point the adapter at it.
+        #[cfg(unix)]
+        #[test]
+        fn slow_binary_times_out_and_is_reaped() {
+            use std::os::unix::fs::PermissionsExt;
+            use std::{env, fs, process};
 
-        let adapter = ClaudeCliAdapter::new(
-            script.to_string_lossy().into_owned(),
-            Duration::from_millis(50),
-        );
-        let started = Instant::now();
-        let err = adapter
-            .cli_send(&req())
-            .expect_err("a slow binary must time out");
+            let mut script = env::temp_dir();
+            script.push(format!("aether-cli-timeout-{}.sh", process::id()));
+            // Ignore every arg, sleep 5s. A ~50ms deadline must fire first.
+            fs::write(&script, "#!/bin/sh\nsleep 5\n").expect("write stand-in script");
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+                .expect("chmod stand-in script");
 
-        let _ = fs::remove_file(&script);
+            let adapter = ClaudeCliAdapter::new(
+                script.to_string_lossy().into_owned(),
+                Duration::from_millis(50),
+            );
+            let started = Instant::now();
+            let err = adapter
+                .cli_send(&req())
+                .expect_err("a slow binary must time out");
 
-        assert!(
-            err.starts_with(TIMEOUT_SENTINEL),
-            "expected timeout sentinel, got {err:?}",
-        );
-        // The deadline fired well under the child's 5s lifetime, which
-        // also implies the kill returned (the child was reaped).
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timeout took too long: {:?}",
-            started.elapsed(),
-        );
+            let _ = fs::remove_file(&script);
+
+            assert!(
+                err.starts_with(TIMEOUT_SENTINEL),
+                "expected timeout sentinel, got {err:?}",
+            );
+            // The deadline fired well under the child's 5s lifetime, which
+            // also implies the kill returned (the child was reaped).
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "timeout took too long: {:?}",
+                started.elapsed(),
+            );
+        }
     }
 }

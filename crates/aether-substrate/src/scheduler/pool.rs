@@ -36,6 +36,7 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 
+use crate::config::{KnobKind, KnobRecord};
 use crate::scheduler::spin_park::{Acquired, DEFAULT_SPIN_WINDOW_USEC, SpinPark};
 use crate::scheduler::worker_deque;
 
@@ -232,6 +233,20 @@ impl Pool {
     }
 }
 
+/// Config-discovery record (ADR-0090 unit b2) for the spin-window knob
+/// [`spin_window_from_env`] reads. Referenced by
+/// [`crate::scheduler::SCHEDULER_KNOBS`] so the e1 unknown-key sweep and
+/// the e2 `--config` dump cover it; the read path stays untouched. Pure
+/// `&'static` metadata.
+pub const SPIN_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: "AETHER_SPIN_WINDOW_USEC",
+    doc: "Route-to-spinner spin-window (microseconds) before a worker parks. The \
+          latency sweep retunes this without a recompile; malformed values fall \
+          back to 50.",
+    default: Some("50"),
+    kind: KnobKind::HandRegistered,
+}];
+
 /// Read the spin-window override (`AETHER_SPIN_WINDOW_USEC`) for the
 /// route-to-spinner coordinator, falling back to the default. The
 /// experiment's latency sweep retunes this without a recompile; a
@@ -327,8 +342,8 @@ fn worker_loop(
 /// `worker_deque::try_push_local_budgeted`, iamacoffeepot/aether#1174) —
 /// produced blobs are cascade descendants kept warm — until the per-burst
 /// **time valve** (`worker_deque::time_budget`, default 12µs) trips and spills
-/// a heavy cascade to parallelise; mail-count budgeting (#1160) is off by
-/// default. The own deque is checked first so a pushed slot is never stranded.
+/// a heavy cascade to parallelise. The own deque is checked first so a pushed
+/// slot is never stranded.
 ///
 /// When the own deque is empty, this resets the local-drain burst
 /// (iamacoffeepot/aether#1160) — one local cascade is one burst, so the
@@ -348,6 +363,14 @@ fn worker_loop(
 /// work still exits — iamacoffeepot/aether#1531), and inside the
 /// coordinator (a flag + an explicit unpark of every worker on
 /// teardown, covering spinning and parked workers).
+///
+/// The own-deque fast path carries the **every-K chain backstop**
+/// (`worker_deque::chain_pop_due`, iamacoffeepot/aether#1535): every
+/// `chain_backstop()` consecutive own-deque pops, one
+/// `steal_into_local` pass runs before the chain continues, so a
+/// self-sustaining relay loop (which never drains its deque and so
+/// never reaches the steal arm) cannot starve the injector for longer
+/// than ~K cycles.
 fn acquire_slot(
     idx: usize,
     stealers: &[Stealer<Arc<dyn Drainable>>],
@@ -366,6 +389,29 @@ fn acquire_slot(
         return None;
     }
     if let Some(slot) = worker_deque::pop_local() {
+        // Every-K chain backstop (iamacoffeepot/aether#1535): the depth-0
+        // keep-local exemption means a serial chain oscillates the own
+        // deque 0→1→0 and never reaches the steal below, so a
+        // *self-sustaining* chain would monopolise this worker and starve
+        // the injector indefinitely. Every `chain_backstop()`-th
+        // consecutive pop, take one look at the injector before
+        // continuing the chain: a hit runs the stolen slot now — the
+        // chain slot goes back on the own deque (LIFO top: it is the next
+        // pop, so the chain resumes right after) — and a miss costs one
+        // empty probe. Injector starvation is thereby bounded at ~K ×
+        // cycle-time per worker; the chain stays warm K−1 of K cycles.
+        if worker_deque::chain_pop_due()
+            && let Some(stolen) =
+                worker_deque::steal_into_local(idx, stealers, injector, peer_steal)
+        {
+            if let Err(slot) = worker_deque::push_local(slot) {
+                // Unreachable on a worker (`pop_local` just succeeded, so
+                // the own deque is installed); spill rather than lose the
+                // slot if it ever isn't.
+                injector.push(slot);
+            }
+            return Some(stolen);
+        }
         return Some(slot);
     }
     // Own deque drained empty — the local cascade is over. Close its
@@ -434,8 +480,9 @@ mod tests {
 
     /// End-to-end happy path: register a slot, push N envelopes,
     /// observe the worker drain them all and park the slot Idle.
-    #[test]
-    fn pool_drains_pushed_envelopes() {
+    /// Body lives here to share the parent helpers; the `#[test]` wrapper
+    /// is in `mod heavy` (issue 1522 — spawns a worker pool + `wait_until`).
+    fn pool_drains_pushed_envelopes_body() {
         let handle = standard_handle(1);
         let slot = CounterSlot::new("happy");
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
@@ -462,9 +509,9 @@ mod tests {
 
     /// Two slots, both perpetually ready: a worker fairly round-robins
     /// (the budget yield is what enables this — without it one slot
-    /// would monopolise the worker until empty).
-    #[test]
-    fn two_slots_round_robin_under_budget() {
+    /// would monopolise the worker until empty). Body here, `#[test]`
+    /// wrapper in `mod heavy` (issue 1522 — worker pool + `wait_until`).
+    fn two_slots_round_robin_under_budget_body() {
         // One worker so the round-robin is observable. Custom budget
         // — a tiny mail cap means each slot hits Yielded quickly and
         // the worker drains the other.
@@ -519,9 +566,9 @@ mod tests {
     /// A handler panic escalates via the [`FatalAborter`]. The test
     /// uses [`PanicAborter`] (the test-only aborter) which `panic!`s
     /// instead of `process::exit`; the worker thread propagates the
-    /// panic, and `shutdown` returns it via `JoinHandle::join`.
-    #[test]
-    fn handler_panic_escalates_via_aborter() {
+    /// panic, and `shutdown` returns it via `JoinHandle::join`. Body here,
+    /// `#[test]` wrapper in `mod heavy` (issue 1522 — pool + `wait_until`).
+    fn handler_panic_escalates_via_aborter_body() {
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
         let handle = Pool::start(
             PoolConfig {
@@ -605,6 +652,139 @@ mod tests {
     /// oversubscribing cores against one another.
     mod heavy {
         use super::*;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        /// A self-sustaining slot (iamacoffeepot/aether#1535): each
+        /// `run_cycle` immediately re-schedules itself through
+        /// `WakeSink::schedule` — the handler-wake keep-local path
+        /// (`worker_deque::try_push_local_budgeted`) — so the running
+        /// worker's own deque oscillates 0→1→0 forever. The depth-0
+        /// exemption keeps every re-push local with no clock read, so
+        /// without the every-K backstop the worker would never visit the
+        /// injector again. `stop` ends the loop so shutdown can drain.
+        struct LoopSlot {
+            cycles: AtomicU32,
+            stop: Arc<AtomicBool>,
+            sink: WakeSink,
+            this: Weak<Self>,
+        }
+
+        impl LoopSlot {
+            fn new(stop: Arc<AtomicBool>, sink: WakeSink) -> Arc<Self> {
+                Arc::new_cyclic(|this| Self {
+                    cycles: AtomicU32::new(0),
+                    stop,
+                    sink,
+                    this: this.clone(),
+                })
+            }
+
+            fn cycles(&self) -> u32 {
+                self.cycles.load(Ordering::Acquire)
+            }
+        }
+
+        impl Drainable for LoopSlot {
+            fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+                self.cycles.fetch_add(1, Ordering::AcqRel);
+                if !self.stop.load(Ordering::Acquire)
+                    && let Some(me) = self.this.upgrade()
+                {
+                    self.sink.schedule(me);
+                }
+                CycleResult::Idle
+            }
+
+            fn label(&self) -> &'static str {
+                "loop-slot"
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        /// Regression for the every-K chain backstop
+        /// (iamacoffeepot/aether#1535): W self-sustaining loops capture all
+        /// W workers, then an independent slot arrives through the
+        /// injector. Without the backstop no captured worker ever consults
+        /// the injector again (the depth-0 keep-local chain never drains
+        /// its deque), so the slot starves past any deadline; with it,
+        /// every worker probes the injector each `chain_backstop()`-th pop
+        /// and the slot dispatches almost immediately.
+        #[test]
+        fn injector_fed_slot_dispatches_under_full_worker_capture() {
+            const WORKERS: usize = 2;
+            let handle = standard_handle(WORKERS);
+            let stop = Arc::new(AtomicBool::new(false));
+
+            // Seed the loops one at a time, waiting for each to start
+            // cycling before seeding the next: an already-captured worker
+            // takes injector work at most once per backstop window, so
+            // each fresh loop lands on a still-idle worker (and if a
+            // captured worker's probe does take it, the displaced idle
+            // worker only makes the final assertion easier — the test
+            // discriminates either way: with no backstop, captured
+            // workers never steal at all).
+            let loops: Vec<Arc<LoopSlot>> = (0..WORKERS)
+                .map(|_| LoopSlot::new(Arc::clone(&stop), handle.wake_sink()))
+                .collect();
+            for slot in &loops {
+                let seed: Arc<dyn Drainable> = slot.clone();
+                handle.wake_sink().schedule(seed);
+                assert!(
+                    wait_until(Duration::from_secs(2), || slot.cycles() > 0),
+                    "loop slot should start cycling once a worker picks it up"
+                );
+            }
+
+            // Every worker is captured. An independent slot now arrives
+            // through the injector (a wake off any pool worker spills
+            // there) — the path the backstop exists to keep live.
+            let probe = CounterSlot::new("injector-fed");
+            let probe_dyn: Arc<dyn Drainable> = probe.clone();
+            let weak: Weak<dyn Drainable> = Arc::downgrade(&probe_dyn);
+            drop(probe_dyn);
+            let wake = WakeHandle::new(probe.state.clone(), weak, handle.wake_sink());
+            probe.push(1);
+            assert!(wake.wake());
+
+            let dispatched = wait_until(Duration::from_secs(5), || probe.dispatched() == 1);
+
+            // End the loops *before* asserting so the deques drain — a
+            // perpetually-cycling worker only reaches the shutdown
+            // observation point (the spin/park coordinator) once its own
+            // deque runs empty. Asserting first would leave the loops
+            // spinning through the panic unwind and wedge the suite on a
+            // regression instead of failing at the deadline.
+            stop.store(true, Ordering::Release);
+            drop(wake);
+            let _ = handle.shutdown_with_results();
+
+            assert!(
+                dispatched,
+                "every-K backstop must dispatch injector work under full \
+                 worker capture (iamacoffeepot/aether#1535)"
+            );
+        }
+
+        /// `#[test]` wrappers for the parent dispatch tests that spawn a
+        /// worker pool and `wait_until`-poll under a multi-second deadline
+        /// (issue 1522). Bodies stay in the parent to share its helpers.
+        #[test]
+        fn pool_drains_pushed_envelopes() {
+            pool_drains_pushed_envelopes_body();
+        }
+
+        #[test]
+        fn two_slots_round_robin_under_budget() {
+            two_slots_round_robin_under_budget_body();
+        }
+
+        #[test]
+        fn handler_panic_escalates_via_aborter() {
+            handler_panic_escalates_via_aborter_body();
+        }
 
         /// Stress: 4 slots × 1000 envelopes each across 2 workers. Confirm
         /// every envelope dispatches and no slot is left orphaned.

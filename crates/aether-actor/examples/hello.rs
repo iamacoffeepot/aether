@@ -21,7 +21,7 @@
 // fine but must keep the signature.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, KindId, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
@@ -56,9 +56,7 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 };
 
 /// Per-instance state for the hello component.
-pub struct Hello {
-    pong: KindId<Pong>,
-}
+pub struct Hello {}
 
 /// Minimal end-to-end smoke component: draws a static triangle every
 /// tick and echoes pings back to the sender.
@@ -72,13 +70,11 @@ pub struct Hello {
 impl FfiActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
         C: Resolver,
     {
-        Ok(Hello {
-            pong: ctx.resolve::<Pong>(),
-        })
+        Ok(Hello {})
     }
 
     //noinspection DuplicatedCode
@@ -107,9 +103,7 @@ impl FfiActor for Hello {
     /// are in flight.
     #[handler]
     fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, ping: Ping) {
-        if let Some(sender) = ctx.reply_target() {
-            ctx.reply_kind(sender, self.pong, &Pong { seq: ping.seq });
-        }
+        ctx.reply(&Pong { seq: ping.seq });
     }
 }
 

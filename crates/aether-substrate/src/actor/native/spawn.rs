@@ -29,9 +29,11 @@ use aether_kinds::trace::Nanos;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
+use crate::actor::native::{
+    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+};
 use crate::actor::registry::ActorRegistry;
-use crate::chassis::ctx::MailboxWakeSlot;
+use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::mail::mailer::Mailer;
@@ -387,7 +389,7 @@ impl Spawner {
             // today — Phase 4+ may revisit. Pass a throwaway
             // ExportedHandles to keep the init-ctx shape uniform with
             // the singleton path.
-            let mut throwaway_handles = crate::ExportedHandles::new();
+            let mut throwaway_handles = ExportedHandles::new();
             let mut init_ctx =
                 NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
             // ADR-0081: wrap `init` in `with_stamped` so any
@@ -418,28 +420,14 @@ impl Spawner {
         // and external mail addressed to the dead mailbox warn-drops.
         let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
         let weak_for_handler = Arc::downgrade(&strong_sender);
-        // Per-actor inbox-pending counter. Sink handler ++ on push;
-        // dispatcher slot -- after handling. Pre-PR-4 the test bench's
-        // `wait_instanced_quiesce` queried this through
-        // `Spawner::instanced_pending`; ADR-0080 settlement gating
-        // retires that polling path. The counter survives because the
-        // `DispatcherSlot` still threads it as the optional `pending`
-        // arg, but nothing queries the value today — a future cleanup
-        // PR can drop it entirely.
-        let pending = Arc::new(AtomicU64::new(0));
-        let pending_for_handler = Arc::clone(&pending);
         // Issue 635 PR C: pool wake hook. Populated post-init below
         // (every actor is pool-dispatched since issue 1187); empty until
         // then so the closure's `get()` is a single relaxed atomic load.
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
         // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
-        // directly. Payload + kind_name + origin all move into the
-        // forwarded `Envelope` via `From`; no clones on the
-        // instanced-actor hot path. The pre-send increment + on-fail
-        // decrement bracket the `tx.send` exactly as before; the
-        // failure branch reads `env.kind_name` out of `SendError`
-        // since `dispatch` was already moved into `env`.
+        // and routes it through [`relay_or_transfer`] — the shared
+        // upgrade → send → wake core with both ADR-0094 transfer seams.
         // ADR-0099 §3: register under the lineage-folded `id`, not
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
@@ -447,43 +435,22 @@ impl Spawner {
             id,
             full_name.clone(),
             Arc::new(move |dispatch: OwnedDispatch| {
-                let Some(tx) = weak_for_handler.upgrade() else {
-                    // ADR-0094: the actor's sender is gone — the mail is
-                    // discarded at this relay seam, not held here, so
-                    // mark the obligation transferred (the dropped-mail
-                    // accounting is a separate concern, not this guard's).
-                    dispatch.mark_transferred();
-                    tracing::warn!(
-                        target: "aether_substrate::spawn",
-                        kind = %dispatch.kind_name,
-                        "instanced actor sender dropped — mail discarded"
-                    );
-                    return;
-                };
-                // ADR-0094: the success path moves `env` onto the channel
-                // (a transfer — the obligation rides the value); the
-                // actor's dispatcher discharges it on drain. No annotation
-                // here because the value is not dropped at this seam.
-                let env: Envelope = dispatch;
-                pending_for_handler.fetch_add(1, Ordering::AcqRel);
-                if let Err(mpsc::SendError(env)) = tx.send(env) {
-                    // Receiver disconnected before we could deliver;
-                    // un-account for the increment so the counter
-                    // stays accurate (a future post-PR-4 cleanup may
-                    // drop the counter entirely now that
-                    // `wait_instanced_quiesce` retired).
-                    pending_for_handler.fetch_sub(1, Ordering::AcqRel);
-                    // ADR-0094: discarded at the relay seam — transfer.
-                    env.mark_transferred();
-                    tracing::warn!(
-                        target: "aether_substrate::spawn",
-                        kind = %env.kind_name,
-                        "instanced actor receiver dropped — mail discarded"
-                    );
-                    return;
-                }
-                if let Some(wake) = wake_for_handler.get() {
-                    wake();
+                match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler) {
+                    RelayOutcome::Delivered => {}
+                    RelayOutcome::SenderGone { kind_name } => {
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            kind = %kind_name,
+                            "instanced actor sender dropped — mail discarded"
+                        );
+                    }
+                    RelayOutcome::ReceiverGone { kind_name } => {
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            kind = %kind_name,
+                            "instanced actor receiver dropped — mail discarded"
+                        );
+                    }
                 }
             }),
         );
@@ -540,22 +507,14 @@ impl Spawner {
         // child wire→dispatcher transition is sequential within this
         // ctx, peers are running, all mailboxes claimed.
         local::with_stamped(&slots, || {
-            let mut wire_ctx = crate::actor::native::NativeCtx::new(
-                &transport,
-                Source::NONE,
-                MailId::NONE,
-                MailId::NONE,
-            );
+            let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
             actor.wire(&mut wire_ctx);
         });
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
-        // succeed. The per-actor `pending` counter increments here
-        // for symmetry with the sink-handler path; the value is no
-        // longer queried (PR 4 retired `wait_instanced_quiesce`).
+        // succeed.
         for env in after_init_mail {
-            pending.fetch_add(1, Ordering::AcqRel);
             // mpsc::Sender::send only fails when the receiver
             // disconnects; rx is alive here. Discard on the
             // theoretical impossibility.
@@ -576,7 +535,6 @@ impl Spawner {
             actor,
             Arc::clone(&transport),
             slots,
-            Some(Arc::clone(&pending)),
             Arc::clone(&self.actor_registry),
             Arc::clone(&self.mailer),
             id,

@@ -1853,6 +1853,31 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         ));
     }
 
+    // Two `#[handler]` methods that accept the same mail kind would emit
+    // two `HandlesKind<K>` impls (a coherence error) plus a dead second
+    // dispatch arm the first arm always shadows. Reject the duplicate at
+    // compile time, spanned at the later handler. The macro has no type
+    // resolution, so dedup is by token equality (`types_token_eq`), not
+    // by resolved `KindId`.
+    for (i, later) in handlers.iter().enumerate() {
+        if let Some(earlier) = handlers[..i]
+            .iter()
+            .find(|earlier| types_token_eq(&earlier.kind_ty, &later.kind_ty))
+        {
+            let earlier_name = &earlier.method.sig.ident;
+            let kind_ty = &later.kind_ty;
+            return Err(syn::Error::new_spanned(
+                &later.method.sig.ident,
+                format!(
+                    "two #[handler] methods accept the same mail kind `{}` (also on \
+                     `{earlier_name}`) — each kind routes to exactly one handler. Give each \
+                     handler a distinct kind.",
+                    quote!(#kind_ty)
+                ),
+            ));
+        }
+    }
+
     // ADR-0090 (issue 1256): the trait now takes `init(config: Self::Config,
     // ctx: &mut C)`. If the user declared `type Config = …`, leave their
     // init alone — they're expected to spell out the `config` param. If
@@ -1919,6 +1944,41 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // Component for X` to a sibling `impl ::aether_actor::Actor`
     // block so satisfying `FfiActor: Actor` works without making the
     // user split the impl manually.
+    //
+    // Validate the const surface first: `NAMESPACE` is required (the
+    // marker `impl Actor` carries it) and is the only authorable const on
+    // the `Actor` super-trait. A removed `SCHEDULING` const (issue 1187)
+    // and any stray const are rejected at their own span, and a missing
+    // `NAMESPACE` at the type — each a pointed diagnostic rather than a
+    // later "no associated const NAMESPACE" error against the surfaceless
+    // `Actor` trait.
+    let mut has_namespace = false;
+    for c in &consts {
+        if c.ident == "NAMESPACE" {
+            has_namespace = true;
+        } else if c.ident == "SCHEDULING" {
+            return Err(syn::Error::new_spanned(
+                c,
+                "`SCHEDULING` was removed (issue 1187): every actor drains on the chassis \
+                 worker pool. Drop the const — never block a handler; offload blocking work \
+                 to a `ctx.spawn`'d thread that feeds results back as mail.",
+            ));
+        } else {
+            return Err(syn::Error::new_spanned(
+                c,
+                "#[actor] impl FfiActor for X accepts only \
+                 `const NAMESPACE: &'static str = …` — the `Actor` super-trait carries no \
+                 other authorable const",
+            ));
+        }
+    }
+    if !has_namespace {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "#[actor] impl FfiActor for X must declare \
+             `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
+        ));
+    }
     let const_tokens = consts.iter();
     let actor_impl = if consts.is_empty() {
         quote! {}
@@ -2036,7 +2096,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 ///     (extracted from the impl block so the `NativeActor: Actor`
 ///     supertrait bound is satisfied).
 ///   - `impl HandlesKind<K> for X` per `#[handler]` method — the
-///     compile-time gate `Sender::send::<R, K>` consults.
+///     compile-time gate `MailSender::send::<R, K>` consults.
 ///   - `impl NativeActor for X { type Config; fn init }` (the user's
 ///     bodies, attribute-stripped).
 ///   - `impl ::aether_substrate::NativeDispatch for X` whose body is
@@ -2215,6 +2275,31 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     }
 
+    // Two `#[handler]` methods that accept the same mail kind would emit
+    // two `HandlesKind<K>` impls (a coherence error) plus a dead second
+    // dispatch arm the first arm always shadows. Reject the duplicate at
+    // compile time, spanned at the later handler. The macro has no type
+    // resolution, so dedup is by token equality (`types_token_eq`,
+    // matching the task-handler check above), not by resolved `KindId`.
+    for (i, later) in handlers.iter().enumerate() {
+        if let Some(earlier) = handlers[..i]
+            .iter()
+            .find(|earlier| types_token_eq(&earlier.kind_ty, &later.kind_ty))
+        {
+            let earlier_name = &earlier.method.sig.ident;
+            let kind_ty = &later.kind_ty;
+            return Err(syn::Error::new_spanned(
+                &later.method.sig.ident,
+                format!(
+                    "two #[handler] methods accept the same mail kind `{}` (also on \
+                     `{earlier_name}`) — each kind routes to exactly one handler. Give each \
+                     handler a distinct kind.",
+                    quote!(#kind_ty)
+                ),
+            ));
+        }
+    }
+
     // `NAMESPACE` is declared on the supertrait `Actor`, but the user
     // wrote it inside `impl NativeActor for X` for the symmetric
     // authoring shape. Route the const onto a sibling `impl Actor for X`
@@ -2228,18 +2313,47 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // expansion does not duplicate them. The native-only impls below
     // still emit unchanged.
     //
-    // Dispatch placement is no longer authorable (issue 1187): the
-    // scheduling enum + trait const were removed — every actor drains on
-    // the chassis worker pool. Reject a leftover `SCHEDULING` const with
-    // a pointed diagnostic instead of letting it pass through to a
-    // "no associated const SCHEDULING" error against the surfaceless
-    // `Actor` trait.
-    if let Some(c) = consts.iter().find(|c| c.ident == "SCHEDULING") {
+    //
+    // Validate the const surface in one pass. Dispatch placement is no
+    // longer authorable (issue 1187): the scheduling enum + trait const
+    // were removed — every actor drains on the chassis worker pool, so a
+    // leftover `SCHEDULING` const earns a pointed diagnostic. Any const
+    // other than `NAMESPACE` is stray (the `Actor` super-trait carries no
+    // other
+    // authorable const) and is rejected at its own span rather than
+    // silently routed onto the sibling `impl Actor` block; and the
+    // presence of `NAMESPACE` is tracked so a block that omits it fails
+    // here (spanned at the type, mirroring the `#[bridge]` path) instead
+    // of at a later "no associated const NAMESPACE" error against the
+    // surfaceless `Actor` trait. A `skip_markers` (bridge-wrapped) block
+    // legitimately omits `NAMESPACE` — the `#[bridge]` expansion emits
+    // the marker `impl Actor` carrying it as a sibling — so the
+    // missing-NAMESPACE check is gated on `!opts.skip_markers`.
+    let mut has_namespace = false;
+    for c in &consts {
+        if c.ident == "NAMESPACE" {
+            has_namespace = true;
+        } else if c.ident == "SCHEDULING" {
+            return Err(syn::Error::new_spanned(
+                c,
+                "`SCHEDULING` was removed (issue 1187): every actor drains on the chassis \
+                 worker pool. Drop the const — never block a handler; offload blocking work \
+                 to a `ctx.spawn`'d thread that feeds results back as mail.",
+            ));
+        } else {
+            return Err(syn::Error::new_spanned(
+                c,
+                "#[actor] impl NativeActor for X accepts only \
+                 `const NAMESPACE: &'static str = …` — the `Actor` super-trait carries no \
+                 other authorable const",
+            ));
+        }
+    }
+    if !has_namespace && !opts.skip_markers {
         return Err(syn::Error::new_spanned(
-            c,
-            "`SCHEDULING` was removed (issue 1187): every actor drains on the chassis \
-             worker pool. Drop the const — never block a handler; offload blocking work \
-             to a `ctx.spawn`'d thread that feeds results back as mail.",
+            self_ty,
+            "#[actor] impl NativeActor for X must declare \
+             `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
         ));
     }
     // NAMESPACE passes through unchanged because its RHS is a

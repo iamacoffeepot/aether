@@ -27,7 +27,7 @@ pub(crate) mod test_echo;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
-pub use server::{RpcServerCapability, rpc_server_mailbox_id};
+pub use server::RpcServerCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{RpcServerConfig, RpcServerHandle};
 pub use wire::{

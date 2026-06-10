@@ -74,8 +74,11 @@ impl<'a, R> NativeActorMailbox<'a, R> {
 
     /// Resolve a sibling mailbox on the same binding, addressed by
     /// `name`. Same FNV-hash name resolution as
-    /// [`NativeCtx::resolve_actor`] — kept as an inherent method so
-    /// cap-owned ext traits (which only have a mailbox in hand, not a
+    /// [`NativeCtx::resolve_actor`] — `name` must be the peer's **full
+    /// registered name** (flat ADR-0029 hash). A caller that needs a
+    /// lineage-folded child id (ADR-0099 §3) uses
+    /// [`Self::resolve_peer_scoped`] instead. Kept as an inherent method
+    /// so cap-owned ext traits (which only have a mailbox in hand, not a
     /// ctx) can hand back peer handles without rethreading the ctx.
     /// Threads the existing `'a` binding ref, so the returned handle
     /// inherits the parent mailbox's borrow lifetime.

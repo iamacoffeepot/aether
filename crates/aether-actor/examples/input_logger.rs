@@ -13,8 +13,9 @@
 //!
 //! Each input kind has its own `#[handler]` method. Issue 640 retired
 //! the cap-side manifest auto-subscribe walker (and the macro-side
-//! walker retired earlier in #403); components subscribe explicitly
-//! via `ctx.subscribe_input::<K>()` in `init`.
+//! walker retired earlier in #403); components subscribe from the
+//! `wire` hook by sending a `SubscribeInput { kind, mailbox }` to the
+//! `InputCapability`.
 
 // Stateless logger: each `#[handler]` keeps `&mut self` for the
 // ADR-0033 / ADR-0038 dispatch ABI but doesn't need any field access.

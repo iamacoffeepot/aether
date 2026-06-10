@@ -21,27 +21,32 @@
 
 use aether_data::Kind;
 
-use crate::actor::{Actor, HandlesKind};
+use crate::actor::{HandlesKind, Singleton};
 
 /// Outbound-mail surface every actor ctx exposes.
 ///
-/// `R: Actor + HandlesKind<K>` is the compile-time gate: trying to
+/// `R: Singleton + HandlesKind<K>` is the compile-time gate: trying to
 /// send a kind the receiver doesn't handle is rejected at the call
-/// site, not silently warn-dropped at runtime. Wire shape (cast or
-/// postcard) follows `Kind::encode_into_bytes` (issue #240).
+/// site, not silently warn-dropped at runtime. The receiver's mailbox
+/// is resolved through `R::resolve(caller_carry)` (ADR-0099 §5) — the
+/// same lineage-aware path `ctx.actor::<R>()` walks — so a non-root
+/// receiver routes to the lineage-folded id, not the flat
+/// `hash(R::NAMESPACE)`. Wire shape (cast or postcard) follows
+/// `Kind::encode_into_bytes` (issue #240).
 pub trait MailSender {
     /// Send a single payload of kind `K` to the singleton instance of
-    /// receiver actor `R`.
+    /// receiver actor `R`, resolved via `R::resolve` against the
+    /// caller's lineage carry (ADR-0099 §5).
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind;
 
     /// Send a slice of cast-shape payloads as a contiguous batch.
     /// Cast-only — postcard has no efficient batched wire shape.
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit;
 
     /// String-keyed escape hatch for callers that genuinely don't
@@ -75,7 +80,7 @@ pub trait MailSender {
     /// trace.
     fn send_detached<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         self.send::<R, K>(payload);

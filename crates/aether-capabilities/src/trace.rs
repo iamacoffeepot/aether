@@ -29,7 +29,7 @@ mod native {
     use super::{DispatchTraced, DispatchTracedAck};
     use std::sync::Arc;
 
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::helpers::resolve_bundle;

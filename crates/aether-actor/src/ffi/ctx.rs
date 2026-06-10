@@ -24,7 +24,6 @@ use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::resolver::Resolver;
-use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
@@ -146,14 +145,16 @@ impl FfiCtx<'_> {
         self.sender = sender.map(ReplyHandle::raw);
     }
 
-    /// Reply with an explicit `sender` + cached `KindId<K>`. Sits
-    /// alongside the trait-driven [`OutboundReply::reply`] which uses
-    /// the dispatcher-stamped sender plus `K::ID`. Useful for FFI
-    /// guests sending cast-shaped types that don't impl
-    /// `serde::Serialize` (the trait method's bound covers native's
-    /// postcard reply path; FFI's `reply_mail` only ships bytes via
-    /// [`Kind::encode_into_bytes`], so the bound is over-strict for
-    /// guest-side cast kinds).
+    /// Reply with an explicit `sender` + cached `KindId<K>`.
+    ///
+    /// Prefer the trait surface: [`OutboundReply::reply`] replies to the
+    /// dispatcher-stamped sender (a no-op when there's none), and
+    /// [`OutboundReply::reply_to`] takes an explicit [`ReplyHandle`]. Both
+    /// derive the kind from `K::ID`, so the cached `KindId<K>` argument
+    /// here is redundant.
+    #[deprecated(
+        note = "use OutboundReply::reply / reply_to; ADR-0100 dropped the Serialize bound"
+    )]
     pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.reply_mail(sender.raw(), kind.raw(), &bytes, 1);
@@ -258,22 +259,22 @@ impl MailSender for FfiCtx<'_> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1);
     }
 
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         MAIL_BRIDGE.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -316,44 +317,14 @@ impl OutboundReply for FfiCtx<'_> {
     }
 }
 
-impl Sender for FfiCtx<'_> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as MailSender>::send::<R, K>(self, payload);
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as MailSender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as MailSender>::send_to_named::<K>(self, name, payload);
-    }
-}
-
-impl MailCtx for FfiCtx<'_> {
-    //noinspection DuplicatedCode
-    fn reply<K: Kind>(&mut self, payload: &K) {
-        if let Some(raw) = self.sender {
-            let bytes = payload.encode_into_bytes();
-            MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
-        }
-    }
-}
-
 /// Narrowed capability handle for the `on_dehydrate` save hook.
-/// Outbound mail still works through [`Sender`]; the reply / resolve
+/// Outbound mail still works through [`MailSender`]; the reply / resolve
 /// surfaces are intentionally absent.
 pub struct FfiDropCtx<'a> {
+    /// The actor's own mailbox id (its lineage carry), so a buffered
+    /// `send` resolves the receiver through `R::resolve(self.mailbox)`
+    /// like every other ctx (ADR-0099 §5).
+    mailbox: u64,
     _borrow: PhantomData<&'a ()>,
 }
 
@@ -361,8 +332,9 @@ impl FfiDropCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
     #[must_use]
-    pub fn __new() -> Self {
+    pub fn __new(mailbox: u64) -> Self {
         Self {
+            mailbox,
             _borrow: PhantomData,
         }
     }
@@ -396,22 +368,22 @@ impl MailSender for FfiDropCtx<'_> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1);
     }
 
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         MAIL_BRIDGE.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -436,29 +408,5 @@ impl Persistence for FfiDropCtx<'_> {
             status, 0,
             "aether-actor: save_state failed (status {status})"
         );
-    }
-}
-
-impl Sender for FfiDropCtx<'_> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as MailSender>::send::<R, K>(self, payload);
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as MailSender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as MailSender>::send_to_named::<K>(self, name, payload);
     }
 }

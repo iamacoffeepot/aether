@@ -167,7 +167,7 @@ pub struct KnobRecord {
     /// the getter doc-comment.
     pub doc: &'static str,
     /// The literal default, if the knob has one. `None` for adaptive
-    /// / unset knobs (`time_budget`, `mail_budget`) — rendered
+    /// / unset knobs (`time_budget`, `wake_cost_nanos`) — rendered
     /// "derived/unset" by the dump.
     pub default: Option<&'static str>,
     /// Whether this is a confique-backed or hand-registered knob.

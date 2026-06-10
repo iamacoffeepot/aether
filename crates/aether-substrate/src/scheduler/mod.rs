@@ -49,6 +49,7 @@ pub use slot::{
 pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
 
+use crate::actor::native::blob_work::RECRUIT_KNOBS;
 use crate::config::{KnobKind, KnobRecord};
 
 /// The lifecycle advance-timeout knob (ADR-0090 unit b2,
@@ -71,11 +72,13 @@ pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
 /// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).
 /// Concatenates the four deque / keep-local-valve knobs
 /// (`worker_deque::DEQUE_KNOBS`), the handoff-cost calibration knob
-/// (`calibrate::CALIBRATE_KNOBS`), and the lifecycle advance-timeout
-/// knob ([`LIFECYCLE_KNOBS`]) into the single
-/// slice e1's `chassis_known_keys()` folds into the known-key set and
-/// e2's `--config` dump renders. Pure `&'static` metadata — there is
-/// no change to any hot-path `OnceLock` read.
+/// (`calibrate::CALIBRATE_KNOBS`), the lifecycle advance-timeout knob
+/// ([`LIFECYCLE_KNOBS`]), the three blob-recruiter knobs
+/// (`blob_work::RECRUIT_KNOBS`), and the spin-window knob
+/// (`pool::SPIN_KNOBS`) into the single slice e1's `chassis_known_keys()`
+/// folds into the known-key set and e2's `--config` dump renders. Pure
+/// `&'static` metadata — there is no change to any hot-path `OnceLock`
+/// read.
 ///
 /// The element-by-element array (rather than a runtime concat) keeps
 /// `SCHEDULER_KNOBS` a `const`: each record is still *defined* once in
@@ -87,6 +90,10 @@ pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
     worker_deque::DEQUE_KNOBS[3],
     calibrate::CALIBRATE_KNOBS[0],
     LIFECYCLE_KNOBS[0],
+    RECRUIT_KNOBS[0],
+    RECRUIT_KNOBS[1],
+    RECRUIT_KNOBS[2],
+    pool::SPIN_KNOBS[0],
 ];
 
 #[cfg(test)]
@@ -95,22 +102,26 @@ mod knob_tests {
     use crate::config::KnobKind;
 
     #[test]
-    fn scheduler_knobs_cover_all_six_hot_path_env_keys() {
+    fn scheduler_knobs_cover_all_hot_path_env_keys() {
         let keys: Vec<&str> = SCHEDULER_KNOBS.iter().map(|r| r.env_key).collect();
         for expected in [
             "AETHER_LOCAL_STICKY_MAX",
-            "AETHER_LOCAL_MAIL_BUDGET",
             "AETHER_LOCAL_TIME_BUDGET_US",
             "AETHER_PEER_STEAL",
+            "AETHER_LOCAL_CHAIN_BACKSTOP",
             "AETHER_HANDOFF_COST_NS",
             "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+            "AETHER_BLOB_RECRUIT_MIN",
+            "AETHER_BLOB_RECRUIT_MAX",
+            "AETHER_WAKE_COST_NANOS",
+            "AETHER_SPIN_WINDOW_USEC",
         ] {
             assert!(
                 keys.contains(&expected),
                 "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
             );
         }
-        assert_eq!(SCHEDULER_KNOBS.len(), 6);
+        assert_eq!(SCHEDULER_KNOBS.len(), 10);
     }
 
     #[test]
@@ -127,10 +138,10 @@ mod knob_tests {
 
     #[test]
     fn adaptive_knobs_have_no_literal_default() {
-        // time_budget / mail_budget are adaptive / off-by-default with
-        // no single literal default (ADR-0090 unit b2): their record
-        // default is None ("derived/unset"), satisfied by the doc text.
-        for key in ["AETHER_LOCAL_TIME_BUDGET_US", "AETHER_LOCAL_MAIL_BUDGET"] {
+        // time_budget / wake_cost_nanos are adaptive with no single literal
+        // default (ADR-0090 unit b2): their record default is None
+        // ("derived/unset"), satisfied by the doc text.
+        for key in ["AETHER_LOCAL_TIME_BUDGET_US", "AETHER_WAKE_COST_NANOS"] {
             let rec = SCHEDULER_KNOBS
                 .iter()
                 .find(|r| r.env_key == key)

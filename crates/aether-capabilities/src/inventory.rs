@@ -45,7 +45,7 @@ use aether_kinds::{ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve
 mod native {
     use super::{ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve, ResolveResult};
 
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_data::KindId;
     use aether_data::canonical::kind_id_from_parts;
     use aether_data::name_inventory::{Cardinality, ParamKind, name_entries, template_entries};

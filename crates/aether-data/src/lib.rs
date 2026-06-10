@@ -42,7 +42,6 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use serde::de::DeserializeOwned;
 
 pub mod canonical;
 pub mod hash;
@@ -56,9 +55,10 @@ pub mod tagged_id;
 pub mod transform;
 pub mod wire_id;
 pub use hash::{
-    HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN,
-    content_addressed_handle_id, fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage,
-    mailbox_id_from_name, mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name,
+    HANDLE_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH,
+    ScopePathError, THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, content_addressed_handle_id,
+    fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage, mailbox_id_from_name,
+    mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name, validate_scope_path,
 };
 pub use ids::{
     ActorId, DagId, HandleId, KindId, MailboxId, ThreadId, TransformId, tag_for_type_id,
@@ -988,22 +988,6 @@ pub fn decode_slice<T: Kind + bytemuck::AnyBitPattern>(bytes: &[u8]) -> Result<&
     bytemuck::try_cast_slice(bytes).map_err(DecodeError::from)
 }
 
-/// Encode a structural value via postcard.
-///
-/// # Panics
-/// Panics if postcard encoding of `value` fails — fail-fast per ADR-0063:
-/// `postcard::to_allocvec` into a growable `Vec` cannot fail for the
-/// `Serialize` types this is used with, so a failure indicates the
-/// caller passed a type whose serializer is observably broken.
-pub fn encode_struct<T: Kind + serde::Serialize>(value: &T) -> Vec<u8> {
-    postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
-}
-
-/// Decode a structural value via postcard. Returns owned `T`.
-pub fn decode_struct<T: Kind + DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
-    postcard::from_bytes(bytes).map_err(DecodeError::from)
-}
-
 /// Marker payload for signal-only kinds with no bytes on the wire.
 /// Implementors need nothing but a `Kind` impl; use `encode_empty` on
 /// the sender side and ignore the payload on the receiver side.
@@ -1102,25 +1086,6 @@ mod tests {
                 actual: 7
             }
         ));
-    }
-
-    #[test]
-    fn struct_roundtrip() {
-        let v = TestStruct {
-            tag: 7,
-            label: String::from("hello"),
-        };
-        let bytes = encode_struct(&v);
-        let back: TestStruct =
-            decode_struct(&bytes).expect("test setup: postcard round-trip decodes TestStruct");
-        assert_eq!(back, v);
-    }
-
-    #[test]
-    fn struct_decode_malformed_rejected() {
-        let err = decode_struct::<TestStruct>(&[0x00])
-            .expect_err("test setup: single-byte buffer must fail postcard decode");
-        assert!(matches!(err, DecodeError::Postcard(_)));
     }
 
     #[test]

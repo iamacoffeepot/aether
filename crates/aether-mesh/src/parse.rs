@@ -167,7 +167,7 @@ fn expect_arity(
 fn require_color(node: &'static str, keywords: &[(String, &Value)]) -> Result<u32, ParseError> {
     for (k, v) in keywords {
         if k == "color" {
-            return as_u32(v);
+            return as_uint(v);
         }
     }
     Err(ParseError::MissingKeyword {
@@ -196,14 +196,14 @@ fn check_no_extra_keywords(
 // the intended precision boundary (DSL author writes the literal;
 // we keep the lower-precision in-engine representation).
 #[allow(clippy::cast_possible_truncation)]
-fn as_f32(value: &Value) -> Result<f32, ParseError> {
+fn as_float(value: &Value) -> Result<f32, ParseError> {
     value
         .as_f64()
         .map(|n| n as f32)
         .ok_or_else(|| ParseError::ExpectedNumber(format!("{value}")))
 }
 
-fn as_u32(value: &Value) -> Result<u32, ParseError> {
+fn as_uint(value: &Value) -> Result<u32, ParseError> {
     let n = value
         .as_u64()
         .ok_or_else(|| ParseError::ExpectedInteger(format!("{value}")))?;
@@ -236,9 +236,9 @@ fn as_vec3(node: &'static str, value: &Value) -> Result<Vec3, ParseError> {
         });
     }
     Ok(Vec3::new(
-        as_f32(items[0])?,
-        as_f32(items[1])?,
-        as_f32(items[2])?,
+        as_float(items[0])?,
+        as_float(items[1])?,
+        as_float(items[2])?,
     ))
 }
 
@@ -250,7 +250,7 @@ fn as_profile(value: &Value) -> Result<Vec<[f32; 2]>, ParseError> {
         if coords.len() != 2 {
             return Err(ParseError::InvalidProfilePoint(coords.len()));
         }
-        out.push([as_f32(coords[0])?, as_f32(coords[1])?]);
+        out.push([as_float(coords[0])?, as_float(coords[1])?]);
     }
     Ok(out)
 }
@@ -259,9 +259,9 @@ fn parse_box(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Nod
     expect_arity("box", positional, 3)?;
     check_no_extra_keywords("box", keywords, &["color"])?;
     Ok(Node::Box {
-        x: as_f32(positional[0])?,
-        y: as_f32(positional[1])?,
-        z: as_f32(positional[2])?,
+        x: as_float(positional[0])?,
+        y: as_float(positional[1])?,
+        z: as_float(positional[2])?,
         color: require_color("box", keywords)?,
     })
 }
@@ -273,9 +273,9 @@ fn parse_cylinder(
     expect_arity("cylinder", positional, 3)?;
     check_no_extra_keywords("cylinder", keywords, &["color"])?;
     Ok(Node::Cylinder {
-        radius: as_f32(positional[0])?,
-        height: as_f32(positional[1])?,
-        segments: as_u32(positional[2])?,
+        radius: as_float(positional[0])?,
+        height: as_float(positional[1])?,
+        segments: as_uint(positional[2])?,
         color: require_color("cylinder", keywords)?,
     })
 }
@@ -284,9 +284,9 @@ fn parse_cone(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<No
     expect_arity("cone", positional, 3)?;
     check_no_extra_keywords("cone", keywords, &["color"])?;
     Ok(Node::Cone {
-        radius: as_f32(positional[0])?,
-        height: as_f32(positional[1])?,
-        segments: as_u32(positional[2])?,
+        radius: as_float(positional[0])?,
+        height: as_float(positional[1])?,
+        segments: as_uint(positional[2])?,
         color: require_color("cone", keywords)?,
     })
 }
@@ -295,9 +295,9 @@ fn parse_wedge(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
     expect_arity("wedge", positional, 3)?;
     check_no_extra_keywords("wedge", keywords, &["color"])?;
     Ok(Node::Wedge {
-        x: as_f32(positional[0])?,
-        y: as_f32(positional[1])?,
-        z: as_f32(positional[2])?,
+        x: as_float(positional[0])?,
+        y: as_float(positional[1])?,
+        z: as_float(positional[2])?,
         color: require_color("wedge", keywords)?,
     })
 }
@@ -306,8 +306,8 @@ fn parse_sphere(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<
     expect_arity("sphere", positional, 2)?;
     check_no_extra_keywords("sphere", keywords, &["color"])?;
     Ok(Node::Sphere {
-        radius: as_f32(positional[0])?,
-        subdivisions: as_u32(positional[1])?,
+        radius: as_float(positional[0])?,
+        subdivisions: as_uint(positional[1])?,
         color: require_color("sphere", keywords)?,
     })
 }
@@ -317,7 +317,7 @@ fn parse_lathe(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
     check_no_extra_keywords("lathe", keywords, &["color"])?;
     Ok(Node::Lathe {
         profile: as_profile(positional[0])?,
-        segments: as_u32(positional[1])?,
+        segments: as_uint(positional[1])?,
         color: require_color("lathe", keywords)?,
     })
 }
@@ -327,7 +327,7 @@ fn parse_extrude(positional: &[&Value], keywords: &[(String, &Value)]) -> Result
     check_no_extra_keywords("extrude", keywords, &["color"])?;
     Ok(Node::Extrude {
         profile: as_profile(positional[0])?,
-        depth: as_f32(positional[1])?,
+        depth: as_float(positional[1])?,
         color: require_color("extrude", keywords)?,
     })
 }
@@ -336,10 +336,10 @@ fn parse_torus(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
     expect_arity("torus", positional, 4)?;
     check_no_extra_keywords("torus", keywords, &["color"])?;
     Ok(Node::Torus {
-        major_radius: as_f32(positional[0])?,
-        minor_radius: as_f32(positional[1])?,
-        major_segments: as_u32(positional[2])?,
-        minor_segments: as_u32(positional[3])?,
+        major_radius: as_float(positional[0])?,
+        minor_radius: as_float(positional[1])?,
+        major_segments: as_uint(positional[2])?,
+        minor_segments: as_uint(positional[3])?,
         color: require_color("torus", keywords)?,
     })
 }
@@ -378,7 +378,7 @@ fn parse_sweep(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
 
 fn as_scalar_list(value: &Value) -> Result<Vec<f32>, ParseError> {
     let items = list_to_vec(value)?;
-    items.iter().map(|v| as_f32(v)).collect()
+    items.iter().map(|v| as_float(v)).collect()
 }
 
 fn as_path(value: &Value) -> Result<Vec<Vec3>, ParseError> {
@@ -419,7 +419,7 @@ fn parse_rotate(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<
     check_no_extra_keywords("rotate", keywords, &[])?;
     Ok(Node::Rotate {
         axis: as_vec3("rotate", positional[0])?,
-        angle: as_f32(positional[1])?,
+        angle: as_float(positional[1])?,
         child: Box::new(parse_node(positional[2])?),
     })
 }
@@ -451,7 +451,7 @@ fn parse_array(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
     expect_arity("array", positional, 3)?;
     check_no_extra_keywords("array", keywords, &[])?;
     Ok(Node::Array {
-        count: as_u32(positional[0])?,
+        count: as_uint(positional[0])?,
         spacing: as_vec3("array", positional[1])?,
         child: Box::new(parse_node(positional[2])?),
     })
@@ -461,11 +461,11 @@ fn parse_array(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
 mod tests {
     use super::*;
 
-    /// `as_u32` accepts values up to `u32::MAX`. Pinned by issue #362
+    /// `as_uint` accepts values up to `u32::MAX`. Pinned by issue #362
     /// to keep the boundary case from regressing if the conversion is
     /// ever rewritten.
     #[test]
-    fn as_u32_accepts_u32_max() {
+    fn as_uint_accepts_u32_max() {
         let dsl = format!("(box 1 1 1 :color {})", u32::MAX);
         parse(&dsl).expect("u32::MAX must parse successfully");
     }
@@ -474,7 +474,7 @@ mod tests {
     /// (`n as u32` is a wrapping cast); per issue #362 they must now
     /// surface a parse error rather than producing a different mesh.
     #[test]
-    fn as_u32_rejects_values_above_u32_max() {
+    fn as_uint_rejects_values_above_u32_max() {
         let dsl = format!("(box 1 1 1 :color {})", u64::from(u32::MAX) + 1);
         let err = parse(&dsl).expect_err("values above u32::MAX must error");
         match err {

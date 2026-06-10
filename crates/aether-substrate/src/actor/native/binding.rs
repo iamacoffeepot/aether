@@ -477,7 +477,7 @@ impl NativeBinding {
     /// the in-flight handler's lineage so the outgoing [`Mail`] picks
     /// up the correct `parent_mail` and inherited `root`. The
     /// per-handler [`super::ctx::NativeCtx`]'s
-    /// [`aether_actor::actor::sender::Sender`] impl reads from its
+    /// [`aether_actor::actor::ctx::MailSender`] impl reads from its
     /// `in_flight_mail_id()` / `in_flight_root()` accessors and threads
     /// them in.
     ///
@@ -1027,6 +1027,84 @@ mod tests {
             resolved,
             mailbox_id_from_name("test.actor_fold.child"),
             "the folded own-child id differs from the flat depth-1 hash"
+        );
+    }
+
+    /// ADR-0099 §5 own-child path through the generic `MailSender::send`
+    /// surface: `send::<R>` resolves the receiver through
+    /// `R::resolve(caller_carry)` — the same lineage-aware path
+    /// `ctx.actor::<R>()` walks — so a parent at carry `C` sending by
+    /// bare type lands on `fold(C, ActorId::singleton(NAMESPACE))`, not
+    /// the flat `hash(NAMESPACE)`. The send-path analogue of
+    /// `ctx_actor_folds_own_child_singleton_onto_caller_carry`, closing
+    /// the divergence between the two send forms (#1550).
+    #[test]
+    fn mailsender_send_routes_through_resolve_not_flat_hash() {
+        use crate::actor::native::ctx::NativeCtx;
+        use aether_actor::actor::HandlesKind;
+        use aether_actor::{Actor, MailSender, Singleton};
+        use aether_data::mailbox_id_from_name;
+        use aether_kinds::Tick;
+
+        struct Child;
+        impl Actor for Child {
+            const NAMESPACE: &'static str = "test.send_fold.child";
+        }
+        impl Singleton for Child {
+            // A carry-dependent target distinct from the flat hash: a different
+            // caller carry resolves to a different mailbox, so a send that lands
+            // here proves the carry was threaded through `resolve` rather than
+            // dropped for `mailbox_id_from_name(NAMESPACE)`. The exact ADR-0099
+            // fold is exercised by aether-actor's own resolve unit tests.
+            fn resolve(caller_carry: u64) -> MailboxId {
+                mailbox_id_from_name(&format!("test.send_fold.child.{caller_carry:x}"))
+            }
+        }
+        impl HandlesKind<Tick> for Child {}
+
+        let (registry, mailer) = fresh_substrate();
+        let parent_carry = 0x0BAD_F00D_u64;
+
+        let resolved = Child::resolve(parent_carry);
+        let flat = mailbox_id_from_name("test.send_fold.child");
+        assert_ne!(
+            resolved, flat,
+            "fixture: the carry-derived id must differ from the flat hash"
+        );
+
+        // Capture at both candidate recipients: the carry-derived id the
+        // send must target, and the flat depth-1 hash the pre-fix path used.
+        let (resolved_tx, resolved_rx) = mpsc::channel::<Envelope>();
+        let (flat_tx, flat_rx) = mpsc::channel::<Envelope>();
+        registry
+            .try_register_inbox_with_id(
+                resolved,
+                "test.send_fold.resolved",
+                forward_to_envelope_sender(resolved_tx),
+            )
+            .expect("register resolved sink");
+        registry
+            .try_register_inbox_with_id(
+                flat,
+                "test.send_fold.flat",
+                forward_to_envelope_sender(flat_tx),
+            )
+            .expect("register flat sink");
+
+        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
+        {
+            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            <NativeCtx as MailSender>::send::<Child, Tick>(&mut ctx, &Tick);
+            // ctx drops here → `flush_outbound` routes the buffered send.
+        }
+
+        assert!(
+            resolved_rx.try_recv().is_ok(),
+            "send must route to Child::resolve(carry), the carry-derived id"
+        );
+        assert!(
+            flat_rx.try_recv().is_err(),
+            "send must NOT route to the flat hash(NAMESPACE)"
         );
     }
 

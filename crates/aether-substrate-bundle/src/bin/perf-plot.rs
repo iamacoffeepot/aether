@@ -161,10 +161,10 @@ fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
             .copied()
             .filter(|&v| v > 0)
     };
-    let lo_ns = positive().min().unwrap_or(1);
-    let hi_ns = positive().max().unwrap_or(1).max(lo_ns + 1);
-    let xmin = (lo_ns as f64 / 1000.0).max(0.001);
-    let xmax = (hi_ns as f64 / 1000.0).max(xmin * 1.001);
+    let lo_nanos = positive().min().unwrap_or(1);
+    let hi_nanos = positive().max().unwrap_or(1).max(lo_nanos + 1);
+    let xmin = (lo_nanos as f64 / 1000.0).max(0.001);
+    let xmax = (hi_nanos as f64 / 1000.0).max(xmin * 1.001);
 
     let (lmin, lmax) = (xmin.ln(), xmax.ln());
     let bin_of = |us: f64| -> usize {

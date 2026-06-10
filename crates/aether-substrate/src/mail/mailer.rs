@@ -1023,9 +1023,7 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------
     // ADR-0045 Ref-resolution integration
-    // ------------------------------------------------------------
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
     struct Note {

@@ -759,22 +759,6 @@ impl MailRing {
         hdr.lock.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Batch-decrement a blob's lock by `n` (the inline-drain path, where
-    /// the worker ran `n` of the blob's recipients itself). **Producer or
-    /// consumer-safe** — it is the same atomic as [`Self::release`].
-    ///
-    /// # Safety
-    /// Same as [`Self::release`], and `n` must not exceed the lock the
-    /// caller holds.
-    pub unsafe fn release_n(&self, header_off: u32, n: u32) {
-        if n == 0 {
-            return;
-        }
-        // SAFETY: header_off addresses a live blob's header.
-        let hdr = unsafe { &*self.header_ptr(header_off as usize) };
-        hdr.lock.fetch_sub(n, Ordering::Release);
-    }
-
     /// Advance `front` past every fully-released (`lock == 0`) blob at the
     /// head, freeing their bytes for reuse. Lazy: the producer calls this
     /// before a write (or opportunistically). **Producer-only.** Returns
@@ -813,6 +797,28 @@ impl MailRing {
             reclaimed += total;
         }
         reclaimed
+    }
+}
+
+#[cfg(test)]
+impl MailRing {
+    /// Batch-decrement a blob's lock by `n`. **Producer or consumer-safe**
+    /// — it is the same atomic as [`Self::release`]. Test-only: the
+    /// production inline-drain path releases one count at a time via
+    /// [`Self::release`]; this batched form has no production callers and
+    /// only exists to exercise the reclaim arithmetic in
+    /// [`tests::batch_release_reclaims`].
+    ///
+    /// # Safety
+    /// Same as [`Self::release`], and `n` must not exceed the lock the
+    /// caller holds.
+    pub unsafe fn release_n(&self, header_off: u32, n: u32) {
+        if n == 0 {
+            return;
+        }
+        // SAFETY: header_off addresses a live blob's header.
+        let hdr = unsafe { &*self.header_ptr(header_off as usize) };
+        hdr.lock.fetch_sub(n, Ordering::Release);
     }
 }
 

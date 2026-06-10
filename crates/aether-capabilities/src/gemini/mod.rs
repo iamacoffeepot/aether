@@ -42,7 +42,7 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 
 /// Default per-request timeout when `AETHER_GEMINI_TIMEOUT_MS` is unset.
 /// Media generation can run a couple minutes.
-pub const DEFAULT_TIMEOUT_MS: u32 = 180_000;
+pub const DEFAULT_TIMEOUT_MILLIS: u32 = 180_000;
 
 /// Adapter returned when `GEMINI_API_KEY` is unset (or
 /// `AETHER_GEMINI_DISABLE=1`). Every request replies
@@ -61,7 +61,7 @@ impl GeminiAdapter for DisabledGeminiAdapter {
 }
 
 mod config {
-    use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS};
+    use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS};
     // confique consumes these through `#[config(parse_env = …)]`; IntelliJ-Rust
     // doesn't trace macro-attr path args (Qodana FP), but rustc + clippy do.
     #[allow(unused_imports)]
@@ -119,7 +119,7 @@ mod config {
             feature = "native",
             config(
                 default = 180_000,
-                parse = parse_millis_strict::<DEFAULT_TIMEOUT_MS>,
+                parse = parse_millis_strict::<DEFAULT_TIMEOUT_MILLIS>,
                 ms_duration,
                 layer_field = "timeout_ms"
             )
@@ -133,7 +133,7 @@ mod config {
                 api_key: None,
                 disabled: false,
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
-                timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
+                timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
             }
         }
     }
@@ -145,7 +145,9 @@ mod config {
 
     #[cfg(all(test, feature = "native"))]
     mod tests {
-        use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS, GeminiConfig, GeminiConfigLayer};
+        use super::{
+            DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS, GeminiConfig, GeminiConfigLayer,
+        };
         use confique::Config as _;
         use std::time::Duration;
 
@@ -163,7 +165,7 @@ mod config {
             assert_eq!(layer.api_key, None);
             assert!(!layer.disabled);
             assert_eq!(layer.max_in_flight, DEFAULT_MAX_IN_FLIGHT);
-            assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MS);
+            assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MILLIS);
             assert_eq!(
                 Duration::from_millis(u64::from(layer.timeout_ms)),
                 default.timeout
@@ -212,11 +214,11 @@ impl UreqGeminiAdapter {
             .header("content-type", "application/json")
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
-        let (status, retry_after_ms, text) =
+        let (status, retry_after_millis, text) =
             shared::run_request(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
             return Err(format!(
-                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+                "status={status} retry_after_ms={retry_after_millis:?} body={text}"
             ));
         }
         Ok(text)

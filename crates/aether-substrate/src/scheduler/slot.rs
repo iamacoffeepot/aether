@@ -102,8 +102,14 @@ impl SlotState {
     /// (`Ready` or `Running`); the existing scheduling will pick up
     /// the newly-pushed envelope.
     pub fn try_wake(&self) -> bool {
+        // SeqCst: producer side of the send-vs-drain store-buffer pattern
+        // (inbox push then this CAS, vs the worker's `mark_idle` store then
+        // recheck). A single total order across `try_wake` / `mark_idle` /
+        // `seize` / `try_self_requeue` is what guarantees that the sender and
+        // the draining worker cannot both observe stale state and strand the
+        // envelope in an Idle, unqueued slot.
         self.state
-            .compare_exchange(STATE_IDLE, STATE_READY, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(STATE_IDLE, STATE_READY, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
@@ -135,12 +141,17 @@ impl SlotState {
     /// `route_mail`, and the holder/woken cycle drains it (per-recipient
     /// FIFO preserved by the inbox's own ordering).
     pub fn seize(&self) -> bool {
+        // SeqCst: a demuxer's `Idle → Running` seize competes with a sender's
+        // `try_wake` (`Idle → Ready`) for the same Idle slot. Both must agree,
+        // in the single total order shared with `try_wake` / `mark_idle` /
+        // `try_self_requeue`, on which transition won — otherwise the loser's
+        // mail can strand in an Idle, unqueued slot.
         self.state
             .compare_exchange(
                 STATE_IDLE,
                 STATE_RUNNING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
             )
             .is_ok()
     }
@@ -149,7 +160,13 @@ impl SlotState {
     /// `Running → Idle` is unconditional (we hold the slot exclusively
     /// while `Running`).
     pub fn mark_idle(&self) {
-        self.state.store(STATE_IDLE, Ordering::Release);
+        // SeqCst: consumer side of the send-vs-drain store-buffer pattern —
+        // this `Running → Idle` store precedes the worker's inbox recheck.
+        // Placing it in the single total order shared with `try_wake` /
+        // `seize` / `try_self_requeue` forbids the worker's recheck and a
+        // concurrent sender's `try_wake` from both reading stale state and
+        // leaving freshly-pushed mail stranded in an Idle, unqueued slot.
+        self.state.store(STATE_IDLE, Ordering::SeqCst);
     }
 
     /// Worker-side: budget hit — leave the slot in `Ready` so the
@@ -165,8 +182,13 @@ impl SlotState {
     /// re-pushes the slot; `false` means a concurrent sender beat us
     /// to it (and they re-pushed).
     pub fn try_self_requeue(&self) -> bool {
+        // SeqCst: the post-`mark_idle` recheck CAS races a concurrent sender's
+        // `try_wake` for the requeue. Sequencing it in the single total order
+        // shared with `try_wake` / `seize` / `mark_idle` guarantees exactly
+        // one of the two wins the `Idle → Ready` transition and re-pushes the
+        // slot, so the rechecked envelope is never lost.
         self.state
-            .compare_exchange(STATE_IDLE, STATE_READY, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(STATE_IDLE, STATE_READY, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
@@ -395,15 +417,13 @@ impl WakeSink {
     /// iamacoffeepot/aether#1174) — a produced blob is a descendant of the
     /// cascade already on this worker — until the per-burst **time valve**
     /// (`worker_deque::time_budget`, default 12µs) trips and spills a heavy
-    /// cascade to parallelise; mail-count budgeting is off by default. This is
-    /// the non-demux wake destination, shared by [`WakeHandle::wake`], the
-    /// producer-side blob push, and an inline recipient that yielded mid-drain
-    /// (ADR-0087 Phase 3b). The injector push is infallible; shutdown is
-    /// observed through the coordinator's flag.
+    /// cascade to parallelise. This is the non-demux wake destination, shared
+    /// by [`WakeHandle::wake`], the producer-side blob push, and an inline
+    /// recipient that yielded mid-drain (ADR-0087 Phase 3b). The injector push
+    /// is infallible; shutdown is observed through the coordinator's flag.
     pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
         let kept = worker_deque::try_push_local_budgeted(
             slot,
-            worker_deque::mail_budget(),
             worker_deque::time_budget(),
             worker_deque::hard_cap(),
         );

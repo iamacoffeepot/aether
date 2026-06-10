@@ -17,9 +17,9 @@ derive = ["dep:aether-actor-derive", "dep:aether-data-derive"]
 [dependencies]
 aether-actor-derive = { path = "../aether-actor-derive", optional = true }
 aether-data-derive = { path = "../aether-data-derive", optional = true }
-bytemuck = { version = "1.19", features = ["derive"] }
-postcard = { version = "1.1", default-features = false, features = ["alloc"] }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+bytemuck = { workspace = true, features = ["derive"] }
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # ADR-0070 phase 4 follow-up (ADR-0071 phase 7c): identity types
 # `EngineId` / `SessionToken` are UUIDs at the wire boundary. Default
 # features off keeps `aether-data` no_std + alloc; the `serde` feature
@@ -36,7 +36,7 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 # compiled. ADR-0032's wasm `aether.kinds` custom-section path remains
 # the wasm-side collection mechanism; this is the native mirror.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-inventory = "0.3"
+inventory = { workspace = true }
 
 [lints]
 workspace = true

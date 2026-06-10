@@ -521,10 +521,11 @@ pub mod guest_alloc {
 /// - `#[link_section = "aether.namespace"]` static that pins the
 ///   actor's `Actor::NAMESPACE` bytes (issue 525 Phase 1B).
 ///
-/// Only one actor per guest crate. A second [`crate::export!`] call in
-/// the same crate is a duplicate-symbol compile error on the shared
-/// `init` / `receive` names — ADR-0014 §4 parks multi-actor crates as
-/// out of scope.
+/// A single-type `export!(C)` binds the shared `init` / `receive`
+/// exports to one actor. ADR-0096 multi-actor modules pass two or more
+/// types — `export!(First, Second, …)` — which routes through
+/// `__export_multi_internal!`; the arity is what keeps the multi-actor
+/// arm from shadowing this single-actor form.
 ///
 /// ```ignore
 /// pub struct Hello { /* fields */ }
@@ -800,7 +801,14 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new();
+            // Derive the actor's own mailbox id (its lineage carry) so a
+            // `send::<R>` from the save hook resolves the receiver through
+            // `R::resolve` — the same id `receive` derives for `FfiCtx`.
+            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
+                <$component as $crate::Actor>::NAMESPACE,
+            )
+            .0;
+            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
             <$component as $crate::FfiActor>::on_dehydrate(instance, &mut ctx);
             0
         }
@@ -1081,7 +1089,14 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new();
+            // Derive the live actor's own mailbox id (its lineage carry) so a
+            // `send::<R>` from the save hook resolves the receiver through
+            // `R::resolve` — the same id `receive` derives for `FfiCtx`.
+            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
+                instance.erased_namespace(),
+            )
+            .0;
+            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
             instance.erased_on_dehydrate(&mut ctx);
             0
         }
