@@ -38,10 +38,20 @@
 //! flushes under burst: a second flush to a not-yet-drained recipient lands
 //! in the same group rather than a second group two workers could seize
 //! out of order. A flush that overflows the group array (or hits a retired
-//! blob) rolls the remainder into a fresh blob — and the overflow remainder
+//! blob) rolls the remainder into a fresh blob — the overflow remainder
 //! is always *new* recipients (seen recipients push to existing groups, no
-//! new-group pressure), so a rolled blob never shares a recipient with the
-//! one it rolled from: no cross-blob same-recipient race.
+//! new-group pressure), so the rolled blob shares no recipient with the
+//! one it rolled from. The detached (overflowed-out) blob itself stays on
+//! the producer's `detached` list with its recipient index (pruned of
+//! retired blobs at each flush), and a later flush routes a recipient that
+//! misses the active index through the detached indexes first —
+//! newest-first — pushing onto a still-open group there (and re-scheduling
+//! that blob for pickup) instead of opening a second group in the active
+//! blob; a closed detached group deposits through `route_mail`, which the
+//! close barrier makes strictly-after. The invariant the ordering spine
+//! rests on: **a recipient has at most one unclosed group across all of a
+//! producer's live blobs**, so no two workers ever hold same-recipient
+//! mail concurrently (iamacoffeepot/aether#1533).
 //!
 //! ## Closeable per-group buffer (the merge-vs-claim handshake)
 //!
@@ -797,6 +807,16 @@ pub struct BlobProducer {
     /// The active blob + its producer-private recipient → group-index map.
     /// `None` until the first flush, and after a retired blob is dropped.
     active: Option<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
+    /// Overflowed-out blobs that may still hold open (undrained) groups,
+    /// each with its recipient → group-index map, oldest first. A later
+    /// flush routes a recipient that misses the active index through these
+    /// indexes ([`Self::route_detached`]) so it pushes onto its existing
+    /// open group instead of opening a second live group another worker
+    /// could drain first — the cross-blob FIFO inversion
+    /// (iamacoffeepot/aether#1533). Producer-private (no new sharing),
+    /// empty except during overflow bursts, and self-bounding: entries
+    /// leave when their blob retires (pruned at each flush).
+    detached: Vec<(Arc<BlobWork>, FxHashMap<MailboxId, usize>)>,
 }
 
 impl BlobProducer {
@@ -807,6 +827,7 @@ impl BlobProducer {
             mailer,
             sink,
             active: None,
+            detached: Vec::new(),
         }
     }
 
@@ -814,7 +835,13 @@ impl BlobProducer {
     /// scheduling a drainer and broadcast-recruiting siblings for wide
     /// fan-outs. Called on the producing actor's thread.
     pub fn flush(&mut self, routed: Vec<Mail>) {
-        let mut pending = routed;
+        // Prune detached blobs that have retired (fully drained — every
+        // group closed, so nothing left to order against). Entries leave
+        // on retire, keeping the list self-bounding.
+        self.detached
+            .retain(|(blob, _)| !blob.lifecycle.is_retired());
+
+        let mut pending = self.route_detached(routed);
         while !pending.is_empty() {
             // Ensure a live (un-retired) active blob, sized to the pending
             // mail if we have to make a fresh one.
@@ -851,13 +878,81 @@ impl BlobProducer {
             // groups — its array is full (or it retired mid-publish). Detach
             // it so the remainder rolls into a fresh blob next iteration;
             // otherwise we'd re-append to the same full blob forever. The
-            // detached blob stays alive via its in-flight `Arc` copies until
-            // drained, and the leftover is always *new* recipients, so the
-            // fresh blob shares none of its groups.
-            if !pending.is_empty() {
-                self.active = None;
+            // leftover is always *new* recipients, so the fresh blob shares
+            // none of its groups — but the detached blob may still hold
+            // open (undrained) groups, so it moves onto `detached` with its
+            // index rather than being forgotten: the next flush must keep
+            // routing same-recipient mail onto those groups, or the fresh
+            // blob would open a second live group whichever worker drains
+            // first wins (the iamacoffeepot/aether#1533 FIFO inversion). A
+            // blob that retired mid-publish has every group closed already,
+            // so it drops here and never enters the list.
+            if !pending.is_empty()
+                && let Some((blob, index)) = self.active.take()
+                && !blob.lifecycle.is_retired()
+            {
+                self.detached.push((blob, index));
             }
         }
+    }
+
+    /// Route one flush's mail through the detached blobs' recipient indexes
+    /// before it reaches the active blob. A recipient already in the active
+    /// index passes through untouched (`append_flush` pushes onto its open
+    /// group there). A recipient that misses the active index but has a
+    /// group in a detached blob — scanned newest-first — **pushes onto that
+    /// group** when it is still open (the same [`Group::push`] the active
+    /// path uses, so FIFO rides the group buffer), and deposits through
+    /// [`Mailer::push`] when it has closed (safe: close-on-empty means
+    /// every predecessor was dispatched, and the deposit's wake makes the
+    /// slot `Ready`, so a later in-place seize loses and lands behind it).
+    /// Every detached blob that took a push is re-scheduled through the
+    /// sink — the same pickup guarantee [`Self::flush`] gives the active
+    /// blob. Only mail whose recipient misses everywhere is returned, to
+    /// become fresh groups in the active blob — upholding the at-most-one-
+    /// unclosed-group invariant (module doc §Single active blob + append;
+    /// iamacoffeepot/aether#1533).
+    fn route_detached(&self, routed: Vec<Mail>) -> Vec<Mail> {
+        if self.detached.is_empty() {
+            return routed;
+        }
+        let mut pending = Vec::with_capacity(routed.len());
+        let mut pushed = vec![false; self.detached.len()];
+        'mail: for mail in routed {
+            let in_active = self
+                .active
+                .as_ref()
+                .is_some_and(|(_, index)| index.contains_key(&mail.recipient));
+            if in_active {
+                pending.push(mail);
+                continue;
+            }
+            for (i, (blob, index)) in self.detached.iter().enumerate().rev() {
+                let Some(&g) = index.get(&mail.recipient) else {
+                    continue;
+                };
+                // SAFETY: `g` is in this blob's producer-private index, so
+                // this producer wrote and published the slot (a failed
+                // publish removes its entries); published slots are never
+                // mutated after the write.
+                let group = unsafe { blob.groups[g].get() };
+                match group.push(mail) {
+                    Ok(()) => pushed[i] = true,
+                    // Closed (drained) — deposit lands strictly after
+                    // everything the closing worker dispatched.
+                    Err(mail) => self.mailer.push(mail),
+                }
+                continue 'mail;
+            }
+            pending.push(mail);
+        }
+        for (i, (blob, _)) in self.detached.iter().enumerate() {
+            if pushed[i] {
+                let blob_arc: Arc<BlobWork> = Arc::clone(blob);
+                self.sink.schedule(blob_arc);
+            }
+        }
+        pending
     }
 }
 
@@ -1227,6 +1322,85 @@ mod tests {
         assert_eq!(
             got, want,
             "every recipient delivered exactly once across the roll"
+        );
+    }
+
+    /// iamacoffeepot/aether#1533: same-recipient FIFO holds *across* an
+    /// overflow detach. Flush r1 → R (blob1, left undrained), force a
+    /// group-array overflow with brand-new recipients (blob1 detaches;
+    /// blob2 takes the leftover), then flush r2 → R. The producer must
+    /// route r2 onto R's still-open group in detached blob1 — not open a
+    /// second R group in active blob2 — so draining blob2 strictly
+    /// *before* blob1 still observes r1 then r2. (Pre-fix, r2 landed in
+    /// blob2 and the early blob2 drain dispatched r2 first.) Drain order
+    /// is driven entirely by the test — no timing, so not `mod heavy`.
+    #[test]
+    fn detached_blob_keeps_same_recipient_fifo_across_overflow() {
+        let (registry, mailer) = fresh_substrate();
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let (r, _fix, direct_rx, _dep) = seizable_recipient(&registry, "r");
+        let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
+
+        // Flush 1: r1 → R. blob1 (cap = GROUP_CAP_MIN) holds R's open
+        // group; nothing drains yet.
+        producer.flush(vec![mail_to(r, 1)]);
+
+        // Flush 2: enough brand-new recipients to overflow blob1's group
+        // array → blob1 detaches; blob2 takes the leftover (new
+        // recipients only).
+        let mut fixtures = Vec::new();
+        let mut fresh_rxs = Vec::new();
+        let mut routed = Vec::new();
+        for i in 0..=(GROUP_CAP_MIN as u8) {
+            let (id, fix, direct, _dep) = seizable_recipient(&registry, &format!("f{i}"));
+            routed.push(mail_to(id, 100 + i));
+            fixtures.push(fix);
+            fresh_rxs.push(direct);
+        }
+        producer.flush(routed);
+        assert_eq!(
+            producer.detached.len(),
+            1,
+            "overflow moves blob1 onto the detached list"
+        );
+
+        // Flush 3: r2 → R appends to R's open group in detached blob1.
+        producer.flush(vec![mail_to(r, 2)]);
+
+        // Drain blob2 strictly BEFORE blob1 — the order that inverted
+        // pre-fix.
+        let blob1 = Arc::clone(&producer.detached[0].0);
+        let blob2 = Arc::clone(&producer.active.as_ref().expect("active blob2").0);
+        assert!(
+            !Arc::ptr_eq(&blob1, &blob2),
+            "overflow rolled a second blob"
+        );
+        assert_eq!(blob2.run_cycle(BatchBudget::standard()), CycleResult::Idle);
+        assert_eq!(blob1.run_cycle(BatchBudget::standard()), CycleResult::Idle);
+        // Mop up the scheduled copies (both cursors are exhausted).
+        drain_injector(&injector);
+
+        assert_eq!(direct_rx.try_recv().ok(), Some(1), "r1 dispatches first");
+        assert_eq!(direct_rx.try_recv().ok(), Some(2), "r2 dispatches second");
+        assert!(direct_rx.try_recv().is_err(), "R dispatched exactly twice");
+
+        // Every overflow recipient still delivered exactly once.
+        for (i, rx) in fresh_rxs.iter().enumerate() {
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(100 + i as u8),
+                "fresh recipient {i} delivered"
+            );
+            assert!(rx.try_recv().is_err(), "fresh recipient {i} exactly once");
+        }
+
+        // Self-bounding: blob1 retired on full drain, and the next flush
+        // prunes its detached entry.
+        assert!(blob1.lifecycle.is_retired(), "blob1 retired after drain");
+        producer.flush(Vec::new());
+        assert!(
+            producer.detached.is_empty(),
+            "retired detached entry pruned at flush entry"
         );
     }
 
