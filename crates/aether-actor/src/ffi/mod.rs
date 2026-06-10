@@ -521,10 +521,11 @@ pub mod guest_alloc {
 /// - `#[link_section = "aether.namespace"]` static that pins the
 ///   actor's `Actor::NAMESPACE` bytes (issue 525 Phase 1B).
 ///
-/// Only one actor per guest crate. A second [`crate::export!`] call in
-/// the same crate is a duplicate-symbol compile error on the shared
-/// `init` / `receive` names — ADR-0014 §4 parks multi-actor crates as
-/// out of scope.
+/// A single-type `export!(C)` binds the shared `init` / `receive`
+/// exports to one actor. ADR-0096 multi-actor modules pass two or more
+/// types — `export!(First, Second, …)` — which routes through
+/// `__export_multi_internal!`; the arity is what keeps the multi-actor
+/// arm from shadowing this single-actor form.
 ///
 /// ```ignore
 /// pub struct Hello { /* fields */ }

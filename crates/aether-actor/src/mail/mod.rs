@@ -70,7 +70,9 @@ impl ReplyHandle {
     }
 }
 
-/// Inbound mail, as received by `Component::receive`. Wraps the raw
+/// Inbound mail, as received by the `#[actor]`-synthesized
+/// `__aether_dispatch` (driven by the guest's `receive` FFI export).
+/// Wraps the raw
 /// `(kind, ptr, count, sender)` FFI parameters with typed decode helpers.
 ///
 /// The lifetime `'a` ties the returned references back to the receive
