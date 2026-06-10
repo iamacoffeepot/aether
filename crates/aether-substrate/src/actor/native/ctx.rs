@@ -567,7 +567,7 @@ impl NativeCtx<'_> {
     /// Recipients aren't known to share a receiver type at compile site
     /// (subscribers register at runtime by mailbox id), so this takes
     /// mailbox ids directly rather than the typed
-    /// `R: Actor + HandlesKind<K>` shape of [`MailSender::send`]. The empty
+    /// `R: Singleton + HandlesKind<K>` shape of [`MailSender::send`]. The empty
     /// recipient set is a fast no-op — encoding only runs when there's at
     /// least one consumer.
     ///
@@ -822,12 +822,12 @@ impl MailSender for NativeCtx<'_> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.binding.carry()).0,
             K::ID.0,
             &bytes,
             1,
@@ -839,7 +839,7 @@ impl MailSender for NativeCtx<'_> {
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
@@ -848,7 +848,7 @@ impl MailSender for NativeCtx<'_> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.push_envelope_buffered(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.binding.carry()).0,
             K::ID.0,
             bytes,
             count,

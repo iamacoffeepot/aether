@@ -125,12 +125,12 @@ impl<A: Actor> MailSender for InheritCtx<A> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.binding.carry()).0,
             K::ID.0,
             &bytes,
             1,
@@ -142,7 +142,7 @@ impl<A: Actor> MailSender for InheritCtx<A> {
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
@@ -151,7 +151,7 @@ impl<A: Actor> MailSender for InheritCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.binding.carry()).0,
             K::ID.0,
             bytes,
             count,
@@ -203,14 +203,14 @@ impl<A> RootCtx<A> {
 impl<A: Actor> MailSender for RootCtx<A> {
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
         // No inherited parent / root — each send mints its own chain
         // rooted at the freshly minted `MailId` (sender = A.mailbox).
         self.binding.send_mail_with_lineage(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.binding.carry()).0,
             K::ID.0,
             &bytes,
             1,
@@ -221,7 +221,7 @@ impl<A: Actor> MailSender for RootCtx<A> {
 
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
@@ -230,7 +230,7 @@ impl<A: Actor> MailSender for RootCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.binding.carry()).0,
             K::ID.0,
             bytes,
             count,
