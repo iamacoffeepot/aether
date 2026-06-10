@@ -36,6 +36,20 @@
 //! the shared injector, never a sibling's cascade. Set `AETHER_PEER_STEAL=1`
 //! to opt the sibling-tail raid back in.
 //!
+//! The depth-0 keep-local exemption (the `len > 0` term in
+//! [`try_push_local_budgeted`]'s spill condition) means a serial relay
+//! chain — own deque oscillating 0→1→0 — never reads the clock, never
+//! trips the time valve, and never visits the injector. A
+//! *self-sustaining* chain (A mails B, B mails A, no external pacing)
+//! would therefore monopolise its worker indefinitely and, with one such
+//! loop per worker, starve the injector completely. The **every-K chain
+//! backstop** (iamacoffeepot/aether#1535) bounds that monopoly: every
+//! [`chain_backstop`] consecutive own-deque pops ([`chain_pop_due`],
+//! `AETHER_LOCAL_CHAIN_BACKSTOP`, default 64) `acquire_slot` takes one
+//! look at the injector before continuing the chain, so injector
+//! starvation is bounded at ~K × cycle-time per worker while the chain
+//! stays warm K−1 of K cycles — no clock read added.
+//!
 //! Only pool-worker threads call [`install`]; on any other thread
 //! (chassis main, the hub, the trace drainer) [`try_push_local_budgeted`]
 //! is a no-op spill and [`pop_local`] / [`steal_into_local`] yield nothing.
@@ -52,10 +66,11 @@ use crate::config::{KnobKind, KnobRecord};
 use crate::scheduler::calibrate::handoff_cost;
 use crate::scheduler::slot::Drainable;
 
-/// Discovery records for the four deque / keep-local-valve hot-path
+/// Discovery records for the five deque / keep-local-valve hot-path
 /// tuning knobs (ADR-0090 unit b2, iamacoffeepot/aether#1255). These
 /// describe the `OnceLock` getters below ([`hard_cap`], [`mail_budget`],
-/// [`time_budget`], [`peer_steal_enabled`]) so e1's unknown-`AETHER_*`
+/// [`time_budget`], [`peer_steal_enabled`], [`chain_backstop`]) so e1's
+/// unknown-`AETHER_*`
 /// sweep doesn't flag them and e2's `--config` dump lists them. The
 /// hot-path read stays exactly as-is — these are pure `&'static`
 /// metadata assembled once at boot, never on the dispatch path. Docs +
@@ -91,6 +106,15 @@ pub const DEQUE_KNOBS: &[KnobRecord] = &[
         doc: "Whether idle workers may raid siblings' deques (peer-deque stealing). \
               Default off (owner-only); set 1/true to opt the sibling raid back in.",
         default: Some("off"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_LOCAL_CHAIN_BACKSTOP",
+        doc: "Every-K injector backstop for keep-local chains: after K consecutive \
+              own-deque pops a worker probes the injector once before continuing \
+              its chain, bounding injector starvation at ~K cycles per worker \
+              (values < 1 / unparseable fall back).",
+        default: Some("64"),
         kind: KnobKind::HandRegistered,
     },
 ];
@@ -131,6 +155,16 @@ thread_local! {
     /// or before the burst's first mail. [`burst_over_budget`] reads
     /// `elapsed()` against it at decision time.
     static BURST_START: Cell<Option<Instant>> = const { Cell::new(None) };
+
+    /// Consecutive own-deque `pop_local` hits since the last injector
+    /// probe or burst reset — the every-K chain-backstop counter
+    /// (iamacoffeepot/aether#1535). [`chain_pop_due`] bumps it per pop hit
+    /// and reports `true` (resetting) every [`chain_backstop`]-th hit;
+    /// [`burst_reset`] zeroes it when the own deque drains empty (the
+    /// chain is over — the next cascade starts fresh). Single-writer
+    /// (only the running worker touches it, never across a `run_cycle`),
+    /// so a plain `Cell` — same pattern as `BURST_MAIL`.
+    static CHAIN_POPS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Move this worker's deque into its thread-local. Called once at the top
@@ -305,6 +339,46 @@ pub fn peer_steal_enabled() -> bool {
     })
 }
 
+/// Every-K chain backstop (iamacoffeepot/aether#1535) — how many
+/// consecutive own-deque pops a worker takes before [`chain_pop_due`]
+/// directs `acquire_slot` to probe the injector once. The depth-0
+/// keep-local exemption deliberately keeps a serial chain warm with no
+/// clock read (iamacoffeepot/aether#1174), so a *self-sustaining* chain
+/// would otherwise monopolise its worker forever; this bounds injector
+/// starvation at ~K × cycle-time per worker while the chain stays warm
+/// K−1 of K cycles. Read once from `AETHER_LOCAL_CHAIN_BACKSTOP`; values
+/// `< 1` and unparseable input fall back to `64`.
+#[must_use]
+pub fn chain_backstop() -> u32 {
+    static K: OnceLock<u32> = OnceLock::new();
+    *K.get_or_init(|| {
+        env::var("AETHER_LOCAL_CHAIN_BACKSTOP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&k| k >= 1)
+            .unwrap_or(64)
+    })
+}
+
+/// Note one own-deque `pop_local` hit against the every-K chain backstop
+/// (iamacoffeepot/aether#1535): bump the consecutive-pop counter and
+/// report `true` — resetting it — on every [`chain_backstop`]-th hit.
+/// `acquire_slot` calls this on its pop-hit path and, when due, runs one
+/// `steal_into_local` pass before continuing the chain. The counter also
+/// resets in [`burst_reset`] (own deque drained empty — the chain is
+/// over). A `Cell` bump and an integer compare per pop; no clock read.
+#[must_use]
+pub fn chain_pop_due() -> bool {
+    let n = CHAIN_POPS.get().saturating_add(1);
+    if n >= chain_backstop() {
+        CHAIN_POPS.set(0);
+        true
+    } else {
+        CHAIN_POPS.set(n);
+        false
+    }
+}
+
 /// Note one dispatched envelope against the current local-drain burst
 /// (iamacoffeepot/aether#1160). Increments the burst mail counter and, when
 /// time budgeting is on (`time_budget > 0`), anchors the burst start on the
@@ -357,13 +431,16 @@ pub fn burst_over_budget(mail_budget: Option<u32>, time_budget: Duration) -> boo
         .is_some_and(|start| start.elapsed() >= time_budget)
 }
 
-/// Reset the local-drain burst counters (iamacoffeepot/aether#1160). Called
-/// by `acquire_slot` the moment `pop_local` reports the own deque drained
+/// Reset the local-drain burst counters (iamacoffeepot/aether#1160) and the
+/// chain-backstop pop counter (iamacoffeepot/aether#1535). Called by
+/// `acquire_slot` the moment `pop_local` reports the own deque drained
 /// empty, so each local cascade is one burst and any subsequently stolen
-/// work starts a fresh budget.
+/// work starts a fresh budget — and the next chain starts a fresh
+/// every-K count.
 pub fn burst_reset() {
     BURST_MAIL.set(0);
     BURST_START.set(None);
+    CHAIN_POPS.set(0);
 }
 
 /// Push of a just-produced blob onto this worker's own deque
@@ -422,6 +499,25 @@ pub fn try_push_local_budgeted(
 /// and before the park, so an own slot is never stranded.
 pub fn pop_local() -> Option<Slot> {
     LOCAL.with(|w| w.borrow().as_ref().and_then(Worker::pop))
+}
+
+/// Unconditional push back onto this worker's own deque — the re-queue
+/// arm of the every-K chain backstop (iamacoffeepot/aether#1535).
+/// `acquire_slot` gives a just-popped chain slot back when the backstop
+/// probe found injector work to run first: the stolen slot runs now and
+/// the chain slot waits at the LIFO top (it is the next pop, so the
+/// chain resumes right after). No budget terms — the keep-local decision
+/// was already made when the slot was pushed; this only restores it. Off
+/// a pool worker there is no own deque, so the slot is handed back
+/// (`Err`) for the caller to spill.
+pub fn push_local(slot: Slot) -> Result<(), Slot> {
+    LOCAL.with(|w| match w.borrow().as_ref() {
+        Some(worker) => {
+            worker.push(slot);
+            Ok(())
+        }
+        None => Err(slot),
+    })
 }
 
 /// Steal work into this worker's own deque and return one slot to run.
@@ -766,6 +862,68 @@ mod tests {
             !burst_over_budget(Some(u32::MAX), tiny),
             "reset clears the burst start"
         );
+    }
+
+    #[test]
+    fn chain_pop_due_fires_every_k_and_resets() {
+        // The every-K backstop counter (iamacoffeepot/aether#1535): quiet
+        // for K−1 consecutive pop hits, due on the K-th, then the reset
+        // makes the next window identical.
+        burst_reset();
+        let k = chain_backstop();
+        for i in 1..k {
+            assert!(!chain_pop_due(), "pop {i} of {k} must not be due");
+        }
+        assert!(chain_pop_due(), "the K-th consecutive pop is due");
+        for i in 1..k {
+            assert!(!chain_pop_due(), "post-reset pop {i} must not be due");
+        }
+        assert!(chain_pop_due(), "the window repeats after the due-reset");
+    }
+
+    #[test]
+    fn burst_reset_clears_chain_pops() {
+        // A drained deque ends the chain: `burst_reset` zeroes the
+        // counter, so the next chain gets a full fresh window rather
+        // than inheriting the old chain's progress toward K.
+        burst_reset();
+        let k = chain_backstop();
+        for _ in 1..k {
+            assert!(!chain_pop_due());
+        }
+        burst_reset(); // own deque drained — chain over
+        for i in 1..k {
+            assert!(
+                !chain_pop_due(),
+                "pop {i} after reset must restart the count, not inherit it"
+            );
+        }
+        assert!(chain_pop_due());
+    }
+
+    #[test]
+    fn push_local_off_worker_hands_back() {
+        // No `install` on this thread — not a pool worker, so there is
+        // no own deque to restore the slot to.
+        assert!(push_local(noop()).is_err());
+    }
+
+    #[test]
+    fn push_local_on_worker_requeues_unconditionally() {
+        // The re-queue arm ignores every budget term: deque depth and
+        // burst state don't matter, the slot was already keep-local.
+        install(Worker::new_lifo());
+        drain_local();
+        burst_reset();
+        for _ in 0..100 {
+            burst_note_mail(Duration::ZERO); // far past any budget
+        }
+        assert!(push_local(noop()).is_ok());
+        assert!(push_local(noop()).is_ok(), "no budget term applies");
+        assert!(pop_local().is_some());
+        assert!(pop_local().is_some());
+        assert!(pop_local().is_none());
+        burst_reset();
     }
 
     #[test]
