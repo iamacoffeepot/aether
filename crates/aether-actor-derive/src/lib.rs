@@ -2036,7 +2036,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 ///     (extracted from the impl block so the `NativeActor: Actor`
 ///     supertrait bound is satisfied).
 ///   - `impl HandlesKind<K> for X` per `#[handler]` method — the
-///     compile-time gate `Sender::send::<R, K>` consults.
+///     compile-time gate `MailSender::send::<R, K>` consults.
 ///   - `impl NativeActor for X { type Config; fn init }` (the user's
 ///     bodies, attribute-stripped).
 ///   - `impl ::aether_substrate::NativeDispatch for X` whose body is

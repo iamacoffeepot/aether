@@ -24,7 +24,7 @@ mod native {
     use std::sync::Arc;
 
     use super::{HandleDescribe, HandlePin, HandlePublish, HandleRelease, HandleUnpin};
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_kinds::{
         HandleDescribeResult, HandleError, HandlePinResult, HandlePublishResult,
         HandleReleaseResult, HandleSummary, HandleUnpinResult,

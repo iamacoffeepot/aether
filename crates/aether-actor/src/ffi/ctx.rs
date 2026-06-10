@@ -24,7 +24,6 @@ use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
 use crate::actor::ctx::resolver::Resolver;
-use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
@@ -316,42 +315,8 @@ impl OutboundReply for FfiCtx<'_> {
     }
 }
 
-impl Sender for FfiCtx<'_> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as MailSender>::send::<R, K>(self, payload);
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as MailSender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as MailSender>::send_to_named::<K>(self, name, payload);
-    }
-}
-
-impl MailCtx for FfiCtx<'_> {
-    //noinspection DuplicatedCode
-    fn reply<K: Kind>(&mut self, payload: &K) {
-        if let Some(raw) = self.sender {
-            let bytes = payload.encode_into_bytes();
-            MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
-        }
-    }
-}
-
 /// Narrowed capability handle for the `on_dehydrate` save hook.
-/// Outbound mail still works through [`Sender`]; the reply / resolve
+/// Outbound mail still works through [`MailSender`]; the reply / resolve
 /// surfaces are intentionally absent.
 pub struct FfiDropCtx<'a> {
     _borrow: PhantomData<&'a ()>,
@@ -436,29 +401,5 @@ impl Persistence for FfiDropCtx<'_> {
             status, 0,
             "aether-actor: save_state failed (status {status})"
         );
-    }
-}
-
-impl Sender for FfiDropCtx<'_> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as MailSender>::send::<R, K>(self, payload);
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as MailSender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as MailSender>::send_to_named::<K>(self, name, payload);
     }
 }

@@ -42,7 +42,7 @@ mod native {
     use std::time::Duration;
 
     use super::{Cancel, DagReapTick, DagTransformDone, Settled, Status, Submit};
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_data::{Kind, KindId, MailId, MailboxId};
     use aether_kinds::{StatusResult, SubmitResult};
     use aether_substrate::Mail;

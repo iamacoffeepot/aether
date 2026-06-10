@@ -12,7 +12,7 @@
 //!
 //! ADR-0033 phase 3: each kind gets its own `#[handler]` method on
 //! the `#[actor]`-decorated impl. The peer-component send to
-//! `"echoer"` rides the `Sender::send_to_named` string-keyed escape
+//! `"echoer"` rides the `MailSender::send_to_named` string-keyed escape
 //! hatch — the echoer's actor type lives in a sibling cdylib this
 //! crate can't import without colliding FFI exports.
 

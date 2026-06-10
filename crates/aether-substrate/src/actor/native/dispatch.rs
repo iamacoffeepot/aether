@@ -20,7 +20,7 @@
 //!   the per-handler EWMA (iamacoffeepot/aether#1128, measure-only).
 
 use aether_actor::Local;
-use aether_actor::MailCtx;
+use aether_actor::OutboundReply;
 use aether_actor::cost::CostCells;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace_ring::ActorTraceRing;

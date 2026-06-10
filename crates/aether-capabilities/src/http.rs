@@ -310,7 +310,7 @@ mod native {
         DisabledHttpAdapter, Fetch, FetchRequest, FetchResponse, HttpAdapter, HttpConfig,
         HttpError, HttpHeader, HttpMethod,
     };
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_kinds::FetchResult;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
