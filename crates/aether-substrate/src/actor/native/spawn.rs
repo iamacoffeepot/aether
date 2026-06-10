@@ -33,7 +33,7 @@ use crate::actor::native::{
     ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
 };
 use crate::actor::registry::ActorRegistry;
-use crate::chassis::ctx::MailboxWakeSlot;
+use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::mail::mailer::Mailer;
@@ -436,12 +436,14 @@ impl Spawner {
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
         // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
-        // directly. Payload + kind_name + origin all move into the
-        // forwarded `Envelope` via `From`; no clones on the
-        // instanced-actor hot path. The pre-send increment + on-fail
-        // decrement bracket the `tx.send` exactly as before; the
-        // failure branch reads `env.kind_name` out of `SendError`
-        // since `dispatch` was already moved into `env`.
+        // and routes it through [`relay_or_transfer`] — the shared
+        // upgrade → send → wake core with both ADR-0094 transfer seams.
+        // The instanced-only `pending` bracket stays here at the call
+        // site: `fetch_add` before the relay, `fetch_sub` on either
+        // abandonment arm, so the at-rest value is identical to the
+        // pre-helper code (a delivered envelope's `-1` happens in the
+        // dispatcher after drain). The counter is provably unread today
+        // (`wait_instanced_quiesce` retired); #1567 removes it entirely.
         // ADR-0099 §3: register under the lineage-folded `id`, not
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
@@ -449,43 +451,25 @@ impl Spawner {
             id,
             full_name.clone(),
             Arc::new(move |dispatch: OwnedDispatch| {
-                let Some(tx) = weak_for_handler.upgrade() else {
-                    // ADR-0094: the actor's sender is gone — the mail is
-                    // discarded at this relay seam, not held here, so
-                    // mark the obligation transferred (the dropped-mail
-                    // accounting is a separate concern, not this guard's).
-                    dispatch.mark_transferred();
-                    tracing::warn!(
-                        target: "aether_substrate::spawn",
-                        kind = %dispatch.kind_name,
-                        "instanced actor sender dropped — mail discarded"
-                    );
-                    return;
-                };
-                // ADR-0094: the success path moves `env` onto the channel
-                // (a transfer — the obligation rides the value); the
-                // actor's dispatcher discharges it on drain. No annotation
-                // here because the value is not dropped at this seam.
-                let env: Envelope = dispatch;
                 pending_for_handler.fetch_add(1, Ordering::AcqRel);
-                if let Err(mpsc::SendError(env)) = tx.send(env) {
-                    // Receiver disconnected before we could deliver;
-                    // un-account for the increment so the counter
-                    // stays accurate (a future post-PR-4 cleanup may
-                    // drop the counter entirely now that
-                    // `wait_instanced_quiesce` retired).
-                    pending_for_handler.fetch_sub(1, Ordering::AcqRel);
-                    // ADR-0094: discarded at the relay seam — transfer.
-                    env.mark_transferred();
-                    tracing::warn!(
-                        target: "aether_substrate::spawn",
-                        kind = %env.kind_name,
-                        "instanced actor receiver dropped — mail discarded"
-                    );
-                    return;
-                }
-                if let Some(wake) = wake_for_handler.get() {
-                    wake();
+                match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler) {
+                    RelayOutcome::Delivered => {}
+                    RelayOutcome::SenderGone { kind_name } => {
+                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            kind = %kind_name,
+                            "instanced actor sender dropped — mail discarded"
+                        );
+                    }
+                    RelayOutcome::ReceiverGone { kind_name } => {
+                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            kind = %kind_name,
+                            "instanced actor receiver dropped — mail discarded"
+                        );
+                    }
                 }
             }),
         );
