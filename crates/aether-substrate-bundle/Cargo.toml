@@ -32,13 +32,18 @@ path = "src/bin/hub.rs"
 name = "aether-substrate-test-bench"
 path = "src/bin/test-bench.rs"
 
-# Standalone game build (#1518): a desktop chassis that auto-loads a game
-# component embedded at build time, so the binary runs hub-less and
-# double-click-to-play. `build.rs` stages the wasm `aether-game` embeds;
-# `cargo xtask bundle` builds the component wasm and drives this.
+# Standalone bundle builds (#1529, generalizing #1518): a chassis that
+# auto-loads the component pack embedded at build time, so the binary
+# runs hub-less. `build.rs` stages the pack the bins embed; `cargo xtask
+# bundle --chassis {desktop|headless}` builds the component wasms and
+# drives this.
 [[bin]]
-name = "aether-game"
-path = "src/bin/aether-game.rs"
+name = "aether-bundle-desktop"
+path = "src/bin/aether-bundle-desktop.rs"
+
+[[bin]]
+name = "aether-bundle-headless"
+path = "src/bin/aether-bundle-headless.rs"
 
 # Perf-comparison tooling (iamacoffeepot/aether#1077). `perf-trial` runs
 # one latency sweep and emits a TrialReport JSON; `perf-compare`
@@ -122,6 +127,13 @@ signal-hook = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc = "3"
+
+[build-dependencies]
+# `build.rs` parses the `AETHER_BUNDLE_MANIFEST` JSON and encodes the
+# bundle pack through `src/bundle_pack.rs` (compiled in via `#[path]`,
+# #1529), so the build script needs serde + serde_json in build scope.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests

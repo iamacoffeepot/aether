@@ -30,6 +30,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
+use crate::autoload::{AutoloadComponent, autoload_mail};
 use crate::chassis_common::{
     CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server, resolve_persist_state,
     tick_only_lifecycle_config, with_common_caps,
@@ -89,6 +90,10 @@ pub struct HeadlessEnv {
     /// in-memory byte budget. `None` falls through to env-only
     /// `AETHER_HANDLE_STORE_MAX_BYTES`.
     pub handle_store_max_bytes: Option<usize>,
+    /// Components to auto-load on boot, in order. A bundled standalone build
+    /// populates this so the components come up with no hub; the normal
+    /// headless bin leaves it empty and loads components over the hub instead.
+    pub autoload: Vec<AutoloadComponent>,
 }
 
 impl HeadlessEnv {
@@ -166,6 +171,7 @@ impl HeadlessEnv {
             workers,
             persist: persist_state,
             handle_store_max_bytes,
+            autoload: Vec::new(),
         })
     }
 }
@@ -218,6 +224,7 @@ impl HeadlessChassis {
             workers,
             persist,
             handle_store_max_bytes,
+            autoload,
         } = env;
 
         // ADR-0049 §9: headless enables on-disk handle persistence.
@@ -320,7 +327,16 @@ impl HeadlessChassis {
             .with_actor::<UnsupportedTestBenchCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
-        builder.driver(driver).build()
+        let built = builder.driver(driver).build()?;
+        // Auto-load any bundled components, in order, before the run loop
+        // starts. Fire-and-forward: the component host dispatches each load
+        // off the worker pool (already up after `build`), so the components
+        // are live shortly after `run` begins — no hub required. Mirrors the
+        // desktop chassis drain (#1520, generalized in #1529).
+        for component in autoload {
+            mailer.push(autoload_mail(component));
+        }
+        Ok(built)
     }
 }
 

@@ -6,3 +6,5 @@ pub mod chassis;
 pub mod driver;
 
 pub use chassis::{HeadlessChassis, HeadlessEnv};
+
+pub use crate::autoload::AutoloadComponent;

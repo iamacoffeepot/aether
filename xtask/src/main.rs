@@ -43,8 +43,8 @@ struct Cli {
 enum Commands {
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
-    /// Build a standalone, hub-less game executable with the game component
-    /// embedded at build time (#1518).
+    /// Build a standalone, hub-less executable: a chassis with an ordered
+    /// component set (plus configs) embedded at build time (#1529).
     Bundle(BundleArgs),
 }
 
@@ -61,13 +61,77 @@ struct DistArgs {
 
 #[derive(Args)]
 struct BundleArgs {
-    /// Cargo profile for the game binary and its component.
+    /// Cargo profile for the bundle binary and its components.
     #[arg(long, value_enum, default_value_t = Profile::Release)]
     profile: Profile,
-    /// Cross-compile the game binary for this target triple (e.g.
+    /// Cross-compile the bundle binary for this target triple (e.g.
     /// `x86_64-pc-windows-msvc`). Defaults to the host target.
     #[arg(long)]
     target: Option<String>,
+    /// Chassis the bundle boots.
+    #[arg(long, value_enum, default_value_t = BundleChassis::Desktop)]
+    chassis: BundleChassis,
+    /// Ordered components to embed (autoload order is argument order):
+    /// a workspace package name, built for wasm32 as its lib cdylib, or
+    /// a path to a prebuilt artifact (recognized by the `.wasm` suffix
+    /// — use this for `[[example]]` cdylibs).
+    #[arg(long, num_args = 1.., required_unless_present = "spec")]
+    components: Vec<String>,
+    /// Per-component init-config file (ADR-0090), paired with
+    /// `--components` by position (repeat the flag; trailing components
+    /// without a config get empty config bytes).
+    #[arg(long = "config")]
+    configs: Vec<PathBuf>,
+    /// Window title (desktop chassis only).
+    #[arg(long)]
+    title: Option<String>,
+    /// Window mode spec (desktop chassis only), same vocabulary as
+    /// `AETHER_WINDOW_MODE` (`windowed[:WxH]` / `fullscreen-borderless`
+    /// / `exclusive:WxH@HZ`).
+    #[arg(long)]
+    window_mode: Option<String>,
+    /// Tick cadence in hertz (headless chassis only).
+    #[arg(long)]
+    tick_hz: Option<u32>,
+    /// Full-fidelity bundle spec (JSON) — alternative to the component
+    /// and chassis-config flags. Carries chassis, `title` /
+    /// `window_mode` / `tick_hz`, and per-component `package`-or-`wasm` + `config` +
+    /// `name` + `export`; relative paths resolve against the spec
+    /// file's directory.
+    #[arg(
+        long,
+        conflicts_with_all = ["components", "configs", "title", "window_mode", "tick_hz"]
+    )]
+    spec: Option<PathBuf>,
+}
+
+/// Which chassis a bundle boots. Each maps to a generic bundle bin in
+/// the chassis package; the two are distinct binaries because the
+/// chassis are genuinely different link sets (desktop pulls
+/// winit/wgpu/cpal, headless none).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BundleChassis {
+    Desktop,
+    Headless,
+}
+
+impl BundleChassis {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Headless => "headless",
+        }
+    }
+
+    /// The generic bundle bin (`[[bin]]` in the chassis package) that
+    /// embeds the pack for this chassis.
+    fn bin_name(self) -> &'static str {
+        match self {
+            Self::Desktop => "aether-bundle-desktop",
+            Self::Headless => "aether-bundle-headless",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -188,49 +252,139 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     Ok(())
 }
 
-/// The game's component package, its wasm stem, and the standalone bin name.
-const GAME_COMPONENT: &str = "aether-kit";
-const GAME_COMPONENT_STEM: &str = "aether_kit";
-const GAME_BIN: &str = "aether-game";
+/// One component in a resolved bundle plan: where its wasm comes from
+/// plus the per-component load inputs that ride into the pack manifest.
+struct PlannedComponent {
+    source: ComponentSource,
+    config: Option<PathBuf>,
+    name: Option<String>,
+    export: Option<String>,
+}
 
-/// Build a standalone game executable: build the game component for wasm, embed
-/// it into [`GAME_BIN`] via the bundle crate's `build.rs` (which reads
-/// `AETHER_GAME_WASM`), and report the resulting binary.
+/// Where a planned component's wasm comes from.
+enum ComponentSource {
+    /// A workspace package whose lib cdylib xtask builds for wasm32.
+    Package(String),
+    /// A prebuilt `.wasm` artifact supplied by path.
+    Prebuilt(PathBuf),
+}
+
+/// The normalized bundle inputs — flags and the `--spec` file both
+/// resolve to this before any cargo invocation runs.
+struct BundlePlan {
+    chassis: BundleChassis,
+    title: Option<String>,
+    window_mode: Option<String>,
+    tick_hz: Option<u32>,
+    components: Vec<PlannedComponent>,
+}
+
+/// `--spec` file schema (JSON). Mirrors [`BundlePlan`] with
+/// per-component `package` XOR `wasm`.
+#[derive(serde::Deserialize)]
+struct BundleSpec {
+    /// Overrides the `--chassis` flag when present.
+    #[serde(default)]
+    chassis: Option<BundleChassis>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    window_mode: Option<String>,
+    #[serde(default)]
+    tick_hz: Option<u32>,
+    components: Vec<SpecComponent>,
+}
+
+/// One component entry in a [`BundleSpec`].
+#[derive(serde::Deserialize)]
+struct SpecComponent {
+    #[serde(default)]
+    package: Option<String>,
+    #[serde(default)]
+    wasm: Option<PathBuf>,
+    #[serde(default)]
+    config: Option<PathBuf>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    export: Option<String>,
+}
+
+/// Build a standalone, hub-less executable (#1529): build each listed
+/// component for wasm32, write the pack manifest, and build the
+/// chassis's generic bundle bin with `AETHER_BUNDLE_MANIFEST` pointing
+/// at it (the chassis package's `build.rs` packs the wasms for
+/// `include_bytes!`). Reports the resulting binary.
 fn run_bundle(args: &BundleArgs) -> Result<()> {
+    let plan = resolve_bundle_plan(args)?;
     let metadata = MetadataCommand::new()
         .no_deps()
         .exec()
         .context("run cargo metadata")?;
     let target_dir = metadata.target_directory.as_std_path();
 
-    // 1. Build the game component for wasm.
-    let mut wasm_cmd = Command::new(cargo());
-    wasm_cmd.args(["build", "--target", WASM_TARGET, "-p", GAME_COMPONENT]);
-    if let Some(flag) = args.profile.cargo_flag() {
-        wasm_cmd.arg(flag);
-    }
-    run(wasm_cmd, "build game component wasm")?;
-    let wasm = target_dir
-        .join(WASM_TARGET)
-        .join(args.profile.as_str())
-        .join(format!("{GAME_COMPONENT_STEM}.wasm"));
-    if !wasm.exists() {
-        bail!("game component wasm not found at {}", wasm.display());
+    // 1. Build (or locate) each component's wasm, in order. One cargo
+    // invocation per package — never batch multiple `-p` (see
+    // `inventory::build_plans` on the feature-unification trap).
+    let mut wasm_paths = Vec::new();
+    for component in &plan.components {
+        let wasm = match &component.source {
+            ComponentSource::Package(package) => {
+                let mut wasm_cmd = Command::new(cargo());
+                wasm_cmd.args(["build", "--target", WASM_TARGET, "-p", package]);
+                if let Some(flag) = args.profile.cargo_flag() {
+                    wasm_cmd.arg(flag);
+                }
+                run(wasm_cmd, &format!("build component wasm for {package}"))?;
+                let stem = package.replace('-', "_");
+                let wasm = target_dir
+                    .join(WASM_TARGET)
+                    .join(args.profile.as_str())
+                    .join(format!("{stem}.wasm"));
+                if !wasm.exists() {
+                    bail!(
+                        "component wasm for {package} not found at {} \
+                         (packages bundle their lib cdylib; pass a prebuilt \
+                         .wasm path for [[example]] cdylibs)",
+                        wasm.display(),
+                    );
+                }
+                wasm
+            }
+            ComponentSource::Prebuilt(path) => fs::canonicalize(path)
+                .with_context(|| format!("locate prebuilt component wasm {}", path.display()))?,
+        };
+        wasm_paths.push(wasm);
     }
 
-    // 2. Build the game binary with the wasm staged for `include_bytes!`.
+    // 2. Write the pack manifest the chassis package's `build.rs` reads.
+    let manifest = bundle_manifest_json(&plan, &wasm_paths)?;
+    let manifest_dir = target_dir.join("bundle");
+    fs::create_dir_all(&manifest_dir)
+        .with_context(|| format!("create {}", manifest_dir.display()))?;
+    let manifest_path =
+        manifest_dir.join(format!("{}-bundle-manifest.json", plan.chassis.as_str()));
+    let mut manifest_text =
+        serde_json::to_string_pretty(&manifest).context("serialize bundle manifest")?;
+    manifest_text.push('\n');
+    fs::write(&manifest_path, manifest_text)
+        .with_context(|| format!("write {}", manifest_path.display()))?;
+
+    // 3. Build the chassis's generic bundle bin with the pack staged
+    // for `include_bytes!`.
+    let bin = plan.chassis.bin_name();
     let mut bin_cmd = Command::new(cargo());
-    bin_cmd.args(["build", "-p", CHASSIS_PACKAGE, "--bin", GAME_BIN]);
+    bin_cmd.args(["build", "-p", CHASSIS_PACKAGE, "--bin", bin]);
     if let Some(flag) = args.profile.cargo_flag() {
         bin_cmd.arg(flag);
     }
     if let Some(triple) = &args.target {
         bin_cmd.args(["--target", triple]);
     }
-    bin_cmd.env("AETHER_GAME_WASM", &wasm);
-    run(bin_cmd, "build game binary")?;
+    bin_cmd.env("AETHER_BUNDLE_MANIFEST", &manifest_path);
+    run(bin_cmd, &format!("build bundle binary {bin}"))?;
 
-    // 3. Report the output path.
+    // 4. Report the output path.
     let profile_dir = args.target.as_ref().map_or_else(
         || target_dir.join(args.profile.as_str()),
         |triple| target_dir.join(triple).join(args.profile.as_str()),
@@ -238,14 +392,141 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
     let windows = args
         .target
         .as_deref()
-        .is_some_and(|t| t.contains("windows"));
+        .map_or(cfg!(windows), |t| t.contains("windows"));
     let exe = profile_dir.join(if windows {
-        format!("{GAME_BIN}.exe")
+        format!("{bin}.exe")
     } else {
-        GAME_BIN.to_string()
+        bin.to_string()
     });
-    println!("game bundle -> {}", exe.display());
+    println!(
+        "{} bundle ({} component(s)) -> {}",
+        plan.chassis.as_str(),
+        plan.components.len(),
+        exe.display(),
+    );
     Ok(())
+}
+
+/// Normalize the bundle inputs: `--spec <file>` when present, the
+/// component + chassis-config flags otherwise.
+fn resolve_bundle_plan(args: &BundleArgs) -> Result<BundlePlan> {
+    if let Some(spec_path) = &args.spec {
+        return resolve_bundle_spec(spec_path, args.chassis);
+    }
+    if args.configs.len() > args.components.len() {
+        bail!(
+            "{} --config values for {} --components entries — configs pair by position",
+            args.configs.len(),
+            args.components.len(),
+        );
+    }
+    let components = args
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| PlannedComponent {
+            source: classify_component(raw),
+            config: args.configs.get(i).cloned(),
+            name: None,
+            export: None,
+        })
+        .collect();
+    Ok(BundlePlan {
+        chassis: args.chassis,
+        title: args.title.clone(),
+        window_mode: args.window_mode.clone(),
+        tick_hz: args.tick_hz,
+        components,
+    })
+}
+
+/// Parse a `--spec` file into a plan. Relative paths inside the spec
+/// resolve against the spec file's directory.
+fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<BundlePlan> {
+    let text = fs::read_to_string(spec_path)
+        .with_context(|| format!("read bundle spec {}", spec_path.display()))?;
+    let spec: BundleSpec = serde_json::from_str(&text)
+        .with_context(|| format!("parse bundle spec {}", spec_path.display()))?;
+    let spec_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    let anchor = |path: &Path| -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            spec_dir.join(path)
+        }
+    };
+    let mut components = Vec::new();
+    for (i, entry) in spec.components.iter().enumerate() {
+        let source = match (&entry.package, &entry.wasm) {
+            (Some(package), None) => ComponentSource::Package(package.clone()),
+            (None, Some(wasm)) => ComponentSource::Prebuilt(anchor(wasm)),
+            _ => {
+                bail!("bundle spec component {i}: exactly one of `package` or `wasm` is required")
+            }
+        };
+        components.push(PlannedComponent {
+            source,
+            config: entry.config.as_deref().map(anchor),
+            name: entry.name.clone(),
+            export: entry.export.clone(),
+        });
+    }
+    if components.is_empty() {
+        bail!("bundle spec {} lists no components", spec_path.display());
+    }
+    Ok(BundlePlan {
+        chassis: spec.chassis.unwrap_or(chassis_flag),
+        title: spec.title,
+        window_mode: spec.window_mode,
+        tick_hz: spec.tick_hz,
+        components,
+    })
+}
+
+/// A `--components` entry is a prebuilt artifact iff it carries the
+/// `.wasm` suffix; anything else is a workspace package name.
+fn classify_component(raw: &str) -> ComponentSource {
+    let is_wasm_path = Path::new(raw)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("wasm"));
+    if is_wasm_path {
+        ComponentSource::Prebuilt(PathBuf::from(raw))
+    } else {
+        ComponentSource::Package(raw.to_string())
+    }
+}
+
+/// Render the pack manifest JSON the chassis package's `build.rs`
+/// consumes (`BundleManifest` in
+/// `crates/aether-substrate-bundle/src/bundle_pack.rs` — xtask doesn't
+/// depend on the chassis crate, so keep the field names in sync).
+/// Component order is plan order; config paths are canonicalized here
+/// so the manifest carries only absolute paths.
+fn bundle_manifest_json(plan: &BundlePlan, wasm_paths: &[PathBuf]) -> Result<serde_json::Value> {
+    let mut components = Vec::new();
+    for (component, wasm) in plan.components.iter().zip(wasm_paths) {
+        let config = component
+            .config
+            .as_ref()
+            .map(|path| {
+                fs::canonicalize(path)
+                    .with_context(|| format!("locate component config {}", path.display()))
+            })
+            .transpose()?;
+        components.push(serde_json::json!({
+            "wasm": wasm,
+            "config": config,
+            "name": component.name,
+            "export": component.export,
+        }));
+    }
+    Ok(serde_json::json!({
+        "chassis": plan.chassis.as_str(),
+        "title": plan.title,
+        "window_mode": plan.window_mode,
+        "tick_hz": plan.tick_hz,
+        "components": components,
+    }))
 }
 
 /// Source path of a component's wasm under the target tree. Example
@@ -313,8 +594,53 @@ fn cargo() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     use super::inventory::discover_components;
+    use super::{
+        BundleChassis, BundlePlan, ComponentSource, PlannedComponent, bundle_manifest_json,
+    };
+
+    #[test]
+    fn bundle_manifest_carries_chassis_and_component_order() {
+        // The manifest is the contract between xtask and the chassis
+        // package's `build.rs`: chassis string, chassis settings, and
+        // the component list in plan (= autoload) order.
+        let plan = BundlePlan {
+            chassis: BundleChassis::Headless,
+            title: None,
+            window_mode: None,
+            tick_hz: Some(30),
+            components: vec![
+                PlannedComponent {
+                    source: ComponentSource::Prebuilt(PathBuf::from("/abs/first.wasm")),
+                    config: None,
+                    name: Some("first".to_owned()),
+                    export: None,
+                },
+                PlannedComponent {
+                    source: ComponentSource::Prebuilt(PathBuf::from("/abs/second.wasm")),
+                    config: None,
+                    name: None,
+                    export: Some("alt".to_owned()),
+                },
+            ],
+        };
+        let wasm_paths = vec![
+            PathBuf::from("/abs/first.wasm"),
+            PathBuf::from("/abs/second.wasm"),
+        ];
+        let manifest = bundle_manifest_json(&plan, &wasm_paths).expect("render manifest");
+        assert_eq!(manifest["chassis"], "headless");
+        assert_eq!(manifest["tick_hz"], 30);
+        assert_eq!(manifest["title"], serde_json::Value::Null);
+        let components = manifest["components"].as_array().expect("components array");
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0]["wasm"], "/abs/first.wasm");
+        assert_eq!(components[0]["name"], "first");
+        assert_eq!(components[1]["wasm"], "/abs/second.wasm");
+        assert_eq!(components[1]["export"], "alt");
+    }
 
     #[test]
     fn discovers_expected_component_set() {

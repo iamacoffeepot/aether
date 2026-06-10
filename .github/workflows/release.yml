@@ -1,10 +1,11 @@
 name: release
 
 # Manually triggered: build the standalone loco-motion game for Windows and
-# upload the `.exe` as an artifact to download and hand out (#1518). The host
-# target on `windows-latest` is `x86_64-pc-windows-msvc`, so `cargo xtask
-# bundle` cross-builds the component for wasm32 and builds the game bin for
-# Windows in one step.
+# upload the `.exe` as an artifact to download and hand out (#1518; bundling
+# generalized in #1529 — loco-motion is one `cargo xtask bundle` invocation
+# of the chassis-agnostic path). The host target on `windows-latest` is
+# `x86_64-pc-windows-msvc`, so `cargo xtask bundle` cross-builds the
+# component for wasm32 and builds the bundle bin for Windows in one step.
 on:
   workflow_dispatch:
 
@@ -22,10 +23,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build the standalone game (release)
-        run: cargo xtask bundle --profile release
+        run: cargo xtask bundle --profile release --chassis desktop --components aether-kit --title loco-motion
+      - name: Rename the executable for hand-out
+        run: Move-Item target/release/aether-bundle-desktop.exe target/release/loco-motion.exe
       - name: Upload the Windows executable
         uses: actions/upload-artifact@v4
         with:
           name: loco-motion-windows
-          path: target/release/aether-game.exe
+          path: target/release/loco-motion.exe
           if-no-files-found: error

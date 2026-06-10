@@ -8,5 +8,7 @@ pub mod chassis;
 pub mod driver;
 pub mod render;
 
-pub use chassis::{AutoloadComponent, DesktopChassis, DesktopEnv, UserEvent};
+pub use chassis::{DesktopChassis, DesktopEnv, UserEvent};
 pub use driver::{DesktopDriverCapability, DesktopDriverRunning};
+
+pub use crate::autoload::AutoloadComponent;
