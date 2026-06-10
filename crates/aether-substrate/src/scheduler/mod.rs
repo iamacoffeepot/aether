@@ -49,6 +49,7 @@ pub use slot::{
 pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};
 
+use crate::actor::native::blob_work::RECRUIT_KNOBS;
 use crate::config::{KnobKind, KnobRecord};
 
 /// The lifecycle advance-timeout knob (ADR-0090 unit b2,
@@ -71,11 +72,13 @@ pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
 /// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).
 /// Concatenates the five deque / keep-local-valve knobs
 /// (`worker_deque::DEQUE_KNOBS`), the handoff-cost calibration knob
-/// (`calibrate::CALIBRATE_KNOBS`), and the lifecycle advance-timeout
-/// knob ([`LIFECYCLE_KNOBS`]) into the single
-/// slice e1's `chassis_known_keys()` folds into the known-key set and
-/// e2's `--config` dump renders. Pure `&'static` metadata — there is
-/// no change to any hot-path `OnceLock` read.
+/// (`calibrate::CALIBRATE_KNOBS`), the lifecycle advance-timeout knob
+/// ([`LIFECYCLE_KNOBS`]), the three blob-recruiter knobs
+/// (`blob_work::RECRUIT_KNOBS`), and the spin-window knob
+/// (`pool::SPIN_KNOBS`) into the single slice e1's `chassis_known_keys()`
+/// folds into the known-key set and e2's `--config` dump renders. Pure
+/// `&'static` metadata — there is no change to any hot-path `OnceLock`
+/// read.
 ///
 /// The element-by-element array (rather than a runtime concat) keeps
 /// `SCHEDULER_KNOBS` a `const`: each record is still *defined* once in
@@ -88,6 +91,10 @@ pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
     worker_deque::DEQUE_KNOBS[4],
     calibrate::CALIBRATE_KNOBS[0],
     LIFECYCLE_KNOBS[0],
+    RECRUIT_KNOBS[0],
+    RECRUIT_KNOBS[1],
+    RECRUIT_KNOBS[2],
+    pool::SPIN_KNOBS[0],
 ];
 
 #[cfg(test)]
@@ -96,7 +103,7 @@ mod knob_tests {
     use crate::config::KnobKind;
 
     #[test]
-    fn scheduler_knobs_cover_all_seven_hot_path_env_keys() {
+    fn scheduler_knobs_cover_all_hot_path_env_keys() {
         let keys: Vec<&str> = SCHEDULER_KNOBS.iter().map(|r| r.env_key).collect();
         for expected in [
             "AETHER_LOCAL_STICKY_MAX",
@@ -106,13 +113,17 @@ mod knob_tests {
             "AETHER_LOCAL_CHAIN_BACKSTOP",
             "AETHER_HANDOFF_COST_NS",
             "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+            "AETHER_BLOB_RECRUIT_MIN",
+            "AETHER_BLOB_RECRUIT_MAX",
+            "AETHER_WAKE_COST_NANOS",
+            "AETHER_SPIN_WINDOW_USEC",
         ] {
             assert!(
                 keys.contains(&expected),
                 "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
             );
         }
-        assert_eq!(SCHEDULER_KNOBS.len(), 7);
+        assert_eq!(SCHEDULER_KNOBS.len(), 11);
     }
 
     #[test]

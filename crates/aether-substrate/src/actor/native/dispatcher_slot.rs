@@ -59,17 +59,28 @@ use std::sync::PoisonError;
 /// `ActorSlots` uses `RefCell` internally because the dedicated-thread
 /// dispatcher path only ever reaches it from one OS thread. Worker-pool
 /// dispatch can have *different* worker threads hit the same slot
-/// across cycles — but the [`SlotState`] machine guarantees only one
-/// worker is in `Running` at a time. That serialization makes the
-/// `RefCell` accesses sound; this wrapper is the safety story.
+/// across cycles, so the wrapper has to make those accesses sound.
+///
+/// The root guarantor is the actor [`Mutex`](DispatcherSlot::actor):
+/// every read of the inner `ActorSlots` happens inside
+/// [`DispatcherSlot::drain_after_seed`], which holds that lock for the
+/// whole drain. The lock provides both the mutual exclusion (one
+/// dispatcher body at a time) and the happens-before edge that
+/// publishes one body's `RefCell` mutations to the next. The
+/// [`SlotState`] machine is the *scheduling filter* layered above it —
+/// it keeps the common case to a single un-contended worker — but it is
+/// not the exclusion on its own: in the post-`mark_idle` recheck window
+/// a worker can dispatch an envelope without holding `Running` while a
+/// second worker legitimately enters `drain_after_seed`, so only the
+/// actor `Mutex` actually serializes the `ActorSlots` access there.
 #[repr(transparent)]
 struct PooledSlots(Box<ActorSlots>);
 
-// SAFETY: see the doc-comment on `PooledSlots`. The SlotState
-// machine's `Idle → Ready → Running → Idle` invariant ensures at most
-// one worker thread holds an active reference to the inner
-// `ActorSlots` at any time, so the inner `RefCell` is effectively
-// single-threaded across the Pooled dispatch path.
+// SAFETY: see the doc-comment on `PooledSlots`. Every access to the
+// inner `ActorSlots` is made under the actor `Mutex` held across
+// `DispatcherSlot::drain_after_seed`, which serializes the `RefCell`
+// accesses and establishes the happens-before edge between successive
+// dispatch bodies regardless of which worker thread runs them.
 unsafe impl Sync for PooledSlots {}
 
 impl Deref for PooledSlots {
@@ -101,11 +112,14 @@ where
 {
     /// The slot's atomic state machine. Shared with the `WakeHandle`.
     pub(crate) state: Arc<SlotState>,
-    /// The actor itself. The state machine guarantees only one worker
-    /// is in `Running` at a time, so the `Mutex` is uncontested in
-    /// production — used here over `UnsafeCell` only for the simpler
-    /// safety story. `Option` so the `Closed` finalize path can take
-    /// the box and run `unwire` on the consumed actor.
+    /// The actor itself. This `Mutex` is the root mutual-exclusion +
+    /// happens-before guarantor for a slot's dispatch: every drain runs
+    /// under it (see [`Self::drain_after_seed`]), so two workers that
+    /// reach the slot — e.g. a recheck-window dispatch racing a fresh
+    /// `seize_and_run` — serialize here rather than relying on
+    /// [`SlotState`] alone, which is the scheduling filter above it.
+    /// `Option` so the `Closed` finalize path can take the box and run
+    /// `unwire` on the consumed actor.
     actor: Mutex<Option<Box<A>>>,
     /// Per-actor binding (inbox + shutdown flag + reply machinery).
     binding: Arc<NativeBinding>,
