@@ -44,45 +44,21 @@ Wait for the user's response. Parse "1,3,4" into a set of indices.
 
 For each selected finding:
 
-1. **Generate a conventional-commit title** from the finding text. The agent applies its judgment for the type prefix:
-   - "dead code", "unused", "drift" → `chore(<crate>)`
-   - "missing test", "test gap" → `test(<crate>)`
-   - "doc gap", "missing rustdoc" → `docs(<crate>)`
-   - "bug", "regression" → `fix(<crate>)`
-   - "missing feature", "extension" → `feat(<crate>)`
-   - Default if ambiguous → `chore(<crate>)`
+1. **File the child via `/sketch`'s mechanics** (read `.claude/skills/sketch/SKILL.md` — it is the single definition of issue filing). The finding text is the sketch input: `/sketch` owns title inference (type prefix from its inference table, crate scope from the finding's file pointer — e.g. `aether-substrate/dispatch.rs:142` → `substrate`; ask the user inline if the pointer is missing or ambiguous), label selection, board placement at `Phase=Backlog`, and the item-ID cache write.
 
-   The `<crate>` comes from the file pointer in the finding (e.g. `aether-substrate/dispatch.rs:142` → `substrate`). If the pointer is missing or ambiguous, ask the user inline.
-
-2. **File the child issue:**
-
-   ```bash
-   gh issue create --title "<conventional-title>" --body "<body>"
-   ```
-
-   Body template:
+2. **Append the spinoff context** to the body `/sketch` produces — the lead comment plus a `## Found during` section after `## Description`:
 
    ```markdown
    <!-- pr-body-ok: e — auto-filed from scope-spinoff, scope is parent-issue context -->
-
-   ## Description
-
-   <expanded finding text — keep the original line, add any context the agent already has from reading the code>
 
    ## Found during
 
    Spun off from #<parent> §Side findings during `/scope-spinoff` on <date>.
    ```
 
-3. **Add the child to the active project** at `Phase=Backlog`:
+   For a spun-off finding the verbatim blockquote in `## Description` is the finding line as it appeared in the parent body; the expansion is any context the agent already has from reading the code. Don't set Type/Size/AgentReady — `/scope` handles those when the child gets scoped.
 
-   ```bash
-   gh project item-add <active-project> --owner <owner> --url <child-url>
-   ```
-
-   Don't set Type/Size/AgentReady — `/scope` handles those when the child gets scoped.
-
-4. **Audit comment on parent:**
+3. **Audit comment on parent:**
 
    ```
    [scope-spinoff] Filed #<child> from finding "<one-line finding text>".
