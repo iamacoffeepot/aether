@@ -22,7 +22,6 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
@@ -344,7 +343,6 @@ struct ClaimResources {
     mailbox_id: MailboxId,
     transport: Arc<NativeBinding>,
     mailbox_sender: MailboxSender,
-    pending: Option<Arc<AtomicU64>>,
     wake_slot: Arc<MailboxWakeSlot>,
     slots: Box<ActorSlots>,
 }
@@ -437,27 +435,20 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
             )))));
         }
 
-        // Frame-bound caps (today: render) claim through the
-        // frame-bound path so the `pending` counter feeds the chassis
-        // frame loop. Free-running caps take the regular drop-on-
-        // shutdown claim. Both share the same dispatcher trampoline
-        // shape apart from the post-dispatch decrement.
-        //
         // ADR-0082: every cap takes the drop-on-shutdown claim. The
         // FRAME_BARRIER frame-bound claim variant retired with the
         // per-frame drain barrier — settlement gating on the
         // LifecycleAdvance chain root is the frame-integration gate
-        // now, so no cap needs a pending-counter registration.
+        // now.
         let claim_result = ctx.claim_mailbox_drop_on_shutdown::<A>().map(|claim| {
             (
                 claim.id,
                 claim.receiver,
                 claim.mailbox_sender,
-                None,
                 claim.wake_slot,
             )
         });
-        let (mailbox_id, receiver, mailbox_sender, pending, wake_slot) = match claim_result {
+        let (mailbox_id, receiver, mailbox_sender, wake_slot) = match claim_result {
             Ok(c) => c,
             Err(e) => {
                 // Release the namespace claim we just made — otherwise
@@ -489,7 +480,6 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                 mailbox_id,
                 transport,
                 mailbox_sender,
-                pending,
                 wake_slot,
                 slots,
             },
@@ -616,7 +606,6 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
             mailbox_id,
             transport,
             mailbox_sender,
-            pending,
             wake_slot,
             slots,
         } = resources;
@@ -632,7 +621,6 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
             actor,
             Arc::clone(&transport),
             slots,
-            pending,
             actor_registry,
             mailer_clone,
             mailbox_id,
