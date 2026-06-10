@@ -84,8 +84,8 @@ use aether_kinds::{
 };
 use aether_math::{Mat4, Vec3};
 
-use crate::arena::{Arena, HH, HW, SUB};
-use crate::{OCTIMETERS_PER_TILE, SetGranularity, SetWalkable, TILE_BITS, Teleport};
+use crate::arena::{Arena, HH, HW, SUB, ShapeClass};
+use crate::{OCTIMETERS_PER_TILE, Preview, SetGranularity, SetWalkable, TILE_BITS, Teleport};
 
 /// Walkable map dimensions, in tiles.
 pub(crate) const GRID_W: i32 = 16;
@@ -153,6 +153,28 @@ const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
 /// Highlight tint for the click-to-move destination cell — the exact region
 /// the mover will come to rest in.
 const DEST_COLOR: (f32, f32, f32) = (0.20, 0.95, 0.65);
+
+/// Each level lasts 30 s at the 60 Hz tick.
+const LEVEL_TICKS: u32 = 1800;
+
+/// The five levels: a shape class and the intensity envelope it ramps across
+/// (start → end). The three classes are reused, each repeat starting harder, so
+/// difficulty climbs both within a level and across the run.
+const LEVELS: [(ShapeClass, i32, i32); 5] = [
+    (ShapeClass::Ring, 0, 50),
+    (ShapeClass::Wave, 10, 60),
+    (ShapeClass::Wall, 15, 65),
+    (ShapeClass::Ring, 45, 90),
+    (ShapeClass::Wall, 55, 100),
+];
+
+/// Full health. A larger pool than it needs to be so the bar drains smoothly.
+const HEALTH_MAX: i32 = 1000;
+/// Health lost per tick while standing on a striking (red) sub-cell — about two
+/// seconds of continuous contact to die from full.
+const DAMAGE_PER_TICK: i32 = 8;
+/// Pause after death before the run restarts: 10 s at the 60 Hz tick.
+const RESTART_TICKS: u32 = 600;
 
 /// Player capsule (a capped cylinder) at human dimensions: 1.8 m tall,
 /// 0.3 m radius. The bottom cap rests on the ground (`y = 0`).
@@ -320,6 +342,19 @@ pub struct Locomotion {
     /// Whether to draw the orange warning telegraph. Off is a hardcore mode —
     /// only the red strikes (and the blue refuge) show. Toggled with `O`.
     show_warnings: bool,
+    /// Design-aid preview (not play): when non-zero the live game is frozen and
+    /// the field shows a static parameter matrix of one shape (see [`Preview`]),
+    /// viewed top-down. `0` is normal play.
+    preview: u32,
+    /// Index into [`LEVELS`] of the level being played.
+    level: usize,
+    /// Ticks elapsed in the current level, `0..LEVEL_TICKS`; drives the
+    /// continuous difficulty ramp.
+    level_clock: u32,
+    /// Remaining health, `0..=HEALTH_MAX`. Drains while standing on a red cell.
+    health: i32,
+    /// When dead, ticks left before the run restarts; `None` while alive.
+    dead_clock: Option<u32>,
 }
 
 #[actor]
@@ -349,6 +384,11 @@ impl FfiActor for Locomotion {
             cam_held: CamHeld::default(),
             arena: Arena::new(),
             show_warnings: true,
+            preview: 0,
+            level: 0,
+            level_clock: 0,
+            health: HEALTH_MAX,
+            dead_clock: None,
         })
     }
 
@@ -366,8 +406,24 @@ impl FfiActor for Locomotion {
 
     #[handler]
     fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
+        // In preview mode the game is frozen: the static matrix in the field
+        // must persist, so skip the simulation entirely.
+        if self.preview != 0 {
+            return;
+        }
+        // The camera still orbits whether alive or dead.
         self.orbit_camera();
+        // Dead: the game is frozen; count down, then restart the run.
+        if let Some(remaining) = self.dead_clock {
+            match remaining.checked_sub(1).filter(|&r| r > 0) {
+                Some(r) => self.dead_clock = Some(r),
+                None => self.restart(),
+            }
+            return;
+        }
+        self.advance_level();
         self.arena.tick();
+        self.apply_damage();
         self.advance();
     }
 
@@ -411,12 +467,6 @@ impl FfiActor for Locomotion {
             keycode::KEY_J => {
                 tracing::info!(speed_percent = self.arena.speed_down(), "hazard speed");
             }
-            keycode::KEY_M => {
-                tracing::info!(wall_thickness = self.arena.walls_thicker(), "hazard walls");
-            }
-            keycode::KEY_N => {
-                tracing::info!(wall_thickness = self.arena.walls_thinner(), "hazard walls");
-            }
             _ => self.set_held(key.code, true),
         }
     }
@@ -457,6 +507,15 @@ impl FfiActor for Locomotion {
     fn on_set_granularity(&mut self, _ctx: &mut FfiCtx<'_>, mail: SetGranularity) {
         self.set_cell(mail.cell_octimeters);
     }
+
+    #[handler]
+    fn on_preview(&mut self, _ctx: &mut FfiCtx<'_>, mail: Preview) {
+        self.preview = mail.shape;
+        if mail.shape != 0 {
+            self.arena.show_matrix(mail.shape);
+        }
+        tracing::info!(shape = mail.shape, "locomotion preview");
+    }
 }
 
 impl Locomotion {
@@ -474,6 +533,49 @@ impl Locomotion {
             keycode::KEY_DOWN => self.cam_held.down = down,
             _ => {}
         }
+    }
+
+    /// Drive the level director one tick: ramp the current level's intensity
+    /// across its clock, push it to the arena, and roll to the next level (wrap
+    /// at the end) when the clock expires.
+    fn advance_level(&mut self) {
+        let (class, lo, hi) = LEVELS[self.level];
+        self.arena
+            .set_level(class, lerp_level(lo, hi, self.level_clock, LEVEL_TICKS));
+        self.level_clock += 1;
+        if self.level_clock >= LEVEL_TICKS {
+            self.level_clock = 0;
+            self.level = (self.level + 1) % LEVELS.len();
+        }
+    }
+
+    /// Drain health while the mover's tile stands on a striking (red) sub-cell;
+    /// at zero, enter the death pause that restarts the run.
+    fn apply_damage(&mut self) {
+        let sub = OCTIMETERS_PER_TILE / SUB;
+        if self.arena.is_danger(self.mover.x / sub, self.mover.z / sub) {
+            self.health = (self.health - DAMAGE_PER_TICK).max(0);
+            if self.health == 0 {
+                self.dead_clock = Some(RESTART_TICKS);
+            }
+        }
+    }
+
+    /// Restart the run from level one: full health, fresh arena, mover recentred.
+    fn restart(&mut self) {
+        self.level = 0;
+        self.level_clock = 0;
+        self.health = HEALTH_MAX;
+        self.dead_clock = None;
+        self.arena.reset();
+        self.mover = Mover {
+            x: tile_center_octimeters(GRID_W / 2),
+            z: tile_center_octimeters(GRID_H / 2),
+        };
+        self.path.clear();
+        self.dest = None;
+        self.target_x = None;
+        self.target_z = None;
     }
 
     /// Orbit the camera one tick from the held arrow keys: sweep yaw freely,
@@ -577,10 +679,17 @@ impl Locomotion {
         (target + offset, target)
     }
 
-    /// Perspective `view_proj` for the follow camera.
+    /// Perspective `view_proj`: the follow camera in play, or a fixed top-down
+    /// view framing the whole grid in preview (so the parameter matrix reads
+    /// like a contact sheet).
     fn view_proj(&self) -> [f32; 16] {
-        let (eye, target) = self.camera_eye_target();
-        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let (eye, target, up) = if self.preview == 0 {
+            let (eye, target) = self.camera_eye_target();
+            (eye, target, Vec3::Y)
+        } else {
+            preview_camera()
+        };
+        let view = Mat4::look_at_rh(eye, target, up);
         let proj = Mat4::perspective_rh(CAMERA_FOV_Y, self.aspect(), CAMERA_Z_NEAR, CAMERA_Z_FAR);
         (proj * view).to_cols_array()
     }
@@ -697,17 +806,25 @@ impl Locomotion {
                 push_quad(&mut out, tx as f32 + 0.5, tz as f32 + 0.5, 0.48, 0.0, color);
             }
         }
-        // Hazard overlay at sub-cell resolution, laid just above the floor.
+        // Hazard overlay at sub-cell resolution, laid just above the floor. In
+        // preview the orange telegraph always shows (the matrix is about seeing
+        // both bands), independent of the hardcore toggle.
+        let show_warnings = self.show_warnings || self.preview != 0;
         let sub = SUB as f32;
         let half = 0.5 / sub;
         for sz in 0..HH {
             for sx in 0..HW {
-                if let Some(color) = self.arena.subcell_color(sx, sz, self.show_warnings) {
+                if let Some(color) = self.arena.subcell_color(sx, sz, show_warnings) {
                     let cx = (sx as f32 + 0.5) / sub;
                     let cz = (sz as f32 + 0.5) / sub;
                     push_quad(&mut out, cx, cz, half, 0.02, color);
                 }
             }
+        }
+        // The preview is a static contact sheet: no player or destination, just
+        // the parameter matrix on the floor.
+        if self.preview != 0 {
+            return out;
         }
         // Click-to-move destination: the exact cell the mover will rest in,
         // sized to the active granularity. Laid above the hazard overlay
@@ -721,8 +838,95 @@ impl Locomotion {
         let ax = self.mover.x as f32 / OCTIMETERS_PER_TILE as f32;
         let az = self.mover.z as f32 / OCTIMETERS_PER_TILE as f32;
         push_capsule(&mut out, ax, az, mover_color(self.cell));
+        // HUD: a health bar pinned to the top of the screen, drawn last so it
+        // sits over the scene. A dark backing plate, then a fill that shrinks
+        // and reddens as health drops.
+        let hud = Hud::new(self.camera_eye_target(), self.aspect());
+        hud.quad(
+            &mut out,
+            [-0.55, 0.55, 0.84, 0.92],
+            0.50,
+            (0.10, 0.10, 0.13),
+        );
+        let frac = self.health as f32 / HEALTH_MAX as f32;
+        if frac > 0.0 {
+            // A touch closer than the backing so it wins the depth test.
+            let rect = [-0.52, frac.mul_add(1.04, -0.52), 0.855, 0.905];
+            hud.quad(&mut out, rect, 0.49, health_color(frac));
+        }
         out
     }
+}
+
+/// A projector for screen-pinned HUD quads: it places a quad given in NDC at a
+/// fixed depth along the camera ray, so the quad holds its screen position as
+/// the camera orbits.
+struct Hud {
+    eye: Vec3,
+    fwd: Vec3,
+    right: Vec3,
+    up: Vec3,
+    scale_x: f32,
+    scale_y: f32,
+}
+
+impl Hud {
+    /// Build from the camera's eye/target and the viewport aspect — the same
+    /// basis `pick_world` derives, reused to project the other way.
+    fn new((eye, target): (Vec3, Vec3), aspect: f32) -> Self {
+        let fwd = (target - eye).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd);
+        let tan = (CAMERA_FOV_Y * 0.5).tan();
+        Self {
+            eye,
+            fwd,
+            right,
+            up,
+            scale_x: tan * aspect,
+            scale_y: tan,
+        }
+    }
+
+    /// Append a flat-coloured quad covering the NDC rectangle `[x0, x1, y0, y1]`
+    /// at `depth` along the camera ray — smaller depth draws nearer, so layered
+    /// HUD pieces win the depth test in order.
+    fn quad(&self, out: &mut Vec<DrawTriangle>, rect: [f32; 4], depth: f32, rgb: (f32, f32, f32)) {
+        let [x0, x1, y0, y1] = rect;
+        let corner = |nx: f32, ny: f32| {
+            self.eye
+                + self.fwd * depth
+                + self.right * (nx * self.scale_x * depth)
+                + self.up * (ny * self.scale_y * depth)
+        };
+        let (r, g, b) = rgb;
+        let v = |p: Vec3| Vertex {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+            r,
+            g,
+            b,
+        };
+        let (p00, p10, p11, p01) = (
+            corner(x0, y0),
+            corner(x1, y0),
+            corner(x1, y1),
+            corner(x0, y1),
+        );
+        out.push(DrawTriangle {
+            verts: [v(p00), v(p10), v(p11)],
+        });
+        out.push(DrawTriangle {
+            verts: [v(p00), v(p11), v(p01)],
+        });
+    }
+}
+
+/// Health-bar fill colour: red at empty through green at full.
+fn health_color(frac: f32) -> (f32, f32, f32) {
+    let lerp = |a: f32, b: f32| (b - a).mul_add(frac, a);
+    (lerp(0.85, 0.25), lerp(0.20, 0.82), lerp(0.18, 0.32))
 }
 
 /// Mover tint for the active cell size — its [`CELL_PRESETS`] color, or a
@@ -946,6 +1150,24 @@ fn step_camera(yaw: f32, pitch: f32, yaw_dir: f32, pitch_dir: f32) -> (f32, f32)
         .mul_add(CAMERA_PITCH_SPEED, pitch)
         .clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
     (yaw, pitch)
+}
+
+/// Intensity at `clock`/`span` of the way through a level's `lo`..`hi` ramp.
+#[allow(clippy::cast_possible_wrap)] // clock/span are small (<= LEVEL_TICKS)
+fn lerp_level(lo: i32, hi: i32, clock: u32, span: u32) -> i32 {
+    lo + (hi - lo) * clock as i32 / span as i32
+}
+
+/// Fixed top-down camera for the preview matrix: looks straight down at the
+/// grid center from high enough that the whole 16×16 floor frames with a
+/// margin. Returns `(eye, target, up)`; `up = -Z` puts grid `+Z` toward the
+/// bottom of frame, so matrix rows read top-to-bottom.
+fn preview_camera() -> (Vec3, Vec3, Vec3) {
+    let cx = GRID_W as f32 / 2.0;
+    let cz = GRID_H as f32 / 2.0;
+    let eye = Vec3::new(cx, 20.0, cz);
+    let target = Vec3::new(cx, 0.0, cz);
+    (eye, target, Vec3::new(0.0, 0.0, -1.0))
 }
 
 /// Append a flat axis-aligned quad (two triangles) on the XZ plane.

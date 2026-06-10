@@ -68,6 +68,18 @@ pub struct SetGranularity {
     pub cell_octimeters: i32,
 }
 
+/// `aether.kit.locomotion.preview` — a design aid, not part of play. Freezes
+/// the live hazard game and paints a top-down contact-sheet of one shape's
+/// parameter variations (a 3×3 matrix: thickness down the rows, the shape's
+/// spatial parameter across the columns) so the look of each parameter can be
+/// compared at a glance. `shape` selects which: `0` resumes the game, `1` ring,
+/// `2` wall, `3` wave.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.locomotion.preview")]
+pub struct Preview {
+    pub shape: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
