@@ -355,6 +355,17 @@ impl SpinPark {
     pub fn set_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
     }
+
+    /// Whether shutdown has been signalled. The worker loop's shutdown
+    /// gate: `acquire_slot` checks this before its own-deque /
+    /// steal fast paths so a worker that keeps finding work (a
+    /// perpetually-requeueing slot, or a steady steal-fed cycle) still
+    /// observes teardown instead of churning past the coordinator
+    /// forever (iamacoffeepot/aether#1531).
+    #[must_use]
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
 }
 
 impl Default for SpinPark {
