@@ -25,10 +25,6 @@
 //! discriminator: a cheap cascade's whole burst stays fully inlined (no
 //! bimodal), while a heavy one trips the valve and spills
 //! (iamacoffeepot/aether#1174 matrix: heavy −15% end-to-end, trivial flat).
-//! **mail-count** budgeting (`AETHER_LOCAL_MAIL_BUDGET`,
-//! [`mail_budget`]) is **off** by default — it can't separate a cheap cascade
-//! from a heavy one of the same width, so it only re-introduces the
-//! generational bimodal; opt it in for a deque-growth bound by count.
 //! `AETHER_LOCAL_TIME_BUDGET_US=0` disables the valve (pure inline-cascade,
 //! bounded only by the deque-length backstop `AETHER_LOCAL_STICKY_MAX`,
 //! [`hard_cap`]). A worker is also **owner-only** over its own deque by
@@ -66,31 +62,23 @@ use crate::config::{KnobKind, KnobRecord};
 use crate::scheduler::calibrate::handoff_cost;
 use crate::scheduler::slot::Drainable;
 
-/// Discovery records for the five deque / keep-local-valve hot-path
+/// Discovery records for the four deque / keep-local-valve hot-path
 /// tuning knobs (ADR-0090 unit b2, iamacoffeepot/aether#1255). These
-/// describe the `OnceLock` getters below ([`hard_cap`], [`mail_budget`],
-/// [`time_budget`], [`peer_steal_enabled`], [`chain_backstop`]) so e1's
+/// describe the `OnceLock` getters below ([`hard_cap`], [`time_budget`],
+/// [`peer_steal_enabled`], [`chain_backstop`]) so e1's
 /// unknown-`AETHER_*`
 /// sweep doesn't flag them and e2's `--config` dump lists them. The
 /// hot-path read stays exactly as-is — these are pure `&'static`
 /// metadata assembled once at boot, never on the dispatch path. Docs +
 /// defaults are lifted verbatim from the getter doc-comments;
-/// `time_budget` / `mail_budget` are adaptive / off-by-default with no
-/// literal default, so their `default` is `None` (rendered
-/// "derived/unset").
+/// `time_budget` is adaptive with no literal default, so its `default`
+/// is `None` (rendered "derived/unset").
 pub const DEQUE_KNOBS: &[KnobRecord] = &[
     KnobRecord {
         env_key: "AETHER_LOCAL_STICKY_MAX",
         doc: "Deque-length backstop: max slots a worker keeps on its own deque \
               before forcing a spill (values < 1 / unparseable fall back).",
         default: Some("256"),
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_LOCAL_MAIL_BUDGET",
-        doc: "Keep-local mail-count budget per burst, off by default \
-              (Some(n) spills after n mail; Some(0) reproduces cap == 1).",
-        default: None,
         kind: KnobKind::HandRegistered,
     },
     KnobRecord {
@@ -139,16 +127,6 @@ thread_local! {
     /// off-worker injects), where `pending_depth` reports `0`.
     static INJECTOR: RefCell<Option<Arc<Injector<Slot>>>> = const { RefCell::new(None) };
 
-    /// Per-burst mail counter for the keep-local budget
-    /// (iamacoffeepot/aether#1160). A *burst* is the run of local-deque work
-    /// a worker drains between two "own deque drained empty" transitions —
-    /// one local cascade. [`burst_note_mail`] increments it per dispatched
-    /// envelope; [`burst_over_budget`] consults it per keep-vs-spill
-    /// decision; [`burst_reset`] zeroes it when `acquire_slot` finds the
-    /// deque empty. Single-writer (only the running worker touches it, never
-    /// across a `run_cycle`), so a plain `Cell` — no atomics.
-    static BURST_MAIL: Cell<u32> = const { Cell::new(0) };
-
     /// Start instant of the current burst, anchored on its first mail by
     /// [`burst_note_mail`] when time budgeting is on (iamacoffeepot/aether#1160).
     /// `None` when time budgeting is off (the default — no clock ever read)
@@ -163,7 +141,7 @@ thread_local! {
     /// [`burst_reset`] zeroes it when the own deque drains empty (the
     /// chain is over — the next cascade starts fresh). Single-writer
     /// (only the running worker touches it, never across a `run_cycle`),
-    /// so a plain `Cell` — same pattern as `BURST_MAIL`.
+    /// so a plain `Cell` — no atomics.
     static CHAIN_POPS: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -217,26 +195,6 @@ pub fn hard_cap() -> usize {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&k| k >= 1)
             .unwrap_or(256)
-    })
-}
-
-/// Keep-local **mail-count** budget per burst, **off by default**
-/// (iamacoffeepot/aether#1174). `None` unless `AETHER_LOCAL_MAIL_BUDGET` is
-/// set; `Some(n)` enables a spill once the burst has dispatched `n` mail
-/// (`Some(0)` reproduces the historical `cap == 1`). Off by default because
-/// the #1174 matrix showed mail-count **cannot discriminate** a cheap cascade
-/// from a heavy one — both have the same mail count (a 6-node tree is 6 mail
-/// whether its handlers cost 0.1µs or 23µs) — so any count low enough to spill
-/// a heavy cascade also spills the cheap one (re-introducing the generational
-/// bimodal), and any count high enough to spare the cheap one never trips the
-/// heavy one. The discriminator is duration, i.e. [`time_budget`].
-#[must_use]
-pub fn mail_budget() -> Option<u32> {
-    static B: OnceLock<Option<u32>> = OnceLock::new();
-    *B.get_or_init(|| {
-        env::var("AETHER_LOCAL_MAIL_BUDGET")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
     })
 }
 
@@ -380,49 +338,36 @@ pub fn chain_pop_due() -> bool {
 }
 
 /// Note one dispatched envelope against the current local-drain burst
-/// (iamacoffeepot/aether#1160). Increments the burst mail counter and, when
-/// time budgeting is on (`time_budget > 0`), anchors the burst start on the
-/// first mail so `burst_over_budget` can measure elapsed at decision time.
-/// With `time_budget == 0` (the valve disabled) the clock is never read — a
-/// single `Cell` increment. The clock is sampled at
-/// *decision* time, not per mail (iamacoffeepot/aether#1160 fix): the prior
-/// strided per-mail sample never fired for a sub-stride burst, so a narrow
-/// *heavy* cascade (few mail × expensive handlers) never tripped the time
-/// budget — exactly the case the valve exists to catch.
+/// (iamacoffeepot/aether#1160). When time budgeting is on
+/// (`time_budget > 0`), anchors the burst start on the first mail so
+/// `burst_over_budget` can measure elapsed at decision time. With
+/// `time_budget == 0` (the valve disabled) the clock is never read — a
+/// no-op. The clock is sampled at *decision* time, not per mail
+/// (iamacoffeepot/aether#1160 fix): the prior strided per-mail sample never
+/// fired for a sub-stride burst, so a narrow *heavy* cascade (few mail ×
+/// expensive handlers) never tripped the time budget — exactly the case the
+/// valve exists to catch.
 pub fn burst_note_mail(time_budget: Duration) {
-    let n = BURST_MAIL.get().saturating_add(1);
-    BURST_MAIL.set(n);
     // Anchor the burst start at its first mail (one clock read per burst,
     // only when time budgeting is on) so a heavy first handler's elapsed is
     // counted by the time path — not deferred to the first decision, which
-    // would under-count the work that already ran.
-    if !time_budget.is_zero() && n == 1 {
+    // would under-count the work that already ran. The burst's first mail is
+    // the one that finds no start anchored yet.
+    if !time_budget.is_zero() && BURST_START.get().is_none() {
         BURST_START.set(Some(Instant::now()));
     }
 }
 
-/// Has the current burst exceeded its keep-local budget
-/// (iamacoffeepot/aether#1160, #1174)? Two arms, both opt-in/configurable:
-///
-/// - **mail-count** (`mail_budget: Some(n)`, off by default): `true` once the
-///   burst has dispatched `n` envelopes (`Some(0)` ⇒ always over, the
-///   historical `cap == 1`). `None` skips this arm entirely.
-/// - **time** (`time_budget`, default 12µs; `0` disables): `true` once the
-///   burst has run past `time_budget` since its first mail — the default
-///   discriminator that spills heavy cascades but leaves cheap ones inlined.
-///
-/// The mail arm short-circuits, so the wall clock is read only when mail is
-/// under budget (or off) *and* time budgeting is on — once per genuine
-/// keep-vs-spill decision on a multi-blob backlog. Called by
-/// [`try_push_local_budgeted`] only after the `depth > 0` guard, so a
-/// single-blob fan-out or a chain (depth 0) reads no clock at all.
+/// Has the current burst exceeded its keep-local **time** budget
+/// (iamacoffeepot/aether#1160, #1174)? `time_budget` (default 12µs; `0`
+/// disables): `true` once the burst has run past `time_budget` since its
+/// first mail — the discriminator that spills heavy cascades but leaves
+/// cheap ones inlined. The wall clock is read only when time budgeting is
+/// on — once per genuine keep-vs-spill decision on a multi-blob backlog.
+/// Called by [`try_push_local_budgeted`] only after the `depth > 0` guard,
+/// so a single-blob fan-out or a chain (depth 0) reads no clock at all.
 #[must_use]
-pub fn burst_over_budget(mail_budget: Option<u32>, time_budget: Duration) -> bool {
-    // Mail-count arm (opt-in): trips at `mb` mail, or immediately for `Some(0)`
-    // (the historical `cap == 1`). `None` skips it.
-    if mail_budget.is_some_and(|mb| mb == 0 || BURST_MAIL.get() >= mb) {
-        return true;
-    }
+pub fn burst_over_budget(time_budget: Duration) -> bool {
     if time_budget.is_zero() {
         return false;
     }
@@ -438,7 +383,6 @@ pub fn burst_over_budget(mail_budget: Option<u32>, time_budget: Duration) -> boo
 /// work starts a fresh budget — and the next chain starts a fresh
 /// every-K count.
 pub fn burst_reset() {
-    BURST_MAIL.set(0);
     BURST_START.set(None);
     CHAIN_POPS.set(0);
 }
@@ -451,19 +395,16 @@ pub fn burst_reset() {
 ///
 /// ```text
 /// spill  ⟺  local_deque_len >= hard_cap
-///           || (local_deque_len > 0 && burst_over_budget(mail_budget, time_budget))
+///           || (local_deque_len > 0 && burst_over_budget(time_budget))
 /// ```
 ///
-/// By default `mail_budget` is `None` (mail-count off) and `time_budget` is
-/// 12µs, so [`burst_over_budget`] is purely the **time valve**: a cheap
-/// cascade (whole burst ≈ 6µs) stays fully inlined at every generation — no
-/// bimodal, no cross-worker wakeup for sub-threshold work — while a heavy
-/// cascade trips the valve after ~12µs and spills its backlog to parallelise
-/// (iamacoffeepot/aether#1174 matrix: heavy −15% end-to-end, trivial flat).
-/// The `len > 0` guard keeps a serial chain or single-blob fan-out local with
-/// no clock read. Mail-count is off by default because it can't separate a
-/// cheap cascade from a heavy one of the same width — set
-/// `AETHER_LOCAL_MAIL_BUDGET` to opt it in (`0` ⇒ `cap == 1`), or
+/// By default `time_budget` is 12µs, so [`burst_over_budget`] is the
+/// **time valve**: a cheap cascade (whole burst ≈ 6µs) stays fully inlined
+/// at every generation — no bimodal, no cross-worker wakeup for sub-threshold
+/// work — while a heavy cascade trips the valve after ~12µs and spills its
+/// backlog to parallelise (iamacoffeepot/aether#1174 matrix: heavy −15%
+/// end-to-end, trivial flat). The `len > 0` guard keeps a serial chain or
+/// single-blob fan-out local with no clock read. Set
 /// `AETHER_LOCAL_TIME_BUDGET_US=0` to disable the valve (pure inline-cascade).
 ///
 /// Returns `Ok(())` when kept local (the caller skips injector + notify),
@@ -471,7 +412,6 @@ pub fn burst_reset() {
 /// always `Err` (spill).
 pub fn try_push_local_budgeted(
     slot: Slot,
-    mail_budget: Option<u32>,
     time_budget: Duration,
     hard_cap: usize,
 ) -> Result<(), Slot> {
@@ -480,8 +420,7 @@ pub fn try_push_local_budgeted(
         match w.as_ref() {
             Some(worker) => {
                 let len = worker.len();
-                let spill =
-                    len >= hard_cap || (len > 0 && burst_over_budget(mail_budget, time_budget));
+                let spill = len >= hard_cap || (len > 0 && burst_over_budget(time_budget));
                 if spill {
                     Err(slot)
                 } else {
@@ -645,57 +584,35 @@ mod tests {
     fn budgeted_off_worker_always_spills() {
         // This test never calls `install`, so it isn't a pool worker:
         // every push must spill regardless of budget or backlog.
-        assert!(try_push_local_budgeted(noop(), Some(1000), Duration::ZERO, 256).is_err());
+        assert!(try_push_local_budgeted(noop(), Duration::ZERO, 256).is_err());
         assert!(pop_local().is_none());
     }
 
     #[test]
-    fn budget_active_mail_zero_reproduces_cap_one() {
-        // With mail-count opted in (`AETHER_LOCAL_MAIL_BUDGET=0`), `Some(0)`
-        // ⇒ always over budget ⇒ spill whenever the own deque already holds
-        // work — exactly the pre-#1160 `cap == 1` "keep only when the deque is
-        // empty" shape. (Post-#1174 mail-count is opt-in, off by default — the
-        // default is the 12µs time valve; see
-        // `inline_cascade_valve_off_keeps_local_past_budget`.)
-        install(Worker::new_lifo());
-        drain_local();
-        burst_reset();
-
-        // Empty deque: kept local.
-        assert!(try_push_local_budgeted(noop(), Some(0), Duration::ZERO, 256).is_ok());
-        // Deque now at depth 1: the next spills.
-        assert!(
-            try_push_local_budgeted(noop(), Some(0), Duration::ZERO, 256).is_err(),
-            "budget active + mail_budget 0 spills any fan-out extra, like cap 1"
-        );
-        drain_local();
-    }
-
-    #[test]
     fn inline_cascade_valve_off_keeps_local_past_budget() {
-        // #1174: with the valve off (`mail_budget == None` + `time_budget ==
-        // 0`) a worker inlines its ENTIRE cascade — every blob is kept local
-        // even when the burst is well over any count, because no spill term
-        // fires at any generation. Only `hard_cap` bounds it. (The shipped
-        // default leaves the time valve on at 12µs; this is the
-        // `AETHER_LOCAL_TIME_BUDGET_US=0` pure-inline opt-out.)
+        // #1174: with the valve off (`time_budget == 0`) a worker inlines its
+        // ENTIRE cascade — every blob is kept local even when the burst is
+        // long-running, because no spill term fires at any generation. Only
+        // `hard_cap` bounds it. (The shipped default leaves the time valve on
+        // at 12µs; this is the `AETHER_LOCAL_TIME_BUDGET_US=0` pure-inline
+        // opt-out.)
         install(Worker::new_lifo());
         drain_local();
         burst_reset();
         for _ in 0..100 {
-            burst_note_mail(Duration::ZERO); // far past any small budget
+            burst_note_mail(Duration::ZERO); // valve off ⇒ no clock anchored
         }
-        // Mail off + time off ⇒ `burst_over_budget` is always false, so the
-        // descendant is kept local regardless of depth or burst length.
-        assert!(try_push_local_budgeted(noop(), None, Duration::ZERO, 256).is_ok());
+        // Time off ⇒ `burst_over_budget` is always false, so the descendant
+        // is kept local regardless of depth or burst length.
+        assert!(try_push_local_budgeted(noop(), Duration::ZERO, 256).is_ok());
         assert!(
-            try_push_local_budgeted(noop(), None, Duration::ZERO, 256).is_ok(),
-            "valve off keeps a descendant local at depth > 0, over any count"
+            try_push_local_budgeted(noop(), Duration::ZERO, 256).is_ok(),
+            "valve off keeps a descendant local at depth > 0, over any burst"
         );
         // The deque-length backstop still bounds it: with hard_cap 2, the
         // third push (len == 2) spills even with the valve off.
         assert!(
-            try_push_local_budgeted(noop(), None, Duration::ZERO, 2).is_err(),
+            try_push_local_budgeted(noop(), Duration::ZERO, 2).is_err(),
             "hard_cap still bounds the inline cascade"
         );
         drain_local();
@@ -705,21 +622,21 @@ mod tests {
     fn budgeted_chain_never_spills_at_depth_zero() {
         // The load-bearing guard: a serial chain has an empty deque at
         // schedule time (the current blob was popped), so it stays local
-        // even when the burst is well over budget — a chain has no
+        // even when the burst is well over the time budget — a chain has no
         // independent work to parallelize, so a spill would only buy a
         // wakeup.
         install(Worker::new_lifo());
         drain_local();
         burst_reset();
-        for _ in 0..100 {
-            burst_note_mail(Duration::ZERO); // far past any small budget
-        }
+        let tiny = Duration::from_nanos(1);
+        burst_note_mail(tiny); // anchors the burst start
+        thread::sleep(Duration::from_micros(50)); // now well past `tiny`
         assert!(
-            burst_over_budget(Some(1), Duration::ZERO),
-            "burst should read over a 1-mail budget"
+            burst_over_budget(tiny),
+            "burst should read over the tiny time budget"
         );
         assert!(
-            try_push_local_budgeted(noop(), Some(1), Duration::ZERO, 256).is_ok(),
+            try_push_local_budgeted(noop(), tiny, 256).is_ok(),
             "depth 0 keeps local even over budget (the chain guard)"
         );
         drain_local();
@@ -727,14 +644,16 @@ mod tests {
 
     #[test]
     fn budgeted_keeps_local_under_budget() {
-        // Under budget (large mail_budget, small burst) a cascade stacks on
-        // the own deque — the keep-local win the spill cost avoids.
+        // Under the time budget (a generous valve, a fresh burst) a cascade
+        // stacks on the own deque — the keep-local win the spill cost avoids.
         install(Worker::new_lifo());
         drain_local();
         burst_reset();
+        let generous = Duration::from_secs(10);
         for _ in 0..5 {
+            burst_note_mail(generous); // anchors the burst start once
             assert!(
-                try_push_local_budgeted(noop(), Some(1000), Duration::ZERO, 256).is_ok(),
+                try_push_local_budgeted(noop(), generous, 256).is_ok(),
                 "under budget keeps local"
             );
         }
@@ -742,37 +661,17 @@ mod tests {
     }
 
     #[test]
-    fn budgeted_spills_backlog_over_budget() {
-        // Over budget (burst 10 > mail_budget 4) with real backlog
-        // (depth > 0): spill the extra so an idle sibling can steal it.
-        install(Worker::new_lifo());
-        drain_local();
-        burst_reset();
-        for _ in 0..10 {
-            burst_note_mail(Duration::ZERO);
-        }
-        // Empty deque first push keeps (the depth-0 chain guard).
-        assert!(try_push_local_budgeted(noop(), Some(4), Duration::ZERO, 256).is_ok());
-        // Now depth 1 + over budget → spill.
-        assert!(
-            try_push_local_budgeted(noop(), Some(4), Duration::ZERO, 256).is_err(),
-            "over budget with backlog spills"
-        );
-        drain_local();
-    }
-
-    #[test]
     fn budgeted_hard_cap_backstop() {
-        // Even under the mail/time budget, the deque-length backstop forces
-        // a spill once the own deque reaches `hard_cap`.
+        // Even under the time budget, the deque-length backstop forces a
+        // spill once the own deque reaches `hard_cap`.
         install(Worker::new_lifo());
         drain_local();
         burst_reset();
-        // hard_cap 2, large mail_budget (never trips by count).
-        assert!(try_push_local_budgeted(noop(), Some(1000), Duration::ZERO, 2).is_ok()); // len 0 → 1
-        assert!(try_push_local_budgeted(noop(), Some(1000), Duration::ZERO, 2).is_ok()); // len 1 → 2
+        // hard_cap 2, valve off (never trips by time).
+        assert!(try_push_local_budgeted(noop(), Duration::ZERO, 2).is_ok()); // len 0 → 1
+        assert!(try_push_local_budgeted(noop(), Duration::ZERO, 2).is_ok()); // len 1 → 2
         assert!(
-            try_push_local_budgeted(noop(), Some(1000), Duration::ZERO, 2).is_err(),
+            try_push_local_budgeted(noop(), Duration::ZERO, 2).is_err(),
             "len == hard_cap spills regardless of budget"
         );
         drain_local();
@@ -781,87 +680,52 @@ mod tests {
     #[test]
     fn budgeted_time_valve_spills_few_mail_heavy() {
         // The core #1160 fix: a *few-mail* burst that has run past the time
-        // budget spills its backlog (depth > 0), even though the mail count
-        // is far under budget — the narrow-heavy case the strided per-mail
-        // clock used to miss (it never sampled a sub-stride burst).
+        // budget spills its backlog (depth > 0) — the narrow-heavy case the
+        // strided per-mail clock used to miss (it never sampled a sub-stride
+        // burst).
         install(Worker::new_lifo());
         drain_local();
         burst_reset();
         let tiny = Duration::from_nanos(1);
-        burst_note_mail(tiny); // 1 mail, anchors the burst start
+        burst_note_mail(tiny); // anchors the burst start
         thread::sleep(Duration::from_micros(50)); // now well past `tiny`
         // Depth 0 still keeps — the chain guard short-circuits before the
         // budget (and before any clock read).
         assert!(
-            try_push_local_budgeted(noop(), Some(1000), tiny, 256).is_ok(),
+            try_push_local_budgeted(noop(), tiny, 256).is_ok(),
             "depth 0 keeps regardless of elapsed time"
         );
-        // Depth 1, only 1 mail (≪ 1000 budget), but over the time budget →
-        // spill. Mail-only (the pre-fix behaviour) would have kept it.
+        // Depth 1, over the time budget → spill.
         assert!(
-            try_push_local_budgeted(noop(), Some(1000), tiny, 256).is_err(),
-            "few mail but over the time budget spills the backlog (the valve fix)"
+            try_push_local_budgeted(noop(), tiny, 256).is_err(),
+            "over the time budget spills the backlog (the valve fix)"
         );
         drain_local();
-    }
-
-    #[test]
-    fn burst_counts_and_resets() {
-        burst_reset();
-        for _ in 0..5 {
-            burst_note_mail(Duration::ZERO);
-        }
-        assert!(
-            burst_over_budget(Some(5), Duration::ZERO),
-            "5 mail meets a 5-mail budget"
-        );
-        assert!(
-            !burst_over_budget(Some(6), Duration::ZERO),
-            "5 mail is under a 6-mail budget"
-        );
-        burst_reset();
-        assert!(
-            !burst_over_budget(Some(1), Duration::ZERO),
-            "reset zeroes the counter"
-        );
-    }
-
-    #[test]
-    fn burst_mail_budget_zero_is_always_over() {
-        burst_reset();
-        assert!(
-            burst_over_budget(Some(0), Duration::ZERO),
-            "mail_budget 0 trips at zero mail"
-        );
     }
 
     #[test]
     fn burst_time_path_trips_over_budget() {
         // With time budgeting on, a burst that has run past the time budget
-        // trips at decision time even when the mail count is nowhere near
-        // its budget — the few-mail-heavy case the strided per-mail sample
-        // used to miss (iamacoffeepot/aether#1160). The start is anchored on
-        // the first mail; a tiny budget + a real sleep makes the elapsed
-        // check at the decision deterministic.
+        // trips at decision time — the few-mail-heavy case the strided
+        // per-mail sample used to miss (iamacoffeepot/aether#1160). The start
+        // is anchored on the first mail; a tiny budget + a real sleep makes
+        // the elapsed check at the decision deterministic.
         burst_reset();
         let tiny = Duration::from_nanos(1);
-        burst_note_mail(tiny); // n == 1 anchors BURST_START
+        burst_note_mail(tiny); // anchors BURST_START
         thread::sleep(Duration::from_micros(50));
         assert!(
-            burst_over_budget(Some(u32::MAX), tiny),
-            "only the time path can trip here (mail count is 1, mail budget u32::MAX)"
+            burst_over_budget(tiny),
+            "the time path trips past the budget"
         );
         // Time budgeting off ⇒ the time path is never consulted, even though
         // the same elapsed time has passed.
         assert!(
-            !burst_over_budget(Some(u32::MAX), Duration::ZERO),
+            !burst_over_budget(Duration::ZERO),
             "time_budget 0 never trips on elapsed"
         );
         burst_reset();
-        assert!(
-            !burst_over_budget(Some(u32::MAX), tiny),
-            "reset clears the burst start"
-        );
+        assert!(!burst_over_budget(tiny), "reset clears the burst start");
     }
 
     #[test]
@@ -932,13 +796,6 @@ mod tests {
         // simulated pool worker (own deque installed on this thread). Under
         // the Phase 3 keep-local default a small cascade (burst well under
         // budget) stays on the own deque — no spill, no sibling wakeup.
-        //
-        // `schedule` reads the env-cached `mail_budget()`; skip when `cap=1`
-        // is opted back in (`AETHER_LOCAL_MAIL_BUDGET=0`), where the second
-        // schedule legitimately spills its backlog instead.
-        if mail_budget() == Some(0) {
-            return;
-        }
         install(Worker::new_lifo());
         drain_local();
         burst_reset();

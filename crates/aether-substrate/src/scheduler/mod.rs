@@ -70,7 +70,7 @@ pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
 
 /// The scheduler + lifecycle hot-path tuning knobs registered for
 /// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).
-/// Concatenates the five deque / keep-local-valve knobs
+/// Concatenates the four deque / keep-local-valve knobs
 /// (`worker_deque::DEQUE_KNOBS`), the handoff-cost calibration knob
 /// (`calibrate::CALIBRATE_KNOBS`), the lifecycle advance-timeout knob
 /// ([`LIFECYCLE_KNOBS`]), the three blob-recruiter knobs
@@ -88,7 +88,6 @@ pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
     worker_deque::DEQUE_KNOBS[1],
     worker_deque::DEQUE_KNOBS[2],
     worker_deque::DEQUE_KNOBS[3],
-    worker_deque::DEQUE_KNOBS[4],
     calibrate::CALIBRATE_KNOBS[0],
     LIFECYCLE_KNOBS[0],
     RECRUIT_KNOBS[0],
@@ -107,7 +106,6 @@ mod knob_tests {
         let keys: Vec<&str> = SCHEDULER_KNOBS.iter().map(|r| r.env_key).collect();
         for expected in [
             "AETHER_LOCAL_STICKY_MAX",
-            "AETHER_LOCAL_MAIL_BUDGET",
             "AETHER_LOCAL_TIME_BUDGET_US",
             "AETHER_PEER_STEAL",
             "AETHER_LOCAL_CHAIN_BACKSTOP",
@@ -123,7 +121,7 @@ mod knob_tests {
                 "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
             );
         }
-        assert_eq!(SCHEDULER_KNOBS.len(), 11);
+        assert_eq!(SCHEDULER_KNOBS.len(), 10);
     }
 
     #[test]
@@ -140,10 +138,10 @@ mod knob_tests {
 
     #[test]
     fn adaptive_knobs_have_no_literal_default() {
-        // time_budget / mail_budget are adaptive / off-by-default with
-        // no single literal default (ADR-0090 unit b2): their record
-        // default is None ("derived/unset"), satisfied by the doc text.
-        for key in ["AETHER_LOCAL_TIME_BUDGET_US", "AETHER_LOCAL_MAIL_BUDGET"] {
+        // time_budget / wake_cost_nanos are adaptive with no single literal
+        // default (ADR-0090 unit b2): their record default is None
+        // ("derived/unset"), satisfied by the doc text.
+        for key in ["AETHER_LOCAL_TIME_BUDGET_US", "AETHER_WAKE_COST_NANOS"] {
             let rec = SCHEDULER_KNOBS
                 .iter()
                 .find(|r| r.env_key == key)

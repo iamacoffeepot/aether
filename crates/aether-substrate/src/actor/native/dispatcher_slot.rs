@@ -228,12 +228,12 @@ where
     // happen to, but the surface mirrors the owning dispatch loop.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
-        // iamacoffeepot/aether#1160: count this envelope against the
+        // iamacoffeepot/aether#1160: note this envelope against the
         // worker's local-drain burst *before* running the handler, so a
-        // blob this handler produces (scheduled at `ctx` drop below) sees
-        // the current envelope in the keep-local budget. Off a pool worker
-        // / in the default-preserving config this is a single `Cell`
-        // increment (no clock).
+        // blob this handler produces (scheduled at `ctx` drop below) is
+        // measured against a burst start that already covers this handler.
+        // With the time valve on, the burst's first mail anchors the start
+        // (one clock read per burst); with it off, this is a no-op.
         burst_note_mail(time_budget());
         let inbound_mail_id = env.mail_id;
         // Issue 734 / ADR-0088 §7: stamp the dispatching thread's

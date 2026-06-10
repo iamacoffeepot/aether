@@ -461,7 +461,6 @@ mod tests {
         let known = chassis_known_keys();
         for key in [
             "AETHER_LOCAL_STICKY_MAX",
-            "AETHER_LOCAL_MAIL_BUDGET",
             "AETHER_LOCAL_TIME_BUDGET_US",
             "AETHER_PEER_STEAL",
             "AETHER_HANDOFF_COST_NS",

@@ -342,8 +342,8 @@ fn worker_loop(
 /// `worker_deque::try_push_local_budgeted`, iamacoffeepot/aether#1174) —
 /// produced blobs are cascade descendants kept warm — until the per-burst
 /// **time valve** (`worker_deque::time_budget`, default 12µs) trips and spills
-/// a heavy cascade to parallelise; mail-count budgeting (#1160) is off by
-/// default. The own deque is checked first so a pushed slot is never stranded.
+/// a heavy cascade to parallelise. The own deque is checked first so a pushed
+/// slot is never stranded.
 ///
 /// When the own deque is empty, this resets the local-drain burst
 /// (iamacoffeepot/aether#1160) — one local cascade is one burst, so the
