@@ -69,6 +69,14 @@ crate-type = ["cdylib"]
 name = "stateful_replace"
 crate-type = ["cdylib"]
 
+# Issue 1454: cube render fixture. Emits a twelve-triangle world-space
+# unit cube under a fixed `view_proj` so the TestBench cube scenario can
+# assert the camera + depth + readback pipeline.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/cube.wasm
+[[example]]
+name = "cube"
+crate-type = ["cdylib"]
+
 # Issue 1472: DAG `Source` fixture. Replies a fixed `Mat4Apply` operand
 # on `Mat4SourceTrigger`, feeding the `mat4_apply` transform downstream.
 # Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/mat4_source.wasm
