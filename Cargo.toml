@@ -32,6 +32,11 @@ exclude = [
     "spikes/aether-mail-spike-host",
     "spikes/prompt-pipeline-spike",
     "spikes/recruit-k-sim",
+    # The cargo-fuzz harness (issue 1562) is its own nested crate on the
+    # nightly toolchain; keeping it out of the workspace members leaves
+    # the stable `cargo` build, the lockfile, and the `crate:<short>`
+    # product-crate convention untouched.
+    "fuzz",
 ]
 
 [workspace.package]

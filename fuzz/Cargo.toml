@@ -1,0 +1,47 @@
+[package]
+name = "aether-codec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace root. The root `Cargo.toml` already lists `fuzz`
+# under `exclude`, but the nested crate must also stop cargo's
+# parent-manifest walk so it never re-absorbs into an enclosing
+# workspace (e.g. when this checkout lives inside another tree).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.aether-codec]
+path = "../crates/aether-codec"
+
+[dependencies.aether-data]
+path = "../crates/aether-data"
+
+# The fuzz crate is deliberately outside the root workspace (the root
+# `Cargo.toml` lists it under `exclude`), so it carries its own profile
+# rather than inheriting the workspace one.
+
+[lib]
+path = "src/lib.rs"
+
+# The corpus generator emits one valid `encode_schema` frame per table
+# schema. A maintenance tool, not part of the fuzz run.
+[[bin]]
+name = "gen-corpus"
+path = "src/bin/gen_corpus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_schema"
+path = "fuzz_targets/decode_schema.rs"
+test = false
+doc = false
+bench = false
