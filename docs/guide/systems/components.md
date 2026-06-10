@@ -2,7 +2,7 @@
 
 > **Governing ADRs:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (one actor model, two hosts), [ADR-0024](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0024-dual-target-host-fn-ffi.md) (the
 > dual-target FFI convention), [ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md) / [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the kind + handler
-> manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) / [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)
+> manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) / [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md) / [ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)
 > (in-place hot-swap), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
 > selected at load) and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its
 > siblings). The authoring and loading surface here is **stable** — it's
@@ -141,34 +141,39 @@ each keeps its own state.
 
 ## Hot reload
 
-Replacing a component's wasm *without* dropping its mailbox is opt-in. By default a
-component isn't replaceable; to participate, impl the `Replaceable` subtrait and
-emit with the `replaceable` flag:
+Every component can already be replaced in place — its wasm swapped behind a stable
+mailbox without a drop. State continuity across that swap rides two `FfiActor` hooks,
+`on_dehydrate` and `on_rehydrate`, that default to no-ops ([ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)). Override them
+to carry state forward: `on_dehydrate` serializes the old instance's state, and
+`on_rehydrate` recovers it on the replacement. There's no `replaceable` flag on
+`export!` and no subtrait — participation is the override itself:
 
 ```rust
-impl Replaceable for MyComponent {
-    fn on_replace<C>(&mut self, ctx: &mut C)
-    where C: MailSender + Persistence {
-        ctx.save_state_kind(1, &self.snapshot());   // hand state to the successor
+#[actor]
+impl FfiActor for MyComponent {
+    // init / wire / #[handler]s as usual …
+
+    fn on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>) {
+        ctx.save_state_kind::<Snapshot>(0, &snapshot);   // hand state to the successor
     }
 
-    fn on_rehydrate<C>(&mut self, ctx: &mut C, prior: PriorState<'_>)
-    where C: OutboundReply {
-        if let Some(snap) = prior.as_kind::<Snapshot>(Snapshot::ID) { … }
+    fn on_rehydrate(&mut self, ctx: &mut FfiCtx<'_>, prior: PriorState<'_>) {
+        if let Some(snap) = prior.as_kind::<Snapshot>() { … }
     }
 }
 
-aether_actor::export!(MyComponent, replaceable);
+aether_actor::export!(MyComponent);
 ```
 
 `aether.component.replace` ([ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md)) freezes the target mailbox, **drains
-in-flight mail through the old instance**, calls `on_replace` on it (its chance to
+in-flight mail through the old instance**, calls `on_dehydrate` on it (its chance to
 serialize state via the `Persistence` ctx), instantiates the new wasm module
 **behind the same binding**, and calls `on_rehydrate` on the new instance with the
-prior state bundle if one was saved. If the drain exceeds its timeout the replace
-fails and the **old instance stays bound** — a failed swap is a no-op, not a
-half-swapped actor. `ReplaceResult::Ok` carries the new component's capabilities so
-the hub's cached view reflects the swapped binary.
+prior state bundle if one was saved. A component that leaves both hooks at their
+default swaps cleanly and comes back fresh from `init`. If the drain exceeds its
+timeout the replace fails and the **old instance stays bound** — a failed swap is a
+no-op, not a half-swapped actor. `ReplaceResult::Ok` carries the new component's
+capabilities so the hub's cached view reflects the swapped binary.
 
 The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): the swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
