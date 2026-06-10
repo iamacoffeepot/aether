@@ -61,7 +61,7 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
 
 ## Execute phase
 
-1. Set project item's `Phase = Executing` and reconcile the issue label to `phase:executing` (see [Phase label reconcile](#phase-label-reconcile)). In `--quick` label-only mode (issue not on the board), set the label and skip the board field. Post audit comment: `[implement] Executing — branched <type>/issue-<N>-<slug> off main, worktree .claude/worktrees/issue-<N>`.
+1. Set project item's `Phase = Executing` (item ID from `release-state.json`'s `item_cache`, targeted-lookup fallback per `/scope` §Project board mechanics) and reconcile the issue label to `phase:executing` (see [Phase label reconcile](#phase-label-reconcile)). In `--quick` label-only mode (issue not on the board), set the label and skip the board field. No comment — the label event records the transition, and the branch/worktree are printed in the run's output.
 
 2. Implement per the issue body's `## Implementation plan` section. The agent follows the plan literally: same files, same sequence, same test coverage. Deviations are bounces, not freelancing.
 
@@ -79,7 +79,7 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
    gh pr create --draft --title "<conventional-commit title>" --body "<see PR body template below>"
    ```
 
-5. Audit comment on issue: `[implement] PR opened: #<pr-number>`.
+   No "PR opened" comment — the PR body's closing reference creates a cross-reference event in the issue's timeline.
 
 ## Refine loop (the spin-until-green part)
 
@@ -108,15 +108,13 @@ After PR open, enter the loop. On each iteration:
 
 4. If real failure, fix in the worktree, push to the same branch, increment attempt counter, goto step 1.
 
-5. Set project item's `Phase` to `Refine` during fix-and-wait, back to `Executing` when pushing the fix. (Flicker is intentional — gives the board honest visibility.) Reconcile the `phase:*` label on each flip (see [Phase label reconcile](#phase-label-reconcile)).
+5. Set project item's `Phase` to `Refine` during fix-and-wait, back to `Executing` when pushing the fix. (Flicker is intentional — gives the board honest visibility.) Reconcile the `phase:*` label on each flip (see [Phase label reconcile](#phase-label-reconcile)). No per-attempt comments — the PR's own commit and check history is the attempt record; track the attempt counter in-session.
 
-6. Audit comment per attempt: `[implement] CI failed (attempt <N>/<retry-cap>): <one-line summary>` and `[implement] Fix pushed for attempt <N>`.
+6. **Retry cap hit** → self-bounce. `Phase=Bounced`, `BounceTo=Plan`, comment with the full attempt history.
 
-7. **Retry cap hit** → self-bounce. `Phase=Bounced`, `BounceTo=Plan`, comment with the full attempt history.
+7. **Wall-clock hit** → self-bounce. Same as retry cap with the elapsed time noted.
 
-8. **Wall-clock hit** → self-bounce. Same as retry cap with the elapsed time noted.
-
-9. **Design-level discovery** at any attempt → self-bounce. `Phase=Bounced`, `BounceTo=Design`, comment with the specific finding. Examples:
+8. **Design-level discovery** at any attempt → self-bounce. `Phase=Bounced`, `BounceTo=Design`, comment with the specific finding. Examples:
    - "Approach X doesn't work because Y; needs alternative."
    - "Test Z passes only if we also change A, which is outside §Implementation plan."
 
@@ -130,10 +128,9 @@ Format/clippy/build are never flakes — always real, always immediate fix.
 
 CI green:
 
-1. Audit comment: `[implement] CI green on attempt <N>. Draft PR #<pr-number> ready for your review.`
-2. Project item: leave `Phase = Refine` and `AgentReady = Yes` (the issue label stays `phase:refine`). The resting state is "draft PR open + green".
-3. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not auto-set Phase=Done. Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
-4. Print to user:
+1. Project item: leave `Phase = Refine` and `AgentReady = Yes` (the issue label stays `phase:refine`). The resting state is "draft PR open + green" — no comment; the green checks on the PR are the record.
+2. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not auto-set Phase=Done. Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
+3. Print to user:
 
    ```
    ✓ #<N> implemented and CI-green.
@@ -151,15 +148,18 @@ For v1, that final transition is manual: the user merges via `gh pr merge` or th
 
 ## Self-bounce mechanics
 
-Uses the same machinery as `/bounce` — see that skill's "Self-bounce by other skills" section. Audit comment prefix is `[implement]`:
+Uses the same machinery as `/bounce` — see that skill's "Self-bounce by other skills" section. The bounce comment is prose markdown carrying the reason and the full attempt history (the one place that history lives):
 
-```
-[implement] Self-bounce after attempt <N>: Executing → Bounced (BounceTo=Plan).
-   Reason: <retry cap hit | wall clock hit | scope expansion needed | ...>
-   Attempts history:
-     1. <failure summary>
-     2. <failure summary>
-     3. <failure summary>
+```markdown
+**Bounced to Plan** — retry cap hit after attempt <N>.
+
+Attempts:
+
+1. <failure summary>
+2. <failure summary>
+3. <failure summary>
+
+<what the plan needs to address before a re-run>
 ```
 
 The worktree stays on disk until the user cleans up — useful for inspecting the failed state. Worktree cleanup is *not* part of self-bounce.
@@ -220,7 +220,7 @@ gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:rea
 - Edit the issue body (only `/scope` does).
 - Re-scope the issue when CI surfaces problems — bounce instead.
 - Address reviewer feedback on the PR. Reviewers comment; `/bounce` if the feedback requires re-scoping; manual handling otherwise.
-- Notify anyone. Audit comments are the surface.
+- Notify anyone. The printed output and the `phase:*` labels are the surface; the only comment this skill posts is a self-bounce reason.
 - Merge — code PRs always hold for your review; auto-merge is the release process's call, not this skill's.
 - Run scoped (without `--quick`) on issues that aren't in the active project. For an ad-hoc fix outside the board, use `--quick` (label-only mode).
 - Clean up worktrees after success or bounce. Leaves them for inspection; `git worktree remove .claude/worktrees/issue-<N>` is the user's call.

@@ -1,6 +1,6 @@
 ---
 name: secretary
-description: Surface everything that needs your attention as a ranked queue, then prompt with `AskUserQuestion` selectors so resolution is click-driven instead of typed. Bidirectional — invoke as `/secretary` to see what's pending, or have Claude/agents post a blocker via `/secretary --post-blocker` when mid-task work needs a user decision. Scans observable state (open PRs, project board phases, failing CI, unanswered audit comments) plus a posted-blockers file. Output is a printed queue followed by selector questions (HIGH/MED) — LOW items print-only.
+description: Surface everything that needs your attention as a ranked queue, then prompt with `AskUserQuestion` selectors so resolution is click-driven instead of typed. Bidirectional — invoke as `/secretary` to see what's pending, or have Claude/agents post a blocker via `/secretary --post-blocker` when mid-task work needs a user decision. Scans observable state (open PRs, project board phases, failing CI, unresolved bounce reasons) plus a posted-blockers file. Output is a printed queue followed by selector questions (HIGH/MED) — LOW items print-only.
 ---
 
 # /secretary — pending-attention queue
@@ -36,7 +36,7 @@ Most blockers are observable; the skill doesn't need anything written ahead of t
 1. **Open PRs you authored** — `gh pr list --author @me --state open --json number,title,createdAt,reviewDecision,statusCheckRollup`. Items with no review and >24h old are MED; items with failing CI are HIGH.
 2. **Open PRs from agents on your behalf** — `gh pr list --search "is:open author:app/*"` (or filter by branch prefix if agents use a convention).
 3. **Active release project** (if `.claude/release-state.json` exists) — items at `Phase=Plan` with `AgentReady=No` (awaiting `/approve`), `Phase=Bounced` (need triage), `Phase=Stalled` (env/tooling).
-4. **Issues with unanswered `[bounce]` / `[scope]` audit comments** since the last user reply on that issue.
+4. **Issues labeled `phase:bounced` / `phase:stalled`** — `gh issue list --label phase:bounced` (one cheap REST call; repeat for `phase:stalled`). This is the label-side mirror of source 3's board scan and works even when `release-state.json` is absent. An issue is *unresolved* when the user hasn't commented since the bounce-reason comment; fetch that comment's text for the item's description so the queue entry says what's blocked, not just that something is.
 5. **Failing CI on your branches** — `gh run list --branch <branch> --status failure --limit 5` per checked-out branch with recent activity.
 6. **Wish reports awaiting triage** — `ls wishes/` directories without corresponding filed issues. Cross-reference against `gh issue list` body content (search for the wish slug).
 7. **Pending memory writes** — entries in `~/.claude/projects/.../memory/PENDING.md` if the file exists (a thin convention: Claude appends "memory I think should be saved but you haven't decided on" entries; `/secretary` surfaces them as multi-choice).
@@ -129,7 +129,7 @@ After the user picks, act on each one (run `/approve`, `/bounce`, save memory fi
 ## Priority rules
 
 - **HIGH**: posted blockers (active agents are waiting); CI red on a branch with recent commits; Bounced / Stalled project items; PRs with explicit "changes requested" review.
-- **MED**: open PRs >24h with no review; project items at `Phase=Plan + AgentReady=No`; unanswered audit comments; failing CI on branches without recent commits.
+- **MED**: open PRs >24h with no review; project items at `Phase=Plan + AgentReady=No`; failing CI on branches without recent commits.
 - **LOW**: pending memory saves; old wish reports awaiting triage; stale unmerged branches with no PR.
 
 If `--high` is passed, only HIGH items print.

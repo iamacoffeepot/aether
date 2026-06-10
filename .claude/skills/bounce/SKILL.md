@@ -5,7 +5,7 @@ description: Explicit phase regression. Move an issue from its current Phase bac
 
 # /bounce — explicit phase regression
 
-The user invokes `/bounce` when reviewing scope artifacts (or watching execution) and concludes an upstream phase needs rework. The skill records the regression as a `Phase=Bounced` + `BounceTo=<phase>` state with an audit comment. `/scope` then resumes from the target phase on next invocation.
+The user invokes `/bounce` when reviewing scope artifacts (or watching execution) and concludes an upstream phase needs rework. The skill records the regression as a `Phase=Bounced` + `BounceTo=<phase>` state with the reason posted as a comment. `/scope` then resumes from the target phase on next invocation.
 
 Self-bounces by other skills (`/scope` hitting a wall, `/implement` discovering a design flaw mid-execution) use the same mechanism — this skill is the explicit user-driven wrapper.
 
@@ -42,17 +42,16 @@ A bounce from `Ready` to `Plan` is valid (target=3 < current=4). A bounce from `
 
 ## Actions on pass
 
-1. Set the project item's `Phase` field to `Bounced`, and reconcile the issue label to `phase:bounced` (see [Phase label reconcile](#phase-label-reconcile)).
-2. Set the project item's `BounceTo` field to the target phase.
-3. Post an audit comment:
+1. Set the project item's `Phase` field to `Bounced` and its `BounceTo` field to the target phase in **one** `gh api graphql` request — two aliased `updateProjectV2ItemFieldValue` mutations against the same item (item ID from `item_cache`, targeted-lookup fallback per `/scope` §Project board mechanics). Then reconcile the issue label to `phase:bounced` (see [Phase label reconcile](#phase-label-reconcile)).
+2. Post the reason as a comment — it is the surviving comment class (information addressed to a human with no structured home), written as prose markdown with a bold lead:
 
+   ```markdown
+   **Bounced to <target>** (from <previous-phase>)
+
+   <reason text, verbatim>
    ```
-   [bounce] Phase regression by <user>: <previous-phase> → Bounced (BounceTo=<target>).
 
-   Reason: <text>
-   ```
-
-4. Print summary:
+3. Print summary:
 
    ```
    ✓ #N bounced.
@@ -70,18 +69,23 @@ When `/scope <issue>` runs on a Bounced issue, it must:
 2. Set `Phase=<BounceTo>` (clears the Bounced state), reconciling the label from `phase:bounced` to `phase:<BounceTo>`.
 3. Run from that phase forward — redoing the bounced phase and every downstream phase.
 
-If the user passes `/scope <issue> --phase <name>` while bounced and `<name>` matches `BounceTo`, behavior is identical (the flag is the explicit form of the same intent). If `<name>` differs from `BounceTo`, honor `<name>` (the user is overriding) but post a comment noting the override.
+If the user passes `/scope <issue> --phase <name>` while bounced and `<name>` matches `BounceTo`, behavior is identical (the flag is the explicit form of the same intent). If `<name>` differs from `BounceTo`, honor `<name>` (the user is overriding) and note the override in the run's output.
 
 ## Self-bounce by other skills
 
-Skills that detect their own wall conditions (`/scope` hitting a vague issue body, `/implement` discovering a broken assumption) call into the same logic: set `Phase=Bounced`, set `BounceTo=<phase>`, post a comment. The audit comment prefix changes to identify the source:
+Skills that detect their own wall conditions (`/scope` hitting a vague issue body, `/implement` discovering a broken assumption) call into the same logic: set `Phase=Bounced`, set `BounceTo=<phase>`, post the blocker as a comment. Same prose-markdown shape, with the lead naming what's blocked and the body carrying the question or finding:
 
+```markdown
+**Bounced to Design** — the two candidate shapes are genuinely tied.
+
+<the specific question the user must answer>
 ```
-[scope] Self-bounce: <previous> → Bounced (BounceTo=Design).
-   Question: <the blocker>
 
-[implement] Self-bounce: Executing → Bounced (BounceTo=Plan).
-   Discovered during implementation: <the issue>
+```markdown
+**Bounced to Plan** — discovered during implementation.
+
+<the broken assumption, with the file/test that exposed it; for /implement,
+the attempt history follows here>
 ```
 
 Same skill mechanism, different invocation site. `/bounce` is the user-driven variant.
@@ -90,7 +94,7 @@ Same skill mechanism, different invocation site. `/bounce` is the user-driven va
 
 `Phase=Stalled` is a different signal — env/tooling failure, not a phase regression. Examples: qodana CI service down, GitHub API rate-limited mid-batch, `gh` token expired. The issue's scoping is fine; the *environment* is the problem.
 
-v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit` with the BounceTo field left null. When you do, also set the `phase:stalled` label on the issue (`gh issue edit <n> --remove-label "phase:define,…,phase:bounced,phase:stalled" && gh issue edit <n> --add-label phase:stalled` — `&&`-chained per [Phase label reconcile](#phase-label-reconcile)) so the halt is visible in `gh issue list`. Future `/stall <issue> --reason "<env-issue>"` would post the same kind of audit comment.
+v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit` with the BounceTo field left null. When you do, also set the `phase:stalled` label on the issue (`gh issue edit <n> --remove-label "phase:define,…,phase:bounced,phase:stalled" && gh issue edit <n> --add-label phase:stalled` — `&&`-chained per [Phase label reconcile](#phase-label-reconcile)) so the halt is visible in `gh issue list`. Future `/stall <issue> --reason "<env-issue>"` would post the reason the same way `/bounce` does — it's the same surviving comment class.
 
 ## Phase label reconcile
 
