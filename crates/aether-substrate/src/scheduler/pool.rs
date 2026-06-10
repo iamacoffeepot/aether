@@ -480,8 +480,9 @@ mod tests {
 
     /// End-to-end happy path: register a slot, push N envelopes,
     /// observe the worker drain them all and park the slot Idle.
-    #[test]
-    fn pool_drains_pushed_envelopes() {
+    /// Body lives here to share the parent helpers; the `#[test]` wrapper
+    /// is in `mod heavy` (issue 1522 — spawns a worker pool + `wait_until`).
+    fn pool_drains_pushed_envelopes_body() {
         let handle = standard_handle(1);
         let slot = CounterSlot::new("happy");
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
@@ -508,9 +509,9 @@ mod tests {
 
     /// Two slots, both perpetually ready: a worker fairly round-robins
     /// (the budget yield is what enables this — without it one slot
-    /// would monopolise the worker until empty).
-    #[test]
-    fn two_slots_round_robin_under_budget() {
+    /// would monopolise the worker until empty). Body here, `#[test]`
+    /// wrapper in `mod heavy` (issue 1522 — worker pool + `wait_until`).
+    fn two_slots_round_robin_under_budget_body() {
         // One worker so the round-robin is observable. Custom budget
         // — a tiny mail cap means each slot hits Yielded quickly and
         // the worker drains the other.
@@ -565,9 +566,9 @@ mod tests {
     /// A handler panic escalates via the [`FatalAborter`]. The test
     /// uses [`PanicAborter`] (the test-only aborter) which `panic!`s
     /// instead of `process::exit`; the worker thread propagates the
-    /// panic, and `shutdown` returns it via `JoinHandle::join`.
-    #[test]
-    fn handler_panic_escalates_via_aborter() {
+    /// panic, and `shutdown` returns it via `JoinHandle::join`. Body here,
+    /// `#[test]` wrapper in `mod heavy` (issue 1522 — pool + `wait_until`).
+    fn handler_panic_escalates_via_aborter_body() {
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
         let handle = Pool::start(
             PoolConfig {
@@ -765,6 +766,24 @@ mod tests {
                 "every-K backstop must dispatch injector work under full \
                  worker capture (iamacoffeepot/aether#1535)"
             );
+        }
+
+        /// `#[test]` wrappers for the parent dispatch tests that spawn a
+        /// worker pool and `wait_until`-poll under a multi-second deadline
+        /// (issue 1522). Bodies stay in the parent to share its helpers.
+        #[test]
+        fn pool_drains_pushed_envelopes() {
+            pool_drains_pushed_envelopes_body();
+        }
+
+        #[test]
+        fn two_slots_round_robin_under_budget() {
+            two_slots_round_robin_under_budget_body();
+        }
+
+        #[test]
+        fn handler_panic_escalates_via_aborter() {
+            handler_panic_escalates_via_aborter_body();
         }
 
         /// Stress: 4 slots × 1000 envelopes each across 2 workers. Confirm

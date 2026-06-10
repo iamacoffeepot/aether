@@ -724,90 +724,98 @@ mod tests {
         assert_eq!(decoded, r2);
     }
 
-    /// Resolves-within-cap: the signal fires after one round elapses
-    /// (exercising the re-arm path), and the helper returns `Settled`.
-    #[test]
-    fn await_internal_signal_resolves_after_rearm() {
-        let (tx, rx) = bounded::<()>(1);
-        // Fire from a sibling thread after roughly one round budget so
-        // the first `recv_timeout` times out (logging + re-arm) and the
-        // second resolves.
-        let handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(30));
-            let _ = tx.try_send(());
-        });
-        let outcome = await_internal_signal(
-            &rx,
-            "test.rearm",
-            Duration::from_millis(10),
-            Duration::from_secs(5),
-            TerminalDisposition::Proceed,
-        );
-        handle.join().expect("firing thread joins");
-        assert!(matches!(outcome, WaitOutcome::Settled));
-    }
+    /// The `await_internal_signal` family drives the real `recv_timeout`
+    /// settlement loop (one spawns a firing thread) under sub-100ms round
+    /// budgets, so they live in `mod heavy` for the `serial-heavy` nextest
+    /// group (issue 1522).
+    mod heavy {
+        use super::*;
 
-    /// Cap-exhaustion: the signal never fires, so the helper exhausts
-    /// the cumulative cap and returns `Wedged` (not disconnected) for a
-    /// non-`Panic` disposition.
-    #[test]
-    fn await_internal_signal_cap_exhaustion_wedges() {
-        // Hold the sender alive so the channel doesn't disconnect —
-        // this is the silent-to-cap path, distinct from `Disconnected`.
-        let (_tx, rx) = bounded::<()>(1);
-        let outcome = await_internal_signal(
-            &rx,
-            "test.cap",
-            Duration::from_millis(5),
-            Duration::from_millis(20),
-            TerminalDisposition::ReplyErr,
-        );
-        match outcome {
-            WaitOutcome::Wedged(w) => {
-                assert!(!w.disconnected);
-                assert_eq!(w.gate, "test.cap");
-                assert!(w.waited >= Duration::from_millis(20));
-            }
-            WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
+        /// Resolves-within-cap: the signal fires after one round elapses
+        /// (exercising the re-arm path), and the helper returns `Settled`.
+        #[test]
+        fn await_internal_signal_resolves_after_rearm() {
+            let (tx, rx) = bounded::<()>(1);
+            // Fire from a sibling thread after roughly one round budget so
+            // the first `recv_timeout` times out (logging + re-arm) and the
+            // second resolves.
+            let handle = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(30));
+                let _ = tx.try_send(());
+            });
+            let outcome = await_internal_signal(
+                &rx,
+                "test.rearm",
+                Duration::from_millis(10),
+                Duration::from_secs(5),
+                TerminalDisposition::Proceed,
+            );
+            handle.join().expect("firing thread joins");
+            assert!(matches!(outcome, WaitOutcome::Settled));
         }
-    }
 
-    /// `Disconnected`: dropping the sender takes the same terminal path
-    /// as cap-exhaustion, with `disconnected` set.
-    #[test]
-    fn await_internal_signal_disconnect_wedges() {
-        let (tx, rx) = bounded::<()>(1);
-        drop(tx);
-        let outcome = await_internal_signal(
-            &rx,
-            "test.disconnect",
-            Duration::from_millis(50),
-            Duration::from_secs(5),
-            TerminalDisposition::Proceed,
-        );
-        match outcome {
-            WaitOutcome::Wedged(w) => {
-                assert!(w.disconnected);
-                assert_eq!(w.gate, "test.disconnect");
+        /// Cap-exhaustion: the signal never fires, so the helper exhausts
+        /// the cumulative cap and returns `Wedged` (not disconnected) for a
+        /// non-`Panic` disposition.
+        #[test]
+        fn await_internal_signal_cap_exhaustion_wedges() {
+            // Hold the sender alive so the channel doesn't disconnect —
+            // this is the silent-to-cap path, distinct from `Disconnected`.
+            let (_tx, rx) = bounded::<()>(1);
+            let outcome = await_internal_signal(
+                &rx,
+                "test.cap",
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+                TerminalDisposition::ReplyErr,
+            );
+            match outcome {
+                WaitOutcome::Wedged(w) => {
+                    assert!(!w.disconnected);
+                    assert_eq!(w.gate, "test.cap");
+                    assert!(w.waited >= Duration::from_millis(20));
+                }
+                WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
             }
-            WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
         }
-    }
 
-    /// `Panic` disposition diverges inside the helper on a wedge —
-    /// asserts the gate fails attributably at the gate site.
-    #[test]
-    #[should_panic(expected = "gate test.panic wedged")]
-    fn await_internal_signal_panic_disposition_diverges() {
-        let (tx, rx) = bounded::<()>(1);
-        drop(tx);
-        let _ = await_internal_signal(
-            &rx,
-            "test.panic",
-            Duration::from_millis(5),
-            Duration::from_millis(20),
-            TerminalDisposition::Panic,
-        );
+        /// `Disconnected`: dropping the sender takes the same terminal path
+        /// as cap-exhaustion, with `disconnected` set.
+        #[test]
+        fn await_internal_signal_disconnect_wedges() {
+            let (tx, rx) = bounded::<()>(1);
+            drop(tx);
+            let outcome = await_internal_signal(
+                &rx,
+                "test.disconnect",
+                Duration::from_millis(50),
+                Duration::from_secs(5),
+                TerminalDisposition::Proceed,
+            );
+            match outcome {
+                WaitOutcome::Wedged(w) => {
+                    assert!(w.disconnected);
+                    assert_eq!(w.gate, "test.disconnect");
+                }
+                WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
+            }
+        }
+
+        /// `Panic` disposition diverges inside the helper on a wedge —
+        /// asserts the gate fails attributably at the gate site.
+        #[test]
+        #[should_panic(expected = "gate test.panic wedged")]
+        fn await_internal_signal_panic_disposition_diverges() {
+            let (tx, rx) = bounded::<()>(1);
+            drop(tx);
+            let _ = await_internal_signal(
+                &rx,
+                "test.panic",
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+                TerminalDisposition::Panic,
+            );
+        }
     }
 
     /// The settlement-notice payload postcard-decodes back to the

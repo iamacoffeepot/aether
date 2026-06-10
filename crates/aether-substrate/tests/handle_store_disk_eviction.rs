@@ -200,40 +200,46 @@ fn eviction_recovers_from_orphan_bin() {
     cleanup(&root);
 }
 
-#[test]
-fn eviction_ledger_stays_consistent_under_concurrent_writes() {
-    let root = scratch_root("ledger");
-    let cfg = cfg_with_budget(&root, u64::MAX);
-    let store = Arc::new(HandleStore::with_persist(
-        256 * 1024 * 1024,
-        Some(cfg.clone()),
-    ));
-    // 10 threads × 100 distinct entries × 256 bytes.
-    let handles: Vec<_> = (0..10u64)
-        .map(|t| {
-            let store = Arc::clone(&store);
-            thread::spawn(move || {
-                for i in 0..100u64 {
-                    let id = HandleId(t * 1000 + i + 1);
-                    let origin = TransformOrigin {
-                        component_mailbox: t,
-                        transform_index: 0,
-                        input_handle_ids: vec![],
-                    };
-                    store
-                        .put_persistent(id, KindId(7), vec![0u8; 256], Some(origin))
-                        .unwrap();
-                }
+/// Spawns 10 writer threads racing `put_persistent` and joins them, so it
+/// lives in `mod heavy` for the `serial-heavy` nextest group (issue 1522).
+mod heavy {
+    use super::*;
+
+    #[test]
+    fn eviction_ledger_stays_consistent_under_concurrent_writes() {
+        let root = scratch_root("ledger");
+        let cfg = cfg_with_budget(&root, u64::MAX);
+        let store = Arc::new(HandleStore::with_persist(
+            256 * 1024 * 1024,
+            Some(cfg.clone()),
+        ));
+        // 10 threads × 100 distinct entries × 256 bytes.
+        let handles: Vec<_> = (0..10u64)
+            .map(|t| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    for i in 0..100u64 {
+                        let id = HandleId(t * 1000 + i + 1);
+                        let origin = TransformOrigin {
+                            component_mailbox: t,
+                            transform_index: 0,
+                            input_handle_ids: vec![],
+                        };
+                        store
+                            .put_persistent(id, KindId(7), vec![0u8; 256], Some(origin))
+                            .unwrap();
+                    }
+                })
             })
-        })
-        .collect();
-    for h in handles {
-        h.join().unwrap();
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Distinct ids → ledger equals actual on-disk bin bytes.
+        assert_eq!(store.disk_bytes(), actual_bin_bytes(&cfg));
+        assert_eq!(store.disk_bytes(), 1000 * 256);
+        cleanup(&root);
     }
-    // Distinct ids → ledger equals actual on-disk bin bytes.
-    assert_eq!(store.disk_bytes(), actual_bin_bytes(&cfg));
-    assert_eq!(store.disk_bytes(), 1000 * 256);
-    cleanup(&root);
 }
 
 #[test]
