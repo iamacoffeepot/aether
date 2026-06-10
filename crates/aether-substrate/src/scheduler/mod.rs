@@ -69,7 +69,7 @@ pub const LIFECYCLE_KNOBS: &[KnobRecord] = &[KnobRecord {
 
 /// The scheduler + lifecycle hot-path tuning knobs registered for
 /// config discovery (ADR-0090 unit b2, iamacoffeepot/aether#1255).
-/// Concatenates the four deque / keep-local-valve knobs
+/// Concatenates the five deque / keep-local-valve knobs
 /// (`worker_deque::DEQUE_KNOBS`), the handoff-cost calibration knob
 /// (`calibrate::CALIBRATE_KNOBS`), and the lifecycle advance-timeout
 /// knob ([`LIFECYCLE_KNOBS`]) into the single
@@ -85,6 +85,7 @@ pub const SCHEDULER_KNOBS: &[KnobRecord] = &[
     worker_deque::DEQUE_KNOBS[1],
     worker_deque::DEQUE_KNOBS[2],
     worker_deque::DEQUE_KNOBS[3],
+    worker_deque::DEQUE_KNOBS[4],
     calibrate::CALIBRATE_KNOBS[0],
     LIFECYCLE_KNOBS[0],
 ];
@@ -95,13 +96,14 @@ mod knob_tests {
     use crate::config::KnobKind;
 
     #[test]
-    fn scheduler_knobs_cover_all_six_hot_path_env_keys() {
+    fn scheduler_knobs_cover_all_seven_hot_path_env_keys() {
         let keys: Vec<&str> = SCHEDULER_KNOBS.iter().map(|r| r.env_key).collect();
         for expected in [
             "AETHER_LOCAL_STICKY_MAX",
             "AETHER_LOCAL_MAIL_BUDGET",
             "AETHER_LOCAL_TIME_BUDGET_US",
             "AETHER_PEER_STEAL",
+            "AETHER_LOCAL_CHAIN_BACKSTOP",
             "AETHER_HANDOFF_COST_NS",
             "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
         ] {
@@ -110,7 +112,7 @@ mod knob_tests {
                 "SCHEDULER_KNOBS missing {expected}; has {keys:?}",
             );
         }
-        assert_eq!(SCHEDULER_KNOBS.len(), 6);
+        assert_eq!(SCHEDULER_KNOBS.len(), 7);
     }
 
     #[test]
