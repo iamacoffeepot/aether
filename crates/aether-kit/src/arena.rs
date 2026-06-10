@@ -68,10 +68,13 @@ const COLUMN_THICK: i32 = 2;
 /// Gap width in the wall, in sub-cells (~3 tiles of breathing room).
 const COLUMN_GAP: i32 = 12;
 
-// Wave: a single expanding arc — one ~90° sector of an outward ring.
+// Wave: a single expanding arc — one sector of an outward ring.
 const WAVE_TICKS_PER_STEP: i32 = 5;
 const WAVE_THICK: i32 = 3;
 const WAVE_MAX: i32 = 50;
+/// Wave half-angle as a `(numerator, denominator)` slope bound on `|cross| /
+/// dot` (see [`paint_arc`]): `(1, 1)` is a ±45° wedge, a 90° sector.
+const WAVE_WEDGE: (i32, i32) = (1, 1);
 
 /// The eight compass directions a wave can face.
 const COMPASS_DIRS: [(i32, i32); 8] = [
@@ -96,9 +99,11 @@ const MAX_CONCURRENT: usize = 2;
 const SPEED_DEN: i32 = 4;
 const SPEED_MIN: i32 = 1; // 0.25×
 const SPEED_MAX: i32 = 16; // 4×
-/// Adjustable wall-thickness bounds, in sub-cells.
+/// Adjustable wall-thickness bounds, in sub-cells. The ceiling is high enough
+/// for a wall to read as a thick advancing slab (40 sub = 10 tiles, most of the
+/// 16-tile field), not just a thin line.
 const WALL_MIN: i32 = 1;
-const WALL_MAX: i32 = 8;
+const WALL_MAX: i32 = 40;
 
 /// A sub-cell's current hazard state.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -212,9 +217,15 @@ impl Pattern {
             Shape::Wave { cx, cz, ux, uz } => {
                 let wf = (age / WAVE_TICKS_PER_STEP).min(WAVE_MAX);
                 let df = (danger_age / WAVE_TICKS_PER_STEP).min(WAVE_MAX);
-                paint_arc(field, cx, cz, df, wf + WAVE_THICK, Phase::Warning, (ux, uz));
+                let arc = ArcSpec {
+                    cx,
+                    cz,
+                    dir: (ux, uz),
+                    wedge: WAVE_WEDGE,
+                };
+                paint_arc(field, df, wf + WAVE_THICK, Phase::Warning, arc);
                 if age >= LEAD_TICKS {
-                    paint_arc(field, cx, cz, df, df + WAVE_THICK, Phase::Danger, (ux, uz));
+                    paint_arc(field, df, df + WAVE_THICK, Phase::Danger, arc);
                 }
             }
         }
@@ -399,6 +410,91 @@ impl Arena {
             Phase::Safe | Phase::Warning => None,
         }
     }
+
+    /// Design aid (not gameplay): freeze the field into a static 3×3 contact
+    /// sheet of one shape's parameter variations, so the look of each parameter
+    /// reads at a glance under the top-down preview camera. Thickness varies
+    /// down the rows; the shape's spatial parameter varies across the columns.
+    /// `shape`: `1` ring, `2` wall, `3` wave; anything else clears the field.
+    /// The danger band shows red with its leading-edge orange telegraph, the
+    /// same as in play.
+    pub fn show_matrix(&mut self, shape: u32) {
+        self.phases.fill(Phase::Safe);
+        match shape {
+            1 => self.paint_ring_matrix(),
+            2 => self.paint_wall_matrix(),
+            3 => self.paint_wave_matrix(),
+            _ => {}
+        }
+    }
+
+    /// Rings: band thickness down the rows, expansion-frontier radius across the
+    /// columns. Orange leads outward — where the ring is about to reach.
+    fn paint_ring_matrix(&mut self) {
+        const RADII: [i32; 3] = [4, 6, 8];
+        const THICKS: [i32; 3] = [2, 3, 4];
+        for (row, &thick) in THICKS.iter().enumerate() {
+            for (col, &radius) in RADII.iter().enumerate() {
+                let (cx, cz) = panel_center(col, row);
+                paint_annulus(&mut self.phases, cx, cz, radius, radius + 3, Phase::Warning);
+                paint_annulus(&mut self.phases, cx, cz, radius - thick, radius, Phase::Danger);
+            }
+        }
+    }
+
+    /// Walls: a wall spans the whole arena, so it reads as a barrier rather than
+    /// a panel tile. Three full-width walls stacked down the field, thickness
+    /// growing top to bottom at a fixed gap; orange leads downward (`+z`), the
+    /// sweep direction. Each wall is anchored at the top of its band so the
+    /// thick one grows down into its own space without overlapping the next.
+    #[allow(clippy::cast_possible_wrap)] // row is a 0..3 loop index
+    fn paint_wall_matrix(&mut self) {
+        const THICKS: [i32; 3] = [4, 10, 16];
+        const GAP: i32 = 10;
+        let gap_lo = HW / 2 - GAP / 2;
+        let gap_hi = HW / 2 + GAP / 2;
+        let band = HH / 3;
+        for (row, &thick) in THICKS.iter().enumerate() {
+            let z0 = row as i32 * band + 1;
+            for k in 0..thick {
+                paint_line(&mut self.phases, true, z0 + k, gap_lo, gap_hi, Phase::Danger);
+            }
+            for k in thick..(thick + 3) {
+                paint_line(&mut self.phases, true, z0 + k, gap_lo, gap_hi, Phase::Warning);
+            }
+        }
+    }
+
+    /// Waves: band thickness down the rows, arc width across the columns. Each
+    /// arc opens downward (`+z`); orange leads outward along the radius.
+    fn paint_wave_matrix(&mut self) {
+        const WEDGES: [(i32, i32); 3] = [(1, 2), (1, 1), (2, 1)];
+        const THICKS: [i32; 3] = [2, 3, 4];
+        const RADIUS: i32 = 8;
+        for (row, &thick) in THICKS.iter().enumerate() {
+            for (col, &wedge) in WEDGES.iter().enumerate() {
+                let (cx, panel_cz) = panel_center(col, row);
+                // Centre the arc's apex in the panel's upper quarter so the
+                // sector opens down into the panel.
+                let cz = panel_cz - HH / 12;
+                let arc = ArcSpec {
+                    cx,
+                    cz,
+                    dir: (0, 1),
+                    wedge,
+                };
+                paint_arc(&mut self.phases, RADIUS, RADIUS + 3, Phase::Warning, arc);
+                paint_arc(&mut self.phases, RADIUS - thick, RADIUS, Phase::Danger, arc);
+            }
+        }
+    }
+}
+
+/// Sub-cell center of preview panel `(col, row)` in a 3×3 grid over the field.
+#[allow(clippy::cast_possible_wrap)] // col/row are 0..3 loop indices
+fn panel_center(col: usize, row: usize) -> (i32, i32) {
+    let (pw, ph) = (HW / 3, HH / 3);
+    (col as i32 * pw + pw / 2, row as i32 * ph + ph / 2)
 }
 
 /// Set a sub-cell to `phase`, with danger overriding an existing warning but a
@@ -432,22 +528,31 @@ fn paint_annulus(field: &mut [Phase], cx: i32, cz: i32, r_lo: i32, r_hi: i32, ph
     }
 }
 
-/// Paint the annulus `r_lo <= dist < r_hi` about a center, but only within the
-/// ~90° arc facing `(ux, uz)` — a single wave segment. Integer cross/dot, so
-/// it stays deterministic.
-fn paint_arc(
-    field: &mut [Phase],
+/// A wave arc: a sector of an annulus about `(cx, cz)` opening toward `dir`,
+/// `wedge`-wide. `wedge` is a `(numerator, denominator)` bound on the slope
+/// `|cross| / dot` from the facing axis — `(1, 1)` is a ±45° half-angle (a 90°
+/// sector), `(1, 2)` narrows it (~±27°), `(2, 1)` widens it (~±63°).
+#[derive(Clone, Copy)]
+struct ArcSpec {
     cx: i32,
     cz: i32,
-    r_lo: i32,
-    r_hi: i32,
-    phase: Phase,
     dir: (i32, i32),
-) {
+    wedge: (i32, i32),
+}
+
+/// Paint the annulus `r_lo <= dist < r_hi` about the arc's center, but only
+/// within the sector facing `arc.dir` and no wider than `arc.wedge`. Integer
+/// cross/dot, so it stays deterministic.
+fn paint_arc(field: &mut [Phase], r_lo: i32, r_hi: i32, phase: Phase, arc: ArcSpec) {
     if r_hi <= 0 {
         return;
     }
-    let (ux, uz) = dir;
+    let ArcSpec {
+        cx,
+        cz,
+        dir: (ux, uz),
+        wedge: (wn, wd),
+    } = arc;
     let r_lo = r_lo.max(0);
     let (lo2, hi2) = (r_lo * r_lo, r_hi * r_hi);
     for sz in (cz - r_hi).max(0)..=(cz + r_hi).min(HH - 1) {
@@ -455,11 +560,11 @@ fn paint_arc(
             let (dx, dz) = (sx - cx, sz - cz);
             let d2 = dx * dx + dz * dz;
             if d2 >= lo2 && d2 < hi2 {
-                // Within ±45° of the facing direction: |cross| ≤ dot, on its
-                // side (dot > 0).
+                // On the facing side (dot > 0) and within the wedge:
+                // |cross| / dot <= wn / wd, compared by cross-multiplication.
                 let dot = dx * ux + dz * uz;
                 let cross = dx * uz - dz * ux;
-                if dot > 0 && cross.abs() <= dot {
+                if dot > 0 && cross.abs() * wd <= dot * wn {
                     set(field, sx, sz, phase);
                 }
             }

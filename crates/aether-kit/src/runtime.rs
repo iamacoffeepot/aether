@@ -85,7 +85,7 @@ use aether_kinds::{
 use aether_math::{Mat4, Vec3};
 
 use crate::arena::{Arena, HH, HW, SUB};
-use crate::{OCTIMETERS_PER_TILE, SetGranularity, SetWalkable, TILE_BITS, Teleport};
+use crate::{OCTIMETERS_PER_TILE, Preview, SetGranularity, SetWalkable, TILE_BITS, Teleport};
 
 /// Walkable map dimensions, in tiles.
 pub(crate) const GRID_W: i32 = 16;
@@ -320,6 +320,10 @@ pub struct Locomotion {
     /// Whether to draw the orange warning telegraph. Off is a hardcore mode —
     /// only the red strikes (and the blue refuge) show. Toggled with `O`.
     show_warnings: bool,
+    /// Design-aid preview (not play): when non-zero the live game is frozen and
+    /// the field shows a static parameter matrix of one shape (see [`Preview`]),
+    /// viewed top-down. `0` is normal play.
+    preview: u32,
 }
 
 #[actor]
@@ -349,6 +353,7 @@ impl FfiActor for Locomotion {
             cam_held: CamHeld::default(),
             arena: Arena::new(),
             show_warnings: true,
+            preview: 0,
         })
     }
 
@@ -366,6 +371,11 @@ impl FfiActor for Locomotion {
 
     #[handler]
     fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {
+        // In preview mode the game is frozen: the static matrix in the field
+        // must persist, so skip the simulation entirely.
+        if self.preview != 0 {
+            return;
+        }
         self.orbit_camera();
         self.arena.tick();
         self.advance();
@@ -456,6 +466,15 @@ impl FfiActor for Locomotion {
     #[handler]
     fn on_set_granularity(&mut self, _ctx: &mut FfiCtx<'_>, mail: SetGranularity) {
         self.set_cell(mail.cell_octimeters);
+    }
+
+    #[handler]
+    fn on_preview(&mut self, _ctx: &mut FfiCtx<'_>, mail: Preview) {
+        self.preview = mail.shape;
+        if mail.shape != 0 {
+            self.arena.show_matrix(mail.shape);
+        }
+        tracing::info!(shape = mail.shape, "locomotion preview");
     }
 }
 
@@ -577,10 +596,17 @@ impl Locomotion {
         (target + offset, target)
     }
 
-    /// Perspective `view_proj` for the follow camera.
+    /// Perspective `view_proj`: the follow camera in play, or a fixed top-down
+    /// view framing the whole grid in preview (so the parameter matrix reads
+    /// like a contact sheet).
     fn view_proj(&self) -> [f32; 16] {
-        let (eye, target) = self.camera_eye_target();
-        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let (eye, target, up) = if self.preview == 0 {
+            let (eye, target) = self.camera_eye_target();
+            (eye, target, Vec3::Y)
+        } else {
+            preview_camera()
+        };
+        let view = Mat4::look_at_rh(eye, target, up);
         let proj = Mat4::perspective_rh(CAMERA_FOV_Y, self.aspect(), CAMERA_Z_NEAR, CAMERA_Z_FAR);
         (proj * view).to_cols_array()
     }
@@ -697,17 +723,25 @@ impl Locomotion {
                 push_quad(&mut out, tx as f32 + 0.5, tz as f32 + 0.5, 0.48, 0.0, color);
             }
         }
-        // Hazard overlay at sub-cell resolution, laid just above the floor.
+        // Hazard overlay at sub-cell resolution, laid just above the floor. In
+        // preview the orange telegraph always shows (the matrix is about seeing
+        // both bands), independent of the hardcore toggle.
+        let show_warnings = self.show_warnings || self.preview != 0;
         let sub = SUB as f32;
         let half = 0.5 / sub;
         for sz in 0..HH {
             for sx in 0..HW {
-                if let Some(color) = self.arena.subcell_color(sx, sz, self.show_warnings) {
+                if let Some(color) = self.arena.subcell_color(sx, sz, show_warnings) {
                     let cx = (sx as f32 + 0.5) / sub;
                     let cz = (sz as f32 + 0.5) / sub;
                     push_quad(&mut out, cx, cz, half, 0.02, color);
                 }
             }
+        }
+        // The preview is a static contact sheet: no player or destination, just
+        // the parameter matrix on the floor.
+        if self.preview != 0 {
+            return out;
         }
         // Click-to-move destination: the exact cell the mover will rest in,
         // sized to the active granularity. Laid above the hazard overlay
@@ -946,6 +980,18 @@ fn step_camera(yaw: f32, pitch: f32, yaw_dir: f32, pitch_dir: f32) -> (f32, f32)
         .mul_add(CAMERA_PITCH_SPEED, pitch)
         .clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
     (yaw, pitch)
+}
+
+/// Fixed top-down camera for the preview matrix: looks straight down at the
+/// grid center from high enough that the whole 16×16 floor frames with a
+/// margin. Returns `(eye, target, up)`; `up = -Z` puts grid `+Z` toward the
+/// bottom of frame, so matrix rows read top-to-bottom.
+fn preview_camera() -> (Vec3, Vec3, Vec3) {
+    let cx = GRID_W as f32 / 2.0;
+    let cz = GRID_H as f32 / 2.0;
+    let eye = Vec3::new(cx, 20.0, cz);
+    let target = Vec3::new(cx, 0.0, cz);
+    (eye, target, Vec3::new(0.0, 0.0, -1.0))
 }
 
 /// Append a flat axis-aligned quad (two triangles) on the XZ plane.
