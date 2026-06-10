@@ -35,6 +35,7 @@ exclude:
       # attached to any cargo target, so Qodana's "Detached file"
       # inspection fires on every one. The detachment is the trybuild
       # contract, not a defect; exclude the fixture trees.
+      - crates/aether-actor-derive/tests/ui
       - crates/aether-data-derive/tests/ui
       - crates/aether-derive/tests/ui
 

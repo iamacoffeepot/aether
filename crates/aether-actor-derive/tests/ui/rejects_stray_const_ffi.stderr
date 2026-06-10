@@ -1,0 +1,5 @@
+error: #[actor] impl FfiActor for X accepts only `const NAMESPACE: &'static str = …` — the `Actor` super-trait carries no other authorable const
+  --> tests/ui/rejects_stray_const_ffi.rs:28:5
+   |
+28 |     const BUFFER_CAPACITY: usize = 64;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

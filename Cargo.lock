@@ -59,6 +59,7 @@ dependencies = [
  "quote",
  "serde",
  "syn",
+ "trybuild",
 ]
 
 [[package]]

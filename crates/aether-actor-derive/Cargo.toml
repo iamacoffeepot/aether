@@ -17,6 +17,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive", "std"] }
 inventory = { workspace = true }
 aether-actor = { path = "../aether-actor" }
+trybuild = "1"
 
 [lints]
 workspace = true

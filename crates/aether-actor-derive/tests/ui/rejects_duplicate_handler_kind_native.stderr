@@ -1,0 +1,5 @@
+error: two #[handler] methods accept the same mail kind `Ping` (also on `on_first`) — each kind routes to exactly one handler. Give each handler a distinct kind.
+  --> tests/ui/rejects_duplicate_handler_kind_native.rs:45:8
+   |
+45 |     fn on_second(
+   |        ^^^^^^^^^
