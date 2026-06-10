@@ -26,7 +26,9 @@ use std::sync::atomic::AtomicU64;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
-use crate::actor::native::{ExportedHandles, NativeActor, NativeDispatch, NativeInitCtx};
+use crate::actor::native::{
+    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+};
 use crate::chassis::Chassis;
 use crate::chassis::ctx::MailboxSender;
 use crate::chassis::ctx::MailboxWakeSlot;
@@ -593,7 +595,7 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
         // so `Local<T>` and `tracing::*` route into this actor's
         // `ActorLogRing` identically.
         local::with_stamped(&resources.slots, || {
-            let mut wire_ctx = crate::actor::native::NativeCtx::new(
+            let mut wire_ctx = NativeCtx::new(
                 &resources.transport,
                 aether_data::Source::NONE,
                 aether_data::MailId::NONE,
