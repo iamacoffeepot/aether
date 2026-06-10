@@ -34,17 +34,18 @@ Reads `.claude/release-state.json` at the repo root:
     "Size":       { "id": "...", "options": { ... } },
     "AgentReady": { "id": "...", "options": { ... } },
     "BounceTo":   { "id": "...", "options": { ... } }
-  }
+  },
+  "item_cache": { "<issue-number>": "PVTI_..." }
 }
 ```
 
 If the file is missing, abort with: *"No active release state. Run `/release-init <version>` first or create `.claude/release-state.json`."*
 
-The cache is populated by `/release-init`; this skill never writes it.
+`field_cache` is populated by `/release-init`; no other skill writes it. `item_cache` maps issue numbers to project item IDs — `/sketch` seeds it at filing, and any skill appends on a lookup miss (see [Project board mechanics](#project-board-mechanics)). Item IDs are stable for the life of the project.
 
 ## Phase walk
 
-For each sub-phase: read inputs, write the corresponding body section, post a brief progress comment, advance the `Phase` field on the project board — and reconcile the matching `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)). If a sub-phase has nothing to do (already complete on a resumed run), skip it.
+For each sub-phase: read inputs, write the corresponding body section, advance the `Phase` field on the project board — and reconcile the matching `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)). If a sub-phase has nothing to do (already complete on a resumed run), skip it.
 
 ### Define
 
@@ -99,7 +100,7 @@ For each sub-phase: read inputs, write the corresponding body section, post a br
 - **Multi-PR split** triggers when:
   - More than 3 logically-separable changes, *or*
   - More than 2 crates with logically-separable work
-  - In that case, file each sub-issue (Phase=Backlog initially, link parent), update §Sub-issues, and scope each child in a follow-up `/scope` run.
+  - In that case, file each sub-issue via `/sketch`'s mechanics (Phase=Backlog initially, link parent), update §Sub-issues, and scope each child in a follow-up `/scope` run.
 - **Size estimation** — set the `Size` custom field on the project item:
   - **S**: single file, single concept, <100 LOC change
   - **M**: single crate, multiple files, <500 LOC change
@@ -119,17 +120,18 @@ During Design and Plan reads, the agent will inevitably notice unrelated issues 
 
 These are *not auto-filed* as child issues. The user reviews them at `/approve` time and chooses which to spin off via `/scope-spinoff <issue>` (separate skill).
 
-## Comments (audit trail)
+## Comments
 
-After each sub-phase completes, post a brief comment so the timeline is legible:
+No progress comments — phase transitions are already legible from the `phase:*` labels (the issue timeline records every label change), the board fields, and the body sections themselves. A comment exists only when it is addressed to a human and carries content with no structured home. For this skill that is the **self-bounce question/blocker**, written as prose markdown with a bold lead, no `[skill]` prefix:
 
+```markdown
+**Bounced to Define** — the body doesn't say which chassis this applies to.
+
+Desktop-only (window mail exists) or all four? The answer changes whether the
+headless chassis needs a nop mailbox. Re-run `/scope` once the body says.
 ```
-[scope] Define complete — see body §Problem statement
-[scope] Design complete — chose A over B because <one-line reason>
-[scope] Plan complete — Size=M, sub-issues filed: #NNN, #MMM
-```
 
-Bounces are full comments with the question/blocker. Don't pad them with summaries of the section.
+Don't pad the comment with summaries of work that completed — the body sections carry that.
 
 ## Body editing mechanics
 
@@ -154,14 +156,16 @@ gh project item-edit \
     --single-select-option-id <option-id>
 ```
 
-All four IDs come from `.claude/release-state.json`'s `field_cache`. The item ID for a given issue:
+Field and option IDs come from `.claude/release-state.json`'s `field_cache`; the item ID comes from its `item_cache` (keyed by issue number). On a cache miss, resolve it with one targeted GraphQL query — never a board-wide `gh project item-list` scan:
 
-```
-gh project item-list <active_project> --owner <owner> --format json \
-  | jq '.items[] | select(.content.number == <issue-number>) | .id'
+```bash
+gh api graphql -f query='query { repository(owner: "<owner>", name: "aether") {
+  issue(number: <n>) { projectItems(first: 10) { nodes { id project { id } } } } } }'
 ```
 
-Cache item IDs per-issue per-run to avoid repeated lookups.
+Pick the node whose `project.id` matches `project_node_id`, then append it to `item_cache` so every later run skips the query.
+
+GitHub's REST and GraphQL rate budgets are separate, and the GraphQL one is the binding constraint when many agents run — spend GraphQL only where it's mandatory (board field reads/writes); labels, comments, and body edits ride REST via plain `gh issue` commands.
 
 ## Phase label reconcile
 
@@ -187,7 +191,7 @@ gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:rea
 - Merge anything.
 - Auto-file side findings as child issues (use `/scope-spinoff`).
 - Set `AgentReady=Yes` (use `/approve`).
-- Set `Type` — that should come from the issue title's conventional-commit prefix (`feat:` → `feat`, `fix:` → `fix`, etc.). If unset, infer from title; if title has no prefix, leave unset and surface in a Plan-phase comment.
+- Set `Type` — that should come from the issue title's conventional-commit prefix (`feat:` → `feat`, `fix:` → `fix`, etc.). If unset, infer from title; if title has no prefix, leave unset and surface it in the run's output.
 
 ## Failure modes to handle gracefully
 
@@ -195,5 +199,5 @@ gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:rea
 - **Issue not in active project**: add it (`gh project item-add`), then proceed.
 - **`gh` lacks `project` scope**: abort with *"Run `gh auth refresh -s project`"*.
 - **Issue already at Phase=Done or Phase=Executing**: refuse with *"Issue is past Plan — use `/bounce` to regress or work in a fresh issue."*
-- **ADR drafting failure**: keep the issue at Design, post a comment explaining, don't advance to Plan.
-- **Body-edit collision (user edited body mid-run)**: re-read, re-merge, post a comment if there are conflicts in managed sections.
+- **ADR drafting failure**: keep the issue at Design, explain in the run's output, don't advance to Plan.
+- **Body-edit collision (user edited body mid-run)**: re-read, re-merge, surface any conflicts in managed sections in the run's output.

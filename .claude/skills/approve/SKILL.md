@@ -11,7 +11,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
 ```
 /approve <issue>                    standard
-/approve <issue> --note "<text>"    adds the text to the audit comment
+/approve <issue> --note "<text>"    posts the text as a comment on the issue
 /approve <issue> --skip-adr         bypass the ADR-merged check (emergency override)
 ```
 
@@ -22,7 +22,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
 ## Gate checks
 
-Run all of these. **Refuse** if any fail; list every failure in the refusal comment, don't stop at the first.
+Run all of these. **Refuse** if any fail; list every failure in the refusal output, don't stop at the first.
 
 | Gate | Check | Refusal message |
 |------|-------|-----------------|
@@ -37,16 +37,14 @@ If **all** gates pass, proceed.
 
 ## Actions on pass
 
-1. Set the project item's `AgentReady` field to `Yes`.
-2. Set the project item's `Phase` field to `Ready`, and reconcile the issue label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)).
-3. Post an audit comment:
+1. Set the project item's `AgentReady` field to `Yes` and its `Phase` field to `Ready` in **one** `gh api graphql` request — two aliased `updateProjectV2ItemFieldValue` mutations against the same item (field/option IDs from `field_cache`, item ID from `item_cache` with the targeted-lookup fallback — see `/scope` §Project board mechanics). Then reconcile the issue label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)).
+2. No comment on a plain approve — the `phase:ready` label, the board fields, and the timeline's label event already record it. If `--note` was passed, post the note as prose markdown:
 
-   ```
-   [approve] Plan approved by <user>. Phase → Ready, AgentReady=Yes.
-   <--note text if passed>
+   ```markdown
+   **Approved** — <note text>
    ```
 
-4. Print a summary to the user:
+3. Print a summary to the user:
 
    ```
    ✓ #N approved.
@@ -88,12 +86,12 @@ For each such reference, run `gh pr view <N> --json mergedAt,state` and require 
 - The ADR is intentionally drafted in the same release but lands separately (e.g. ADR-NNNN cluster work).
 - The change is small enough that ADR-by-the-time-Ready is overkill in retrospect.
 
-When `--skip-adr` is used, the audit comment is verbose:
+When `--skip-adr` is used, a comment is mandatory — the override rationale has no structured home, and the next reader of the issue needs it:
 
-```
-[approve] Plan approved by <user> with --skip-adr override.
-   Unmerged ADRs at approval time: #M
-   Reason: <required note text>
+```markdown
+**Approved with `--skip-adr`** — ADR PR #M was not merged at approval time.
+
+<required note text>
 ```
 
 `--skip-adr` requires `--note "<reason>"`. Don't allow silent ADR bypasses.
@@ -122,4 +120,4 @@ gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:rea
 - Edit the issue body. Even if a gate fails because a section is missing, /approve doesn't write the missing section — that's `/scope`'s job.
 - Auto-resolve side findings.
 - Close umbrella issues when children complete. Future work.
-- Notify anyone. The audit comment is the notification surface.
+- Notify anyone. The printed summary (and the `phase:ready` label) is the surface; comments appear only for `--note` / `--skip-adr`.
