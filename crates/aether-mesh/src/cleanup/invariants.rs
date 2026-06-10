@@ -24,7 +24,7 @@ use crate::point::Point3;
 
 /// One twin-edge violation surfaced by [`find_twin_edges`].
 #[derive(Debug, Clone)]
-pub struct TwinEdgeViolation {
+pub(super) struct TwinEdgeViolation {
     pub plane: Plane3,
     pub color: u32,
     pub edge: (VertexId, VertexId),
@@ -35,7 +35,7 @@ pub struct TwinEdgeViolation {
 /// fixed-point coordinates — both mean the welded mesh's vertex identity
 /// guarantee broke.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PostWeldViolation {
+pub(super) enum PostWeldViolation {
     /// Polygon[`poly_idx`] references `vertex_id ≥ pool_size`.
     OrphanedId {
         poly_idx: usize,
@@ -55,7 +55,7 @@ pub enum PostWeldViolation {
 /// strictly interior to some polygon's edge, meaning the repair pass
 /// didn't reach a fixed point.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnrepairedTJunction {
+pub(super) struct UnrepairedTJunction {
     pub edge: (VertexId, VertexId),
     pub interior_vertex: VertexId,
 }
@@ -64,7 +64,7 @@ pub struct UnrepairedTJunction {
 /// dropped below 3 vertices (should have been retained-out by the pass)
 /// or carries adjacent duplicate `VertexId`s (the dedup didn't fire).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PostSliverViolation {
+pub(super) enum PostSliverViolation {
     /// Polygon has fewer than 3 vertices.
     TooFewVertices { poly_idx: usize, len: usize },
     /// `polygon.vertices[i] == polygon.vertices[(i+1) % n]`.
@@ -81,7 +81,7 @@ pub enum PostSliverViolation {
 /// that already lives elsewhere in the loop, but any non-adjacent repeat
 /// breaks the simple-polygon contract that downstream passes assume.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NonSimpleLoopViolation {
+pub(super) struct NonSimpleLoopViolation {
     pub poly_idx: usize,
     pub vertex_id: VertexId,
     /// First two positions in `poly.vertices` where `vertex_id` appears.
@@ -102,7 +102,7 @@ fn bucket_key(plane: &Plane3, color: u32) -> BucketKey {
 /// emit a non-simple loop is identifiable.
 ///
 /// O(P · V) — one `HashSet` per polygon, single linear scan.
-pub fn find_non_simple_loops(mesh: &IndexedMesh) -> Vec<NonSimpleLoopViolation> {
+pub(super) fn find_non_simple_loops(mesh: &IndexedMesh) -> Vec<NonSimpleLoopViolation> {
     use std::collections::HashMap;
     let mut violations: Vec<NonSimpleLoopViolation> = Vec::new();
     for (poly_idx, poly) in mesh.polygons.iter().enumerate() {
@@ -135,7 +135,7 @@ pub fn find_non_simple_loops(mesh: &IndexedMesh) -> Vec<NonSimpleLoopViolation> 
 /// Returns one violation per surviving twin pair. Buckets are scanned
 /// in undefined order; within a bucket, `edge` is the lexicographically
 /// smaller direction so each twin pair surfaces exactly once.
-pub fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
+pub(super) fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
     use std::collections::HashMap;
     let mut directed: HashMap<BucketKey, HashMap<(VertexId, VertexId), usize>> = HashMap::new();
     for poly in &mesh.polygons {
@@ -191,7 +191,7 @@ pub fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
 ///
 /// O(P + V) — orphan check is per-polygon-vertex, duplicate check is
 /// one linear sweep into a `HashMap<Point3, VertexId>`.
-pub fn find_post_weld_violations(mesh: &IndexedMesh) -> Vec<PostWeldViolation> {
+pub(super) fn find_post_weld_violations(mesh: &IndexedMesh) -> Vec<PostWeldViolation> {
     use std::collections::HashMap;
     let mut violations: Vec<PostWeldViolation> = Vec::new();
     let pool_size = mesh.vertices.len();
@@ -244,7 +244,7 @@ pub fn find_post_weld_violations(mesh: &IndexedMesh) -> Vec<PostWeldViolation> {
 /// check is warn-only diagnostic; if it dominates cleanup time the
 /// soak-then-promote cadence in the module doc applies (cull the warn
 /// or move it behind a `cfg(debug_assertions)`).
-pub fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJunction> {
+pub(super) fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJunction> {
     use std::collections::HashSet;
     let mut edges: HashSet<(VertexId, VertexId)> = HashSet::new();
     for poly in &mesh.polygons {
@@ -283,7 +283,7 @@ pub fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJunction
 /// before retain), so violations here mean a regression in either step.
 ///
 /// O(P · `V_avg`).
-pub fn find_post_sliver_violations(mesh: &IndexedMesh) -> Vec<PostSliverViolation> {
+pub(super) fn find_post_sliver_violations(mesh: &IndexedMesh) -> Vec<PostSliverViolation> {
     let mut violations: Vec<PostSliverViolation> = Vec::new();
     for (poly_idx, poly) in mesh.polygons.iter().enumerate() {
         let n = poly.vertices.len();

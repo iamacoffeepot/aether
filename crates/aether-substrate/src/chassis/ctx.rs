@@ -228,12 +228,6 @@ impl MailboxSender {
 /// fan-out).
 pub type FallbackRouter = Arc<dyn Fn(&Envelope) -> bool + Send + Sync + 'static>;
 
-/// Marker trait for type-erased chassis-stored entries. The chassis
-/// builder's `BootedPassives` holds per-cap shutdown shims as
-/// `Box<dyn ActorErased>` so the chassis can drop them in reverse
-/// boot order regardless of cap type.
-pub trait ActorErased: Send {}
-
 /// Kernel-side handle bundle exposed to a capability during its
 /// `boot()` call. Shared (`&mut`) across every `boot()` in the
 /// builder — one ctx per build, threaded through the capability list

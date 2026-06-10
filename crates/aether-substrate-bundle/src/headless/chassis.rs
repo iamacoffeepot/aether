@@ -32,8 +32,8 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
 use crate::autoload::{AutoloadComponent, autoload_mail};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server, resolve_persist_state,
-    tick_only_lifecycle_config, with_common_caps,
+    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server, parse_workers_env,
+    resolve_persist_state, tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -41,7 +41,6 @@ use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
-use std::env;
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -173,35 +172,6 @@ impl HeadlessEnv {
             handle_store_max_bytes,
             autoload: Vec::new(),
         })
-    }
-}
-
-//noinspection DuplicatedCode
-/// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
-/// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
-/// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
-/// one worker); unparseable → `None` with a warn. Issue 745.
-fn parse_workers_env() -> Option<usize> {
-    let raw = env::var("AETHER_WORKERS").ok()?;
-    match raw.trim().parse::<usize>() {
-        Ok(0) => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                "AETHER_WORKERS=0 — clamping to 1",
-            );
-            Some(1)
-        }
-        Ok(n) => Some(n),
-        Err(e) => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                error = %e,
-                "AETHER_WORKERS unparseable — falling back to PoolConfig::default",
-            );
-            None
-        }
     }
 }
 
@@ -337,66 +307,5 @@ impl HeadlessChassis {
             mailer.push(autoload_mail(component));
         }
         Ok(built)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_workers_env;
-    use std::env;
-    use std::sync::Mutex;
-    use std::sync::PoisonError;
-
-    /// Process-wide guard around `AETHER_WORKERS` env mutation —
-    /// `cargo test` parallelises within a binary, so each parser test
-    /// has to serialise its set/remove pair. Shared with the desktop
-    /// chassis test would require a crate-level module; one per chassis
-    /// is fine given there are four tests total.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        // Safety: this test owns the AETHER_WORKERS slot for the
-        // duration of the closure via ENV_LOCK; no other thread inside
-        // the same test binary mutates it concurrently. Edition-2024
-        // marked the env mutators unsafe due to non-test signal-handler
-        // races that don't apply here.
-        unsafe {
-            match value {
-                Some(v) => env::set_var("AETHER_WORKERS", v),
-                None => env::remove_var("AETHER_WORKERS"),
-            }
-        }
-        let out = f();
-        // SAFETY: same justification as the prior block — this test
-        // still owns the `AETHER_WORKERS` slot via `ENV_LOCK`.
-        unsafe {
-            env::remove_var("AETHER_WORKERS");
-        }
-        out
-    }
-
-    #[test]
-    fn parse_workers_unset_returns_none() {
-        let parsed = with_env(None, parse_workers_env);
-        assert_eq!(parsed, None);
-    }
-
-    #[test]
-    fn parse_workers_positive_returns_some() {
-        let parsed = with_env(Some("4"), parse_workers_env);
-        assert_eq!(parsed, Some(4));
-    }
-
-    #[test]
-    fn parse_workers_zero_clamps_to_one() {
-        let parsed = with_env(Some("0"), parse_workers_env);
-        assert_eq!(parsed, Some(1));
-    }
-
-    #[test]
-    fn parse_workers_unparseable_returns_none() {
-        let parsed = with_env(Some("abc"), parse_workers_env);
-        assert_eq!(parsed, None);
     }
 }

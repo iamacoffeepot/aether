@@ -35,7 +35,7 @@ use super::driver::{DesktopDriverCapability, parse_window_mode_env};
 use crate::autoload::{AutoloadComponent, autoload_mail};
 use crate::chassis_common::{
     CommonBoot, PersistOverride, chassis_known_keys, frame_lifecycle_config, maybe_with_rpc_server,
-    resolve_persist_state, with_common_caps,
+    parse_workers_env, resolve_persist_state, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
@@ -309,35 +309,6 @@ impl DesktopEnv {
             handle_store_max_bytes,
             autoload: Vec::new(),
         })
-    }
-}
-
-//noinspection DuplicatedCode
-/// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
-/// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
-/// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
-/// one worker); unparseable → `None` with a warn. Issue 745.
-fn parse_workers_env() -> Option<usize> {
-    let raw = env::var("AETHER_WORKERS").ok()?;
-    match raw.trim().parse::<usize>() {
-        Ok(0) => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                "AETHER_WORKERS=0 — clamping to 1",
-            );
-            Some(1)
-        }
-        Ok(n) => Some(n),
-        Err(e) => {
-            tracing::warn!(
-                target: "aether_substrate::boot",
-                value = %raw,
-                error = %e,
-                "AETHER_WORKERS unparseable — falling back to PoolConfig::default",
-            );
-            None
-        }
     }
 }
 

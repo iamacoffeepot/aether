@@ -31,7 +31,7 @@ pub fn serialize(node: &Node) -> String {
 // inline; extracting per-variant helpers would just move the same
 // per-field plumbing one level out.
 #[allow(clippy::too_many_lines)]
-pub fn node_to_value(node: &Node) -> Value {
+pub(crate) fn node_to_value(node: &Node) -> Value {
     match node {
         Node::Box { x, y, z, color } => list([
             sym("box"),

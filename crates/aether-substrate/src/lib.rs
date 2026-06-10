@@ -77,8 +77,7 @@ pub use chassis::builder::{
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use chassis::ctx::{
-    ActorErased, ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender,
-    SharedActorSlots,
+    ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, SharedActorSlots,
 };
 pub use chassis::error::BootError;
 pub use config::{

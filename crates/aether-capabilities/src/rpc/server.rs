@@ -885,16 +885,6 @@ mod server_native {
     }
 }
 
-/// Address-resolution helper. The cap's mailbox id, derived from its
-/// `NAMESPACE` via the standard name-hash. Convenience for chassis
-/// code that wants to address the cap without round-tripping through
-/// a runtime lookup.
-#[must_use]
-pub fn rpc_server_mailbox_id() -> aether_data::MailboxId {
-    use aether_actor::Actor;
-    aether_data::mailbox_id_from_name(<RpcServerCapability as Actor>::NAMESPACE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
