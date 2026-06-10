@@ -145,14 +145,16 @@ impl FfiCtx<'_> {
         self.sender = sender.map(ReplyHandle::raw);
     }
 
-    /// Reply with an explicit `sender` + cached `KindId<K>`. Sits
-    /// alongside the trait-driven [`OutboundReply::reply`] which uses
-    /// the dispatcher-stamped sender plus `K::ID`. Useful for FFI
-    /// guests sending cast-shaped types that don't impl
-    /// `serde::Serialize` (the trait method's bound covers native's
-    /// postcard reply path; FFI's `reply_mail` only ships bytes via
-    /// [`Kind::encode_into_bytes`], so the bound is over-strict for
-    /// guest-side cast kinds).
+    /// Reply with an explicit `sender` + cached `KindId<K>`.
+    ///
+    /// Prefer the trait surface: [`OutboundReply::reply`] replies to the
+    /// dispatcher-stamped sender (a no-op when there's none), and
+    /// [`OutboundReply::reply_to`] takes an explicit [`ReplyHandle`]. Both
+    /// derive the kind from `K::ID`, so the cached `KindId<K>` argument
+    /// here is redundant.
+    #[deprecated(
+        note = "use OutboundReply::reply / reply_to; ADR-0100 dropped the Serialize bound"
+    )]
     pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.reply_mail(sender.raw(), kind.raw(), &bytes, 1);
