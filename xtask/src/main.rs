@@ -43,6 +43,9 @@ struct Cli {
 enum Commands {
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
+    /// Build a standalone, hub-less game executable with the game component
+    /// embedded at build time (#1518).
+    Bundle(BundleArgs),
 }
 
 #[derive(Args)]
@@ -54,6 +57,17 @@ struct DistArgs {
     /// fast path uses this to stay wasm-only.
     #[arg(long)]
     no_bins: bool,
+}
+
+#[derive(Args)]
+struct BundleArgs {
+    /// Cargo profile for the game binary and its component.
+    #[arg(long, value_enum, default_value_t = Profile::Release)]
+    profile: Profile,
+    /// Cross-compile the game binary for this target triple (e.g.
+    /// `x86_64-pc-windows-msvc`). Defaults to the host target.
+    #[arg(long)]
+    target: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -97,6 +111,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Dist(args) => run_dist(&args),
+        Commands::Bundle(args) => run_bundle(&args),
     }
 }
 
@@ -170,6 +185,66 @@ fn run_dist(args: &DistArgs) -> Result<()> {
         manifest.chassis.len(),
         manifest_path.display(),
     );
+    Ok(())
+}
+
+/// The game's component package, its wasm stem, and the standalone bin name.
+const GAME_COMPONENT: &str = "aether-kit";
+const GAME_COMPONENT_STEM: &str = "aether_kit";
+const GAME_BIN: &str = "aether-game";
+
+/// Build a standalone game executable: build the game component for wasm, embed
+/// it into [`GAME_BIN`] via the bundle crate's `build.rs` (which reads
+/// `AETHER_GAME_WASM`), and report the resulting binary.
+fn run_bundle(args: &BundleArgs) -> Result<()> {
+    let metadata = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .context("run cargo metadata")?;
+    let target_dir = metadata.target_directory.as_std_path();
+
+    // 1. Build the game component for wasm.
+    let mut wasm_cmd = Command::new(cargo());
+    wasm_cmd.args(["build", "--target", WASM_TARGET, "-p", GAME_COMPONENT]);
+    if let Some(flag) = args.profile.cargo_flag() {
+        wasm_cmd.arg(flag);
+    }
+    run(wasm_cmd, "build game component wasm")?;
+    let wasm = target_dir
+        .join(WASM_TARGET)
+        .join(args.profile.as_str())
+        .join(format!("{GAME_COMPONENT_STEM}.wasm"));
+    if !wasm.exists() {
+        bail!("game component wasm not found at {}", wasm.display());
+    }
+
+    // 2. Build the game binary with the wasm staged for `include_bytes!`.
+    let mut bin_cmd = Command::new(cargo());
+    bin_cmd.args(["build", "-p", CHASSIS_PACKAGE, "--bin", GAME_BIN]);
+    if let Some(flag) = args.profile.cargo_flag() {
+        bin_cmd.arg(flag);
+    }
+    if let Some(triple) = &args.target {
+        bin_cmd.args(["--target", triple]);
+    }
+    bin_cmd.env("AETHER_GAME_WASM", &wasm);
+    run(bin_cmd, "build game binary")?;
+
+    // 3. Report the output path.
+    let profile_dir = args.target.as_ref().map_or_else(
+        || target_dir.join(args.profile.as_str()),
+        |triple| target_dir.join(triple).join(args.profile.as_str()),
+    );
+    let windows = args
+        .target
+        .as_deref()
+        .is_some_and(|t| t.contains("windows"));
+    let exe = profile_dir.join(if windows {
+        format!("{GAME_BIN}.exe")
+    } else {
+        GAME_BIN.to_string()
+    });
+    println!("game bundle -> {}", exe.display());
     Ok(())
 }
 

@@ -32,6 +32,14 @@ path = "src/bin/hub.rs"
 name = "aether-substrate-test-bench"
 path = "src/bin/test-bench.rs"
 
+# Standalone game build (#1518): a desktop chassis that auto-loads a game
+# component embedded at build time, so the binary runs hub-less and
+# double-click-to-play. `build.rs` stages the wasm `aether-game` embeds;
+# `cargo xtask bundle` builds the component wasm and drives this.
+[[bin]]
+name = "aether-game"
+path = "src/bin/aether-game.rs"
+
 # Perf-comparison tooling (iamacoffeepot/aether#1077). `perf-trial` runs
 # one latency sweep and emits a TrialReport JSON; `perf-compare`
 # interleaves K base/candidate trials and renders the noise-aware paired
