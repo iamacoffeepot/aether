@@ -32,9 +32,10 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 # iamacoffeepot/aether#1275 feature-gated wasmtime out of the
 # `aether-derive` fixture dep graph (local wall-clock 240s → 18s on
 # our dev boxes); CI's 2-core runners still push it past 60s under
-# parallel contention with `aether-data-derive`'s ui binary, so both
-# crates keep the wider cap. The bigger speedup for both is its own
-# follow-up.
+# parallel contention with `aether-data-derive`'s ui binary, so all
+# three derive crates (`aether-data-derive`, `aether-derive`,
+# `aether-actor-derive`) keep the wider cap. The bigger speedup for
+# all three is its own follow-up.
 [[profile.ci.overrides]]
-filter = "package(=aether-data-derive) | package(=aether-derive)"
+filter = "package(=aether-data-derive) | package(=aether-derive) | package(=aether-actor-derive)"
 slow-timeout = { period = "300s", terminate-after = 1 }
