@@ -48,6 +48,12 @@ edition = "2024"
 # consumer today (`aether-substrate-bundle`); workspaced so future CLI
 # surfaces reach for the same major.
 clap = { version = "4", features = ["derive"] }
+# Property-based testing (issue 1561). Dev-only on the two hand-rolled
+# wire boundaries — the codec round-trip law (`aether-codec`) and the
+# mail-ring reclaim state machine (`aether-substrate`). Pinned once here
+# so both suites share a major; pulled in via `[dev-dependencies]`, never
+# linked into a production build.
+proptest = "1"
 
 # High-fanout shared deps (iamacoffeepot/aether#1526). Promoted to the
 # workspace table so the single-version property is structural — members

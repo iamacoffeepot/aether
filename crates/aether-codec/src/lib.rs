@@ -27,6 +27,8 @@ mod decode;
 mod encode;
 pub mod frame;
 #[cfg(test)]
+mod proptest_roundtrip;
+#[cfg(test)]
 mod test_fixtures;
 
 pub use decode::{DecodeError, decode_schema};
