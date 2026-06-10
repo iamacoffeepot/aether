@@ -1,6 +1,6 @@
 ---
 name: scope-spinoff
-description: Triage §Side findings into child GitHub issues. Reads the parent issue's §Side findings section, lets the user pick which entries to spin off, files each as a new Backlog-Phase issue with a conventional-commit title and a link back to the parent, then removes the spun-off entries from the parent body. Audit-comment trail on the parent records what was spun.
+description: Triage §Side findings into child GitHub issues. Reads the parent issue's §Side findings section, lets the user pick which entries to spin off, files each via /sketch's mechanics as a new Backlog-Phase issue with a link back to the parent, then removes the spun-off entries from the parent body. The children's timeline cross-references on the parent record what was spun.
 ---
 
 # /scope-spinoff — side findings → child issues
@@ -58,13 +58,7 @@ For each selected finding:
 
    For a spun-off finding the verbatim blockquote in `## Description` is the finding line as it appeared in the parent body; the expansion is any context the agent already has from reading the code. Don't set Type/Size/AgentReady — `/scope` handles those when the child gets scoped.
 
-3. **Audit comment on parent:**
-
-   ```
-   [scope-spinoff] Filed #<child> from finding "<one-line finding text>".
-   ```
-
-   One comment per spin-off, not a batched list — makes the timeline legible per-finding.
+No comment is posted on the parent: the child's `Spun off from #<parent>` line creates a cross-reference event in the parent's timeline automatically, one per filing, which is the per-finding record.
 
 After all selected findings are filed, **rewrite the parent's body** to remove the spun-off entries from §Side findings. Remaining findings keep their original numbering shifted to fill gaps (1, 2, 3 after removing original 2 means new 1, 2 — the user re-runs `/scope-spinoff` with fresh indices).
 
@@ -80,7 +74,6 @@ Would file:
   - "test(actor): add coverage for ReplaceResult error path" (from finding 3)
 
 Would remove findings 1, 3 from #<parent> §Side findings.
-Would add 2 audit comments to #<parent>.
 
 (no changes made — re-run without --dry-run to file)
 ```
@@ -97,12 +90,12 @@ Would add 2 audit comments to #<parent>.
   Use which scope? (e.g. substrate, actor, mesh, or "skip" to omit this finding)
   ```
 
-- **Parent issue closed**: still allowed — informational findings can be filed against a closed parent. Add a note in the audit comment that the parent is closed.
+- **Parent issue closed**: still allowed — informational findings can be filed against a closed parent. Note it in the run's output.
 
 ## What `/scope-spinoff` does NOT do
 
 - Scope the child issues. They're filed at `Phase=Backlog` with a title + description; running `/scope <child>` is a separate operation.
-- Auto-link as dependencies. The §Found during line in the body and the `[scope-spinoff]` audit comment on the parent are the connection. GitHub's native `--add-dependency` feature could be added in v2 if the dependency graph view becomes load-bearing.
+- Auto-link as dependencies. The §Found during line in the body (and the timeline cross-reference it creates on the parent) is the connection. GitHub's native `--add-dependency` feature could be added in v2 if the dependency graph view becomes load-bearing.
 - Modify §Problem statement, §Design notes, or §Implementation plan on the parent. Only §Side findings is touched.
 - Reorder remaining findings. Index reuse means re-run = different number for the same item; user is expected to re-read after a partial spin-off.
 
@@ -111,6 +104,6 @@ Would add 2 audit comments to #<parent>.
 Two alternatives considered for handling spun-off entries:
 
 - **Strikethrough**: visually clear what was spun, preserves history in-body. But clutters the section over time and competes with future spin-off runs.
-- **Move to a §Spun off subsection**: keeps the body as the canonical record. But duplicates the audit-comment trail and bloats the body.
+- **Move to a §Spun off subsection**: keeps the body as the canonical record. But duplicates the timeline's cross-reference trail and bloats the body.
 
-**Removal** is cleanest: the §Side findings section stays a live to-triage list; the audit comments are the historical record; the child issue itself carries the long-form context. The body shouldn't be a log.
+**Removal** is cleanest: the §Side findings section stays a live to-triage list; the timeline cross-references are the historical record; the child issue itself carries the long-form context. The body shouldn't be a log.
