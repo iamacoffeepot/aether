@@ -22,18 +22,18 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # 552 stage 0) also build `aether.fs.*` / `aether.net.*` / `aether.log.*`
 # request kinds — that whole vocabulary lives in `aether-kinds`.
 aether-kinds = { path = "../aether-kinds" }
-bytemuck = { version = "1", default-features = false }
-postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+bytemuck = { workspace = true, default-features = false }
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
 # Postcard-decoding typed payloads (e.g. `PriorState::as_kind`,
 # `Mail::decode_kind`) is serde-driven. The crate stays
 # `no_std`-friendly with `default-features = false`.
-serde = { version = "1", default-features = false, features = ["alloc"] }
+serde = { workspace = true, default-features = false, features = ["alloc"] }
 # ADR-0060: the wasm shim installs a `tracing::Subscriber`
 # (`MailSubscriber`) at component boot that turns `tracing::warn!` /
 # `error!` / `info!` inside the wasm sandbox into `aether.log` mail.
 # The facade itself is `no_std`-friendly with `default-features = false`;
 # we don't pull `tracing-subscriber`.
-tracing = { version = "0.1", default-features = false }
+tracing = { workspace = true, default-features = false }
 
 [dev-dependencies]
 # Examples migrate from kind-typed `Mailbox` resolutions to actor-
@@ -44,13 +44,13 @@ tracing = { version = "0.1", default-features = false }
 # feature). `aether-substrate` deps back on `aether-actor`, but cargo
 # permits dev-dep cycles for the test-target build graph.
 aether-capabilities = { path = "../aether-capabilities", features = ["render"] }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
-bytemuck = { version = "1", features = ["derive"] }
-postcard = { version = "1.1", features = ["alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+bytemuck = { workspace = true, features = ["derive"] }
+postcard = { workspace = true, features = ["alloc", "heapless-cas"] }
 # Issue #243: `#[derive(Kind)]` test fixtures emit `inventory::submit!`
 # on native targets; the macro path needs `::inventory` reachable.
 # Tests run native, so an unconditional dev-dep is fine.
-inventory = "0.3"
+inventory = { workspace = true }
 
 # ADR-0017 (component-to-component reply) smoke pair: caller sends
 # `demo.request` to "echoer" and observes the reply.

@@ -78,13 +78,13 @@ clap = { workspace = true }
 # the cap's `from_argv_then_env` then preloads it into the confique
 # builder ahead of `.env()`. Direct dep so cli.rs can name the
 # `confique::Layer` trait without reaching through aether-capabilities.
-confique = { version = "0.4", default-features = false }
+confique = { workspace = true }
 # Catch-all error type for chassis main()s + build_passive that
 # bridge BootError / wasmtime / io faults purely to bubble up.
 # Same crate as `wasmtime::Result` re-exports (issue #571).
-anyhow = "1"
-bytemuck = { version = "1.19", features = ["derive"] }
-png = "0.18"
+anyhow = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+png = { workspace = true }
 pollster = "0.4.0"
 # iamacoffeepot/aether#1155: distribution-plot rendering for the
 # `perf-plot` bin. `ab_glyph` keeps fonts pure-Rust (no font-kit / system
@@ -98,19 +98,19 @@ plotters = { version = "0.3", default-features = false, features = [
     "ab_glyph",
     "line_series",
 ] }
-postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
 # `rmcp` / `axum` / `base64` / `schemars` retired with the embedded MCP
 # server (issue 763 P5e) — the harness moved out-of-process into the
 # `aether-mcp` crate, which owns those deps now.
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true, features = ["derive", "std"] }
 # Trial reports + comparison output are JSON (perf tooling, #1077).
-serde_json = "1"
+serde_json = { workspace = true }
 # `test_bench::visual::ImageError` derives `thiserror::Error` (moved
 # from `aether-scenario` per issue 821). New runtime dep here because
 # `aether-substrate-bundle` had no prior thiserror consumer.
 thiserror = "2"
-tracing = "0.1"
-wgpu = "29.0.1"
+tracing = { workspace = true, features = ["std", "attributes"] }
+wgpu = { workspace = true }
 winit = "0.30.13"
 
 # Hub chassis blocks on a SIGINT/SIGTERM signal in
@@ -131,8 +131,8 @@ ctrlc = "3"
 # `build.rs` parses the `AETHER_BUNDLE_MANIFEST` JSON and encodes the
 # bundle pack through `src/bundle_pack.rs` (compiled in via `#[path]`,
 # #1529), so the build script needs serde + serde_json in build scope.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests
