@@ -114,6 +114,10 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # dev-deps, not the lib's regular deps).
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1.19", features = ["derive"] }
+# Issue 1561: the mail-ring reclaim state machine — random op sequences
+# (push / open-append-seal / release / reclaim) checked against a shadow
+# model after every op. Lives in `mod heavy`. Dev-only.
+proptest.workspace = true
 
 [lints]
 workspace = true
