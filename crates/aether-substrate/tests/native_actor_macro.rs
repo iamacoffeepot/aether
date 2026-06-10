@@ -163,139 +163,218 @@ fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {
     counter.load(AtomicOrdering::SeqCst) >= target
 }
 
-#[test]
-fn macro_emitted_cap_routes_postcard_kind_through_dispatch() {
-    let (registry, mailer) = fresh_substrate();
-    let greet_total = Arc::new(AtomicU32::new(0));
-    let ping_total = Arc::new(AtomicU32::new(0));
+/// Dispatcher-thread tests: each boots a cap and `wait_for`/sleep-polls an
+/// atomic up to a target under a 500ms–2s deadline (some spawn pool
+/// workers), so they live in `mod heavy` for the `serial-heavy` nextest
+/// group (issue 1522).
+mod heavy {
+    use super::*;
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
+    #[test]
+    fn macro_emitted_cap_routes_postcard_kind_through_dispatch() {
+        let (registry, mailer) = fresh_substrate();
+        let greet_total = Arc::new(AtomicU32::new(0));
+        let ping_total = Arc::new(AtomicU32::new(0));
 
-    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Greet { tag: 7 });
-    assert!(
-        wait_for(7, &greet_total, Duration::from_millis(500)),
-        "macro dispatcher should route Greet → on_greet within budget"
-    );
-    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+        let chassis: PassiveChassis<TestChassis> =
+            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<MacroProbeCap>(ProbeConfig {
+                    greet_total: Arc::clone(&greet_total),
+                    ping_total: Arc::clone(&ping_total),
+                })
+                .build_passive()
+                .expect("macro-emitted cap boots");
 
-    drop(chassis);
-}
-
-/// iamacoffeepot/aether#1135: a blob demuxer seeds a free `Pooled` actor
-/// via `seize_and_run` — the seed dispatches in place (no inbox deposit /
-/// `try_recv` repop) and the slot returns to `Idle`. Boots a real Pooled
-/// actor through the chassis, lets it quiesce, then resolves the seize
-/// handle off its registry `Inbox` entry, wins the `Idle → Running` seize,
-/// and runs one seed envelope.
-#[test]
-fn seize_and_run_dispatches_seed_in_place() {
-    use aether_substrate::mail::registry::MailboxEntry;
-    use aether_substrate::scheduler::{BatchBudget, SlotStateLabel};
-
-    let (registry, mailer) = fresh_substrate();
-    let greet_total = Arc::new(AtomicU32::new(0));
-    let ping_total = Arc::new(AtomicU32::new(0));
-
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
-
-    let id = registry
-        .lookup(MacroProbeCap::NAMESPACE)
-        .expect("cap mailbox registered");
-
-    // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
-    // Resolve the seize handle off the `Inbox` entry's deferred cell (the
-    // #1135 surfacing) and wait for the slot to be seizable.
-    let MailboxEntry::Inbox { seize, .. } = registry.entry(id).expect("entry exists") else {
-        panic!("expected an Inbox entry for the Pooled cap");
-    };
-    let seize = seize.get().expect("a Pooled actor exposes a seize handle");
-
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let slot = loop {
-        if let Some(slot) = seize.try_seize() {
-            break slot;
-        }
+        push_envelope(&registry, MacroProbeCap::NAMESPACE, &Greet { tag: 7 });
         assert!(
-            Instant::now() < deadline,
-            "Pooled slot should quiesce to Idle and become seizable"
+            wait_for(7, &greet_total, Duration::from_millis(500)),
+            "macro dispatcher should route Greet → on_greet within budget"
         );
-        thread::sleep(Duration::from_millis(5));
-    };
-    // The seize put the slot in `Running`.
-    assert_eq!(seize.state().current(), SlotStateLabel::Running);
+        assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
 
-    // Build one seed envelope and dispatch it in place — no inbox bounce.
-    let payload = Greet { tag: 11 }.encode_into_bytes();
-    let seed = OwnedDispatch::disarmed(
-        <Greet as Kind>::ID,
-        Greet::NAME.to_owned(),
-        None,
-        Source::NONE,
-        MailRef::from(payload),
-        1,
-        MailId::NONE,
-        MailId::NONE,
-        None,
-        // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
-        Nanos(0),
-        0,
-        MailboxId(0),
-    );
-    slot.seize_and_run(seed, BatchBudget::standard());
+        drop(chassis);
+    }
 
-    // Handler ran exactly once; the slot drained empty back to `Idle`.
-    assert_eq!(
-        greet_total.load(AtomicOrdering::SeqCst),
-        11,
-        "the seed dispatched through on_greet in place"
-    );
-    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
-    assert_eq!(
-        seize.state().current(),
-        SlotStateLabel::Idle,
-        "the slot drained empty and returned to Idle"
-    );
+    /// iamacoffeepot/aether#1135: a blob demuxer seeds a free `Pooled` actor
+    /// via `seize_and_run` — the seed dispatches in place (no inbox deposit /
+    /// `try_recv` repop) and the slot returns to `Idle`. Boots a real Pooled
+    /// actor through the chassis, lets it quiesce, then resolves the seize
+    /// handle off its registry `Inbox` entry, wins the `Idle → Running` seize,
+    /// and runs one seed envelope.
+    #[test]
+    fn seize_and_run_dispatches_seed_in_place() {
+        use aether_substrate::mail::registry::MailboxEntry;
+        use aether_substrate::scheduler::{BatchBudget, SlotStateLabel};
 
-    drop(chassis);
-}
+        let (registry, mailer) = fresh_substrate();
+        let greet_total = Arc::new(AtomicU32::new(0));
+        let ping_total = Arc::new(AtomicU32::new(0));
 
-#[test]
-fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
-    let (registry, mailer) = fresh_substrate();
-    let greet_total = Arc::new(AtomicU32::new(0));
-    let ping_total = Arc::new(AtomicU32::new(0));
+        let chassis: PassiveChassis<TestChassis> =
+            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<MacroProbeCap>(ProbeConfig {
+                    greet_total: Arc::clone(&greet_total),
+                    ping_total: Arc::clone(&ping_total),
+                })
+                .build_passive()
+                .expect("macro-emitted cap boots");
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
+        let id = registry
+            .lookup(MacroProbeCap::NAMESPACE)
+            .expect("cap mailbox registered");
 
-    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Ping { seq: 42 });
-    assert!(
-        wait_for(42, &ping_total, Duration::from_millis(500)),
-        "macro dispatcher should route Ping → on_ping within budget"
-    );
-    assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
+        // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
+        // Resolve the seize handle off the `Inbox` entry's deferred cell (the
+        // #1135 surfacing) and wait for the slot to be seizable.
+        let MailboxEntry::Inbox { seize, .. } = registry.entry(id).expect("entry exists") else {
+            panic!("expected an Inbox entry for the Pooled cap");
+        };
+        let seize = seize.get().expect("a Pooled actor exposes a seize handle");
 
-    drop(chassis);
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let slot = loop {
+            if let Some(slot) = seize.try_seize() {
+                break slot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Pooled slot should quiesce to Idle and become seizable"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        // The seize put the slot in `Running`.
+        assert_eq!(seize.state().current(), SlotStateLabel::Running);
+
+        // Build one seed envelope and dispatch it in place — no inbox bounce.
+        let payload = Greet { tag: 11 }.encode_into_bytes();
+        let seed = OwnedDispatch::disarmed(
+            <Greet as Kind>::ID,
+            Greet::NAME.to_owned(),
+            None,
+            Source::NONE,
+            MailRef::from(payload),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
+            Nanos(0),
+            0,
+            MailboxId(0),
+        );
+        slot.seize_and_run(seed, BatchBudget::standard());
+
+        // Handler ran exactly once; the slot drained empty back to `Idle`.
+        assert_eq!(
+            greet_total.load(AtomicOrdering::SeqCst),
+            11,
+            "the seed dispatched through on_greet in place"
+        );
+        assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            seize.state().current(),
+            SlotStateLabel::Idle,
+            "the slot drained empty and returned to Idle"
+        );
+
+        drop(chassis);
+    }
+
+    #[test]
+    fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
+        let (registry, mailer) = fresh_substrate();
+        let greet_total = Arc::new(AtomicU32::new(0));
+        let ping_total = Arc::new(AtomicU32::new(0));
+
+        let chassis: PassiveChassis<TestChassis> =
+            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<MacroProbeCap>(ProbeConfig {
+                    greet_total: Arc::clone(&greet_total),
+                    ping_total: Arc::clone(&ping_total),
+                })
+                .build_passive()
+                .expect("macro-emitted cap boots");
+
+        push_envelope(&registry, MacroProbeCap::NAMESPACE, &Ping { seq: 42 });
+        assert!(
+            wait_for(42, &ping_total, Duration::from_millis(500)),
+            "macro dispatcher should route Ping → on_ping within budget"
+        );
+        assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
+
+        drop(chassis);
+    }
+
+    #[test]
+    fn macro_routes_task_completions_by_output_type() {
+        let (registry, mailer) = fresh_substrate();
+        let obs = TaskObservations {
+            dispatched: Arc::new(AtomicU32::new(0)),
+            a_value: Arc::new(AtomicU64::new(0)),
+            a_calls: Arc::new(AtomicU32::new(0)),
+            b_tag: Arc::new(AtomicU32::new(0)),
+            b_calls: Arc::new(AtomicU32::new(0)),
+        };
+
+        let chassis: PassiveChassis<TestChassis> =
+            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<TaskRouteCap>(obs.clone())
+                .build_passive()
+                .expect("task-routing cap boots");
+
+        // Kick off both dispatches. Each handler spawns a worker that fills
+        // the ledger and pushes a `TaskCompletionWake` back to this actor's
+        // own mailbox; the chassis redelivers those wakes through the macro's
+        // single completion arm, which routes each to its output-typed
+        // handler.
+        push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
+        push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
+
+        assert!(
+            wait_for(1, &obs.a_calls, Duration::from_secs(2)),
+            "the ResultA completion routed to on_result_a"
+        );
+        assert!(
+            wait_for(1, &obs.b_calls, Duration::from_secs(2)),
+            "the ResultB completion routed to on_result_b"
+        );
+
+        // Each completion landed on the correct handler with the correct
+        // payload — output-type routing, not a kind id.
+        assert_eq!(
+            obs.a_value.load(AtomicOrdering::SeqCst),
+            7,
+            "on_result_a saw its own dispatch's value"
+        );
+        assert_eq!(
+            obs.b_tag.load(AtomicOrdering::SeqCst),
+            9,
+            "on_result_b saw its own dispatch's tag"
+        );
+
+        // Neither completion was mis-delivered to the other-typed handler:
+        // each task handler fired exactly once. A wrong-type probe in the
+        // completion arm must leave the ledger entry intact (non-consuming
+        // `try_take_task_done`) — if it consumed, one handler would swallow
+        // the other's completion and its call count would be 0.
+        assert_eq!(
+            obs.a_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "on_result_a fired exactly once (no mis-routed extra completion)"
+        );
+        assert_eq!(
+            obs.b_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "on_result_b fired exactly once"
+        );
+        assert_eq!(
+            obs.dispatched.load(AtomicOrdering::SeqCst),
+            2,
+            "both kick handlers dispatched a worker"
+        );
+
+        drop(chassis);
+    }
 }
 
 /// Type-level assertion that the macro emits the universal
@@ -506,75 +585,4 @@ impl NativeActor for TaskRouteCap {
         self.obs.b_calls.fetch_add(1, AtomicOrdering::SeqCst);
         done.resolve(ctx);
     }
-}
-
-#[test]
-fn macro_routes_task_completions_by_output_type() {
-    let (registry, mailer) = fresh_substrate();
-    let obs = TaskObservations {
-        dispatched: Arc::new(AtomicU32::new(0)),
-        a_value: Arc::new(AtomicU64::new(0)),
-        a_calls: Arc::new(AtomicU32::new(0)),
-        b_tag: Arc::new(AtomicU32::new(0)),
-        b_calls: Arc::new(AtomicU32::new(0)),
-    };
-
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TaskRouteCap>(obs.clone())
-            .build_passive()
-            .expect("task-routing cap boots");
-
-    // Kick off both dispatches. Each handler spawns a worker that fills
-    // the ledger and pushes a `TaskCompletionWake` back to this actor's
-    // own mailbox; the chassis redelivers those wakes through the macro's
-    // single completion arm, which routes each to its output-typed
-    // handler.
-    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
-    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
-
-    assert!(
-        wait_for(1, &obs.a_calls, Duration::from_secs(2)),
-        "the ResultA completion routed to on_result_a"
-    );
-    assert!(
-        wait_for(1, &obs.b_calls, Duration::from_secs(2)),
-        "the ResultB completion routed to on_result_b"
-    );
-
-    // Each completion landed on the correct handler with the correct
-    // payload — output-type routing, not a kind id.
-    assert_eq!(
-        obs.a_value.load(AtomicOrdering::SeqCst),
-        7,
-        "on_result_a saw its own dispatch's value"
-    );
-    assert_eq!(
-        obs.b_tag.load(AtomicOrdering::SeqCst),
-        9,
-        "on_result_b saw its own dispatch's tag"
-    );
-
-    // Neither completion was mis-delivered to the other-typed handler:
-    // each task handler fired exactly once. A wrong-type probe in the
-    // completion arm must leave the ledger entry intact (non-consuming
-    // `try_take_task_done`) — if it consumed, one handler would swallow
-    // the other's completion and its call count would be 0.
-    assert_eq!(
-        obs.a_calls.load(AtomicOrdering::SeqCst),
-        1,
-        "on_result_a fired exactly once (no mis-routed extra completion)"
-    );
-    assert_eq!(
-        obs.b_calls.load(AtomicOrdering::SeqCst),
-        1,
-        "on_result_b fired exactly once"
-    );
-    assert_eq!(
-        obs.dispatched.load(AtomicOrdering::SeqCst),
-        2,
-        "both kick handlers dispatched a worker"
-    );
-
-    drop(chassis);
 }

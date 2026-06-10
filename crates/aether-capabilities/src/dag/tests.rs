@@ -572,7 +572,6 @@ fn dag_executor_status_reports_running() {
 /// With tiny retention windows, a completed DAG is observable as
 /// `Complete`, then reaped — after which `status` reports the unknown-dag
 /// shape (`Failed { error: "unknown dag .." }`).
-#[test]
 fn dag_executor_status_reports_complete_then_reaps() {
     // SAFETY: nextest runs each test in its own process, so the env set
     // here doesn't race sibling tests.
@@ -714,7 +713,6 @@ fn dag_executor_call_inherited_worker_counts_toward_settlement() {
 /// Call to a cap that never settles (holds the chain open forever): with
 /// a tiny per-`Call` timeout the node fails rather than buffering forever
 /// or truncating to a partial bundle.
-#[test]
 fn dag_executor_call_times_out_nonsettling_cap() {
     // SAFETY: nextest runs each test in its own process.
     unsafe {
@@ -908,7 +906,6 @@ fn number_transform_dag(tx: aether_data::TransformId, value: u64) -> DagDescript
 /// source → `double` transform → observer. The observer receives the
 /// doubled value resolved inline; the DAG reaches `Complete` (ADR-0048
 /// §3 invocation path).
-#[test]
 fn transform_invoke_resolves_handle() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestNumberObserved> = Arc::new(Mutex::new(Vec::new()));
@@ -988,7 +985,6 @@ fn transform_panic_fails_node() {
 /// { error: "timeout: ..." }`; the thread orphans (the executor
 /// continues). The fixture releases the gate afterward so the pool
 /// joins cleanly (ADR-0048 §6).
-#[test]
 fn transform_timeout_fails_node() {
     SLOW_TRANSFORM_GATE.store(false, Ordering::Release);
     // SAFETY: nextest runs each test in its own process.
@@ -1169,6 +1165,26 @@ mod heavy {
     #[test]
     fn transform_skips_invoke_on_cache_hit() {
         super::transform_skips_invoke_on_cache_hit();
+    }
+
+    #[test]
+    fn dag_executor_status_reports_complete_then_reaps() {
+        super::dag_executor_status_reports_complete_then_reaps();
+    }
+
+    #[test]
+    fn dag_executor_call_times_out_nonsettling_cap() {
+        super::dag_executor_call_times_out_nonsettling_cap();
+    }
+
+    #[test]
+    fn transform_invoke_resolves_handle() {
+        super::transform_invoke_resolves_handle();
+    }
+
+    #[test]
+    fn transform_timeout_fails_node() {
+        super::transform_timeout_fails_node();
     }
 }
 

@@ -758,7 +758,9 @@ mod tests {
     /// reply-to, and observe the echoed value land on the sink — proof
     /// the proxy forwards as a `Call` and routes the `ReplyEvent` back
     /// to the original sender.
-    #[test]
+    /// Body lives here to share the parent fixtures; the `#[test]` wrapper
+    /// is in `mod heavy` (issue 1522 — boots a TCP RPC server + proxy
+    /// threads and polls a 5s cross-thread round-trip).
     fn forward_round_trips_reply_back_to_sender() {
         let (registry, mailer) = fresh_substrate();
         let recorded: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
@@ -988,6 +990,14 @@ mod tests {
     /// `serial-heavy` nextest group (`.config/nextest.toml`).
     mod heavy {
         use super::*;
+
+        /// `#[test]` wrapper for the parent forward-round-trip body, which
+        /// boots a TCP RPC server + proxy threads and polls a 5s
+        /// cross-thread deadline (issue 1522).
+        #[test]
+        fn forward_round_trips_reply_back_to_sender() {
+            super::forward_round_trips_reply_back_to_sender();
+        }
 
         /// A wedged engine (handshakes, then never answers a heartbeat
         /// `Ping`) is evicted: after `miss_limit` missed pongs the proxy
