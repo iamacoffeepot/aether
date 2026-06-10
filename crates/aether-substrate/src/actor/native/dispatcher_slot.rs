@@ -44,7 +44,6 @@
 //! the same drain tail ([`Self::drain_after_seed`]).
 
 use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -127,12 +126,6 @@ where
     /// envelope dispatch. Wrapped in [`PooledSlots`] for the `Sync`
     /// safety story — see that type's doc-comment.
     slots: PooledSlots,
-    /// Per-actor inbox-pending counter, decremented after every
-    /// successful dispatch. `None` for singleton caps (ADR-0082 retired
-    /// the frame-bound drain that was the singleton consumer); `Some`
-    /// for instanced actors, where `Spawner::shutdown_instanced` reads
-    /// it to coordinate teardown (issue 685).
-    pending: Option<Arc<AtomicU64>>,
     /// Chassis-level actor registry. Used by [`Self::finalize_registry`]
     /// to drain `monitors_of[id]` and prune `monitoring[id]` from each
     /// target on shutdown.
@@ -179,7 +172,6 @@ where
         actor: Box<A>,
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
-        pending: Option<Arc<AtomicU64>>,
         actor_registry: Arc<ActorRegistry>,
         mailer: Arc<Mailer>,
         self_id: MailboxId,
@@ -189,7 +181,6 @@ where
             actor: Mutex::new(Some(actor)),
             binding,
             slots: PooledSlots(slots),
-            pending,
             actor_registry,
             mailer,
             self_id,
@@ -306,9 +297,6 @@ where
         // discharge site — every wasm component and native actor (issue
         // 634 Phase 4) drains through here.
         env.discharge();
-        if let Some(p) = &self.pending {
-            p.fetch_sub(1, Ordering::AcqRel);
-        }
     }
 
     /// The close hook in the slot teardown sequence. Wraps `actor.unwire`

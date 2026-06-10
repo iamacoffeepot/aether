@@ -420,16 +420,6 @@ impl Spawner {
         // and external mail addressed to the dead mailbox warn-drops.
         let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
         let weak_for_handler = Arc::downgrade(&strong_sender);
-        // Per-actor inbox-pending counter. Sink handler ++ on push;
-        // dispatcher slot -- after handling. Pre-PR-4 the test bench's
-        // `wait_instanced_quiesce` queried this through
-        // `Spawner::instanced_pending`; ADR-0080 settlement gating
-        // retires that polling path. The counter survives because the
-        // `DispatcherSlot` still threads it as the optional `pending`
-        // arg, but nothing queries the value today — a future cleanup
-        // PR can drop it entirely.
-        let pending = Arc::new(AtomicU64::new(0));
-        let pending_for_handler = Arc::clone(&pending);
         // Issue 635 PR C: pool wake hook. Populated post-init below
         // (every actor is pool-dispatched since issue 1187); empty until
         // then so the closure's `get()` is a single relaxed atomic load.
@@ -438,12 +428,6 @@ impl Spawner {
         // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
         // and routes it through [`relay_or_transfer`] — the shared
         // upgrade → send → wake core with both ADR-0094 transfer seams.
-        // The instanced-only `pending` bracket stays here at the call
-        // site: `fetch_add` before the relay, `fetch_sub` on either
-        // abandonment arm, so the at-rest value is identical to the
-        // pre-helper code (a delivered envelope's `-1` happens in the
-        // dispatcher after drain). The counter is provably unread today
-        // (`wait_instanced_quiesce` retired); #1567 removes it entirely.
         // ADR-0099 §3: register under the lineage-folded `id`, not
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
@@ -451,11 +435,9 @@ impl Spawner {
             id,
             full_name.clone(),
             Arc::new(move |dispatch: OwnedDispatch| {
-                pending_for_handler.fetch_add(1, Ordering::AcqRel);
                 match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler) {
                     RelayOutcome::Delivered => {}
                     RelayOutcome::SenderGone { kind_name } => {
-                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
                         tracing::warn!(
                             target: "aether_substrate::spawn",
                             kind = %kind_name,
@@ -463,7 +445,6 @@ impl Spawner {
                         );
                     }
                     RelayOutcome::ReceiverGone { kind_name } => {
-                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
                         tracing::warn!(
                             target: "aether_substrate::spawn",
                             kind = %kind_name,
@@ -532,11 +513,8 @@ impl Spawner {
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
-        // succeed. The per-actor `pending` counter increments here
-        // for symmetry with the sink-handler path; the value is no
-        // longer queried (PR 4 retired `wait_instanced_quiesce`).
+        // succeed.
         for env in after_init_mail {
-            pending.fetch_add(1, Ordering::AcqRel);
             // mpsc::Sender::send only fails when the receiver
             // disconnects; rx is alive here. Discard on the
             // theoretical impossibility.
@@ -557,7 +535,6 @@ impl Spawner {
             actor,
             Arc::clone(&transport),
             slots,
-            Some(Arc::clone(&pending)),
             Arc::clone(&self.actor_registry),
             Arc::clone(&self.mailer),
             id,
