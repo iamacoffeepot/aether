@@ -38,7 +38,7 @@ use aether_kinds::{
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
-    visual::{background_top_left, centroid, coverage, decode_png},
+    visual::{background_top_left, bounding_box, centroid, coverage, decode_png},
 };
 use aether_test_fixtures::{Bump, CountQuery, CountReport, SetRender};
 
@@ -113,6 +113,36 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
     {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component: {error}"),
+    }
+}
+
+/// Load the `cube` fixture into the bench, blocking on `LoadResult`
+/// so the subsequent advance sees a tick-subscribed component. Mirrors
+/// `load_probe`; the cube scenario only needs the load to succeed (it
+/// captures rather than mailing the component), so the returned
+/// `MailboxId` is discarded.
+fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some("cube".to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load_component(cube): {error}"),
     }
 }
 
@@ -518,6 +548,90 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
         cleaned_coverage < 0.01,
         "after after-mail cleanup the captured frame should be uniform clear color, \
          but coverage was {cleaned_coverage} (cleanup did not run)",
+    );
+}
+
+/// Render-pipeline proof: load the `cube` fixture, drive one tick, and
+/// capture. The fixture publishes a fixed `Camera { view_proj }` and a
+/// twelve-triangle world-space unit cube, so the captured frame puts
+/// every stage on the line at once — camera, `view_proj`, world-space
+/// geometry, the depth test that orders the cube's faces, and GPU
+/// readback. The existing `capture_frame_round_trip` scenario only
+/// draws a flat NDC triangle at identity `view_proj`, so this is the
+/// first capture that actually projects geometry through a camera.
+///
+/// The assertions use the #1513 silhouette reductions against the
+/// known framing matrix: the cube's lit bounding box must sit centered
+/// and inset from the frame edges (not a corner speck, not full-bleed),
+/// and coverage must land in the cube's band. The bounds below were
+/// tuned against the real captured frame at this size and `view_proj`.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn cube_render_projects_centered_silhouette() {
+    let Some(wasm_path) = require_runtime("cube") else {
+        return;
+    };
+    // 128×96 matches the fixture's `view_proj` aspect (4:3), so the
+    // silhouette projects undistorted.
+    let (width, height) = (128u32, 96u32);
+    let mut bench = TestBench::start_with_size(width, height).expect("boot");
+    load_cube(&mut bench, &wasm_path);
+
+    // Priming advance subscribes the cube to ticks; the next tick (run
+    // inside `capture`) drives the cube's camera + geometry emission so
+    // the readback sees a fully-formed frame.
+    let captured = bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            ("snap", BenchOp::capture()),
+        ])
+        .expect("prime + capture");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    // Coverage band: the cube fills a healthy fraction of the frame but
+    // leaves the clear color showing in the corners. The fixed
+    // `view_proj` makes this deterministic; the observed fraction is
+    // ~0.18, so the band brackets it with margin while still ruling out
+    // an empty frame (drew nothing) and a full-bleed frame (clear-color
+    // mismatch or runaway geometry).
+    let drawn = coverage(&img, bg, tolerance);
+    assert!(
+        (0.10..0.30).contains(&drawn),
+        "cube coverage {drawn} fell outside the expected band (0.10, 0.30); \
+         the captured frame is effectively empty or entirely filled",
+    );
+
+    // The silhouette must be centered and inset from every edge —
+    // proving the cube projected to the middle of the frame, not into a
+    // corner and not bleeding past the borders.
+    let silhouette = bounding_box(&img, bg, tolerance).expect("a lit frame has a bounding box");
+    let (frame_width, frame_height) = (img.width as f32, img.height as f32);
+    let min_x = silhouette.min_x as f32;
+    let min_y = silhouette.min_y as f32;
+    let max_x = silhouette.max_x as f32;
+    let max_y = silhouette.max_y as f32;
+    assert!(
+        min_x > 0.05 * frame_width
+            && max_x < 0.95 * frame_width
+            && min_y > 0.05 * frame_height
+            && max_y < 0.95 * frame_height,
+        "cube silhouette {silhouette:?} should be inset from the edges of the \
+         {}x{} frame (not full-bleed)",
+        img.width,
+        img.height,
+    );
+    assert!(
+        min_x < 0.45 * frame_width
+            && max_x > 0.55 * frame_width
+            && min_y < 0.45 * frame_height
+            && max_y > 0.55 * frame_height,
+        "cube silhouette {silhouette:?} should straddle the center of the \
+         {}x{} frame (not a corner speck)",
+        img.width,
+        img.height,
     );
 }
 
