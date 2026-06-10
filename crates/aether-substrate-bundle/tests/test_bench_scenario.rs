@@ -38,7 +38,7 @@ use aether_kinds::{
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
-    visual::{decode_png, differs_from_background},
+    visual::{background_top_left, centroid, coverage, decode_png},
 };
 use aether_test_fixtures::{Bump, CountQuery, CountReport, SetRender};
 
@@ -412,13 +412,15 @@ fn drop_component_silences_tick_echoes() {
 }
 
 /// `capture_frame` round-trip with non-empty mail bundles. The
-/// pre-mail bundle flips the fixture's render state to "visible
-/// red"; the captured PNG must contain at least one pixel that
-/// diverges from the chassis clear color. The after-mail bundle
-/// flips render back to invisible; a follow-up advance + plain
-/// capture must produce a frame back at the clear color, proving
-/// the after-mail cleanup ran.
+/// pre-mail bundle flips the fixture's render state to "visible red";
+/// the probe then paints one large triangle, so the captured PNG must
+/// show a coverage fraction inside a sane band (neither all-background
+/// nor all-filled) with a centroid sitting in the frame interior. The
+/// after-mail bundle flips render back to invisible; a follow-up
+/// advance + plain capture must produce a frame back at the clear
+/// color — near-zero coverage — proving the after-mail cleanup ran.
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn capture_frame_round_trip_runs_pre_and_after_mails() {
     let Some(wasm_path) = require_runtime("probe") else {
         return;
@@ -471,7 +473,34 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
         .expect("prime + capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
-    differs_from_background(&img, 5).expect("captured frame should contain a non-background pixel");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+    // The probe draws one large triangle (NDC verts spanning ±0.9),
+    // covering roughly 40% of the frame. A coverage band rules out the
+    // two ways the old single-pixel `differs_from_background` check went
+    // placebo: an all-background miss (drew nothing) and an all-filled
+    // frame (clear color itself diverging from the sampled corner).
+    let drawn = coverage(&img, bg, tolerance);
+    assert!(
+        (0.05..0.95).contains(&drawn),
+        "probe triangle coverage {drawn} fell outside the expected band (0.05, 0.95); \
+         the captured frame is effectively empty or entirely filled",
+    );
+    // The triangle is centered on the middle column and weighted toward
+    // the lower half, so its centroid lands well inside the frame rather
+    // than hugging an edge.
+    let (center_x, center_y) = centroid(&img, bg, tolerance).expect("a lit frame has a centroid");
+    let (width, height) = (img.width as f32, img.height as f32);
+    assert!(
+        center_x > 0.1 * width
+            && center_x < 0.9 * width
+            && center_y > 0.1 * height
+            && center_y < 0.9 * height,
+        "triangle centroid ({center_x}, {center_y}) should sit in the frame interior \
+         of the {}x{} capture",
+        img.width,
+        img.height,
+    );
 
     // Cleanup ran: probe.render is now { visible: 0 }. Advance once
     // and capture again — the next tick won't emit DrawTriangle, so
@@ -484,10 +513,11 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
         .expect("post-cleanup advance + capture");
     let png2 = cleaned.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleanup png");
+    let cleaned_coverage = coverage(&img2, background_top_left(&img2), 5);
     assert!(
-        differs_from_background(&img2, 5).is_err(),
+        cleaned_coverage < 0.01,
         "after after-mail cleanup the captured frame should be uniform clear color, \
-         but at least one pixel still diverges (cleanup did not run)",
+         but coverage was {cleaned_coverage} (cleanup did not run)",
     );
 }
 
