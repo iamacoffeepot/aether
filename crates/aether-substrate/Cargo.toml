@@ -23,10 +23,6 @@ wasm = ["dep:wasmtime", "dep:wasmparser"]
 # offscreen pipeline + capture path. Headless and hub leave it off
 # and never link wgpu.
 render = ["dep:wgpu", "dep:png"]
-# ADR-0070 phase 3 (part 4): chassis with an audio device enable
-# `audio` to pull in the cpal-backed synth + the `aether.sink.audio`
-# capability. Headless and hub leave it off; desktop turns it on.
-audio = ["dep:cpal"]
 
 [dependencies]
 # ADR-0074 Phase 2: target-agnostic actor SDK. Capabilities own a
@@ -70,9 +66,6 @@ wasmtime = { version = "44", optional = true }
 # their builds.
 wgpu = { version = "29.0.1", optional = true }
 png = { version = "0.18", optional = true }
-# Audio-only deps; gated by the `audio` feature. Desktop enables it,
-# headless and hub do not.
-cpal = { version = "0.17", optional = true }
 # Issue 635 PR B worker-pool ready queue. MPMC channel — std mpsc is
 # single-consumer so it can't load-balance across pool workers. Still
 # used for settlement/capture one-shots + the close-done signal; the
@@ -86,7 +79,7 @@ crossbeam-deque = "0.8"
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
 # `aether.kinds` section. Pin to the version wasmtime re-exports
 # transitively so we stay on a single compiled copy.
-wasmparser = { version = "0.249", optional = true }
+wasmparser = { version = "0.246", optional = true }
 # Registry hot-path maps (#1067): FxHashMap on the id-keyed `mailboxes`
 # and `kinds` tables. Keys are pre-hashed 64-bit ids (ADR-0029/0030), so
 # SipHash's DoS resistance buys nothing here — Fx is faster per lookup and

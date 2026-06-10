@@ -40,7 +40,6 @@ native = [
     "dep:confique",
     "dep:dirs",
     "dep:postcard",
-    "dep:rustc-hash",
     "dep:serde_json",
     "dep:tracing",
     "dep:ureq",
@@ -62,8 +61,8 @@ audio = []
 # Native impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
 # marker layer + `native` so chassis builds still see the full cap.
-render-native = ["render", "native", "aether-substrate/render", "dep:wgpu", "dep:png"]
-audio-native = ["audio", "native", "aether-substrate/audio", "dep:cpal", "dep:crossbeam-queue"]
+render-native = ["render", "native", "aether-substrate/render", "dep:wgpu"]
+audio-native = ["audio", "native", "dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
@@ -96,9 +95,6 @@ clap = { workspace = true, optional = true }
 confique = { version = "0.4", default-features = false, optional = true }
 dirs = { version = "6", optional = true }
 postcard = { version = "1.1", optional = true, features = ["alloc"] }
-# Fast non-cryptographic hasher for the trace observer's hot-path maps
-# (keyed by 64-bit ids — no DoS surface). iamacoffeepot/aether#1054.
-rustc-hash = { version = "2", optional = true }
 # JSON request/response bodies for the content-gen provider APIs
 # (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
 serde_json = { version = "1", optional = true }
@@ -118,7 +114,6 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 # in the dep tree.
 wasmtime = { version = "44", optional = true }
 wgpu = { version = "29.0.1", optional = true }
-png = { version = "0.18", optional = true }
 cpal = { version = "0.17", optional = true }
 crossbeam-queue = { version = "0.3", optional = true }
 

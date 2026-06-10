@@ -92,9 +92,7 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "dirs",
- "png",
  "postcard",
- "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "tracing",
@@ -269,7 +267,6 @@ dependencies = [
  "aether-kinds",
  "bytemuck",
  "confique",
- "cpal",
  "crossbeam-channel",
  "crossbeam-deque",
  "dirs",
@@ -281,7 +278,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
- "wasmparser 0.249.0",
+ "wasmparser 0.246.2",
  "wasmtime",
  "wat",
  "wgpu",
@@ -1853,8 +1850,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 dependencies = [
  "foldhash 0.2.0",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -4682,19 +4677,6 @@ checksum = "71cde4757396defafd25417cfb36aa3161027d06d865b0c24baaae229aac005d"
 dependencies = [
  "bitflags 2.11.0",
  "hashbrown 0.16.1",
- "indexmap",
- "semver",
- "serde",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.249.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30538cae9a794215f490b532df01c557e2e2bfac92569482554acd0992a102ea"
-dependencies = [
- "bitflags 2.11.0",
- "hashbrown 0.17.0",
  "indexmap",
  "semver",
  "serde",

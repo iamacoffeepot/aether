@@ -64,11 +64,10 @@ name = "aether-perf-plot"
 path = "src/bin/perf-plot.rs"
 
 [dependencies]
-aether-substrate = { path = "../aether-substrate", features = ["render", "audio"] }
+aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities", features = ["render-native", "audio-native"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
-aether-codec = { path = "../aether-codec" }
 aether-kinds = { path = "../aether-kinds" }
 # Chassis-binary argv parsing (ADR-0090 unit d, issue 1258). The
 # `cli` module declares per-chassis Parser roots and per-cap overlay
@@ -147,6 +146,10 @@ serde_json = "1"
 # ADR-0090 c1: renamed from `aether-test-fixture-probe` and restructured
 # so per-fixture cdylibs live as `[[example]]`s; the lib rlib carries
 # the shared `Kind` definitions.
+# Length-prefix postcard frame helpers (`aether_codec::frame::{read_frame,
+# write_frame}`) used by the RPC engine-routing + FleetBench integration
+# tests; no `src/` consumer, so it rides dev-dependencies only.
+aether-codec = { path = "../aether-codec" }
 aether-test-fixtures = { path = "../aether-test-fixtures" }
 # iamacoffeepot/aether#1472: the FleetBench Transform-DAG test builds a
 # descriptor with `output_kind_id == Vec4::ID` and casts the observer's
