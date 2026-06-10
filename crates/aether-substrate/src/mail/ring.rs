@@ -359,15 +359,36 @@ impl MailRing {
         // multiple of ALIGN (cursor only ever advances by aligned sizes).
         let locs = unsafe { self.write_blob_at(start, mails, size) };
 
-        let new_write = if start + size == self.cap {
+        // Absorb a sub-header tail: `write` must never stop strictly
+        // within `HEADER_LEN` bytes of `cap`, because a later wrap would
+        // have to lay a filler header into a tail too small to hold one
+        // (an out-of-bounds write). Cursor advances are multiples of
+        // `ALIGN`, so the only reachable sub-header remainder is 8; pad
+        // this blob's `total_len` to swallow it and wrap `write` to 0.
+        // Invisible to consumers: `total_len` is read only as the reclaim
+        // stride, while entry iteration is driven by `n_mails`.
+        let end = start + size;
+        let remainder = self.cap - end;
+        let occupied = if remainder > 0 && remainder < HEADER_LEN {
+            // SAFETY: `start` is the just-written blob's header in
+            // producer-owned space; only the producer reads `total_len`.
+            unsafe {
+                let hdr = self.header_ptr(start);
+                (&raw mut (*hdr).total_len).write((size + remainder) as u32);
+            }
+            size + remainder
+        } else {
+            size
+        };
+        let new_write = if start + occupied == self.cap {
             0
         } else {
-            start + size
+            start + occupied
         };
         self.write.store(new_write as u32, Ordering::Relaxed);
         // SAFETY: producer-only mutation of the live counter.
         unsafe {
-            *self.live.get() += size;
+            *self.live.get() += occupied;
             if start == 0 && write != 0 {
                 // We wrapped: the filler bytes over the old tail are now
                 // live too (reclaimed lazily like any other blob).
@@ -387,6 +408,13 @@ impl MailRing {
         reason = "len is bounded by capacity, asserted <= u32::MAX in with_capacity"
     )]
     fn write_filler(&self, off: usize, len: usize) {
+        // The sub-header-tail absorb in `push_blob` / `finalize_header`
+        // guarantees `write` never stops strictly within `HEADER_LEN`
+        // bytes of `cap`, so every filler region has room for its header.
+        debug_assert!(
+            len >= HEADER_LEN,
+            "filler tail of {len} B cannot hold a {HEADER_LEN}-B header"
+        );
         // SAFETY: caller guarantees the range is producer-owned free space.
         // The backing bytes are uninitialized, so every field is written
         // with a non-dropping `ptr::write`.
@@ -656,12 +684,23 @@ impl MailRing {
     fn finalize_header(&self, header_off: u32, cursor: u32, n_mails: u32) {
         let header_off = header_off as usize;
         let cursor = cursor as usize;
-        let total = cursor - header_off;
+        let mut total = cursor - header_off;
+        // Absorb a sub-header tail (same invariant as `push_blob`):
+        // `write` must never stop strictly within `HEADER_LEN` bytes of
+        // `cap`, or a later wrap filler would write its header out of
+        // bounds. Pad `total_len` to swallow the remainder and wrap
+        // `write` to 0; reclaim strides `front + total == cap → 0` with
+        // no consumer-side change.
+        let remainder = self.cap - cursor;
+        if remainder > 0 && remainder < HEADER_LEN {
+            total += remainder;
+        }
         // SAFETY: `[header_off, cursor)` is the producer-owned region just
-        // written by `append`; we write the header fields once. The lock's
-        // initialized value is published to consumers through the inbox
-        // channel handoff of the minted `MailRef` (see module docs), so a
-        // plain write suffices here.
+        // written by `append` (and a sub-header remainder up to `cap` is
+        // producer-owned free space); we write the header fields once.
+        // The lock's initialized value is published to consumers through
+        // the inbox channel handoff of the minted `MailRef` (see module
+        // docs), so a plain write suffices here.
         unsafe {
             let hdr = self.header_ptr(header_off);
             (&raw mut (*hdr).lock).write(AtomicU32::new(n_mails));
@@ -670,7 +709,8 @@ impl MailRing {
             (&raw mut (*hdr).is_filler).write(0);
             *self.live.get() += total;
         }
-        let new_write = if cursor == self.cap { 0 } else { cursor };
+        let end = header_off + total;
+        let new_write = if end == self.cap { 0 } else { end };
         self.write.store(new_write as u32, Ordering::Relaxed);
     }
 
@@ -1035,6 +1075,93 @@ mod tests {
             ring.reclaim();
         }
         while ring.reclaim() > 0 {}
+        assert_eq!(ring.live_bytes(), 0);
+    }
+
+    #[test]
+    fn atomic_push_absorbs_sub_header_tail() {
+        // Regression for iamacoffeepot/aether#1530: drive `write` to
+        // exactly `cap - 8` — the one reachable sub-header tail — and
+        // verify the last blob absorbed the remainder instead of leaving
+        // a tail too small for a wrap filler's header (an OOB write).
+        // Blob sizes: empty payload = 40 B, 8-byte payload = 48 B;
+        // 40*5 + 48*81 = 4088 = 4096 - 8.
+        let ring = MailRing::with_capacity(4096);
+        let mut locs = Vec::new();
+        for i in 0..5u64 {
+            locs.extend(ring.push_blob(&[out(i, i, &[])]).unwrap());
+        }
+        for i in 0..81u64 {
+            locs.extend(ring.push_blob(&[out(i, i, &[0xCD; 8])]).unwrap());
+        }
+        // The absorb padded the last blob's total_len by 8 and wrapped
+        // `write` to 0, so the whole ring is live (4088 written + 8
+        // absorbed). Without the absorb this reads 4088.
+        assert_eq!(ring.live_bytes(), 4096);
+        // The absorbed blob's payload is intact (padding is invisible).
+        let last = *locs.last().unwrap();
+        // SAFETY: lock held until the release loop below.
+        unsafe { assert_eq!(ring.payload(last.payload_off, last.len), &[0xCD; 8]) };
+        for l in &locs {
+            // SAFETY: one held count per loc.
+            unsafe { ring.release(l.header_off) };
+        }
+        // Reclaim strides the padded blob `front + total == cap → 0` —
+        // an unpadded 48-byte stride would park `front` at 4088 and read
+        // garbage header bytes there.
+        assert_eq!(ring.reclaim(), 4096);
+        assert_eq!(ring.live_bytes(), 0);
+        // The ring stays fully usable: the next blob lands at offset 0.
+        let l = ring.push_blob(&[out(7, 7, &[0xEE; 8])]).unwrap();
+        assert_eq!(l[0].header_off, 0);
+        // SAFETY: lock held, released after the read.
+        unsafe {
+            assert_eq!(ring.payload(l[0].payload_off, l[0].len), &[0xEE; 8]);
+            ring.release(l[0].header_off);
+        }
+        assert!(ring.reclaim() > 0);
+        assert_eq!(ring.live_bytes(), 0);
+    }
+
+    #[test]
+    fn incremental_seal_absorbs_sub_header_tail() {
+        // Regression for iamacoffeepot/aether#1530, append/seal path:
+        // a sealed blob ending at exactly `cap - 8` absorbs the
+        // sub-header remainder in `finalize_header`.
+        let ring = MailRing::with_capacity(4096);
+        // March `write`/`front` to 4000 with 100 push/release/reclaim
+        // cycles of a 40-byte blob.
+        for _ in 0..100 {
+            let l = ring.push_blob(&[out(1, 1, &[])]).unwrap();
+            // SAFETY: single held count, released immediately.
+            unsafe { ring.release(l[0].header_off) };
+            ring.reclaim();
+        }
+        // Build a blob of 16 + (24 + 48) = 88 bytes at 4000: it ends at
+        // 4088 = cap - 8, and seal absorbs the 8-byte remainder.
+        ring.open_blob();
+        let l = ring.append(2, 2, &[0xAB; 48]).unwrap();
+        ring.seal();
+        // 88 written + 8 absorbed; without the absorb this reads 88.
+        assert_eq!(ring.live_bytes(), 96);
+        // SAFETY: lock held until the release below.
+        unsafe { assert_eq!(ring.payload(l.payload_off, l.len), &[0xAB; 48]) };
+        // SAFETY: the blob's single held count.
+        unsafe { ring.release(l.header_off) };
+        // Reclaim strides `4000 + 96 == cap → 0`.
+        assert_eq!(ring.reclaim(), 96);
+        assert_eq!(ring.live_bytes(), 0);
+        // The next incremental blob lands at offset 0 and round-trips.
+        ring.open_blob();
+        let l = ring.append(3, 3, &[0x5A; 8]).unwrap();
+        ring.seal();
+        assert_eq!(l.header_off, 0);
+        // SAFETY: lock held, released after the read.
+        unsafe {
+            assert_eq!(ring.payload(l.payload_off, l.len), &[0x5A; 8]);
+            ring.release(l.header_off);
+        }
+        assert!(ring.reclaim() > 0);
         assert_eq!(ring.live_bytes(), 0);
     }
 
