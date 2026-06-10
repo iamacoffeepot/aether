@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::DEFAULT_TIMEOUT_MS;
+use super::DEFAULT_TIMEOUT_MILLIS;
 use crate::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
 /// Sentinel returned when the `claude` binary isn't on PATH so the cap
@@ -45,7 +45,7 @@ impl Default for ClaudeCliAdapter {
     fn default() -> Self {
         Self {
             binary: String::from("claude"),
-            timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
+            timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
         }
     }
 }
