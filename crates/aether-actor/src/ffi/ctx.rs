@@ -259,22 +259,22 @@ impl MailSender for FfiCtx<'_> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1);
     }
 
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         MAIL_BRIDGE.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -321,6 +321,10 @@ impl OutboundReply for FfiCtx<'_> {
 /// Outbound mail still works through [`MailSender`]; the reply / resolve
 /// surfaces are intentionally absent.
 pub struct FfiDropCtx<'a> {
+    /// The actor's own mailbox id (its lineage carry), so a buffered
+    /// `send` resolves the receiver through `R::resolve(self.mailbox)`
+    /// like every other ctx (ADR-0099 §5).
+    mailbox: u64,
     _borrow: PhantomData<&'a ()>,
 }
 
@@ -328,8 +332,9 @@ impl FfiDropCtx<'_> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
     #[must_use]
-    pub fn __new() -> Self {
+    pub fn __new(mailbox: u64) -> Self {
         Self {
+            mailbox,
             _borrow: PhantomData,
         }
     }
@@ -363,22 +368,22 @@ impl MailSender for FfiDropCtx<'_> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1);
     }
 
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Actor + HandlesKind<K>,
+        R: Singleton + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         MAIL_BRIDGE.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
+            R::resolve(self.mailbox).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
