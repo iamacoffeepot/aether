@@ -105,6 +105,14 @@ For each sub-phase: read inputs, write the corresponding body section, advance t
   - **S**: single file, single concept, <100 LOC change
   - **M**: single crate, multiple files, <500 LOC change
   - **L**: cross-crate, architectural, or >500 LOC change
+
+  In the same step you set the `Size` field, mirror it to a `size:s|m|l` label using the same remove-then-add reconcile `phase:*` uses (see [Phase label reconcile](#phase-label-reconcile)), so the dispatcher reads the estimate over REST without spending a GraphQL board query:
+
+  ```bash
+  gh issue edit <n> --remove-label "size:s,size:m,size:l" \
+    && gh issue edit <n> --add-label "size:<x>"
+  ```
+- **Model opt-in** — leave the model unlabelled by default: an absent `model:*` label means the dispatched agent inherits the orchestrator's own model (whatever the dispatcher is running — e.g. Opus when the dispatcher is Opus). Stamp a *downgrade* — `model:sonnet` or `model:haiku` — only when the work is mechanical and S-sized; never stamp a top-tier label (`model:opus` / `model:fable`), since absence already routes to the dispatcher's model. Misjudging downward is the expensive failure, so a downgrade is always a deliberate per-issue opt-in, orthogonal to size. The full `model:fable|opus|sonnet|haiku` vocabulary exists so a human can pin any model explicitly; `/scope` only ever stamps the two downgrades. When you stamp a model label, note the choice in the Plan audit comment.
 - **Project board**: leave `Phase=Plan`; set `AgentReady=No` (default, but explicit). This is the resting state awaiting `/approve`.
 
 ## Side findings
