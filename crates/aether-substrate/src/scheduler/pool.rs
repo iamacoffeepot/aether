@@ -289,7 +289,9 @@ fn worker_loop(
                 // own deque) so the yield actually yields — any worker,
                 // incl. this one after its own deque, can steal it;
                 // notify routes to a spinner or unparks one. Shutdown is
-                // observed at the next `acquire_slot`.
+                // observed at the top of the next `acquire_slot`, before
+                // its pop/steal fast paths — so requeueing here cannot
+                // keep a worker alive past teardown.
                 injector.push(slot);
                 spin.notify();
             }
@@ -341,8 +343,11 @@ fn worker_loop(
 /// route a spill or relay hop to it without a futex wake, then parks it —
 /// and the coordinator's park-commit recheck re-runs the steal scan,
 /// which *is* the pre-park steal-rescan that closes the lost-wakeup
-/// window. Shutdown is observed inside the coordinator (a flag + an
-/// explicit unpark of every worker on teardown).
+/// window. Shutdown is observed in two places: at the top of this
+/// function, before the fast paths (so a worker that keeps finding
+/// work still exits — iamacoffeepot/aether#1531), and inside the
+/// coordinator (a flag + an explicit unpark of every worker on
+/// teardown, covering spinning and parked workers).
 fn acquire_slot(
     idx: usize,
     stealers: &[Stealer<Arc<dyn Drainable>>],
@@ -350,6 +355,16 @@ fn acquire_slot(
     spin: &SpinPark,
     peer_steal: bool,
 ) -> Option<Arc<dyn Drainable>> {
+    // Shutdown gate, ahead of the fast paths: without it a worker that
+    // keeps finding work (a perpetually-requeueing slot, or a steady
+    // steal-fed cycle) returns early every iteration and never reaches
+    // the coordinator's flag check — `shutdown_with_results` / `Drop`
+    // joins hang (iamacoffeepot/aether#1531). One Acquire load of a
+    // write-once flag per cycle; work left in the deques/injector is
+    // dropped at teardown by the documented stance above.
+    if spin.is_shutdown() {
+        return None;
+    }
     if let Some(slot) = worker_deque::pop_local() {
         return Some(slot);
     }
@@ -679,6 +694,60 @@ mod tests {
 
             drop(entry_wake);
             let _ = handle.shutdown_with_results();
+        }
+
+        /// Regression for iamacoffeepot/aether#1531: a worker fed by a
+        /// perpetually-requeueing slot must still observe shutdown. The
+        /// slot's `run_cycle` always returns `Requeue` — the
+        /// deterministic equivalent of two actors ping-ponging mail —
+        /// so the worker requeues it to the injector and immediately
+        /// steals it back, never reaching the spin/park coordinator.
+        /// Without the `acquire_slot` shutdown gate, the join in
+        /// `shutdown_with_results` hangs forever.
+        #[test]
+        fn shutdown_joins_under_unconditional_requeue() {
+            struct RequeueForever;
+            impl Drainable for RequeueForever {
+                fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+                    CycleResult::Requeue
+                }
+                fn label(&self) -> &'static str {
+                    "requeue-forever"
+                }
+                fn as_any(&self) -> &dyn Any {
+                    self
+                }
+            }
+
+            let handle = standard_handle(2);
+            let worker_count = handle.worker_count();
+            // Feed the slot straight into the injector + notify — the
+            // same path the worker's own `Requeue` arm takes — so a
+            // worker steals it and enters the self-sustaining cycle.
+            let slot: Arc<dyn Drainable> = Arc::new(RequeueForever);
+            handle.injector.push(slot);
+            handle.spin.notify();
+            // Let the requeue cycle churn so a worker is actively fed
+            // (not parked) when shutdown is signalled.
+            thread::sleep(Duration::from_millis(50));
+
+            // Run the join on a helper thread so the test can hold it
+            // to a deadline — a regression here otherwise hangs the
+            // whole suite instead of failing.
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            // Test scaffolding below the actor/mail layer — no
+            // settlement contract on this helper thread.
+            #[allow(clippy::disallowed_methods)]
+            thread::spawn(move || {
+                let _ = tx.send(handle.shutdown_with_results());
+            });
+            let results = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("shutdown join must complete despite a perpetually-requeueing slot");
+            assert_eq!(results.len(), worker_count);
+            for result in results {
+                assert!(result.is_ok(), "every worker should exit cleanly");
+            }
         }
     }
 
