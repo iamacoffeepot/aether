@@ -24,6 +24,8 @@
 //! `aether-substrate` — depend on that directly when you don't need
 //! chassis surface.
 
+pub mod autoload;
+pub mod bundle_pack;
 mod chassis_common;
 pub use chassis_common::{PersistOverride, chassis_config_dump};
 pub mod chassis_root;
