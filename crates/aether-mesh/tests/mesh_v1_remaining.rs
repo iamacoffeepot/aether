@@ -25,7 +25,7 @@ fn tri_centroid(tri: &aether_mesh::Triangle) -> Vec3 {
     (tri.vertices[0] + tri.vertices[1] + tri.vertices[2]) * (1.0 / 3.0)
 }
 
-// ---------- cylinder ----------
+// cylinder
 
 #[test]
 fn cylinder_has_28_triangles_after_cap_merge() {
@@ -68,7 +68,7 @@ fn cylinder_outward_normals() {
     }
 }
 
-// ---------- cone ----------
+// cone
 
 #[test]
 fn cone_has_10_triangles_after_cap_merge() {
@@ -102,7 +102,7 @@ fn cone_outward_normals() {
     }
 }
 
-// ---------- wedge ----------
+// wedge
 
 #[test]
 fn wedge_has_eight_triangles() {
@@ -145,7 +145,7 @@ fn wedge_uses_six_unique_vertices() {
     assert_eq!(seen.len(), 6, "expected 6 unique corners, got {seen:?}");
 }
 
-// ---------- sphere ----------
+// sphere
 
 #[test]
 fn sphere_triangle_count_matches_lathe_pole_collapse() {
@@ -192,7 +192,7 @@ fn sphere_outward_normals() {
     }
 }
 
-// ---------- extrude ----------
+// extrude
 
 #[test]
 fn extrude_square_produces_walls_and_caps() {
@@ -247,7 +247,7 @@ fn extrude_with_under_three_profile_points_emits_nothing() {
     assert_eq!(mesh(&ast).expect("test setup: extrude meshes").len(), 0);
 }
 
-// ---------- mirror ----------
+// mirror
 
 #[test]
 fn mirror_x_reflects_box_across_yz_plane() {
@@ -288,7 +288,7 @@ fn mirror_preserves_outward_winding() {
     }
 }
 
-// ---------- array ----------
+// array
 
 #[test]
 fn array_produces_count_copies() {
@@ -322,7 +322,7 @@ fn array_zero_count_emits_nothing() {
     assert_eq!(mesh(&ast).expect("test setup: array meshes").len(), 0);
 }
 
-// ---------- round-trip across the full v1 vocabulary ----------
+// round-trip across the full v1 vocabulary
 
 #[test]
 fn round_trip_full_v1_vocab() {

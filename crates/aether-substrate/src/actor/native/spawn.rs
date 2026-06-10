@@ -29,7 +29,9 @@ use aether_kinds::trace::Nanos;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
+use crate::actor::native::{
+    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::MailboxWakeSlot;
 use crate::chassis::error::BootError;
@@ -387,7 +389,7 @@ impl Spawner {
             // today — Phase 4+ may revisit. Pass a throwaway
             // ExportedHandles to keep the init-ctx shape uniform with
             // the singleton path.
-            let mut throwaway_handles = crate::ExportedHandles::new();
+            let mut throwaway_handles = ExportedHandles::new();
             let mut init_ctx =
                 NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
             // ADR-0081: wrap `init` in `with_stamped` so any
@@ -540,12 +542,7 @@ impl Spawner {
         // child wire→dispatcher transition is sequential within this
         // ctx, peers are running, all mailboxes claimed.
         local::with_stamped(&slots, || {
-            let mut wire_ctx = crate::actor::native::NativeCtx::new(
-                &transport,
-                Source::NONE,
-                MailId::NONE,
-                MailId::NONE,
-            );
+            let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
             actor.wire(&mut wire_ctx);
         });
 

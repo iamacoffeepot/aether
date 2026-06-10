@@ -2455,9 +2455,7 @@ mod tests {
         assert_eq!(layer.eviction_tick_secs, DEFAULT_DISK_EVICTION_TICK_SECS);
     }
 
-    // ------------------------------------------------------------
     // HandleStore unit tests
-    // ------------------------------------------------------------
 
     #[test]
     fn put_then_get_round_trips_bytes_and_kind() {
@@ -2621,9 +2619,7 @@ mod tests {
         assert_eq!(bytes, vec![1, 2, 3]);
     }
 
-    // ------------------------------------------------------------
     // Walker tests — schema-driven over real Ref<K> wire
-    // ------------------------------------------------------------
 
     /// Tiny postcard kind for walker tests. Kept here rather than
     /// pulling the derive macro into substrate-core's dev-deps:
