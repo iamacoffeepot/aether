@@ -64,7 +64,6 @@ pub mod mail;
 pub mod trace_ring;
 
 pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, Resolver};
-pub use actor::sender::{MailCtx, Sender};
 pub use actor::slot::Slot;
 pub use actor::{
     Actor, EmbeddedHost, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError,

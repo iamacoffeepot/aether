@@ -430,7 +430,7 @@ mod native {
         AdapterRegistry, Delete, FsError, List, NamespaceRoots, NamespaceRootsLayer, Read, Write,
         build_registry,
     };
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;

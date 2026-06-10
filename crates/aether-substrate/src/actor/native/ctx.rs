@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
-use aether_actor::{Actor, HandlesKind, MailCtx, Sender, Singleton};
+use aether_actor::{Actor, HandlesKind, Singleton};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
@@ -44,7 +44,7 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
 /// actor's [`NativeBinding`] for outbound mail and carries the
-/// inbound's reply target so the `MailCtx::reply::<K>(&payload)` API
+/// inbound's reply target so the `OutboundReply::reply::<K>(&payload)` API
 /// can route back to the originator without rethreading the handle.
 ///
 /// Stage 1 ships the wiring; the actual reply routing through
@@ -383,7 +383,7 @@ impl<'a> NativeCtx<'a> {
     /// The reply target for the mail currently being dispatched.
     /// Useful when a handler wants to inspect the originator (audit
     /// trails, multi-tenant routing) without going through
-    /// [`MailCtx::reply`]. `target == SourceAddr::None` means the
+    /// [`OutboundReply::reply`]. `target == SourceAddr::None` means the
     /// inbound was broadcast or peer-component mail with no reply
     /// destination.
     #[must_use]
@@ -417,7 +417,7 @@ impl<'a> NativeCtx<'a> {
     /// completion-wake's sender (the worker thread's loopback mail, which
     /// has no caller behind it). Routes through the same
     /// [`NativeBinding::send_reply_for_handler`] path as
-    /// [`MailCtx::reply`].
+    /// [`OutboundReply::reply`].
     pub fn reply_to_target<K: Kind>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload);
     }
@@ -567,7 +567,7 @@ impl NativeCtx<'_> {
     /// Recipients aren't known to share a receiver type at compile site
     /// (subscribers register at runtime by mailbox id), so this takes
     /// mailbox ids directly rather than the typed
-    /// `R: Actor + HandlesKind<K>` shape of [`Sender::send`]. The empty
+    /// `R: Actor + HandlesKind<K>` shape of [`MailSender::send`]. The empty
     /// recipient set is a fast no-op — encoding only runs when there's at
     /// least one consumer.
     ///
@@ -716,73 +716,6 @@ impl Drop for NativeCtx<'_> {
     }
 }
 
-impl Sender for NativeCtx<'_> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        // Batch count rides as `u32` on the wire (matches the FFI ABI);
-        // realistic mail batches stay well below `u32::MAX`.
-        #[allow(clippy::cast_possible_truncation)]
-        let count = payloads.len() as u32;
-        self.binding.push_envelope_buffered(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            K::ID.0,
-            bytes,
-            count,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
-    //noinspection DuplicatedCode
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(
-            mailbox_id_from_name(name).0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-}
-
-impl MailCtx for NativeCtx<'_> {
-    /// Stage 2: route the reply through the substrate's `Mailer::send_reply`
-    /// (Component recipient → push as Mail with the originator's
-    /// correlation echoed and reply-to None; Session / `EngineMailbox`
-    /// → outbound bridge; None → silent drop). This is the same path
-    /// pre-stage-2 caps walked manually via `self.mailer.send_reply(sender, &result)`
-    /// — caps now reach for `ctx.reply(&result)` and the per-mail
-    /// ctx already holds both the mailer reference (via the transport)
-    /// and the inbound's reply target.
-    fn reply<K: Kind>(&mut self, payload: &K) {
-        self.binding.send_reply_for_handler(self.source, payload);
-    }
-}
-
 /// Boot-time context for [`NativeActor::init`]. Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
 /// chassis's [`ExportedHandles`] map (so the cap can publish a
@@ -870,16 +803,16 @@ impl<'a> NativeInitCtx<'a> {
     native_sender_methods!();
 }
 
-// Issue 703: NativeInitCtx no longer impls `Sender` / `MailSender`.
+// Issue 703: NativeInitCtx no longer impls `MailSender`.
 // `init` is the sync constructor (ADR-0079) and must NOT mail —
 // subscriptions, peer hellos, and self-mail kickoffs all belong in
 // `wire`, where `NativeCtx` provides the full mail surface.
 
-// Issue 663 phase B layers the per-stage capability trait impls on top
-// of the existing `Sender` / `MailCtx` impls. Default-impl bodies on
-// `MailSender` cover `actor::<R>()` / `resolve_actor` / `send` /
-// `send_many` / `send_to_named`, so each impl below only spells out
-// the stage-specific accessors. `LifecycleControl::shutdown` /
+// The per-stage capability trait impls (`MailSender` / `OutboundReply`
+// / `LifecycleControl`). Default-impl bodies on
+// `MailSender` cover `send_detached` / `send_detached_to_named`,
+// so each impl below spells out the stage-specific accessors and
+// routing methods. `LifecycleControl::shutdown` /
 // `monitor` forward to the existing inherent methods that today
 // reach into the substrate-internal spawner + actor registry; future
 // FFI-side wiring (issue 607 phase 4 / ADR-0079) will program against
@@ -1148,7 +1081,6 @@ mod tests {
     /// `serde::Serialize` half, this stops compiling.
     #[allow(dead_code)]
     fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_>, sender: Source) {
-        MailCtx::reply(ctx, &CastOnly { code: 1 });
         OutboundReply::reply(ctx, &CastOnly { code: 2 });
         OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });
         ctx.reply_to_target(sender, &CastOnly { code: 4 });

@@ -3525,7 +3525,7 @@ mod tests {
     }
 
     fn wire_pass_mail_crosses_actors(pinger_first: bool) {
-        use aether_actor::Sender;
+        use aether_actor::MailSender;
         use aether_data::{Kind, KindId as DataKindId};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 

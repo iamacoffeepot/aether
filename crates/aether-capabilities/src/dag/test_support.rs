@@ -147,7 +147,7 @@ pub struct TestCallConfig {
 #[aether_actor::bridge(singleton)]
 mod test_source {
     use super::{TestReadResult, TestSourceRequest};
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
@@ -282,7 +282,7 @@ mod test_bundle_observer {
 #[aether_actor::bridge(singleton)]
 mod test_call {
     use super::{TestCallConfig, TestCallReply, TestCallRequest};
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::runtime::trace::SettlementHold;
@@ -522,7 +522,7 @@ fn big_output(x: TestNumber) -> TestBytes {
 #[aether_actor::bridge(singleton)]
 mod test_number_source {
     use super::{TestNumber, TestNumberRequest};
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 

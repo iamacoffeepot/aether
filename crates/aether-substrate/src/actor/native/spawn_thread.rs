@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use aether_actor::actor::{Actor, HandlesKind};
-use aether_actor::{MailSender, Sender, Singleton};
+use aether_actor::{MailSender, Singleton};
 use aether_data::{Kind, MailId, mailbox_id_from_name};
 
 use super::binding::NativeBinding;
@@ -121,7 +121,7 @@ impl<A> InheritCtx<A> {
     }
 }
 
-impl<A: Actor> Sender for InheritCtx<A> {
+impl<A: Actor> MailSender for InheritCtx<A> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -172,30 +172,6 @@ impl<A: Actor> Sender for InheritCtx<A> {
             self.outbound_root(),
         );
     }
-}
-
-impl<A: Actor> MailSender for InheritCtx<A> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as Sender>::send::<R, K>(self, payload);
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as Sender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as Sender>::send_to_named::<K>(self, name, payload);
-    }
 
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
@@ -224,7 +200,7 @@ impl<A> RootCtx<A> {
     }
 }
 
-impl<A: Actor> Sender for RootCtx<A> {
+impl<A: Actor> MailSender for RootCtx<A> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
@@ -273,30 +249,6 @@ impl<A: Actor> Sender for RootCtx<A> {
             None,
             None,
         );
-    }
-}
-
-impl<A: Actor> MailSender for RootCtx<A> {
-    //noinspection DuplicatedCode
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as Sender>::send::<R, K>(self, payload);
-    }
-
-    //noinspection DuplicatedCode
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as Sender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as Sender>::send_to_named::<K>(self, name, payload);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -463,7 +415,7 @@ mod tests {
             inherited_mail_id,
             inherited_root,
             move |mut inherit| {
-                <InheritCtx<StubActor> as Sender>::send_to_named(
+                <InheritCtx<StubActor> as MailSender>::send_to_named(
                     &mut inherit,
                     "test.spawn_thread.recipient",
                     &aether_kinds::Tick,
@@ -510,7 +462,7 @@ mod tests {
         ));
 
         let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
-            <RootCtx<StubActor> as Sender>::send_to_named(
+            <RootCtx<StubActor> as MailSender>::send_to_named(
                 &mut root,
                 "test.spawn_thread.recipient",
                 &aether_kinds::Tick,
@@ -552,7 +504,7 @@ mod tests {
 
         let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
             for _ in 0..3 {
-                <RootCtx<StubActor> as Sender>::send_to_named(
+                <RootCtx<StubActor> as MailSender>::send_to_named(
                     &mut root,
                     "test.spawn_thread.recipient",
                     &aether_kinds::Tick,

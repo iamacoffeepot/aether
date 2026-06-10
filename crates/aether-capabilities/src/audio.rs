@@ -72,7 +72,7 @@ mod native {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use crossbeam_queue::ArrayQueue;
 
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_data::{MailboxId, Source, SourceAddr};
     use aether_kinds::SetMasterGainResult;
 

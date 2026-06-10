@@ -477,7 +477,7 @@ impl NativeBinding {
     /// the in-flight handler's lineage so the outgoing [`Mail`] picks
     /// up the correct `parent_mail` and inherited `root`. The
     /// per-handler [`super::ctx::NativeCtx`]'s
-    /// [`aether_actor::actor::sender::Sender`] impl reads from its
+    /// [`aether_actor::actor::ctx::MailSender`] impl reads from its
     /// `in_flight_mail_id()` / `in_flight_root()` accessors and threads
     /// them in.
     ///

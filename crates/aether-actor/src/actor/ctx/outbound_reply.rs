@@ -4,12 +4,6 @@
 //! ctxs (the FFI runtime `Ctx`, substrate's `NativeCtx`) impl this; init
 //! and drop ctxs deliberately do not — there's no inbound mail at boot
 //! and reply targets are not honoured during teardown.
-//!
-//! Phase A of issue 663 adds the trait alongside the existing
-//! [`crate::actor::sender::MailCtx`] which still backs current call
-//! sites; Phase B impls it on the existing ctx types so the trait is
-//! reachable everywhere `MailCtx` is reachable; Phase D drops the
-//! pre-issue-663 `MailCtx` once the generic-bounds API has converged.
 
 use aether_data::{Kind, MailboxId};
 

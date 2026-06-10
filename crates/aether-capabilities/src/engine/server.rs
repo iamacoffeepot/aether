@@ -57,7 +57,7 @@ mod server_native {
         EngineAlive, EngineDied, ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::{OutboundReply, actor};
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
         CallSettled, EngineDescriptor, ForwardEnvelope, ListEnginesResult, SpawnEngineResult,

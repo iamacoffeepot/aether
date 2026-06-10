@@ -1,7 +1,6 @@
 //! Actor SDK primitive: the marker trait surface (here in `mod.rs`)
 //! plus per-mail / per-init / per-drop ctx machinery
-//! ([`ctx`]), the `Sender` / `MailCtx` traits
-//! ([`sender`]), and the `Slot` single-instance
+//! ([`ctx`]) and the `Slot` single-instance
 //! backing store ([`slot`]). Marker traits are
 //! pure compile-time markers — no transport machinery, no lifecycle
 //! methods, just identity (`Actor`), singleton-ness (`Singleton`),
@@ -22,7 +21,6 @@
 //! the actor SDK.
 
 pub mod ctx;
-pub mod sender;
 pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
