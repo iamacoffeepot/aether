@@ -1,12 +1,9 @@
-//! Twin-edge cancellation primitive shared by [`super::merge`] and
-//! [`super::provenance`].
+//! Twin-edge cancellation primitive used by [`super::merge`].
 //!
-//! Both modules need the same "for each canonical edge, push the
-//! surplus copies of whichever direction dominates" walk over a
-//! directed-edge multiplicity map. Merge runs it per
-//! `(plane, color)` bucket (`boundary_edges_after_twin_cancellation`);
-//! provenance runs it globally over the whole mesh
-//! (`unmatched_edges`). Per issue #350, the naive
+//! Merge needs a "for each canonical edge, push the surplus copies of
+//! whichever direction dominates" walk over a directed-edge
+//! multiplicity map, run per `(plane, color)` bucket
+//! (`boundary_edges_after_twin_cancellation`). Per issue #350, the naive
 //! "both directions present ⇒ cancel" boolean overcounts by one and
 //! tears the boundary open; the multiplicity-preserving form here is
 //! the correct cancellation.

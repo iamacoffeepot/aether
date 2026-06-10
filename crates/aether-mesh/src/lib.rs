@@ -34,4 +34,4 @@ pub use obj::to_obj;
 pub use parse::{ParseError, parse};
 pub use point::Point3;
 pub use polygon::{Polygon, mesh_polygons, tessellate_polygon};
-pub use serialize::{node_to_value, serialize};
+pub use serialize::serialize;

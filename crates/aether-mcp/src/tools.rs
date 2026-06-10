@@ -26,8 +26,8 @@ use aether_data::MailId;
 use aether_data::SchemaType;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{
-    DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name,
-    mailbox_id_from_path, tagged_id,
+    DagId, EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid,
+    mailbox_id_from_name, mailbox_id_from_path, tagged_id, validate_scope_path,
 };
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
@@ -999,6 +999,11 @@ impl Mcp {
     /// `aether.inventory.kinds` refresh before erroring "unknown
     /// kind"; the encode then succeeds for the component's own kinds.
     async fn build_mail_envelope(&self, spec: MailSpec) -> anyhow::Result<MailEnvelope> {
+        // ADR-0098/0099 wire boundary: `recipient_name` is user-controlled
+        // and folds to a registry key, so cap its scope depth / byte size
+        // before it reaches `mailbox_id_from_path` (the fold itself stays
+        // infallible for static callers). A breach fails this mail item.
+        validate_recipient_scope(&spec.recipient_name)?;
         let engine = EngineId(
             Uuid::parse_str(&spec.engine_id)
                 .map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
@@ -1317,6 +1322,24 @@ impl ServerHandler for Mcp {
         info.server_info = server_info;
         info
     }
+}
+
+/// ADR-0098/0099 input hygiene: reject a `recipient_name` whose
+/// `/`-rendered scope path exceeds the depth or byte caps before it
+/// folds to a `MailboxId`. The MCP `send_mail` surface is the wire
+/// boundary for user-controlled names, so the aggregate-key guard lands
+/// here; [`aether_data::mailbox_id_from_path`] stays infallible for
+/// static callers.
+fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<()> {
+    let segments: Vec<&str> = recipient_name.split('/').collect();
+    validate_scope_path(&segments).map_err(|e| match e {
+        ScopePathError::TooDeep { limit } => {
+            anyhow::anyhow!("recipient_name has more than {limit} scope segments")
+        }
+        ScopePathError::TooLong { limit } => {
+            anyhow::anyhow!("recipient_name exceeds the {limit}-byte scope-path cap")
+        }
+    })
 }
 
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
@@ -1794,6 +1817,30 @@ mod tests {
     use crate::args::DescribeHandlesArgs;
     use crate::test_chassis::TestChassis;
     use aether_kinds::descriptors;
+
+    #[test]
+    fn recipient_scope_normal_name_passes() {
+        // A `/`-rendered hosted-actor name is within both caps.
+        validate_recipient_scope("aether.component/aether.embedded:camera")
+            .expect("a two-segment hosted-actor name is under the scope caps");
+    }
+
+    #[test]
+    fn recipient_scope_over_depth_rejected() {
+        // One segment past `MAX_SCOPE_PATH_DEPTH`.
+        let name = (0..=aether_data::MAX_SCOPE_PATH_DEPTH)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(validate_recipient_scope(&name).is_err());
+    }
+
+    #[test]
+    fn recipient_scope_over_bytes_rejected() {
+        // A single segment longer than the byte cap (depth stays 1).
+        let name = "a".repeat(aether_data::MAX_SCOPE_PATH_BYTES + 1);
+        assert!(validate_recipient_scope(&name).is_err());
+    }
 
     /// Boot a hub-shaped passive chassis: a forwarding
     /// `RpcServerCapability` + the engines cap + `TraceObserver` (so
