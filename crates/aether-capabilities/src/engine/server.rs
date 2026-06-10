@@ -670,94 +670,6 @@ mod tests {
         }
     }
 
-    /// `on_list` on a fresh cap replies with an empty engine list.
-    #[test]
-    fn list_on_empty_cap_is_empty() {
-        let (_chassis, mailer, cells) = boot();
-        let result = drive(&mailer, &ListEngines {}, || {
-            cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex poisoned")
-                .take()
-        });
-        assert!(result.engines.is_empty(), "fresh cap supervises no engines");
-    }
-
-    /// `on_spawn` with a binary path that doesn't exist fails fast at
-    /// the fork — no proxy is spawned, no retry window is entered.
-    #[test]
-    fn spawn_with_missing_binary_replies_err() {
-        let (_chassis, mailer, cells) = boot();
-        let result = drive(
-            &mailer,
-            &SpawnEngine {
-                binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
-                args: vec![],
-            },
-            || {
-                cells
-                    .spawn
-                    .lock()
-                    .expect("test setup: spawn cell mutex poisoned")
-                    .take()
-            },
-        );
-        match result {
-            SpawnEngineResult::Err { error } => {
-                assert!(
-                    error.contains("failed to spawn"),
-                    "unexpected error: {error}"
-                );
-            }
-            SpawnEngineResult::Ok { .. } => panic!("a missing binary must not spawn"),
-        }
-    }
-
-    /// `on_terminate` with an `engine_id` that isn't a UUID, and one
-    /// that is well-formed but names no supervised engine, both reply
-    /// `Err` rather than panicking.
-    #[test]
-    fn terminate_unknown_engine_replies_err() {
-        let (_chassis, mailer, cells) = boot();
-
-        let malformed = drive(
-            &mailer,
-            &TerminateEngine {
-                engine_id: "not-a-uuid".to_owned(),
-            },
-            || {
-                cells
-                    .terminate
-                    .lock()
-                    .expect("test setup: terminate cell mutex poisoned")
-                    .take()
-            },
-        );
-        assert!(
-            matches!(malformed, TerminateEngineResult::Err { .. }),
-            "a malformed engine_id should be rejected",
-        );
-
-        let unknown = drive(
-            &mailer,
-            &TerminateEngine {
-                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-            },
-            || {
-                cells
-                    .terminate
-                    .lock()
-                    .expect("test setup: terminate cell mutex poisoned")
-                    .take()
-            },
-        );
-        assert!(
-            matches!(unknown, TerminateEngineResult::Err { .. }),
-            "a well-formed but unknown engine_id should be rejected",
-        );
-    }
-
     /// Push a fire-and-forget kind at the cap, then drive a `ListEngines`
     /// so the assertion runs only after the cap has processed the
     /// earlier mail (single-threaded actor, in-order mailbox). Returns
@@ -779,55 +691,151 @@ mod tests {
         .engines
     }
 
-    /// `on_engine_died` for an engine the cap never supervised — the
-    /// terminate-race / double-report case — is an idempotent no-op,
-    /// not a panic, and inserts nothing. Covers both a malformed and a
-    /// well-formed-but-unknown `engine_id` (issue 1339).
-    #[test]
-    fn engine_died_for_unknown_is_noop() {
-        let (_chassis, mailer, cells) = boot();
+    /// Contention-sensitive driver tests: each boots a `PassiveChassis`
+    /// whose dispatcher thread must make timely cross-thread progress for
+    /// the poll-until deadline to pass, so they serialize under
+    /// `serial-heavy` (the `::heavy::` path is the marker).
+    mod heavy {
+        use super::*;
 
-        let after_malformed = push_then_list(
-            &mailer,
-            &cells,
-            &EngineDied {
-                engine_id: "not-a-uuid".to_owned(),
-            },
-        );
-        assert!(
-            after_malformed.is_empty(),
-            "a malformed died must not panic or insert",
-        );
+        /// `on_list` on a fresh cap replies with an empty engine list.
+        #[test]
+        fn list_on_empty_cap_is_empty() {
+            let (_chassis, mailer, cells) = boot();
+            let result = drive(&mailer, &ListEngines {}, || {
+                cells
+                    .list
+                    .lock()
+                    .expect("test setup: list cell mutex poisoned")
+                    .take()
+            });
+            assert!(result.engines.is_empty(), "fresh cap supervises no engines");
+        }
 
-        let after_unknown = push_then_list(
-            &mailer,
-            &cells,
-            &EngineDied {
-                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-            },
-        );
-        assert!(
-            after_unknown.is_empty(),
-            "a died for an unknown engine is a no-op",
-        );
-    }
+        /// `on_spawn` with a binary path that doesn't exist fails fast at
+        /// the fork — no proxy is spawned, no retry window is entered.
+        #[test]
+        fn spawn_with_missing_binary_replies_err() {
+            let (_chassis, mailer, cells) = boot();
+            let result = drive(
+                &mailer,
+                &SpawnEngine {
+                    binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
+                    args: vec![],
+                },
+                || {
+                    cells
+                        .spawn
+                        .lock()
+                        .expect("test setup: spawn cell mutex poisoned")
+                        .take()
+                },
+            );
+            match result {
+                SpawnEngineResult::Err { error } => {
+                    assert!(
+                        error.contains("failed to spawn"),
+                        "unexpected error: {error}"
+                    );
+                }
+                SpawnEngineResult::Ok { .. } => panic!("a missing binary must not spawn"),
+            }
+        }
 
-    /// `on_engine_alive` for an unknown engine is a silent no-op (no
-    /// panic, no spurious insert) — a stale `alive` racing an eviction
-    /// must not resurrect the engine (issue 1339).
-    #[test]
-    fn engine_alive_for_unknown_is_noop() {
-        let (_chassis, mailer, cells) = boot();
-        let after = push_then_list(
-            &mailer,
-            &cells,
-            &EngineAlive {
-                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-            },
-        );
-        assert!(
-            after.is_empty(),
-            "an alive for an unknown engine must not insert it",
-        );
+        /// `on_terminate` with an `engine_id` that isn't a UUID, and one
+        /// that is well-formed but names no supervised engine, both reply
+        /// `Err` rather than panicking.
+        #[test]
+        fn terminate_unknown_engine_replies_err() {
+            let (_chassis, mailer, cells) = boot();
+
+            let malformed = drive(
+                &mailer,
+                &TerminateEngine {
+                    engine_id: "not-a-uuid".to_owned(),
+                },
+                || {
+                    cells
+                        .terminate
+                        .lock()
+                        .expect("test setup: terminate cell mutex poisoned")
+                        .take()
+                },
+            );
+            assert!(
+                matches!(malformed, TerminateEngineResult::Err { .. }),
+                "a malformed engine_id should be rejected",
+            );
+
+            let unknown = drive(
+                &mailer,
+                &TerminateEngine {
+                    engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                },
+                || {
+                    cells
+                        .terminate
+                        .lock()
+                        .expect("test setup: terminate cell mutex poisoned")
+                        .take()
+                },
+            );
+            assert!(
+                matches!(unknown, TerminateEngineResult::Err { .. }),
+                "a well-formed but unknown engine_id should be rejected",
+            );
+        }
+
+        /// `on_engine_died` for an engine the cap never supervised — the
+        /// terminate-race / double-report case — is an idempotent no-op,
+        /// not a panic, and inserts nothing. Covers both a malformed and a
+        /// well-formed-but-unknown `engine_id` (issue 1339).
+        #[test]
+        fn engine_died_for_unknown_is_noop() {
+            let (_chassis, mailer, cells) = boot();
+
+            let after_malformed = push_then_list(
+                &mailer,
+                &cells,
+                &EngineDied {
+                    engine_id: "not-a-uuid".to_owned(),
+                },
+            );
+            assert!(
+                after_malformed.is_empty(),
+                "a malformed died must not panic or insert",
+            );
+
+            let after_unknown = push_then_list(
+                &mailer,
+                &cells,
+                &EngineDied {
+                    engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                },
+            );
+            assert!(
+                after_unknown.is_empty(),
+                "a died for an unknown engine is a no-op",
+            );
+        }
+
+        /// `on_engine_alive` for an unknown engine is a silent no-op (no
+        /// panic, no spurious insert) — a stale `alive` racing an eviction
+        /// must not resurrect the engine (issue 1339).
+        #[test]
+        fn engine_alive_for_unknown_is_noop() {
+            let (_chassis, mailer, cells) = boot();
+            let after = push_then_list(
+                &mailer,
+                &cells,
+                &EngineAlive {
+                    engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                },
+            );
+            assert!(
+                after.is_empty(),
+                "an alive for an unknown engine must not insert it",
+            );
+        }
     }
 }
