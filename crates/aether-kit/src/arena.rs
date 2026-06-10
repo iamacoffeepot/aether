@@ -51,30 +51,14 @@ const DANGER_COLOR: (f32, f32, f32) = (0.85, 0.13, 0.11);
 /// by this, so nothing strikes a cell that wasn't telegraphed.
 const LEAD_TICKS: i32 = 84;
 
-// Ring motion: the front advances one sub-cell of radius every
-// `RING_TICKS_PER_STEP` ticks. Rings stop short of the arena so there is
-// always a safe island — outward rings stop at `RING_OUT_MAX` (safe band
-// outside), inward rings contract from `RING_IN_START` only to `RING_IN_MIN`
-// (safe center).
-const RING_TICKS_PER_STEP: i32 = 6;
-const RING_THICK: i32 = 3;
-const RING_OUT_MAX: i32 = 24;
+/// Difficulty runs `0..=INTENSITY_MAX`. A level ramps it across its duration,
+/// and every spawn snapshots its parameters from it (see [`Tuning`]) so each
+/// pattern's motion stays consistent even as the ramp moves underneath it.
+const INTENSITY_MAX: i32 = 100;
+
+/// Inward rings always collapse from this radius; the safe-island *floor* they
+/// stop at is the difficulty-driven part (see [`Tuning::in_min`]).
 const RING_IN_START: i32 = 40;
-const RING_IN_MIN: i32 = 14;
-
-// Column (swept wall) motion along one axis, with a gap to aim for.
-const COLUMN_TICKS_PER_STEP: i32 = 5;
-const COLUMN_THICK: i32 = 2;
-/// Gap width in the wall, in sub-cells (~3 tiles of breathing room).
-const COLUMN_GAP: i32 = 12;
-
-// Wave: a single expanding arc — one sector of an outward ring.
-const WAVE_TICKS_PER_STEP: i32 = 5;
-const WAVE_THICK: i32 = 3;
-const WAVE_MAX: i32 = 50;
-/// Wave half-angle as a `(numerator, denominator)` slope bound on `|cross| /
-/// dot` (see [`paint_arc`]): `(1, 1)` is a ±45° wedge, a 90° sector.
-const WAVE_WEDGE: (i32, i32) = (1, 1);
 
 /// The eight compass directions a wave can face.
 const COMPASS_DIRS: [(i32, i32); 8] = [
@@ -88,10 +72,11 @@ const COMPASS_DIRS: [(i32, i32); 8] = [
     (-1, -1),
 ];
 
-/// Ticks between pattern spawns.
-const SPAWN_INTERVAL_TICKS: u64 = 110;
-/// Most patterns running at once.
-const MAX_CONCURRENT: usize = 2;
+/// Spawn cadence (ticks between patterns) and max concurrent patterns, each an
+/// `(easy, hard)` pair interpolated by intensity — harder spawns more often and
+/// runs more at once.
+const SPAWN_INTERVAL: (i32, i32) = (150, 55);
+const CONCURRENT: (i32, i32) = (1, 3);
 
 /// Global speed is `speed_num / SPEED_DEN`: the arena clock advances that many
 /// quarter-steps per tick, scaling motion, telegraph, and spawn rate together.
@@ -99,11 +84,10 @@ const MAX_CONCURRENT: usize = 2;
 const SPEED_DEN: i32 = 4;
 const SPEED_MIN: i32 = 1; // 0.25×
 const SPEED_MAX: i32 = 16; // 4×
-/// Adjustable wall-thickness bounds, in sub-cells. The ceiling is high enough
-/// for a wall to read as a thick advancing slab (40 sub = 10 tiles, most of the
-/// 16-tile field), not just a thin line.
-const WALL_MIN: i32 = 1;
-const WALL_MAX: i32 = 40;
+
+/// Fixed non-zero RNG seed: every run faces the same pattern sequence, which is
+/// both fair across players and exactly replayable.
+const SEED: u64 = 0x2545_F491_4F6C_DD1D;
 
 /// A sub-cell's current hazard state.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,60 +111,134 @@ enum Shape {
         gap_lo: i32,
         reverse: bool,
     },
-    /// A single expanding arc — one ~90° sector of an outward ring, facing
+    /// A single expanding arc — one sector of an outward ring, facing
     /// `(ux, uz)`. A radial wave to dodge out of the way of.
     Wave { cx: i32, cz: i32, ux: i32, uz: i32 },
 }
 
-/// One live pattern: a shape plus the ticks since it spawned.
+/// The three hazard families a level is built from. A level confines spawns to
+/// one class; `Shape` is the concrete instance (a ring can collapse or expand, a
+/// wall sweep either axis, and so on).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShapeClass {
+    Ring,
+    Wall,
+    Wave,
+}
+
+/// A shape's parameters at a given difficulty. Snapshotted when a pattern spawns
+/// so its motion stays consistent even as the level's intensity ramps underneath
+/// it. Fields a class doesn't use stay at their defaults.
+#[derive(Clone, Copy)]
+struct Tuning {
+    /// Band depth, sub-cells.
+    thick: i32,
+    /// Ticks per sub-cell of front travel — smaller is faster.
+    speed: i32,
+    /// Ring: outward frontier cap (safe band beyond it).
+    out_max: i32,
+    /// Ring: inward collapse floor (safe island inside it).
+    in_min: i32,
+    /// Wall: gap width, sub-cells.
+    gap: i32,
+    /// Wave: radial reach.
+    reach: i32,
+    /// Wave: arc half-angle as a `(num, den)` slope bound on `|cross| / dot`.
+    wedge: (i32, i32),
+}
+
+impl Tuning {
+    /// The parameter envelope for a class at `intensity`, interpolating each
+    /// knob from its easy value (intensity 0) to its hard value
+    /// ([`INTENSITY_MAX`]). Harder means faster, thicker, and tighter margins.
+    fn for_class(class: ShapeClass, intensity: i32) -> Self {
+        let t = intensity.clamp(0, INTENSITY_MAX);
+        let lerp = |easy, hard| lerp_i(easy, hard, t, INTENSITY_MAX);
+        let base = Self {
+            thick: 0,
+            speed: 5,
+            out_max: 0,
+            in_min: 0,
+            gap: 0,
+            reach: 0,
+            wedge: (1, 1),
+        };
+        match class {
+            ShapeClass::Ring => Self {
+                thick: lerp(2, 5),
+                speed: lerp(8, 3),
+                out_max: lerp(20, 28),
+                in_min: lerp(16, 8),
+                ..base
+            },
+            ShapeClass::Wall => Self {
+                thick: lerp(2, 20),
+                speed: lerp(7, 3),
+                gap: lerp(18, 6),
+                ..base
+            },
+            ShapeClass::Wave => Self {
+                thick: lerp(2, 4),
+                speed: lerp(7, 3),
+                reach: lerp(40, 60),
+                wedge: (lerp(1, 5), 2),
+                ..base
+            },
+        }
+    }
+}
+
+/// One live pattern: a shape, the ticks since it spawned, and the tuning it was
+/// born with.
 struct Pattern {
     shape: Shape,
     age: i32,
+    tuning: Tuning,
 }
 
 impl Pattern {
     /// Whether the pattern has finished — its danger front has run off the end
     /// of its animation — and should be retired.
-    fn done(&self, wall_thickness: i32) -> bool {
+    fn done(&self) -> bool {
+        let tn = &self.tuning;
         match self.shape {
             Shape::Ring { inward, .. } => {
                 let travel = if inward {
-                    RING_IN_START - RING_IN_MIN
+                    RING_IN_START - tn.in_min
                 } else {
-                    RING_OUT_MAX
+                    tn.out_max
                 };
-                self.age > LEAD_TICKS + (travel + RING_THICK) * RING_TICKS_PER_STEP
+                self.age > LEAD_TICKS + (travel + tn.thick) * tn.speed
             }
             Shape::Column { horizontal, .. } => {
                 let span = if horizontal { HH } else { HW };
-                self.age > LEAD_TICKS + (span + wall_thickness) * COLUMN_TICKS_PER_STEP
+                self.age > LEAD_TICKS + (span + tn.thick) * tn.speed
             }
-            Shape::Wave { .. } => {
-                self.age > LEAD_TICKS + (WAVE_MAX + WAVE_THICK) * WAVE_TICKS_PER_STEP
-            }
+            Shape::Wave { .. } => self.age > LEAD_TICKS + (tn.reach + tn.thick) * tn.speed,
         }
     }
 
     /// Paint this shape's warning band (current age) and danger front (age
     /// minus the lead) into the field.
-    fn paint(&self, field: &mut [Phase], wall_thickness: i32) {
+    fn paint(&self, field: &mut [Phase]) {
+        let tn = &self.tuning;
         let age = self.age;
         let danger_age = (age - LEAD_TICKS).max(0);
         match self.shape {
             Shape::Ring { cx, cz, inward } => {
-                let wf = ring_radius(age, inward);
-                let df = ring_radius(danger_age, inward);
+                let wf = ring_radius(age, inward, tn);
+                let df = ring_radius(danger_age, inward, tn);
                 // Warning spans the whole band from the danger front to the
                 // leading edge; danger is the thin front, painted only once the
                 // lead has elapsed.
                 let (lo, hi) = if inward {
-                    (wf, df + RING_THICK)
+                    (wf, df + tn.thick)
                 } else {
-                    (df, wf + RING_THICK)
+                    (df, wf + tn.thick)
                 };
                 paint_annulus(field, cx, cz, lo, hi, Phase::Warning);
                 if age >= LEAD_TICKS {
-                    paint_annulus(field, cx, cz, df, df + RING_THICK, Phase::Danger);
+                    paint_annulus(field, cx, cz, df, df + tn.thick, Phase::Danger);
                 }
             }
             Shape::Column {
@@ -189,10 +247,10 @@ impl Pattern {
                 reverse,
             } => {
                 let span = if horizontal { HH } else { HW };
-                let wpos = column_pos(age, span, reverse);
-                let dpos = column_pos(danger_age, span, reverse);
+                let wpos = column_pos(age, span, reverse, tn.speed);
+                let dpos = column_pos(danger_age, span, reverse, tn.speed);
                 let dir = if reverse { -1 } else { 1 };
-                let gap_hi = gap_lo + COLUMN_GAP;
+                let gap_hi = gap_lo + tn.gap;
                 let (lo, hi) = if wpos <= dpos {
                     (wpos, dpos)
                 } else {
@@ -202,7 +260,7 @@ impl Pattern {
                     paint_line(field, horizontal, pos, gap_lo, gap_hi, Phase::Warning);
                 }
                 if age >= LEAD_TICKS {
-                    for k in 0..wall_thickness {
+                    for k in 0..tn.thick {
                         paint_line(
                             field,
                             horizontal,
@@ -215,39 +273,45 @@ impl Pattern {
                 }
             }
             Shape::Wave { cx, cz, ux, uz } => {
-                let wf = (age / WAVE_TICKS_PER_STEP).min(WAVE_MAX);
-                let df = (danger_age / WAVE_TICKS_PER_STEP).min(WAVE_MAX);
+                let wf = (age / tn.speed).min(tn.reach);
+                let df = (danger_age / tn.speed).min(tn.reach);
                 let arc = ArcSpec {
                     cx,
                     cz,
                     dir: (ux, uz),
-                    wedge: WAVE_WEDGE,
+                    wedge: tn.wedge,
                 };
-                paint_arc(field, df, wf + WAVE_THICK, Phase::Warning, arc);
+                paint_arc(field, df, wf + tn.thick, Phase::Warning, arc);
                 if age >= LEAD_TICKS {
-                    paint_arc(field, df, df + WAVE_THICK, Phase::Danger, arc);
+                    paint_arc(field, df, df + tn.thick, Phase::Danger, arc);
                 }
             }
         }
     }
 }
 
-/// Ring front radius at a given age, clamped to its safe-island limit:
-/// outward grows from 0 up to `RING_OUT_MAX`, inward shrinks from
-/// `RING_IN_START` down to `RING_IN_MIN`.
-fn ring_radius(age: i32, inward: bool) -> i32 {
-    let step = age / RING_TICKS_PER_STEP;
+/// Ring front radius at a given age, clamped to its safe-island limit: outward
+/// grows from 0 up to `tn.out_max`, inward shrinks from `RING_IN_START` down to
+/// `tn.in_min`.
+fn ring_radius(age: i32, inward: bool, tn: &Tuning) -> i32 {
+    let step = age / tn.speed;
     if inward {
-        (RING_IN_START - step).max(RING_IN_MIN)
+        (RING_IN_START - step).max(tn.in_min)
     } else {
-        step.min(RING_OUT_MAX)
+        step.min(tn.out_max)
     }
 }
 
 /// Column front position at a given age along a `span`-long axis.
-fn column_pos(age: i32, span: i32, reverse: bool) -> i32 {
-    let step = age / COLUMN_TICKS_PER_STEP;
+fn column_pos(age: i32, span: i32, reverse: bool, speed: i32) -> i32 {
+    let step = age / speed;
     if reverse { span - 1 - step } else { step }
+}
+
+/// Integer linear interpolation: `a` at `t = 0`, `b` at `t = tmax`. Works for a
+/// descending range (`a > b`), and rounds toward `a`.
+fn lerp_i(a: i32, b: i32, t: i32, tmax: i32) -> i32 {
+    a + (b - a) * t / tmax
 }
 
 /// The hazard field plus its deterministic spawn clock and live patterns.
@@ -263,8 +327,12 @@ pub struct Arena {
     speed_num: i32,
     /// Fractional carry for sub-1× speeds.
     time_accum: i32,
-    /// Swept-wall thickness, in sub-cells.
-    wall_thickness: i32,
+    /// The class a level confines spawns to; `None` is free-play (a random class
+    /// each spawn).
+    director: Option<ShapeClass>,
+    /// Current difficulty, `0..=INTENSITY_MAX`. Drives each spawn's tuning and
+    /// the spawn cadence/concurrency.
+    intensity: i32,
 }
 
 impl Arena {
@@ -272,13 +340,12 @@ impl Arena {
         Self {
             phases: [Phase::Safe; HCELLS],
             patterns: Vec::new(),
-            // Fixed non-zero seed: every run faces the same sequence, which is
-            // both fair across players and exactly replayable.
-            rng: 0x2545_F491_4F6C_DD1D,
+            rng: SEED,
             elapsed: 0,
             speed_num: SPEED_DEN,
             time_accum: 0,
-            wall_thickness: COLUMN_THICK,
+            director: None,
+            intensity: INTENSITY_MAX / 2,
         }
     }
 
@@ -292,23 +359,56 @@ impl Arena {
         }
         self.phases.fill(Phase::Safe);
         for pattern in &self.patterns {
-            pattern.paint(&mut self.phases, self.wall_thickness);
+            pattern.paint(&mut self.phases);
         }
     }
 
-    /// One logical step: spawn on cadence, age the patterns, retire finished
-    /// ones.
+    /// One logical step: spawn on the intensity-scaled cadence, age the
+    /// patterns, retire finished ones.
+    #[allow(clippy::cast_sign_loss)] // interval/concurrent lerp from non-negative endpoints
     fn step(&mut self) {
-        if self.elapsed.is_multiple_of(SPAWN_INTERVAL_TICKS) && self.patterns.len() < MAX_CONCURRENT
+        let interval = lerp_i(
+            SPAWN_INTERVAL.0,
+            SPAWN_INTERVAL.1,
+            self.intensity,
+            INTENSITY_MAX,
+        );
+        let concurrent = lerp_i(CONCURRENT.0, CONCURRENT.1, self.intensity, INTENSITY_MAX);
+        if self.elapsed.is_multiple_of(interval.max(1) as u64)
+            && self.patterns.len() < concurrent.max(1) as usize
         {
             self.spawn();
         }
         for pattern in &mut self.patterns {
             pattern.age += 1;
         }
-        let wall = self.wall_thickness;
-        self.patterns.retain(|pattern| !pattern.done(wall));
+        self.patterns.retain(|pattern| !pattern.done());
         self.elapsed += 1;
+    }
+
+    /// Confine spawns to one class at a fixed difficulty — what a level drives
+    /// each tick as its clock ramps the intensity.
+    pub fn set_level(&mut self, class: ShapeClass, intensity: i32) {
+        self.director = Some(class);
+        self.intensity = intensity.clamp(0, INTENSITY_MAX);
+    }
+
+    /// Clear the field back to a fresh start (no live patterns, clock zeroed,
+    /// RNG re-seeded) — used when the game restarts after a death.
+    pub fn reset(&mut self) {
+        self.phases.fill(Phase::Safe);
+        self.patterns.clear();
+        self.rng = SEED;
+        self.elapsed = 0;
+        self.time_accum = 0;
+    }
+
+    /// Whether a sub-cell is currently lethal (red). Out-of-bounds reads safe.
+    #[allow(clippy::cast_sign_loss)] // caller passes in-bounds coords
+    pub fn is_danger(&self, sx: i32, sz: i32) -> bool {
+        (0..HW).contains(&sx)
+            && (0..HH).contains(&sz)
+            && self.phases[(sz * HW + sx) as usize] == Phase::Danger
     }
 
     /// Nudge global speed up / down a quarter-step; returns the new speed as a
@@ -323,54 +423,53 @@ impl Arena {
         self.speed_num * 100 / SPEED_DEN
     }
 
-    /// Thicken / thin the swept walls; returns the new thickness in sub-cells.
-    pub fn walls_thicker(&mut self) -> i32 {
-        self.wall_thickness = (self.wall_thickness + 1).min(WALL_MAX);
-        self.wall_thickness
-    }
-
-    pub fn walls_thinner(&mut self) -> i32 {
-        self.wall_thickness = (self.wall_thickness - 1).max(WALL_MIN);
-        self.wall_thickness
-    }
-
-    /// Pick and place a fresh pattern from the RNG.
+    /// Pick the class (the level's, or a random one in free-play), snapshot its
+    /// tuning at the current intensity, and place a fresh pattern.
     fn spawn(&mut self) {
-        let shape = match self.next_rng() % 5 {
-            // Expanding ring: dodge the band.
-            0 => Shape::Ring {
-                cx: self.rand_between(SUB * 4, HW - SUB * 4),
-                cz: self.rand_between(SUB * 4, HH - SUB * 4),
-                inward: false,
+        let class = self.director.unwrap_or_else(|| match self.next_rng() % 3 {
+            0 => ShapeClass::Ring,
+            1 => ShapeClass::Wall,
+            _ => ShapeClass::Wave,
+        });
+        let tuning = Tuning::for_class(class, self.intensity);
+        let shape = self.make_shape(class, &tuning);
+        self.patterns.push(Pattern {
+            shape,
+            age: 0,
+            tuning,
+        });
+    }
+
+    /// A concrete shape of `class` — random placement / orientation from the
+    /// RNG, with the gap sized to `tuning`.
+    fn make_shape(&mut self, class: ShapeClass, tuning: &Tuning) -> Shape {
+        let margin = SUB * 4;
+        match class {
+            ShapeClass::Ring => Shape::Ring {
+                cx: self.rand_between(margin, HW - margin),
+                cz: self.rand_between(margin, HH - margin),
+                inward: self.next_rng().is_multiple_of(2),
             },
-            // Collapsing ring: get to the center before it closes.
-            1 => Shape::Ring {
-                cx: self.rand_between(SUB * 4, HW - SUB * 4),
-                cz: self.rand_between(SUB * 4, HH - SUB * 4),
-                inward: true,
-            },
-            2 => Shape::Column {
-                horizontal: true,
-                gap_lo: self.rand_between(0, HW - COLUMN_GAP),
-                reverse: self.next_rng().is_multiple_of(2),
-            },
-            3 => Shape::Column {
-                horizontal: false,
-                gap_lo: self.rand_between(0, HH - COLUMN_GAP),
-                reverse: self.next_rng().is_multiple_of(2),
-            },
-            // Single expanding arc — a radial wave.
-            _ => {
+            ShapeClass::Wall => {
+                let horizontal = self.next_rng().is_multiple_of(2);
+                // Horizontal walls span X (gap on X); vertical span Z (gap on Z).
+                let gap_span = if horizontal { HW } else { HH };
+                Shape::Column {
+                    horizontal,
+                    gap_lo: self.rand_between(0, (gap_span - tuning.gap).max(1)),
+                    reverse: self.next_rng().is_multiple_of(2),
+                }
+            }
+            ShapeClass::Wave => {
                 let (ux, uz) = self.rand_dir();
                 Shape::Wave {
-                    cx: self.rand_between(SUB * 4, HW - SUB * 4),
-                    cz: self.rand_between(SUB * 4, HH - SUB * 4),
+                    cx: self.rand_between(margin, HW - margin),
+                    cz: self.rand_between(margin, HH - margin),
                     ux,
                     uz,
                 }
             }
-        };
-        self.patterns.push(Pattern { shape, age: 0 });
+        }
     }
 
     /// Deterministic xorshift64 step.
@@ -437,7 +536,14 @@ impl Arena {
             for (col, &radius) in RADII.iter().enumerate() {
                 let (cx, cz) = panel_center(col, row);
                 paint_annulus(&mut self.phases, cx, cz, radius, radius + 3, Phase::Warning);
-                paint_annulus(&mut self.phases, cx, cz, radius - thick, radius, Phase::Danger);
+                paint_annulus(
+                    &mut self.phases,
+                    cx,
+                    cz,
+                    radius - thick,
+                    radius,
+                    Phase::Danger,
+                );
             }
         }
     }
@@ -447,7 +553,7 @@ impl Arena {
     /// growing top to bottom at a fixed gap; orange leads downward (`+z`), the
     /// sweep direction. Each wall is anchored at the top of its band so the
     /// thick one grows down into its own space without overlapping the next.
-    #[allow(clippy::cast_possible_wrap)] // row is a 0..3 loop index
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // row is 0..3
     fn paint_wall_matrix(&mut self) {
         const THICKS: [i32; 3] = [4, 10, 16];
         const GAP: i32 = 10;
@@ -457,10 +563,24 @@ impl Arena {
         for (row, &thick) in THICKS.iter().enumerate() {
             let z0 = row as i32 * band + 1;
             for k in 0..thick {
-                paint_line(&mut self.phases, true, z0 + k, gap_lo, gap_hi, Phase::Danger);
+                paint_line(
+                    &mut self.phases,
+                    true,
+                    z0 + k,
+                    gap_lo,
+                    gap_hi,
+                    Phase::Danger,
+                );
             }
             for k in thick..(thick + 3) {
-                paint_line(&mut self.phases, true, z0 + k, gap_lo, gap_hi, Phase::Warning);
+                paint_line(
+                    &mut self.phases,
+                    true,
+                    z0 + k,
+                    gap_lo,
+                    gap_hi,
+                    Phase::Warning,
+                );
             }
         }
     }
@@ -491,7 +611,7 @@ impl Arena {
 }
 
 /// Sub-cell center of preview panel `(col, row)` in a 3×3 grid over the field.
-#[allow(clippy::cast_possible_wrap)] // col/row are 0..3 loop indices
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // col/row are 0..3
 fn panel_center(col: usize, row: usize) -> (i32, i32) {
     let (pw, ph) = (HW / 3, HH / 3);
     (col as i32 * pw + pw / 2, row as i32 * ph + ph / 2)
@@ -652,10 +772,27 @@ mod tests {
     fn patterns_retire_so_the_field_does_not_fill_up() {
         // Patterns finish and are dropped, so the live set stays bounded and
         // hazards never accumulate without end.
+        let cap = usize::try_from(CONCURRENT.1).expect("CONCURRENT.1 is a small positive constant");
         let mut arena = Arena::new();
         for _ in 0..3_000 {
             arena.tick();
-            assert!(arena.patterns.len() <= MAX_CONCURRENT);
+            assert!(arena.patterns.len() <= cap);
+        }
+    }
+
+    #[test]
+    fn a_level_spawns_only_its_class() {
+        // A level confines spawns to its one class — no mixing.
+        let mut arena = Arena::new();
+        arena.set_level(ShapeClass::Wall, 70);
+        for _ in 0..2_500 {
+            arena.tick();
+            for pattern in &arena.patterns {
+                assert!(
+                    matches!(pattern.shape, Shape::Column { .. }),
+                    "a non-wall pattern spawned in a wall level"
+                );
+            }
         }
     }
 }
