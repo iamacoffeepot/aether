@@ -234,8 +234,8 @@ fn parse_cost_override(raw: Option<String>) -> Option<u64> {
 /// `actor_logs` on any box (especially the CI VM) to confirm the budget
 /// landed where intended. Called once at chassis boot.
 pub fn log_handoff_calibration() {
-    let cost_ns = handoff_cost_nanos();
-    let budget_ns =
+    let cost_nanos = handoff_cost_nanos();
+    let budget_nanos =
         u64::try_from(super::worker_deque::time_budget().as_nanos()).unwrap_or(u64::MAX);
     // Realized handoffs-per-budget on this box: `BUDGET_HANDOFF_MULTIPLIER`
     // in the common case, or off it when a rail / env override bound the
@@ -244,11 +244,11 @@ pub fn log_handoff_calibration() {
         clippy::cast_precision_loss,
         reason = "nanosecond counts are well within f64's exact-integer range; the ratio is a diagnostic, not load-bearing"
     )]
-    let realized_multiplier = budget_ns as f64 / cost_ns as f64;
+    let realized_multiplier = budget_nanos as f64 / cost_nanos as f64;
     tracing::info!(
         target: "aether_substrate::scheduler",
-        handoff_cost_ns = cost_ns,
-        budget_ns,
+        handoff_cost_nanos = cost_nanos,
+        budget_nanos,
         realized_multiplier,
         "keep-local time budget derived from the measured cross-worker handoff cost (iamacoffeepot/aether#1182)",
     );

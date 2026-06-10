@@ -553,7 +553,7 @@ pub struct CompareConfig {
     /// differences read as noise; see the latency-sweep finding that
     /// ~100ns deltas are unresolvable). Without it, a 50ns shift on a
     /// 170ns sub-µs handler cell reads as a 30% "regression".
-    pub abs_floor_ns: f64,
+    pub abs_floor_nanos: f64,
     /// Fraction of trials whose delta must share the effect's sign.
     pub consistency: f64,
 }
@@ -563,7 +563,7 @@ impl Default for CompareConfig {
         Self {
             effect_floor_iqr: 1.5,
             rel_floor: 0.10,
-            abs_floor_ns: 300.0,
+            abs_floor_nanos: 300.0,
             consistency: 0.75,
         }
     }
@@ -942,13 +942,13 @@ fn classify(
         .count() as f64;
     let consistent = same_sign / n >= cfg.consistency;
 
-    // The absolute floor (`abs_floor_ns`) is a *nanosecond* resolution
+    // The absolute floor (`abs_floor_nanos`) is a *nanosecond* resolution
     // floor — meaningful for a latency span, meaningless for a mails/sec
     // rate (iamacoffeepot/aether#1202). For a higher-is-better rate the
     // verdict rests on the IQR + relative floors only; the ns floor is
     // neutralised to zero.
     let abs_floor = match dir {
-        Direction::LowerIsBetter => cfg.abs_floor_ns,
+        Direction::LowerIsBetter => cfg.abs_floor_nanos,
         Direction::HigherIsBetter => 0.0,
     };
     let floor = (cfg.effect_floor_iqr * delta_iqr)

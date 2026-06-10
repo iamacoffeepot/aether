@@ -69,7 +69,7 @@ impl UreqAnthropicAdapter {
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
 
-        let (status, retry_after_ms, text) =
+        let (status, retry_after_millis, text) =
             shared::run_request(&self.agent, http_req, self.timeout)?;
 
         if !(200..300).contains(&status) {
@@ -77,12 +77,12 @@ impl UreqAnthropicAdapter {
             // the cap's `error::status_to_error` mapping reconstructs
             // the typed variant. The cap parses the leading status.
             return Err(format!(
-                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+                "status={status} retry_after_ms={retry_after_millis:?} body={text}"
             ));
         }
 
-        let elapsed_ms = elapsed_ms(started);
-        parse_messages_response(&text, &req.model, elapsed_ms)
+        let elapsed_millis = elapsed_millis(started);
+        parse_messages_response(&text, &req.model, elapsed_millis)
     }
 }
 
@@ -159,7 +159,7 @@ fn clamp_u32(v: u64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
-fn elapsed_ms(started: Instant) -> u32 {
+fn elapsed_millis(started: Instant) -> u32 {
     clamp_u32(u64::try_from(started.elapsed().as_millis()).unwrap_or_else(|_| u64::from(u32::MAX)))
 }
 

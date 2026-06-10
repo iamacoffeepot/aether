@@ -212,11 +212,11 @@ impl UreqGeminiAdapter {
             .header("content-type", "application/json")
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
-        let (status, retry_after_ms, text) =
+        let (status, retry_after_millis, text) =
             shared::run_request(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
             return Err(format!(
-                "status={status} retry_after_ms={retry_after_ms:?} body={text}"
+                "status={status} retry_after_ms={retry_after_millis:?} body={text}"
             ));
         }
         Ok(text)

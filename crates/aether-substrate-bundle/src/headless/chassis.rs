@@ -29,7 +29,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use super::driver::{HeadlessTimerCapability, parse_tick_hz_env};
+use super::driver::{HeadlessTimerDriverCapability, parse_tick_hz_env};
 use crate::autoload::{AutoloadComponent, autoload_mail};
 use crate::chassis_common::{
     CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server, parse_workers_env,
@@ -50,7 +50,7 @@ pub struct HeadlessChassis;
 
 impl Chassis for HeadlessChassis {
     const PROFILE: &'static str = "headless";
-    type Driver = HeadlessTimerCapability;
+    type Driver = HeadlessTimerDriverCapability;
     type Env = HeadlessEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
@@ -181,7 +181,7 @@ impl HeadlessChassis {
     /// the native passives (broadcast/handle/log/control/io/http plus
     /// the headless render / window / test-bench fail-fast caps)
     /// through the `chassis_builder` `.with()` chain, then wrap the
-    /// timer in a [`HeadlessTimerCapability`] and hand it to the
+    /// timer in a [`HeadlessTimerDriverCapability`] and hand it to the
     /// builder.
     fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<Self>, BootError> {
         let HeadlessEnv {
@@ -267,7 +267,7 @@ impl HeadlessChassis {
         let aborter: Arc<dyn FatalAborter> =
             Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
 
-        let driver = HeadlessTimerCapability {
+        let driver = HeadlessTimerDriverCapability {
             boot,
             kind_tick,
             tick_period,

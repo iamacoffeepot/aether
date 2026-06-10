@@ -127,9 +127,9 @@ impl ClaudeCliAdapter {
                         // JoinHandle detaches the thread; its buffer is moot.
                         let _ = child.kill();
                         let _ = child.wait();
-                        let elapsed_ms =
+                        let elapsed_millis =
                             u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-                        return Err(format!("{TIMEOUT_SENTINEL}{elapsed_ms}"));
+                        return Err(format!("{TIMEOUT_SENTINEL}{elapsed_millis}"));
                     }
                     thread::sleep(POLL_INTERVAL);
                 }

@@ -18,7 +18,7 @@
 use aether_actor::Local;
 use aether_actor::log::{ActorLogRing, render_event};
 
-use super::now_unix_ms;
+use super::now_unix_millis;
 use std::io;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
@@ -39,7 +39,7 @@ where
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let (level, target, message) = render_event(event);
-        let timestamp = now_unix_ms();
+        let timestamp = now_unix_millis();
         // `try_with_mut` returns `Some` only when the chassis
         // dispatcher has stamped an actor's slots (in-actor branch).
         // Out-of-actor events drop here and leave `engine_logs`
@@ -64,7 +64,7 @@ pub fn emit_host_event(level: u32, target: &str, message: &str) {
     // skip the macro entirely and push directly to the actor's ring.
     // `EnvFilter` matched against the *host* target, not the guest's,
     // would otherwise drop the guest event on its way through.
-    let timestamp = now_unix_ms();
+    let timestamp = now_unix_millis();
     let target = target.to_owned();
     let message = message.to_owned();
     let level_u8 = level.min(4) as u8;

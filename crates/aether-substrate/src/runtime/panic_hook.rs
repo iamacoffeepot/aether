@@ -44,7 +44,7 @@ use aether_actor::Local;
 use aether_actor::log::ActorLogRing;
 use aether_kinds::LogEntry;
 
-use super::now_unix_ms;
+use super::now_unix_millis;
 
 /// Env var that forces backtrace capture without flipping
 /// `RUST_BACKTRACE` for the whole process (which would change every
@@ -96,7 +96,7 @@ fn make_hook(
         // failures — a panic during the panic hook is the worst-
         // case-scenario; we never want to obscure the original
         // payload by panicking again here.
-        let timestamp_unix_ms = now_unix_ms();
+        let timestamp_unix_ms = now_unix_millis();
         let thread = thread::current();
         let thread_name = thread.name().unwrap_or("<unnamed>").to_owned();
         let location = info.location().map_or_else(

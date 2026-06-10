@@ -72,7 +72,7 @@ pub fn parse_tick_hz_env() -> u32 {
 /// it now fires `LifecycleAdvance` at `aether.lifecycle`, and the
 /// `LifecycleCapability` owns the broadcast vocabulary so the substrate
 /// observes a labelled `aether.lifecycle` root for every frame chain.
-pub struct HeadlessTimerCapability {
+pub struct HeadlessTimerDriverCapability {
     pub boot: SubstrateBoot,
     /// Field kept for wire compatibility; the timer body no longer
     /// touches `Tick` directly post-ADR-0082, but chassis builders
@@ -97,7 +97,7 @@ pub struct HeadlessTimerRunning {
     kind_lifecycle_advance: KindId,
     tick_period: Duration,
     /// SIGINT/SIGTERM shutdown flag, flipped from the signal handler
-    /// installed in [`HeadlessTimerCapability::boot`]. The run loop
+    /// installed in [`HeadlessTimerDriverCapability::boot`]. The run loop
     /// checks it at the top of each iteration and `break`s, so `run()`
     /// returns and the chassis teardown unwinds. A struct field (not a
     /// loop-local) so tests can inject a pre-set flag and drive `run()`
@@ -108,7 +108,7 @@ pub struct HeadlessTimerRunning {
     _boot: SubstrateBoot,
 }
 
-impl DriverCapability for HeadlessTimerCapability {
+impl DriverCapability for HeadlessTimerDriverCapability {
     type Running = HeadlessTimerRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
