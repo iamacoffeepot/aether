@@ -508,6 +508,11 @@ fn dag_executor_cancels_running_dag() {
                 query_status(&registry, &rx, dag_id, 100),
                 StatusResult::Complete { .. }
             ));
+            // DAG completed normally; observer mail may be in flight.
+            // Settle it before chassis drop.
+            let _ = poll_until(Duration::from_secs(5), || {
+                recorder.lock().unwrap().len() == 1
+            });
         }
         CancelResult::Err { error } => panic!("cancel errored: {error}"),
     }
@@ -518,7 +523,6 @@ fn dag_executor_cancels_running_dag() {
 /// A DAG polled mid-flight reports `Running` (with a per-node progress
 /// list naming both nodes), `Pending`, or `Complete`; it always reaches
 /// `Complete`.
-#[test]
 fn dag_executor_status_reports_running() {
     let (registry, mailer, rx) = fresh_substrate_with_rx();
     let recorder: Recorder<TestObserved> = Arc::new(Mutex::new(Vec::new()));
@@ -565,6 +569,12 @@ fn dag_executor_status_reports_running() {
         query_status(&registry, &rx, dag_id, 100),
         StatusResult::Complete { .. }
     )));
+    // The observer dispatch is fire-and-forget after `Complete`; wait for
+    // it to land before tearing down so no armed OwnedDispatch is dropped
+    // inside a worker's TLS destructor (ADR-0094 settlement-obligation).
+    let _ = poll_until(Duration::from_secs(5), || {
+        recorder.lock().unwrap().len() == 1
+    });
 
     drop(chassis);
 }
@@ -613,6 +623,10 @@ fn dag_executor_status_reports_complete_then_reaps() {
         query_status(&registry, &rx, dag_id, 100),
         StatusResult::Complete { .. }
     )));
+    // Settle the observer mail before retention expiry triggers the reap.
+    let _ = poll_until(Duration::from_secs(5), || {
+        recorder.lock().unwrap().len() == 1
+    });
 
     thread::sleep(Duration::from_millis(120));
     let unknown = poll_until(Duration::from_secs(5), || {
@@ -1158,6 +1172,16 @@ fn transform_skips_invoke_on_cache_hit() {
 /// declared at module scope.
 mod heavy {
     #[test]
+    fn dag_executor_status_reports_running() {
+        super::dag_executor_status_reports_running();
+    }
+
+    #[test]
+    fn transform_runs_off_executor_thread() {
+        super::transform_runs_off_executor_thread();
+    }
+
+    #[test]
     fn transform_panic_fails_node() {
         super::transform_panic_fails_node();
     }
@@ -1192,7 +1216,6 @@ mod heavy {
 /// parking / reaping of other DAG branches: a sibling DAG's pure
 /// `double` resolves while the `slow` transform spins (ADR-0048 §3 off
 /// the executor thread).
-#[test]
 fn transform_runs_off_executor_thread() {
     SLOW_TRANSFORM_GATE.store(false, Ordering::Release);
     let (registry, mailer, rx) = fresh_substrate_with_rx();
@@ -1222,7 +1245,7 @@ fn transform_runs_off_executor_thread() {
             slot: 0,
         }],
     };
-    let _slow_dag = submit_ok(&registry, &rx, slow_descriptor, 1);
+    let slow_dag_id = submit_ok(&registry, &rx, slow_descriptor, 1);
 
     // DAG 2: a pure `double` that must resolve while DAG 1 is blocked.
     let dag2 = submit_ok(
@@ -1246,7 +1269,16 @@ fn transform_runs_off_executor_thread() {
         aether_data::Ref::Inline(TestNumber { value: 8, tag: 0 }),
     );
 
-    // Release the spinning worker so the pool joins cleanly.
+    // Release the spinning worker so the pool joins cleanly, then wait
+    // for the slow DAG to reach a terminal state before dropping — ensures
+    // no armed OwnedDispatch is dropped inside a worker's TLS destructor
+    // (ADR-0094 settlement-obligation teardown race).
     SLOW_TRANSFORM_GATE.store(true, Ordering::Release);
+    let _ = poll_until(Duration::from_secs(10), || {
+        matches!(
+            query_status(&registry, &rx, slow_dag_id, 200),
+            StatusResult::Complete { .. } | StatusResult::Failed { .. }
+        )
+    });
     drop(chassis);
 }
