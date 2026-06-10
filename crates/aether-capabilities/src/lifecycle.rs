@@ -641,7 +641,7 @@ mod native {
                 initial_subscribers,
             } = config;
             let current_state = graph.start();
-            let advance_timeout_ms = env::var("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS")
+            let advance_timeout_millis = env::var("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(ADVANCE_TIMEOUT_MS_DEFAULT);
@@ -669,7 +669,7 @@ mod native {
                 terminal_reached: false,
                 quit_pending: false,
                 pending: None,
-                advance_timeout: Duration::from_millis(advance_timeout_ms),
+                advance_timeout: Duration::from_millis(advance_timeout_millis),
                 settlement_latency_ewma: None,
                 last_slow_warn: None,
                 mailer,

@@ -40,7 +40,7 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Default per-request timeout when `AETHER_HTTP_TIMEOUT_MS` is unset
 /// and the fetch itself supplies no `timeout_ms`. 30s matches
 /// ADR-0043 §4.
-pub const DEFAULT_TIMEOUT_MS: u32 = 30_000;
+pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
 /// kind by the cap before handing to the adapter.
@@ -136,7 +136,7 @@ pub struct HttpConfig {
     )]
     pub max_body_bytes: usize,
     /// Default per-request timeout when `Fetch.timeout_ms` is
-    /// `None`. Defaults to [`DEFAULT_TIMEOUT_MS`] (30 s). The derive's
+    /// `None`. Defaults to [`DEFAULT_TIMEOUT_MILLIS`] (30 s). The derive's
     /// `ms_duration` hint stores the Layer field as `u32`-ms and
     /// bridges via `Duration::from_millis(u64::from(...))`;
     /// `layer_field = "timeout_ms"` pins the Layer / env / CLI shape to
@@ -146,7 +146,7 @@ pub struct HttpConfig {
         feature = "native",
         config(
             default = 30_000,
-            parse = parse_timeout_ms,
+            parse = parse_timeout_millis,
             ms_duration,
             layer_field = "timeout_ms"
         )
@@ -161,7 +161,7 @@ impl Default for HttpConfig {
             allowlist: HashSet::new(),
             require_https: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
-            default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
+            default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
         }
     }
 }
@@ -202,7 +202,7 @@ fn parse_max_body_bytes(s: &str) -> Result<usize, ParseIntError> {
 }
 
 /// Parse a timeout in milliseconds (ADR-0090 §4 hard-error half):
-/// empty → [`DEFAULT_TIMEOUT_MS`]; a non-empty value that doesn't
+/// empty → [`DEFAULT_TIMEOUT_MILLIS`]; a non-empty value that doesn't
 /// parse as `u32` errors.
 ///
 /// # Errors
@@ -210,9 +210,9 @@ fn parse_max_body_bytes(s: &str) -> Result<usize, ParseIntError> {
 /// Returns a [`ParseIntError`] for a
 /// non-empty value that isn't a valid `u32`.
 #[cfg(feature = "native")]
-fn parse_timeout_ms(s: &str) -> Result<u32, ParseIntError> {
+fn parse_timeout_millis(s: &str) -> Result<u32, ParseIntError> {
     if s.trim().is_empty() {
-        return Ok(DEFAULT_TIMEOUT_MS);
+        return Ok(DEFAULT_TIMEOUT_MILLIS);
     }
     s.trim().parse()
 }
@@ -625,13 +625,15 @@ mod native {
             // empty value falls back to the default (unset), and a
             // non-empty garbage value errors rather than silently
             // defaulting.
-            use super::super::{DEFAULT_TIMEOUT_MS, parse_max_body_bytes, parse_timeout_ms};
+            use super::super::{
+                DEFAULT_TIMEOUT_MILLIS, parse_max_body_bytes, parse_timeout_millis,
+            };
             assert_eq!(parse_max_body_bytes("1024"), Ok(1024));
             assert_eq!(parse_max_body_bytes(""), Ok(DEFAULT_MAX_BODY_BYTES));
             assert!(parse_max_body_bytes("not-a-number").is_err());
-            assert_eq!(parse_timeout_ms("5000"), Ok(5000));
-            assert_eq!(parse_timeout_ms(""), Ok(DEFAULT_TIMEOUT_MS));
-            assert!(parse_timeout_ms("garbage").is_err());
+            assert_eq!(parse_timeout_millis("5000"), Ok(5000));
+            assert_eq!(parse_timeout_millis(""), Ok(DEFAULT_TIMEOUT_MILLIS));
+            assert!(parse_timeout_millis("garbage").is_err());
         }
 
         #[test]

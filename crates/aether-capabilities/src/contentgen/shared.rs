@@ -42,7 +42,7 @@ pub fn run_request(
         .run()
         .map_err(|e| format!("request: {e}"))?;
     let status = response.status().as_u16();
-    let retry_after_ms = response
+    let retry_after_millis = response
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
@@ -52,7 +52,7 @@ pub fn run_request(
         .body_mut()
         .read_to_string()
         .map_err(|e| format!("read body: {e}"))?;
-    Ok((status, retry_after_ms, text))
+    Ok((status, retry_after_millis, text))
 }
 
 /// Parse the `<status> retry_after_ms=<Debug-of-Option<u32>>` prefix a
@@ -63,7 +63,7 @@ pub fn run_request(
 pub fn parse_status_prefix(rest: &str) -> Option<(u16, Option<u32>)> {
     let mut parts = rest.split_whitespace();
     let status = parts.next()?.parse::<u16>().ok()?;
-    let retry_after_ms = parts.next().and_then(|tok| {
+    let retry_after_millis = parts.next().and_then(|tok| {
         tok.strip_prefix("retry_after_ms=").and_then(|v| {
             // The backend formats `Option<u32>` via Debug — `Some(1500)`
             // or `None`. Extract the inner integer when present.
@@ -72,7 +72,7 @@ pub fn parse_status_prefix(rest: &str) -> Option<(u16, Option<u32>)> {
                 .and_then(|n| n.parse::<u32>().ok())
         })
     });
-    Some((status, retry_after_ms))
+    Some((status, retry_after_millis))
 }
 
 /// Trim a response body to a short diagnostic snippet so an adapter
