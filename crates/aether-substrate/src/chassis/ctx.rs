@@ -412,6 +412,14 @@ impl<'a> ChassisCtx<'a> {
             // `env.kind_name` out of the `SendError` payload.
             Arc::new(move |dispatch: OwnedDispatch| {
                 let Some(tx) = weak.upgrade() else {
+                    // ADR-0094: the cap dropped its `MailboxSender` during
+                    // shutdown — the mail is discarded at this relay seam,
+                    // not held here, so mark the obligation transferred.
+                    // Without this a send racing teardown (e.g. a loaded
+                    // component's `subscribe_self` arriving as the lifecycle
+                    // cap shuts down) drops an armed `OwnedDispatch` and
+                    // trips the debug guard (#1564).
+                    dispatch.mark_transferred();
                     tracing::warn!(
                         target: "aether_substrate::capability",
                         kind = %dispatch.kind_name,
@@ -421,6 +429,8 @@ impl<'a> ChassisCtx<'a> {
                 };
                 let env: Envelope = dispatch;
                 if let Err(mpsc::SendError(env)) = tx.send(env) {
+                    // ADR-0094: discarded at the relay seam — transfer.
+                    env.mark_transferred();
                     tracing::warn!(
                         target: "aether_substrate::capability",
                         kind = %env.kind_name,
@@ -546,10 +556,14 @@ mod tests {
     use aether_actor::local::with_stamped;
     use aether_kinds::descriptors;
 
+    use aether_kinds::trace::Nanos;
+
     use crate::actor::registry::ActorRegistry;
     use crate::handle_store::HandleStore;
+    use crate::mail::registry::MailboxEntry;
+    use crate::mail::{KindId, MailId, MailRef, Source};
     use crate::runtime::lifecycle::PanicAborter;
-    use crate::scheduler::{Pool, PoolConfig};
+    use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 
     /// Per-actor scratch type for the iamacoffeepot/aether#1272 round-trip
     /// test. Mirrors the `ActorLogRing` shape (`Default + Local`) at the
@@ -619,5 +633,130 @@ mod tests {
             Probe::try_with(|p| p.0).expect("any stamped slots carry Probe")
         });
         assert_eq!(other_read, 0, "fresh slots see the Local at its default");
+    }
+
+    /// The long-lived owned infra a `ChassisCtx` borrows from. Held by
+    /// the test for the duration of the claim so the registered handler
+    /// outlives the `ctx` that registered it.
+    type TestInfra = (
+        Arc<Registry>,
+        Arc<Mailer>,
+        Arc<crate::Spawner>,
+        Arc<dyn FatalAborter>,
+        PoolHandle,
+    );
+
+    fn test_infra() -> TestInfra {
+        let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+        let actor_registry = Arc::new(ActorRegistry::new());
+        let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
+        let spawner = Arc::new(crate::Spawner::new(
+            Arc::clone(&registry),
+            actor_registry,
+            Arc::clone(&mailer),
+            Arc::clone(&aborter),
+            pool.wake_sink(),
+        ));
+        (registry, mailer, spawner, aborter, pool)
+    }
+
+    /// An armed `OwnedDispatch` addressed at `id`, shaped like the
+    /// `subscribe_self` mail a loaded component sends from its `wire`
+    /// hook. Armed, so dropping it without `discharge`/`mark_transferred`
+    /// trips the ADR-0094 guard in a debug build.
+    fn armed_subscribe_self(id: MailboxId) -> OwnedDispatch {
+        OwnedDispatch::armed(
+            KindId(7),
+            "aether.lifecycle.subscribe_self".to_owned(),
+            None,
+            Source::NONE,
+            MailRef::from(Vec::new()),
+            1,
+            MailId::new(id, 1),
+            MailId::new(id, 1),
+            None,
+            Nanos(0),
+            0,
+            id,
+        )
+    }
+
+    /// ADR-0094 / #1564: the `claim_mailbox_drop_on_shutdown` inbox
+    /// closure registers under a `Weak` sender, so once the cap sheds its
+    /// `MailboxSender` at shutdown the `weak.upgrade()` returns `None`. A
+    /// mail arriving in that window (e.g. a loaded component's
+    /// `subscribe_self` racing the lifecycle cap's teardown) must be
+    /// `mark_transferred` at the seam, not dropped armed — which would
+    /// trip the obligation guard and fatally abort the substrate.
+    #[test]
+    fn drop_on_shutdown_inbox_transfers_obligation_when_sender_gone() {
+        let (registry, mailer, spawner, aborter, _pool) = test_infra();
+        let claim_id;
+        {
+            let mut fallback: Option<FallbackRouter> = None;
+            let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+            let mut ctx = ChassisCtx::new(
+                &registry,
+                &mailer,
+                &mut fallback,
+                &aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+            );
+            let claim = ctx
+                .claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone")
+                .expect("claim succeeds");
+            claim_id = claim.id;
+            // Drop the only strong `Sender` — the registry's `Weak` now
+            // fails to upgrade, exactly as it does once a cap shuts down.
+            drop(claim.mailbox_sender);
+            drop(claim.receiver);
+        }
+        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(claim_id) else {
+            panic!("claimed mailbox should be an Inbox entry");
+        };
+        // Pre-fix this dropped the armed dispatch and panicked the guard.
+        handler.enqueue(armed_subscribe_self(claim_id));
+    }
+
+    /// ADR-0094 / #1564: the receiver-gone branch (`tx.send` returns
+    /// `SendError` because the dispatcher's receiver dropped) must also
+    /// `mark_transferred`, not drop the armed dispatch.
+    #[test]
+    fn drop_on_shutdown_inbox_transfers_obligation_when_receiver_gone() {
+        let (registry, mailer, spawner, aborter, _pool) = test_infra();
+        let claim_id;
+        // Hold the `MailboxSender` so `weak.upgrade()` still succeeds; the
+        // dropped receiver is what forces the `SendError` branch.
+        let _keep_sender;
+        {
+            let mut fallback: Option<FallbackRouter> = None;
+            let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+            let mut ctx = ChassisCtx::new(
+                &registry,
+                &mailer,
+                &mut fallback,
+                &aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+            );
+            let claim = ctx
+                .claim_mailbox_drop_on_shutdown_with_override("test.1564.receiver_gone")
+                .expect("claim succeeds");
+            claim_id = claim.id;
+            drop(claim.receiver);
+            _keep_sender = claim.mailbox_sender;
+        }
+        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(claim_id) else {
+            panic!("claimed mailbox should be an Inbox entry");
+        };
+        // Pre-fix this dropped the armed dispatch and panicked the guard.
+        handler.enqueue(armed_subscribe_self(claim_id));
     }
 }
