@@ -176,6 +176,17 @@ impl Lifecycle {
     pub fn complete(&self) -> bool {
         let mut w = self.word.load(Ordering::Acquire);
         loop {
+            // Invariant: each `complete` pairs with a claimed group, so
+            // `done` can never reach `len` before this call bumps it. An
+            // unpaired `complete` would push `done` past `len`, so the
+            // `done == len` seal test below never fires and the blob wedges
+            // (never retires). Guard the pairing in debug builds.
+            debug_assert!(
+                done_of(w) < len_of(w),
+                "Lifecycle::complete called with done ({}) >= len ({}) — unpaired complete",
+                done_of(w),
+                len_of(w),
+            );
             let new_done = done_of(w) + 1;
             let retire = new_done == len_of(w);
             let next = pack(cursor_of(w), len_of(w), new_done, sealed_of(w) || retire);
@@ -263,6 +274,22 @@ mod tests {
         assert!(lc.complete(), "completion bringing done==len retires");
         assert!(lc.is_retired());
         assert_eq!(lc.snapshot(), (2, 2, 2, true));
+    }
+
+    /// An unpaired `complete` (more completions than claimed groups) trips
+    /// the `done < len` debug guard rather than silently pushing `done`
+    /// past `len` and wedging the blob (it would never seal). Debug-only:
+    /// `debug_assert!` is compiled out in release, so the panic only fires
+    /// under `debug_assertions`.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "unpaired complete")]
+    fn complete_past_len_trips_debug_guard() {
+        let lc = Lifecycle::new(1);
+        assert_eq!(lc.claim(), Some(0));
+        assert!(lc.complete(), "the one claimed group retires the blob");
+        // Second, unpaired completion: done (1) >= len (1) — guard fires.
+        lc.complete();
     }
 
     #[test]

@@ -36,6 +36,7 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 
+use crate::config::{KnobKind, KnobRecord};
 use crate::scheduler::spin_park::{Acquired, DEFAULT_SPIN_WINDOW_USEC, SpinPark};
 use crate::scheduler::worker_deque;
 
@@ -231,6 +232,20 @@ impl Pool {
         }
     }
 }
+
+/// Config-discovery record (ADR-0090 unit b2) for the spin-window knob
+/// [`spin_window_from_env`] reads. Referenced by
+/// [`crate::scheduler::SCHEDULER_KNOBS`] so the e1 unknown-key sweep and
+/// the e2 `--config` dump cover it; the read path stays untouched. Pure
+/// `&'static` metadata.
+pub const SPIN_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: "AETHER_SPIN_WINDOW_USEC",
+    doc: "Route-to-spinner spin-window (microseconds) before a worker parks. The \
+          latency sweep retunes this without a recompile; malformed values fall \
+          back to 50.",
+    default: Some("50"),
+    kind: KnobKind::HandRegistered,
+}];
 
 /// Read the spin-window override (`AETHER_SPIN_WINDOW_USEC`) for the
 /// route-to-spinner coordinator, falling back to the default. The

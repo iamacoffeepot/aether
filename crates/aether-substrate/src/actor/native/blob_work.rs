@@ -137,12 +137,46 @@ use rustc_hash::FxHashMap;
 
 use crate::actor::native::Envelope;
 use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
+use crate::config::{KnobKind, KnobRecord};
 use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::scheduler::{
     BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos,
 };
+
+/// Config-discovery records (ADR-0090 unit b2) for the blob recruiter's
+/// three `OnceLock`-cached env knobs — [`recruit_min`], [`recruit_cap`],
+/// and [`wake_cost_nanos`]. Referenced by
+/// [`crate::scheduler::SCHEDULER_KNOBS`] so the e1 unknown-key sweep and
+/// the e2 `--config` dump cover them; the getters' hot-path reads stay
+/// untouched. Pure `&'static` metadata, docs/defaults lifted from the
+/// getter doc-comments.
+pub const RECRUIT_KNOBS: &[KnobRecord] = &[
+    KnobRecord {
+        env_key: "AETHER_BLOB_RECRUIT_MIN",
+        doc: "Minimum fresh-group count for a flush to broadcast-recruit siblings \
+              (the width gate). Values < 1 / unparseable fall back to 9.",
+        default: Some("9"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_BLOB_RECRUIT_MAX",
+        doc: "Cap on the number of sibling copies a single flush injects when \
+              recruiting, bounding injector churn for a very wide fan-out. Values \
+              < 1 / unparseable fall back to 32.",
+        default: Some("32"),
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
+        env_key: "AETHER_WAKE_COST_NANOS",
+        doc: "Pins the recruit wake break-even (nanoseconds) and freezes live \
+              refinement. Values < 1 / unparseable fall back to the box-measured \
+              handoff cost. Unset → measured and live-refined.",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+];
 
 /// Floor for a fresh blob's group-array capacity — a little headroom so a
 /// couple of subsequent flushes to *new* recipients can accumulate before
@@ -214,6 +248,11 @@ fn wake_cost_nanos() -> u64 {
         env::var("AETHER_WAKE_COST_NANOS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            // `>= 1`: a 0 override would disable the recruit wake gate
+            // entirely (every blob clears the break-even). Filter it out for
+            // consistency with `AETHER_HANDOFF_COST_NS` / `recruit_min` /
+            // `recruit_cap`; a rejected 0 falls through to the measured cost.
+            .filter(|&ns| ns >= 1)
     }) {
         return ns;
     }
