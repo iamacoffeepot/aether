@@ -44,7 +44,7 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = DEFAULT_PROVIDER_MAX_IN_FLIGHT;
 
 /// Default per-request timeout when `AETHER_ANTHROPIC_TIMEOUT_MS` is
 /// unset. A long completion can run tens of seconds.
-pub const DEFAULT_TIMEOUT_MS: u32 = 120_000;
+pub const DEFAULT_TIMEOUT_MILLIS: u32 = 120_000;
 
 /// Models the Messages-API backend accepts. The cap validates a
 /// request's `model` against this before any dispatch; the CLI backend
@@ -70,7 +70,7 @@ pub struct DisabledAnthropicAdapter {
 impl DisabledAnthropicAdapter {
     /// Build the disabled adapter with the CLI backend wired to the
     /// cap's per-request `timeout`. The default impl uses
-    /// `DEFAULT_TIMEOUT_MS`; production threads `config.timeout`.
+    /// `DEFAULT_TIMEOUT_MILLIS`; production threads `config.timeout`.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
         Self {
@@ -128,7 +128,7 @@ impl AnthropicAdapter for CombinedAnthropicAdapter {
 }
 
 mod config {
-    use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS};
+    use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS};
     // confique consumes these through `#[config(parse_env = …)]`; IntelliJ-Rust
     // doesn't trace macro-attr path args (Qodana FP), but rustc + clippy do.
     #[allow(unused_imports)]
@@ -187,7 +187,7 @@ mod config {
             feature = "native",
             config(
                 default = 120_000,
-                parse = parse_millis_strict::<DEFAULT_TIMEOUT_MS>,
+                parse = parse_millis_strict::<DEFAULT_TIMEOUT_MILLIS>,
                 ms_duration,
                 layer_field = "timeout_ms"
             )
@@ -201,7 +201,7 @@ mod config {
                 api_key: None,
                 disabled: false,
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
-                timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS)),
+                timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
             }
         }
     }
@@ -209,7 +209,7 @@ mod config {
     #[cfg(all(test, feature = "native"))]
     mod tests {
         use super::{
-            AnthropicConfig, AnthropicConfigLayer, DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS,
+            AnthropicConfig, AnthropicConfigLayer, DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS,
         };
         use confique::Config as _;
         use std::time::Duration;
@@ -228,7 +228,7 @@ mod config {
             assert_eq!(layer.api_key, None);
             assert!(!layer.disabled);
             assert_eq!(layer.max_in_flight, DEFAULT_MAX_IN_FLIGHT);
-            assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MS);
+            assert_eq!(layer.timeout_ms, DEFAULT_TIMEOUT_MILLIS);
             assert_eq!(
                 Duration::from_millis(u64::from(layer.timeout_ms)),
                 default.timeout
