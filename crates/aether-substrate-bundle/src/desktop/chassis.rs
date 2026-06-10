@@ -24,10 +24,11 @@ use aether_capabilities::{
     InputConfig, RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
     audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
-use aether_kinds::WindowMode;
+use aether_data::{Kind as _, mailbox_id_from_name};
+use aether_kinds::{LoadComponent, WindowMode};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{Chassis, Mail, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
@@ -171,6 +172,40 @@ pub struct DesktopEnv {
     /// in-memory byte budget. `None` falls through to env-only
     /// `AETHER_HANDLE_STORE_MAX_BYTES`.
     pub handle_store_max_bytes: Option<usize>,
+    /// Components to auto-load on boot, in order. A bundled standalone build
+    /// populates this so the game comes up with no hub; the normal desktop bin
+    /// leaves it empty and loads components over the hub instead.
+    pub autoload: Vec<AutoloadComponent>,
+}
+
+/// A component to auto-load on boot — its wasm bytes, optional init-config
+/// bytes (ADR-0090; empty for none), and the optional load name / export
+/// selector that `aether.component.load` carries (ADR-0096). A standalone
+/// bundle embeds these and feeds them to [`DesktopEnv::autoload`].
+pub struct AutoloadComponent {
+    pub wasm: Vec<u8>,
+    pub config: Vec<u8>,
+    pub name: Option<String>,
+    pub export: Option<String>,
+}
+
+/// Build the `aether.component.load` mail that auto-loads `component`, addressed
+/// to the `aether.component` mailbox the same way the hub's `load_component`
+/// and the test bench do.
+fn autoload_mail(component: AutoloadComponent) -> Mail {
+    let payload = LoadComponent {
+        wasm: component.wasm,
+        name: component.name,
+        config: component.config,
+        export: component.export,
+    }
+    .encode_into_bytes();
+    Mail::new(
+        mailbox_id_from_name("aether.component"),
+        LoadComponent::ID,
+        payload,
+        1,
+    )
 }
 
 impl DesktopEnv {
@@ -302,6 +337,7 @@ impl DesktopEnv {
             workers,
             persist: persist_state,
             handle_store_max_bytes,
+            autoload: Vec::new(),
         })
     }
 }
@@ -360,6 +396,7 @@ impl DesktopChassis {
             workers,
             persist,
             handle_store_max_bytes,
+            autoload,
         } = env;
 
         // ADR-0049 §9: desktop enables on-disk handle persistence.
@@ -451,6 +488,33 @@ impl DesktopChassis {
             .with_actor::<UnsupportedTestBenchCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
-        builder.driver(driver).build()
+        let built = builder.driver(driver).build()?;
+        // Auto-load any bundled components, in order, before the run loop
+        // starts. Fire-and-forward: the component host dispatches each load off
+        // the worker pool (already up after `build`), so the game is live
+        // shortly after `run` begins — no hub required.
+        for component in autoload {
+            mailer.push(autoload_mail(component));
+        }
+        Ok(built)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autoload_mail_addresses_the_component_host() {
+        // The autoload mail must target the component host's mailbox with the
+        // load kind — the same address the hub and test bench load through.
+        let mail = autoload_mail(AutoloadComponent {
+            wasm: vec![0, 1, 2, 3],
+            config: Vec::new(),
+            name: Some("loco-motion".to_owned()),
+            export: None,
+        });
+        assert_eq!(mail.recipient, mailbox_id_from_name("aether.component"));
+        assert_eq!(mail.kind, LoadComponent::ID);
     }
 }
