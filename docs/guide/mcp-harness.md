@@ -114,10 +114,13 @@ config kind's wire bytes; `describe_component` tells you which kind it wants).
 
 **Observation.** `capture_frame` returns the engine's current frame as inline PNG,
 and can carry two mail bundles dispatched atomically around the readback — `mails`
-before (the state that should appear) and `after_mails` after (cleanup).
+before (the state that should appear) and `after_mails` after (cleanup). How that
+frame is produced — world-space geometry, the camera matrix, the depth convention —
+is covered in [Rendering & camera](systems/rendering.md).
 `actor_logs` pulls recent entries from one actor's per-actor log ring by mailbox
 name; thread the reply's `next_since` back as `since` to page forward without
-re-reading.
+re-reading. Only in-actor `tracing::*` events reach a ring — see
+[Logging](systems/logging.md) for the in-actor versus stderr boundary.
 
 **Computation DAG.** `submit_dag` validates a descriptor synchronously (you get the
 verdict and the output handle ids immediately) and then executes the sources
@@ -141,6 +144,8 @@ asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DA
   flipped.)
 - **Desktop-only surfaces fail fast.** `capture_frame` and the window ops need the
   desktop chassis; the headless chassis replies with an error rather than hanging.
+  To read back a backgrounded or minimized window, mail `aether.window.focus`
+  first to foreground it — see [Window](systems/window.md).
 - **`describe_component` reads a cache.** It's populated by `load_component` /
   `replace_component`, so describing a component this aether-mcp didn't load — or one
   loaded before an aether-mcp restart — returns an error; reload it.
@@ -153,4 +158,5 @@ asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DA
 - Settlement and the trace tree behind `send_mail_traced` — [Tracing & settlement](systems/tracing-and-settlement.md).
 - The computation DAG the `*_dag` tools drive — [The computation DAG]().
 - The handle store `describe_handles` inspects — [Handles](systems/handles.md).
+- Adding your own tool to this surface — [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md).
 - The operational reference — ports, env overrides, `restart-hub` — `CLAUDE.md`.
