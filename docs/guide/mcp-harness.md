@@ -114,7 +114,9 @@ config kind's wire bytes; `describe_component` tells you which kind it wants).
 
 **Observation.** `capture_frame` returns the engine's current frame as inline PNG,
 and can carry two mail bundles dispatched atomically around the readback — `mails`
-before (the state that should appear) and `after_mails` after (cleanup).
+before (the state that should appear) and `after_mails` after (cleanup). How that
+frame is produced — world-space geometry, the camera matrix, the depth convention —
+is covered in [Rendering & camera](systems/rendering.md).
 `actor_logs` pulls recent entries from one actor's per-actor log ring by mailbox
 name; thread the reply's `next_since` back as `since` to page forward without
 re-reading.
