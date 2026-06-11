@@ -25,15 +25,17 @@ With no idea text, ask what the idea is — don't guess from conversation contex
 
 `{type}({crate}): subject` — lowercase subject, conventional-commit form. The repo's issue lint auto-applies `invalid-title` to anything else, and `/scope` derives the board `Type` field from the prefix, so the title is load-bearing.
 
-Type inference from the idea text (same table `/scope-spinoff` uses):
+Type inference from the idea text (same table `/scope-spinoff` uses). The authoritative type set is the `TYPES` array in `.github/workflows/issue-labels.yml` — check it when this table and the lint diverge.
 
 - "dead code", "unused", "drift", workflow/tooling → `chore`
-- "missing test", "test gap", "flaky" → `test`
+- "flaky", "contention", "intermittent" → `flake`
+- "missing test", "test gap", "harness tooling" → `chore` (or `fix` when the gap is a defect in existing tooling)
 - "doc gap", "missing rustdoc", guide/ADR work → `docs`
 - "bug", "regression", "broken", "panics" → `fix`
 - new capability, "add", "support" → `feat`
+- "slow", "perf regression", throughput/latency → `perf`
 - restructure with no behavior change → `refactor`
-- pipelines, runners, release automation → `ci`
+- CI pipelines, runners, release automation → `chore(ci):` or `fix(ci):`
 - Default if genuinely ambiguous → `chore`, and say so in the output
 
 The crate scope comes from whatever the idea names or points at (a file path resolves to its crate; skill/workflow/process work uses `workflow`; repo-wide chores use `repo`). If the scope is ambiguous, ask inline — a wrong scope is worse than one question.
@@ -42,7 +44,7 @@ The crate scope comes from whatever the idea names or points at (a file path res
 
 Apply the labels on the issue-create call itself — the REST `POST …/issues` form (see [Filing](#filing)) takes them inline via repeated `-f 'labels[]=…'`, so they land in the one create request rather than as follow-up edits.
 
-- `type:<t>` mirrors the title prefix (note: not every type has a label — check `gh label list` output cached in this repo: `type:feat`, `type:fix`, `type:docs`, `type:chore`, `type:perf`, `type:refactor`, `type:flake` exist; `ci`/`test` have no label — skip, the title carries it).
+- `type:<t>` mirrors the title prefix. All seven allowed types have a matching label: `type:feat`, `type:fix`, `type:chore`, `type:docs`, `type:perf`, `type:refactor`, `type:flake`.
 - `crate:<short>` for the crate scope. **If the crate is new and has no label, create it first** (`gh label create "crate:<short>" --color bfdadc --description "<full crate name>"`) — PRs against a crate with no label trip the title lint (Pattern E).
 - `papercut` / `design` when the idea is a gotcha/rough-edge or a work-in-progress design, respectively — pass via `--label` or infer when the idea text says so.
 - No `phase:*` label — Backlog carries none by convention.
