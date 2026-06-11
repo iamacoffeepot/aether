@@ -184,9 +184,10 @@ recipe).
 The mail spine is the thing you extend *through*, so most extension is "teach
 the system a new kind" or "stand up a new mailbox":
 
-- **A new message shape →** add a kind. See the *Adding a substrate kind*
-  recipe: define the type in the right kind crate, derive `Kind`/`Schema`,
-  register it in the inventory, surface it on the MCP wire.
+- **A new message shape →** add a kind. See the [Adding a substrate
+  kind](../recipes/adding-a-substrate-kind.md) recipe: define the type in the
+  right kind crate, derive `Kind`/`Schema`, add a handler — the descriptor that
+  surfaces it on the MCP wire registers itself.
 - **A new mailbox →** stand up an actor to own it. A native one is a chassis
   capability (the *Adding a chassis capability* recipe); a wasm one is a
   component (the *Writing a component* recipe). Either way it's the same actor

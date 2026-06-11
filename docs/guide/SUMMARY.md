@@ -37,7 +37,7 @@
 
 - [Recipes](recipes.md)
   - [Adding a config knob]()
-  - [Adding a substrate kind]()
+  - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
   - [Adding a chassis capability]()
   - [Wiring an MCP tool]()
   - [Writing a component]()
