@@ -2,6 +2,7 @@
 name = "aether-mesh-viewer"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Issue 552 stage 1.5: consolidated dual-output crate. Trunk types
 # (kind structs, parameter shapes) live at the crate root for

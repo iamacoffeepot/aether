@@ -2,6 +2,7 @@
 name = "aether-actor-derive"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [lib]
 proc-macro = true

@@ -2,6 +2,7 @@
 name = "aether-math"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 # ADR-0048 / issue 1464: `Vec4` is the `aether.math.vec4` wire kind
