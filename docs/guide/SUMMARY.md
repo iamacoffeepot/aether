@@ -29,6 +29,7 @@
   - [Input streams](systems/input.md)
   - [The frame lifecycle](systems/lifecycle.md)
   - [File I/O](systems/file-io.md)
+  - [HTTP egress](systems/http.md)
   - [Audio]()
   - [Window](systems/window.md)
   - [Tracing & settlement](systems/tracing-and-settlement.md)
