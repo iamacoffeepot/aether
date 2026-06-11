@@ -117,7 +117,9 @@ and can carry two mail bundles dispatched atomically around the readback — `ma
 before (the state that should appear) and `after_mails` after (cleanup).
 `actor_logs` pulls recent entries from one actor's per-actor log ring by mailbox
 name; thread the reply's `next_since` back as `since` to page forward without
-re-reading.
+re-reading. `actor_cost` reads each actor's per-handler execution-cost EWMA table
+(mean and MAD in nanoseconds, plus a sample count); pass a `kind_id` to filter to
+one handler.
 
 **Computation DAG.** `submit_dag` validates a descriptor synchronously (you get the
 verdict and the output handle ids immediately) and then executes the sources
