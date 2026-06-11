@@ -1446,8 +1446,8 @@ mod native {
         /// `Source` the transport host-stamps to the calling actor, and
         /// delivering that mail to the cap lands the calling actor in the
         /// `Tick` stage set. The wasm FFI shims `export!` emits are
-        /// wasm32-only, so the host test drives the cap through
-        /// `NativeTransport`.
+        /// wasm32-only, so the host test drives the cap through a
+        /// `NativeBinding`.
         #[test]
         fn subscribe_via_native_mailbox_lands_calling_actor_in_stage_set() {
             use std::sync::mpsc;
