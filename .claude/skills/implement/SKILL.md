@@ -169,7 +169,7 @@ The worktree stays on disk until the user cleans up — useful for inspecting th
 ## PR body template
 
 ```markdown
-Closes iamacoffeepot/aether#<issue>.
+Closes #<issue>.
 
 ## Summary
 
@@ -183,8 +183,6 @@ Closes iamacoffeepot/aether#<issue>.
 
 `/implement` — agent execution of [scoped issue #<issue>](<issue-url>).
 ```
-
-The cross-repo close form (`Closes iamacoffeepot/aether#N`) is required because the bare `#N` form gets stripped by the user's PR-body hook. See `feedback_close_keyword_hook_strips_hash.md`.
 
 ## Auth budget (v1, will grow in Phase C)
 
