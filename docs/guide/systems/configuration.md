@@ -140,7 +140,8 @@ Two things to know going in:
   default and your struct's `Default` are declared separately and a test keeps
   them honest).
 
-The full walkthrough is the *Adding a config knob* recipe; the rule to carry is
+The full walkthrough is the [*Adding a config knob*](../recipes/adding-a-config-knob.md)
+recipe; the rule to carry is
 that a knob is declared once and resolved by the layer, never read ad-hoc.
 
 ## Where to read more

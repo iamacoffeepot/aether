@@ -40,7 +40,7 @@
 # Building with aether
 
 - [Recipes](recipes.md)
-  - [Adding a config knob]()
+  - [Adding a config knob](recipes/adding-a-config-knob.md)
   - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
   - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
