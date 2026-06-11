@@ -153,4 +153,5 @@ asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DA
 - Settlement and the trace tree behind `send_mail_traced` — [Tracing & settlement](systems/tracing-and-settlement.md).
 - The computation DAG the `*_dag` tools drive — [The computation DAG]().
 - The handle store `describe_handles` inspects — [Handles](systems/handles.md).
+- Adding your own tool to this surface — [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md).
 - The operational reference — ports, env overrides, `restart-hub` — `CLAUDE.md`.
