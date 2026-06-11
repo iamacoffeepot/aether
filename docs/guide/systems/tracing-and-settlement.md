@@ -28,7 +28,8 @@ its chain an obligation — miss it and a caller hangs with nothing named.
 The engine needs to know a piece of work is fully *done* only at specific points
 — when something has to happen atomically, once everything an earlier mail set in
 motion has finished. A frame can't advance until the tick's effects have played
-out; a component swap waits for the old instance to finish draining; a lifecycle
+out (the [frame lifecycle](lifecycle.md) gates each stage on this); a component
+swap waits for the old instance to finish draining; a lifecycle
 step waits for wiring to complete; an agent waits for its mail's effects before
 it reads the result back. What's being waited on is never one mail but the whole
 chain of work it set off, and no single mail can report that the chain has closed

@@ -26,6 +26,7 @@
   - [Rendering & camera]()
   - [Mesh authoring & the DSL]()
   - [Input streams](systems/input.md)
+  - [The frame lifecycle](systems/lifecycle.md)
   - [File I/O](systems/file-io.md)
   - [Audio]()
   - [Tracing & settlement](systems/tracing-and-settlement.md)
