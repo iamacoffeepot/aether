@@ -71,7 +71,7 @@ If §Side findings becomes empty after removal, delete the section header too.
 ```
 Would file:
   - "chore(substrate): drop unreferenced drop_handler" (from finding 1)
-  - "test(actor): add coverage for ReplaceResult error path" (from finding 3)
+  - "chore(actor): add coverage for ReplaceResult error path" (from finding 3)
 
 Would remove findings 1, 3 from #<parent> §Side findings.
 
