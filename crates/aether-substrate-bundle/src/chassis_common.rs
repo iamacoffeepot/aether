@@ -175,14 +175,13 @@ pub fn resolve_persist_state(persist: &PersistOverlay) -> PersistOverride {
     }
 }
 
-/// Build the standard single-stage lifecycle config every Tick-driven
-/// chassis shares today (ADR-0082 PR 3b): a `Tick` self-loop with a
-/// `Quit` escape to a `Shutdown` terminal. Components subscribe the
-/// `Tick` stage directly on `aether.lifecycle` (ADR-0082 §7/§11), so
-/// the config wires no initial subscribers. Headless / `test_bench` /
-/// desktop all use this identical shape; a chassis that adds
-/// `Render` / `Present` stages (ADR-0082 §11) builds its own graph
-/// instead.
+/// Build the single-stage lifecycle config the headless chassis runs
+/// (ADR-0082 PR 3b): a `Tick` self-loop with a `Quit` escape to a
+/// `Shutdown` terminal. Components subscribe the `Tick` stage directly
+/// on `aether.lifecycle` (ADR-0082 §7/§11), so the config wires no
+/// initial subscribers. Desktop and `test_bench` run the three-stage
+/// `Tick → Render → Present` graph from `frame_lifecycle_config()`
+/// below instead.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
