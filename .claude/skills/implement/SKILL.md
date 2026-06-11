@@ -43,7 +43,18 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
 
 3. **Pack and order.** Apply the **Batched dispatch** rules above (under the hybrid background-agent mode): budget-based packing against the `size:*`-label priors refined by each body read, crate-affinity co-queueing with the trivial-mechanical exception, broadest-exploration-first ordering within each queue.
 
-4. **Print the dispatch plan and wait for confirmation.** Packing is heuristic, so a mis-packed multi-issue agent run is expensive to unwind — one confirmation prompt per sweep is cheap insurance. Print the queues, their issues in order, the routed model per queue, and the dropped-with-reason list, then stop and wait:
+   **Stale-worktree probe.** A re-swept issue from a prior bounced or aborted attempt can leave a stale `.claude/worktrees/issue-<N>` worktree and branch behind, so probe each packed candidate before dispatch: does the worktree exist, how many files are uncommitted in it, is its branch ahead of `origin/main`, and is there an open PR for the head branch (the REST `pulls?head=` form, never `gh pr list`):
+
+   ```bash
+   wt=.claude/worktrees/issue-<N>; br=<type>/issue-<N>-<slug>
+   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+   ahead=$(git -C "$wt" rev-list --count origin/main..HEAD 2>/dev/null)
+   pr=$(gh api "repos/iamacoffeepot/aether/pulls?head=iamacoffeepot:$br&state=open" --jq '.[].number')
+   ```
+
+   Classify each: **safe to auto-clear** when the worktree is clean (`dirty == 0`), its branch is not ahead of `origin/main` (`ahead == 0`), and there is no open PR — clear it at dispatch with `git worktree remove "$wt"` plus `git branch -D "$br"`. **Flag** when any of uncommitted files, unpushed commits, or an open PR is present — clearing would discard bounce context or unpushed work, so surface it as a plan line item rather than clearing, and let the one confirmation prompt the sweep already prints cover the destructive decision.
+
+4. **Print the dispatch plan and wait for confirmation.** Packing is heuristic, so a mis-packed multi-issue agent run is expensive to unwind — one confirmation prompt per sweep is cheap insurance. Print the queues, their issues in order, the routed model per queue, the stale-worktree classification per affected candidate, and the dropped-with-reason list, then stop and wait:
 
    ```
    Sweep: 7 Ready+AgentReady issues, 3 dropped, 4 dispatched across 2 agents.
@@ -55,6 +66,10 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
      #1631  fix the doc link in fs.md
      #1633  drop the stale config knob
 
+   Stale worktrees:
+     #1612  clean, branch at origin/main, no PR → auto-clear at dispatch
+     #1631  2 uncommitted files → FLAG: clearing loses bounce context, confirm
+
    Dropped:
      #1620  Phase=Design, not Ready
      #1622  no ## Implementation plan
@@ -63,7 +78,9 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
    Confirm dispatch? (the agents spawn only on your go-ahead)
    ```
 
-5. **On confirmation, dispatch.** For every issue in every queue, the **parent** performs §Execute step 1 (the `Phase=Executing` board write + `phase:executing` label reconcile) at dispatch time — see the hybrid background-agent paragraph — then spawns one background agent per queue, each working its queue's issues in order as full single-issue `/implement` runs that stop after commit. The parent then takes over each finished worktree per the hybrid split (preflight, push, draft PR, Refine loop).
+   Candidates with no stale worktree need no line. Omit the **Stale worktrees** block entirely when none of the dispatched candidates have one.
+
+5. **On confirmation, dispatch.** Clear the stale worktrees first: the auto-clear set unconditionally, and any flagged set the user confirmed (`git worktree remove` plus `git branch -D` per candidate) so each agent's `git worktree add` starts clean. Then, for every issue in every queue, the **parent** performs §Execute step 1 (the `Phase=Executing` board write + `phase:executing` label reconcile) at dispatch time — see the hybrid background-agent paragraph — and spawns one background agent per queue, each working its queue's issues in order as full single-issue `/implement` runs that stop after commit. The parent then takes over each finished worktree per the hybrid split (preflight, push, draft PR, Refine loop).
 
 The sweep never auto-confirms and never dispatches the serial tail (push / PR / CI loop / board writes) to an agent — it only assembles and confirms the batch the hybrid mode then runs.
 
@@ -108,6 +125,8 @@ cd .claude/worktrees/issue-<N>
 
 Worktree path is `.claude/worktrees/issue-<N>` (gitignored per CLAUDE.md §Workflow) so concurrent `/implement` runs on different issues don't collide. Branch is cut from `main` (not the current branch) per the user's memory rule.
 
+Before the `git worktree add`, run the same [stale-worktree probe](#sweep-dispatch) §Sweep dispatch uses, for this one issue: if `.claude/worktrees/issue-<N>` already exists from a prior aborted or bounced attempt, check its uncommitted-file count, whether its branch is ahead of `origin/main`, and whether an open PR is attached (the REST `pulls?head=` form). Auto-clear when safe — clean worktree, branch not ahead, no open PR — with `git worktree remove` plus `git branch -D`, then proceed with the add. Surface and stop when the worktree is dirty, ahead, or PR-attached: clearing would discard uncommitted bounce context or unpushed work, so report the state and let the user decide rather than forcing the add.
+
 Type comes from the project item's `Type` field. Slug is the issue title sanitized: lowercased, alnum + dashes, max 30 chars.
 
 ## Execute phase
@@ -145,15 +164,20 @@ After PR open, enter the loop. On each iteration:
 
    ```bash
    sha=$(git rev-parse HEAD)
-   until [ "$(gh api repos/iamacoffeepot/aether/commits/$sha/check-runs \
-       --jq '[.check_runs[] | select(.status != "completed")] | length')" = 0 ]; do
+   # Green iff the CI pass aggregator is present + completed AND no check-run is still pending.
+   # CI pass is the required merge gate, so a subset-registered matrix can't satisfy it.
+   while :; do
+     runs=$(gh api repos/iamacoffeepot/aether/commits/$sha/check-runs --jq '.check_runs')
+     agg_done=$(echo "$runs" | jq '[.[] | select(.name == "CI pass" and .status == "completed")] | length')
+     pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+     [ "$agg_done" = 1 ] && [ "$pending" = 0 ] && break
      sleep 20
    done
-   gh api repos/iamacoffeepot/aether/commits/$sha/check-runs \
-     --jq '.check_runs[] | select(.conclusion != "success") | .name + ": " + .conclusion'
+   echo "$runs" | jq -r '.[] | select(.name == "CI pass") | .conclusion'
+   echo "$runs" | jq -r '.[] | select(.conclusion != "success" and .conclusion != null) | .name + ": " + .conclusion'
    ```
 
-   No printed line means every check concluded `success` → green. Any printed line is a failed/neutral check → go to step 3.
+   The loop exits only when `CI pass` — the required merge aggregator — is present and completed with zero pending check-runs, so a subset-registered matrix (only `Detect changes` up, say) can't trip a false green. The first printed line is the verdict read from `CI pass`: `success` → green, goto step 2; any other value is a failed/neutral aggregate → go to step 3. The second print names the failed/neutral child checks to pull logs for in step 3.
 
 2. **CI green** → goto "Done condition" below.
 
@@ -283,7 +307,7 @@ The single `PUT …/labels` replaces the label set with the non-`phase:*` labels
 - **`release-state.json` stale**: rebuild via `/release-init <version> --reuse <num>`.
 - **PR creation fails** (e.g. duplicate branch from prior aborted run): clean up the stale branch (`git branch -D`), retry. If repeated failure, self-bounce to Plan.
 - **Pre-flight CI failure on first push** (formatting, build): fix in-worktree and push. Doesn't count against retry budget — local-equivalent failures are pre-CI.
-- **Worktree creation fails** (path already exists from prior aborted run): `git worktree remove` the stale one, retry. If `git worktree list` is stuck, instruct the user to clean it up manually.
+- **Stale worktree from a prior aborted or bounced run** (`.claude/worktrees/issue-<N>` already exists): the [stale-worktree probe](#sweep-dispatch) catches this before `git worktree add` runs — auto-cleared when safe (clean, branch not ahead, no open PR), surfaced for a decision when dirty / ahead / PR-attached — both in §Sweep dispatch for the batch and inline in §Worktree setup for a single-issue run. If `git worktree list` is itself wedged so the remove can't proceed, instruct the user to clean it up manually.
 - **Phase regression while running** (someone hand-bounces the issue mid-execution): detect on next field-update, abort the loop, leave the branch and PR as-is, post a comment noting the abort.
 - **PR gets reviewer comments mid-loop**: ignore in v1. `/implement` only listens to CI signal. Reviewer feedback is a separate human concern — they can `/bounce` or comment on the PR directly.
 
