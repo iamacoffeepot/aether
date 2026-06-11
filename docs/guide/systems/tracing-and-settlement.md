@@ -146,7 +146,8 @@ The two spans you reach for most are **queue latency** — how long the mail wai
 before a handler ran it — and **handler duration** (`t_finished − t_received`).
 The finer **queued** / **drain** split says *why* a hop waited: scheduling
 pressure (no worker free yet) versus a long serial fan-out dispatched ahead of it
-in the same blob (the blob model is on [Concurrency & blocking](concurrency.md)).
+in the same blob — [The scheduler](scheduler.md) maps each span back to the
+dispatch machinery.
 A node still missing `t_finished` is mail that hasn't finished handling yet.
 
 **Where it lives, and how to read it.** Trace events aren't kept centrally. Each

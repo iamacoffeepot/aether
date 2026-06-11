@@ -149,9 +149,9 @@ to reason about concurrency here — is its own topic (forthcoming). The rule to
 carry now: **don't block in a handler.**
 
 *How* mail is batched and balanced across workers (the per-producer rings, the
-work-stealing pool, the blob-as-unit-of-dispatch) is still settling — read
-[ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) for the current design, but build on the contracts above, not its
-internals.
+work-stealing pool, the blob-as-unit-of-dispatch) is drawn out on
+[The scheduler](scheduler.md), with [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) as the authority while the
+internals settle — build on the contracts above, not the internals.
 
 ## How to use it
 
