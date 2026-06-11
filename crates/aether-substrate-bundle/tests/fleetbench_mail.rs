@@ -22,7 +22,7 @@ mod tests {
         use aether_kinds::{List, ListResult};
         use aether_test_fixtures::{ConfigEcho, ConfigQuery, ProbeConfig};
 
-        use crate::fleetbench::FleetBench;
+        use crate::fleetbench::{FleetBench, dist_manifest_present};
 
         /// Ping-pong (verify-first, the #1451 deferral): load
         /// `probe_with_config` with a seeded `ProbeConfig`, send it a
@@ -39,6 +39,9 @@ mod tests {
         /// mail rows.
         #[test]
         fn fleetbench_pingpong_echoes_typed_config() {
+            if !dist_manifest_present() {
+                return;
+            }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
             let config = ProbeConfig {

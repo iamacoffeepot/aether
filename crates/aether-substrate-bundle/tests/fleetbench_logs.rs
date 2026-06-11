@@ -17,7 +17,7 @@ mod tests {
 
         use aether_kinds::LogTailResult;
 
-        use crate::fleetbench::FleetBench;
+        use crate::fleetbench::{FleetBench, dist_manifest_present};
 
         /// Up to ~3s of bounded polling closes the wire→first-tick race:
         /// the headless chassis auto-ticks at 60Hz, so the probe's first
@@ -38,6 +38,9 @@ mod tests {
         /// walk.
         #[test]
         fn fleetbench_actor_logs_surface_the_probe_first_tick_entry() {
+            if !dist_manifest_present() {
+                return;
+            }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
             let addr = bench.load(engine, "probe");

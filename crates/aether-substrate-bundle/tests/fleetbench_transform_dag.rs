@@ -32,7 +32,7 @@ mod tests {
         use aether_math::Vec4;
         use aether_test_fixtures::{Mat4SourceTrigger, Vec4Observed};
 
-        use crate::fleetbench::FleetBench;
+        use crate::fleetbench::{FleetBench, dist_manifest_present};
 
         /// The observer's surfaced output file, under the `save`
         /// namespace. The `vec4_observer` fixture writes the resolved
@@ -47,6 +47,9 @@ mod tests {
         /// `Mat4Apply` / `Vec4` round-trip across the real wire.
         #[test]
         fn fleetbench_transform_dag_observer_sees_m_times_v() {
+            if !dist_manifest_present() {
+                return;
+            }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
 
