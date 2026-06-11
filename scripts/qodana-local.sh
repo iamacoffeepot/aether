@@ -9,35 +9,42 @@
 # note). CI never hits this: it checks out onto the runner's native
 # ext4 and caches `/data/cache` across runs.
 #
-# This script reproduces both of CI's advantages locally:
+# This script reproduces CI's advantages locally:
 #   1. The project lives in a Docker *named volume* (the colima VM's
 #      native ext4), not the virtiofs host mount — so the analyzer's
 #      file IO is fast.
 #   2. A persistent cache volume holds the bootstrapped toolchain +
 #      cargo registry + analysis caches, so only the FIRST run pays the
 #      ~minutes of bootstrap; later runs are warm.
+#   3. Real git history rides into the project volume, so the scan runs
+#      in the same *scoped* (PR) mode CI's qodana-action auto-enables on
+#      a pull request: only findings newly introduced against the
+#      merge-base with origin/main count toward `failThreshold`. CI's
+#      action does this implicitly in a PR context (the "Using 'scoped'
+#      script" log line); locally we pass `--diff-start <merge-base>`
+#      explicitly. Pass `--full` to force the old whole-tree scan, and
+#      the scan also falls back to whole-tree automatically when there is
+#      no diff against origin/main (e.g. running on main itself).
 #
 # It runs the same linter image, profile, and fail-threshold as
-# `.github/workflows/ci.yml`'s Qodana job, reading the same
-# `qodana.yaml` (linter, profile, excludes, bootstrap, `failThreshold`
-# — the single source of truth both this run and CI inherit). Findings
-# match
-# CI: validated against main run 26928217340, local reproduced 19 of 22
-# findings exactly (RsUnnecessaryQualifications, DuplicatedCode,
-# RsUnusedImport, CargoUnusedDependency all matched).
+# `.github/workflows/ci.yml`'s Qodana job, reading the same `qodana.yaml`
+# (linter, profile, excludes, bootstrap, `failThreshold` — the single
+# source of truth both this run and CI inherit). Matching CI's scope is
+# the point: a plain whole-tree scan counts every pre-existing finding
+# and over-reports against CI's PR-mode gate.
 #
-# Caveat — one inspection can't run offline: `NewCrateVersionAvailable`
-# queries crates.io for newer dep versions and needs the Qodana Cloud /
-# network integration gated behind QODANA_TOKEN, so a tokenless local
-# run skips it (the 3-finding gap above). Export QODANA_TOKEN to close
-# it; otherwise that one check stays CI-only.
+# Cost of syncing `.git`: the project volume now also carries the repo's
+# git history (the scoped diff needs it). The sync is larger than the old
+# source-only copy, but it lands on the VM's native ext4 so the scan IO
+# stays fast.
 #
 # Timing: first run ~3.5min (bootstraps the toolchain + cold cargo
 # metadata + analysis cache into the persistent cache volume); warm runs
 # ~3.3min. Both well under the virtiofs timeout the naive bind-mount hits.
 #
 # Usage:
-#   scripts/qodana-local.sh            # scan the working tree
+#   scripts/qodana-local.sh            # scoped scan vs origin/main merge-base
+#   scripts/qodana-local.sh --full     # whole-tree scan (every finding)
 #   scripts/qodana-local.sh --rebuild-cache   # drop the cache volume first
 #
 # Exit code is Qodana's: 0 = no findings over threshold, non-zero =
@@ -57,8 +64,10 @@ cache_vol=aether-qodana-cache
 results_vol=aether-qodana-results
 out_dir="$repo_root/.qodana-local"
 
+full_scan=0
 for arg in "$@"; do
     case "$arg" in
+        --full) full_scan=1 ;;
         --rebuild-cache) docker volume rm -f "$cache_vol" >/dev/null 2>&1 || true ;;
         *) echo "qodana-local: unknown arg '$arg'" >&2; exit 2 ;;
     esac
@@ -90,12 +99,14 @@ docker volume create "$proj_vol"   >/dev/null
 docker volume create "$cache_vol"  >/dev/null
 docker volume create "$results_vol" >/dev/null
 
-# Sync the working tree into the project volume. Exclude the heavy
-# non-source trees (target/.git and the artifact dirs) so the copy is
-# ~12MB / sub-second; keep every cargo workspace member (crates/*,
+# Sync the working tree — including `.git` — into the project volume.
+# Real git history is what lets the scan run scoped: `qodana scan
+# --diff-start <merge-base>` walks the history to compute the changed
+# region. Still exclude the heavy non-source trees (target/ and the
+# artifact dirs); keep every cargo workspace member (crates/*,
 # demos/sokoban) and the spikes/ paths the root Cargo.toml `exclude`
 # references, or `cargo metadata` breaks.
-echo "qodana-local: syncing working tree → $proj_vol ..."
+echo "qodana-local: syncing working tree (+ .git) → $proj_vol ..."
 # COPYFILE_DISABLE=1 stops macOS `tar` (bsdtar) from emitting AppleDouble
 # `._*` sidecar entries for files carrying extended attributes. Without
 # it those extract as real `._foo.rs` files in the Linux container, and
@@ -103,29 +114,53 @@ echo "qodana-local: syncing working tree → $proj_vol ..."
 # file) — pure noise CI never sees. The `._*` exclude is belt-and-braces.
 COPYFILE_DISABLE=1 tar -C "$repo_root" \
     --exclude='._*' \
-    --exclude=./target --exclude=./.git --exclude=./.claude \
+    --exclude=./target --exclude=./.claude \
     --exclude=./wishes --exclude=./research \
     --exclude='./*.png' --exclude=./.qodana-local \
     -cf - . \
     | docker run --rm -i -v "$proj_vol":/data/project alpine \
         sh -c 'cd /data/project && rm -rf ./* ./.[!.]* 2>/dev/null; tar -xf -'
 
-# Qodana wants a git repo at the project root (rev-parse --show-toplevel)
-# for VCS metadata; we dropped .git in the sync, so seed a throwaway one
-# to silence the "not a git repository" log noise. Cosmetic only — the
-# scan runs fine without it (full-scan, no changed-files scoping) — so
-# this is best-effort: `|| true` guarantees a git hiccup never sinks the
-# pre-flight. `safe.directory '*'` defuses git's dubious-ownership guard
-# on the root-owned volume.
-docker run --rm -v "$proj_vol":/data/project -e HOME=/root alpine sh -c '
-    apk add --no-cache git >/dev/null 2>&1 || exit 0
-    git config --global --add safe.directory "*"
-    git config --global user.email local@qodana
-    git config --global user.name local
-    cd /data/project || exit 0
-    if [ ! -d .git ]; then
-        git init -q && git add -A && git commit -qm snapshot
-    fi' || true
+# In a `.claude/worktrees/` worktree, `.git` is a gitdir-*pointer* file,
+# not the object store — the sync above copied that pointer, so the
+# container has no usable repo to diff. Reconstruct a standalone `.git`:
+# the common dir (objects + refs, shared across worktrees) is the bulk,
+# overlaid with this worktree's HEAD + index so the right commit reads as
+# HEAD. A normal checkout has `.git` as a real directory, so this whole
+# block is skipped and the tar above already carried real history.
+if [[ -f "$repo_root/.git" ]]; then
+    common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+    git_dir=$(git rev-parse --absolute-git-dir)
+    echo "qodana-local: worktree — overlaying real git history ($common_dir) ..."
+    COPYFILE_DISABLE=1 tar -C "$common_dir" \
+        --exclude='._*' --exclude=./worktrees -cf - . \
+        | docker run --rm -i -v "$proj_vol":/data/project alpine \
+            sh -c 'cd /data/project && rm -rf .git && mkdir .git && tar -C .git -xf -'
+    COPYFILE_DISABLE=1 tar -C "$git_dir" -cf - ./HEAD ./index 2>/dev/null \
+        | docker run --rm -i -v "$proj_vol":/data/project alpine \
+            sh -c 'cd /data/project/.git && tar -xf -' || true
+fi
+
+# Decide scoped vs full scan. CI's qodana-action auto-enables scoped (PR)
+# mode in a pull-request context, diffing against the base branch so only
+# newly-introduced findings count toward `failThreshold`. Mirror that:
+# diff against the merge-base with origin/main and hand it to the scan as
+# `--diff-start`. The merge-base resolves here on the host against the
+# shared repo refs, so this works from a `.claude/worktrees/` worktree
+# too; the `.git` synced above carries the history the container walks.
+scan_args=()
+if [[ "$full_scan" -eq 1 ]]; then
+    echo "qodana-local: --full → whole-tree scan (every finding counts)."
+else
+    base=$(git merge-base HEAD origin/main 2>/dev/null || true)
+    head_sha=$(git rev-parse HEAD 2>/dev/null || true)
+    if [[ -n "$base" && "$base" != "$head_sha" ]]; then
+        echo "qodana-local: scoped scan → --diff-start $base (vs origin/main)."
+        scan_args+=(--diff-start "$base")
+    else
+        echo "qodana-local: no diff against origin/main (on main, or merge-base == HEAD) → whole-tree scan."
+    fi
+fi
 
 rm -rf "$out_dir"; mkdir -p "$out_dir"
 
@@ -136,7 +171,7 @@ docker run --rm -u root \
     -v "$cache_vol":/data/cache \
     -v "$results_vol":/data/results \
     ${QODANA_TOKEN:+-e QODANA_TOKEN="$QODANA_TOKEN"} \
-    "$image"
+    "$image" ${scan_args[@]+"${scan_args[@]}"}
 scan_status=$?
 set -e
 
