@@ -91,6 +91,11 @@ a mismatched producer and consumer compute *different* ids and the mail lands on
 "kind not found." The full contract is in
 [Invariants & guarantees](invariants.md).
 
+For the end-to-end walkthrough of declaring a new substrate kind — the derives,
+the self-registering descriptor, the handler, and the rebuild rule when an edit
+moves the id — see the [Adding a substrate
+kind](../recipes/adding-a-substrate-kind.md) recipe.
+
 ## The schema vocabulary — `SchemaType`
 
 A kind's shape is a tree of `SchemaType`. The leaves and containers are what
