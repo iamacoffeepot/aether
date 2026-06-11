@@ -15,7 +15,10 @@
 //!   The `real` tier (`socket-server` / `tick-broadcast` / `ui-roundtrip`) is
 //!   always driven **paced** — `AETHER_LATENCY_PACE_HZ` or a 60 Hz default —
 //!   regardless of `AETHER_PERF_DRIVE`, modelling a client/server round-trip
-//!   rather than a flood; light / heavy keep the `AETHER_PERF_DRIVE` mode.
+//!   rather than a flood; light / heavy keep the `AETHER_PERF_DRIVE` mode. The
+//!   real tier reports **keep-up** (completed-vs-offered, elapsed-vs-expected
+//!   at the pace) rather than per-hop span percentiles, whose volume laps the
+//!   trace ring at real-tier fan-out (iamacoffeepot/aether#1233).
 //! - `AETHER_PERF_TOPOS` — the breadth knob *within* a tier: `ci`
 //!   (depth-1/8 + fanout-4/8 + tree) or `full` (the whole default set).
 //!   Default `ci`. Orthogonal to `AETHER_PERF_TIER`.
