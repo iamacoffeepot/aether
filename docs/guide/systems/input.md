@@ -5,8 +5,8 @@
 > (subscribers keyed by `KindId`). The model — subscribe by kind, fan out to
 > every subscriber — is **stable**. This page covers the input interrupts
 > (key, mouse, window-size). The per-frame `Tick` is a frame-lifecycle stage:
-> a component subscribes it on `aether.lifecycle`, not here — the lifecycle
-> state machine (its own page) owns it.
+> a component subscribes it on `aether.lifecycle`, not here — the
+> [frame lifecycle](lifecycle.md) owns it.
 
 The substrate owns the window, the keyboard, and the mouse. The events they
 produce — a key down, the cursor moving, a resize — reach actors as ordinary
@@ -150,7 +150,7 @@ through `aether.input` by hand.
   [ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md).
 - The `wire` hook, `init` versus `wire`, and writing handlers —
   [Components & lifecycle](components.md).
-- What drives the per-frame `Tick`, and the frame stages around it — the frame
-  lifecycle state machine (forthcoming).
+- What drives the per-frame `Tick`, and the frame stages around it — the
+  [frame lifecycle](lifecycle.md).
 - `KindId`, the fan-out lineage, and addressing by kind —
   [Mail, kinds & scheduling](mail-and-kinds.md).

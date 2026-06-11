@@ -186,6 +186,9 @@ bundle unless you're persisting a non-kind blob or driving an explicit migration
 
 - The actor this specializes — its lifecycle, `#[actor]`, handlers, addressing —
   [The actor model](../foundations/actor-model.md).
+- The empty-crate-to-loaded walkthrough — crate setup, the actor block, `export!`,
+  the wasm build, loading, and the first round-trip — the
+  [Writing a component](../recipes/writing-a-component.md) recipe.
 - Kinds, ids, and how the vocabulary crosses the wasm boundary — [The type system](../foundations/type-system.md).
 - How mail routes and what a kind is — [Mail, kinds & scheduling](mail-and-kinds.md).
 - Why a handler must never block, and how to wait instead — [Concurrency & blocking](concurrency.md).

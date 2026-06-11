@@ -22,7 +22,7 @@ the only guest target wired up today. So a component is WASM *right now*, but a
 C / C++ / other guest that speaks the ABI is the same category. All of them are
 one actor model and address each other identically. When this page says
 "component" it means a loaded FFI actor; "actor" means either kind. Deep dive:
-[Components & lifecycle]().
+[Components & lifecycle](components.md).
 
 ## Why it exists
 
@@ -149,9 +149,9 @@ to reason about concurrency here — is its own topic (forthcoming). The rule to
 carry now: **don't block in a handler.**
 
 *How* mail is batched and balanced across workers (the per-producer rings, the
-work-stealing pool, the blob-as-unit-of-dispatch) is still settling — read
-[ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) for the current design, but build on the contracts above, not its
-internals.
+work-stealing pool, the blob-as-unit-of-dispatch) is drawn out on
+[The scheduler](scheduler.md), with [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) as the authority while the
+internals settle — build on the contracts above, not the internals.
 
 ## How to use it
 
@@ -166,14 +166,14 @@ kind's schema. For a batch that must settle as one traced unit, use
 `Kind::ID` and `mailbox_id_from_name` are compile-time constants, so there's no
 host round-trip to resolve an address. You receive mail with a
 `#[handler] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
-third parameter (see [Components & lifecycle]() and the *Writing a component*
+third parameter (see [Components & lifecycle](components.md) and the *Writing a component*
 recipe).
 
 **Addressing rules that bite if ignored:**
 
 - Chassis mailboxes live under `aether.<name>` (`aether.render`, `aether.fs`,
-  `aether.audio`, `aether.input`, `aether.window`, `aether.component`,
-  `aether.handle`).
+  `aether.audio`, `aether.input`, `aether.lifecycle`, `aether.window`,
+  `aether.component`, `aether.handle`).
 - A loaded component registers at `aether.component/aether.embedded:NAME` — use the
   full address `LoadResult.name` hands back.
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
@@ -184,16 +184,17 @@ recipe).
 The mail spine is the thing you extend *through*, so most extension is "teach
 the system a new kind" or "stand up a new mailbox":
 
-- **A new message shape →** add a kind. See the *Adding a substrate kind*
-  recipe: define the type in the right kind crate, derive `Kind`/`Schema`,
-  register it in the inventory, surface it on the MCP wire.
+- **A new message shape →** add a kind. See the [Adding a substrate
+  kind](../recipes/adding-a-substrate-kind.md) recipe: define the type in the
+  right kind crate, derive `Kind`/`Schema`, add a handler — the descriptor that
+  surfaces it on the MCP wire registers itself.
 - **A new mailbox →** stand up an actor to own it. A native one is a chassis
   capability (the *Adding a chassis capability* recipe); a wasm one is a
   component (the *Writing a component* recipe). Either way it's the same actor
   model and the same addressing.
 - **Reuse the streams** rather than polling. Tick / key / mouse / window-size
   are publish-subscribe — subscribe from a component's `wire` hook and you get
-  the events as mail. See [Input, file I/O & audio]().
+  the events as mail. See [Input](input.md) and [File I/O](file-io.md).
 
 Because everything is mail, these few moves compose: a new capability that
 handles a new kind and publishes another is the whole vocabulary of building on

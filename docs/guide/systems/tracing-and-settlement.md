@@ -28,7 +28,8 @@ its chain an obligation — miss it and a caller hangs with nothing named.
 The engine needs to know a piece of work is fully *done* only at specific points
 — when something has to happen atomically, once everything an earlier mail set in
 motion has finished. A frame can't advance until the tick's effects have played
-out; a component swap waits for the old instance to finish draining; a lifecycle
+out (the [frame lifecycle](lifecycle.md) gates each stage on this); a component
+swap waits for the old instance to finish draining; a lifecycle
 step waits for wiring to complete; an agent waits for its mail's effects before
 it reads the result back. What's being waited on is never one mail but the whole
 chain of work it set off, and no single mail can report that the chain has closed
@@ -106,8 +107,9 @@ off the pool, and the engine has exactly one such case today: the **desktop
 chassis's window driver**. Window operations have to run on the OS event-loop
 thread rather than a pool worker, so `aether.window` is registered as an inbox the
 event loop drains itself, recording each inbound mail's `Finished` as it applies
-the op and sends the reply. That's the lone precedent — but the same obligation
-lands on any future driver that owns and drains its own mailbox off-thread.
+the op and sends the reply ([Window](window.md) covers that mailbox's surface).
+That's the lone precedent — but the same obligation lands on any future driver
+that owns and drains its own mailbox off-thread.
 
 Forget it and you get the worst diagnostic the runtime offers: a silent
 multi-second hang with no actor and no mail named, ending only when the
@@ -146,11 +148,13 @@ The two spans you reach for most are **queue latency** — how long the mail wai
 before a handler ran it — and **handler duration** (`t_finished − t_received`).
 The finer **queued** / **drain** split says *why* a hop waited: scheduling
 pressure (no worker free yet) versus a long serial fan-out dispatched ahead of it
-in the same blob (the blob model is on [Concurrency & blocking](concurrency.md)).
+in the same blob — [The scheduler](scheduler.md) maps each span back to the
+dispatch machinery.
 A node still missing `t_finished` is mail that hasn't finished handling yet.
 
 **Where it lives, and how to read it.** Trace events aren't kept centrally. Each
-actor holds its own **trace ring** — the same per-actor storage logs use
+actor holds its own **trace ring** — the same per-actor storage the
+[log rings](logging.md) use
 ([ADR-0081](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0081-decentralized-per-actor-log-storage.md) / [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)) — recording the events that passed through it. A tree is
 rebuilt by a **guided walk**: start at the root's sender, read its ring
 (`aether.trace.tail`, the sibling of the `aether.log.tail` behind `actor_logs`),
@@ -196,7 +200,9 @@ returns the combined trace tree, the correlated replies, and a `status`:
 - `"timeout"` — the chain didn't settle within `settlement_timeout_ms` (default
   300s, clamped to 600s). A timeout is the bound on a hung chain, and the usual
   cause is exactly the two failures above: a deferred reply that never held its
-  chain open, or a drain that dropped its finish obligation upstream.
+  chain open, or a drain that dropped its finish obligation upstream. The triage
+  path from this status to the offending handler is the
+  [Debugging a hung settlement](../recipes/debugging-a-hung-settlement.md) recipe.
 - `"dispatched"` — only with `fire_and_forget`; the shared root acked, no
   settlement wait.
 
