@@ -17,7 +17,7 @@ It splits in two:
 > Concurrency *enforces* several of these (single-threaded actors, ordering,
 > no-blocking) but is not the same topic — the contracts live here; the
 > machinery that makes them hold, and how to work with it, is
-> [Concurrency & blocking](). Invariants are the *what*; concurrency is one of
+> [Concurrency & blocking](../systems/concurrency.md). Invariants are the *what*; concurrency is one of
 > the *hows*.
 >
 > Maturity: the addressing, typing, and identity invariants are **stable** —
@@ -68,7 +68,7 @@ buys: a producer emitting `Thing { a }` and a consumer expecting
 found" and can never silently garbage-decode into the wrong shape ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)).
 The fix for a mismatch is always "recompile both sides," and the failure points
 straight at it. (Exactly which edits move the id — and which, like a field
-rename, leave it untouched — is the type system's story: [The type system]().)
+rename, leave it untouched — is the type system's story: [The type system](type-system.md).)
 
 **A kind is self-describing.** Every kind carries a schema describing its bytes
 ([ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md)/[ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)), so the wire layer can encode it from JSON and a recipient can
@@ -117,7 +117,7 @@ have *its* next mail queued behind you). Await a reply through the framework, or
 hand blocking/async work off the actor thread (a computation DAG, or the
 sanctioned spawn primitives). *Tell:* a hang with no progress and, often, no
 actor named — the worst diagnostic shape the runtime offers. Full treatment in
-[Concurrency & blocking]().
+[Concurrency & blocking](../systems/concurrency.md).
 
 **Address exactly — bare and unknown names warn-drop.** A bare name (`"camera"`,
 `"player"`) or a kind name used as a recipient (`aether.audio.note_on` as an
@@ -166,9 +166,9 @@ is fine. *Tell:* a stack-overflow abort on adversarial or pathological input.
 ## Where to read more
 
 - The mechanics behind the concurrency invariants —
-  [Concurrency & blocking]().
+  [Concurrency & blocking](../systems/concurrency.md).
 - How kinds, mailboxes, handles, and ids fit together —
-  [The type system]().
+  [The type system](type-system.md).
 - The mail spine these all hang on —
   [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
 - Settlement and tracing in depth — [Tracing & settlement](../systems/tracing-and-settlement.md).
