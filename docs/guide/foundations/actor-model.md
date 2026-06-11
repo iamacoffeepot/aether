@@ -3,7 +3,8 @@
 > **Governing ADR:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (the unified actor model — capabilities and
 > components are one model, not two) with [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md) (the lifecycle stages)
 > and [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the `#[actor]` macro), extended by [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (a wasm module exports several
-> actor types) and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its siblings). This model is **stable**; it's the
+> actor types), [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its siblings), and [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (actor
+> identity and addressing). This model is **stable**; it's the
 > spine everything else hangs off. Signatures here were read from the current SDK
 > (`aether-actor`) and runtime (`aether-substrate`).
 
@@ -196,37 +197,57 @@ call, and how a chassis assembles its own layered config, are the
 ## Names and addressing
 
 The `NAMESPACE` const on the `Actor` trait is the name an actor claims — the
-`"hello"`, `"camera"`, `"aether.audio"` in the examples above. Names are how actors
-get reached: a mailbox id is just a compile-time hash of the name
-(`mailbox_id_from_name`), so `ctx.actor::<RenderCapability>()` resolves to an address
-with no runtime lookup — the type carries its `NAMESPACE`, the hash is a const, and
-the send lands at the right mailbox.
+`"hello"`, `"camera"`, `"aether.audio"` in the examples above. From the name and
+the actor's place in the runtime tree come two ids, two distinct moments
+([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)):
 
-Because the name *is* the address, it has to be unique — two actors claiming the same
-name hash to the same mailbox. The substrate enforces one claimant per name **at
-registration**: a second capability claiming a taken name fails to boot, and a
-component loaded under a name already in use comes back as a load error. This is not
-a compile-time check — two types can declare the same `NAMESPACE` string and compile
-cleanly; the collision only surfaces when the second one tries to register. For an
-instanced actor (below) the uniqueness is on the full `NAMESPACE:subname`, not the
+- **`NAMESPACE` → `ActorId`, at compile time.** The hash of the `NAMESPACE`
+  names *which actor* this is — binary-unique, the same wherever the actor is
+  hosted. An instanced actor (below) folds its runtime discriminator in:
+  `hash(NAMESPACE:subname)`.
+- **Lineage → `MailboxId`, at creation.** *Where* the actor sits is its
+  **lineage** — the ordered ActorIds from the substrate root down to it, fixed
+  when the actor is created. Its `MailboxId` is a hash chain over the lineage,
+  one fold step per node, and mail routes to that.
+
+For a **capability** the two coincide. It sits at the root, so its lineage is
+one node and the fold of one node is that node: `MailboxId == ActorId`, the
+`NAMESPACE` is the whole address (`aether.audio`, `aether.render`,
+`aether.input`), and `ctx.actor::<AudioCapability>()` resolves to it as a
+compile-time const with no runtime lookup.
+
+For a **component** the `NAMESPACE` is the *default load name*, and the loaded
+actor runs under the component host: its lineage is the `aether.component` host,
+then itself as an instance under the embedding-host class (`aether.embedded`),
+rendered with one `/` per node as
+`aether.component/aether.embedded:<name>` — the name `LoadResult` hands back
+(the `NAMESPACE` unless the load overrode it). The string is a display rendering
+of the lineage; the `MailboxId` is the fold over the nodes
+(`mailbox_id_from_path` on the string side), never a hash of the joined string.
+You reach a loaded component through its lineage: pass `LoadResult.name` to
+`resolve_actor`, use the `loaded` helper below, or address it by bare type —
+`ctx.actor::<Camera>()` on an embeddable component type resolves by folding the
+component's own name under the embedding-host class, landing on the same hosted
+mailbox.
+
+Because the lineage is the address, two actors collide exactly when they would
+occupy the same position — same parent, same name. The substrate enforces one
+claimant per position **at registration**: a second capability claiming a taken
+root name fails to boot, and a component loaded under a name already in use
+comes back as a load error. This is not a compile-time check — two types can
+declare the same `NAMESPACE` string and compile cleanly; the collision only
+surfaces when the second one tries to register. For an instanced actor (below)
+the colliding unit is the full `NAMESPACE:subname` under one parent, not the
 shared prefix.
-
-What the name maps to depends on the host. For a **capability** the `NAMESPACE` *is*
-the mailbox — `aether.audio`, `aether.render`, `aether.input` — claimed by the
-chassis at boot, so `ctx.actor::<AudioCapability>()` reaches it directly. For a
-**component** the `NAMESPACE` is only the *default load name*: once loaded, the actor
-is registered at `aether.component/aether.embedded:<name>` (the name `LoadResult` hands
-back, which is the `NAMESPACE` unless the load overrode it). You reach it by that
-registered name, not by hashing the bare `NAMESPACE` — either pass `LoadResult.name`
-to `resolve_actor`, or use the `loaded` helper below.
 
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
 `ctx.actor::<InputCapability>().subscribe::<Key>()` is one (from
 `InputMailboxExt`), and `ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")`
-is the loaded-component lookup just mentioned (from `ComponentHostExt`). Each such
-trait is implemented for *both* the component and the capability handle, so the same
-helper reads the same whichever host you write from.
+is the loaded-component lookup just mentioned (from `ComponentHostFfiExt` in a
+component, `ComponentHostNativeExt` in a capability). Each helper is available on
+both the component and the capability handle, so the same call reads the same
+whichever host you write from.
 
 ## One or many: cardinality
 
@@ -234,14 +255,18 @@ An actor type is either **singleton** or **instanced**, marked by the `Singleton
 `Instanced` trait, and the choice sets whether its `NAMESPACE` is a whole name or a
 prefix.
 
-A **singleton** is one of a kind: at most one instance, and the `NAMESPACE` is its
-whole name. Every capability is a singleton — and because a capability's name is its
-mailbox, you address it straight by type, `ctx.actor::<R>()`.
+A **singleton** is one of a kind: at most one instance under a given parent, and
+its `ActorId` is the plain `hash(NAMESPACE)`. Every capability is a root
+singleton — its one-node lineage makes its `NAMESPACE` the whole address, so you
+address it straight by type, `ctx.actor::<R>()`.
 
 An **instanced** actor is one of many sharing a prefix. Its `NAMESPACE` is that
-prefix, and each live instance has a full name `NAMESPACE:subname` — for example
-`aether.net.session:42`. The case that drives this is sockets: a singleton listener
-accepts connections and spawns a session actor per connection with `ctx.spawn_child`
+prefix, and each live instance gets its own `ActorId` by folding a runtime
+discriminator in — `hash(NAMESPACE:subname)`, rendered `aether.net.session:42` —
+with its `MailboxId` folding that ActorId under the parent's lineage, so two
+instances under one parent differ by subname. The case that drives this is
+sockets: a singleton listener accepts connections and spawns a session actor per
+connection with `ctx.spawn_child`
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
 
@@ -308,9 +333,10 @@ lifecycle, and components get to reuse every pattern capabilities use.
 So **start here, with the actor**, and the two host pages are just specializations:
 
 - The wasm/FFI host — the trampoline, `export!`, loading, hot-swap — is
-  [Components & lifecycle](../systems/components.md).
-- Adding a native capability is a recipe ([Recipes](../recipes.md)); it's the same
-  `#[actor]` shape against `NativeActor`.
+  [Components & lifecycle](../systems/components.md), and the empty-crate-to-loaded
+  walkthrough is the [Writing a component](../recipes/writing-a-component.md) recipe.
+- Adding a native capability is a recipe ([Adding a chassis capability](../recipes/adding-a-chassis-capability.md));
+  it's the same `#[actor]` shape against `NativeActor`.
 
 ## Where to read more
 

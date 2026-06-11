@@ -18,7 +18,7 @@ Before the table: the rule that everything else assumes. `recipient_name`
 names the **mailbox**; `kind_name` names the **payload shape**. They route
 independently even when they share a prefix. Chassis-owned mailboxes live under
 `aether.<name>` (`aether.render`, `aether.audio`, `aether.fs`, `aether.input`,
-`aether.window`, `aether.component`, `aether.handle`). A loaded wasm component
+`aether.lifecycle`, `aether.window`, `aether.component`, `aether.handle`). A loaded wasm component
 registers at `aether.component/aether.embedded:NAME` — use the full address that
 `LoadResult.name` hands back. **Bare names** (`"camera"`, `"player"`) are not
 registered and warn-drop.
@@ -30,7 +30,7 @@ registered and warn-drop.
 | **Mail & scheduling** | The universal interaction mechanism + the blob dispatcher that runs actors. | (the substrate itself; not a mailbox) | 0002, 0005, 0019, 0087 | Settling (scheduler internals) |
 | **Kinds, schema & encoding** | Typed payloads that describe themselves on the wire. | — | 0005, 0031, 0032, 0064, 0065, 0091 | Stable |
 | **Components & lifecycle** | Loading, replacing, and hot-reloading wasm actors. | `aether.component` — `load` / `drop` / `replace` | 0010, 0015, 0022, 0038, 0063, 0074 | Stable |
-| **Input streams** | Tick / key / mouse / window-size as publish-subscribe, keyed by `KindId`. | subscribe via `aether.input` from a component's `wire` hook | 0021, 0068 | Stable |
+| **Input streams** | Key / mouse / window-size input interrupts on `aether.input`; the per-frame Tick is a lifecycle stage on `aether.lifecycle`. All publish-subscribe, keyed by `KindId`. | subscribe via `aether.input`; subscribe Tick via `aether.lifecycle` | 0021, 0068, 0082 | Stable |
 | **Rendering & camera** | World-space geometry + a `view_proj` uniform; a camera publishes the matrix. | `aether.render` (`DrawTriangle`, `aether.camera`) | 0025, 0066, 0074 §7 | Stable |
 | **Mesh authoring & the DSL** | Author meshes as DSL text, hot-load them, replay to the renderer. | `aether.mesh.load` to the mesh-viewer component | 0026, 0051, 0052, 0057 | Stable |
 | **File I/O** | Namespaced read/write/delete/list — `save` / `assets` / `config`. | `aether.fs` — `read` / `write` / `delete` / `list` | 0041 | Stable |

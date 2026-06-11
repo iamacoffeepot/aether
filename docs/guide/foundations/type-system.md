@@ -1,7 +1,7 @@
 # The type system
 
 > **Governing ADRs:** [ADR-0005](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0005-mail-typing-system.md) (mail typing), [ADR-0019](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0019-unified-mail-encoding.md) (unified encoding),
-> [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md) (name- and schema-derived ids), [ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md) (const
+> [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md) (name- and schema-derived ids), [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (actor identity and addressing), [ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)/[ADR-0032](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0032-canonical-schema-bytes-and-labels-sidecar.md) (const
 > schema + canonical bytes / labels sidecar), [ADR-0045](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0045-computation-dag-and-typed-handles.md)/[ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)/[ADR-0049](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0049-persistent-handle-store.md) (handles,
 > transforms, the handle store), [ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)/[ADR-0065](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0065-typed-id-newtypes-and-first-class-type-ids-in-the-schema.md) (type-tagged wire ids +
 > first-class id types). The type vocabulary is **stable** — the wire format
@@ -91,6 +91,11 @@ a mismatched producer and consumer compute *different* ids and the mail lands on
 "kind not found." The full contract is in
 [Invariants & guarantees](invariants.md).
 
+For the end-to-end walkthrough of declaring a new substrate kind — the derives,
+the self-registering descriptor, the handler, and the rebuild rule when an edit
+moves the id — see the [Adding a substrate
+kind](../recipes/adding-a-substrate-kind.md) recipe.
+
 ## The schema vocabulary — `SchemaType`
 
 A kind's shape is a tree of `SchemaType`. The leaves and containers are what
@@ -163,13 +168,38 @@ cases that surprise people live at the schema-arm level. Holding the
 
 ## Mailboxes — typed addresses
 
-A **mailbox** is an address: where mail goes. Its `MailboxId` is a 64-bit hash
-of the mailbox *name* alone (no schema — a mailbox is a pure address, [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)),
-so it's the same id in every process that hashes the same name, and it survives
-a component hot-swap. In a component you rarely touch the id directly: you
-address a peer by type (`ctx.actor::<RenderCapability>()`) or hold a `Mailbox<K>`
-token. The mailbox-vs-kind distinction — why an address and a payload shape are
-different things even when they share a name prefix — is the
+A **mailbox** is an address: where mail goes. Addressing rests on two ids, one
+per question ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)):
+
+- An **`ActorId`** answers *which actor*. It is a 64-bit hash of the actor's
+  `NAMESPACE` alone — `hash(NAMESPACE)` for a singleton actor,
+  `hash(NAMESPACE:subname)` for an instanced one — with no schema in the hash,
+  because an actor's identity is its name ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)). It names the actor
+  wherever it is hosted, and it reverse-maps to that name for introspection.
+- A **`MailboxId`** answers *where in the tree*. An actor sits somewhere — at
+  the substrate root, or hosted under a parent — and its **lineage** is the
+  ordered list of ActorIds from the root down to it. The `MailboxId` is a hash
+  chain over that lineage (`fold_lineage`, one fold step per node), and mail
+  routes to it.
+
+For a root actor — every chassis capability — the lineage is a single node,
+and the fold of one node is that node: `MailboxId == ActorId == hash(name)`,
+so the name hash of [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md) is the depth-1 case of the fold. A hosted
+actor — a loaded component, a spawned child — folds its ActorId onto its
+parent's, so the same code under two different parents is two different
+mailboxes. The `/`-rendered addresses you see
+(`aether.component/aether.embedded:camera`) are a display rendering of the
+lineage, one segment per ActorId; a written path resolves by parsing it into
+segments and re-folding (`mailbox_id_from_path`), never by hashing the joined
+string.
+
+Both ids are computed from compile-time constants with no registry lookup, so
+every process that holds the same names and the same lineage computes the same
+ids — and a component hot-swap, which changes neither, keeps the address
+valid. In a component you rarely touch either id directly: you address a peer
+by type (`ctx.actor::<RenderCapability>()`) or hold a `Mailbox<K>` token. The
+mailbox-vs-kind distinction — why an address and a payload shape are different
+things even when they share a name prefix — is the
 [Mail, kinds & scheduling](../systems/mail-and-kinds.md) page's subject.
 
 ## Handles — references to stored values
@@ -219,7 +249,8 @@ Every typed thing is named by a newtype over a hash, not a bare integer:
 | id | wraps | derived from |
 |---|---|---|
 | `KindId` | `u64` | `name + schema` ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)) |
-| `MailboxId` | `u64` | mailbox name ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)) |
+| `ActorId` | `u64` | the actor's `NAMESPACE` (plus `:subname` when instanced) ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)) |
+| `MailboxId` | `u64` | the actor's lineage — a hash chain of `ActorId`s, root → leaf; a root actor's equals its name hash ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)/[ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)) |
 | `HandleId` | `u64` | the stored bytes (content-addressed, [ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
 | `TransformId` | `u64` | the transform's identity ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)) |
 | `DagId` | `u64` | an in-flight DAG job |
@@ -231,7 +262,9 @@ Two properties keep these from being foot-guns:
   different domain prefixes, so the *same* name produces *different* ids in the
   two spaces — the id spaces don't collide even when names are shared ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)).
   This is the mechanical reason a kind name and a mailbox name can look alike yet
-  address different things.
+  address different things. (`ActorId` deliberately shares the mailbox domain —
+  a root actor's `MailboxId` *is* its `ActorId`, which is what keeps every
+  chassis capability's id equal to its name hash.)
 - **Tagged strings on the MCP wire.** Across the agent boundary, ids encode as
   `<tag>-XXXX-XXXX-XXXX` — `mbx-…` for a mailbox, `knd-…` for a kind, `hdl-…` for
   a handle ([ADR-0064](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0064-type-tagged-opaque-ids-on-the-mcp-wire.md)). The tag makes an id self-identifying, so a mailbox id and
