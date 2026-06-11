@@ -309,8 +309,8 @@ So **start here, with the actor**, and the two host pages are just specializatio
 
 - The wasm/FFI host — the trampoline, `export!`, loading, hot-swap — is
   [Components & lifecycle](../systems/components.md).
-- Adding a native capability is a recipe ([Recipes](../recipes.md)); it's the same
-  `#[actor]` shape against `NativeActor`.
+- Adding a native capability is a recipe ([Adding a chassis capability](../recipes/adding-a-chassis-capability.md));
+  it's the same `#[actor]` shape against `NativeActor`.
 
 ## Where to read more
 

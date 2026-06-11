@@ -38,7 +38,7 @@
 - [Recipes](recipes.md)
   - [Adding a config knob]()
   - [Adding a substrate kind]()
-  - [Adding a chassis capability]()
+  - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool]()
   - [Writing a component]()
   - [Debugging a hung settlement]()
