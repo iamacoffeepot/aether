@@ -48,6 +48,13 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  no-dividers:
+    name: No divider banners
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-no-dividers.sh
+
   clippy:
     name: Clippy
     needs: changes
@@ -290,13 +297,14 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, clippy, docs, test, desktop, qodana ]
+    needs: [ changes, fmt, no-dividers, clippy, docs, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
+          echo "no-dividers: ${{ needs.no-dividers.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
           echo "test:    ${{ needs.test.result }}"
@@ -305,6 +313,7 @@ jobs:
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
+          [[ "${{ needs.no-dividers.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
