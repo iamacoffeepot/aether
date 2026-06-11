@@ -240,7 +240,7 @@ its input and output kinds ([ADR-0048](https://github.com/iamacoffeepot/aether/b
 an address, a transform is a typed *edge*: it takes a resolved handle of one kind
 and writes a new handle of another. Inspect the linked set with
 `describe_transforms`. The DAG that wires sources, transforms, and outputs into a
-job is its own subject — [The computation DAG]().
+job is its own subject — [The computation DAG](../systems/dag.md).
 
 ## Typed ids — the naming layer
 
@@ -286,4 +286,4 @@ built on.
 - The contracts these types enforce — [Invariants & guarantees](invariants.md).
 - Addresses vs payloads, in depth — [Mail, kinds & scheduling](../systems/mail-and-kinds.md).
 - Handles and the store they live in — [Handles](../systems/handles.md).
-- Transforms and the DAG that runs them — [The computation DAG]().
+- Transforms and the DAG that runs them — [The computation DAG](../systems/dag.md).
