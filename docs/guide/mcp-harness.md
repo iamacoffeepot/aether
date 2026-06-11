@@ -121,6 +121,9 @@ is covered in [Rendering & camera](systems/rendering.md).
 name; thread the reply's `next_since` back as `since` to page forward without
 re-reading. Only in-actor `tracing::*` events reach a ring — see
 [Logging](systems/logging.md) for the in-actor versus stderr boundary.
+`actor_cost` reads each actor's per-handler execution-cost EWMA table
+(mean and MAD in nanoseconds, plus a sample count); pass a `kind_id` to filter to
+one handler.
 
 **Computation DAG.** `submit_dag` validates a descriptor synchronously (you get the
 verdict and the output handle ids immediately) and then executes the sources
