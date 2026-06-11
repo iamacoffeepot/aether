@@ -3,68 +3,39 @@
 > **Governing ADRs:** [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md) (the blob dispatch model + scheduler), [ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)
 > (the hold-until-resolve offload primitive), [ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) (settlement). The
 > *contracts* on this page — single-threaded actors, per-recipient FIFO, no
-> blocking — are **stable**. The scheduler *internals* that enforce them (the
-> per-actor mail ring, blob formation, the cursor-shared cooperative drain) are
-> **live and still being tuned** — a run of perf PRs through mid-2026 reshaped
-> them — so treat this section as the *shape*, not a spec, and read
-> `aether-substrate` (and [ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) for the current mechanism. Build on the
-> contracts, not the internals.
+> blocking — are **stable**. The scheduler *internals* that enforce them are
+> drawn out on [The scheduler](scheduler.md) and are **live and still being
+> tuned**. Build on the contracts, not the internals.
 
 The invariants page states three contracts as rules: an actor is single-threaded
 from its own perspective, mail is per-recipient FIFO, and a handler must never
-block. This page is the machinery behind them — how the scheduler makes the
-first two hold, why the third is non-negotiable, and what you do *instead* of
-blocking when a handler needs to wait.
+block. This page is about writing code inside them — the scheduling model in
+enough detail to reason from, why the third contract is non-negotiable, and what
+you do *instead* of blocking when a handler needs to wait. The machinery that
+makes the first two hold is drawn out on [The scheduler](scheduler.md).
 
 ## The model: cooperative scheduling
 
 Actors don't each own a thread. There are far more actors than worker threads,
-and the pool multiplexes them on demand ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — no actor is pinned to a
-core. And the thing the pool actually hands around is not a message, nor "an
-actor," but a **blob**.
+and a small work-stealing pool multiplexes them on demand
+([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)). The unit the pool hands around is a **blob** — one handler
+execution's buffered sends, grouped by recipient and published for idle workers
+to race — and a per-actor **run-token** admits one worker to a given actor at a
+time. The token is what makes an actor single-threaded (so actor state is plain
+fields with no locks) and what makes **per-recipient FIFO fall out for free**
+while distinct recipients run concurrently — exactly the ordering spine the
+[invariants](../foundations/invariants.md) and [mail](mail-and-kinds.md) pages
+rely on. The full machinery — the outbound mail ring, blob formation, the
+cursor race, the run-token state machine, wakeup and fairness — is drawn out on
+[The scheduler](scheduler.md).
 
-Sends don't deliver eagerly. While a handler runs, each `send` is written into
-that actor's own **outbound mail ring** — a fixed-size, single-producer byte
-buffer the actor fills in place — and the sends are grouped **by recipient** into
-one **blob**. At the handler boundary the blob is flushed and routed: a recipient
-receives a lightweight *reference into the producer's ring*, not a copied buffer,
-so cross-actor mail is largely zero-copy. The blob — one producer's grouped
-fan-out — is the unit of work the scheduler hands around.
-
-A blob isn't handed to one worker to own — it's **published and raced**. The
-worker that produced it keeps it warm on its own queue by default (a relay chain
-stays on one hot worker, no cross-thread handoff), but once a fan-out is big
-enough to be worth spreading, the blob is published and idle workers are woken to
-**join in on the same blob**: they race a single shared cursor — one small atomic
-— each grabbing the next recipient-group, seizing that recipient, and dispatching
-its mail in place, then coming back for the next. The scheduler never decides
-*where* a piece of work should run; there is no placement step and no
-load-balancer. Work is just made available, and whatever workers are free race to
-drain it as fast as they can, contending only on that cursor. **That minimal
-coordination is the speed**: claiming the next group is a single atomic operation,
-not a scheduling decision about who should do what.
-
-What keeps an actor single-threaded through all of this is its **run-token** — a
-per-actor `Idle → Ready → Running` word, not anything the pool does by placing
-actors. It guards two points. When mail arrives, only the waker that wins the
-`Idle → Ready` CAS publishes the actor's work, so it is never enqueued twice. And
-a worker racing the cursor must win that recipient's `→ Running` CAS before
-dispatching to it — lose the race (the actor is *already* `Running` under another
-worker) and the mail is re-deposited for later rather than run concurrently. So
-two workers never run one actor; and because a single worker thereby walks a
-given recipient's mail, **per-recipient FIFO falls out for free** while distinct
-recipients run concurrently — exactly the ordering spine the
-[invariants](../foundations/invariants.md) and
-[mail](mail-and-kinds.md) pages rely on. And single-threaded-per-actor is *why*
-actor state is plain fields with no locks: nothing else can touch it
-concurrently.
-
-Scheduling is **cooperative and non-preemptive**. Once a worker starts a handler,
-that handler runs to completion — the scheduler cannot interrupt it. A worker
-dispatches a bounded batch and then releases the run-token so other actors get
-their turn, but *within* a single handler invocation there is no yield point. A
-long **compute** handler is fine: it ties up only its own worker and blocks
-nobody else's stealable work. The problem is a handler that **waits**.
+What this page needs from that model is one property: scheduling is
+**cooperative and non-preemptive**. Once a worker starts a handler, that handler
+runs to completion — the scheduler cannot interrupt it. A worker dispatches a
+bounded batch and then releases the run-token so other actors get their turn,
+but *within* a single handler invocation there is no yield point. A long
+**compute** handler is fine: it ties up only its own worker and blocks nobody
+else's runnable work. The problem is a handler that **waits**.
 
 ## Why a handler must never block
 
@@ -171,6 +142,7 @@ cap-local spawn, scoped tightly to the blocking call ([ADR-0050](https://github.
 ## Where to read more
 
 - The contracts this page implements — [Invariants & guarantees](../foundations/invariants.md).
+- The dispatch machinery behind them, drawn out — [The scheduler](scheduler.md).
 - The mail spine and the per-recipient ordering guarantee — [Mail, kinds & scheduling](mail-and-kinds.md).
 - Settlement and the hold contract in depth — [Tracing & settlement](tracing-and-settlement.md).
 - Offloading heavy compute — [The computation DAG]().
