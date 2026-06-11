@@ -60,6 +60,18 @@ pub enum DecodeError {
         path: String,
         discriminant: u32,
     },
+    /// The decode produced more `Value` nodes than the input length
+    /// justifies (`VALUE_BUDGET_BASE + input_len * VALUES_PER_INPUT_BYTE`).
+    /// Guards the zero-wire-byte-element collection class (`Vec<Unit>`,
+    /// `Vec<Struct {}>`) whose decode loop allocates a `Value` per
+    /// iteration without consuming input — the pre-allocation clamp
+    /// alone can't bound it. Same altitude as `frame.rs`'s
+    /// `MAX_FRAME_SIZE`: a length prefix must not drive a reader into an
+    /// unbounded allocation.
+    ValueBudgetExceeded {
+        path: String,
+        budget: usize,
+    },
     /// Schema arm the hub decoder can't handle in this position. Mirror
     /// of the encoder's same variant — fires for non-cast leaf types
     /// inside a cast-shaped parent.
@@ -83,6 +95,10 @@ impl fmt::Display for DecodeError {
             Self::VarintOverflow { path } => {
                 write!(f, "varint at {path} exceeds 10 bytes (overflow)")
             }
+            Self::ValueBudgetExceeded { path, budget } => write!(
+                f,
+                "decode value budget exceeded at {path}: more than {budget} values for the input length"
+            ),
             Self::UnknownEnumDiscriminant { path, discriminant } => write!(
                 f,
                 "enum at {path} has no variant for discriminant {discriminant}"
@@ -95,6 +111,29 @@ impl fmt::Display for DecodeError {
 }
 
 impl error::Error for DecodeError {}
+
+/// Decode-side allocation budget, in the spirit of `frame.rs`'s
+/// `MAX_FRAME_SIZE`: a wire-decoded length must never drive the decoder
+/// into an unbounded allocation. Every postcard node charges one value
+/// against a per-decode budget sized from the input length, so a crafted
+/// length — or a zero-wire-byte-element collection (`Unit`, field-less
+/// `Struct`) whose decode loop allocates per iteration without consuming
+/// input — can't expand into more values than the bytes justify.
+///
+/// The budget is `VALUE_BUDGET_BASE + input_len * VALUES_PER_INPUT_BYTE`.
+/// Every node except the zero-wire-byte class consumes at least one input
+/// byte, so valid decodes sit near one value per byte; the linear term
+/// keeps frame-scale payloads decodable (a `Bytes` field decodes one
+/// value per byte, so a default-config 64 MiB frame legitimately produces
+/// tens of millions of values), and the base term absorbs small
+/// zero-byte-element collections (the proptest generator's depth-≤4 /
+/// width-≤4 trees peak at a few hundred values). What it rejects is the
+/// decompression-bomb class: a decoded value count unjustified by the
+/// bytes actually sent. A global budget is the only bound that composes —
+/// per-arm caps multiply under nesting (`Vec<Vec<Unit>>` turns a per-arm
+/// cap of C into `input_bytes × C` values).
+const VALUE_BUDGET_BASE: usize = 4096;
+const VALUES_PER_INPUT_BYTE: usize = 4;
 
 /// ADR-0020: decode `bytes` against a `SchemaType` descriptor into a
 /// JSON value symmetric to what `encode_schema` would accept.
@@ -278,6 +317,11 @@ fn decode_postcard(
     schema: &SchemaType,
     path: &str,
 ) -> Result<Value, DecodeError> {
+    // Every postcard node charges exactly once — collection elements,
+    // struct fields, enum bodies — including through recursion, so the
+    // decode-wide budget bounds the zero-wire-byte-element class whose
+    // loop allocates without consuming input.
+    cur.charge_value(path)?;
     match schema {
         SchemaType::Unit => Ok(Value::Null),
         SchemaType::Bool => {
@@ -319,7 +363,12 @@ fn decode_postcard(
         }
         SchemaType::Vec(inner) => {
             let len = read_varint_u64(cur, path)? as usize;
-            let mut arr = Vec::with_capacity(len);
+            // Clamp the pre-allocation against the bytes that remain: a
+            // varint-encoded element occupies ≥ 1 byte, so a `len` past
+            // `remaining` can't be valid non-degenerate input. Zero-byte
+            // elements start small and grow by push; the decode-wide
+            // budget bounds that loop.
+            let mut arr = Vec::with_capacity(len.min(cur.remaining()));
             for i in 0..len {
                 let elem_path = format!("{path}[{i}]");
                 arr.push(decode_postcard(cur, inner, &elem_path)?);
@@ -368,7 +417,9 @@ fn decode_postcard(
             // string keys identity. Order in the emitted object isn't
             // load-bearing for decoders that compare by value.
             let len = read_varint_u64(cur, path)? as usize;
-            let mut obj = Map::with_capacity(len);
+            // Same clamp as the `Vec` arm: a `(k, v)` pair occupies ≥ 1
+            // byte, so cap the pre-allocation at the bytes remaining.
+            let mut obj = Map::with_capacity(len.min(cur.remaining()));
             for i in 0..len {
                 let entry_path = format!("{path}[{i}]");
                 let key_value = decode_postcard(cur, key_schema, &entry_path)?;
@@ -575,15 +626,44 @@ fn json_f64(n: f64) -> Value {
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// Remaining value budget for this decode (see `VALUE_BUDGET_BASE`).
+    /// Each postcard node decrements it via `charge_value`.
+    values_left: usize,
 }
 
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        // Saturating: a `bytes.len()` near `usize::MAX` is not reachable
+        // (it's a real slice), but the arithmetic stays defined.
+        let values_left =
+            VALUE_BUDGET_BASE.saturating_add(bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE));
+        Self {
+            bytes,
+            pos: 0,
+            values_left,
+        }
     }
 
     fn remaining(&self) -> usize {
         self.bytes.len() - self.pos
+    }
+
+    /// Charge one value against the decode-wide budget. Returns
+    /// `ValueBudgetExceeded` once the budget is exhausted, so a decode
+    /// can't expand into more `Value` nodes than the input length
+    /// justifies — the bound for zero-wire-byte-element collections.
+    fn charge_value(&mut self, path: &str) -> Result<(), DecodeError> {
+        match self.values_left.checked_sub(1) {
+            Some(remaining) => {
+                self.values_left = remaining;
+                Ok(())
+            }
+            None => Err(DecodeError::ValueBudgetExceeded {
+                path: path.into(),
+                budget: VALUE_BUDGET_BASE
+                    .saturating_add(self.bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE)),
+            }),
+        }
     }
 
     fn take<const N: usize>(&mut self, path: &str) -> Result<[u8; N], DecodeError> {
@@ -1145,6 +1225,73 @@ mod tests {
         // JSON descriptor round-trips through wire and back.
         let back = decode_schema(&bytes, &schema).expect("decode Inline Ref");
         assert_eq!(back, value);
+    }
+
+    // Issue #1586 — bound `decode_schema` collection allocations. A
+    // wire-decoded length must not drive the decoder into an unbounded
+    // allocation; the four classes below pin the fix.
+
+    /// (a) The `ASan` repro class (#1562 fuzz crash): a varint of
+    /// `u32::MAX` followed by an empty tail against `Vec<u32>` and
+    /// `Map<u32, u32>`. The pre-allocation clamp keeps `with_capacity`
+    /// from requesting an exabyte; the decode then errors `Truncated`
+    /// reading the first absent element rather than aborting the process.
+    #[test]
+    fn oversized_collection_length_errors_without_allocating() {
+        let len_bytes =
+            postcard::to_allocvec(&u64::from(u32::MAX)).expect("test setup: varint u32::MAX");
+
+        let vec_schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Scalar(Primitive::U32)));
+        let err = decode_schema(&len_bytes, &vec_schema)
+            .expect_err("oversized Vec length must error, not allocate");
+        assert!(matches!(err, DecodeError::Truncated { .. }));
+
+        let map = map_schema(
+            SchemaType::Scalar(Primitive::U32),
+            SchemaType::Scalar(Primitive::U32),
+        );
+        let err = decode_schema(&len_bytes, &map)
+            .expect_err("oversized Map length must error, not allocate");
+        assert!(matches!(err, DecodeError::Truncated { .. }));
+    }
+
+    /// (b) The bomb class the 2026-06-10 bounce identified: a huge count
+    /// of zero-wire-byte elements (`Unit`, field-less `Struct`). The
+    /// clamp can't help — each loop iteration consumes no input yet
+    /// allocates a `Value` — so the decode-wide value budget is what
+    /// stops it with `ValueBudgetExceeded`.
+    #[test]
+    fn zero_byte_element_bomb_exceeds_value_budget() {
+        let count_bytes =
+            postcard::to_allocvec(&u64::from(u32::MAX)).expect("test setup: varint count");
+
+        let unit_vec = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
+        let err = decode_schema(&count_bytes, &unit_vec)
+            .expect_err("Vec<Unit> bomb must exceed the value budget");
+        assert!(matches!(err, DecodeError::ValueBudgetExceeded { .. }));
+
+        let struct_vec = SchemaType::Vec(SchemaCell::owned(pc_struct(vec![])));
+        let err = decode_schema(&count_bytes, &struct_vec)
+            .expect_err("Vec<Struct {}> bomb must exceed the value budget");
+        assert!(matches!(err, DecodeError::ValueBudgetExceeded { .. }));
+    }
+
+    /// (c) The bounce's valid-input counterexample: a single field-less
+    /// struct element, `[{}]`, must still round-trip. The rejected
+    /// `len > remaining` guard would have refused this (the element is
+    /// zero wire bytes); the clamp + budget approach leaves it valid.
+    #[test]
+    fn vec_of_one_empty_struct_roundtrips() {
+        let schema = SchemaType::Vec(SchemaCell::owned(pc_struct(vec![])));
+        roundtrip(json!([{}]), &schema);
+    }
+
+    /// (d) A moderate zero-wire-byte-element collection (≈100 `Unit`s)
+    /// sits well inside the base budget and round-trips.
+    #[test]
+    fn vec_of_hundred_units_roundtrips_inside_base_budget() {
+        let schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
+        roundtrip(Value::Array(vec![Value::Null; 100]), &schema);
     }
 
     #[test]
