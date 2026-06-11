@@ -153,6 +153,11 @@ consumes an owned dispatch carries the same obligation by hand: record completio
 or settlement never fires. See the *hold the chain open* obligation on the
 [invariants page](../foundations/invariants.md).)
 
+A chain that never settles traces back to a missed hold here — picking the wrong
+shape from this table, or a raw `std::thread::spawn` that opts the work out. The
+[Debugging a hung settlement](../recipes/debugging-a-hung-settlement.md) recipe
+walks from the `"timeout"` symptom back to the offending primitive.
+
 ## The rare dedicated thread
 
 Some work genuinely blocks at the *edges* of the engine — a TCP listener's

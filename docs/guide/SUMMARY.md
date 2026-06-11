@@ -41,7 +41,7 @@
   - [Adding a chassis capability]()
   - [Wiring an MCP tool]()
   - [Writing a component]()
-  - [Debugging a hung settlement]()
+  - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Reference
 
