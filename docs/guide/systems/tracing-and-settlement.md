@@ -106,8 +106,9 @@ off the pool, and the engine has exactly one such case today: the **desktop
 chassis's window driver**. Window operations have to run on the OS event-loop
 thread rather than a pool worker, so `aether.window` is registered as an inbox the
 event loop drains itself, recording each inbound mail's `Finished` as it applies
-the op and sends the reply. That's the lone precedent — but the same obligation
-lands on any future driver that owns and drains its own mailbox off-thread.
+the op and sends the reply ([Window](window.md) covers that mailbox's surface).
+That's the lone precedent — but the same obligation lands on any future driver
+that owns and drains its own mailbox off-thread.
 
 Forget it and you get the worst diagnostic the runtime offers: a silent
 multi-second hang with no actor and no mail named, ending only when the

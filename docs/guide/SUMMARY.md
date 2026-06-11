@@ -28,6 +28,7 @@
   - [Input streams](systems/input.md)
   - [File I/O](systems/file-io.md)
   - [Audio]()
+  - [Window](systems/window.md)
   - [Tracing & settlement](systems/tracing-and-settlement.md)
   - [Configuration](systems/configuration.md)
   - [Handles](systems/handles.md)
