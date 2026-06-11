@@ -10,7 +10,8 @@ The primary human review point of the release flow. The user invokes `/approve <
 ## Invocation
 
 ```
-/approve <issue>                    standard
+/approve <issue>                    standard (single issue)
+/approve <issue> [<issue> …]        batch — validate each, write all board fields in one aliased request
 /approve <issue> --note "<text>"    posts the text as a comment on the issue
 /approve <issue> --skip-adr         bypass the ADR-merged check (emergency override)
 ```
@@ -37,7 +38,7 @@ If **all** gates pass, proceed.
 
 ## Actions on pass
 
-1. Set the project item's `AgentReady` field to `Yes` and its `Phase` field to `Ready` in **one** `gh api graphql` request — two aliased `updateProjectV2ItemFieldValue` mutations against the same item (field/option IDs from `field_cache`, item ID from `item_cache` with the targeted-lookup fallback — see `/scope` §Project board mechanics). Then reconcile the issue label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)).
+1. Set every approved issue's `Phase` field to `Ready` and its `AgentReady` field to `Yes` in **one** `gh api graphql` request — two aliased `updateProjectV2ItemFieldValue` mutations per issue (2N for N issues), assembled per `/scope` §"Batch every multi-write run into one aliased request" (field/option IDs from `field_cache`, item IDs from `item_cache` with the targeted-lookup fallback). A single-issue `/approve` is the N=1 case — still the aliased form, just the two mutations. Then reconcile each approved issue's label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)). When a batch mixes passing and failing issues, write the board fields only for the ones that cleared every gate and list the rest in the refusal.
 2. No comment on a plain approve — the `phase:ready` label, the board fields, and the timeline's label event already record it. If `--note` was passed, post the note as prose markdown:
 
    ```markdown
@@ -79,7 +80,7 @@ Parse §Design notes for a URL or reference matching one of:
 - `Closes <owner>/<repo>#<N>` (the cross-repo close form per the user's memory)
 - A bare `#<N>` paired with an "ADR" mention nearby
 
-For each such reference, run `gh pr view <N> --json mergedAt,state` and require `state == MERGED`. List every unmerged ADR PR in the refusal.
+For each such reference, read the PR's merge state over REST — `gh api repos/iamacoffeepot/aether/pulls/<N> --jq '.merged'` returns `true` once merged (the REST `state` only distinguishes `open`/`closed`, so `merged` is the field to test). Require it `true`; list every unmerged ADR PR in the refusal.
 
 `--skip-adr` exists for cases where:
 
@@ -98,14 +99,21 @@ When `--skip-adr` is used, a comment is mandatory — the override rationale has
 
 ## Phase label reconcile
 
-The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the label work stays off the contended pool. **In the same step you set the `Phase` field, swap the label over REST:**
 
 ```bash
-gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
-  && gh issue edit <n> --add-label "phase:<new>"
+# Atomic swap to phase:ready. Runs under bash for array word-splitting.
+bash <<'EOF'
+n=<n>; new="phase:ready"; repo=iamacoffeepot/aether
+args=()
+while IFS= read -r l; do args+=(-f "labels[]=$l"); done < <(
+  gh api "repos/$repo/issues/$n/labels" --jq '.[].name | select(startswith("phase:") | not)')
+args+=(-f "labels[]=$new")
+gh api -X PUT "repos/$repo/issues/$n/labels" "${args[@]}"
+EOF
 ```
 
-`--remove-label` ignores labels the issue doesn't carry, so the remove is safe on any transition and idempotent on re-run (lowercased: `Phase=Ready` → `phase:ready`). The two calls are chained with `&&` so the add fires only after the remove succeeds — if the first `gh` call stalls or errors (a transient CLI or API outage), the chain stops there instead of stamping the new label onto an issue whose old phase label is still present, which would leave two phase labels on the board at once. A reconcile that fails partway leaves the prior label untouched and heals on the next run. The only write this skill makes is `Phase=Ready` → `phase:ready`. On idempotent re-run (already Ready) the reconcile is a harmless no-op; run it anyway so a hand-stripped label self-heals.
+The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus `phase:ready`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than the old remove-then-add pair, which had a window between its two calls. The only write this skill makes is `Phase=Ready` → `phase:ready`; run the swap once per approved issue. On idempotent re-run (already Ready) the swap re-asserts the same set — a harmless no-op that also self-heals a hand-stripped label.
 
 ## Failure modes
 

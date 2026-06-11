@@ -94,18 +94,25 @@ Same skill mechanism, different invocation site. `/bounce` is the user-driven va
 
 `Phase=Stalled` is a different signal — env/tooling failure, not a phase regression. Examples: qodana CI service down, GitHub API rate-limited mid-batch, `gh` token expired. The issue's scoping is fine; the *environment* is the problem.
 
-v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit` with the BounceTo field left null. When you do, also set the `phase:stalled` label on the issue (`gh issue edit <n> --remove-label "phase:define,…,phase:bounced,phase:stalled" && gh issue edit <n> --add-label phase:stalled` — `&&`-chained per [Phase label reconcile](#phase-label-reconcile)) so the halt is visible in `gh issue list`. Future `/stall <issue> --reason "<env-issue>"` would post the reason the same way `/bounce` does — it's the same surviving comment class.
+v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit` with the BounceTo field left null. When you do, also set the `phase:stalled` label on the issue — the REST swap from [Phase label reconcile](#phase-label-reconcile), with `new="phase:stalled"` — so the halt is visible in `gh issue list`. Future `/stall <issue> --reason "<env-issue>"` would post the reason the same way `/bounce` does — it's the same surviving comment class.
 
 ## Phase label reconcile
 
-The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the label work stays off the contended pool. **In the same step you set the `Phase` field, swap the label over REST:**
 
 ```bash
-gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
-  && gh issue edit <n> --add-label "phase:<new>"
+# Atomic swap to an active phase. Runs under bash for array word-splitting.
+bash <<'EOF'
+n=<n>; new="phase:<new>"; repo=iamacoffeepot/aether
+args=()
+while IFS= read -r l; do args+=(-f "labels[]=$l"); done < <(
+  gh api "repos/$repo/issues/$n/labels" --jq '.[].name | select(startswith("phase:") | not)')
+args+=(-f "labels[]=$new")
+gh api -X PUT "repos/$repo/issues/$n/labels" "${args[@]}"
+EOF
 ```
 
-`--remove-label` ignores labels the issue doesn't carry, so the remove is safe on any transition and idempotent on re-run (lowercased: `Phase=Ready` → `phase:ready`). The two calls are chained with `&&` so the add fires only after the remove succeeds — if the first `gh` call stalls or errors (a transient CLI or API outage), the chain stops there instead of stamping the new label onto an issue whose old phase label is still present, which would leave two phase labels on the board at once. A reconcile that fails partway leaves the prior label untouched and heals on the next run. This skill writes `Phase=Bounced` (`phase:bounced`), and on the `/scope` resume contract `Phase=<BounceTo>` (`phase:<BounceTo>`).
+The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus the one new `phase:*`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than the old remove-then-add pair, which had a window between its two calls (lowercased: `Phase=Bounced` → `phase:bounced`). A failed PUT leaves the prior labels untouched and heals on the next run. This skill writes `Phase=Bounced` (`phase:bounced`), and on the `/scope` resume contract `Phase=<BounceTo>` (`phase:<BounceTo>`).
 
 ## Failure modes
 
