@@ -1319,12 +1319,13 @@ fn assemble_request(
     let SchemaType::Struct { fields, .. } = &descriptor.schema else {
         return None;
     };
-    // The declared inner kind id of each `Ref<K>` slot, in declaration
-    // order — emitted onto the wire `Ref::Handle.kind_id`.
-    let ref_slot_kinds: Vec<KindId> = fields
+    // The schema cell of each `Ref<K>` slot, in declaration order —
+    // the structural fallback when the producer's output kind isn't
+    // statically knowable (see `producer_output_kind`).
+    let ref_slot_cells: Vec<&aether_data::SchemaCell> = fields
         .iter()
         .filter_map(|f| match &f.ty {
-            SchemaType::Ref(cell) => Some(slot_inner_kind_id(registry, cell)),
+            SchemaType::Ref(cell) => Some(cell),
             _ => None,
         })
         .collect();
@@ -1336,12 +1337,16 @@ fn assemble_request(
             slot_source.insert(edge.slot, edge.from);
         }
     }
+    // Node lookup by id, for resolving each slot's producer.
+    let by_id: HashMap<NodeId, &Node> =
+        state.descriptor.nodes.iter().map(|n| (n.id(), n)).collect();
 
     let mut out: Vec<u8> = Vec::new();
-    for (slot_index, expected_kind) in ref_slot_kinds.iter().enumerate() {
+    for (slot_index, cell) in ref_slot_cells.iter().enumerate() {
         let slot = u32::try_from(slot_index).unwrap_or(u32::MAX);
         let from = slot_source.get(&slot)?;
         let handle = *state.handles.get(from)?;
+        let stamp = producer_output_kind(by_id.get(from).copied(), registry, cell);
         // The Handle variant carries no `K`, so any `Kind` marker works
         // (`Ref<K>`'s serde needs `K: Kind` post-ADR-0100, and the unit
         // kind is the zero-cost marker) — emit the wire
@@ -1350,7 +1355,7 @@ fn assemble_request(
         // splicing the stored bytes inline (or parking).
         let r: Ref<()> = Ref::Handle {
             id: handle.0,
-            kind_id: expected_kind.0,
+            kind_id: stamp.0,
         };
         let mut field_bytes = postcard::to_allocvec(&r).ok()?;
         out.append(&mut field_bytes);
@@ -1358,16 +1363,37 @@ fn assemble_request(
     Some(out)
 }
 
-/// The declared inner kind id of a `Ref<K>` slot. The schema cell
-/// carries `K`'s schema; look up its registered kind id so the emitted
-/// `Ref::Handle.kind_id` matches what the consumer declared. Falls back
-/// to `KindId(0)` when no registered kind matches — the walk-and-resolve
-/// path validates against the *field's* expected type, not this id, so a
-/// fallback id still resolves for the common case where the producer's
-/// stored kind equals the slot type.
-fn slot_inner_kind_id(registry: &Registry, cell: &aether_data::SchemaCell) -> KindId {
-    let inner: &SchemaType = cell;
-    kind_id_for_schema(registry, inner)
+/// The kind id to stamp on a slot's wire `Ref::Handle`, derived from the
+/// producer node feeding it (issue iamacoffeepot/aether#1047). Exact for
+/// the statically-typed producers: a `Transform` stores its output under
+/// its declared `output_kind_id` (the validator enforced it against the
+/// transform manifest) and a `Call` stores under `Bundle::ID`, so for
+/// both the stamp agrees with the stored kind even when structurally
+/// identical kinds are registered. A `Source`'s reply kind isn't
+/// statically knowable — the slot's schema cell carries `K`'s schema but
+/// not its name, so the kind id can't be recovered exactly — and the
+/// stamp falls back to a best-effort structural scan of the registered
+/// vocabulary (`KindId(0)` when nothing matches). The walk-and-resolve
+/// path resolves by handle id and validates against the *field's*
+/// expected type, not this id, so an imprecise fallback stamp still
+/// resolves correctly; it surfaces only in diagnostics.
+fn producer_output_kind(
+    producer: Option<&Node>,
+    registry: &Registry,
+    cell: &aether_data::SchemaCell,
+) -> KindId {
+    match producer {
+        Some(Node::Transform { output_kind_id, .. }) => *output_kind_id,
+        Some(Node::Call { .. }) => <Bundle as aether_data::Kind>::ID,
+        // A `Source`'s output is whatever the cap replies; an `Observer`
+        // producer can't validate (no outgoing edges) and `None` is a
+        // defensive arm for an edge naming an unknown node — both fall
+        // back to the structural scan.
+        Some(Node::Source { .. } | Node::Observer { .. }) | None => {
+            let inner: &SchemaType = cell;
+            kind_id_for_schema(registry, inner)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1447,5 +1473,139 @@ mod config_tests {
         assert_eq!(layer.pool_threads, None);
         assert!(default.pool_threads >= 1);
         assert_eq!(default.pool_threads, default_pool_threads());
+    }
+}
+
+#[cfg(test)]
+mod assemble_tests {
+    use std::collections::HashMap;
+
+    use aether_data::{DagId, HandleId, Kind, KindDescriptor, Ref, Schema, TransformId};
+    use aether_kinds::{DagDescriptor, Edge, Node, NodeId};
+
+    use super::{KindId, MailboxId, assemble_request};
+    use crate::dag::kind_id_for_schema;
+    use crate::dag::state::DagState;
+    use crate::dag::validator::ValidatedDag;
+    use crate::mail::Registry;
+
+    // Issue iamacoffeepot/aether#1047 — structurally identical kinds must
+    // not collide in the wire `Ref::Handle.kind_id` stamp when the
+    // producer's output kind is statically known. `TwinDecoy` and
+    // `TwinOutput` share a canonical positional schema; only the name
+    // (and so the kind id) differs.
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
+    #[kind(name = "test.dag.twin_decoy")]
+    struct TwinDecoy {
+        value: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
+    #[kind(name = "test.dag.twin_output")]
+    struct TwinOutput {
+        value: u64,
+    }
+
+    /// Observer request kind with one `Ref<TwinOutput>` slot.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
+    #[kind(name = "test.dag.twin_observer")]
+    struct TwinObserver {
+        input: Ref<TwinOutput>,
+    }
+
+    fn descriptor_of<K: Kind + Schema>() -> KindDescriptor {
+        KindDescriptor {
+            name: K::NAME.to_owned(),
+            schema: K::SCHEMA,
+        }
+    }
+
+    /// Registry with the decoy registered *before* the real output kind,
+    /// so a structural first-match scan resolves the decoy.
+    fn twin_registry() -> Registry {
+        let reg = Registry::new();
+        reg.register_kind_with_descriptor(descriptor_of::<TwinDecoy>())
+            .expect("register decoy");
+        reg.register_kind_with_descriptor(descriptor_of::<TwinOutput>())
+            .expect("register output");
+        reg.register_kind_with_descriptor(descriptor_of::<TwinObserver>())
+            .expect("register observer kind");
+        reg
+    }
+
+    fn state_with(producer: Node) -> DagState {
+        let producer_id = producer.id();
+        let descriptor = DagDescriptor {
+            version: 1,
+            nodes: vec![
+                producer,
+                Node::Observer {
+                    id: NodeId(2),
+                    recipient: MailboxId(99),
+                    kind_id: TwinObserver::ID,
+                },
+            ],
+            edges: vec![Edge {
+                from: producer_id,
+                to: NodeId(2),
+                slot: 0,
+            }],
+        };
+        let validated = ValidatedDag {
+            descriptor,
+            topo_order: vec![producer_id, NodeId(2)],
+        };
+        let handles: HashMap<NodeId, HandleId> =
+            [(producer_id, HandleId(7)), (NodeId(2), HandleId(8))].into();
+        DagState::new(DagId(1), validated, handles)
+    }
+
+    /// Decode the single emitted `Ref::Handle` from an assembled payload.
+    fn decode_stamp(payload: &[u8]) -> (u64, u64) {
+        let r: Ref<()> = postcard::from_bytes(payload).expect("decode Ref wire");
+        match r {
+            Ref::Handle { id, kind_id } => (id, kind_id),
+            Ref::Inline(()) => panic!("assemble emits the Handle arm"),
+        }
+    }
+
+    /// A transform-fed slot stamps the transform's declared output kind
+    /// exactly, even with a structurally identical decoy registered
+    /// first — the collision class from issue 1047.
+    #[test]
+    fn transform_fed_slot_stamps_declared_output_kind() {
+        let reg = twin_registry();
+        let state = state_with(Node::Transform {
+            id: NodeId(1),
+            transform_id: TransformId(42),
+            output_kind_id: TwinOutput::ID,
+            timeout_ms: None,
+        });
+        let payload = assemble_request(&state, &reg, NodeId(2), TwinObserver::ID)
+            .expect("assemble must succeed");
+        let (handle, stamp) = decode_stamp(&payload);
+        assert_eq!(handle, 7);
+        assert_eq!(KindId(stamp), TwinOutput::ID);
+        assert_ne!(KindId(stamp), TwinDecoy::ID);
+    }
+
+    /// A source-fed slot keeps the documented best-effort structural
+    /// scan — the reply kind isn't statically knowable, so the stamp is
+    /// whatever the registered vocabulary structurally resolves.
+    #[test]
+    fn source_fed_slot_falls_back_to_structural_scan() {
+        let reg = twin_registry();
+        let state = state_with(Node::Source {
+            id: NodeId(1),
+            mailbox: MailboxId(50),
+            kind_id: TwinDecoy::ID,
+            payload: Vec::new(),
+        });
+        let payload = assemble_request(&state, &reg, NodeId(2), TwinObserver::ID)
+            .expect("assemble must succeed");
+        let (_, stamp) = decode_stamp(&payload);
+        let scan = kind_id_for_schema(&reg, &TwinOutput::SCHEMA);
+        assert_eq!(KindId(stamp), scan);
     }
 }
