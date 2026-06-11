@@ -23,7 +23,7 @@
   - [Mail, kinds & scheduling](systems/mail-and-kinds.md)
   - [Concurrency & blocking](systems/concurrency.md)
   - [Components & lifecycle](systems/components.md)
-  - [Rendering & camera]()
+  - [Rendering & camera](systems/rendering.md)
   - [Mesh authoring & the DSL]()
   - [Input streams](systems/input.md)
   - [File I/O](systems/file-io.md)
