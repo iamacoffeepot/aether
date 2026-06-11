@@ -169,8 +169,10 @@ fn latency_section_renders_verdict(name: &str) -> bool {
 }
 
 /// One cell's measured throughput in a single trial
-/// (iamacoffeepot/aether#1202): completed mails/sec for a (worker ×
-/// topology) cell under saturation. `mails_per_sec` is `None` when the
+/// (iamacoffeepot/aether#1202): a steady-state mails/sec estimate for a (worker
+/// × topology) cell under saturation — the rate over the trimmed saturated
+/// middle of the run, not a full-batch makespan average
+/// (iamacoffeepot/aether#1227). `mails_per_sec` is `None` when the
 /// cell **truncated** — the entry relay's trace ring lapped during the run,
 /// so the completed-count is undercounted and any rate computed from it
 /// would be wrong. Such a cell is emitted flagged-not-dropped
