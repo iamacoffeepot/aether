@@ -144,6 +144,10 @@ The full walkthrough is the [*Adding a config knob*](../recipes/adding-a-config-
 recipe; the rule to carry is
 that a knob is declared once and resolved by the layer, never read ad-hoc.
 
+`HttpConfig` above is the live example: each field is a knob the deployer sets at
+boot, and what those knobs gate — the deny-by-default egress allowlist, the body
+cap, the per-request timeout — is the subject of [HTTP egress](http.md).
+
 ## Where to read more
 
 - The rollout's design, the source-stack rationale, and the crate choice —

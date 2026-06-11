@@ -41,7 +41,7 @@ registered and warn-drop.
 | **Configuration** | Layered app config — derive + overlay + argv/env, dumped via `--config`. | — (boot-time + CLI) | 0090 | Settling (rollout across knobs) |
 | **Handles** | Typed references to substrate-held values; a value travels by reference, not by bytes. | `aether.handle` — `publish` / `release` / `pin` / `describe` | 0045, 0048, 0049 | Stable; lightly exercised |
 | **Computation DAG** | Large/async work as a graph of sink calls + transforms wired by handles. | via `submit_dag` / `dag_status` / `dag_cancel` | 0045, 0047, 0048, 0084 | Stable (pattern); lightly exercised |
-| **HTTP egress** | Outbound network as a capability. | `aether.http` | 0043 | Stable |
+| **[HTTP egress](systems/http.md)** | Outbound network as a capability. | `aether.http` | 0043 | Stable |
 
 ## How to read an explainer (the shape each page follows)
 
