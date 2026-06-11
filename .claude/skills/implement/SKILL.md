@@ -17,19 +17,68 @@ Two ways to run it:
 - **In-session (default).** The whole skill runs in the main session — implement, push, drive CI green, hold the draft. Use this for a single issue or when you want tight control over each step.
 - **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh --qodana` (which stamps the commit; `--qodana` runs the same qodana scan CI gates on, needs colima up), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or board writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`). **The parent owns the `Phase=Executing` flip at dispatch:** before or as it spawns the agents, the parent performs §Execute step 1 — the `Phase=Executing` board write plus the `phase:executing` label reconcile — for every issue in the batch. The dispatched agent never touches the board, so the flip cannot be deferred to it; leaving it for the parent's takeover would hold each issue at `Phase=Ready` for the whole time its agent is implementing, misreporting the in-flight fleet and inviting a double-dispatch. `Executing` here means *handed to an agent*: with batched per-agent queues every issue in a queue flips at dispatch, so a queued-but-not-yet-started issue reads `Executing` slightly early — accepted, because the parent cannot observe intra-agent queue progress and `Ready` would misreport the whole window.
 
-  **Batched dispatch.** Before spawning agents, the orchestrator reads each candidate issue's `size:*` and `model:*` labels over REST (`gh api repos/iamacoffeepot/aether/issues/<n> --jq '.labels[].name'` per issue, or one `gh api 'repos/iamacoffeepot/aether/issues?labels=size:m&state=open' --jq '.[].number'` sweep — not `gh issue view` / `gh issue list`, which are GraphQL-backed) — no GraphQL board query, since `/scope` mirrors the `Size` field and the model opt-in onto labels at Plan time. It then groups the approved issues into per-agent queues: roughly **three S issues or one M per dispatched agent, an L always solo**. Each queued issue is still a full single-issue `/implement` run — its own worktree, its own draft PR; batching only decides how many of those runs one background agent works through before it spins down, so a pile of small mechanical work doesn't spin up one full agent each (fewer concurrent agents also staggers the shared per-user GraphQL budget). The `model:*` label routes the agent's model: an absent label means the agent inherits the orchestrator's own model (whatever the dispatcher is running — e.g. Opus when the dispatcher is Opus); a `model:sonnet` / `model:haiku` label runs that issue on the smaller model. `/scope` stamps both label families at Plan time — see its §Plan size-estimation and model-opt-in notes.
+  **Batched dispatch.** Before spawning agents, the orchestrator reads each candidate issue's `size:*` and `model:*` labels over REST (`gh api repos/iamacoffeepot/aether/issues/<n> --jq '.labels[].name'` per issue, or one `gh api 'repos/iamacoffeepot/aether/issues?labels=size:m&state=open' --jq '.[].number'` sweep — not `gh issue view` / `gh issue list`, which are GraphQL-backed) — no GraphQL board query, since `/scope` mirrors the `Size` field and the model opt-in onto labels at Plan time. It then packs the approved issues into per-agent queues by an **estimated context budget** rather than a fixed count: a queue accumulates issues until the next one would push it past the ~150k-token compaction threshold an agent hits, then a new queue opens.
+
+  The `size:*` label is the prior context-cost estimate — heuristic anchors **S ≈ 25k, M ≈ 60k, L ≈ 120k** accumulated agent context (exploration + diff + validation churn) — and reading each candidate's body and `## Implementation plan` refines it: step count, the count of files and crates the plan touches, and how much exploration the change implies all move the estimate off its label anchor. Pack greedily against the refined estimates: smalls pack densely (several trivial S can share one agent where the old count rule capped at three), mediums co-queue when two fit under the cap, and an L stays solo because its prior alone approaches the threshold.
+
+  Co-queue only under **crate affinity** — issues that share a `crate:*` label or carry an explicit relates-to link — so the shared exploration context an agent builds for the first issue pays off on the next. Issues with no affinity are dispatched one agent each, in parallel; batching unrelated work just piles unreusable context into one queue. The exception is trivial mechanical no-crate work (a doc tweak, a label fix, a one-line config change): co-queue it regardless of crate, since its context residue is noise and the per-agent dispatch overhead dominates the cost. Order each queue **broadest-exploration-first** — the issue needing the widest read goes at the head, so the shared context is paid for once and the cheaper issues behind it reuse it.
+
+  Each queued issue is still a full single-issue `/implement` run — its own worktree, its own draft PR; packing only decides how many of those runs one background agent works through before it spins down, so a pile of small mechanical work doesn't spin up one full agent each (fewer concurrent agents also staggers the shared per-user GraphQL budget). The `model:*` label routes the agent's model: an absent label means the agent inherits the orchestrator's own model (whatever the dispatcher is running — e.g. Opus when the dispatcher is Opus); a `model:sonnet` / `model:haiku` label runs that issue on the smaller model. `/scope` stamps both label families at Plan time — see its §Plan size-estimation and model-opt-in notes.
 
 Either mode opens the PR **as a draft**, drives CI green, and holds it in draft for your review. This repo has native GitHub auto-merge on, so a *non-draft* PR that reaches green merges itself — draft is the review gate (see `feedback_green_pr_automerges_before_review`). Landing is the release *process*'s call: an approved release un-drafts the PR so native auto-merge takes it. This skill never issues a merge command and never un-drafts on its own.
+
+## Sweep dispatch
+
+`/implement --sweep` is the batched hybrid background-agent entry point: it discovers the eligible set instead of taking one issue, packs it into per-agent queues, and waits for your confirmation before any agent spawns. It exists so the orchestrator stops assembling each dispatch set by hand.
+
+1. **Enumerate over REST, in one call.** `phase:ready` is set only by `/approve`, which flips `AgentReady=Yes` in the same step — so the label alone is the eligibility signal and no GraphQL board read is needed:
+
+   ```bash
+   gh api 'repos/iamacoffeepot/aether/issues?labels=phase:ready&state=open' --jq '.[].number'
+   ```
+
+   This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
+
+2. **Gate-check each candidate.** Run the same [per-issue preconditions](#preconditions) the single-issue path runs — `Phase == Ready`, `AgentReady == Yes`, no `## Sub-issues` umbrella, `## Implementation plan` present. Drop any issue that fails and record the reason; the sweep does not silently skip — every dropped issue is listed in the plan with its drop reason.
+
+3. **Pack and order.** Apply the **Batched dispatch** rules above (under the hybrid background-agent mode): budget-based packing against the `size:*`-label priors refined by each body read, crate-affinity co-queueing with the trivial-mechanical exception, broadest-exploration-first ordering within each queue.
+
+4. **Print the dispatch plan and wait for confirmation.** Packing is heuristic, so a mis-packed multi-issue agent run is expensive to unwind — one confirmation prompt per sweep is cheap insurance. Print the queues, their issues in order, the routed model per queue, and the dropped-with-reason list, then stop and wait:
+
+   ```
+   Sweep: 7 Ready+AgentReady issues, 3 dropped, 4 dispatched across 2 agents.
+
+   Agent 1 (model: inherit)  ~110k  [crate:aether-data]
+     #1612  refactor kind-id newtype helpers        (broadest — read first)
+     #1613  thread the helper through the decoder
+   Agent 2 (model: sonnet)   ~70k   [trivial mechanical]
+     #1631  fix the doc link in fs.md
+     #1633  drop the stale config knob
+
+   Dropped:
+     #1620  Phase=Design, not Ready
+     #1622  no ## Implementation plan
+     #1607  umbrella (has ## Sub-issues)
+
+   Confirm dispatch? (the agents spawn only on your go-ahead)
+   ```
+
+5. **On confirmation, dispatch.** For every issue in every queue, the **parent** performs §Execute step 1 (the `Phase=Executing` board write + `phase:executing` label reconcile) at dispatch time — see the hybrid background-agent paragraph — then spawns one background agent per queue, each working its queue's issues in order as full single-issue `/implement` runs that stop after commit. The parent then takes over each finished worktree per the hybrid split (preflight, push, draft PR, Refine loop).
+
+The sweep never auto-confirms and never dispatches the serial tail (push / PR / CI loop / board writes) to an agent — it only assembles and confirms the batch the hybrid mode then runs.
 
 ## Invocation
 
 ```
 /implement <issue>                       scoped run (defaults: retry-cap=3, wall=30min)
+/implement --sweep                       enumerate every Ready+AgentReady issue, pack per-agent queues, confirm, dispatch
 /implement <issue> --quick               ad-hoc fix: skip the Ready/AgentReady gate (body must carry a complete fix)
 /implement <issue> --retry-cap <N>       override retry cap
 /implement <issue> --wall-clock <mins>   override wall-clock budget
 /implement <issue> --resume              continue an in-flight execution (rare)
 ```
+
+`--sweep` takes no issue argument — it discovers them. It is the batched hybrid background-agent entry point: one REST enumeration of the eligible set, budget-based packing into per-agent queues, a confirmation gate, then dispatch. See [Sweep dispatch](#sweep-dispatch).
 
 ## Preconditions
 
