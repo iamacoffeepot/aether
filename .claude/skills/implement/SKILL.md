@@ -72,7 +72,7 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
    - `cargo clippy --workspace --all-targets -- -D warnings`
    - `cargo nextest run --workspace`
    - `cargo doc --workspace --no-deps`
-   - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-component` dep)
+   - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-actor` dep)
    - `scripts/preflight.sh --qodana` if present (writes the stamp file expected by the pre-push hook). Pass `--qodana` on this push path so the pre-flight runs the same qodana scan CI gates on before the PR opens — it needs colima/docker up and adds ~3.3min; a non-clean qodana exit (findings over `failThreshold`, or the Qodana-for-Rust EAP tooling crash) classifies as a build-env failure → `Stalled` (handle as a `--no-verify` push only for a confirmed EAP flake, never to skip real findings)
 
 4. Push the branch and open the PR:
