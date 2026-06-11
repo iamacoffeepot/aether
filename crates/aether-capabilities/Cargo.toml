@@ -73,6 +73,13 @@ aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# ADR-0102: the RPC wire vocabulary + `Call` client + the trace walk
+# were extracted to `aether-rpc` (a crate with no native deps). This
+# crate re-exports them at their original paths (`rpc::*`,
+# `trace_walk::*`) and keeps the substrate-bound `RpcServerCapability`
+# next to them. Always-on + target-agnostic — the wire types ride the
+# wasm-header build too.
+aether-rpc = { path = "../aether-rpc" }
 # Issue 1464: the `mat4_apply` first-party transform rebuilds a `Mat4`
 # / `Vec4` from the wire `[f32; N]` arrays. Always-on + target-agnostic
 # (no_std), so it rides the wasm-header-only build too.

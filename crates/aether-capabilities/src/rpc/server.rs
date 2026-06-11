@@ -31,12 +31,12 @@ use aether_kinds::{RpcInboundReady, trace::Settled};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server_native::{RpcServerConfig, RpcServerHandle};
 
-use super::wire::PeerKind;
+use aether_rpc::rpc::PeerKind;
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
     use super::{PeerKind, RpcInboundReady, Settled};
-    use crate::rpc::wire::{
+    use crate::rpc::{
         Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
     };
     use aether_actor::actor;
@@ -888,7 +888,7 @@ mod server_native {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::wire::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+    use crate::rpc::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use crate::test_chassis::{TestChassis, fresh_substrate};
     use aether_codec::frame::{read_frame, write_frame};
     use aether_substrate::chassis::builder::Builder;
@@ -1049,7 +1049,7 @@ mod tests {
     #[test]
     fn call_echo_round_trip_event_then_end() {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
-        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::rpc::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceDispatchCapability;
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
@@ -1130,7 +1130,7 @@ mod tests {
     /// `Err` rides home as a `ReplyEvent` before the `ReplyEnd`.
     #[test]
     fn call_headless_window_set_mode_err_reaches_component_reply() {
-        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::rpc::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceDispatchCapability;
         use crate::window::HeadlessWindowCapability;
         use aether_actor::Actor;
@@ -1214,7 +1214,7 @@ mod tests {
     #[test]
     fn call_deferred_echo_settles_after_reply() {
         use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
-        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::rpc::{MailEnvelope, MailboxAddress};
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
 
@@ -1290,7 +1290,7 @@ mod tests {
     #[test]
     fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
         use crate::rpc::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
-        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::rpc::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceDispatchCapability;
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
@@ -1395,7 +1395,7 @@ mod tests {
     #[test]
     fn call_without_cid_is_fire_and_forget() {
         use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
-        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::rpc::{MailEnvelope, MailboxAddress};
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
 
@@ -1482,7 +1482,7 @@ mod tests {
     /// as `Pong`, proving the session survived.
     #[test]
     fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
-        use crate::rpc::wire::RpcError;
+        use crate::rpc::RpcError;
         use aether_codec::frame::{MAX_FRAME_SIZE, max_frame_size};
         use std::io::Write;
 
@@ -1555,7 +1555,7 @@ mod tests {
     /// re-ordering.
     #[test]
     fn rpc_error_frame_too_large_postcard_roundtrips() {
-        use crate::rpc::wire::RpcError;
+        use crate::rpc::RpcError;
         let err = RpcError::FrameTooLarge {
             size: 99_000_000,
             max: 64 * 1024 * 1024,
@@ -1563,5 +1563,148 @@ mod tests {
         let bytes = postcard::to_allocvec(&err).expect("postcard encode");
         let back: RpcError = postcard::from_bytes(&bytes).expect("postcard decode");
         assert_eq!(err, back);
+    }
+
+    fn client_peer_kind() -> PeerKind {
+        PeerKind::Client {
+            client_name: "rpc-client-test".into(),
+            client_version: "0.0.1".into(),
+        }
+    }
+
+    /// Full socket round-trip: boot `RpcServerCapability` + the echo
+    /// actor + `TraceDispatchCapability`, connect a real
+    /// [`RpcClient`](aether_rpc::rpc::RpcClient), fire a `Call` carrying a
+    /// `TestEchoRequest`, and drain the inbound channel — expect
+    /// `ReplyEvent { TestEchoReply }` then `ReplyEnd { Ok }`. This is the
+    /// only test exercising the actual TCP client↔server path end to end
+    /// (the `RpcClient` half moved to `aether-rpc` per ADR-0102; this
+    /// integration test stays here, where the server lives).
+    #[test]
+    fn call_echo_round_trips_over_the_socket() {
+        use crate::rpc::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
+        use crate::rpc::{MailEnvelope, MailboxAddress, RpcClient};
+        use crate::trace::TraceDispatchCapability;
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            // TraceObserver fires `Settled { root }` once a dispatched
+            // chain drains; without it RpcServer's settlement
+            // subscription never wakes and no `ReplyEnd` is written.
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<TestEchoActor>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let port = chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+
+        // No on_frame work needed — `recv_timeout` returning is the
+        // observable signal we care about. iamacoffeepot/aether#835:
+        // a prior version asserted `frames_seen >= 2` against an
+        // AtomicUsize bumped inside the hook, but the hook is a
+        // post-enqueue scheduling kick by design — the test thread can
+        // wake from `recv_timeout` before the reader thread reaches
+        // `on_frame()`, racing the assertion. End-to-end correctness
+        // here is the two `recv_timeout` returns below: ReplyEvent then
+        // ReplyEnd.
+        let mut conn = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {})
+            .expect("client connects + handshakes");
+
+        // The handshake handed back the server's identity.
+        match &conn.server {
+            PeerKind::Substrate { engine_name, .. } => assert_eq!(engine_name, "test"),
+            PeerKind::Client { .. } => panic!("expected Substrate peer kind from server"),
+        }
+
+        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 })
+            .expect("test setup: TestEchoRequest serializes via postcard");
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
+        let cid = conn
+            .client
+            .call(MailEnvelope {
+                to: MailboxAddress::local(echo_mailbox),
+                from: None,
+                kind: <TestEchoRequest as Kind>::ID,
+                correlation_id: None,
+                payload: echo_payload,
+            })
+            .expect("call writes");
+
+        // First frame back: ReplyEvent carrying the echoed reply.
+        // recv_timeout so a hung settlement fails the test instead of
+        // blocking forever.
+        let event = conn
+            .inbound
+            .recv_timeout(Duration::from_secs(5))
+            .expect("ReplyEvent within 5s");
+        let envelope = match event {
+            WireFrame::ReplyEvent {
+                cid: ev_cid,
+                envelope,
+            } => {
+                assert_eq!(ev_cid, cid);
+                envelope
+            }
+            other => panic!("expected ReplyEvent, got {other:?}"),
+        };
+        assert_eq!(envelope.kind, <TestEchoReply as Kind>::ID);
+        let decoded: TestEchoReply = postcard::from_bytes(&envelope.payload).expect("decode reply");
+        assert_eq!(decoded.value, 42);
+
+        // Then ReplyEnd closes the call.
+        let end = conn
+            .inbound
+            .recv_timeout(Duration::from_secs(5))
+            .expect("ReplyEnd within 5s");
+        match end {
+            WireFrame::ReplyEnd {
+                cid: end_cid,
+                result,
+            } => {
+                assert_eq!(end_cid, cid);
+                result.expect("ReplyEnd result Ok");
+            }
+            other => panic!("expected ReplyEnd, got {other:?}"),
+        }
+    }
+
+    /// `Ping(nonce)` round-trips as `Pong(nonce)` over the socket via a
+    /// real [`RpcClient`](aether_rpc::rpc::RpcClient).
+    #[test]
+    fn ping_pongs_over_the_socket() {
+        use crate::rpc::RpcClient;
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("rpc server boots");
+
+        let port = chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+
+        let mut conn = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {})
+            .expect("client connects");
+
+        conn.client.ping(0x00c0_ffee).expect("ping writes");
+        let pong = conn
+            .inbound
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Pong within 2s");
+        assert_eq!(pong, WireFrame::Pong(0x00c0_ffee));
     }
 }

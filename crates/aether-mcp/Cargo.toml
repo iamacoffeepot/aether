@@ -8,8 +8,11 @@ license.workspace = true
 # `.mcp.json` at this binary; it owns the `rmcp` HTTP server and the
 # tool surface, and reaches engines purely as an RPC *client* — it dials
 # the hub's `RpcServerCapability` and relays tool calls as wire `Call`s.
-# No `aether-substrate` / wasmtime / wgpu in the dep graph: the MCP
-# coordinator never hosts an actor system, it just speaks the wire.
+# No `aether-substrate` / wasmtime / wgpu in the production dep graph:
+# the coordinator depends on `aether-rpc` alone for its wire surface
+# (ADR-0102), and `aether-rpc` has no path to the substrate / wasmtime /
+# wgpu. Test builds re-enable native `aether-capabilities` through the
+# dev-dependency below for the in-process `EngineServer` they spin.
 #
 # Until the P5d cutover the embedded `aether-substrate-bundle::hub::mcp`
 # server keeps running on its own port — this crate is additive.
@@ -26,11 +29,13 @@ name = "aether-tunnel"
 path = "src/bin/aether-tunnel.rs"
 
 [dependencies]
-# Wire vocabulary + the RPC client primitive. `aether-capabilities`
-# with default features pulls `aether-substrate`; we only need the
-# `rpc::client` types, but the crate isn't split finer than this today
-# so we take the native default. (Trimming this is a P5d follow-up.)
-aether-capabilities = { path = "../aether-capabilities" }
+# ADR-0102: the wire vocabulary (`rpc::{MailEnvelope, MailboxAddress,
+# RpcClient, WireFrame, ...}`) + the decentralized trace walk
+# (`trace_walk::TreeWalk`) — the coordinator's entire production surface,
+# in a crate with no path to `aether-substrate` / wasmtime / wgpu. The
+# crate edge is what keeps that trim true under cargo's workspace-wide
+# feature unification (a feature flag on `aether-capabilities` cannot).
+aether-rpc = { path = "../aether-rpc" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
@@ -64,6 +69,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 aether-substrate = { path = "../aether-substrate" }
+# ADR-0102: the `tools.rs` test module spins a real in-process
+# `EngineServer` (with `EngineConfig`) and touches
+# `TraceDispatchCapability` / `InventoryCapability` — all native
+# `aether-capabilities` surface. Dev-dependency feature unification
+# applies to test builds only, so re-enabling `native` here never
+# enters the production graph `cargo tree -p aether-mcp -e normal`
+# reports.
+aether-capabilities = { path = "../aether-capabilities", features = ["native"] }
 # `StreamReader` bridges reqwest's byte stream into an `AsyncRead` so the
 # tunnel's SSE integration test can read events line-by-line as they
 # arrive (the back-pressure / no-buffering guard).
