@@ -22,6 +22,10 @@
 //! exercised by another.
 
 #![allow(dead_code)]
+// The manifest-presence guard emits its skip diagnostic via stderr so
+// `cargo test` surfaces "skipping: ..." alongside `test ... ok` (issue
+// 891), matching `headless_autoload.rs`.
+#![allow(clippy::print_stderr)]
 
 use std::collections::BTreeMap;
 use std::env;
@@ -705,10 +709,45 @@ fn dist_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
 }
 
+/// Manifest-presence guard for the `FleetBench` tests that load component
+/// wasm. Returns `true` when `dist/manifest.json` is present (the test
+/// proceeds); returns `false` when it's absent so the caller can
+/// early-return as a skip — except under `AETHER_REQUIRE_RUNTIME` (which
+/// CI sets), where a missing manifest panics so a missing
+/// `cargo xtask dist` pre-build can't pass silently. Mirrors
+/// `headless_autoload.rs`'s pre-built-wasm skip/require convention (issue
+/// 891): a bare `cargo nextest run` in a worktree that hasn't run
+/// `cargo xtask dist` skips instead of reporting hard failures that read
+/// as regressions.
+///
+/// [`read_component_wasm`] itself keeps its panic: past this guard the
+/// manifest is present, and a manifest that exists but is missing a
+/// requested stem (a stale dist, not an unbuilt one) is a real test bug.
+#[must_use]
+pub fn dist_manifest_present() -> bool {
+    let manifest_path = dist_dir().join("manifest.json");
+    if manifest_path.exists() {
+        return true;
+    }
+    assert!(
+        env::var("AETHER_REQUIRE_RUNTIME").is_err(),
+        "AETHER_REQUIRE_RUNTIME set but {} is absent; \
+         run `cargo xtask dist` to build the component wasm + manifest",
+        manifest_path.display(),
+    );
+    eprintln!(
+        "skipping: {} absent; \
+         run `cargo xtask dist` first to build the component wasm + manifest",
+        manifest_path.display(),
+    );
+    false
+}
+
 /// Read a component wasm by stem through `dist/manifest.json` (the
 /// #1445 dist tree). Panics with a `cargo xtask dist` hint if the
 /// manifest is absent — the harness can't locate component wasm without
-/// it.
+/// it. Tests guard their load path with [`dist_manifest_present`] so a
+/// missing manifest skips rather than reaching this panic.
 pub fn read_component_wasm(stem: &str) -> Vec<u8> {
     let dist = dist_dir();
     let manifest_path = dist.join("manifest.json");

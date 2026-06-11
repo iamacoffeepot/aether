@@ -23,7 +23,7 @@ mod tests {
             DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
         };
 
-        use crate::fleetbench::{FleetBench, read_component_wasm};
+        use crate::fleetbench::{FleetBench, dist_manifest_present, read_component_wasm};
 
         /// Load the `probe` component, then drive a `ReplaceComponent`
         /// and a `DropComponent` to its cap over the real wire and assert
@@ -34,6 +34,9 @@ mod tests {
         /// reply set came back empty.
         #[test]
         fn forwarded_replace_and_drop_route_their_reply() {
+            if !dist_manifest_present() {
+                return;
+            }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
             let wasm = read_component_wasm("probe");

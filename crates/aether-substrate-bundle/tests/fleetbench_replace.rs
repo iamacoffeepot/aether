@@ -19,7 +19,7 @@ mod tests {
         use aether_kinds::{ComponentCapabilities, LogTailResult, Tick};
         use aether_test_fixtures::SetRender;
 
-        use crate::fleetbench::FleetBench;
+        use crate::fleetbench::{FleetBench, dist_manifest_present};
 
         /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
         /// it with `aether_camera` (handlers `CameraCreate` + `Tick` +
@@ -31,6 +31,9 @@ mod tests {
         /// must still route to the live mailbox afterward.
         #[test]
         fn fleetbench_replaces_probe_with_camera_at_a_stable_address() {
+            if !dist_manifest_present() {
+                return;
+            }
             let mut bench = FleetBench::start();
             let engine = bench.spawn_headless();
             let loaded = bench.load_full(engine, "probe");
