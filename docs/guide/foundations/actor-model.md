@@ -308,7 +308,8 @@ lifecycle, and components get to reuse every pattern capabilities use.
 So **start here, with the actor**, and the two host pages are just specializations:
 
 - The wasm/FFI host — the trampoline, `export!`, loading, hot-swap — is
-  [Components & lifecycle](../systems/components.md).
+  [Components & lifecycle](../systems/components.md), and the empty-crate-to-loaded
+  walkthrough is the [Writing a component](../recipes/writing-a-component.md) recipe.
 - Adding a native capability is a recipe ([Recipes](../recipes.md)); it's the same
   `#[actor]` shape against `NativeActor`.
 

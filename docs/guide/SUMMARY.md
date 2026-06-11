@@ -40,7 +40,7 @@
   - [Adding a substrate kind]()
   - [Adding a chassis capability]()
   - [Wiring an MCP tool]()
-  - [Writing a component]()
+  - [Writing a component](recipes/writing-a-component.md)
   - [Debugging a hung settlement]()
 
 # Reference
