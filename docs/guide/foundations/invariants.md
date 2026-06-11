@@ -46,17 +46,33 @@ independently.** The mailbox decides *where* mail goes; the kind only describes
 `.note_on` verb → `aether.audio.note_on` kind), but routing never consults the
 kind. Hold these apart and most "my mail vanished" confusion disappears.
 
-**Identity is name-derived and stable.** A `MailboxId` is a deterministic hash
-of the mailbox name (FNV-1a 64, [ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md)); a `KindId` is a hash of the kind name
-*plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)). Two consequences you can lean on:
+**Identity is name-derived and stable.** An actor carries two ids, each
+deterministic ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)): its `ActorId` — *which actor* — is the FNV-1a 64
+hash of its `NAMESPACE` (`hash(NAMESPACE:subname)` for an instanced actor), and
+its `MailboxId` — *where it sits* — is a hash chain over its **lineage**, the
+ordered ActorIds from the substrate root down to the actor. A root actor's
+lineage is one node, so its `MailboxId` equals its `ActorId` — the name hash of
+[ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md) is the depth-1 case of the fold. A `KindId` is a hash of the kind
+name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0030-hashed-kind-ids.md)). Two consequences you can lean on:
 
-- **Stable across processes.** Two substrates that hash the same name produce
-  the same id, so addressing works across a fleet without a resolution
-  round-trip — `Kind::ID` and `mailbox_id_from_name` are compile-time constants.
-- **Stable across hot-swap.** Because the id is derived from the name, replacing
-  a component in place keeps its mailbox id valid — senders and route caches
-  survive the swap ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md); the `replace_component_preserves_mailbox_identity`
+- **Stable across processes.** Every id is computed from names and lineage,
+  never assigned — `Kind::ID` and `mailbox_id_from_name` are compile-time
+  constants, and the lineage fold (`fold_lineage`) is the same pure function on
+  every substrate and guest — so two processes that hold the same names and the
+  same lineage produce the same ids, and addressing works across a fleet
+  without a resolution round-trip.
+- **Stable across hot-swap.** Replacing a component in place changes neither
+  its name nor its position under its host, so its lineage — and the
+  `MailboxId` folded from it — is unchanged: senders and route caches survive
+  the swap ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md); the `replace_component_preserves_mailbox_identity`
   scenario guards it).
+
+One sharp edge follows from the lineage fold: a `/`-rendered address
+(`aether.component/aether.embedded:camera`) resolves by parsing it into
+segments and folding their ActorIds (`mailbox_id_from_path`). Hashing the
+joined string as a flat name yields an id the registry never registered, and
+mail to it warn-drops — the string is a rendering of the lineage, never the
+hash input.
 
 **A kind id encodes its shape — drift fails loud, not silently.** The `KindId`
 hashes `name + schema`, where `name` is the kind's *declared* name
