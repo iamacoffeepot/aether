@@ -42,7 +42,7 @@
 - [Recipes](recipes.md)
   - [Adding a config knob]()
   - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
-  - [Adding a chassis capability]()
+  - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
   - [Writing a component](recipes/writing-a-component.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
