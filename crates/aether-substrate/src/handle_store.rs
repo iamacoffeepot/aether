@@ -2337,13 +2337,29 @@ fn walk(
                     let Some((stored_kind, bytes)) = store.get(id) else {
                         return Ok(Some((id, kind)));
                     };
-                    debug_assert_eq!(
-                        stored_kind, kind,
-                        "handle store kind id disagrees with wire kind id; \
-                         put() validates this so reaching here means the \
-                         entry was rebound after the wire reference was \
-                         minted",
-                    );
+                    if stored_kind != kind {
+                        // Diagnostic, not fatal: the wire stamp is exact
+                        // for transform/`Call`-fed slots but best-effort
+                        // for source-fed ones (the slot cell carries
+                        // `K`'s schema, not its name — issue
+                        // iamacoffeepot/aether#1047), so under
+                        // structurally identical registered kinds the
+                        // stamp can name a sibling of the stored kind.
+                        // Resolution keys on the handle id and the
+                        // consumer's field schema, so the splice below
+                        // is sound either way. Rebinding — the other way
+                        // the ids could disagree — is hard-errored by
+                        // `put()` (`PutError::KindMismatch`) before this
+                        // point.
+                        tracing::warn!(
+                            handle = id.0,
+                            wire_kind = kind.0,
+                            stored_kind = stored_kind.0,
+                            "wire Ref::Handle kind stamp disagrees with stored kind; \
+                             resolving by handle id (structural-collision diagnostic, \
+                             issue 1047)"
+                        );
+                    }
                     // Recursively resolve nested refs inside the
                     // stored bytes. If any nested handle is missing,
                     // bubble up so the *outer* mail parks on that id.
