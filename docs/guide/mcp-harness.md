@@ -141,6 +141,8 @@ asynchronously; `dag_status` polls execution, `dag_cancel` stops an in-flight DA
   flipped.)
 - **Desktop-only surfaces fail fast.** `capture_frame` and the window ops need the
   desktop chassis; the headless chassis replies with an error rather than hanging.
+  To read back a backgrounded or minimized window, mail `aether.window.focus`
+  first to foreground it — see [Window](systems/window.md).
 - **`describe_component` reads a cache.** It's populated by `load_component` /
   `replace_component`, so describing a component this aether-mcp didn't load — or one
   loaded before an aether-mcp restart — returns an error; reload it.
