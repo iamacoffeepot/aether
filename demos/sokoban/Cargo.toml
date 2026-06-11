@@ -2,6 +2,7 @@
 name = "aether-demo-sokoban"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [lib]
 # `cdylib` is the production artifact (wasm32 build → component). `rlib`

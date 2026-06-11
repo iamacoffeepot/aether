@@ -42,6 +42,7 @@ exclude = [
 [workspace.package]
 version = "0.3.0-alpha"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Chassis-binary argv parsing (ADR-0090 unit d, issue 1258). One

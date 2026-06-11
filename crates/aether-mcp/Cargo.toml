@@ -2,6 +2,7 @@
 name = "aether-mcp"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # The out-of-process MCP coordinator (issue 763 P5). Claude Code points
 # `.mcp.json` at this binary; it owns the `rmcp` HTTP server and the
