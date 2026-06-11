@@ -729,7 +729,7 @@ mod tests {
     };
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
-    use crate::rpc::wire::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+    use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use crate::test_chassis::{TestChassis, fresh_substrate};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Actor;

@@ -588,6 +588,12 @@ impl TestBench {
     /// the trace-query traffic itself.
     #[cfg(test)]
     pub(crate) fn describe_tree_walked(&mut self, root: MailId) -> DescribeTreeResult {
+        // The in-process harness reaches the substrate's reverse-lookup
+        // registry directly, so it resolves each node's thread name
+        // (ADR-0102: the resolver is the caller's; the MCP path passes
+        // none).
+        use aether_substrate::runtime::thread_name;
+
         let mut walk = TreeWalk::new(root);
         while let Some(mailbox) = walk.next_mailbox() {
             let request = TraceTail {
@@ -611,7 +617,7 @@ impl TestBench {
                 walk.absorb(entries);
             }
         }
-        walk.finish()
+        walk.finish_with(|tid| thread_name::resolve(tid.0))
     }
 
     /// Bytes-level request/reply: push `(kind, payload)` to

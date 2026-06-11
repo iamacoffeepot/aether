@@ -21,38 +21,22 @@
 //! harness calls the per-actor ring tail / `chassis_host_tail`
 //! directly. [`TreeWalk`] owns the seed, frontier, dedup, and stitch;
 //! the caller owns only the fetch.
+//!
+//! Thread-name resolution is the caller's too (ADR-0102). A
+//! [`MailNodeWire::thread_name`] is recovered from the event's `Copy`
+//! [`ThreadId`] only if the caller supplies a resolver: the in-process
+//! substrate passes `aether_substrate::runtime::thread_name::resolve`,
+//! which reads its process-global reverse-lookup registry; the
+//! out-of-process MCP (which can't reach a substrate's registry) and the
+//! wasm build use the [`stitch`] / [`fold_nodes`] / [`TreeWalk::finish`]
+//! variants that resolve to `None` and let the renderer fall back to the
+//! ADR-0064 tagged-id string. This crate carries no native dependency,
+//! so it never reaches a registry itself.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aether_data::{KindId, MailId, MailboxId, ThreadId};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, Nanos, TraceEvent, TraceRingEntry};
-
-/// Resolve a `Received` event's optional [`ThreadId`] (ADR-0088 §7) to a
-/// display name. The trace event carries a `Copy` [`ThreadId`] (no
-/// per-hop alloc); this cold fold path reverses it to the
-/// `aether-worker-N` / `aether-instanced-…` string for
-/// [`MailNodeWire::thread_name`].
-///
-/// `trace_walk` stays transport-agnostic and compiles in every feature
-/// config (including the wasm-component build), so the registry lookup
-/// is `native`-gated: the in-process substrate reverses through its
-/// process-global registry; the wasm build and the out-of-process MCP
-/// (which can't reach a substrate's registry until the ADR-0088 §6
-/// inventory actor lands) get `None` and the renderer falls back exactly
-/// as before — nothing regresses.
-fn resolve_thread_name(thread_id: Option<ThreadId>) -> Option<String> {
-    let thread_id = thread_id?;
-    #[cfg(feature = "native")]
-    {
-        use aether_substrate::runtime::thread_name;
-        thread_name::resolve(thread_id.0)
-    }
-    #[cfg(not(feature = "native"))]
-    {
-        let _ = thread_id;
-        None
-    }
-}
 
 /// A guided breadth-first walk of one root's mail tree across per-actor
 /// trace rings. Construct with [`TreeWalk::new`], then drive the loop:
@@ -114,22 +98,49 @@ impl TreeWalk {
         }
     }
 
-    /// Stitch the collected events into a [`DescribeTreeResult`].
+    /// Stitch the collected events into a [`DescribeTreeResult`],
+    /// resolving every node's `thread_name` to `None`. The path the MCP
+    /// and the wasm build take — neither can reach a substrate's
+    /// reverse-lookup registry.
     #[must_use]
     pub fn finish(self) -> DescribeTreeResult {
-        stitch(self.root, self.collected)
+        self.finish_with(|_| None)
     }
+
+    /// Stitch the collected events into a [`DescribeTreeResult`], using
+    /// `resolve` to recover each node's `thread_name` from the trace
+    /// event's [`ThreadId`]. The in-process substrate passes
+    /// `aether_substrate::runtime::thread_name::resolve` (ADR-0088 §7).
+    #[must_use]
+    pub fn finish_with<F>(self, resolve: F) -> DescribeTreeResult
+    where
+        F: Fn(ThreadId) -> Option<String>,
+    {
+        stitch_with(self.root, self.collected, resolve)
+    }
+}
+
+/// Fold a flat set of [`TraceRingEntry`]s into one [`MailNodeWire`] per
+/// `mail_id` and frame the result as a [`DescribeTreeResult`], resolving
+/// every node's `thread_name` to `None`. See [`stitch_with`] for the
+/// resolver-injecting form and the full contract.
+#[must_use]
+pub fn stitch(
+    root: MailId,
+    entries: impl IntoIterator<Item = TraceRingEntry>,
+) -> DescribeTreeResult {
+    stitch_with(root, entries, |_| None)
 }
 
 /// Fold a flat set of [`TraceRingEntry`]s — gathered from however many
 /// per-actor rings a walk visited — into one [`MailNodeWire`] per
 /// `mail_id`. `Sent` seeds the node's topology fields and `t_sent`;
 /// `Received` adds `t_received` + the dispatching thread's display name
-/// (resolved from the event's `Copy` [`ThreadId`] via the installed
-/// reverse-lookup resolver, ADR-0088 §7); `Finished` adds
-/// `t_finished`. Holds (`HoldOpen` / `Release`) carry no `mail_id` and
-/// are skipped — they aren't tree nodes (ADR-0086 Phase 3 §C). The fold
-/// is order-independent, so a node first seen via `Received` (its `Sent`
+/// (recovered from the event's `Copy` [`ThreadId`] via the caller's
+/// `resolve`, ADR-0088 §7); `Finished` adds `t_finished`. Holds
+/// (`HoldOpen` / `Release`) carry no `mail_id` and are skipped — they
+/// aren't tree nodes (ADR-0086 Phase 3 §C). The fold is
+/// order-independent, so a node first seen via `Received` (its `Sent`
 /// in a ring absorbed later) resolves once the `Sent` lands.
 ///
 /// Returns `Err { not_found }` when the root produced no `Sent` — the
@@ -138,11 +149,15 @@ impl TreeWalk {
 /// but no `Finished`; the only caller today walks post-settlement, so
 /// it sees `0`.
 #[must_use]
-pub fn stitch(
+pub fn stitch_with<F>(
     root: MailId,
     entries: impl IntoIterator<Item = TraceRingEntry>,
-) -> DescribeTreeResult {
-    let mails = fold_nodes(entries);
+    resolve: F,
+) -> DescribeTreeResult
+where
+    F: Fn(ThreadId) -> Option<String>,
+{
+    let mails = fold_nodes_with(entries, resolve);
     if !mails.iter().any(|n| n.mail_id == root) {
         return DescribeTreeResult::Err { not_found: root };
     }
@@ -155,15 +170,31 @@ pub fn stitch(
     }
 }
 
-/// The order-independent fold under [`stitch`], without the root /
-/// `in_flight` framing: collapse a flat event stream into one
-/// [`MailNodeWire`] per `mail_id`. A node with no `Sent` (its sender's
-/// ring never visited, or evicted) is dropped — `MailNodeWire` requires
-/// the topology fields a `Sent` carries. Exposed for callers that
-/// aggregate across many roots' rings at once (the latency harness folds
-/// every relay's ring this way) rather than reconstructing one tree.
+/// Collapse a flat event stream into one [`MailNodeWire`] per `mail_id`,
+/// resolving every node's `thread_name` to `None`. See
+/// [`fold_nodes_with`] for the resolver-injecting form.
 #[must_use]
 pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<MailNodeWire> {
+    fold_nodes_with(entries, |_| None)
+}
+
+/// The order-independent fold under [`stitch_with`], without the root /
+/// `in_flight` framing: collapse a flat event stream into one
+/// [`MailNodeWire`] per `mail_id`, using `resolve` to recover each
+/// node's `thread_name` from its [`ThreadId`]. A node with no `Sent`
+/// (its sender's ring never visited, or evicted) is dropped —
+/// `MailNodeWire` requires the topology fields a `Sent` carries. Exposed
+/// for callers that aggregate across many roots' rings at once (the
+/// latency harness folds every relay's ring this way) rather than
+/// reconstructing one tree.
+#[must_use]
+pub fn fold_nodes_with<F>(
+    entries: impl IntoIterator<Item = TraceRingEntry>,
+    resolve: F,
+) -> Vec<MailNodeWire>
+where
+    F: Fn(ThreadId) -> Option<String>,
+{
     let mut nodes: BTreeMap<MailId, PartialNode> = BTreeMap::new();
     for entry in entries {
         match entry.event {
@@ -202,8 +233,9 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
                 node.t_enqueue = Some(t_enqueue);
                 node.enqueue_depth = Some(enqueue_depth);
                 // ADR-0088 §7: the event carries a `Copy` `ThreadId`;
-                // resolve it to a display name on this cold fold path.
-                node.thread_name = resolve_thread_name(thread_id);
+                // recover its display name on this cold fold path via the
+                // caller's resolver (`None` for the MCP / wasm path).
+                node.thread_name = thread_id.and_then(&resolve);
             }
             TraceEvent::Finished { mail_id, t } => {
                 nodes.entry(mail_id).or_default().t_finished = Some(t);
@@ -256,6 +288,7 @@ struct SentFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_kinds::trace::MailNodeWire;
 
     fn mid(sender: u64, cid: u64) -> MailId {
         MailId {
@@ -293,10 +326,17 @@ mod tests {
     }
 
     /// The thread name every `received` fixture event hashes into a
-    /// `ThreadId`. [`register_fixture_thread_name`] seeds the substrate's
-    /// reverse-lookup registry so the `native`-gated fold path reverses
-    /// it back.
+    /// `ThreadId`. [`fixture_resolver`] reverses that one id back to its
+    /// display name, standing in for the substrate's reverse-lookup
+    /// registry without dragging a native dependency into this crate.
     const FIXTURE_THREAD_NAME: &str = "aether-worker-0";
+
+    /// A pure stand-in for `aether_substrate::runtime::thread_name::resolve`
+    /// (ADR-0102): reverses the one fixture `ThreadId` the `received`
+    /// events carry, `None` for anything else.
+    fn fixture_resolver(id: ThreadId) -> Option<String> {
+        (id == ThreadId::from_name(FIXTURE_THREAD_NAME)).then(|| FIXTURE_THREAD_NAME.to_string())
+    }
 
     fn received(mail_id: MailId, root: MailId) -> TraceRingEntry {
         TraceRingEntry {
@@ -312,16 +352,6 @@ mod tests {
                 thread_id: Some(ThreadId::from_name(FIXTURE_THREAD_NAME)),
             },
         }
-    }
-
-    /// Register the fixture thread name in the substrate's process-global
-    /// reverse-lookup registry so [`resolve_thread_name`] reverses the
-    /// fixture `ThreadId` back to its display name (ADR-0088 §7).
-    /// Idempotent — `register` no-ops on a duplicate.
-    fn register_fixture_thread_name() {
-        use aether_substrate::runtime::thread_name;
-        let id = ThreadId::from_name(FIXTURE_THREAD_NAME);
-        thread_name::register(id.0, FIXTURE_THREAD_NAME);
     }
 
     fn finished(mail_id: MailId, root: MailId) -> TraceRingEntry {
@@ -347,17 +377,18 @@ mod tests {
     }
 
     /// Stitch is order-independent: feeding `Finished` before its
-    /// `Sent` still produces one complete node.
+    /// `Sent` still produces one complete node. Drives the
+    /// resolver-injecting [`stitch_with`] so the cold fold reverses the
+    /// fixture `ThreadId` back to its display name (ADR-0088 §7).
     #[test]
     fn stitch_folds_events_per_mail_id_regardless_of_order() {
-        register_fixture_thread_name();
         let root = mid(1, 1);
         let entries = vec![
             finished(root, root),
             received(root, root),
             sent(root, root, 2),
         ];
-        let (got_root, in_flight, mails) = ok(stitch(root, entries));
+        let (got_root, in_flight, mails) = ok(stitch_with(root, entries, fixture_resolver));
         assert_eq!(got_root, root);
         assert_eq!(in_flight, 0, "node has a Finished");
         assert_eq!(mails.len(), 1);
@@ -368,8 +399,23 @@ mod tests {
         assert_eq!(node.t_received, Some(Nanos(2)));
         assert_eq!(node.t_finished, Some(Nanos(3)));
         // The cold fold resolved the event's `ThreadId` back to the
-        // fixture display name via the test resolver (ADR-0088 §7).
+        // fixture display name via the injected resolver (ADR-0088 §7).
         assert_eq!(node.thread_name.as_deref(), Some("aether-worker-0"));
+    }
+
+    /// The `None`-resolving [`stitch`] leaves `thread_name` empty — the
+    /// MCP / wasm path, where no reverse-lookup registry is reachable.
+    #[test]
+    fn stitch_without_resolver_leaves_thread_name_none() {
+        let root = mid(1, 1);
+        let entries = vec![
+            sent(root, root, 2),
+            received(root, root),
+            finished(root, root),
+        ];
+        let (_, _, mails) = ok(stitch(root, entries));
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].thread_name, None);
     }
 
     /// A root that produced no `Sent` (never seen / seed ring evicted)

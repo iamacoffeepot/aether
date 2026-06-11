@@ -1,6 +1,6 @@
 //! Shared test-support: a minimal echo actor plus its request / reply
-//! kinds, used by both the `rpc::server` and `rpc::client` round-trip
-//! tests.
+//! kinds, used by the `rpc::server` round-trip tests (the client half
+//! lives in `aether-rpc` per ADR-0102) and the `engine::proxy` test.
 //!
 //! The kinds live at this module's root (not nested in a `mod tests`)
 //! so the `Kind` derive's inventory submission stays addressable from a

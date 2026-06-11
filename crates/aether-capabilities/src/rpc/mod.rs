@@ -1,36 +1,30 @@
 //! `aether.rpc` — generic TCP RPC transport (issues 750, 763).
 //!
-//! - [`wire`] — the type-erased wire vocabulary: length-prefix postcard
-//!   [`WireFrame`]s carrying mail envelopes. Endpoints are mail kinds,
-//!   not request enums, so any kind two peers share is reachable
-//!   without a wire change.
-//! - [`server`] — [`RpcServerCapability`], the singleton actor that
-//!   binds a TCP listener, accepts connections, and dispatches inbound
-//!   `Call` envelopes into the local actor system (issue 750).
-//! - [`client`] — [`RpcClient`], the outbound counterpart: dials an RPC
-//!   server, runs the handshake, and frames inbound `WireFrame`s onto
-//!   an mpsc (issue 763 P1). Native-only.
+//! The type-erased wire vocabulary (`WireFrame` + its substructs) and
+//! the outbound `RpcClient` live in `aether-rpc` (ADR-0102) — a crate
+//! with no path to `aether-substrate`. This module re-exports them at
+//! their original `aether_capabilities::rpc::*` paths and keeps the
+//! substrate-bound [`server::RpcServerCapability`] (the singleton actor
+//! that binds a TCP listener, accepts connections, and dispatches
+//! inbound `Call` envelopes into the local actor system) next to them.
 //!
-//! See issues 750 and 763 for the full design.
+//! See issues 750 and 763 for the full design, ADR-0102 for the split.
 
 pub mod server;
-pub mod wire;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub mod client;
 
 // Shared round-trip test scaffolding (echo actor + its kinds), used by
-// the `server` / `client` test modules and the `engine::proxy` test —
-// `pub(crate)` so cross-module test code outside `rpc` can reach it.
+// the `server` test modules and the `engine::proxy` test — `pub(crate)`
+// so cross-module test code outside `rpc` can reach it.
 #[cfg(test)]
 pub(crate) mod test_echo;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
+// Re-export the wire vocabulary + the native `Call` client from
+// `aether-rpc` so `aether_capabilities::rpc::{MailEnvelope, RpcClient,
+// WireFrame, ...}` keeps resolving unchanged (ADR-0102). The client
+// re-exports are themselves `wasm32`-gated inside `aether-rpc`, so the
+// glob carries them only on native targets.
+pub use aether_rpc::rpc::*;
+
 pub use server::RpcServerCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{RpcServerConfig, RpcServerHandle};
-pub use wire::{
-    Hello, HelloAck, KindDescriptor, MailEnvelope, MailboxAddress, PeerKind, RpcError,
-    WIRE_VERSION, WireFrame,
-};
