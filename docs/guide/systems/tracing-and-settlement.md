@@ -196,7 +196,9 @@ returns the combined trace tree, the correlated replies, and a `status`:
 - `"timeout"` — the chain didn't settle within `settlement_timeout_ms` (default
   300s, clamped to 600s). A timeout is the bound on a hung chain, and the usual
   cause is exactly the two failures above: a deferred reply that never held its
-  chain open, or a drain that dropped its finish obligation upstream.
+  chain open, or a drain that dropped its finish obligation upstream. The triage
+  path from this status to the offending handler is the
+  [Debugging a hung settlement](../recipes/debugging-a-hung-settlement.md) recipe.
 - `"dispatched"` — only with `fire_and_forget`; the shared root acked, no
   settlement wait.
 
