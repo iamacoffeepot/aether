@@ -9,7 +9,7 @@
 > tests, but it's **lightly exercised** in practice: its heaviest consumer, the
 > content-generation pipeline ([ADR-0084](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0084-plato-content-generation-on-the-dag.md),
 > a 0.5 target), isn't built yet, and today almost all handle traffic comes from
-> the [computation DAG](). When in doubt, the ADRs are
+> the [computation DAG](dag.md). When in doubt, the ADRs are
 > authoritative.
 
 A handle is a typed reference to a value the substrate is holding for you. Instead
@@ -109,7 +109,7 @@ differently:
   ids. The same transform over the same inputs lands on the same id, so the store
   deduplicates automatically and the result is worth persisting. These are the ids
   that spill to disk. (Transforms run as part of a DAG — see
-  [The computation DAG]().)
+  [The computation DAG](dag.md).)
 
 The exception to "sources don't persist" is a pinned one: pin a fetch result and
 the bytes survive restart for any caller holding that id, even though the
@@ -157,7 +157,7 @@ verbatim.
 The seam is the `Ref<K>` field. A new pipeline kind adopts `Ref<K>` on the fields
 where a value should be able to travel by reference — large payloads, or results
 produced a step earlier. A field typed `Ref<K>` becomes a slot the substrate
-resolves transparently and, downstream, a slot a [DAG]() edge
+resolves transparently and, downstream, a slot a [DAG](dag.md) edge
 can fill. Existing kinds that don't use `Ref` are untouched: the substrate's
 field-resolution walk is a no-op on a kind with no reference fields, so adoption
 is per kind, per field, with no migration.
@@ -179,5 +179,5 @@ a property you set with pins.
 - `Ref<K>` as a schema arm, and where `HandleId` sits among the typed ids —
   [The type system](../foundations/type-system.md).
 - The DAG that produces and consumes most handles —
-  [The computation DAG]().
+  [The computation DAG](dag.md).
 - The `describe_handles` tool in context — [The MCP harness](../mcp-harness.md).

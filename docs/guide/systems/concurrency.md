@@ -97,7 +97,7 @@ form is a deferred superset — guests use shapes 1 and 3.)
 
 **3. Heavy async compute pipelines → the DAG.** Multi-step compute that produces
 handles belongs off the actor thread entirely, expressed as a computation DAG.
-See [The computation DAG]().
+See [The computation DAG](dag.md).
 
 ## The three offload shapes, and the hold
 
@@ -145,4 +145,4 @@ cap-local spawn, scoped tightly to the blocking call ([ADR-0050](https://github.
 - The dispatch machinery behind them, drawn out — [The scheduler](scheduler.md).
 - The mail spine and the per-recipient ordering guarantee — [Mail, kinds & scheduling](mail-and-kinds.md).
 - Settlement and the hold contract in depth — [Tracing & settlement](tracing-and-settlement.md).
-- Offloading heavy compute — [The computation DAG]().
+- Offloading heavy compute — [The computation DAG](dag.md).
