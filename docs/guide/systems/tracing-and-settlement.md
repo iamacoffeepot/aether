@@ -151,7 +151,8 @@ in the same blob (the blob model is on [Concurrency & blocking](concurrency.md))
 A node still missing `t_finished` is mail that hasn't finished handling yet.
 
 **Where it lives, and how to read it.** Trace events aren't kept centrally. Each
-actor holds its own **trace ring** — the same per-actor storage logs use
+actor holds its own **trace ring** — the same per-actor storage the
+[log rings](logging.md) use
 ([ADR-0081](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0081-decentralized-per-actor-log-storage.md) / [ADR-0086](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0086-decouple-settlement-from-trace.md)) — recording the events that passed through it. A tree is
 rebuilt by a **guided walk**: start at the root's sender, read its ring
 (`aether.trace.tail`, the sibling of the `aether.log.tail` behind `actor_logs`),

@@ -30,6 +30,7 @@
   - [Audio]()
   - [Window](systems/window.md)
   - [Tracing & settlement](systems/tracing-and-settlement.md)
+  - [Logging](systems/logging.md)
   - [Configuration](systems/configuration.md)
   - [Handles](systems/handles.md)
   - [The computation DAG]()
