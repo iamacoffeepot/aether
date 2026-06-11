@@ -166,7 +166,7 @@ if [[ ",$allowed," != *",e,"* ]] && (( is_issue_cmd == 1 )) && [[ -n "$title" ]]
     # match META_SCOPES in .github/workflows/issue-labels.yml — the
     # server accepts these, so the local hook must too or it
     # false-positives on a title the server would pass.
-    meta_scopes=" ci docs adr qodana repo release workflow "
+    meta_scopes=" ci docs adr qodana repo release workflow guide "
     if [[ "$title" =~ $title_re ]]; then
         scope="${BASH_REMATCH[2]}"
         if [[ "$meta_scopes" != *" $scope "* ]] \
@@ -189,7 +189,7 @@ if (( ${#issues[@]} )); then
         printf '  - Issue title: {type}({scope}): <subject>. Types: feat fix chore docs perf refactor flake.\n'
         printf '  - PR title: same {type}({scope}): <subject> shape; PR types additionally allow test build ci style revert.\n'
         printf '  - Subject (issue + PR) must start lowercase.\n'
-        printf '  - Scope is a crate name OR a meta-scope: ci docs adr qodana repo release workflow.\n'
+        printf '  - Scope is a crate name OR a meta-scope: ci docs adr qodana repo release workflow guide.\n'
         printf '  - Body: no backslash before a backtick/dollar (A); no dollar-delimited math span, use backticks (D).\n'
         printf '\nTo override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/c/d/e, comma-separated; only listed patterns are skipped).\n'
         printf 'Context: feedback_heredoc_no_backtick_escape.md (auto-memory).\n'
