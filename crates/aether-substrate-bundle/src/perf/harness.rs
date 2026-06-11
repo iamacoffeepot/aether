@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::OutboundReply;
 use aether_actor::trace_ring::DEFAULT_TRACE_RING_CAP;
 use aether_capabilities::trace_walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
@@ -53,6 +54,59 @@ use crate::test_bench::TestBench;
 #[kind(name = "mlat.ping")]
 pub struct Ping {
     pub seq: u32,
+}
+
+/// Run-end harvest query (iamacoffeepot/aether#1233): the harness mails one
+/// of these to each participating actor after the drive loop to pull its
+/// plain-field `Ping` counters out-of-band. The counters live in the actor's
+/// own state (no shared atomics), so the only way to read them cross-thread is
+/// a mail the actor answers — matching the existing `aether.trace.tail`
+/// harvest flow. The body is meaningless (the kind id is the whole signal); a
+/// single field keeps it a well-formed `Pod`.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "mlat.count_query")]
+pub struct CountQuery {
+    /// Unused; present only so the query carries a non-empty `Pod` body.
+    pub nonce: u32,
+}
+
+/// The reply to a [`CountQuery`] (iamacoffeepot/aether#1233): one actor's
+/// `Ping` throughput counters. The real tier's keep-up metric sums these
+/// across the topology — `offered = Σ sent`, `completed = Σ received` — to
+/// report completed-vs-offered without touching the (lapping) trace ring.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "mlat.count_report")]
+pub struct CountReport {
+    /// `Ping` mails this actor dispatched downstream — the source's per-tick
+    /// emissions, or a relay's per-inbound forwards.
+    pub sent: u64,
+    /// `Ping` mails this actor received and handled. Relays only; the source
+    /// handles `Tick`, never `Ping`, so its `received` is always 0.
+    pub received: u64,
 }
 
 /// Bounded, deterministic CPU spin: an FNV-1a-style integer mix run
@@ -91,6 +145,12 @@ pub struct RelayConfig {
 pub struct Relay {
     downstreams: Arc<[MailboxId]>,
     work_iters: u64,
+    /// `Ping` mails handled, for the run-end keep-up harvest
+    /// (iamacoffeepot/aether#1233). A plain field — the actor is
+    /// single-threaded over its own state, so no atomics.
+    received: u64,
+    /// `Ping` mails forwarded downstream, for the same harvest.
+    sent: u64,
 }
 
 impl aether_actor::Actor for Relay {
@@ -104,6 +164,8 @@ impl NativeActor for Relay {
         Ok(Self {
             downstreams: config.downstreams,
             work_iters: config.work_iters,
+            received: 0,
+            sent: 0,
         })
     }
 }
@@ -114,9 +176,19 @@ impl NativeDispatch for Relay {
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
+        // Run-end keep-up harvest (iamacoffeepot/aether#1233): answer the
+        // out-of-band counter query before the `Ping` fast path.
+        if kind.0 == CountQuery::ID.0 {
+            ctx.reply(&CountReport {
+                sent: self.sent,
+                received: self.received,
+            });
+            return Some(());
+        }
         if kind.0 != Ping::ID.0 {
             return None;
         }
+        self.received += 1;
         // Burn the configured CPU budget on this worker thread before
         // forwarding. With heavy leaves and idle cores this is what makes
         // scattering children across workers pay off — the contention the
@@ -127,6 +199,7 @@ impl NativeDispatch for Relay {
         // any per-child enqueue skew.
         for &down in self.downstreams.iter() {
             let _ = ctx.send_envelope_traced(down, Ping::ID, payload);
+            self.sent += 1;
         }
         Some(())
     }
@@ -160,6 +233,10 @@ pub struct TickSource {
     entry: MailboxId,
     burst: u32,
     seq: u32,
+    /// `Ping` mails emitted into the entry, for the run-end keep-up harvest
+    /// (iamacoffeepot/aether#1233) — the offered load. `seq` wraps at `u32`
+    /// for trace legibility; this is the honest cumulative count.
+    sent: u64,
 }
 
 impl aether_actor::Actor for TickSource {
@@ -177,6 +254,7 @@ impl NativeActor for TickSource {
             entry,
             burst,
             seq: 0,
+            sent: 0,
         })
     }
 }
@@ -187,6 +265,15 @@ impl NativeDispatch for TickSource {
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
+        // Run-end keep-up harvest (iamacoffeepot/aether#1233): the source
+        // never receives a `Ping`, so its `received` is 0.
+        if kind.0 == CountQuery::ID.0 {
+            ctx.reply(&CountReport {
+                sent: self.sent,
+                received: 0,
+            });
+            return Some(());
+        }
         if kind.0 != Tick::ID.0 {
             return None;
         }
@@ -194,6 +281,7 @@ impl NativeDispatch for TickSource {
             let bytes = Ping { seq: self.seq }.encode_into_bytes();
             self.seq = self.seq.wrapping_add(1);
             let _ = ctx.send_envelope_traced(self.entry, Ping::ID, &bytes);
+            self.sent += 1;
         }
         Some(())
     }
@@ -429,44 +517,48 @@ pub const REAL_LOGIC_WORK_ITERS: u64 = 5_000;
 /// a DAG). A small fixed count; the real magnitude is tuned in PR 3.
 pub const REAL_UI_FOLLOWUP_STEPS: usize = 4;
 
-/// `socket-server-N` (ADR-0085 amendment): a single-entry DAG modelling an
-/// N-connection server. The entry source forwards each paced request to `N`
-/// **decoder** nodes (heavy codec cost); every decoder forwards to **one
-/// logic** node (the join — `N` parents, medium cost); the logic node
-/// broadcasts to `N` **encoder** nodes (heavy codec cost); each encoder
-/// forwards to **one writer** leaf (the server replying, trivial). The input
-/// chain (source→decode→logic) and the writer chain (logic→encode→write-leaf)
-/// join at the logic node. Pure fan/join — every node forwards the *same*
-/// payload to *all* its downstreams, so [`Relay`]'s broadcast-to-all
-/// forwarding fits unchanged (no conditional routing).
+/// `socket-server-N` (ADR-0085 amendment; reshaped in
+/// iamacoffeepot/aether#1233): a single-entry DAG modelling an N-connection
+/// server as **N independent request→response chains** — the routing a real
+/// socket server has, where each of the N requests flows to its *own* client's
+/// response, not an N→N broadcast. The entry source fans each paced request to
+/// `N` **decoder** nodes (heavy codec cost); each decoder forwards to its own
+/// **logic** node (medium cost); each logic node to its own **encoder** node
+/// (heavy codec cost); each encoder to its own **writer** leaf (the server
+/// replying, trivial). No node is shared between chains, so the per-frame mail
+/// volume is `O(N)` (`1 + 4N` `Ping` mails per root) rather than the `N²` a
+/// shared broadcast join produced — every [`Relay`] forwards to exactly one
+/// downstream past the source's fan, so it never amplifies. `Relay`'s
+/// broadcast-to-all forwarding still fits unchanged (no conditional routing):
+/// the source's single broadcast *is* the per-connection fan, and every
+/// interior node has a single downstream.
 ///
-/// Node layout (indices): `0` = source; `1..=N` = decoders; `N+1` = logic;
-/// `N+2..=2N+1` = encoders; `2N+2..=3N+1` = writers. Total `3N + 2` nodes.
+/// Node layout (indices): `0` = source; `1..=N` = decoders; `N+1..=2N` =
+/// logic; `2N+1..=3N` = encoders; `3N+1..=4N` = writers. Chain `i`
+/// (`1 ≤ i ≤ N`) is `decoder i → logic N+i → encoder 2N+i → writer 3N+i`.
+/// Total `4N + 1` nodes.
 #[must_use]
 pub fn socket_server(n: usize, codec_work: u64, logic_work: u64) -> Topology {
-    let logic = n + 1;
-    let total = 3 * n + 2;
+    let total = 4 * n + 1;
     let mut downstreams = vec![vec![]; total];
     let mut work_iters = vec![0u64; total];
 
-    // 0: source → all N decoders.
+    // 0: source → all N decoders (the connection fan).
     downstreams[0] = (1..=n).collect();
-    // 1..=N: decoders (heavy) → the single logic node (the join).
-    for dec in 1..=n {
-        downstreams[dec] = vec![logic];
-        work_iters[dec] = codec_work;
-    }
-    // N+1: logic (medium) → all N encoders.
-    work_iters[logic] = logic_work;
-    let first_enc = logic + 1; // N+2
-    downstreams[logic] = (first_enc..first_enc + n).collect();
-    // encoders (heavy) → one writer each.
-    let first_writer = first_enc + n; // 2N+2
-    for k in 0..n {
-        let enc = first_enc + k;
-        let writer = first_writer + k;
-        downstreams[enc] = vec![writer];
-        work_iters[enc] = codec_work;
+    for i in 1..=n {
+        // Chain `i`: decoder → logic → encoder → writer, all private to this
+        // connection. Indices step by `n` so the DAG stays strictly forward
+        // (every edge points to a higher index → acyclic).
+        let decoder = i;
+        let logic = n + i;
+        let encoder = 2 * n + i;
+        let writer = 3 * n + i;
+        downstreams[decoder] = vec![logic];
+        downstreams[logic] = vec![encoder];
+        downstreams[encoder] = vec![writer];
+        work_iters[decoder] = codec_work;
+        work_iters[logic] = logic_work;
+        work_iters[encoder] = codec_work;
         // writers stay trivial leaves (downstreams empty, work 0).
     }
 
@@ -599,6 +691,30 @@ pub fn summarize(mut samples: Vec<u64>) -> Stats {
     }
 }
 
+/// The real tier's keep-up characterisation (iamacoffeepot/aether#1233): a
+/// sustained-paced run answers "does it keep up at 60 Hz", not the per-hop
+/// span tree (whose volume laps the trace ring at real-tier fan-out). The
+/// counters are harvested from the harness actors' plain fields at run end;
+/// the timings bracket the paced drive loop. `Some` only for [`Tier::Real`]
+/// cells (the only paced tier); `None` otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeepUp {
+    /// Total `Ping` mails dispatched across the topology (`Σ sent`) — the
+    /// offered load.
+    pub offered: u64,
+    /// Total `Ping` mails handled across the topology (`Σ received`) — the
+    /// work completed. Equals `offered` when the pool drained everything the
+    /// pace offered (the drain-integrity check); a shortfall means mail was
+    /// left in flight.
+    pub completed: u64,
+    /// Wall-clock nanoseconds the paced drive loop took.
+    pub elapsed_nanos: u64,
+    /// Wall-clock nanoseconds the loop *should* have taken at the pace
+    /// (`frames / pace_hz`). `elapsed / expected > 1` means the run fell
+    /// behind the 60 Hz budget — the keep-up signal.
+    pub expected_nanos: u64,
+}
+
 /// One measured cell's **raw** samples (per worker count × topology),
 /// before percentile collapse. The latency spans are nanosecond
 /// samples; `depth` is the scheduler ready-queue length distribution
@@ -624,6 +740,11 @@ pub struct CellSamples {
     /// the latency spans come from), `None` in `Drive::Latency`. A cell
     /// whose entry ring lapped reports `None` rather than a wrong rate.
     pub throughput_mps: Option<f64>,
+    /// iamacoffeepot/aether#1233: the real tier's keep-up characterisation —
+    /// `Some` only for [`Tier::Real`] cells (the paced tier), `None`
+    /// otherwise. The real tier reports this *instead of* the per-hop span
+    /// percentiles.
+    pub keepup: Option<KeepUp>,
 }
 
 impl CellSamples {
@@ -640,6 +761,7 @@ impl CellSamples {
             handler: summarize(self.handler),
             depth: summarize(self.depth),
             throughput_mps: self.throughput_mps,
+            keepup: self.keepup,
         }
     }
 }
@@ -683,6 +805,12 @@ pub struct CellResult {
     /// `None` too when the entry ring lapped, so a truncated cell never
     /// reports a wrong rate.
     pub throughput_mps: Option<f64>,
+    /// iamacoffeepot/aether#1233: the real tier's keep-up characterisation —
+    /// `Some` only for [`Tier::Real`] cells. [`TrialReport::from_cells`]
+    /// renders the real tier from this instead of the span percentiles.
+    ///
+    /// [`TrialReport::from_cells`]: super::report::TrialReport::from_cells
+    pub keepup: Option<KeepUp>,
 }
 
 /// How a sweep cell drives its topology (iamacoffeepot/aether#1202). The
@@ -1050,6 +1178,56 @@ fn throughput_from_nodes(mails: &[MailNodeWire]) -> Option<f64> {
     Some(completed as f64 / elapsed_secs)
 }
 
+/// Harvest the real tier's keep-up counters (iamacoffeepot/aether#1233).
+/// Mails a [`CountQuery`] to every participating actor (by the same names the
+/// trace harvest used), sums `offered = Σ sent` and `completed = Σ received`,
+/// and brackets them with the paced elapsed-vs-expected timing. Returns `None`
+/// (logged) if any actor's reply fails to arrive or decode, so a botched
+/// harvest yields no keep-up cell rather than a wrong one — mirroring the
+/// trace harvest's fail-closed posture.
+fn harvest_keepup(
+    tb: &mut TestBench,
+    names: &[String],
+    topo_name: &str,
+    drive: Drive,
+    frames: u32,
+    drive_elapsed: Duration,
+) -> Option<KeepUp> {
+    let mut offered = 0u64;
+    let mut completed = 0u64;
+    for name in names {
+        let req = CountQuery::default().encode_into_bytes();
+        let reply = match tb.send_bytes_and_await(name, CountQuery::ID, req) {
+            Ok(reply) => reply,
+            Err(e) => {
+                tracing::warn!(target: "aether_perf", topo = %topo_name, %name, error = ?e, "count_query send failed");
+                return None;
+            }
+        };
+        let Some(report) = CountReport::decode_from_bytes(&reply) else {
+            tracing::warn!(target: "aether_perf", topo = %topo_name, %name, "count_report decode failed");
+            return None;
+        };
+        offered = offered.saturating_add(report.sent);
+        completed = completed.saturating_add(report.received);
+    }
+    // Only a paced run has a budget to measure against; an unpaced cell never
+    // reaches here (the real tier is always paced), so the `_ => 0` arm is a
+    // belt-and-braces guard.
+    let expected_nanos = match drive {
+        Drive::Latency { pace_hz: Some(hz) } if hz > 0 => {
+            u64::from(frames).saturating_mul(1_000_000_000 / hz)
+        }
+        _ => 0,
+    };
+    Some(KeepUp {
+        offered,
+        completed,
+        elapsed_nanos: u64::try_from(drive_elapsed.as_nanos()).unwrap_or(u64::MAX),
+        expected_nanos,
+    })
+}
+
 /// Drive the sweep and return each cell's **raw** per-span samples
 /// (un-summarized). [`run_sweep`] wraps this and collapses to
 /// [`CellResult`]; the `perf-plot` bin (iamacoffeepot/aether#1155) reads
@@ -1160,6 +1338,10 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             let frames = cfg.frames;
 
             // Drive via the real lifecycle (per-tier drive resolved above).
+            // Bracket the loop so the real tier's keep-up metric can compare
+            // elapsed wall-clock against the paced budget
+            // (iamacoffeepot/aether#1233).
+            let drive_start = Instant::now();
             match drive {
                 Drive::Latency {
                     pace_hz: Some(hz), ..
@@ -1192,6 +1374,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                     let _ = tb.advance(1);
                 }
             }
+            let drive_elapsed = drive_start.elapsed();
 
             // Harvest each participating actor's trace ring directly
             // (ADR-0086 Phase 3, decentralized trace): we built the
@@ -1304,6 +1487,19 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 _ => None,
             };
 
+            // iamacoffeepot/aether#1233: the real tier reports keep-up, not
+            // span percentiles. Harvest each actor's plain-field `Ping`
+            // counters out-of-band (the same name-addressed `send_and_await`
+            // flow as the trace harvest above) and sum them: `offered =
+            // Σ sent`, `completed = Σ received`. Sidesteps the trace ring
+            // entirely, which the real tier's fan-out laps. Only the real
+            // tier runs paced, so only it has a meaningful elapsed-vs-expected.
+            let keepup = if topo.tier == Tier::Real {
+                harvest_keepup(&mut tb, &names, &topo.name, drive, frames, drive_elapsed)
+            } else {
+                None
+            };
+
             rows.push(CellSamples {
                 workers,
                 topo: topo.name.clone(),
@@ -1314,6 +1510,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 handler,
                 depth,
                 throughput_mps,
+                keepup,
             });
         }
     }
@@ -1572,23 +1769,57 @@ mod tests {
         }
     }
 
+    /// Total `Ping` mails one root drives through `topo` — the per-frame mail
+    /// volume (iamacoffeepot/aether#1233). A single forward pass: the source
+    /// receives one root, every node forwards each of its inbound mails to all
+    /// its downstreams (a [`Relay`] broadcasts), so a downstream's inbound
+    /// count is the sum of its parents'. Relies on the DAG being strictly
+    /// forward (every edge `i → j` has `j > i`), which all real shapes are. A
+    /// fan-in→fan-out join (the reshaped-away `socket_server` bug) would make
+    /// this quadratic in N; the independent-chain shape keeps it `1 + 4N`.
+    fn runtime_ping_volume(topo: &Topology) -> usize {
+        let nodes = topo.downstreams.len();
+        let mut received = vec![0usize; nodes];
+        received[0] = 1; // the source's single inbound root
+        for i in 0..nodes {
+            for &j in &topo.downstreams[i] {
+                received[j] += received[i];
+            }
+        }
+        received.iter().sum()
+    }
+
     #[test]
-    fn socket_server_has_expected_node_count_and_shape() {
+    fn socket_server_models_independent_chains_at_linear_volume() {
         let n = 8;
         let t = socket_server(n, 1_000, 500);
-        // source + N decoders + logic + N encoders + N writers = 3N + 2.
-        assert_well_formed_real(&t, 3 * n + 2);
-        // Source fans to all N decoders; the logic node (index N+1) joins
-        // them and broadcasts to all N encoders.
+        // source + N decoders + N logic + N encoders + N writers = 4N + 1.
+        assert_well_formed_real(&t, 4 * n + 1);
+        // Source fans to all N decoders (the connection accept-fan).
         assert_eq!(t.downstreams[0].len(), n, "source fans to N decoders");
-        let logic = n + 1;
-        assert_eq!(
-            t.downstreams[logic].len(),
-            n,
-            "logic broadcasts to N encoders"
-        );
-        let decoder_parents = (1..=n).filter(|&d| t.downstreams[d] == vec![logic]).count();
-        assert_eq!(decoder_parents, n, "every decoder joins at the logic node");
+        // Each connection is its own chain — decoder i → logic N+i → encoder
+        // 2N+i → writer 3N+i — every interior node with exactly one
+        // downstream and no node shared between chains (no broadcast join).
+        for i in 1..=n {
+            assert_eq!(t.downstreams[i], vec![n + i], "decoder {i} → its own logic");
+            assert_eq!(
+                t.downstreams[n + i],
+                vec![2 * n + i],
+                "logic {i} → its own encoder"
+            );
+            assert_eq!(
+                t.downstreams[2 * n + i],
+                vec![3 * n + i],
+                "encoder {i} → its own writer"
+            );
+            assert!(t.downstreams[3 * n + i].is_empty(), "writer {i} is a leaf");
+        }
+        // The per-frame mail volume is O(N) — `1 + 4N` Ping mails per root,
+        // never the N² a shared broadcast join produced (the bug this reshape
+        // fixes). Pin it at two widths so a regression to a fan-in→fan-out
+        // join (quadratic) trips the test.
+        assert_eq!(runtime_ping_volume(&socket_server(n, 0, 0)), 1 + 4 * n);
+        assert_eq!(runtime_ping_volume(&socket_server(2 * n, 0, 0)), 1 + 8 * n);
     }
 
     #[test]
@@ -1679,6 +1910,40 @@ mod tests {
         assert!(
             cell.throughput_mps.is_none(),
             "a paced (latency) real cell reports no throughput rate"
+        );
+        assert!(
+            cell.keepup.is_some(),
+            "a paced real cell harvests keep-up counters (iamacoffeepot/aether#1233)"
+        );
+    }
+
+    #[test]
+    fn keepup_counters_match_dispatched_mail() {
+        // A paced real cell harvests offered/completed counters from the
+        // actors' plain fields (iamacoffeepot/aether#1233). `advance()`
+        // quiesces each frame, so every dispatched `Ping` is handled within
+        // its frame: offered == completed, and both equal `frames ×
+        // hops-per-root` (the entry send plus one mail per DAG edge).
+        let topo = ui_roundtrip(REAL_UI_FOLLOWUP_STEPS, 500);
+        let hops = hops_per_root(&topo);
+        let Some(cell) = real_cell(2, topo) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let keepup = cell.keepup.expect("a real cell harvests keep-up counters");
+        assert_eq!(
+            keepup.offered, keepup.completed,
+            "a drained run handles every offered mail (offered == completed)"
+        );
+        // `real_cell` advances 4 frames at burst 1 → 4 roots.
+        assert_eq!(
+            keepup.offered,
+            4 * hops as u64,
+            "offered = frames × hops-per-root"
+        );
+        assert!(
+            keepup.expected_nanos > 0,
+            "a paced cell carries a positive 60 Hz budget"
         );
     }
 }

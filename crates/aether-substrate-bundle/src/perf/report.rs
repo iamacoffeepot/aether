@@ -216,6 +216,50 @@ impl ThroughputSection {
     pub const VERSION: &str = "v2";
 }
 
+/// One real-tier cell's keep-up characterisation (iamacoffeepot/aether#1233):
+/// did the paced topology keep up at 60 Hz? The real tier reports this
+/// *instead of* per-hop span percentiles — its fan-out laps the trace ring, so
+/// the span tree is unmeasurable, but the plain-field offered/completed
+/// counters and the paced elapsed-vs-expected timing are not. All times are
+/// nanoseconds.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KeepUpCell {
+    pub workers: usize,
+    pub topo: String,
+    /// Total `Ping` mails the topology dispatched (`Σ sent`) — the offered
+    /// load.
+    pub offered: u64,
+    /// Total `Ping` mails the topology handled (`Σ received`). Equals
+    /// `offered` on a fully-drained run; a shortfall means mail was stranded.
+    pub completed: u64,
+    /// Wall-clock the paced drive loop took.
+    pub elapsed_nanos: u64,
+    /// Wall-clock the loop *should* have taken at the pace (`frames /
+    /// pace_hz`). `elapsed / expected > 1` is the fell-behind signal.
+    pub expected_nanos: u64,
+}
+
+/// The real tier's keep-up section (iamacoffeepot/aether#1233): one
+/// [`KeepUpCell`] per (worker × topology) cell, emitted by a paced real-tier
+/// run in place of a `latency.real` span section. Characterisation only — like
+/// the heavy / real latency sections it carries no verdict; the comparator
+/// renders base-vs-candidate keep-up numbers with no pass/fail.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KeepUpSection {
+    pub cells: Vec<KeepUpCell>,
+}
+
+impl KeepUpSection {
+    /// The section name the comparator dispatches on — distinct from the
+    /// `latency.real` span name so a base trial built before the reframe
+    /// (carrying `latency.real`) and a candidate carrying `keepup.real`
+    /// section independently, each landing in its own uncompared/new block
+    /// rather than version-clashing.
+    pub const NAME: &str = "keepup.real";
+    /// The section version. Bumped when the keep-up cell shape changes.
+    pub const VERSION: &str = "v1";
+}
+
 /// One fresh-process sweep run. The `perf-trial` bin emits this as JSON
 /// on stdout; the `perf-compare` bin collects K of each side.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -273,7 +317,11 @@ impl TrialReport {
         use super::harness::Tier;
 
         let mut sections = Vec::new();
-        for tier in [Tier::Light, Tier::Heavy, Tier::Real] {
+        // The light and heavy tiers report per-hop span percentiles. The real
+        // tier reports **keep-up** instead (iamacoffeepot/aether#1233): its
+        // fan-out laps the trace ring, so the spans are unmeasurable — the
+        // keep-up section below replaces them.
+        for tier in [Tier::Light, Tier::Heavy] {
             let mut rows = Vec::new();
             for c in cells.iter().filter(|c| c.tier == tier) {
                 for (metric, s) in [
@@ -302,6 +350,33 @@ impl TrialReport {
             sections.push(RawSection {
                 name: tier.section_name().to_owned(),
                 version: LatencySection::VERSION.to_owned(),
+                body,
+            });
+        }
+
+        // Real tier: keep-up characterisation (iamacoffeepot/aether#1233).
+        // Only cells that harvested counters contribute; a cell whose harvest
+        // failed (`keepup == None`) is dropped, as a lapped latency cell was.
+        let keepup_rows: Vec<KeepUpCell> = cells
+            .iter()
+            .filter(|c| c.tier == Tier::Real)
+            .filter_map(|c| {
+                c.keepup.map(|k| KeepUpCell {
+                    workers: c.workers,
+                    topo: c.topo.clone(),
+                    offered: k.offered,
+                    completed: k.completed,
+                    elapsed_nanos: k.elapsed_nanos,
+                    expected_nanos: k.expected_nanos,
+                })
+            })
+            .collect();
+        if !keepup_rows.is_empty() {
+            let body = serde_json::to_value(KeepUpSection { cells: keepup_rows })
+                .unwrap_or(serde_json::Value::Null);
+            sections.push(RawSection {
+                name: KeepUpSection::NAME.to_owned(),
+                version: KeepUpSection::VERSION.to_owned(),
                 body,
             });
         }
@@ -481,6 +556,24 @@ pub struct ThroughputComparison {
     pub verdict: Verdict,
 }
 
+/// One compared keep-up cell (iamacoffeepot/aether#1233): the base/candidate
+/// median offered / completed counts and the pace ratio (`elapsed /
+/// expected`), across trials. Characterisation only — no verdict, mirroring
+/// the heavy / real latency trend treatment: the real tier's variance sits
+/// below the band a paired verdict needs.
+#[derive(Serialize, Clone, Debug)]
+pub struct KeepUpComparison {
+    pub workers: usize,
+    pub topo: String,
+    pub base_offered: f64,
+    pub cand_offered: f64,
+    pub base_completed: f64,
+    pub cand_completed: f64,
+    /// `elapsed / expected` — `> 1` means the run fell behind the pace.
+    pub base_pace_ratio: f64,
+    pub cand_pace_ratio: f64,
+}
+
 /// Why a section couldn't be paired into a verdict
 /// (iamacoffeepot/aether#1206). Picked per case so the markdown note and
 /// the JSON report both spell out the reason rather than a bare "skipped".
@@ -523,6 +616,13 @@ pub enum SectionReport {
         stable: usize,
         regressed: usize,
         cells: Vec<ThroughputComparison>,
+    },
+    /// The real tier's keep-up section (iamacoffeepot/aether#1233):
+    /// characterisation, so no improved/stable/regressed counts — the cells
+    /// render as a base-vs-candidate trend with no verdict.
+    KeepUpCompared {
+        name: String,
+        cells: Vec<KeepUpComparison>,
     },
     Uncompared {
         name: String,
@@ -667,6 +767,10 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
             let base_cells = decode_throughput_cells(&base[..k]);
             let cand_cells = decode_throughput_cells(&cand[..k]);
             sections.push(compare_throughput(name, &base_cells, &cand_cells, k, cfg));
+        } else if name == KeepUpSection::NAME {
+            let base_cells = decode_keepup_cells(&base[..k]);
+            let cand_cells = decode_keepup_cells(&cand[..k]);
+            sections.push(compare_keepup(name, &base_cells, &cand_cells, k));
         } else {
             sections.push(SectionReport::Uncompared {
                 name: name.clone(),
@@ -923,6 +1027,98 @@ fn compare_throughput(
     }
 }
 
+/// Per-trial keep-up cells for the `keepup.real` section
+/// (iamacoffeepot/aether#1233), decoding each trial's body and dropping any
+/// trial whose body doesn't decode (it then can't satisfy the
+/// present-in-every-trial gate, exactly as for latency / throughput).
+fn decode_keepup_cells(trials: &[TrialReport]) -> Vec<Vec<KeepUpCell>> {
+    trials
+        .iter()
+        .map(|t| {
+            t.section(KeepUpSection::NAME)
+                .and_then(|s| serde_json::from_value::<KeepUpSection>(s.body.clone()).ok())
+                .map(|k| k.cells)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Find the keep-up cell matching (`workers`, `topo`) in one trial's cells (a
+/// free fn so the returned borrow ties to the slice's lifetime, mirroring
+/// [`find_cell`] / [`find_throughput_cell`]).
+fn find_keepup_cell<'a>(
+    cells: &'a [KeepUpCell],
+    workers: usize,
+    topo: &str,
+) -> Option<&'a KeepUpCell> {
+    cells
+        .iter()
+        .find(|c| c.workers == workers && c.topo == topo)
+}
+
+/// The keep-up section's per-cell trend compare (iamacoffeepot/aether#1233) —
+/// keyed by (workers, topo), it takes the across-trial median of each
+/// base/candidate field. **No verdict**: keep-up is characterisation (like the
+/// heavy / real latency trend), so this reports base-vs-candidate numbers and
+/// the renderer prints them with no pass/fail. A cell missing from any trial
+/// of either side is dropped, exactly as in the other section compares.
+#[allow(clippy::cast_precision_loss)]
+fn compare_keepup(
+    name: &str,
+    base_cells: &[Vec<KeepUpCell>],
+    cand_cells: &[Vec<KeepUpCell>],
+    k: usize,
+) -> SectionReport {
+    let mut cells: Vec<KeepUpComparison> = Vec::new();
+
+    let keys: Vec<(usize, String)> = base_cells
+        .first()
+        .map(|c| c.iter().map(|x| (x.workers, x.topo.clone())).collect())
+        .unwrap_or_default();
+
+    let pace_ratio = |c: &KeepUpCell| -> f64 {
+        if c.expected_nanos > 0 {
+            c.elapsed_nanos as f64 / c.expected_nanos as f64
+        } else {
+            0.0
+        }
+    };
+
+    for (workers, topo) in &keys {
+        let base_hits: Vec<&KeepUpCell> = base_cells[..k.min(base_cells.len())]
+            .iter()
+            .filter_map(|c| find_keepup_cell(c, *workers, topo))
+            .collect();
+        let cand_hits: Vec<&KeepUpCell> = cand_cells[..k.min(cand_cells.len())]
+            .iter()
+            .filter_map(|c| find_keepup_cell(c, *workers, topo))
+            .collect();
+        if base_hits.len() != k || cand_hits.len() != k || k == 0 {
+            continue; // cell not present in every trial — skip
+        }
+
+        let median_of = |hits: &[&KeepUpCell], f: &dyn Fn(&KeepUpCell) -> f64| -> f64 {
+            median_sorted(&sorted(hits.iter().map(|&c| f(c)).collect()))
+        };
+
+        cells.push(KeepUpComparison {
+            workers: *workers,
+            topo: topo.clone(),
+            base_offered: median_of(&base_hits, &|c| c.offered as f64),
+            cand_offered: median_of(&cand_hits, &|c| c.offered as f64),
+            base_completed: median_of(&base_hits, &|c| c.completed as f64),
+            cand_completed: median_of(&cand_hits, &|c| c.completed as f64),
+            base_pace_ratio: median_of(&base_hits, &pace_ratio),
+            cand_pace_ratio: median_of(&cand_hits, &pace_ratio),
+        });
+    }
+
+    SectionReport::KeepUpCompared {
+        name: name.to_owned(),
+        cells,
+    }
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn classify(
     deltas: &[f64],
@@ -1011,7 +1207,11 @@ pub fn headline_counts(report: &ComparisonReport) -> (usize, usize, usize) {
             } => (i + improved, s + stable, r + regressed),
             // A non-light latency section is compared (it carries counts)
             // but its verdict is suppressed — it must not reach the headline.
-            SectionReport::Compared { .. } | SectionReport::Uncompared { .. } => (i, s, r),
+            // A keep-up section carries no verdict at all (characterisation),
+            // so it never contributes to the gate signal either.
+            SectionReport::Compared { .. }
+            | SectionReport::KeepUpCompared { .. }
+            | SectionReport::Uncompared { .. } => (i, s, r),
         })
 }
 
@@ -1043,6 +1243,9 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
             }
             SectionReport::ThroughputCompared { name, cells, .. } => {
                 push_throughput_section(&mut s, name, cells);
+            }
+            SectionReport::KeepUpCompared { name, cells } => {
+                push_keepup_section(&mut s, name, cells);
             }
             SectionReport::Uncompared { name, .. } => {
                 s.push_str(&format!(
@@ -1233,6 +1436,37 @@ fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputCompar
 /// scale-and-fixed-precision rendering for the latency table.
 fn kps(mps: f64) -> String {
     format!("{:.1}", mps / 1000.0)
+}
+
+/// Render the real tier's keep-up section (iamacoffeepot/aether#1233) — a
+/// no-verdict trend grid (like the heavy / real latency trend): offered /
+/// completed mail counts and the pace ratio (`elapsed / expected`,
+/// `× > 1` = fell behind the 60 Hz budget), base→candidate, no pass/fail. Emits
+/// no plot anchor — `perf-plot` renders span PNGs, which a keep-up cell has
+/// none of.
+#[allow(clippy::format_push_string)]
+fn push_keepup_section(s: &mut String, name: &str, cells: &[KeepUpComparison]) {
+    s.push_str(&format!(
+        "<details><summary>{name} — {} cells, keep-up (no verdict)</summary>\n\n",
+        cells.len()
+    ));
+    s.push_str(
+        "| topology | w | offered | completed | base pace | this pace |\n|---|--:|--:|--:|--:|--:|\n",
+    );
+    for c in cells {
+        s.push_str(&format!(
+            "| {} | {} | {:.0}→{:.0} | {:.0}→{:.0} | {:.2}× | {:.2}× |\n",
+            c.topo,
+            c.workers,
+            c.base_offered,
+            c.cand_offered,
+            c.base_completed,
+            c.cand_completed,
+            c.base_pace_ratio,
+            c.cand_pace_ratio,
+        ));
+    }
+    s.push_str("\n</details>\n\n");
 }
 
 #[cfg(test)]
@@ -1667,6 +1901,7 @@ mod tests {
             handler: Stats::default(),
             depth: Stats::default(),
             throughput_mps,
+            keepup: None,
         };
         let cells = vec![
             cell("depth-1", Some(123_456.0)),
@@ -1801,6 +2036,7 @@ mod tests {
             handler: Stats::default(),
             depth: Stats::default(),
             throughput_mps: None,
+            keepup: None,
         };
         let cells = vec![
             cell("fanout-8", Tier::Light),
@@ -1993,5 +2229,137 @@ mod tests {
             });
         }
         side
+    }
+
+    /// Build a K-trial side carrying a single `keepup.real` cell
+    /// (`socket-server-32 @ 11w`, offered == completed) whose paced elapsed
+    /// follows `elapsed_nanos` against a fixed 100ms budget — the keep-up
+    /// analog of [`side`] (iamacoffeepot/aether#1233).
+    fn keepup_side(elapsed_nanos: &[u64]) -> Vec<TrialReport> {
+        elapsed_nanos
+            .iter()
+            .map(|&elapsed_nanos| {
+                let cells = vec![KeepUpCell {
+                    workers: 11,
+                    topo: "socket-server-32".to_owned(),
+                    offered: 6400,
+                    completed: 6400,
+                    elapsed_nanos,
+                    expected_nanos: 100_000_000,
+                }];
+                let body =
+                    serde_json::to_value(KeepUpSection { cells }).expect("encode keepup body");
+                single_section_trial(KeepUpSection::NAME, KeepUpSection::VERSION, body)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn from_cells_real_tier_emits_keepup_not_latency() {
+        // The real tier reports keep-up, not per-hop spans
+        // (iamacoffeepot/aether#1233): a real cell carrying a harvested
+        // `keepup` produces a `keepup.real` section, and no `latency.real`.
+        use crate::perf::harness::{CellResult, KeepUp, Stats, Tier};
+
+        let cell = CellResult {
+            workers: 4,
+            topo: "socket-server-32".to_owned(),
+            tier: Tier::Real,
+            construct: Stats::default(),
+            queued: Stats::default(),
+            drain: Stats::default(),
+            handler: Stats::default(),
+            depth: Stats::default(),
+            throughput_mps: None,
+            keepup: Some(KeepUp {
+                offered: 6400,
+                completed: 6400,
+                elapsed_nanos: 110_000_000,
+                expected_nanos: 100_000_000,
+            }),
+        };
+        let report = TrialReport::from_cells(&[cell], 200, Some(60), None);
+        let names: Vec<&str> = report.sections.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![KeepUpSection::NAME],
+            "the real tier emits the keep-up section, not latency.real"
+        );
+        let sec = &report.sections[0];
+        assert_eq!(sec.version, KeepUpSection::VERSION);
+        let ku: KeepUpSection =
+            serde_json::from_value(sec.body.clone()).expect("decode keepup body");
+        assert_eq!(ku.cells.len(), 1);
+        assert_eq!(ku.cells[0].offered, 6400);
+        assert_eq!(ku.cells[0].completed, 6400);
+    }
+
+    #[test]
+    fn keepup_section_compares_and_renders_trend() {
+        // The keep-up section pairs into a no-verdict trend
+        // (iamacoffeepot/aether#1233): base ran at pace (~1.0×), candidate
+        // fell behind (~1.5×); the comparison carries the numbers, the
+        // headline carries no verdict, and the markdown renders the trend grid.
+        let base = keepup_side(&[100_000_000, 102_000_000, 98_000_000]);
+        let cand = keepup_side(&[150_000_000, 152_000_000, 148_000_000]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+
+        let cells = rep
+            .sections
+            .iter()
+            .find_map(|s| match s {
+                SectionReport::KeepUpCompared { cells, .. } => Some(cells),
+                _ => None,
+            })
+            .expect("keep-up section compared");
+        assert_eq!(cells.len(), 1);
+        assert!(
+            (cells[0].base_pace_ratio - 1.0).abs() < 0.05,
+            "base ran ~at pace, got {}",
+            cells[0].base_pace_ratio
+        );
+        assert!(
+            cells[0].cand_pace_ratio > 1.4,
+            "candidate fell behind the pace, got {}",
+            cells[0].cand_pace_ratio
+        );
+
+        // Characterisation only — no verdict reaches the gate-signal headline.
+        let (improved, _stable, regressed) = headline_counts(&rep);
+        assert_eq!(
+            (improved, regressed),
+            (0, 0),
+            "keep-up is characterisation; no verdict leaks into the headline"
+        );
+
+        let md = markdown(&rep, "PR 9999 vs main", "test");
+        assert!(
+            md.contains("keepup.real — 1 cells, keep-up (no verdict)"),
+            "the keep-up section renders as a no-verdict trend"
+        );
+        assert!(
+            md.contains("| topology | w | offered | completed | base pace | this pace |"),
+            "the keep-up trend grid header is present"
+        );
+        assert!(
+            !md.contains("<!-- aether-perf-plots: keepup.real -->"),
+            "a keep-up section emits no plot anchor (no spans to plot)"
+        );
+    }
+
+    #[test]
+    fn report_json_round_trip_preserves_keepup_section() {
+        let trials = keepup_side(&[110_000_000]);
+        let report = &trials[0];
+        let json = serde_json::to_string(report).expect("serialize trial");
+        let back: TrialReport = serde_json::from_str(&json).expect("deserialize trial");
+        assert_eq!(back.sections.len(), 1);
+        assert_eq!(back.sections[0].name, KeepUpSection::NAME);
+        assert_eq!(back.sections[0].version, KeepUpSection::VERSION);
+        let ku: KeepUpSection =
+            serde_json::from_value(back.sections[0].body.clone()).expect("decode keepup body");
+        assert_eq!(ku.cells.len(), 1);
+        assert_eq!(ku.cells[0].offered, 6400);
+        assert_eq!(ku.cells[0].expected_nanos, 100_000_000);
     }
 }
