@@ -39,7 +39,7 @@
   - [Adding a config knob]()
   - [Adding a substrate kind]()
   - [Adding a chassis capability]()
-  - [Wiring an MCP tool]()
+  - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
   - [Writing a component]()
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
