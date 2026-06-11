@@ -25,9 +25,9 @@ The git targets auto-remove only the entries with a hard merge-oracle (a merged 
 
 1. **List worktrees.** `git worktree list --porcelain`. Parse blocks of `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` separated by blank lines. Skip the primary worktree (the current working directory) and skip any detached-HEAD worktrees (no `branch` line — nothing to match against).
 
-2. **Match each worktree's branch to PR state.** For each non-primary worktree branch:
-   - `gh pr list --head <branch> --state merged --json number,mergedAt,url --limit 1` — if non-empty, mark `merged`.
-   - Otherwise `gh pr list --head <branch> --state all --json number,state,url --limit 1` — distinguish `open` / `closed` (closed-not-merged) / no-PR.
+2. **Match each worktree's branch to PR state over REST.** `gh pr list` is GraphQL-backed and, under GitHub's secondary-rate-limit throttle, *silently returns `[]`* — which this skill would misread as "branch has no PR" and surface for removal of an actually-merged branch (or skip a real one). The REST list errors loudly instead, so a throttle can't masquerade as a clean result. For each non-primary worktree branch:
+   - `gh api 'repos/iamacoffeepot/aether/pulls?head=iamacoffeepot:<branch>&state=closed' --jq '[.[] | select(.merged_at != null)][0].number'` — non-empty → `merged: #NNN`. REST has no `merged` state; a merged PR is `state=closed` with `merged_at` non-null.
+   - Otherwise `gh api 'repos/iamacoffeepot/aether/pulls?head=iamacoffeepot:<branch>&state=all' --jq '.[0] | .number, .state'` — distinguish `open` / `closed` (closed-not-merged) / no-PR (empty).
 
 3. **Surface the plan.** Print a table of every non-primary worktree: path, branch, status (`merged: #NNN`, `open: #NNN`, `closed-not-merged: #NNN`, `no PR`). Then ask the user to confirm before removing anything.
 
@@ -43,11 +43,11 @@ Worktree-less local branches — the ones you checked out and worked on directly
 
 1. **List local branches with upstream-tracking state.** `git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads`. Build the worktree-branch set from `git worktree list --porcelain` and subtract it. Always exclude the current branch and the default branch (`main`).
 
-2. **Classify each remaining branch.**
-   - `gh pr list --head <branch> --state merged --json number,url --limit 1` non-empty → `merged: #NNN`. This is the hard signal (a squash-merge leaves the branch *not* an ancestor of `main`, so PR state is the only reliable merged signal).
+2. **Classify each remaining branch.** Use the REST PR list (`gh pr list` returns `[]` under secondary-throttle and would misclassify a merged branch as no-PR — see the worktrees target):
+   - `gh api 'repos/iamacoffeepot/aether/pulls?head=iamacoffeepot:<branch>&state=closed' --jq '[.[] | select(.merged_at != null)][0].number'` non-empty → `merged: #NNN`. This is the hard signal (a squash-merge leaves the branch *not* an ancestor of `main`, so PR state is the only reliable merged signal). REST has no `merged` state — filter `state=closed` on `merged_at != null`.
    - `[gone]` in the upstream-track column → the remote branch was deleted (the usual after a `--delete-branch` merge). Treat as a *merged candidate* but confirm against the PR check before removing.
    - `git branch --merged main` lists it → `merged-into-main` (true-merge ancestry).
-   - Open PR (`gh pr list --head <branch> --state open`) → `open: #NNN` — leave, in flight.
+   - Open PR (`gh api 'repos/iamacoffeepot/aether/pulls?head=iamacoffeepot:<branch>&state=open' --jq '.[0].number'`) → `open: #NNN` — leave, in flight.
    - No PR and unpushed commits (`%(upstream:track)` shows `ahead` or no upstream + commits not in `main`) → `local-wip` — potential lost work; surface, never auto-remove.
 
 3. **Surface the plan.** Table: branch, status, last-commit date. Confirm before removing.

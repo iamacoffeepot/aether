@@ -40,7 +40,7 @@ The crate scope comes from whatever the idea names or points at (a file path res
 
 ## Labels
 
-Apply on the `gh issue create` call itself (`--label "type:<t>,crate:<c>"`) — labels at creation are part of the one REST call, not follow-up edits.
+Apply the labels on the issue-create call itself — the REST `POST …/issues` form (see [Filing](#filing)) takes them inline via repeated `-f 'labels[]=…'`, so they land in the one create request rather than as follow-up edits.
 
 - `type:<t>` mirrors the title prefix (note: not every type has a label — check `gh label list` output cached in this repo: `type:feat`, `type:fix`, `type:docs`, `type:chore`, `type:perf`, `type:refactor`, `type:flake` exist; `ci`/`test` have no label — skip, the title carries it).
 - `crate:<short>` for the crate scope. **If the crate is new and has no label, create it first** (`gh label create "crate:<short>" --color bfdadc --description "<full crate name>"`) — PRs against a crate with no label trip the title lint (Pattern E).
@@ -66,11 +66,25 @@ The blockquote/expansion split is deliberate: `/scope`'s Define phase needs to k
 
 Callers delegating to this skill (e.g. `/scope-spinoff`) may append their own sections after `## Description` (such as `## Found during`); `/sketch` itself adds nothing more.
 
+## Filing
+
+File over REST — `gh issue create` is GraphQL-backed, while `POST …/issues` is REST and returns the new issue's `node_id` in its response, so the board add needs no follow-up id lookup. Write the body to a file so backticks / `$` in it aren't shell-expanded, and pass the labels inline:
+
+```bash
+gh api -X POST repos/iamacoffeepot/aether/issues \
+  -f title="<type>(<crate>): <subject>" \
+  -F body=@/tmp/sketch-body.md \
+  -f 'labels[]=type:<t>' -f 'labels[]=crate:<c>' \
+  --jq '.number, .node_id'
+```
+
+The response's `node_id` is the issue's GraphQL node ID — feed it straight into the board add below.
+
 ## Board placement
 
-Requires `.claude/release-state.json` (the active-release marker). Two GraphQL calls:
+Requires `.claude/release-state.json` (the active-release marker). Two GraphQL calls — both are ProjectV2 ops with no REST form (see `/scope` §"GraphQL-only"):
 
-1. `addProjectV2ItemById` with the new issue's node ID (returned by `gh issue create` via `--json` or one `gh issue view --json id`).
+1. `addProjectV2ItemById` with the `node_id` the REST create returned (no `gh issue view --json id` follow-up).
 2. `updateProjectV2ItemFieldValue` setting `Phase=Backlog` using the cached field/option IDs.
 
 Record the returned project item ID in `release-state.json` under `item_cache` so later skills skip the lookup entirely:

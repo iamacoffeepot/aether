@@ -17,7 +17,7 @@ Two ways to run it:
 - **In-session (default).** The whole skill runs in the main session — implement, push, drive CI green, hold the draft. Use this for a single issue or when you want tight control over each step.
 - **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh --qodana` (which stamps the commit; `--qodana` runs the same qodana scan CI gates on, needs colima up), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or board writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`). **The parent owns the `Phase=Executing` flip at dispatch:** before or as it spawns the agents, the parent performs §Execute step 1 — the `Phase=Executing` board write plus the `phase:executing` label reconcile — for every issue in the batch. The dispatched agent never touches the board, so the flip cannot be deferred to it; leaving it for the parent's takeover would hold each issue at `Phase=Ready` for the whole time its agent is implementing, misreporting the in-flight fleet and inviting a double-dispatch. `Executing` here means *handed to an agent*: with batched per-agent queues every issue in a queue flips at dispatch, so a queued-but-not-yet-started issue reads `Executing` slightly early — accepted, because the parent cannot observe intra-agent queue progress and `Ready` would misreport the whole window.
 
-  **Batched dispatch.** Before spawning agents, the orchestrator reads each candidate issue's `size:*` and `model:*` labels in one REST call (per-issue `gh issue view <n> --json labels`, or a single `gh issue list --label …` sweep) — no GraphQL board query, since `/scope` mirrors the `Size` field and the model opt-in onto labels at Plan time. It then groups the approved issues into per-agent queues: roughly **three S issues or one M per dispatched agent, an L always solo**. Each queued issue is still a full single-issue `/implement` run — its own worktree, its own draft PR; batching only decides how many of those runs one background agent works through before it spins down, so a pile of small mechanical work doesn't spin up one full agent each (fewer concurrent agents also staggers the shared per-user GraphQL budget). The `model:*` label routes the agent's model: an absent label means the agent inherits the orchestrator's own model (whatever the dispatcher is running — e.g. Opus when the dispatcher is Opus); a `model:sonnet` / `model:haiku` label runs that issue on the smaller model. `/scope` stamps both label families at Plan time — see its §Plan size-estimation and model-opt-in notes.
+  **Batched dispatch.** Before spawning agents, the orchestrator reads each candidate issue's `size:*` and `model:*` labels over REST (`gh api repos/iamacoffeepot/aether/issues/<n> --jq '.labels[].name'` per issue, or one `gh api 'repos/iamacoffeepot/aether/issues?labels=size:m&state=open' --jq '.[].number'` sweep — not `gh issue view` / `gh issue list`, which are GraphQL-backed) — no GraphQL board query, since `/scope` mirrors the `Size` field and the model opt-in onto labels at Plan time. It then groups the approved issues into per-agent queues: roughly **three S issues or one M per dispatched agent, an L always solo**. Each queued issue is still a full single-issue `/implement` run — its own worktree, its own draft PR; batching only decides how many of those runs one background agent works through before it spins down, so a pile of small mechanical work doesn't spin up one full agent each (fewer concurrent agents also staggers the shared per-user GraphQL budget). The `model:*` label routes the agent's model: an absent label means the agent inherits the orchestrator's own model (whatever the dispatcher is running — e.g. Opus when the dispatcher is Opus); a `model:sonnet` / `model:haiku` label runs that issue on the smaller model. `/scope` stamps both label families at Plan time — see its §Plan size-estimation and model-opt-in notes.
 
 Either mode opens the PR **as a draft**, drives CI green, and holds it in draft for your review. This repo has native GitHub auto-merge on, so a *non-draft* PR that reaches green merges itself — draft is the review gate (see `feedback_green_pr_automerges_before_review`). Landing is the release *process*'s call: an approved release un-drafts the PR so native auto-merge takes it. This skill never issues a merge command and never un-drafts on its own.
 
@@ -75,19 +75,36 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
    - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-actor` dep)
    - `scripts/preflight.sh --qodana` if present (writes the stamp file expected by the pre-push hook). Pass `--qodana` on this push path so the pre-flight runs the same qodana scan CI gates on before the PR opens — it needs colima/docker up and adds ~3.3min; a non-clean qodana exit (findings over `failThreshold`, or the Qodana-for-Rust EAP tooling crash) classifies as a build-env failure → `Stalled` (handle as a `--no-verify` push only for a confirmed EAP flake, never to skip real findings)
 
-4. Push the branch and open the PR:
+4. Push the branch, then open the PR over REST (`gh pr create` is GraphQL-backed; `POST …/pulls` is REST and takes `draft: true` directly). Write the PR body to a file first so backticks / `$` in the template aren't shell-expanded, and pass it with `-F body=@<file>`:
    ```bash
    git push -u origin <branch>
-   gh pr create --draft --title "<conventional-commit title>" --body "<see PR body template below>"
+   gh api -X POST repos/iamacoffeepot/aether/pulls \
+     -F draft=true \
+     -f title="<conventional-commit title>" \
+     -f head="<branch>" -f base=main \
+     -F body=@/tmp/pr-body-<N>.md \
+     --jq '.number'
    ```
 
-   No "PR opened" comment — the PR body's closing reference creates a cross-reference event in the issue's timeline.
+   No "PR opened" comment — the PR body's closing reference creates a cross-reference event in the issue's timeline. Capture the returned `number` for the Refine loop.
 
 ## Refine loop (the spin-until-green part)
 
 After PR open, enter the loop. On each iteration:
 
-1. Wait for CI to complete (`gh pr checks <pr> --watch`).
+1. Wait for CI to complete. `gh pr checks --watch` polls GraphQL on every tick, draining the pool the board writes need, so poll the REST check-runs endpoint instead — and run it from a script file rather than inline, since the harness hook that scans command text for `$(…)` / `$…$` spans trips on an inline poller (see `feedback_monitor_ci_via_rest_not_watch`):
+
+   ```bash
+   sha=$(git rev-parse HEAD)
+   until [ "$(gh api repos/iamacoffeepot/aether/commits/$sha/check-runs \
+       --jq '[.check_runs[] | select(.status != "completed")] | length')" = 0 ]; do
+     sleep 20
+   done
+   gh api repos/iamacoffeepot/aether/commits/$sha/check-runs \
+     --jq '.check_runs[] | select(.conclusion != "success") | .name + ": " + .conclusion'
+   ```
+
+   No printed line means every check concluded `success` → green. Any printed line is a failed/neutral check → go to step 3.
 
 2. **CI green** → goto "Done condition" below.
 
@@ -146,7 +163,7 @@ Phase moves to `Done` either:
 - When the user merges and a post-merge hook (or `/release-promote`) detects it, **or**
 - When the Phase C orchestrator (future) merges under bounded auth.
 
-For v1, that final transition is manual: the user merges via `gh pr merge` or the UI, then optionally runs `/release-promote <issue>` to mark Phase=Done. (Or it could just be inferred by Phase D tooling that reconciles state.)
+For v1, that final transition is manual: the user merges via the UI or `gh api -X PUT repos/iamacoffeepot/aether/pulls/<pr>/merge -f merge_method=squash` (REST; `gh pr merge` is the GraphQL-backed convenience form), then optionally runs `/release-promote <issue>` to mark Phase=Done. (Or it could just be inferred by Phase D tooling that reconciles state.)
 
 ## Self-bounce mechanics
 
@@ -196,14 +213,21 @@ Both caps trigger self-bounce to Plan with the budget breach noted. The `AuthBud
 
 ## Phase label reconcile
 
-The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. **In the same step you set the `Phase` field, reconcile the label:**
+The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the label work stays off the contended pool. **In the same step you set the `Phase` field, swap the label over REST:**
 
 ```bash
-gh issue edit <n> --remove-label "phase:define,phase:design,phase:plan,phase:ready,phase:executing,phase:refine,phase:bounced,phase:stalled" \
-  && gh issue edit <n> --add-label "phase:<new>"
+# Atomic swap to an active phase. Runs under bash for array word-splitting.
+bash <<'EOF'
+n=<n>; new="phase:<new>"; repo=iamacoffeepot/aether
+args=()
+while IFS= read -r l; do args+=(-f "labels[]=$l"); done < <(
+  gh api "repos/$repo/issues/$n/labels" --jq '.[].name | select(startswith("phase:") | not)')
+args+=(-f "labels[]=$new")
+gh api -X PUT "repos/$repo/issues/$n/labels" "${args[@]}"
+EOF
 ```
 
-`--remove-label` ignores labels the issue doesn't carry, so the remove is safe on any transition and idempotent on re-run (lowercased: `Phase=Ready` → `phase:ready`). The two calls are chained with `&&` so the add fires only after the remove succeeds — if the first `gh` call stalls or errors (a transient CLI or API outage), the chain stops there instead of stamping the new label onto an issue whose old phase label is still present, which would leave two phase labels on the board at once. A reconcile that fails partway leaves the prior label untouched and heals on the next run. This skill writes `Phase` in four places, each of which must reconcile the label: `Executing` (Execute step 1 + Refine-loop fix-push), `Refine` (Refine-loop fix-and-wait + done condition), `Bounced` (self-bounce on retry-cap / wall-clock / design discovery), and `Stalled` (build-env failure). `Done` carries no label — the merge that closes the issue retires the lifecycle.
+The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus the one new `phase:*`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than the old remove-then-add pair, which had a window between its two calls (lowercased: `Phase=Executing` → `phase:executing`). A failed PUT leaves the prior labels untouched and heals on the next run. This skill writes `Phase` in four places, each of which must swap the label: `Executing` (Execute step 1 + Refine-loop fix-push), `Refine` (Refine-loop fix-and-wait + done condition), `Bounced` (self-bounce on retry-cap / wall-clock / design discovery), and `Stalled` (build-env failure). `Done` carries no label — the merge that closes the issue retires the lifecycle.
 
 ## Failure modes
 
