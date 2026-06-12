@@ -31,9 +31,9 @@ use std::path::Path;
 
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    Delete, DeleteResult, DropComponent, DropResult, FsError, List, ListResult, LoadComponent,
-    LoadResult, MailEnvelope, Ping, Read, ReadResult, ReplaceComponent, ReplaceResult, Write,
-    WriteResult,
+    CreateTexture, CreateTextureResult, Delete, DeleteResult, DrawTexturedQuads, DropComponent,
+    DropResult, FsError, List, ListResult, LoadComponent, LoadResult, MailEnvelope, Ping,
+    QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult, TexturedQuad, Write, WriteResult,
 };
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -632,6 +632,135 @@ fn cube_render_projects_centered_silhouette() {
          {}x{} frame (not a corner speck)",
         img.width,
         img.height,
+    );
+}
+
+/// ADR-0105 textured-quad surface: create an RGBA8 texture from raw
+/// pixels, draw a `Screen`-space quad sampling it at a known pixel rect,
+/// and assert the captured frame lights that rect. A second capture
+/// after an advance with no resent quads asserts the immediate-mode
+/// clear — the quad disappears, matching `aether.draw_triangle`.
+///
+/// No component is loaded; the quad is the only thing that can light a
+/// pixel, so the silhouette reductions pin it directly. The pre-mail
+/// bundle dispatches the `draw_textured_quads` into the accumulator
+/// right before the readback, the same way the probe scenario
+/// synthesises a tick.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn textured_quad_draws_screen_space_rect() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    // 8×8 checkerboard of opaque white and opaque red — both far from the
+    // dark clear color, so every magnified texel of the quad reads as lit
+    // regardless of which cell it samples.
+    let texture_width = 8u32;
+    let texture_height = 8u32;
+    let mut pixels = Vec::with_capacity((texture_width * texture_height * 4) as usize);
+    for y in 0..texture_height {
+        for x in 0..texture_width {
+            let white = (x / 2 + y / 2) % 2 == 0;
+            if white {
+                pixels.extend_from_slice(&[255, 255, 255, 255]);
+            } else {
+                pixels.extend_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+    }
+
+    let created = bench
+        .execute(vec![(
+            "create",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CreateTexture {
+                    width: texture_width,
+                    height: texture_height,
+                    pixels,
+                },
+            ),
+        )])
+        .expect("create_texture sequence");
+    let texture_id = match created
+        .reply::<CreateTextureResult>("create")
+        .expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    // Known screen rect: top-left (16, 12), size 24×18 → columns 16..40,
+    // rows 12..30. Rasterized pixel centers give an inclusive lit box of
+    // roughly [16, 39] × [12, 29].
+    let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawTexturedQuads {
+            texture_id,
+            space: QuadSpace::Screen,
+            quads: vec![TexturedQuad {
+                x: quad_x,
+                y: quad_y,
+                width: quad_w,
+                height: quad_h,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: [1.0, 1.0, 1.0, 1.0],
+            }],
+        },
+    )];
+
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture-with-mails");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    // Coverage band around the quad's area fraction (24*18 / 64*48 ≈
+    // 0.14) — rules out an empty frame and a full-bleed frame.
+    let drawn = coverage(&img, bg, tolerance);
+    assert!(
+        (0.08..0.22).contains(&drawn),
+        "quad coverage {drawn} fell outside the expected band (0.08, 0.22); \
+         the captured frame is effectively empty or entirely filled",
+    );
+
+    // The lit box must land on the requested rect — proving the
+    // screen-space ortho mapped pixels (16, 12)–(40, 30) to the frame.
+    let silhouette = bounding_box(&img, bg, tolerance).expect("a lit frame has a bounding box");
+    assert!(
+        (14..=18).contains(&silhouette.min_x)
+            && (37..=41).contains(&silhouette.max_x)
+            && (10..=14).contains(&silhouette.min_y)
+            && (27..=31).contains(&silhouette.max_y),
+        "quad silhouette {silhouette:?} should bound the screen rect (16,12)-(40,30) \
+         of the {frame_width}x{frame_height} frame",
+    );
+
+    // Immediate-mode contract: with no quad resent, an advance commits
+    // the empty accumulator (clearing the cache) and the next capture is
+    // back at clear color.
+    let cleared = bench
+        .execute(vec![
+            ("clear_advance", BenchOp::advance(1)),
+            ("snap2", BenchOp::capture()),
+        ])
+        .expect("advance + capture");
+    let png2 = cleared.captured("snap2").expect("snap2 step ran");
+    let img2 = decode_png(png2).expect("decode cleared png");
+    let cleared_coverage = coverage(&img2, background_top_left(&img2), tolerance);
+    assert!(
+        cleared_coverage < 0.01,
+        "after the quad stopped being sent the frame should be uniform clear color, \
+         but coverage was {cleared_coverage} (immediate-mode clear did not run)",
     );
 }
 

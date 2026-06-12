@@ -1506,6 +1506,129 @@ mod control_plane {
         }
     }
 
+    // ADR-0105 textured-quad render surface. Three kinds on the
+    // `aether.render` mailbox compose the generic texture surface text /
+    // sprites / HUD images share: register an RGBA8 texture, overwrite a
+    // sub-rect of one, and draw a batch of textured alpha-blended quads
+    // in either projection. Postcard-shaped — `CreateTexture` /
+    // `UpdateTexture` carry `Vec<u8>` pixels, `DrawTexturedQuads` carries
+    // a `space` enum and a `Vec` of quads.
+
+    /// `aether.render.create_texture` — register an RGBA8 texture in the
+    /// render cap's session-scoped texture registry. `pixels` is exactly
+    /// `width * height * 4` bytes (RGBA8, row-major, top-down). The cap
+    /// validates the dimensions, assigns the next `texture_id` past any
+    /// previously created texture (the same id-assignment shape ADR-0103
+    /// uses for instrument ids), stages the pixels CPU-side, and replies
+    /// as soon as the id is assigned — the wgpu texture is realized lazily
+    /// at the next frame record. Reply: `CreateTextureResult`. Desktop-
+    /// only — the headless chassis replies `Err` (fail-fast, ADR-0105).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.render.create_texture")]
+    pub struct CreateTexture {
+        pub width: u32,
+        pub height: u32,
+        pub pixels: Vec<u8>,
+    }
+
+    /// Reply to `CreateTexture`. `Ok` carries the assigned `texture_id` —
+    /// thread it into `DrawTexturedQuads.texture_id` and
+    /// `UpdateTexture.texture_id`. `Err` carries a human-readable reason —
+    /// a zero dimension, or a `pixels` length that doesn't match
+    /// `width * height * 4`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.render.create_texture_result")]
+    pub enum CreateTextureResult {
+        Ok { texture_id: u32 },
+        Err { error: String },
+    }
+
+    /// `aether.render.update_texture` — overwrite a sub-rectangle of a
+    /// previously-created texture's pixels (atlas growth — e.g. the text
+    /// cap rasterizing a new glyph into its atlas). `pixels` is exactly
+    /// `width * height * 4` bytes covering the `(x, y, width, height)`
+    /// sub-rect. Fire-and-forget; a bad `texture_id` or an out-of-bounds
+    /// rect logs and drops. The staged pixels update immediately; the GPU
+    /// texture re-uploads at the next frame record.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.render.update_texture")]
+    pub struct UpdateTexture {
+        pub texture_id: u32,
+        pub x: u32,
+        pub y: u32,
+        pub width: u32,
+        pub height: u32,
+        pub pixels: Vec<u8>,
+    }
+
+    /// One textured quad in a `DrawTexturedQuads` batch. `(x, y)` is the
+    /// top-left corner and `(width, height)` the size, both in the unit
+    /// the batch's `space` selects — window pixels for `Screen`, pixel
+    /// offsets from the anchor for `World`. `(u0, v0)`–`(u1, v1)` is the
+    /// uv sub-rect sampled from the batch's texture (`0,0` top-left to
+    /// `1,1` bottom-right). `tint` is a linear RGBA multiplier applied to
+    /// the sampled texel — `[1.0; 4]` draws the texture unmodified; the
+    /// alpha channel scales the blend. Not a kind on its own — only
+    /// addressable inside `DrawTexturedQuads.quads`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct TexturedQuad {
+        pub x: f32,
+        pub y: f32,
+        pub width: f32,
+        pub height: f32,
+        pub u0: f32,
+        pub v0: f32,
+        pub u1: f32,
+        pub v1: f32,
+        pub tint: [f32; 4],
+    }
+
+    /// How a `QuadSpace::World` quad's clip-space scale factor `k`
+    /// relates on-screen size to distance (ADR-0105).
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub enum QuadScale {
+        /// `k` is a constant derived from `reference_distance`, so the
+        /// perspective divide shrinks the quad as the anchor recedes; the
+        /// quad's pixel size holds exactly at `reference_distance`. The
+        /// above-the-head label mode.
+        Distance { reference_distance: f32 },
+        /// `k = clip.w`, cancelling the perspective divide for constant
+        /// on-screen size regardless of distance.
+        Pixels,
+    }
+
+    /// Projection a `DrawTexturedQuads` batch draws under (ADR-0105).
+    ///
+    /// `Screen` quads are window-pixel rects drawn in an overlay pass
+    /// after the world pass under an ortho matrix derived from the surface
+    /// size, no depth. `World` quads transform only `anchor` through the
+    /// camera's `view_proj`, then apply each quad's pixel offsets in clip
+    /// space, so the quad faces the camera and never skews; `scale` picks
+    /// the distance-vs-size relationship.
+    ///
+    /// The render cap implements `Screen`; `World` ships in the vocabulary
+    /// now but warn-drops at encode until the world-anchor path lands.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub enum QuadSpace {
+        Screen,
+        World { anchor: [f32; 3], scale: QuadScale },
+    }
+
+    /// `aether.render.draw_textured_quads` — draw a batch of textured,
+    /// alpha-blended quads sampling one texture, in the projection `space`
+    /// selects. Accumulated per frame with the same immediate-mode
+    /// contract as `aether.draw_triangle`: send it every frame the quads
+    /// should appear, or they vanish next frame. `texture_id` is a
+    /// registry id from a prior `CreateTexture`; an unknown id warn-drops
+    /// the batch. Fire-and-forget; no reply.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.render.draw_textured_quads")]
+    pub struct DrawTexturedQuads {
+        pub texture_id: u32,
+        pub space: QuadSpace,
+        pub quads: Vec<TexturedQuad>,
+    }
+
     /// The three window presentation modes. `Windowed` has no fields —
     /// the current size lives on `SetWindowModeResult`.
     /// `FullscreenExclusive` carries the specific video mode; the
@@ -3200,6 +3323,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn kind_names_are_stable() {
         assert_eq!(Tick::NAME, "aether.lifecycle.tick");
         assert_eq!(InitCaps::NAME, "aether.lifecycle.init_caps");
@@ -3254,6 +3378,13 @@ mod tests {
             CaptureFrameResult::NAME,
             "aether.render.capture_frame_result"
         );
+        assert_eq!(CreateTexture::NAME, "aether.render.create_texture");
+        assert_eq!(
+            CreateTextureResult::NAME,
+            "aether.render.create_texture_result"
+        );
+        assert_eq!(UpdateTexture::NAME, "aether.render.update_texture");
+        assert_eq!(DrawTexturedQuads::NAME, "aether.render.draw_textured_quads");
         assert_eq!(SetWindowMode::NAME, "aether.window.set_mode");
         assert_eq!(SetWindowModeResult::NAME, "aether.window.set_mode_result");
         assert_eq!(SetWindowTitle::NAME, "aether.window.set_title");
@@ -3368,6 +3499,134 @@ mod tests {
             assert_eq!(nested_fields[0].name, "x");
             assert_eq!(nested_fields[2].name, "z");
             assert_eq!(nested_fields[5].name, "b");
+        }
+    }
+
+    // ADR-0105 textured-quad render-surface kind roundtrips. The request
+    // types carry `Vec<u8>` pixels and a `space` enum carrying nested
+    // arrays; postcard roundtrip proves the derived Serialize/Deserialize
+    // agree on the wire for each shape.
+    mod render_quad_roundtrips {
+        use super::*;
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        #[test]
+        fn create_texture_request_roundtrip() {
+            let c = CreateTexture {
+                width: 2,
+                height: 2,
+                pixels: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            };
+            let bytes =
+                postcard::to_allocvec(&c).expect("test setup: postcard encodes CreateTexture");
+            let back: CreateTexture =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes CreateTexture");
+            assert_eq!(back.width, 2);
+            assert_eq!(back.height, 2);
+            assert_eq!(back.pixels.len(), 16);
+        }
+
+        #[test]
+        fn create_texture_result_roundtrip_both_arms() {
+            let ok = CreateTextureResult::Ok { texture_id: 7 };
+            let bytes = postcard::to_allocvec(&ok)
+                .expect("test setup: postcard encodes CreateTextureResult::Ok");
+            let back: CreateTextureResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CreateTextureResult::Ok");
+            match back {
+                CreateTextureResult::Ok { texture_id } => assert_eq!(texture_id, 7),
+                CreateTextureResult::Err { .. } => panic!("expected Ok"),
+            }
+
+            let err = CreateTextureResult::Err {
+                error: "pixels length mismatch".to_string(),
+            };
+            let bytes = postcard::to_allocvec(&err)
+                .expect("test setup: postcard encodes CreateTextureResult::Err");
+            let back: CreateTextureResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CreateTextureResult::Err");
+            match back {
+                CreateTextureResult::Err { error } => assert_eq!(error, "pixels length mismatch"),
+                CreateTextureResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+
+        #[test]
+        fn update_texture_request_roundtrip() {
+            let u = UpdateTexture {
+                texture_id: 3,
+                x: 4,
+                y: 5,
+                width: 1,
+                height: 1,
+                pixels: vec![9, 8, 7, 6],
+            };
+            let bytes =
+                postcard::to_allocvec(&u).expect("test setup: postcard encodes UpdateTexture");
+            let back: UpdateTexture =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UpdateTexture");
+            assert_eq!(back.texture_id, 3);
+            assert_eq!((back.x, back.y), (4, 5));
+            assert_eq!(back.pixels, vec![9, 8, 7, 6]);
+        }
+
+        #[test]
+        fn draw_textured_quads_screen_roundtrip() {
+            let d = DrawTexturedQuads {
+                texture_id: 1,
+                space: QuadSpace::Screen,
+                quads: vec![TexturedQuad {
+                    x: 10.0,
+                    y: 8.0,
+                    width: 20.0,
+                    height: 16.0,
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                }],
+            };
+            let bytes =
+                postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawTexturedQuads");
+            let back: DrawTexturedQuads = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes DrawTexturedQuads");
+            assert_eq!(back.texture_id, 1);
+            assert_eq!(back.space, QuadSpace::Screen);
+            assert_eq!(back.quads.len(), 1);
+            assert_eq!(back.quads[0].width, 20.0);
+            assert_eq!(back.quads[0].tint, [1.0, 1.0, 1.0, 1.0]);
+        }
+
+        #[test]
+        fn draw_textured_quads_world_roundtrip_carries_anchor_and_scale() {
+            let d = DrawTexturedQuads {
+                texture_id: 2,
+                space: QuadSpace::World {
+                    anchor: [1.0, 2.0, 3.0],
+                    scale: QuadScale::Distance {
+                        reference_distance: 5.0,
+                    },
+                },
+                quads: vec![],
+            };
+            let bytes = postcard::to_allocvec(&d)
+                .expect("test setup: postcard encodes DrawTexturedQuads (World)");
+            let back: DrawTexturedQuads = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes DrawTexturedQuads (World)");
+            match back.space {
+                QuadSpace::World { anchor, scale } => {
+                    assert_eq!(anchor, [1.0, 2.0, 3.0]);
+                    assert_eq!(
+                        scale,
+                        QuadScale::Distance {
+                            reference_distance: 5.0
+                        }
+                    );
+                }
+                QuadSpace::Screen => panic!("expected World"),
+            }
         }
     }
 

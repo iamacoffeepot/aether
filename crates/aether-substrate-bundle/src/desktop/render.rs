@@ -377,6 +377,10 @@ impl Gpu {
             Err(RenderError::VertexBufferOverflow { .. }) => return None,
         }
 
+        // ADR-0105 textured-quad overlay, recorded after the world pass —
+        // commit-current semantic to match `record_frame` above.
+        self.render_handles.record_overlay_pass(&mut encoder, false);
+
         // Capture path: the copy runs against the offscreen texture,
         // which is unaffected by whether a swapchain image is available
         // this frame. That decouples capture from window visibility.

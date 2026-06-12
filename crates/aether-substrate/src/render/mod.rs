@@ -18,10 +18,16 @@
 
 mod capture;
 mod pipeline;
+mod quad;
 mod targets;
 
 pub use capture::{CaptureMeta, finish_capture, prepare_capture_copy};
 pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
+pub use quad::{
+    OverlayDraw, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
+    QuadPipeline, RealizedTexture, build_quad_pipeline, push_screen_quad_vertices, realize_texture,
+    record_quad_overlay_pass, upload_texture_full,
+};
 pub use targets::Targets;
 
 /// Bytes per vertex on the wire: `vec3<f32> position + vec3<f32>
