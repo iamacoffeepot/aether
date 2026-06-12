@@ -420,6 +420,75 @@ fn discharge_settlement(mailer: &Mailer, mail_id: MailId, root: MailId) {
     mailer.record_finished(mail_id, root);
 }
 
+/// The disposition of one consumed `aether.lifecycle.advance_reply`
+/// envelope, returned by [`consume_lifecycle_reply`] to
+/// [`App::recv_lifecycle_advance_next`].
+enum LifecycleReplyOutcome {
+    /// The envelope was the expected [`LifecycleAdvanceComplete`]. Carries
+    /// the decoded `next` stage kind id, or `None` when the payload failed
+    /// to decode — the caller fail-fasts that the same as a missing reply.
+    Complete(Option<u64>),
+    /// An unexpected kind on the dedicated reply inbox (nothing else
+    /// targets it). Discharged like the matched arm; the caller keeps
+    /// waiting for the advance reply rather than mis-gating the cycle.
+    Unexpected,
+}
+
+/// Consume one envelope off the lifecycle reply inbox, discharging its
+/// ADR-0094 obligation guard + ADR-0080 §2 settlement bracket exactly
+/// once — the same per-envelope bracket [`App::dispatch_window_envelope`]
+/// runs for the sibling `aether.window` inbox
+/// (iamacoffeepot/aether#1325), applied here at the lifecycle-reply
+/// consume site (iamacoffeepot/aether#1704).
+///
+/// Both inboxes are hand-rolled `claim_mailbox` consumers that never run
+/// through [`DispatcherSlot::dispatch_one`](aether_substrate::actor::native),
+/// so neither inherits `dispatch_one`'s unconditional discharge tail —
+/// each must run the bracket itself. Post-#1701 the reply envelope
+/// carries a real `mail_id` (the disjoint reply-lineage id), which
+/// **arms** the debug-only obligation guard; dropping it without
+/// [`Envelope::discharge`] panics inside winit's `draw_rect` — a frame
+/// that cannot unwind, so the panic escalates to `abort()` and every
+/// debug desktop run dies on its first painted frame.
+///
+/// On the per-frame path the reply is sent from the lifecycle cap's
+/// `on_settled` in response to a bare, lineage-less `Settled` notice
+/// (`chassis::settlement::push_settlement_notice`), so its `root` is
+/// `MailId::NONE`: the producer's `record_sent_inflight` already no-ops,
+/// and [`discharge_settlement`] here is correspondingly a no-op on the
+/// settlement counter — the live obligation is purely the debug guard.
+/// The `discharge_settlement` call is kept for symmetry with the window
+/// arm and to balance any future non-`NONE`-root reply this inbox might
+/// receive (the degraded `on_advance` inline-reply paths). Since this is
+/// the sole consumer of these reply envelopes — nothing else records
+/// their `Finished` — the bracket can never double-discharge.
+//
+// `env` is taken by value (not `&Envelope`): this consume site owns the
+// envelope it drained off the inbox, so it owns the drop — `env.discharge()`
+// disarms the guard and the envelope drops here, mirroring
+// `dispatch_window_envelope`'s owning-handoff shape.
+#[allow(clippy::needless_pass_by_value)]
+fn consume_lifecycle_reply(mailer: &Mailer, env: Envelope) -> LifecycleReplyOutcome {
+    // Capture the settlement identity before the discharge below; mirrors
+    // `dispatch_window_envelope`'s pre-arm capture (driver.rs#1325).
+    let mail_id = env.mail_id;
+    let root = env.root;
+    let outcome = if env.kind == <LifecycleAdvanceComplete as Kind>::ID {
+        LifecycleReplyOutcome::Complete(
+            LifecycleAdvanceComplete::decode_from_bytes(env.payload.bytes())
+                .map(|complete| complete.next),
+        )
+    } else {
+        LifecycleReplyOutcome::Unexpected
+    };
+    // ADR-0080 §2 settlement discharge + ADR-0094 guard disarm, once per
+    // envelope on both arms — the matched advance-complete return and the
+    // skip-unexpected continue — mirroring `dispatch_window_envelope`.
+    discharge_settlement(mailer, mail_id, root);
+    env.discharge();
+    outcome
+}
+
 /// The disposition of a `capture_frame` wake against the current window
 /// occlusion state — the pure branch-selection half of the occluded
 /// fail-fast (iamacoffeepot/aether#1317), factored out of the winit
@@ -660,13 +729,17 @@ impl App {
                 .lifecycle_reply_inbox
                 .recv_timeout(FRAME_SETTLEMENT_CAP)
                 .ok()?;
-            if env.kind == <LifecycleAdvanceComplete as Kind>::ID {
-                return LifecycleAdvanceComplete::decode_from_bytes(env.payload.bytes())
-                    .map(|complete| complete.next);
+            // iamacoffeepot/aether#1704: every consumed reply envelope must
+            // discharge its ADR-0094 obligation guard + ADR-0080 §2
+            // settlement bracket (see `consume_lifecycle_reply`), or the
+            // armed guard aborts the process on drop in debug builds.
+            match consume_lifecycle_reply(&self.queue, env) {
+                LifecycleReplyOutcome::Complete(next) => return next,
+                // Unexpected kind on this dedicated reply inbox (nothing
+                // else targets it); already discharged — keep waiting for
+                // the advance reply rather than mis-gating the cycle.
+                LifecycleReplyOutcome::Unexpected => {}
             }
-            // Any other kind on this dedicated reply inbox is unexpected
-            // (nothing else targets it); drop and keep waiting for the
-            // advance reply rather than mis-gating the cycle.
         }
     }
 
@@ -1705,6 +1778,112 @@ mod tests {
             guard_rx.try_recv().is_err(),
             "NONE discharge must not settle any root",
         );
+    }
+
+    /// iamacoffeepot/aether#1704: the lifecycle reply inbox is a
+    /// hand-rolled `claim_mailbox` consumer, so it must run the ADR-0094
+    /// obligation + ADR-0080 §2 settlement bracket itself — the sibling
+    /// window arm's #1325 fix, applied at the reply consume site. Route a
+    /// real, obligation-**armed** `LifecycleAdvanceComplete` reply through
+    /// the registered inbox (the production `route_mail` Inbox arm arms the
+    /// guard), then drive `consume_lifecycle_reply` over it and assert the
+    /// guard is disarmed (no abort on drop) AND the settlement counter
+    /// balances — on both a non-`NONE`-root reply (the discharge is the
+    /// sole `Finished`, so the root settles) and the `NONE`-root per-frame
+    /// reply (a counter no-op). Pre-#1704 the armed guard aborted the
+    /// process when the consume site dropped the envelope without
+    /// `discharge`.
+    #[test]
+    fn consume_lifecycle_reply_discharges_armed_reply_and_balances_settlement() {
+        use std::sync::mpsc;
+
+        use aether_data::MailId;
+        use aether_substrate::chassis::settlement::SettlementRegistry;
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::registry::{InboxHandler, Registry};
+
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+
+        // Wire one settlement registry into both seams (the chassis builder
+        // does both installs at boot) so the counter's zero-transition can
+        // `fire_settled`.
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.install_settlement_registry(Arc::clone(&settlement));
+        mailer
+            .trace_handle()
+            .install_settlement_registry(Arc::clone(&settlement));
+
+        // Register the reply inbox exactly as `claim_mailbox` does: forward
+        // the obligation-armed envelope onto an mpsc, carrying its guard
+        // with it so the consumer side owns the discharge.
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: Envelope| {
+            let _ = tx.send(dispatch);
+        });
+        let reply_mailbox = registry
+            .try_register_inbox("aether.lifecycle.advance_reply", handler)
+            .expect("register the reply inbox");
+
+        let cap_mailbox = mailbox_id_from_name("aether.lifecycle");
+
+        // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
+        // shape): the producer hook records the reply's `Sent` against
+        // `root`, and the consume-site discharge is the sole `Finished`, so
+        // the root settles.
+        let root = MailId::new(cap_mailbox, 1);
+        // 1<<63 is the disjoint reply-lineage base (#1701) — a non-`NONE`
+        // mail_id, so the real Inbox arm arms the obligation guard.
+        let armed_reply_id = MailId::new(cap_mailbox, 1 << 63);
+        let settle_rx = settlement.subscribe_settlement(root);
+        let sender = Source::with_correlation(SourceAddr::Component(reply_mailbox), 7);
+        mailer.send_reply_with_lineage(
+            sender,
+            &LifecycleAdvanceComplete {
+                completed: 1,
+                next: 42,
+            },
+            armed_reply_id,
+            root,
+            None,
+        );
+        let env = rx.recv().expect("armed reply routed to the inbox");
+        match consume_lifecycle_reply(&mailer, env) {
+            LifecycleReplyOutcome::Complete(next) => {
+                assert_eq!(next, Some(42), "decodes the advance-complete `next`");
+            }
+            LifecycleReplyOutcome::Unexpected => panic!("expected the advance-complete arm"),
+        }
+        settle_rx
+            .recv()
+            .expect("the consume-site discharge balances the reply's Sent and settles the root");
+
+        // (2) `NONE`-root reply (the real per-frame deferred path, replying
+        // to a bare lineage-less `Settled` notice): the producer's
+        // `record_sent_inflight` no-ops, the discharge is a counter no-op,
+        // and the armed guard is still disarmed so the envelope drops
+        // without the ADR-0094 abort. Reaching the assert at all proves the
+        // guard was disarmed.
+        let armed_reply_id_2 = MailId::new(cap_mailbox, (1 << 63) + 1);
+        let sender_2 = Source::with_correlation(SourceAddr::Component(reply_mailbox), 8);
+        mailer.send_reply_with_lineage(
+            sender_2,
+            &LifecycleAdvanceComplete {
+                completed: 2,
+                next: 0,
+            },
+            armed_reply_id_2,
+            MailId::NONE,
+            None,
+        );
+        let env_2 = rx.recv().expect("second armed reply routed to the inbox");
+        match consume_lifecycle_reply(&mailer, env_2) {
+            LifecycleReplyOutcome::Complete(next) => {
+                assert_eq!(next, Some(0), "the terminal reply decodes `next == 0`");
+            }
+            LifecycleReplyOutcome::Unexpected => panic!("expected the advance-complete arm"),
+        }
     }
 
     /// iamacoffeepot/aether#1317: the occluded-capture branch selection.
