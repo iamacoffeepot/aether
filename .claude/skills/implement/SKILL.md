@@ -161,24 +161,13 @@ Type comes from the project item's `Type` field. Slug is the issue title sanitiz
 
 After PR open, enter the loop. On each iteration:
 
-1. Wait for CI to complete. `gh pr checks --watch` polls GraphQL on every tick, draining the pool the board writes need, so poll the REST check-runs endpoint instead — and run it from a script file rather than inline, since the harness hook that scans command text for `$(…)` / `$…$` spans trips on an inline poller (see `feedback_monitor_ci_via_rest_not_watch`):
+1. Wait for CI to complete. `gh pr checks --watch` polls GraphQL on every tick, draining the pool the board writes need, so poll the REST check-runs endpoint instead — and run from the script file rather than inline, since the harness hook that scans command text for `$(…)` / `$…$` spans trips on an inline poller (see `feedback_monitor_ci_via_rest_not_watch`):
 
    ```bash
-   sha=$(git rev-parse HEAD)
-   # Green iff the CI pass aggregator is present + completed AND no check-run is still pending.
-   # CI pass is the required merge gate, so a subset-registered matrix can't satisfy it.
-   while :; do
-     runs=$(gh api repos/iamacoffeepot/aether/commits/$sha/check-runs --jq '.check_runs')
-     agg_done=$(echo "$runs" | jq '[.[] | select(.name == "CI pass" and .status == "completed")] | length')
-     pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
-     [ "$agg_done" = 1 ] && [ "$pending" = 0 ] && break
-     sleep 20
-   done
-   echo "$runs" | jq -r '.[] | select(.name == "CI pass") | .conclusion'
-   echo "$runs" | jq -r '.[] | select(.conclusion != "success" and .conclusion != null) | .name + ": " + .conclusion'
+   scripts/wave-status.sh --wait <pr>
    ```
 
-   The loop exits only when `CI pass` — the required merge aggregator — is present and completed with zero pending check-runs, so a subset-registered matrix (only `Detect changes` up, say) can't trip a false green. The first printed line is the verdict read from `CI pass`: `success` → green, goto step 2; any other value is a failed/neutral aggregate → go to step 3. The second print names the failed/neutral child checks to pull logs for in step 3.
+   `wave-status.sh --wait <pr>` loops (polling every 20s) until `CI pass` — the required merge aggregator — is present and completed with zero pending check-runs, then exits 0 on `success` or 1 on failure/neutral. A subset-registered matrix (only `Detect changes` up, say) can't trip a false green. Exit 0 → goto step 2; exit 1 → the script has already printed the failed child check names — go to step 3.
 
 2. **CI green** → goto "Done condition" below.
 
