@@ -424,6 +424,9 @@ mod native {
         /// unregistered id and a malformed string both report `None`
         /// (the latter without sinking its siblings). Order + `id` echo
         /// are preserved.
+        // Constructs a well-formed mailbox id the runtime registry never holds
+        // to drive the miss path — incidental test data, not a real address.
+        #[allow(clippy::disallowed_methods)]
         #[test]
         fn resolve_returns_registered_name_and_none_on_miss() {
             // Register a dynamic instance name the way the runtime name

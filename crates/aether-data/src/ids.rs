@@ -185,12 +185,18 @@ impl MailboxId {
     /// **not** registered as a real mailbox — `Registry::insert` rejects
     /// any name that hashes to this id so the routing path stays
     /// unambiguous.
+    // Canonical chassis mailbox-id constant — this IS a core id definition
+    // the resolver builds on, not a sibling-cap address.
+    #[allow(clippy::disallowed_methods)]
     pub const CHASSIS_MAILBOX_ID: Self = mailbox_id_from_name("aether.chassis");
 
     /// Compute the deterministic id for a mailbox name. Same algorithm
     /// the guest SDK uses on the component side — ids round-trip
     /// verbatim across the FFI.
+    // Core name→id routing primitive — the runtime-name escape hatch
+    // (resolve_actor / wire-Call forwarding) builds on this.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub fn from_name(name: &str) -> Self {
         mailbox_id_from_name(name)
     }
@@ -237,7 +243,10 @@ pub struct ActorId(pub u64);
 
 impl ActorId {
     /// A singleton node's `ActorId` — the actor-type tag, `hash(NAMESPACE)`.
+    // Core actor-type identity hash(NAMESPACE) — the lineage carry folds
+    // onto this; it is the id definition, not a sibling-cap address.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub const fn singleton(namespace: &str) -> Self {
         Self(mailbox_id_from_name(namespace).0)
     }
@@ -245,7 +254,10 @@ impl ActorId {
     /// An instanced node's `ActorId` — `hash(NAMESPACE:subname)`, the
     /// namespace with the runtime discriminator folded in by the `:`
     /// cardinality separator (ADR-0079).
+    // Core instanced-node identity hash(NAMESPACE:subname) — the id
+    // definition, not a sibling-cap address.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub const fn instanced(namespace: &str, subname: &str) -> Self {
         Self(mailbox_id_from_name_pair(namespace, subname).0)
     }

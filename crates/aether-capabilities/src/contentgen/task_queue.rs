@@ -127,6 +127,10 @@ impl TaskQueue {
 
 #[cfg(test)]
 mod tests {
+    // Test harness derives its own actor mailbox ids by name so worker wake
+    // pushes route to a registered inbox — fixture id derivation, not
+    // sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::TaskQueue;
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_substrate::actor::native::binding::NativeBinding;

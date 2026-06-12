@@ -402,6 +402,10 @@ impl InflightTable {
 pub(crate) type InflightLedger = Mutex<InflightTable>;
 
 #[cfg(test)]
+// Test harness constructs its own actor/inbox mailbox ids by name so the
+// worker's wake push routes to a registered inbox — fixture id derivation,
+// not sibling-cap addressing.
+#[allow(clippy::disallowed_methods)]
 #[allow(
     clippy::unwrap_used,
     reason = "test-setup unwraps: fixture construction panic on failure is the assertion"

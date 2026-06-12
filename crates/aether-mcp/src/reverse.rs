@@ -192,6 +192,9 @@ impl EngineNames {
 
 #[cfg(test)]
 mod tests {
+    // Tests derive an id by name to probe the reverse-name map — the primitive
+    // yields the reference id under test, not a sibling-cap address.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use aether_data::hash::{mailbox_id_from_name, thread_id_from_name};
     use aether_data::{KIND_DOMAIN, MAILBOX_DOMAIN, THREAD_DOMAIN};

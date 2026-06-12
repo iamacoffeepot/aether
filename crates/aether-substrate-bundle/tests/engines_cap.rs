@@ -9,6 +9,10 @@
 // the fork+exec + startup-race-retry + real-process path — the
 // `EngineServer` unit tests cover the error arms in-process.
 
+// Integration test resolves the server/sink actor mailboxes by their NAMESPACE
+// for fixture wiring — reference id derivation, not sibling-cap addressing.
+#![allow(clippy::disallowed_methods)]
+
 use aether_actor::Actor;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_data::{Kind, mailbox_id_from_name};

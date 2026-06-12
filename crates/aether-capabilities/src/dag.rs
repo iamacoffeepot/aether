@@ -239,7 +239,10 @@ mod native {
 /// Address-resolution helper: the cap's mailbox id, derived from its
 /// `NAMESPACE` via the standard name-hash. Convenience for chassis code
 /// addressing the cap without a runtime lookup.
+// The cap's own mailbox id from its NAMESPACE — a ctx-less convenience for
+// chassis code addressing the cap, not a hardcoded sibling namespace.
 #[must_use]
+#[allow(clippy::disallowed_methods)]
 pub fn dag_mailbox_id() -> aether_data::MailboxId {
     use aether_actor::Actor;
     aether_data::mailbox_id_from_name(<DagCapability as Actor>::NAMESPACE)

@@ -1335,6 +1335,10 @@ impl DriverCapability for DesktopDriverCapability {
             let _ = window_mail_proxy.send_event(UserEvent::WindowMail);
         }));
 
+        // Chassis route-freezing: the desktop driver wires its event loop to
+        // the lifecycle cap's own id (its NAMESPACE) at construction time —
+        // ctx-less, no sibling resolver in scope.
+        #[allow(clippy::disallowed_methods)]
         let lifecycle_mailbox =
             mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
@@ -1359,6 +1363,9 @@ impl DriverCapability for DesktopDriverCapability {
 
         let app = App {
             queue: Arc::clone(&boot.queue),
+            // Chassis route-freezing: the input cap's own id (its NAMESPACE),
+            // ctx-less, no sibling resolver in scope.
+            #[allow(clippy::disallowed_methods)]
             input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             lifecycle_mailbox,
             kind_lifecycle_advance,
@@ -1452,6 +1459,9 @@ impl DriverRunning for DesktopDriverRunning {
 
 #[cfg(test)]
 mod tests {
+    // Tests derive chassis mailbox ids by name to address window/lifecycle mail
+    // in fixtures — reference id derivation, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     #[test]

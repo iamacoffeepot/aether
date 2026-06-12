@@ -85,7 +85,10 @@ macro_rules! native_sender_methods {
 
         /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
         /// from a runtime instance name.
+        // Runtime-name escape hatch: the instance name is only known at
+        // runtime, so there is no `R::resolve` lineage carry to route through.
         #[must_use]
+        #[allow(clippy::disallowed_methods)]
         pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
             NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
         }
@@ -868,6 +871,9 @@ impl MailSender for NativeCtx<'_> {
     }
 
     //noinspection DuplicatedCode
+    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
+    #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(

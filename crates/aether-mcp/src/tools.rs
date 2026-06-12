@@ -879,6 +879,10 @@ impl Mcp {
         let envelope = MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
+                // Runtime-name routing: the out-of-process MCP harness addresses
+                // the dag cap by its well-known wire name (no in-process actor
+                // type to resolve through).
+                #[allow(clippy::disallowed_methods)]
                 mailbox: mailbox_id_from_name(DAG_CAP),
             },
             from: None,
@@ -1794,6 +1798,10 @@ fn level_to_str(level: u8) -> &'static str {
 #[cfg(test)]
 // Test-setup unwraps (tagged-id encode of literal ids, JSON build) panic
 // on failure, which is the assertion; the DAG-tool fixtures lean on them.
+// Test fixtures derive taggable mailbox ids by name to exercise the
+// tagged-string wire round-trip — reference id derivation, not sibling-cap
+// addressing.
+#[allow(clippy::disallowed_methods)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

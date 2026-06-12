@@ -628,7 +628,11 @@ mod server_native {
                     kind: envelope.kind,
                     payload: envelope.payload,
                 };
-                // `mailbox_id_from_name` of `EngineServer::NAMESPACE`.
+                // Runtime-name routing: forwarding a wire `Call` to the
+                // well-known engines cap (`EngineServer::NAMESPACE`); the server
+                // holds opaque MailboxId/KindId/bytes, with no compile-time
+                // sibling type to resolve through.
+                #[allow(clippy::disallowed_methods)]
                 let engine_cap = mailbox_id_from_name("aether.engine");
                 let mail_id = ctx.send_envelope_as_root(
                     engine_cap,
@@ -887,6 +891,9 @@ mod server_native {
 
 #[cfg(test)]
 mod tests {
+    // Test harness resolves echo/target actor mailboxes by their NAMESPACE to
+    // address Call frames — reference id derivation, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use crate::rpc::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use crate::test_chassis::{TestChassis, fresh_substrate};

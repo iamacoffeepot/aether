@@ -171,11 +171,14 @@ mod auto_name_inventory_tests {
     /// this unit-test binary, so the map must then reverse `aether.fs`.
     /// Guards the macro -> submit -> reverse-map chain against a future
     /// regression that stops the bridge emitting the entry.
+    // Probes the reverse map for the fs cap's own id (FsCapability::NAMESPACE)
+    // — the primitive yields the reference id under test.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn chassis_mailbox_name_reverses_via_macro_auto_emitted_name_entry() {
         assert_eq!(FsCapability::NAMESPACE, "aether.fs");
         let map = build_static_reverse_map();
-        let id = mailbox_id_from_name("aether.fs");
+        let id = mailbox_id_from_name(FsCapability::NAMESPACE);
         assert_eq!(
             map.get(&id.0).map(String::as_str),
             Some("aether.fs"),

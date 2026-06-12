@@ -342,6 +342,10 @@ pub const fn thread_id_from_name(name: &str) -> ThreadId {
 
 #[cfg(test)]
 mod tests {
+    // The id/hash primitive's own unit tests call `mailbox_id_from_name` /
+    // `_pair` directly — they are the unit under test, not sibling-cap
+    // addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use alloc::string::String;
 

@@ -133,6 +133,9 @@ fn drive_events_loop(
     let outbound = Arc::clone(&boot.outbound);
     let _ = kind_tick; // PR 3c retired the direct Tick push; the bin now
     // drives `LifecycleAdvance` and the lifecycle driver broadcasts Tick.
+    // Chassis route-freezing: the bin wires its loop to the lifecycle cap's own
+    // id (its NAMESPACE) — ctx-less driver setup, no sibling resolver in scope.
+    #[allow(clippy::disallowed_methods)]
     let lifecycle_mailbox = mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE);
     let kind_lifecycle_advance = <LifecycleAdvance as Kind>::ID;
     let settlement_registry = Arc::clone(passive.settlement_registry());

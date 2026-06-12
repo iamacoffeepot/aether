@@ -967,6 +967,10 @@ mod native {
             if let Some(registry) = self.mailer.settlement_registry() {
                 registry.subscribe_settlement_mail(
                     root,
+                    // The cap's own mailbox id (Self::NAMESPACE) for its
+                    // settlement subscription — a self-address compute with no
+                    // sibling ctx, not a hardcoded peer namespace.
+                    #[allow(clippy::disallowed_methods)]
                     mailbox_id_from_name(<Self as aether_actor::Actor>::NAMESPACE),
                     <Settled as Kind>::ID,
                     Arc::clone(&self.mailer),

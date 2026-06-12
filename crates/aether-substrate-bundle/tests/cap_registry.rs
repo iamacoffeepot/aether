@@ -17,6 +17,9 @@
 // Integration-test skip diagnostic: emit via stderr so `cargo test`
 // surfaces "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
+// Integration test derives the fs cap's own id by name to probe the registry —
+// reference id derivation, not sibling-cap addressing.
+#![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
 

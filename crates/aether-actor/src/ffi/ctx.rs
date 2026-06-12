@@ -81,7 +81,10 @@ impl FfiInitCtx<'_> {
 
     /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
     /// from a runtime instance name.
+    // Runtime-name escape hatch: the instance name is only known at runtime,
+    // so there is no `R::resolve` lineage carry to route through.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
@@ -175,7 +178,10 @@ impl FfiCtx<'_> {
 
     /// Multi-instance sender. Resolve a typed [`FfiActorMailbox`]
     /// from a runtime instance name.
+    // Runtime-name escape hatch: the instance name is only known at runtime,
+    // so there is no `R::resolve` lineage carry to route through.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }
@@ -220,6 +226,10 @@ impl FfiCtx<'_> {
     where
         A: Instanced + FfiActor,
     {
+        // Compile-time actor-type tag for the spawned sibling (hash(NAMESPACE),
+        // ADR-0029) — this is the id definition for the new instance, computed
+        // before any lineage carry exists.
+        #[allow(clippy::disallowed_methods)]
         let tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
         let (is_counter, full_subname) = match subname {
             // `Counter`: pass the type-namespace prefix; the host appends
@@ -282,6 +292,9 @@ impl MailSender for FfiCtx<'_> {
     }
 
     //noinspection DuplicatedCode
+    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
+    #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
@@ -391,6 +404,9 @@ impl MailSender for FfiDropCtx<'_> {
     }
 
     //noinspection DuplicatedCode
+    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
+    #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);

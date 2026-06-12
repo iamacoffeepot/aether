@@ -256,6 +256,10 @@ pub trait HandlesKind<K: Kind>: Actor {}
 
 #[cfg(test)]
 mod tests {
+    // These tests assert the resolve/lineage machinery against the depth-1
+    // name hash — the primitive is the reference value under test, not a
+    // sibling-cap address.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use aether_data::{fold_lineage, mailbox_id_from_name};
 

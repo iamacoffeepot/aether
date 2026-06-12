@@ -16,6 +16,10 @@
 // Step 2 is the P5a proof: before this phase, `engine = Some` Calls
 // were rejected with `RpcError::UnsupportedTarget`.
 
+// Integration test routes a wire Call by runtime mailbox name — runtime-name
+// routing, not sibling-cap addressing.
+#![allow(clippy::disallowed_methods)]
+
 use aether_capabilities::rpc::RpcServerHandle;
 use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,

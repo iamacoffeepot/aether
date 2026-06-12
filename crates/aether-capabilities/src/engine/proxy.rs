@@ -73,6 +73,10 @@ mod proxy_native {
     /// issue 1339). A compile-time const from the well-known name, so no
     /// host round-trip; matches the `RpcServerCapability`'s own
     /// `mailbox_id_from_name("aether.engine")` route lookup.
+    // Well-known engines-cap route shared with `RpcServerCapability`'s own
+    // lookup; a ctx-less free helper in the proxy bridge mod, so there is no
+    // sibling `ctx.actor::<_>()` to resolve through.
+    #[allow(clippy::disallowed_methods)]
     fn engine_cap_mailbox() -> MailboxId {
         mailbox_id_from_name("aether.engine")
     }
@@ -723,6 +727,9 @@ mod proxy_reply_sink {
 
 #[cfg(test)]
 mod tests {
+    // Test harness resolves echo/sink actor mailboxes by their NAMESPACE for
+    // fixture wiring — reference id derivation, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::{
         EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig, HeartbeatParams,
         ProxyReplySink,

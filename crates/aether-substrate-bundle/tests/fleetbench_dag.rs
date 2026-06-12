@@ -27,6 +27,11 @@
 //! live in `mod tests::heavy` so nextest's `test(/::heavy::/)` selector
 //! serializes them in the `serial-heavy` group (and soaks them).
 
+// DAG source nodes address chassis caps (fs/render) by their well-known wire
+// name to build the descriptor — runtime-name routing, not sibling-cap
+// addressing.
+#![allow(clippy::disallowed_methods)]
+
 mod fleetbench;
 
 mod tests {

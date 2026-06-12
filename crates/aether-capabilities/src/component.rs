@@ -325,6 +325,9 @@ mod native {
                 };
                 (
                     group.capabilities.clone(),
+                    // Runtime-name routing: `requested` is the export namespace
+                    // from the wire load request, resolved to its actor-type tag.
+                    #[allow(clippy::disallowed_methods)]
                     Some(aether_data::mailbox_id_from_name(requested).0),
                     Some(requested.clone()),
                 )
@@ -509,6 +512,10 @@ mod native {
 
 #[cfg(test)]
 mod tests {
+    // These tests construct the host carry and assert the canonical
+    // trampoline-address fold against the flat name hash — the primitive is
+    // the reference value under test, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use aether_actor::{Actor, FfiActorMailbox};
     use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
 

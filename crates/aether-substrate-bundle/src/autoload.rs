@@ -49,6 +49,10 @@ pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
     }
     .encode_into_bytes();
     Mail::new(
+        // Boot-time wire mail to the well-known component-host mailbox — a
+        // ctx-less free fn, the same address the hub and test bench load
+        // through, with no sibling resolver in scope.
+        #[allow(clippy::disallowed_methods)]
         mailbox_id_from_name("aether.component"),
         LoadComponent::ID,
         payload,
@@ -58,6 +62,9 @@ pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
 
 #[cfg(test)]
 mod tests {
+    // Asserts the autoload mail targets the component host's own id —
+    // reference id derivation, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
 
     #[test]

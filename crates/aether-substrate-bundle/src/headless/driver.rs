@@ -123,6 +123,9 @@ impl DriverCapability for HeadlessTimerDriverCapability {
 
         Ok(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
+            // Chassis route-freezing: the lifecycle cap's own id (its NAMESPACE),
+            // ctx-less, no sibling resolver in scope.
+            #[allow(clippy::disallowed_methods)]
             lifecycle_mailbox: mailbox_id_from_name(<LifecycleCapability as Actor>::NAMESPACE),
             kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             tick_period,
@@ -242,6 +245,9 @@ impl DriverRunning for HeadlessTimerRunning {
 
 #[cfg(test)]
 mod tests {
+    // Tests derive chassis mailbox ids by name to address fixture mail —
+    // reference id derivation, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::*;
     use std::fs;
     use std::path::PathBuf;

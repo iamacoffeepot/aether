@@ -83,6 +83,9 @@ impl NativeDispatch for RingRelay {
 
 const RING_NS: &str = "mlat.ring";
 
+// Harness wires its synthetic relay-ring topology from precomputed name-hashed
+// ids before any actor spawns — id derivation, not sibling-cap addressing.
+#[allow(clippy::disallowed_methods)]
 fn ring_id(i: usize) -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{RING_NS}:{i}")).0)
 }
@@ -134,6 +137,9 @@ impl NativeDispatch for HoldRelay {
 
 const HOLD_NS: &str = "mlat.hold";
 
+// Harness derives the hold-relay's id from its name to wire the topology —
+// id derivation, not sibling-cap addressing.
+#[allow(clippy::disallowed_methods)]
 fn hold_id() -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{HOLD_NS}:0")).0)
 }

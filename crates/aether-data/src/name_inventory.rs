@@ -414,6 +414,9 @@ mod tests {
         assert_eq!(fill_template("no-hole", "x"), None);
     }
 
+    // Constructs an id to probe the reverse-name map — the primitive is the
+    // unit under test, not a sibling-cap address.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn static_name_entry_reverses_to_real_name() {
         let map = build_static_reverse_map();
