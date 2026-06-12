@@ -1629,6 +1629,65 @@ mod control_plane {
         pub quads: Vec<TexturedQuad>,
     }
 
+    // ADR-0105 text surface. The `aether.text` capability composes the
+    // textured-quad surface above into glyphs: load a TTF off the hot
+    // path under a session-scoped `font_id`, then draw a string every
+    // frame in immediate mode. Postcard-shaped; `space` reuses
+    // `QuadSpace` so a screen-space HUD string and a world-anchored
+    // label ride the same discriminant.
+
+    /// `aether.text.load_font` — fetch a TTF through `aether.fs` and
+    /// register it under a session-scoped `font_id` (assigned the same
+    /// way ADR-0103 assigns instrument ids). `namespace` / `path` address
+    /// the file the same way `aether.fs.read` does (e.g. `"assets"` /
+    /// `"fonts/RobotoMono.ttf"`). The capability forwards the read,
+    /// parses the font off the hot path, and replies `LoadFontResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.text.load_font")]
+    pub struct LoadFont {
+        pub namespace: String,
+        pub path: String,
+    }
+
+    /// Reply to `LoadFont`. `Ok` carries the assigned `font_id` — thread
+    /// it into `DrawText.font_id` — the derived `name` (the file stem),
+    /// and `resident_bytes` (the parsed TTF's byte length). `Err` echoes
+    /// the `namespace` / `path` for correlation plus a human-readable
+    /// reason — a bad path, or a file fontdue could not parse as a font.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.text.load_font_result")]
+    pub enum LoadFontResult {
+        Ok {
+            font_id: u32,
+            name: String,
+            resident_bytes: u64,
+        },
+        Err {
+            namespace: String,
+            path: String,
+            error: String,
+        },
+    }
+
+    /// `aether.text.draw` — lay out and draw `text` in the font named by
+    /// `font_id` at `size_pixels`, every frame the string should appear
+    /// (the same immediate-mode contract as `aether.draw_triangle`: send
+    /// it each frame or it vanishes). `color` is a linear RGBA multiplier
+    /// over the glyph coverage — the alpha channel scales the blend.
+    /// `space` selects the projection: `Screen` flows the string from the
+    /// window's top-left corner along the baseline; `World { anchor,
+    /// scale }` anchors it in the scene. An unknown `font_id` warn-drops.
+    /// Fire-and-forget; no reply.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.text.draw")]
+    pub struct DrawText {
+        pub font_id: u32,
+        pub text: String,
+        pub size_pixels: f32,
+        pub color: [f32; 4],
+        pub space: QuadSpace,
+    }
+
     /// The three window presentation modes. `Windowed` has no fields —
     /// the current size lives on `SetWindowModeResult`.
     /// `FullscreenExclusive` carries the specific video mode; the
@@ -3385,6 +3444,9 @@ mod tests {
         );
         assert_eq!(UpdateTexture::NAME, "aether.render.update_texture");
         assert_eq!(DrawTexturedQuads::NAME, "aether.render.draw_textured_quads");
+        assert_eq!(LoadFont::NAME, "aether.text.load_font");
+        assert_eq!(LoadFontResult::NAME, "aether.text.load_font_result");
+        assert_eq!(DrawText::NAME, "aether.text.draw");
         assert_eq!(SetWindowMode::NAME, "aether.window.set_mode");
         assert_eq!(SetWindowModeResult::NAME, "aether.window.set_mode_result");
         assert_eq!(SetWindowTitle::NAME, "aether.window.set_title");
@@ -3627,6 +3689,85 @@ mod tests {
                 }
                 QuadSpace::Screen => panic!("expected World"),
             }
+        }
+
+        #[test]
+        fn load_font_request_roundtrip() {
+            let r = LoadFont {
+                namespace: "assets".to_string(),
+                path: "fonts/RobotoMono.ttf".to_string(),
+            };
+            let bytes = postcard::to_allocvec(&r).expect("test setup: postcard encodes LoadFont");
+            let back: LoadFont =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes LoadFont");
+            assert_eq!(back.namespace, r.namespace);
+            assert_eq!(back.path, r.path);
+        }
+
+        #[test]
+        fn load_font_result_roundtrip_both_arms() {
+            let ok = LoadFontResult::Ok {
+                font_id: 3,
+                name: "RobotoMono".to_string(),
+                resident_bytes: 183_700,
+            };
+            let bytes = postcard::to_allocvec(&ok)
+                .expect("test setup: postcard encodes LoadFontResult::Ok");
+            let back: LoadFontResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes LoadFontResult::Ok");
+            match back {
+                LoadFontResult::Ok {
+                    font_id,
+                    name,
+                    resident_bytes,
+                } => {
+                    assert_eq!(font_id, 3);
+                    assert_eq!(name, "RobotoMono");
+                    assert_eq!(resident_bytes, 183_700);
+                }
+                LoadFontResult::Err { .. } => panic!("expected Ok"),
+            }
+
+            let err = LoadFontResult::Err {
+                namespace: "assets".to_string(),
+                path: "missing.ttf".to_string(),
+                error: "file read failed".to_string(),
+            };
+            let bytes = postcard::to_allocvec(&err)
+                .expect("test setup: postcard encodes LoadFontResult::Err");
+            let back: LoadFontResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes LoadFontResult::Err");
+            match back {
+                LoadFontResult::Err {
+                    namespace,
+                    path,
+                    error,
+                } => {
+                    assert_eq!(namespace, "assets");
+                    assert_eq!(path, "missing.ttf");
+                    assert_eq!(error, "file read failed");
+                }
+                LoadFontResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+
+        #[test]
+        fn draw_text_screen_roundtrip() {
+            let d = DrawText {
+                font_id: 1,
+                text: "hello aether".to_string(),
+                size_pixels: 32.0,
+                color: [1.0, 0.5, 0.25, 1.0],
+                space: QuadSpace::Screen,
+            };
+            let bytes = postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawText");
+            let back: DrawText =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes DrawText");
+            assert_eq!(back.font_id, 1);
+            assert_eq!(back.text, "hello aether");
+            assert_eq!(back.size_pixels, 32.0);
+            assert_eq!(back.color, [1.0, 0.5, 0.25, 1.0]);
+            assert_eq!(back.space, QuadSpace::Screen);
         }
     }
 
