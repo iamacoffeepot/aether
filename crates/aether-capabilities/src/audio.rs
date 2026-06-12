@@ -9,12 +9,14 @@
 //! [`AudioCapability`] itself.
 //!
 //! Synthesis is hand-rolled (no `SoundFont`, no DSP graph library):
-//! each voice runs one of two kernels — a waveform oscillator through a
-//! linear ADSR, or a fixed bank of inharmonic sine partials with
-//! per-partial exponential decay — summed flat and scaled by master
-//! gain. 8 built-in instruments cover the oscillator shapes (sine /
-//! square / triangle / saw + a pluck-flavoured sawtooth) plus a
-//! partial-bank piano, electric piano, and a slow-swell pad.
+//! each voice runs one of two kernels — a waveform oscillator (a
+//! periodic wave or a seeded noise source, optionally pitch-swept)
+//! through a linear ADSR, or a fixed bank of inharmonic sine partials
+//! with per-partial exponential decay — summed flat and scaled by
+//! master gain. 11 built-in instruments cover the oscillator shapes
+//! (sine / square / triangle / saw + a pluck-flavoured sawtooth), a
+//! partial-bank piano, electric piano, and slow-swell pad, and a
+//! noise / pitch-sweep percussion set (kick / hat / snare).
 //! Per-source / bus-level mixing is deliberately not here — ADR-0039
 //! commits to composing that in user-space via mixer components.
 //!
@@ -190,12 +192,22 @@ mod native {
     /// Primitive waveform the oscillator shapes. `Saw` is a downward ramp
     /// scaled to ±1; `Pluck` reuses `Saw` geometry but pairs with a
     /// fast-decay envelope — kept implicit by the patch table.
+    ///
+    /// `Noise` is the percussion source: white noise from a per-voice
+    /// xorshift32 PRNG (seeded from the voice key, so a fixed key renders
+    /// the same sequence every run), shaped by a one-pole lowpass whose
+    /// `lowpass` coefficient is a patch constant — `1.0` passes the raw
+    /// white noise (bright, a hat), a smaller value smooths it (darker, a
+    /// snare body). `tone_mix` blends in a fixed-level sine at the voice's
+    /// base frequency under the noise (`0.0` is pure noise); it is the one
+    /// patch field that turns a hat patch into a snare.
     #[derive(Copy, Clone, Debug)]
     enum Wave {
         Sine,
         Square,
         Triangle,
         Saw,
+        Noise { lowpass: f32, tone_mix: f32 },
     }
 
     /// Envelope shape — linear segments at sample-rate resolution. Values
@@ -207,6 +219,22 @@ mod native {
         decay_s: f32,
         sustain: f32,
         release_s: f32,
+    }
+
+    /// Optional per-patch pitch envelope on the oscillator kernel — the
+    /// whole identity of a kick. The voice's phase step is multiplied by
+    /// a ratio that starts at `start_ratio` and decays exponentially
+    /// toward `1.0` (the note's base frequency) with the given time
+    /// constant. The decay is precomputed as a per-sample multiplier at
+    /// `note_on`, so the hot loop pays one extra multiply.
+    #[derive(Copy, Clone, Debug)]
+    struct PitchSweep {
+        /// Phase-step multiplier at the note's onset. `4.0` starts two
+        /// octaves above the base frequency; `1.0` is no sweep.
+        start_ratio: f32,
+        /// Exponential time constant (seconds) of the fall back to the
+        /// base frequency. Short (tens of millis) for a punchy kick.
+        time_constant_secs: f32,
     }
 
     /// Number of sine partials in a partial-bank voice. Fixed so the
@@ -277,6 +305,10 @@ mod native {
         name: &'static str,
         voice: VoiceDef,
         base_amp: f32,
+        /// Optional pitch envelope. Applies only to the `Oscillator`
+        /// kernel (the partial bank ignores it); `None` is the common
+        /// case. `Some` is the falling-frequency thump of a kick.
+        pitch_sweep: Option<PitchSweep>,
     }
 
     /// The v1 instrument registry. Index matches `NoteOn.instrument_id`.
@@ -296,6 +328,7 @@ mod native {
                 },
             },
             base_amp: 0.35,
+            pitch_sweep: None,
         },
         InstrumentDef {
             name: "square_bass",
@@ -309,6 +342,7 @@ mod native {
                 },
             },
             base_amp: 0.22,
+            pitch_sweep: None,
         },
         InstrumentDef {
             name: "triangle",
@@ -322,6 +356,7 @@ mod native {
                 },
             },
             base_amp: 0.32,
+            pitch_sweep: None,
         },
         InstrumentDef {
             name: "saw_lead",
@@ -335,6 +370,7 @@ mod native {
                 },
             },
             base_amp: 0.2,
+            pitch_sweep: None,
         },
         InstrumentDef {
             name: "pluck",
@@ -348,6 +384,7 @@ mod native {
                 },
             },
             base_amp: 0.3,
+            pitch_sweep: None,
         },
         // id 5: struck-string piano. Slightly stretched partials, a
         // bright-to-mellow decay (upper partials fade first), and a fast
@@ -365,6 +402,7 @@ mod native {
                 release_s: 0.15,
             }),
             base_amp: 0.3,
+            pitch_sweep: None,
         },
         // id 6: electric piano. Same partial-bank shape, more inharmonic
         // (bell-like), faster decay, and a brighter velocity response —
@@ -382,6 +420,7 @@ mod native {
                 release_s: 0.1,
             }),
             base_amp: 0.28,
+            pitch_sweep: None,
         },
         // id 7: slow-swell pad. Harmonic partials, a long attack, near-
         // zero partial decay so it sustains while held, and a long
@@ -399,6 +438,68 @@ mod native {
                 release_s: 0.6,
             }),
             base_amp: 0.18,
+            pitch_sweep: None,
+        },
+        // id 8: kick. A sine swept down from two octaves above the base
+        // frequency with a fast (30 ms) time constant, through a punchy
+        // no-sustain ADSR — the falling thump that defines a kick. `pitch`
+        // scales the base, so one patch covers kick through toms.
+        InstrumentDef {
+            name: "kick",
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Sine,
+                adsr: Adsr {
+                    attack_s: 0.001,
+                    decay_s: 0.18,
+                    sustain: 0.0,
+                    release_s: 0.02,
+                },
+            },
+            base_amp: 0.9,
+            pitch_sweep: Some(PitchSweep {
+                start_ratio: 4.0,
+                time_constant_secs: 0.03,
+            }),
+        },
+        // id 9: hat. A short burst of bright (near-unfiltered) noise
+        // through a fast no-sustain ADSR. `pitch` shifts the register so
+        // one patch covers closed-versus-open flavours.
+        InstrumentDef {
+            name: "hat",
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Noise {
+                    lowpass: 0.9,
+                    tone_mix: 0.0,
+                },
+                adsr: Adsr {
+                    attack_s: 0.001,
+                    decay_s: 0.04,
+                    sustain: 0.0,
+                    release_s: 0.02,
+                },
+            },
+            base_amp: 0.4,
+            pitch_sweep: None,
+        },
+        // id 10: snare. Darker (lowpassed) noise with a fixed-level sine
+        // body mixed under it (`tone_mix`) — the one patch field that
+        // separates a snare from a hat — through a short no-sustain ADSR.
+        InstrumentDef {
+            name: "snare",
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Noise {
+                    lowpass: 0.5,
+                    tone_mix: 0.25,
+                },
+                adsr: Adsr {
+                    attack_s: 0.001,
+                    decay_s: 0.12,
+                    sustain: 0.0,
+                    release_s: 0.03,
+                },
+            },
+            base_amp: 0.5,
+            pitch_sweep: None,
         },
     ];
 
@@ -446,6 +547,53 @@ mod native {
         wave: Wave,
         adsr: Adsr,
         envelope: EnvelopeStage,
+        /// xorshift32 PRNG state for the `Noise` wave, seeded from the
+        /// voice key. Unused (but harmless) for the periodic waves.
+        rng: u32,
+        /// One-pole lowpass memory for the `Noise` wave (the previous
+        /// filtered output).
+        lp_prev: f32,
+        /// Current pitch-sweep offset added to `1.0` to scale `phase_step`
+        /// this sample. `0.0` when the patch has no sweep.
+        sweep_offset: f32,
+        /// Per-sample multiplier the sweep offset decays by. `1.0` (no
+        /// decay) when the patch has no sweep — the offset is then `0.0`,
+        /// so the ratio stays `1.0`.
+        sweep_decay: f32,
+    }
+
+    /// One step of an xorshift32 PRNG, mapped to white noise in `[-1.0,
+    /// 1.0)`. The state is per-voice so percussion voices are independent
+    /// and a fixed seed is reproducible.
+    fn next_noise(state: &mut u32) -> f32 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *state = x;
+        // Map the full u32 range to [-1.0, 1.0). The mantissa rounding is
+        // inaudible and irrelevant to a noise source.
+        #[allow(clippy::cast_precision_loss)]
+        let frac = (x as f32) / (u32::MAX as f32);
+        frac.mul_add(2.0, -1.0)
+    }
+
+    /// Seed the per-voice noise PRNG from the voice key
+    /// (`sender_mailbox`, `instrument_id`, `pitch`) so a fixed key renders
+    /// the same noise sequence every run. Forced non-zero — xorshift32 is
+    /// stuck at zero.
+    fn voice_seed(sender_mailbox: MailboxId, instrument_id: u8, pitch: u8) -> u32 {
+        // Truncating the 64-bit mailbox id into the hash is intended; the
+        // seed only needs to vary per key, not round-trip.
+        #[allow(clippy::cast_possible_truncation)]
+        let lo = sender_mailbox.0 as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let hi = (sender_mailbox.0 >> 32) as u32;
+        let mixed = lo.wrapping_mul(2_654_435_761)
+            ^ hi.wrapping_mul(40_503)
+            ^ u32::from(instrument_id).wrapping_mul(2_246_822_519)
+            ^ u32::from(pitch).wrapping_mul(3_266_489_917);
+        mixed | 1
     }
 
     impl OscVoice {
@@ -456,6 +604,7 @@ mod native {
             adsr: Adsr,
             base_amp: f32,
             sample_rate: f32,
+            seed: u32,
         ) -> Self {
             let freq = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
             let phase_step = freq / sample_rate;
@@ -468,7 +617,25 @@ mod native {
                 wave,
                 adsr,
                 envelope: EnvelopeStage::Attack { t: 0.0 },
+                rng: seed,
+                lp_prev: 0.0,
+                sweep_offset: 0.0,
+                sweep_decay: 1.0,
             }
+        }
+
+        /// Arm a pitch sweep on a freshly built voice. The offset starts
+        /// at `start_ratio - 1.0` and decays by `sweep_decay` per sample;
+        /// `next_sample` reads `1.0 + sweep_offset` as the phase-step
+        /// multiplier. A non-positive time constant is treated as no
+        /// sweep (the voice keeps its base frequency).
+        fn with_pitch_sweep(mut self, sweep: PitchSweep, sample_rate: f32) -> Self {
+            if sweep.time_constant_secs > 0.0 {
+                let dt = 1.0 / sample_rate;
+                self.sweep_offset = sweep.start_ratio - 1.0;
+                self.sweep_decay = (-dt / sweep.time_constant_secs).exp();
+            }
+            self
         }
 
         fn note_off(&mut self) {
@@ -532,7 +699,10 @@ mod native {
             }
         }
 
-        fn oscillator(&self) -> f32 {
+        /// Render the raw waveform at the current phase. Takes `&mut self`
+        /// because the `Noise` wave advances its PRNG and one-pole filter
+        /// state; the periodic waves only read `phase`.
+        fn waveform(&mut self) -> f32 {
             match self.wave {
                 Wave::Sine => (self.phase * TAU).sin(),
                 Wave::Square => {
@@ -550,16 +720,31 @@ mod native {
                     }
                 }
                 Wave::Saw => 2.0f32.mul_add(-self.phase, 1.0),
+                Wave::Noise { lowpass, tone_mix } => {
+                    let white = next_noise(&mut self.rng);
+                    // One-pole lowpass: y += coeff * (x - y). coeff 1.0
+                    // passes the raw noise; smaller smooths it.
+                    self.lp_prev = lowpass.mul_add(white - self.lp_prev, self.lp_prev);
+                    let noise = self.lp_prev;
+                    if tone_mix > 0.0 {
+                        let tone = (self.phase * TAU).sin();
+                        tone_mix.mul_add(tone, (1.0 - tone_mix) * noise)
+                    } else {
+                        noise
+                    }
+                }
             }
         }
 
         fn next_sample(&mut self, dt: f32) -> f32 {
             let env = self.advance_envelope(dt);
-            let s = self.oscillator() * self.amplitude * env;
-            self.phase += self.phase_step;
+            let s = self.waveform() * self.amplitude * env;
+            let ratio = 1.0 + self.sweep_offset;
+            self.phase += self.phase_step * ratio;
             if self.phase >= 1.0 {
                 self.phase -= 1.0;
             }
+            self.sweep_offset *= self.sweep_decay;
             s
         }
     }
@@ -783,14 +968,15 @@ mod native {
             seq: u64,
         ) -> Self {
             let kernel = match def.voice {
-                VoiceDef::Oscillator { wave, adsr } => VoiceKernel::Oscillator(OscVoice::new(
-                    pitch,
-                    velocity,
-                    wave,
-                    adsr,
-                    def.base_amp,
-                    sample_rate,
-                )),
+                VoiceDef::Oscillator { wave, adsr } => {
+                    let seed = voice_seed(sender_mailbox, instrument_id, pitch);
+                    let mut osc =
+                        OscVoice::new(pitch, velocity, wave, adsr, def.base_amp, sample_rate, seed);
+                    if let Some(sweep) = def.pitch_sweep {
+                        osc = osc.with_pitch_sweep(sweep, sample_rate);
+                    }
+                    VoiceKernel::Oscillator(osc)
+                }
                 VoiceDef::PartialBank(bank) => VoiceKernel::PartialBank(PartialBankVoice::new(
                     pitch,
                     velocity,
@@ -1346,8 +1532,8 @@ mod native {
         }
 
         #[test]
-        fn builtin_registry_lists_eight_patches() {
-            assert_eq!(builtin_count(), 8);
+        fn builtin_registry_lists_eleven_patches() {
+            assert_eq!(builtin_count(), 11);
             assert_eq!(
                 builtin_names(),
                 vec![
@@ -1359,8 +1545,32 @@ mod native {
                     "piano",
                     "electric_piano",
                     "pad",
+                    "kick",
+                    "hat",
+                    "snare",
                 ],
             );
+        }
+
+        /// Every id assigned before this block (0–7) is wire-stable:
+        /// `NoteOn.instrument_id` values already in the wild must keep
+        /// resolving to the same patch, so pin the full prior name table.
+        /// The percussion adds (kick / hat / snare) go strictly after.
+        #[test]
+        fn prior_ids_zero_through_seven_are_wire_stable() {
+            let prior = [
+                "sine_lead",
+                "square_bass",
+                "triangle",
+                "saw_lead",
+                "pluck",
+                "piano",
+                "electric_piano",
+                "pad",
+            ];
+            for (id, name) in prior.iter().enumerate() {
+                assert_eq!(BUILTINS[id].name, *name, "id {id} name drifted");
+            }
         }
 
         /// Pull a `PartialBankDef` out of the registry by name for the
@@ -1504,6 +1714,119 @@ mod native {
             assert!(
                 (after - level).abs() < 1.0e-3,
                 "pad must sustain its level while held: {level} -> {after}",
+            );
+        }
+
+        /// A sustain-holding ADSR (instant attack, no decay, full
+        /// sustain) so a kernel test reads the raw waveform without the
+        /// envelope shaping the level.
+        const HOLD_ADSR: Adsr = Adsr {
+            attack_s: 0.0,
+            decay_s: 0.0,
+            sustain: 1.0,
+            release_s: 0.1,
+        };
+
+        /// Build an oscillator voice and collect `n` samples at 48 kHz.
+        fn collect_osc(wave: Wave, base_amp: f32, seed: u32, n: usize) -> Vec<f32> {
+            let mut voice = OscVoice::new(60, 100, wave, HOLD_ADSR, base_amp, 48_000.0, seed);
+            let dt = 1.0 / 48_000.0;
+            (0..n).map(|_| voice.next_sample(dt)).collect()
+        }
+
+        /// Count sign changes across a sample window — a proxy for
+        /// instantaneous frequency.
+        fn zero_crossings(samples: &[f32]) -> usize {
+            samples
+                .windows(2)
+                .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+                .count()
+        }
+
+        #[test]
+        fn noise_is_bounded_and_nonzero() {
+            let samples = collect_osc(
+                Wave::Noise {
+                    lowpass: 1.0,
+                    tone_mix: 0.0,
+                },
+                1.0,
+                voice_seed(MailboxId(1), 9, 60),
+                4_000,
+            );
+            assert!(
+                samples.iter().all(|s| s.abs() <= 1.0 + f32::EPSILON),
+                "noise sample escaped [-1, 1]",
+            );
+            assert!(
+                samples.iter().any(|s| s.abs() > 0.0),
+                "noise produced silence",
+            );
+        }
+
+        #[test]
+        fn noise_is_deterministic_for_a_fixed_voice_key() {
+            let seed = voice_seed(MailboxId(7), 9, 64);
+            let wave = Wave::Noise {
+                lowpass: 0.8,
+                tone_mix: 0.0,
+            };
+            let first = collect_osc(wave, 1.0, seed, 2_000);
+            let second = collect_osc(wave, 1.0, seed, 2_000);
+            assert_eq!(first, second, "fixed-key noise must be reproducible");
+        }
+
+        #[test]
+        fn lowpass_reduces_sample_to_sample_delta() {
+            let seed = voice_seed(MailboxId(1), 9, 60);
+            let unfiltered = collect_osc(
+                Wave::Noise {
+                    lowpass: 1.0,
+                    tone_mix: 0.0,
+                },
+                1.0,
+                seed,
+                8_000,
+            );
+            let filtered = collect_osc(
+                Wave::Noise {
+                    lowpass: 0.15,
+                    tone_mix: 0.0,
+                },
+                1.0,
+                seed,
+                8_000,
+            );
+            let mean_delta = |s: &[f32]| -> f32 {
+                let sum: f32 = s.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+                // window count is bounded and small — exact in f32.
+                #[allow(clippy::cast_precision_loss)]
+                let count = (s.len() - 1) as f32;
+                sum / count
+            };
+            assert!(
+                mean_delta(&filtered) < mean_delta(&unfiltered),
+                "lowpassed noise should be smoother sample-to-sample",
+            );
+        }
+
+        #[test]
+        fn pitch_sweep_zero_crossing_rate_falls_toward_base() {
+            let mut voice = OscVoice::new(60, 100, Wave::Sine, HOLD_ADSR, 1.0, 48_000.0, 1)
+                .with_pitch_sweep(
+                    PitchSweep {
+                        start_ratio: 8.0,
+                        time_constant_secs: 0.05,
+                    },
+                    48_000.0,
+                );
+            let dt = 1.0 / 48_000.0;
+            let samples: Vec<f32> = (0..19_200).map(|_| voice.next_sample(dt)).collect();
+            let onset = zero_crossings(&samples[0..2_400]);
+            let settled = zero_crossings(&samples[16_800..19_200]);
+            assert!(
+                settled < onset,
+                "swept pitch should slow toward the base frequency: onset {onset}, settled {settled}",
             );
         }
 
