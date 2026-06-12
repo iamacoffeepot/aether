@@ -23,6 +23,7 @@ pub mod ctx;
 pub mod error;
 pub mod frame_loop;
 pub mod helpers;
+pub mod inbox;
 pub mod settlement;
 pub mod settlement_counter;
 pub mod settlement_table;

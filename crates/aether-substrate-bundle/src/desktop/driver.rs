@@ -43,7 +43,8 @@ use aether_substrate::chassis::settlement::{
 };
 use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
-    HubOutbound, Mailer, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
+    ClaimedInbox, HubOutbound, InboundMail, Mailer, SharedActorSlots, Source, SourceAddr,
+    SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
@@ -58,7 +59,6 @@ use super::chassis::UserEvent;
 use super::render::Gpu;
 use aether_substrate::capture::{CaptureQueue, PendingCapture};
 use std::io;
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use winit::dpi::PhysicalSize;
 
@@ -93,7 +93,7 @@ pub struct App {
     /// — keeps the back-to-back advances from racing the cap's overlap
     /// guard (the same reply-gate the test-bench frame loop uses,
     /// iamacoffeepot/aether#999).
-    lifecycle_reply_inbox: Receiver<Envelope>,
+    lifecycle_reply_inbox: ClaimedInbox,
     /// Mailbox id of [`Self::lifecycle_reply_inbox`], used as the
     /// `Component` reply target stamped onto each `LifecycleAdvance`.
     lifecycle_reply_mailbox: MailboxId,
@@ -157,7 +157,7 @@ pub struct App {
     /// runs and drains even under `ControlFlow::Wait` (set when the
     /// window occludes) — the case `aether.window.focus` most needs,
     /// since the loop is otherwise parked until a winit event arrives.
-    window_inbox: Receiver<Envelope>,
+    window_inbox: ClaimedInbox,
     /// Per-actor [`local::ActorSlots`] carried out of the
     /// [`aether_substrate::MailboxClaim`] this driver produced at boot.
     /// Stamped into TLS via [`local::with_stamped`] around
@@ -384,42 +384,6 @@ fn try_framework_dispatch(mailer: &Arc<Mailer>, self_mailbox: MailboxId, env: &E
         || dispatch_cost_tail_if_matching_free(m, env.sender, self_mailbox, env)
 }
 
-/// Discharge the ADR-0080 §2 settlement bracket for one inbound
-/// `aether.window` envelope. `aether.window` is an `Inbox`
-/// (actor-enqueue) mailbox: the mailer records *no* settlement bracket
-/// on the producer side (`mail/mailer.rs` `Inbox` arm), so the
-/// `InboxHandler` contract (`mail/registry.rs`, ADR-0080 §2) puts the
-/// obligation on the downstream consumer — this hand-rolled window
-/// drain. Without it the inbound Call's root `in_flight` never reaches
-/// zero, no `Settled` fires, no wire `ReplyEnd` is emitted, and a
-/// blocking `send_mail` to `set_mode` / `set_title` / `focus` hangs
-/// (iamacoffeepot/aether#1325, a recurrence of the #846 dropped-bracket
-/// class).
-///
-/// Mirrors the bracket template in
-/// [`DispatcherSlot::dispatch_one`](aether_substrate::actor::native)
-/// (`actor/native/dispatcher_slot.rs:289`): `record_finished` after the
-/// reply, so the reply child's `Sent` is accounted before the inbound
-/// parent's `Finished` (the #1150 flush-before-Finished ordering).
-///
-/// Deliberately **settlement-only**: it discharges `in_flight` via
-/// `record_finished` but does not additionally push `Received` /
-/// `Finished` `TraceEvent`s into the driver's per-actor ring the way
-/// `dispatch_one` does. The bug is a settlement leak, not a
-/// trace-visibility gap; full trace-event emission is a separable
-/// trace-fidelity change the minimal fix does not need.
-///
-/// Early-returns on `mail_id == MailId::NONE` for legible intent —
-/// `record_finished` also no-ops on `NONE`, so this is belt-and-braces
-/// for the chassis-internal window-size / frame-stats pushes minted with
-/// `MailId::NONE` roots via `push_chassis_root`.
-fn discharge_settlement(mailer: &Mailer, mail_id: MailId, root: MailId) {
-    if mail_id == MailId::NONE {
-        return;
-    }
-    mailer.record_finished(mail_id, root);
-}
-
 /// The disposition of one consumed `aether.lifecycle.advance_reply`
 /// envelope, returned by [`consume_lifecycle_reply`] to
 /// [`App::recv_lifecycle_advance_next`].
@@ -434,59 +398,33 @@ enum LifecycleReplyOutcome {
     Unexpected,
 }
 
-/// Consume one envelope off the lifecycle reply inbox, discharging its
-/// ADR-0094 obligation guard + ADR-0080 §2 settlement bracket exactly
-/// once — the same per-envelope bracket [`App::dispatch_window_envelope`]
-/// runs for the sibling `aether.window` inbox
-/// (iamacoffeepot/aether#1325), applied here at the lifecycle-reply
-/// consume site (iamacoffeepot/aether#1704).
+/// Consume one [`InboundMail`] off the lifecycle reply inbox. The mail's
+/// ADR-0094 obligation guard + ADR-0080 §2 settlement bracket discharge
+/// when the guard falls out of scope (ADR-0106) — the same scope-exit
+/// settle [`App::dispatch_window_envelope`] relies on for the sibling
+/// `aether.window` inbox. The hand-rolled per-arm `record_finished` +
+/// `discharge()` pairs that #1325 / #1704 added retired with the
+/// framework drain: dropping `mail` on either arm settles.
 ///
-/// Both inboxes are hand-rolled `claim_mailbox` consumers that never run
-/// through [`DispatcherSlot::dispatch_one`](aether_substrate::actor::native),
-/// so neither inherits `dispatch_one`'s unconditional discharge tail —
-/// each must run the bracket itself. Post-#1701 the reply envelope
-/// carries a real `mail_id` (the disjoint reply-lineage id), which
-/// **arms** the debug-only obligation guard; dropping it without
-/// [`Envelope::discharge`] panics inside winit's `draw_rect` — a frame
-/// that cannot unwind, so the panic escalates to `abort()` and every
-/// debug desktop run dies on its first painted frame.
-///
-/// On the per-frame path the reply is sent from the lifecycle cap's
-/// `on_settled` in response to a bare, lineage-less `Settled` notice
-/// (`chassis::settlement::push_settlement_notice`), so its `root` is
-/// `MailId::NONE`: the producer's `record_sent_inflight` already no-ops,
-/// and [`discharge_settlement`] here is correspondingly a no-op on the
-/// settlement counter — the live obligation is purely the debug guard.
-/// The `discharge_settlement` call is kept for symmetry with the window
-/// arm and to balance any future non-`NONE`-root reply this inbox might
-/// receive (the degraded `on_advance` inline-reply paths). Since this is
-/// the sole consumer of these reply envelopes — nothing else records
-/// their `Finished` — the bracket can never double-discharge.
+/// On the per-frame path the reply rides a bare, lineage-less `Settled`
+/// notice, so its `root` is `MailId::NONE` and the drop's `record_finished`
+/// is a counter no-op; the live obligation it discharges is the debug
+/// guard the real `route_mail` Inbox arm armed.
 //
-// `env` is taken by value (not `&Envelope`): this consume site owns the
-// envelope it drained off the inbox, so it owns the drop — `env.discharge()`
-// disarms the guard and the envelope drops here, mirroring
-// `dispatch_window_envelope`'s owning-handoff shape.
+// `mail` is taken by value so its guard's `Drop` (the settlement) binds
+// to this scope; the body only calls `&self` accessors, which clippy
+// reads as a needless by-value.
 #[allow(clippy::needless_pass_by_value)]
-fn consume_lifecycle_reply(mailer: &Mailer, env: Envelope) -> LifecycleReplyOutcome {
-    // Capture the settlement identity before the discharge below; mirrors
-    // `dispatch_window_envelope`'s pre-arm capture (driver.rs#1325).
-    let mail_id = env.mail_id;
-    let root = env.root;
-    let outcome = if env.kind == <LifecycleAdvanceComplete as Kind>::ID {
+fn consume_lifecycle_reply(mail: InboundMail) -> LifecycleReplyOutcome {
+    if mail.kind() == <LifecycleAdvanceComplete as Kind>::ID {
         LifecycleReplyOutcome::Complete(
-            LifecycleAdvanceComplete::decode_from_bytes(env.payload.bytes())
+            LifecycleAdvanceComplete::decode_from_bytes(mail.payload())
                 .map(|complete| complete.next),
         )
     } else {
         LifecycleReplyOutcome::Unexpected
-    };
-    // ADR-0080 §2 settlement discharge + ADR-0094 guard disarm, once per
-    // envelope on both arms — the matched advance-complete return and the
-    // skip-unexpected continue — mirroring `dispatch_window_envelope`.
-    discharge_settlement(mailer, mail_id, root);
-    env.discharge();
-    outcome
+    }
+    // `mail` drops here — both arms settle (ADR-0106).
 }
 
 /// The disposition of a `capture_frame` wake against the current window
@@ -725,19 +663,18 @@ impl App {
     /// the caller can fail-fast.
     fn recv_lifecycle_advance_next(&self) -> Option<u64> {
         loop {
-            let env = self
+            let mail = self
                 .lifecycle_reply_inbox
-                .recv_timeout(FRAME_SETTLEMENT_CAP)
-                .ok()?;
-            // iamacoffeepot/aether#1704: every consumed reply envelope must
-            // discharge its ADR-0094 obligation guard + ADR-0080 §2
-            // settlement bracket (see `consume_lifecycle_reply`), or the
-            // armed guard aborts the process on drop in debug builds.
-            match consume_lifecycle_reply(&self.queue, env) {
+                .recv_timeout(FRAME_SETTLEMENT_CAP)?;
+            // ADR-0106: the consumed reply settles when its `InboundMail`
+            // guard drops inside `consume_lifecycle_reply` — no hand-rolled
+            // bracket. Pre-#1704 a dropped armed guard aborted the process
+            // on every painted frame.
+            match consume_lifecycle_reply(mail) {
                 LifecycleReplyOutcome::Complete(next) => return next,
                 // Unexpected kind on this dedicated reply inbox (nothing
-                // else targets it); already discharged — keep waiting for
-                // the advance reply rather than mis-gating the cycle.
+                // else targets it); already settled — keep waiting for the
+                // advance reply rather than mis-gating the cycle.
                 LifecycleReplyOutcome::Unexpected => {}
             }
         }
@@ -816,7 +753,6 @@ impl App {
     /// per-actor `ActorLogRing` / `ActorTraceRing` (the same property
     /// `DispatcherSlot::run_cycle` opens for every standard actor).
     fn drain_window_inbox(&mut self) {
-        use std::sync::mpsc::TryRecvError;
         // Stamp once around the whole drain rather than per-envelope —
         // the stamp is cheap (single TLS write + RAII guard) but keeping
         // it open across the full burst means a handler that fires
@@ -824,103 +760,79 @@ impl App {
         // in the driver's ring.
         let slots = self.actor_slots.clone();
         local::with_stamped(slots.slots(), || {
-            loop {
-                match self.window_inbox.try_recv() {
-                    Ok(env) => self.dispatch_window_envelope(env),
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
-                }
+            // ADR-0106: `try_next` yields each mail as an owned
+            // `InboundMail` guard, so dispatch can still take `&mut self`
+            // (the guard borrows nothing from `self.window_inbox`). Each
+            // guard settles its inbound when `dispatch_window_envelope`
+            // returns — no hand-rolled per-arm bracket.
+            while let Some(mail) = self.window_inbox.try_next() {
+                self.dispatch_window_envelope(mail);
             }
         });
     }
 
-    // `env` is owned because the dispatch borrows `env.sender`,
-    // `env.payload`, and `env.kind` separately as it walks the
-    // window-control kind set; taking `&Envelope` works but loses the
-    // owning-handoff symmetry with the rest of the dispatch surface.
+    // ADR-0106: `mail` is an owned `InboundMail` guard. It settles its
+    // ADR-0080 §2 bracket + ADR-0094 obligation when it falls out of
+    // scope at the end of this function — on every arm, including the
+    // decode-error early returns — so there is no hand-rolled
+    // `record_finished` / `discharge` pair. Replies go through
+    // `mail.reply`, which joins the inbound's causal chain (ADR-0080
+    // §5/§6) instead of minting the bare lineage-less NONE triple.
+    //
+    // `mail` is taken by value so its guard's `Drop` (the settlement)
+    // binds to this scope; the body only calls `&self` methods on it,
+    // which clippy reads as a needless by-value.
     #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_window_envelope(&mut self, env: Envelope) {
-        // iamacoffeepot/aether#1325: capture the inbound settlement
-        // identity before any arm moves fields out of the owned `env`,
-        // so the ADR-0080 §2 bracket is discharged for every
-        // driver-specific arm below (see `discharge_settlement`).
-        let mail_id = env.mail_id;
-        let root = env.root;
+    fn dispatch_window_envelope(&mut self, mail: InboundMail) {
         // iamacoffeepot/aether#1272: framework-built-in dispatch arms
         // run BEFORE the driver-specific kinds, matching
         // `DispatcherSlot::run_cycle`'s ordering. Factored into a free
-        // fn so the desktop-driver unit test exercises the routing
-        // shape directly without standing up a winit `App`. The
-        // matching `DispatcherSlot::run_cycle`'s ordering. The framework
-        // arms reply but (unlike `dispatch_one`, which records `Finished`
-        // unconditionally at its tail for every arm) do NOT record their
-        // own settlement bracket — so we discharge here on the
-        // early-return path too, mirroring `dispatch_one`'s unconditional
-        // tail. ADR-0094: `env.discharge()` disarms the obligation guard
-        // beside that settlement discharge.
-        if try_framework_dispatch(&self.queue, self.window_mailbox, &env) {
-            discharge_settlement(&self.queue, mail_id, root);
-            env.discharge();
+        // fn so the desktop-driver unit test exercises the routing shape
+        // directly without standing up a winit `App`. On a match the
+        // free fn has already replied; the guard settles on return.
+        if try_framework_dispatch(&self.queue, self.window_mailbox, mail.envelope()) {
             return;
         }
-        if env.kind == self.kind_set_window_mode {
-            let payload: SetWindowMode = match postcard::from_bytes(env.payload.bytes()) {
+        if mail.kind() == self.kind_set_window_mode {
+            let payload: SetWindowMode = match postcard::from_bytes(mail.payload()) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.queue.send_reply(
-                        env.sender,
-                        &SetWindowModeResult::Err {
-                            error: format!("postcard decode failed: {e}"),
-                        },
-                    );
-                    discharge_settlement(&self.queue, mail_id, root);
-                    env.discharge();
+                    mail.reply(&SetWindowModeResult::Err {
+                        error: format!("postcard decode failed: {e}"),
+                    });
                     return;
                 }
             };
             let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
-            self.queue.send_reply(env.sender, &result);
-        } else if env.kind == self.kind_set_window_title {
-            let payload: SetWindowTitle = match postcard::from_bytes(env.payload.bytes()) {
+            mail.reply(&result);
+        } else if mail.kind() == self.kind_set_window_title {
+            let payload: SetWindowTitle = match postcard::from_bytes(mail.payload()) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.queue.send_reply(
-                        env.sender,
-                        &SetWindowTitleResult::Err {
-                            error: format!("postcard decode failed: {e}"),
-                        },
-                    );
-                    discharge_settlement(&self.queue, mail_id, root);
-                    env.discharge();
+                    mail.reply(&SetWindowTitleResult::Err {
+                        error: format!("postcard decode failed: {e}"),
+                    });
                     return;
                 }
             };
             let result = self.apply_window_title(payload.title);
-            self.queue.send_reply(env.sender, &result);
-        } else if env.kind == self.kind_focus_window {
+            mail.reply(&result);
+        } else if mail.kind() == self.kind_focus_window {
             // `FocusWindow` is a unit payload — nothing to decode.
-            // Reply through `self.queue.send_reply` (the `Mailer`),
-            // never `self.outbound` (`HubOutbound` drops
+            // Reply through `mail.reply` (the chain-joined `Mailer`
+            // path), never `self.outbound` (`HubOutbound` drops
             // `SourceAddr::Component`, iamacoffeepot/aether#1316).
             let result = self.apply_window_focus();
-            self.queue.send_reply(env.sender, &result);
+            mail.reply(&result);
         } else {
             tracing::warn!(
                 target: "aether_substrate::driver",
-                kind = %env.kind_name,
+                kind = %mail.kind_name(),
                 "desktop driver dropped unrecognised aether.window kind",
             );
         }
-        // iamacoffeepot/aether#1325 / §Side finding #2: discharge the
-        // ADR-0080 §2 settlement bracket once per envelope at the
-        // drain-loop level (after `send_reply`), covering the two
-        // success arms AND the unrecognised-kind warn-drop arm — a
-        // blocking send of an unhandled window kind carrying a non-NONE
-        // root would otherwise leak settlement the same way. Mirrors
-        // `dispatch_one` (`dispatcher_slot.rs:289`).
-        discharge_settlement(&self.queue, mail_id, root);
-        // ADR-0094: disarm the obligation guard beside the settlement
-        // discharge for the success + unrecognised-kind arms.
-        env.discharge();
+        // `mail` drops here — the success arms AND the unrecognised-kind
+        // warn-drop arm settle (ADR-0106).
     }
 
     fn publish_window_size(&self, width: u32, height: u32) {
@@ -1450,7 +1362,7 @@ impl DriverCapability for DesktopDriverCapability {
             input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             lifecycle_mailbox,
             kind_lifecycle_advance,
-            lifecycle_reply_inbox: lifecycle_reply_claim.receiver,
+            lifecycle_reply_inbox: lifecycle_reply_claim.inbox,
             lifecycle_reply_mailbox: lifecycle_reply_claim.id,
             kind_key,
             kind_key_release,
@@ -1469,7 +1381,7 @@ impl DriverCapability for DesktopDriverCapability {
             boot_size,
             boot_title,
             current_mode: boot_mode,
-            window_inbox: window_claim.receiver,
+            window_inbox: window_claim.inbox,
             actor_slots: window_claim.actor_slots,
             window_mailbox: window_claim.id,
             kind_set_window_mode,
@@ -1723,60 +1635,102 @@ mod tests {
         assert!(rx.try_recv().is_err(), "no reply emitted on skip path");
     }
 
-    /// iamacoffeepot/aether#1325: the window inbox drain owns the
-    /// ADR-0080 §2 settlement bracket for every inbound envelope (the
-    /// `Inbox` mailbox records none on the producer side). Drive the
-    /// extracted `discharge_settlement` free fn — the same call the
-    /// driver makes per envelope — against a seeded in-flight root and
-    /// assert it settles. This is the CI-runnable regression guard for
-    /// every window-kind arm without standing up winit/wgpu; the
-    /// windowed end-to-end blocking-send path stays MCP-manual.
+    /// iamacoffeepot/aether#1325, re-homed on ADR-0106: the window inbox
+    /// drain owns the ADR-0080 §2 settlement bracket for every inbound
+    /// envelope (the `Inbox` mailbox records none on the producer side),
+    /// now by construction — draining a real armed Call through a
+    /// `ClaimedInbox` and letting the `InboundMail` guard fall out of
+    /// scope settles the root and disarms the ADR-0094 guard (no #1704
+    /// abort). The CI-runnable regression guard for the window drain
+    /// without standing up winit/wgpu; the windowed end-to-end
+    /// blocking-send path stays MCP-manual.
     #[test]
-    fn discharge_settlement_settles_window_root() {
-        use aether_data::MailId;
+    fn window_inbox_drain_settles_root_on_guard_drop() {
+        use std::sync::mpsc;
+
+        use aether_data::{Kind, MailId};
+        use aether_kinds::descriptors;
+        use aether_substrate::ClaimedInbox;
         use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
-        use aether_substrate::mail::registry::Registry;
+        use aether_substrate::mail::Mail;
+        use aether_substrate::mail::registry::{InboxHandler, Registry};
+
+        fn title_payload() -> Vec<u8> {
+            postcard::to_allocvec(&SetWindowTitle {
+                title: "ignored".to_owned(),
+            })
+            .expect("encode SetWindowTitle")
+        }
 
         let registry = Arc::new(Registry::new());
+        for d in descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
         let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Mailer::new(registry, store);
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
-        // Wire a settlement registry into the trace handle (the chassis
-        // builder does both installs at boot, builder.rs:1119-1122) so
-        // the emit-time counter's zero-transition can `fire_settled`.
+        // Wire a settlement registry into both seams (the chassis builder
+        // does both installs at boot, builder.rs:1119-1122) so the
+        // emit-time counter's zero-transition can `fire_settled`.
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
         mailer
             .trace_handle()
             .install_settlement_registry(Arc::clone(&settlement));
 
-        // Mint a root, seed its emit-time `in_flight`, and subscribe its
-        // settlement the way the driver does at driver.rs:606. A second
-        // root stays seeded but is only ever poked by the NONE discharge
-        // below — its receiver proves that arm is a no-op.
+        // Register the window mailbox forwarding armed envelopes onto the
+        // `ClaimedInbox`'s channel, exactly as `claim_mailbox` does.
         let window_mailbox = mailbox_id_from_name("aether.window");
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+            let _ = tx.send(d);
+        });
+        registry
+            .try_register_inbox_with_id(window_mailbox, "aether.window", handler)
+            .expect("register the window inbox");
+        let inbox = ClaimedInbox::new(window_mailbox, rx, Arc::clone(&mailer));
+
+        // A real armed Call: seed the root, push through the mailer so the
+        // `route_mail` Inbox arm arms the obligation guard with `mail_id`,
+        // drain via `try_next`, then drop — the guard's `Drop` records
+        // `Finished` and disarms, settling the root.
         let root = MailId::new(window_mailbox, 1);
         let mail_id = MailId::new(window_mailbox, 2);
-        let guard_root = MailId::new(window_mailbox, 3);
         mailer.record_sent_inflight(root);
+        let settle = settlement.subscribe_settlement(root);
+        mailer.push(
+            Mail::new(
+                window_mailbox,
+                <SetWindowTitle as Kind>::ID,
+                title_payload(),
+                1,
+            )
+            .with_lineage(mail_id, root, None),
+        );
+        drop(inbox.try_next().expect("the armed Call is queued"));
+        settle
+            .recv()
+            .expect("window root settles when the drained mail's guard drops");
+
+        // A `MailId::NONE` push (window-size / frame-stats) settles
+        // nothing — the guard mints disarmed and `record_finished` no-ops.
+        let guard_root = MailId::new(window_mailbox, 3);
         mailer.record_sent_inflight(guard_root);
-        let rx = settlement.subscribe_settlement(root);
         let guard_rx = settlement.subscribe_settlement(guard_root);
-
-        // The per-envelope discharge the drain loop performs after
-        // `send_reply`. With it, the inbound root's `in_flight` reaches
-        // zero and `Settled` fires.
-        discharge_settlement(&mailer, mail_id, root);
-        rx.recv().expect("window root settles after discharge");
-
-        // The chassis-internal-push guard: a `MailId::NONE` envelope
-        // (window-size / frame-stats pushes) is a no-op — `guard_root`
-        // stays in-flight and its receiver never wakes.
-        discharge_settlement(&mailer, MailId::NONE, guard_root);
+        mailer.push(
+            Mail::new(
+                window_mailbox,
+                <SetWindowTitle as Kind>::ID,
+                title_payload(),
+                1,
+            )
+            .with_lineage(MailId::NONE, guard_root, None),
+        );
+        drop(inbox.try_next().expect("the NONE push is queued"));
         assert!(
             guard_rx.try_recv().is_err(),
-            "NONE discharge must not settle any root",
+            "a NONE inbound discharges no root",
         );
     }
 
@@ -1798,13 +1752,14 @@ mod tests {
         use std::sync::mpsc;
 
         use aether_data::MailId;
+        use aether_substrate::ClaimedInbox;
         use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
 
         let registry = Arc::new(Registry::new());
         let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Mailer::new(Arc::clone(&registry), store);
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
         // Wire one settlement registry into both seams (the chassis builder
         // does both installs at boot) so the counter's zero-transition can
@@ -1816,8 +1771,9 @@ mod tests {
             .install_settlement_registry(Arc::clone(&settlement));
 
         // Register the reply inbox exactly as `claim_mailbox` does: forward
-        // the obligation-armed envelope onto an mpsc, carrying its guard
-        // with it so the consumer side owns the discharge.
+        // the obligation-armed envelope onto the `ClaimedInbox`'s channel,
+        // carrying its guard with it so the framework drain owns the
+        // discharge.
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: Envelope| {
             let _ = tx.send(dispatch);
@@ -1825,13 +1781,15 @@ mod tests {
         let reply_mailbox = registry
             .try_register_inbox("aether.lifecycle.advance_reply", handler)
             .expect("register the reply inbox");
+        let inbox = ClaimedInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
         let cap_mailbox = mailbox_id_from_name("aether.lifecycle");
 
         // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against
-        // `root`, and the consume-site discharge is the sole `Finished`, so
-        // the root settles.
+        // `root`, and the `InboundMail` guard's `Drop` inside
+        // `consume_lifecycle_reply` is the sole `Finished`, so the root
+        // settles.
         let root = MailId::new(cap_mailbox, 1);
         // 1<<63 is the disjoint reply-lineage base (#1701) — a non-`NONE`
         // mail_id, so the real Inbox arm arms the obligation guard.
@@ -1848,8 +1806,8 @@ mod tests {
             root,
             None,
         );
-        let env = rx.recv().expect("armed reply routed to the inbox");
-        match consume_lifecycle_reply(&mailer, env) {
+        let mail = inbox.try_next().expect("armed reply routed to the inbox");
+        match consume_lifecycle_reply(mail) {
             LifecycleReplyOutcome::Complete(next) => {
                 assert_eq!(next, Some(42), "decodes the advance-complete `next`");
             }
@@ -1857,14 +1815,14 @@ mod tests {
         }
         settle_rx
             .recv()
-            .expect("the consume-site discharge balances the reply's Sent and settles the root");
+            .expect("the guard's Finished balances the reply's Sent and settles the root");
 
         // (2) `NONE`-root reply (the real per-frame deferred path, replying
         // to a bare lineage-less `Settled` notice): the producer's
-        // `record_sent_inflight` no-ops, the discharge is a counter no-op,
-        // and the armed guard is still disarmed so the envelope drops
-        // without the ADR-0094 abort. Reaching the assert at all proves the
-        // guard was disarmed.
+        // `record_sent_inflight` no-ops, the drop's `record_finished` is a
+        // counter no-op, and the armed guard is still disarmed so the
+        // envelope drops without the ADR-0094 abort. Reaching the assert at
+        // all proves the guard was disarmed.
         let armed_reply_id_2 = MailId::new(cap_mailbox, (1 << 63) + 1);
         let sender_2 = Source::with_correlation(SourceAddr::Component(reply_mailbox), 8);
         mailer.send_reply_with_lineage(
@@ -1877,8 +1835,10 @@ mod tests {
             MailId::NONE,
             None,
         );
-        let env_2 = rx.recv().expect("second armed reply routed to the inbox");
-        match consume_lifecycle_reply(&mailer, env_2) {
+        let mail_2 = inbox
+            .try_next()
+            .expect("second armed reply routed to the inbox");
+        match consume_lifecycle_reply(mail_2) {
             LifecycleReplyOutcome::Complete(next) => {
                 assert_eq!(next, Some(0), "the terminal reply decodes `next == 0`");
             }

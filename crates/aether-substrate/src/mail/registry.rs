@@ -582,6 +582,20 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// Release builds compile the guard out entirely (no field, no `Drop`),
 /// so it is zero-cost. Test/helper mints use the disarmed constructor.
 ///
+/// **ADR-0106: prefer the framework drain.** A capability that claims a
+/// mailbox via
+/// [`ChassisCtx::claim_mailbox`](crate::chassis::ctx::ChassisCtx::claim_mailbox)
+/// no longer hand-rolls this bracket: the claim carries a
+/// [`ClaimedInbox`](crate::chassis::inbox::ClaimedInbox) whose drain
+/// methods yield each mail as an
+/// [`InboundMail`](crate::chassis::inbox::InboundMail) guard that records
+/// `Finished` + disarms on scope exit, so every arm settles by
+/// construction. Hand-rolling an `impl InboxHandler` and pairing
+/// `record_finished` with `discharge` per arm is the move-onward relay
+/// shape (the three production closures route through `relay_or_transfer`)
+/// — reach for it only when forwarding the dispatch onward, not when
+/// consuming it.
+///
 /// The owned dispatch type is the structural hint: payload arrives
 /// as `Vec<u8>`, so moving it into an mpsc `Sender` is a single
 /// move, not a clone. A handler that does immediate synchronous
