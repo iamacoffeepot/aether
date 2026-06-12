@@ -113,7 +113,13 @@ For each sub-phase: read inputs, write the corresponding body section, advance t
     | while read -r l; do gh api -X DELETE "repos/iamacoffeepot/aether/issues/<n>/labels/$l"; done \
     && gh api -X POST "repos/iamacoffeepot/aether/issues/<n>/labels" -f "labels[]=size:<x>"
   ```
-- **Model opt-in** — leave the model unlabelled by default: an absent `model:*` label means the dispatched agent inherits the orchestrator's own model (whatever the dispatcher is running — e.g. Opus when the dispatcher is Opus). Stamp a *downgrade* — `model:sonnet` or `model:haiku` — only when the work is mechanical and fully specified by the plan (typically S), never when the design required non-obvious reasoning, whatever the size. Never stamp a top-tier label (`model:opus` / `model:fable`), since absence already routes to the dispatcher's model. The gate encodes a size-asymmetry: a downward misjudgment costs more as size grows, so an M/L downgrade demands a plan that reads as executable verbatim. The full `model:fable|opus|sonnet|haiku` vocabulary exists so a human can pin any model explicitly; `/scope` only ever stamps the two downgrades. When you stamp a model label, note the choice in the Plan audit comment.
+- **Model routing (required)** — every issue leaves Plan with exactly one `model:*` label; `/approve` refuses an unlabelled issue. The label names the model the dispatched agent runs — there is no inherit-the-dispatcher fallback. Stamp it over the same REST `…/labels` endpoints as the size mirror, in the same step. Pick by the work, defaulting cheap:
+  - `model:haiku` — trivial text-only work: doc links, label fixes, one-line config tweaks.
+  - `model:sonnet` — the default for mechanical work fully specified by the plan (typically S, and an M whose plan reads as executable verbatim).
+  - `model:opus` — the implementation itself requires non-obvious judgment: cross-crate L work, design-adjacent changes, plans with open exploration.
+  - `model:fable` — never stamped by `/scope`; reserved for a human pinning the top tier explicitly.
+
+  The gate encodes a size-asymmetry: a downward misjudgment costs more as size grows, so an M/L `model:sonnet` demands a plan that reads as executable verbatim — when in doubt at M or L, stamp `model:opus`. Note the choice and a one-clause reason in the Plan audit comment.
 - **Project board**: leave `Phase=Plan`; set `AgentReady=No` (default, but explicit). This is the resting state awaiting `/approve`.
 
 ## Side findings
