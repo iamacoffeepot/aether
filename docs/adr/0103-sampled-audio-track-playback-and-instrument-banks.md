@@ -57,12 +57,14 @@ No unload and no dedup in v1: loading the same bank twice appends two ids, and b
 A bank is an `.sfz` file plus the WAV files it references, fetched from the same fs namespace relative to the `.sfz` path. SFZ is chosen because freely licensed sample sets ship in it — the alternative is inventing a manifest and converting every set by hand. The subset is deliberately small, parsed by a hand-rolled line-oriented parser (the format is `opcode=value` runs under `<header>` tags; no dependency earns its place):
 
 - Headers: `<control>` (for `default_path`), `<group>`, `<region>`, with group→region opcode inheritance.
-- Opcodes: `sample`, `lokey` / `hikey`, `pitch_keycenter`, `lovel` / `hivel`, `loop_start` / `loop_end`, `loop_mode`.
+- Opcodes: `sample`, `lokey` / `hikey`, `pitch_keycenter`, `lovel` / `hivel`.
 - Unknown opcodes warn and are ignored, so real-world files load rather than failing on the first envelope opcode outside the subset.
+
+The first delivery is piano-first: full-decay sets need no sustain loops, so the loop opcodes (`loop_start` / `loop_end` / `loop_mode`) are deliberately outside the initial subset and join with iamacoffeepot/aether#1682 — until then they fall under warn-and-ignore like any other opcode. Loop points arrive in source-sample frames and are scaled by the resample ratio at load time (the bank stores device-rate positions, fractional, so the wrap interpolates sub-sample).
 
 ### 6. Sample voice kernel
 
-A third voice kernel joins `Oscillator` and `PartialBank`: region selected by `(pitch, velocity)`, played back at rate ratio `2^((pitch − pitch_keycenter) / 12)` with linear interpolation over the region's device-rate PCM, looping over `loop_start..loop_end` when the region says so, wrapped in the same short attack ramp / `note_off`-release shape the partial bank uses. Sample voices are ordinary voices: they count against `MAX_VOICES` and participate in voice-steal. The voice pool's element type stops being `Copy` (a sample voice holds a reference-counted bank handle); the pool was never structurally dependent on `Copy`.
+A third voice kernel joins `Oscillator` and `PartialBank`: region selected by `(pitch, velocity)`, played back at rate ratio `2^((pitch − pitch_keycenter) / 12)` with linear interpolation over the region's device-rate PCM, wrapped in the same short attack ramp / `note_off`-release shape the partial bank uses. The first delivery plays unlooped full-decay samples — a held note ends when its sample runs out, which is correct for the piano-first sets. Sustain loops (#1682) extend the kernel: while a region's loop is active the position wraps from `loop_end` back to `loop_start` (interpolating across the seam), holding the note indefinitely until `note_off` hands it to the release ramp; `loop_sustain` is approximated as `loop_continuous` under the release ramp, exact tail playback parked. Sample voices are ordinary voices: they count against `MAX_VOICES` and participate in voice-steal. The voice pool's element type stops being `Copy` (a sample voice holds a reference-counted bank handle); the pool was never structurally dependent on `Copy`.
 
 ### 7. Chassis policy unchanged
 
@@ -102,5 +104,6 @@ Desktop only. Headless and hub reply `Err` to `play_track` and `load_instrument`
 ## Follow-up work
 
 - **#1678**: decode/resample core, fs-mail fetch + pending-table correlation, track lane, `play_track` / `stop_track` / `play_track_result` kinds.
-- **#1679**: SFZ subset parser, extensible registry + `load_instrument` kinds, sample voice kernel.
-- **Parked**: bank unload / track cache eviction; stereo lane; compressed containers (ogg/flac); `resolve_instrument` for cross-session id stability; streaming decode for long-form audio.
+- **#1679**: SFZ subset parser (piano-first, unlooped), extensible registry + `load_instrument` kinds, sample voice kernel.
+- **#1682**: sustain loops — `loop_start` / `loop_end` / `loop_mode` opcodes, loop-region cycling in the sample voice; unlocks the sustaining sets (organ, bowed strings).
+- **Parked**: bank unload / track cache eviction; stereo lane; compressed containers (ogg/flac); `resolve_instrument` for cross-session id stability; exact `loop_sustain` tail playback; streaming decode for long-form audio.
