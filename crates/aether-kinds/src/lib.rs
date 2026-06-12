@@ -1622,6 +1622,70 @@ mod control_plane {
         Err { error: String },
     }
 
+    // ADR-0104 scheduled note events. One `aether.audio.schedule` mail
+    // carries a whole tune as a batch of timed note events; the audio cap
+    // schedules them against its own sample clock so relative timing is
+    // sample-accurate. Postcard-shaped — the batch is a `Vec`, not a
+    // cast-eligible `#[repr(C)]` body.
+
+    /// One note action in a scheduled batch (ADR-0104). The payload
+    /// mirrors `note_on` / `note_off` exactly — a scheduled note allocates
+    /// from the same voice pool, obeys the same steal policy, and keys
+    /// note-off matching by the scheduling sender, as if the equivalent
+    /// mail had arrived at the event's due instant.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum ScheduledNote {
+        On {
+            pitch: u8,
+            velocity: u8,
+            instrument_id: u8,
+        },
+        Off {
+            pitch: u8,
+            instrument_id: u8,
+        },
+    }
+
+    /// A timed entry in an `aether.audio.schedule` batch (ADR-0104).
+    /// `at_millis` is the play-at offset relative to the batch's arrival
+    /// at the audio callback, so every event in one batch shares a single
+    /// timebase and simultaneous events (a chord) stay aligned. Offsets
+    /// run forward from receipt; there is no notion of a past due time.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct ScheduledEvent {
+        pub at_millis: u32,
+        pub event: ScheduledNote,
+    }
+
+    /// `aether.audio.schedule` — dispatch a batch of timed note events in
+    /// a single mail (ADR-0104), so a melody plays with correct relative
+    /// timing instead of collapsing into a cluster chord. The cap
+    /// validates the batch synchronously — an events-per-batch cap and a
+    /// horizon cap on `at_millis`, rejecting the whole batch atomically on
+    /// any invalid entry — and replies `ScheduleResult` in-handler. The
+    /// accepted batch crosses to the audio callback as one event; the
+    /// synth converts each `at_millis` to an absolute due frame at receipt
+    /// and fires the events sample-accurately inside its render loop.
+    /// Desktop-only — chassis without an audio device reply `Err`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.schedule")]
+    pub struct Schedule {
+        pub events: Vec<ScheduledEvent>,
+    }
+
+    /// Reply to `Schedule`. `Ok { accepted }` reports how many events the
+    /// batch admitted — a score player can trust that an `Ok` batch plays
+    /// in full, since validation is atomic. `Err` carries a human-readable
+    /// reason — an over-cap batch size, an over-horizon `at_millis`, or a
+    /// chassis without an audio device — loud rather than logged-and-
+    /// dropped (ADR-0104).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.schedule_result")]
+    pub enum ScheduleResult {
+        Ok { accepted: u32 },
+        Err { error: String },
+    }
+
     // ADR-0103 track playback. The audio cap plays a decoded audio asset
     // (music, ambience) in its own mixer lane, addressed by fs namespace
     // + path the way the rest of the substrate addresses files (ADR-0041).
@@ -3213,6 +3277,8 @@ mod tests {
             SetMasterGainResult::NAME,
             "aether.audio.set_master_gain_result"
         );
+        assert_eq!(Schedule::NAME, "aether.audio.schedule");
+        assert_eq!(ScheduleResult::NAME, "aether.audio.schedule_result");
         assert_eq!(PlayTrack::NAME, "aether.audio.play_track");
         assert_eq!(PlayTrackResult::NAME, "aether.audio.play_track_result");
         assert_eq!(StopTrack::NAME, "aether.audio.stop_track");
@@ -3759,6 +3825,70 @@ mod tests {
                 .expect("decode ReplaceComponent round-trip");
             assert_eq!(back.config, vec![0x01, 0x02, 0x03]);
             assert_eq!(back.mailbox_id, aether_data::MailboxId(7));
+        }
+
+        #[test]
+        fn schedule_roundtrips_timed_note_batch() {
+            // ADR-0104: the timed batch must survive the wire intact —
+            // a note-on and its later note-off both carry their offset and
+            // payload so the synth can place them on its sample clock.
+            let schedule = Schedule {
+                events: vec![
+                    ScheduledEvent {
+                        at_millis: 0,
+                        event: ScheduledNote::On {
+                            pitch: 60,
+                            velocity: 100,
+                            instrument_id: 0,
+                        },
+                    },
+                    ScheduledEvent {
+                        at_millis: 500,
+                        event: ScheduledNote::Off {
+                            pitch: 60,
+                            instrument_id: 0,
+                        },
+                    },
+                ],
+            };
+            let bytes = schedule.encode_into_bytes();
+            let back = Schedule::decode_from_bytes(&bytes).expect("decode Schedule round-trip");
+            assert_eq!(back.events.len(), 2);
+            assert_eq!(back.events[0].at_millis, 0);
+            assert_eq!(
+                back.events[0].event,
+                ScheduledNote::On {
+                    pitch: 60,
+                    velocity: 100,
+                    instrument_id: 0,
+                },
+            );
+            assert_eq!(back.events[1].at_millis, 500);
+            assert_eq!(
+                back.events[1].event,
+                ScheduledNote::Off {
+                    pitch: 60,
+                    instrument_id: 0,
+                },
+            );
+        }
+
+        #[test]
+        fn schedule_result_roundtrips_both_arms() {
+            let ok = ScheduleResult::Ok { accepted: 7 };
+            let back = ScheduleResult::decode_from_bytes(&ok.encode_into_bytes())
+                .expect("decode ScheduleResult::Ok round-trip");
+            assert!(matches!(back, ScheduleResult::Ok { accepted: 7 }));
+
+            let err = ScheduleResult::Err {
+                error: "batch exceeds the 8192-event cap".to_string(),
+            };
+            let back = ScheduleResult::decode_from_bytes(&err.encode_into_bytes())
+                .expect("decode ScheduleResult::Err round-trip");
+            match back {
+                ScheduleResult::Err { error } => assert!(error.contains("8192-event")),
+                ScheduleResult::Ok { .. } => panic!("expected Err"),
+            }
         }
     }
 }

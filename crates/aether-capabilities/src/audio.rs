@@ -57,7 +57,7 @@
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
 use aether_kinds::{
-    LoadInstrument, NoteOff, NoteOn, PlayTrack, ReadResult, SetMasterGain, StopTrack,
+    LoadInstrument, NoteOff, NoteOn, PlayTrack, ReadResult, Schedule, SetMasterGain, StopTrack,
 };
 
 // `AudioConfig` rides through file root for chassis-bin consumers
@@ -85,6 +85,8 @@ mod sfz;
 
 #[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {
+    use std::cmp::{Ordering, Reverse};
+    use std::collections::BinaryHeap;
     use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::f32::consts::TAU;
@@ -101,7 +103,7 @@ mod native {
     use aether_data::{Kind, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_kinds::{
         LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult, Read, ReadResult,
-        SetMasterGainResult, StopTrack,
+        Schedule, ScheduleResult, ScheduledEvent, ScheduledNote, SetMasterGainResult, StopTrack,
     };
 
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
@@ -134,6 +136,19 @@ mod native {
     /// saturation, voice-steal always evicts the oldest sounding note,
     /// never causing audio glitches.
     const MAX_VOICES: usize = 64;
+
+    /// Maximum note events one `aether.audio.schedule` batch may carry
+    /// (ADR-0104). A batch crosses the event queue as a single slot, so
+    /// this bounds the synth's pending heap rather than the queue; 8192
+    /// events is several minutes of a dense melody (note-on + note-off per
+    /// note). An over-cap batch rejects atomically in the handler reply.
+    const SCHEDULE_MAX_EVENTS: usize = 8192;
+
+    /// Furthest future a scheduled event may be parked, in milliseconds
+    /// (ADR-0104). The horizon bounds how much future a sender can hold in
+    /// the pending heap; ten minutes is generous for a tune dispatched in
+    /// one call. An over-horizon `at_millis` rejects the whole batch.
+    const SCHEDULE_MAX_MILLIS: u32 = 600_000;
 
     /// Resolved configuration for the audio synth. Chassis mains read
     /// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
@@ -229,6 +244,66 @@ mod native {
             id: u8,
             bank: Arc<SampleBank>,
         },
+        /// A validated batch of timed note events (ADR-0104). `sender_mailbox`
+        /// is the scheduling sender, baked in so every scheduled note keys
+        /// its voice (and note-off matching) by the original caller. The
+        /// synth converts each event's `at_millis` to an absolute due frame
+        /// against its frame clock at the instant it drains this event, so
+        /// the whole batch shares one receipt timebase and chords stay
+        /// aligned. One queue slot carries the entire tune.
+        Schedule {
+            sender_mailbox: MailboxId,
+            events: Vec<ScheduledEvent>,
+        },
+    }
+
+    /// One pending scheduled note in the synth's min-heap (ADR-0104).
+    /// Ordered by `(due_frame, seq)` only — `seq` is a monotonic stamp in
+    /// batch-arrival order, so events that fall on the same frame fire in
+    /// the order they were sent. The note payload takes no part in
+    /// ordering, which is why the ordering impls are hand-written rather
+    /// than derived (`ScheduledNote` is not `Ord`).
+    struct ScheduledEntry {
+        due_frame: u64,
+        seq: u64,
+        sender_mailbox: MailboxId,
+        note: ScheduledNote,
+    }
+
+    impl PartialEq for ScheduledEntry {
+        fn eq(&self, other: &Self) -> bool {
+            (self.due_frame, self.seq) == (other.due_frame, other.seq)
+        }
+    }
+
+    impl Eq for ScheduledEntry {}
+
+    impl PartialOrd for ScheduledEntry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for ScheduledEntry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            (self.due_frame, self.seq).cmp(&(other.due_frame, other.seq))
+        }
+    }
+
+    /// Convert a play-at offset in milliseconds to a frame count at the
+    /// device rate (ADR-0104). Added to the frame clock at receipt to land
+    /// the absolute due frame.
+    fn millis_to_frames(at_millis: u32, sample_rate: f32) -> u64 {
+        // `at_millis` is bounded by `SCHEDULE_MAX_MILLIS` and the device
+        // rate is a small positive integer, so the product is well within
+        // u64 and non-negative.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let frames = (f64::from(at_millis) / 1000.0 * f64::from(sample_rate)) as u64;
+        frames
     }
 
     /// Producer side of the audio event queue. The cap holds one (after
@@ -1485,6 +1560,17 @@ mod native {
         /// at allocation. Voice-steal uses the minimum value to locate the
         /// oldest voice regardless of pool order.
         next_seq: u64,
+        /// Running output-frame counter (ADR-0104). Advanced by the frame
+        /// count of every `fill`; the timebase scheduled events are placed
+        /// against and fire from. Callback-owned, so no locking.
+        frame_clock: u64,
+        /// Pending scheduled note events ordered by due frame (ADR-0104),
+        /// a min-heap via `Reverse`. `fill` pops the events that fall on
+        /// each frame and routes them through the note-on / note-off paths.
+        scheduled: BinaryHeap<Reverse<ScheduledEntry>>,
+        /// Monotonic stamp threaded into each `ScheduledEntry::seq` so that
+        /// events on the same due frame fire in batch-arrival order.
+        next_schedule_seq: u64,
     }
 
     impl Synth {
@@ -1497,6 +1583,9 @@ mod native {
                 sample_rate,
                 master_gain: 1.0,
                 next_seq: 0,
+                frame_clock: 0,
+                scheduled: BinaryHeap::new(),
+                next_schedule_seq: 0,
             }
         }
 
@@ -1590,6 +1679,36 @@ mod native {
             });
         }
 
+        /// Release the voice matching `(sender_mailbox, instrument_id,
+        /// pitch)`, if one is sounding. A miss is a silent no-op (a late or
+        /// unmatched note-off), matching the immediate `note_off` path.
+        /// Shared by the queue-drained note-off and the scheduled note-off.
+        fn trigger_note_off(&mut self, sender_mailbox: MailboxId, pitch: u8, instrument_id: u8) {
+            if let Some(v) = self.voices.iter_mut().find(|v| {
+                v.sender_mailbox == sender_mailbox
+                    && v.instrument_id == instrument_id
+                    && v.pitch == pitch
+            }) {
+                v.note_off();
+            }
+        }
+
+        /// Fire one scheduled note event through the same paths the
+        /// immediate mail would take (ADR-0104).
+        fn fire_scheduled(&mut self, sender_mailbox: MailboxId, note: &ScheduledNote) {
+            match *note {
+                ScheduledNote::On {
+                    pitch,
+                    velocity,
+                    instrument_id,
+                } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id),
+                ScheduledNote::Off {
+                    pitch,
+                    instrument_id,
+                } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
+            }
+        }
+
         fn drain_events(&mut self) {
             while let Some(ev) = self.events.pop() {
                 match ev {
@@ -1603,15 +1722,7 @@ mod native {
                         sender_mailbox,
                         pitch,
                         instrument_id,
-                    } => {
-                        if let Some(v) = self.voices.iter_mut().find(|v| {
-                            v.sender_mailbox == sender_mailbox
-                                && v.instrument_id == instrument_id
-                                && v.pitch == pitch
-                        }) {
-                            v.note_off();
-                        }
-                    }
+                    } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
                     AudioEvent::SetMasterGain { gain } => {
                         self.master_gain = gain.clamp(0.0, 1.0);
                     }
@@ -1649,6 +1760,27 @@ mod native {
                             );
                         }
                         self.banks.push(bank);
+                    }
+                    AudioEvent::Schedule {
+                        sender_mailbox,
+                        events,
+                    } => {
+                        // Offsets are relative to receipt at the callback —
+                        // the current frame clock (this drain runs at block
+                        // start). Every event in the batch shares this
+                        // anchor, so simultaneous events stay simultaneous.
+                        for event in events {
+                            let due_frame = self.frame_clock
+                                + millis_to_frames(event.at_millis, self.sample_rate);
+                            let seq = self.next_schedule_seq;
+                            self.next_schedule_seq += 1;
+                            self.scheduled.push(Reverse(ScheduledEntry {
+                                due_frame,
+                                seq,
+                                sender_mailbox,
+                                note: event.event,
+                            }));
+                        }
                     }
                 }
             }
@@ -1709,6 +1841,22 @@ mod native {
             let dt = 1.0 / self.sample_rate;
             let frames = buffer.len() / channels.max(1);
             for frame in 0..frames {
+                // Fire every scheduled event due on or before this frame
+                // before rendering it, so a scheduled note's voice is alive
+                // for the sample it falls on — sample-accurate by
+                // construction (ADR-0104).
+                let absolute = self.frame_clock + frame as u64;
+                loop {
+                    match self.scheduled.peek() {
+                        Some(Reverse(top)) if top.due_frame <= absolute => {}
+                        _ => break,
+                    }
+                    let Reverse(entry) = self
+                        .scheduled
+                        .pop()
+                        .expect("peeked entry is present this iteration");
+                    self.fire_scheduled(entry.sender_mailbox, &entry.note);
+                }
                 let mut sample = 0.0f32;
                 for voice in &mut self.voices {
                     sample += voice.next_sample(dt);
@@ -1725,6 +1873,9 @@ mod native {
                     buffer[start + ch] = sample;
                 }
             }
+            // Advance the clock by this block so the next drain anchors
+            // scheduled offsets against the right receipt frame (ADR-0104).
+            self.frame_clock += frames as u64;
             let mut i = 0;
             while i < self.voices.len() {
                 if self.voices[i].done() {
@@ -1766,6 +1917,11 @@ mod native {
         #[cfg(test)]
         fn bank_count(&self) -> usize {
             self.banks.len()
+        }
+
+        #[cfg(test)]
+        fn scheduled_count(&self) -> usize {
+            self.scheduled.len()
         }
     }
 
@@ -2602,6 +2758,70 @@ mod native {
             }
         }
 
+        /// Schedule a batch of timed note events (ADR-0104).
+        ///
+        /// # Agent
+        /// Reply: `ScheduleResult`. Validates the batch synchronously — a
+        /// non-empty size at or below `SCHEDULE_MAX_EVENTS` and every
+        /// `at_millis` within the `SCHEDULE_MAX_MILLIS` horizon — and
+        /// rejects the whole batch atomically with a loud `Err` on any
+        /// invalid entry. On success the accepted batch crosses to the
+        /// audio callback as one event and `Ok { accepted }` reports the
+        /// count. Nop chassis (headless / hub / disabled / no device) reply
+        /// `Err` fail-fast.
+        #[handler]
+        fn on_schedule(&self, ctx: &mut NativeCtx<'_>, mail: Schedule) {
+            let Some(s) = self.sender.as_ref() else {
+                ctx.reply(&ScheduleResult::Err {
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                });
+                return;
+            };
+            if mail.events.is_empty() {
+                ctx.reply(&ScheduleResult::Err {
+                    error: "schedule batch carries no events".to_owned(),
+                });
+                return;
+            }
+            if mail.events.len() > SCHEDULE_MAX_EVENTS {
+                ctx.reply(&ScheduleResult::Err {
+                    error: format!(
+                        "schedule batch of {} events exceeds the {SCHEDULE_MAX_EVENTS}-event cap",
+                        mail.events.len(),
+                    ),
+                });
+                return;
+            }
+            if let Some(over) = mail
+                .events
+                .iter()
+                .find(|e| e.at_millis > SCHEDULE_MAX_MILLIS)
+            {
+                ctx.reply(&ScheduleResult::Err {
+                    error: format!(
+                        "scheduled event at {} millis exceeds the {SCHEDULE_MAX_MILLIS}-millis horizon",
+                        over.at_millis,
+                    ),
+                });
+                return;
+            }
+            // Length is validated at or below SCHEDULE_MAX_EVENTS, which
+            // fits u32, so the accepted count never truncates.
+            #[allow(clippy::cast_possible_truncation)]
+            let accepted = mail.events.len() as u32;
+            let ev = AudioEvent::Schedule {
+                sender_mailbox: sender_mailbox_id(ctx.reply_target()),
+                events: mail.events,
+            };
+            if s.push(ev).is_err() {
+                ctx.reply(&ScheduleResult::Err {
+                    error: "audio event queue full — schedule dropped".to_owned(),
+                });
+                return;
+            }
+            ctx.reply(&ScheduleResult::Ok { accepted });
+        }
+
         /// Fetch, decode, and play an audio asset in the track lane.
         ///
         /// # Agent
@@ -3361,6 +3581,165 @@ mod native {
             assert_eq!(synth.voice_count(), 0);
         }
 
+        // ADR-0104 scheduled note events. These drive `fill` with known
+        // block sizes against the synth's frame clock, so the frame a
+        // scheduled event fires on is deterministic.
+
+        #[test]
+        fn scheduled_note_fires_at_its_exact_frame() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // 1 ms at 48 kHz is exactly 48 frames.
+            sender
+                .push(AudioEvent::Schedule {
+                    sender_mailbox: MailboxId(1),
+                    events: vec![ScheduledEvent {
+                        at_millis: 1,
+                        event: ScheduledNote::On {
+                            pitch: 60,
+                            velocity: 100,
+                            instrument_id: 0,
+                        },
+                    }],
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 1];
+            // The first drain converts the offset to due frame 48 and parks
+            // it; rendering frames 0..47 must not fire it early.
+            for _ in 0..48 {
+                synth.fill(&mut buf, 1);
+            }
+            assert_eq!(
+                synth.voice_count(),
+                0,
+                "scheduled note fired before its frame"
+            );
+            assert_eq!(synth.scheduled_count(), 1, "event left the heap too early");
+            // The 49th fill renders absolute frame 48 — the exact due frame.
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 1, "scheduled note missed its frame");
+            assert_eq!(
+                synth.scheduled_count(),
+                0,
+                "fired event not drained from the heap"
+            );
+            assert!(synth.has_voice_with_pitch(60));
+        }
+
+        #[test]
+        fn simultaneous_scheduled_events_stay_a_chord() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // Two notes at the same offset share one receipt timebase, so
+            // they fire on the same frame — a chord stays a chord.
+            sender
+                .push(AudioEvent::Schedule {
+                    sender_mailbox: MailboxId(1),
+                    events: vec![
+                        ScheduledEvent {
+                            at_millis: 0,
+                            event: ScheduledNote::On {
+                                pitch: 60,
+                                velocity: 100,
+                                instrument_id: 0,
+                            },
+                        },
+                        ScheduledEvent {
+                            at_millis: 0,
+                            event: ScheduledNote::On {
+                                pitch: 64,
+                                velocity: 100,
+                                instrument_id: 0,
+                            },
+                        },
+                    ],
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(
+                synth.voice_count(),
+                2,
+                "simultaneous notes did not both fire"
+            );
+            assert!(synth.has_voice_with_pitch(60));
+            assert!(synth.has_voice_with_pitch(64));
+        }
+
+        #[test]
+        fn scheduled_note_off_releases_after_its_note_on() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // One note held for 10 ms, then released — both events in one
+            // batch. The off keys the same voice as the on (same sender +
+            // instrument + pitch).
+            sender
+                .push(AudioEvent::Schedule {
+                    sender_mailbox: MailboxId(1),
+                    events: vec![
+                        ScheduledEvent {
+                            at_millis: 0,
+                            event: ScheduledNote::On {
+                                pitch: 60,
+                                velocity: 100,
+                                instrument_id: 0,
+                            },
+                        },
+                        ScheduledEvent {
+                            at_millis: 10,
+                            event: ScheduledNote::Off {
+                                pitch: 60,
+                                instrument_id: 0,
+                            },
+                        },
+                    ],
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 64];
+            // The note-on fires on the first block; the off's due frame
+            // (480 at 48 kHz) is still in the future, so the voice sounds.
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 1, "scheduled note-on never sounded");
+            assert!(synth.has_voice_with_pitch(60));
+            // Play past the off's due frame plus the 0.5 s release: the off
+            // fires after the on and the voice frees.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let tail_samples = (0.6 * TEST_RATE) as usize;
+            let mut tail = vec![0.0f32; tail_samples];
+            synth.fill(&mut tail, 1);
+            assert_eq!(
+                synth.voice_count(),
+                0,
+                "scheduled note-off never released the voice",
+            );
+        }
+
+        #[test]
+        fn schedule_offset_spans_block_boundaries() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // 2 ms == 96 frames; with 64-frame blocks the note lands in the
+            // second block, never the first.
+            sender
+                .push(AudioEvent::Schedule {
+                    sender_mailbox: MailboxId(1),
+                    events: vec![ScheduledEvent {
+                        at_millis: 2,
+                        event: ScheduledNote::On {
+                            pitch: 72,
+                            velocity: 100,
+                            instrument_id: 0,
+                        },
+                    }],
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 0, "fired in the wrong block");
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 1, "note never fired in its block");
+        }
+
         #[test]
         fn retrigger_same_key_replaces_voice() {
             let (sender, queue) = new_event_channel();
@@ -4007,6 +4386,179 @@ mod native {
                     lane: None,
                 },
             );
+        }
+
+        // ADR-0104 schedule handler. The cap validates the batch
+        // synchronously and replies `ScheduleResult` in-handler, then
+        // pushes one `Schedule` event for the accepted batch. The
+        // `load_ctx` helper below builds the session-addressed context.
+
+        #[test]
+        fn schedule_happy_path_replies_ok_and_queues_one_event() {
+            let (cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_schedule(
+                &mut ctx,
+                Schedule {
+                    events: vec![
+                        ScheduledEvent {
+                            at_millis: 0,
+                            event: ScheduledNote::On {
+                                pitch: 60,
+                                velocity: 100,
+                                instrument_id: 0,
+                            },
+                        },
+                        ScheduledEvent {
+                            at_millis: 500,
+                            event: ScheduledNote::Off {
+                                pitch: 60,
+                                instrument_id: 0,
+                            },
+                        },
+                    ],
+                },
+            );
+            match decode_session_reply::<ScheduleResult>(&rx) {
+                ScheduleResult::Ok { accepted } => assert_eq!(accepted, 2),
+                ScheduleResult::Err { error } => panic!("expected Ok, got Err({error})"),
+            }
+            // The whole batch crosses the queue as exactly one event.
+            let event = queue.pop().expect("a schedule event was queued");
+            match event {
+                AudioEvent::Schedule { events, .. } => assert_eq!(events.len(), 2),
+                other => panic!("expected Schedule, got {other:?}"),
+            }
+            assert!(queue.pop().is_none(), "batch must use a single queue slot");
+        }
+
+        #[test]
+        fn schedule_empty_batch_replies_err() {
+            let (cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_schedule(&mut ctx, Schedule { events: vec![] });
+            match decode_session_reply::<ScheduleResult>(&rx) {
+                ScheduleResult::Err { .. } => {}
+                ScheduleResult::Ok { .. } => panic!("empty batch must reject"),
+            }
+            assert!(
+                queue.pop().is_none(),
+                "rejected batch must not queue an event"
+            );
+        }
+
+        #[test]
+        fn schedule_over_event_cap_rejects_atomically() {
+            let (cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            let events = (0..=SCHEDULE_MAX_EVENTS)
+                .map(|_| ScheduledEvent {
+                    at_millis: 0,
+                    event: ScheduledNote::On {
+                        pitch: 60,
+                        velocity: 100,
+                        instrument_id: 0,
+                    },
+                })
+                .collect();
+            cap.on_schedule(&mut ctx, Schedule { events });
+            match decode_session_reply::<ScheduleResult>(&rx) {
+                ScheduleResult::Err { error } => assert!(error.contains("cap"), "reason: {error}"),
+                ScheduleResult::Ok { .. } => panic!("over-cap batch must reject"),
+            }
+            assert!(
+                queue.pop().is_none(),
+                "over-cap batch must not queue an event"
+            );
+        }
+
+        #[test]
+        fn schedule_over_horizon_rejects_atomically() {
+            let (cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_schedule(
+                &mut ctx,
+                Schedule {
+                    events: vec![
+                        ScheduledEvent {
+                            at_millis: 0,
+                            event: ScheduledNote::On {
+                                pitch: 60,
+                                velocity: 100,
+                                instrument_id: 0,
+                            },
+                        },
+                        ScheduledEvent {
+                            at_millis: SCHEDULE_MAX_MILLIS + 1,
+                            event: ScheduledNote::On {
+                                pitch: 64,
+                                velocity: 100,
+                                instrument_id: 0,
+                            },
+                        },
+                    ],
+                },
+            );
+            match decode_session_reply::<ScheduleResult>(&rx) {
+                ScheduleResult::Err { error } => {
+                    assert!(error.contains("horizon"), "reason: {error}");
+                }
+                ScheduleResult::Ok { .. } => panic!("over-horizon batch must reject"),
+            }
+            // A single bad event rejects the whole batch — the valid event
+            // before it never queues.
+            assert!(
+                queue.pop().is_none(),
+                "over-horizon batch must reject atomically"
+            );
+        }
+
+        #[test]
+        fn schedule_on_nop_chassis_replies_err() {
+            let cap = AudioCapability::nop();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_schedule(
+                &mut ctx,
+                Schedule {
+                    events: vec![ScheduledEvent {
+                        at_millis: 0,
+                        event: ScheduledNote::On {
+                            pitch: 60,
+                            velocity: 100,
+                            instrument_id: 0,
+                        },
+                    }],
+                },
+            );
+            match decode_session_reply::<ScheduleResult>(&rx) {
+                ScheduleResult::Err { .. } => {}
+                ScheduleResult::Ok { .. } => panic!("nop chassis must reply Err"),
+            }
         }
 
         /// Mono ramp samples for an in-memory WAV fixture.
