@@ -98,9 +98,9 @@ mod native {
     const EVENT_QUEUE_CAPACITY: usize = 1024;
 
     /// Maximum concurrent voices before voice-stealing kicks in. Chosen
-    /// as "more than a string section fits in one component" — if we
-    /// exceed it regularly the symptom is oldest-note cut-off, not audio
-    /// glitches.
+    /// as "more than a string section fits in one component" — on
+    /// saturation, voice-steal always evicts the oldest sounding note,
+    /// never causing audio glitches.
     const MAX_VOICES: usize = 64;
 
     /// Resolved configuration for the audio synth. Chassis mains read
@@ -759,11 +759,16 @@ mod native {
     /// A single sounding voice: the routing key (`sender_mailbox`,
     /// `instrument_id`, `pitch`) plus the kernel that renders it. `Copy`
     /// and fixed-size, so the voice pool stays a flat `Vec<Voice>`.
+    ///
+    /// `seq` is a monotonically increasing counter stamped at allocation,
+    /// used by voice-steal to locate the oldest voice regardless of the
+    /// pool's current order (which `swap_remove` scrambles).
     #[derive(Copy, Clone, Debug)]
     struct Voice {
         sender_mailbox: MailboxId,
         instrument_id: u8,
         pitch: u8,
+        seq: u64,
         kernel: VoiceKernel,
     }
 
@@ -775,6 +780,7 @@ mod native {
             velocity: u8,
             def: &InstrumentDef,
             sample_rate: f32,
+            seq: u64,
         ) -> Self {
             let kernel = match def.voice {
                 VoiceDef::Oscillator { wave, adsr } => VoiceKernel::Oscillator(OscVoice::new(
@@ -797,6 +803,7 @@ mod native {
                 sender_mailbox,
                 instrument_id,
                 pitch,
+                seq,
                 kernel,
             }
         }
@@ -830,6 +837,10 @@ mod native {
         voices: Vec<Voice>,
         sample_rate: f32,
         master_gain: f32,
+        /// Monotonically increasing counter stamped into each `Voice::seq`
+        /// at allocation. Voice-steal uses the minimum value to locate the
+        /// oldest voice regardless of pool order.
+        next_seq: u64,
     }
 
     impl Synth {
@@ -839,6 +850,7 @@ mod native {
                 voices: Vec::with_capacity(MAX_VOICES),
                 sample_rate,
                 master_gain: 1.0,
+                next_seq: 0,
             }
         }
 
@@ -860,7 +872,18 @@ mod native {
                             continue;
                         };
                         if self.voices.len() >= MAX_VOICES {
-                            self.voices.remove(0);
+                            // Evict the oldest (minimum-seq) voice.
+                            // swap_remove is O(1) and safe here because the
+                            // pool is always non-empty when at capacity.
+                            if let Some(oldest_idx) = self
+                                .voices
+                                .iter()
+                                .enumerate()
+                                .min_by_key(|(_, v)| v.seq)
+                                .map(|(i, _)| i)
+                            {
+                                self.voices.swap_remove(oldest_idx);
+                            }
                         }
                         if let Some(existing) = self.voices.iter().position(|v| {
                             v.sender_mailbox == sender_mailbox
@@ -869,6 +892,8 @@ mod native {
                         }) {
                             self.voices.swap_remove(existing);
                         }
+                        let seq = self.next_seq;
+                        self.next_seq += 1;
                         self.voices.push(Voice::new(
                             sender_mailbox,
                             instrument_id,
@@ -876,6 +901,7 @@ mod native {
                             velocity,
                             def,
                             self.sample_rate,
+                            seq,
                         ));
                     }
                     AudioEvent::NoteOff {
@@ -927,6 +953,11 @@ mod native {
         #[cfg(test)]
         fn voice_count(&self) -> usize {
             self.voices.len()
+        }
+
+        #[cfg(test)]
+        fn has_voice_with_pitch(&self, pitch: u8) -> bool {
+            self.voices.iter().any(|v| v.pitch == pitch)
         }
 
         #[cfg(test)]
@@ -1617,6 +1648,85 @@ mod native {
             let mut buf = vec![0.0f32; 64];
             synth.fill(&mut buf, 1);
             assert_eq!(synth.voice_count(), MAX_VOICES);
+        }
+
+        /// Voice-steal must evict the oldest note (lowest seq) even after
+        /// the pool has been reordered by `swap_remove` in the retrigger path.
+        ///
+        /// Setup: fill to `MAX_VOICES - 1` with pitches `0..(MAX_VOICES - 1)`
+        /// (pitch 0 gets seq 0). Retrigger pitch 0 while below capacity so no
+        /// steal fires: `swap_remove` moves the last voice to index 0, making
+        /// pitch 1 (seq 1, the new oldest) sit at index 1, not index 0. Fill to
+        /// `MAX_VOICES`, then push one more and assert pitch 1 was evicted
+        /// rather than the arbitrary voice that ended up at index 0.
+        #[test]
+        fn voice_steal_evicts_oldest_note() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, 48_000.0);
+
+            // Fill to MAX_VOICES - 1. Pitch 0 -> seq 0; pitch 1 -> seq 1.
+            // Pitch 1 will become the oldest surviving voice after the retrigger.
+            for pitch in 0..(MAX_VOICES - 1) {
+                sender
+                    .push(AudioEvent::NoteOn {
+                        sender_mailbox: MailboxId(1),
+                        pitch: u8::try_from(pitch).unwrap(),
+                        velocity: 100,
+                        instrument_id: 0,
+                    })
+                    .unwrap();
+            }
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), MAX_VOICES - 1);
+
+            // Retrigger pitch=0 while below capacity (no steal fires).
+            // swap_remove moves the last voice to index 0; the oldest
+            // surviving voice (pitch=1, seq=1) is now at index 1, not index 0.
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 0,
+                    velocity: 100,
+                    instrument_id: 0,
+                })
+                .unwrap();
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), MAX_VOICES - 1);
+            assert!(
+                synth.has_voice_with_pitch(1),
+                "pitch=1 (oldest after retrigger) must still be present",
+            );
+
+            // Fill the last slot — no steal yet.
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: u8::try_from(MAX_VOICES - 1).unwrap(),
+                    velocity: 100,
+                    instrument_id: 0,
+                })
+                .unwrap();
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), MAX_VOICES);
+
+            // One more note — steal fires. The oldest voice is pitch=1 (seq=1),
+            // sitting at index 1 after the retrigger scramble. A naive remove(0)
+            // would evict the wrong voice; seq-based steal must evict pitch=1.
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 100,
+                    velocity: 100,
+                    instrument_id: 0,
+                })
+                .unwrap();
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), MAX_VOICES);
+            assert!(
+                !synth.has_voice_with_pitch(1),
+                "voice steal must evict the oldest note (pitch=1, seq=1), not an arbitrary one",
+            );
         }
 
         /// Boot the cap against a disabled config and confirm the
