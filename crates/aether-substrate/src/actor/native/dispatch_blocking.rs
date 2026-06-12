@@ -45,7 +45,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use aether_data::{Kind, KindId};
+use aether_data::{Kind, KindId, MailId};
 
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
@@ -204,6 +204,18 @@ impl<O, C> TaskDone<O, C> {
         drop(self.hold.take());
     }
 
+    /// The root the carried [`SettlementHold`] gates (ADR-0080 §5 /
+    /// #1695). The deferred reply stamps this so its `Sent` joins the
+    /// chain the hold keeps open — replied to from a *later* handler turn
+    /// whose own ctx has no relation to the originating chain.
+    /// `MailId::NONE` once the hold is taken (post-`release`) or for a
+    /// `NONE`-root dispatch.
+    fn hold_root(&self) -> MailId {
+        self.hold
+            .as_ref()
+            .map_or(MailId::NONE, SettlementHold::root)
+    }
+
     /// Re-reply the carried `output` through the carried `reply_to`,
     /// then release the hold (ADR-0093 §4). The worker already shaped
     /// `output` into the reply value, so this is the common one-liner.
@@ -211,7 +223,7 @@ impl<O, C> TaskDone<O, C> {
     where
         O: Kind + serde::Serialize,
     {
-        ctx.reply_to_target(self.reply_to, &self.output);
+        ctx.reply_to_target(self.reply_to, &self.output, self.hold_root(), None);
         self.release();
     }
 
@@ -225,7 +237,7 @@ impl<O, C> TaskDone<O, C> {
         F: FnOnce(&O, &C) -> R,
     {
         let reply = f(&self.output, &self.context);
-        ctx.reply_to_target(self.reply_to, &reply);
+        ctx.reply_to_target(self.reply_to, &reply, self.hold_root(), None);
         self.release();
     }
 
@@ -237,7 +249,7 @@ impl<O, C> TaskDone<O, C> {
     where
         E: Kind + serde::Serialize,
     {
-        ctx.reply_to_target(self.reply_to, err);
+        ctx.reply_to_target(self.reply_to, err, self.hold_root(), None);
         self.release();
     }
 }

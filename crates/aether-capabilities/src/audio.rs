@@ -2111,7 +2111,7 @@ mod native {
             bytes: Vec<u8>,
         ) {
             let Some(target_rate_f32) = self.sample_rate else {
-                ctx.reply_to_target(
+                ctx.reply_to(
                     pending.source,
                     &PlayTrackResult::Err {
                         namespace,
@@ -2160,7 +2160,7 @@ mod native {
             bytes: &[u8],
         ) {
             let Ok(text) = from_utf8(bytes) else {
-                ctx.reply_to_target(
+                ctx.reply_to(
                     pending.source,
                     &LoadInstrumentResult::Err {
                         namespace,
@@ -2173,7 +2173,7 @@ mod native {
             let spec = match parse_sfz(text) {
                 Ok(spec) => spec,
                 Err(e) => {
-                    ctx.reply_to_target(
+                    ctx.reply_to(
                         pending.source,
                         &LoadInstrumentResult::Err {
                             namespace,
@@ -2265,7 +2265,7 @@ mod native {
                 .remove(&assembly_id)
                 .expect("assembly present — checked above");
             let Some(target_rate_f32) = self.sample_rate else {
-                ctx.reply_to_target(
+                ctx.reply_to(
                     assembly.source,
                     &LoadInstrumentResult::Err {
                         namespace: assembly.namespace,
@@ -2313,7 +2313,7 @@ mod native {
             let Some(assembly) = self.assemblies.remove(&assembly_id) else {
                 return;
             };
-            ctx.reply_to_target(
+            ctx.reply_to(
                 assembly.source,
                 &LoadInstrumentResult::Err {
                     namespace: assembly.namespace,
@@ -2686,7 +2686,7 @@ mod native {
                 } => {
                     let reason = format!("file read failed: {error:?}");
                     if let Some(pending) = self.take_pending(&namespace, &path) {
-                        ctx.reply_to_target(
+                        ctx.reply_to(
                             pending.source,
                             &PlayTrackResult::Err {
                                 namespace,
@@ -2696,7 +2696,7 @@ mod native {
                             },
                         );
                     } else if let Some(pending) = self.take_pending_instrument(&namespace, &path) {
-                        ctx.reply_to_target(
+                        ctx.reply_to(
                             pending.source,
                             &LoadInstrumentResult::Err {
                                 namespace,

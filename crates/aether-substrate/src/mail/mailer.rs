@@ -414,10 +414,38 @@ impl Mailer {
         Ok(())
     }
 
-    /// Route a chassis-bound mailbox's `*Result` reply to `sender`
-    /// with a single encode. `Session` / `EngineMailbox` hand off to
-    /// the hub outbound (unchanged hub-wire format); `Component`
-    /// pushes a fresh `Mail` into the target component's inbox so the
+    /// Route a chassis-bound mailbox's `*Result` reply to `sender` with
+    /// a single encode and no inherited lineage — the reply opens as a
+    /// fresh, lineage-less mail (the `MailId::NONE` triple). This is the
+    /// shape for substrate-internal synthesized replies and chassis caps
+    /// that manage their own settlement (the desktop window / render
+    /// drivers); handler replies that should join the caller's ADR-0080
+    /// causal chain go through [`Self::send_reply_with_lineage`] (the
+    /// `NativeBinding::send_reply_for_handler` path).
+    ///
+    /// Equivalent to [`Self::send_reply_with_lineage`] with a `NONE`
+    /// triple — the bare-vs-lineage split mirrors
+    /// [`NativeBinding::send_mail`](crate::actor::native::NativeBinding)'s
+    /// `send_mail` / `send_mail_with_lineage` pair.
+    pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
+    where
+        K: Kind,
+    {
+        self.send_reply_with_lineage(
+            sender,
+            result,
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+            None,
+        )
+    }
+
+    /// ADR-0080 §5/§6: route a `*Result` reply that joins the caller's
+    /// causal chain. `Session` / `EngineMailbox` hand off to the hub
+    /// outbound (unchanged hub-wire format — the wire boundary is
+    /// terminal for engine-side chain accounting, so the lineage is not
+    /// applied there); `Component` records the reply's `Sent` and pushes
+    /// a lineage-stamped `Mail` into the target component's inbox so the
     /// guest's normal dispatch path delivers the reply. `None` is a
     /// silent drop — nobody asked for a reply.
     ///
@@ -426,7 +454,24 @@ impl Mailer {
     /// closure-bound mailbox's id would produce a
     /// `ReplyEntry::Component` pointing at an entry that can't itself
     /// receive mail.
-    pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
+    ///
+    /// The producer hook (`record_sent`) is what keeps the §6 hold-
+    /// contract exact: a synchronous in-handler reply's `Sent` is
+    /// recorded before the replying handler's own `Finished`, so the
+    /// caller's chain stays open until the reply's `Finished` lands. The
+    /// replier is `reply_id.sender` — minted in its own id space by
+    /// `NativeBinding::send_reply_for_handler`. A `MailId::NONE`
+    /// `reply_id` skips the hook and stamps the `NONE` triple,
+    /// reproducing the pre-lineage reply shape for callers without a
+    /// handler chain (the bare [`Self::send_reply`]).
+    pub fn send_reply_with_lineage<K>(
+        &self,
+        sender: Source,
+        result: &K,
+        reply_id: aether_data::MailId,
+        root: aether_data::MailId,
+        parent: Option<aether_data::MailId>,
+    ) -> bool
     where
         K: Kind,
     {
@@ -445,7 +490,18 @@ impl Mailer {
                 // the right reply out of the mpsc by correlation.
                 // Reply target is None — nobody replies to a reply.
                 let reply_to = Source::with_correlation(SourceAddr::None, sender.correlation_id);
-                self.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+                // ADR-0080 §2 producer hook: record the reply's `Sent`
+                // before pushing it, so the caller's `root` counts the
+                // reply in-flight until its `Finished`. Skipped for the
+                // `NONE` reply id (the bare `send_reply` lineage-less path).
+                if reply_id != aether_data::MailId::NONE {
+                    self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, K::ID);
+                }
+                self.push(
+                    Mail::new(mailbox, K::ID, payload, 1)
+                        .with_reply_to(reply_to)
+                        .with_lineage(reply_id, root, parent),
+                );
                 true
             }
         }
@@ -1184,6 +1240,87 @@ mod tests {
             captured,
             vec![bytemuck::bytes_of(&reply).to_vec()],
             "reply payload is the cast image"
+        );
+    }
+
+    /// #1695 / ADR-0080 §5/§6: a `Component`-addressed reply routed
+    /// through `send_reply_with_lineage` carries the caller's `root` +
+    /// `parent` and a real (non-`NONE`) `mail_id`, and records the
+    /// reply's `Sent` against the caller root so the chain stays open
+    /// until the reply's `Finished` (the conformance fix — replies were
+    /// lineage-less `MailId::NONE` mail). The follow-up `record_finished`
+    /// (standing in for the recipient dispatcher) balances that `Sent`
+    /// exactly, reclaiming the root cell.
+    #[test]
+    fn send_reply_with_lineage_stamps_caller_chain() {
+        use aether_data::MailId;
+
+        // Capture the delivered reply's lineage triple off the
+        // `OwnedDispatch` the inbox receives.
+        type CapturedLineage = Arc<RwLock<Vec<(MailId, MailId, Option<MailId>)>>>;
+
+        let (registry, mailer, _store) = make_mailer();
+        let captured: CapturedLineage = Arc::new(RwLock::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        let sink_id = registry.register_inbox(
+            "test.reply_lineage_sink",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                // Terminal test consumer — discharge the obligation, then
+                // read the lineage fields off the dispatch.
+                dispatch.discharge();
+                captured_for_handler.write().unwrap().push((
+                    dispatch.mail_id,
+                    dispatch.root,
+                    dispatch.parent_mail,
+                ));
+            }),
+        );
+
+        let replier = MailboxId(0x5151);
+        let reply_id = MailId::new(replier, 9);
+        let root = MailId::new(MailboxId(0x00CA_11E2), 1);
+        let parent = MailId::new(MailboxId(0x00CA_11E2), 1);
+
+        let counter = mailer.trace_handle().settlement_counter();
+        assert_eq!(counter.live_roots(), 0, "no live root before the reply");
+
+        let sent = mailer.send_reply_with_lineage(
+            Source::with_correlation(SourceAddr::Component(sink_id), 7),
+            &CastReply {
+                code: 1,
+                flag: 2,
+                _pad: 0,
+            },
+            reply_id,
+            root,
+            Some(parent),
+        );
+        assert!(sent, "Component reply target routes");
+
+        let captured = captured.read().unwrap().clone();
+        assert_eq!(captured.len(), 1, "one reply delivered");
+        assert_eq!(
+            captured[0],
+            (reply_id, root, Some(parent)),
+            "reply carries the caller's root + parent and a real mail id"
+        );
+
+        // The §6 producer hook fired: the bare inbox records no
+        // `Finished`, so the reply's `Sent` keeps the root live.
+        assert_eq!(
+            counter.live_roots(),
+            1,
+            "send_reply_with_lineage records the reply's Sent on the caller root"
+        );
+
+        // The recipient's dispatcher would record the matching `Finished`;
+        // doing so here drives the root to zero and reclaims the cell —
+        // proving the reply's `Sent` is balanced, not a leak.
+        mailer.record_finished(reply_id, root);
+        assert_eq!(
+            counter.live_roots(),
+            0,
+            "the reply's Finished balances its Sent exactly"
         );
     }
 

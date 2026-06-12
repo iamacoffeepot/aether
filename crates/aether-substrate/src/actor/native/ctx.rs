@@ -409,17 +409,27 @@ impl<'a> NativeCtx<'a> {
 
     native_sender_methods!();
 
-    /// Reply to an explicit [`Source`] rather than the inbound's own
-    /// sender. The ADR-0093 hold-until-resolve path reaches for this:
-    /// [`TaskDone::resolve`]
-    /// re-replies through the *originating* caller's reply target
-    /// (captured at dispatch, parked in the in-flight ledger), not the
-    /// completion-wake's sender (the worker thread's loopback mail, which
-    /// has no caller behind it). Routes through the same
-    /// [`NativeBinding::send_reply_for_handler`] path as
+    /// Reply to an explicit [`Source`] under an explicit `(root, parent)`
+    /// lineage rather than the inbound's own sender / this ctx's in-flight
+    /// chain. The ADR-0093 hold-until-resolve path reaches for this:
+    /// [`TaskDone::resolve`] re-replies through the *originating* caller's
+    /// reply target (captured at dispatch, parked in the in-flight ledger)
+    /// under the root the parked [`SettlementHold`] keeps open — not the
+    /// completion-wake's sender / chain (the worker thread's loopback
+    /// mail, which has no caller behind it). Passing the hold's root keeps
+    /// the deferred reply's `Sent` in the chain the hold is gating, so the
+    /// chain settles only after the reply lands (#1695). Routes through
+    /// the same [`NativeBinding::send_reply_for_handler`] path as
     /// [`OutboundReply::reply`].
-    pub fn reply_to_target<K: Kind>(&mut self, sender: Source, payload: &K) {
-        self.binding.send_reply_for_handler(sender, payload);
+    pub fn reply_to_target<K: Kind>(
+        &mut self,
+        sender: Source,
+        payload: &K,
+        root: MailId,
+        parent: Option<MailId>,
+    ) {
+        self.binding
+            .send_reply_for_handler(sender, payload, root, parent);
     }
 
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
@@ -897,11 +907,24 @@ impl OutboundReply for NativeCtx<'_> {
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {
-        self.binding.send_reply_for_handler(self.source, payload);
+        // ADR-0080 §5/§6 (#1695): a synchronous reply joins the handler's
+        // causal chain — inherit this ctx's `root` + `parent` so the
+        // reply's `Sent` lands in the caller's chain.
+        self.binding.send_reply_for_handler(
+            self.source,
+            payload,
+            self.in_flight_root,
+            self.outbound_parent(),
+        );
     }
 
     fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
-        self.binding.send_reply_for_handler(sender, payload);
+        self.binding.send_reply_for_handler(
+            sender,
+            payload,
+            self.in_flight_root,
+            self.outbound_parent(),
+        );
     }
 }
 
@@ -1083,6 +1106,6 @@ mod tests {
     fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_>, sender: Source) {
         OutboundReply::reply(ctx, &CastOnly { code: 2 });
         OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });
-        ctx.reply_to_target(sender, &CastOnly { code: 4 });
+        ctx.reply_to_target(sender, &CastOnly { code: 4 }, MailId::NONE, None);
     }
 }

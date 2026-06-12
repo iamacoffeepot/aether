@@ -61,6 +61,17 @@ use crate::runtime::trace::SettlementHold;
 /// on iamacoffeepot/aether#1101.
 const ACTOR_RING_BYTES: usize = 64 * 1024;
 
+/// Starting value of [`NativeBinding::reply_lineage`] (ADR-0080 §5 / #1695).
+/// Sits at the top half of the `u64` space, above the `send` correlation
+/// counter (which starts at `0` and increments once per send), so a
+/// reply's lineage `MailId` never collides with one this actor minted for
+/// a `send` — and minting it leaves the `prev_correlation` the
+/// send counter reports untouched. Mirrors the wasm trampoline's
+/// `ComponentCtx::reply_lineage_counter` base so the native and guest
+/// reply paths derive reply ids the same way. A run would need `2^63`
+/// sends to reach this base, so the two spaces stay disjoint in practice.
+const REPLY_LINEAGE_BASE: u64 = 1 << 63;
+
 /// Where a buffered mail's payload lives until flush (2c,
 /// iamacoffeepot/aether#1110).
 enum PendingPayload {
@@ -170,6 +181,14 @@ pub struct NativeBinding {
     /// Monotonic correlation counter — atomic so `&self` can mint
     /// new ids without `&mut`.
     correlation: AtomicU64,
+    /// ADR-0080 §5 / #1695: monotonic counter for a reply's lineage
+    /// `MailId`, disjoint from [`Self::correlation`] (starts at
+    /// [`REPLY_LINEAGE_BASE`]). [`Self::send_reply_for_handler`] mints
+    /// from it so a reply's trace id never merges with one of this
+    /// actor's own sends, and minting a reply leaves the `send`
+    /// correlation [`Self::prev_correlation`] reports untouched —
+    /// symmetric with the wasm trampoline's reply-lineage counter.
+    reply_lineage: AtomicU64,
     /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] —
     /// invoked by [`Self::fatal_abort`] when a wasm guest traps so a
     /// faulty component brings the substrate down cleanly. Cloned from
@@ -253,6 +272,7 @@ impl NativeBinding {
             carry,
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
+            reply_lineage: AtomicU64::new(REPLY_LINEAGE_BASE),
             aborter,
             spawner,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
@@ -431,19 +451,36 @@ impl NativeBinding {
             .ok()
     }
 
-    /// Reply path for native actors. Routes through the substrate's
-    /// [`Mailer::send_reply`] so a handler's `ctx.reply(&result)`
-    /// reaches the originator the same way a pre-actor-model cap's
-    /// `self.mailer.send_reply(sender, &result)` did. Issue 665
-    /// retired the FFI-shaped `reply_mail` stub the prior
-    /// `MailTransport` impl carried — it took `sender: u32`, a wasm
-    /// handle shape that doesn't fit native's [`Source`]. This typed
-    /// entry is the only reply API native actors reach for.
-    pub fn send_reply_for_handler<K>(&self, sender: Source, payload: &K)
-    where
+    /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
+    /// reply's lineage `MailId` from this actor's disjoint
+    /// `reply_lineage` allocator and routes through
+    /// [`Mailer::send_reply_with_lineage`], so the reply joins the
+    /// caller's causal chain: it inherits the handler's `root` and
+    /// `parent`, and its `Sent` is recorded against that root (keeping
+    /// the §6 hold contract exact — a synchronous reply's `Sent`
+    /// precedes the replying handler's `Finished`). `root == MailId::NONE`
+    /// (a reply from a ctx with no inbound chain) stamps the `NONE`
+    /// triple and skips the producer hook.
+    ///
+    /// The per-handler [`super::ctx::NativeCtx`] supplies `root` /
+    /// `parent` from its in-flight context (`in_flight_root` /
+    /// `outbound_parent`); the ADR-0093 deferred path supplies the
+    /// `SettlementHold`'s root. Issue 665 retired the FFI-shaped
+    /// `reply_mail` stub the prior `MailTransport` impl carried; this
+    /// typed entry is the only reply API native actors reach for.
+    pub fn send_reply_for_handler<K>(
+        &self,
+        sender: Source,
+        payload: &K,
+        root: MailId,
+        parent: Option<MailId>,
+    ) where
         K: aether_data::Kind,
     {
-        self.mailer.send_reply(sender, payload);
+        let correlation = self.reply_lineage.fetch_add(1, Ordering::AcqRel);
+        let reply_id = MailId::new(self.self_mailbox, correlation);
+        self.mailer
+            .send_reply_with_lineage(sender, payload, reply_id, root, parent);
     }
 }
 
@@ -982,6 +1019,106 @@ mod tests {
         assert_eq!(transport.prev_correlation(), 1);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
         assert_eq!(transport.prev_correlation(), 2);
+    }
+
+    /// #1695 / ADR-0080 §5/§6: a synchronous `ctx.reply` from a handler
+    /// with an in-flight chain stamps the reply mail with the caller's
+    /// `root` + the handled mail as `parent`, mints the reply id in the
+    /// replier's id space, and records the reply's `Sent` on that root —
+    /// so the chain stays live until the reply's `Finished`. The reply
+    /// joins the caller's chain instead of opening a lineage-less one.
+    #[test]
+    fn ctx_reply_joins_caller_chain() {
+        use crate::actor::native::ctx::NativeCtx;
+        use aether_actor::OutboundReply;
+        use aether_kinds::Tick;
+
+        let (registry, mailer) = fresh_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+
+        let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
+        let caller = registry.register_inbox(
+            "test.reply_chain.caller",
+            forward_to_envelope_sender(reply_tx),
+        );
+
+        let actor_mailbox = MailboxId(0x00BE_EF01);
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            actor_mailbox,
+        ));
+
+        let root = MailId::new(MailboxId(0xC0), 1);
+        let request = MailId::new(MailboxId(0xC0), 1);
+        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 55);
+
+        {
+            let mut ctx = NativeCtx::new(&binding, caller_source, request, root);
+            OutboundReply::reply(&mut ctx, &Tick);
+            // ctx drops here; the reply already routed eagerly via the
+            // Mailer (replies are not buffered), so the flush is a no-op.
+        }
+
+        let reply = reply_rx.try_recv().expect("reply routed to the caller");
+        assert_eq!(reply.root, root, "reply inherits the caller's root");
+        assert_eq!(
+            reply.parent_mail,
+            Some(request),
+            "reply's parent is the handled request"
+        );
+        assert_ne!(reply.mail_id, MailId::NONE, "reply carries a real mail id");
+        assert_eq!(
+            reply.mail_id.sender, actor_mailbox,
+            "reply id is minted in the replier's id space"
+        );
+
+        // The reply's Sent keeps the caller root live (the bare forwarding
+        // sink records no Finished); the matching Finished reclaims it.
+        assert_eq!(
+            counter.live_roots(),
+            1,
+            "the reply's Sent holds the caller chain open"
+        );
+        mailer.record_finished(reply.mail_id, root);
+        assert_eq!(
+            counter.live_roots(),
+            0,
+            "the reply's Finished balances its Sent exactly"
+        );
+    }
+
+    /// #1695: minting a reply's lineage id draws from the disjoint
+    /// reply-lineage counter, so a reply never advances the `send`
+    /// correlation `prev_correlation` reports (symmetric with the wasm
+    /// trampoline's separate reply counter).
+    #[test]
+    fn reply_does_not_advance_send_correlation() {
+        use crate::actor::native::ctx::NativeCtx;
+        use aether_actor::OutboundReply;
+        use aether_kinds::Tick;
+
+        let (registry, mailer) = fresh_substrate();
+        let (reply_tx, _reply_rx) = mpsc::channel::<Envelope>();
+        let caller = registry.register_inbox(
+            "test.reply_corr.caller",
+            forward_to_envelope_sender(reply_tx),
+        );
+
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF02)));
+        assert_eq!(binding.prev_correlation(), 0);
+
+        let root = MailId::new(MailboxId(0xC0), 1);
+        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
+        {
+            let mut ctx = NativeCtx::new(&binding, caller_source, root, root);
+            OutboundReply::reply(&mut ctx, &Tick);
+            OutboundReply::reply(&mut ctx, &Tick);
+        }
+        assert_eq!(
+            binding.prev_correlation(),
+            0,
+            "replies must not advance the send correlation counter"
+        );
     }
 
     /// ADR-0099 §5 own-child path through the real `ctx.actor` call site:

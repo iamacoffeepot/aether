@@ -130,9 +130,11 @@ impl Mail {
 
     /// ADR-0080 §1 / §5: stamp the producer-minted lineage triple
     /// (`mail_id`, `root`, `parent_mail`) onto this mail. Producer
-    /// paths (`NativeBinding::send_mail`, `Mailer::send_reply`,
-    /// chassis-root push sites) call this immediately after minting.
-    /// Mail with no lineage stamped retains `MailId::NONE` defaults.
+    /// paths (`NativeBinding::send_mail`, `Mailer::send_reply_with_lineage`,
+    /// chassis-root push sites) call this immediately after minting — a
+    /// reply joins the caller's chain by inheriting its `root` / `parent`
+    /// (#1695). Mail with no lineage stamped retains `MailId::NONE`
+    /// defaults.
     #[must_use]
     pub fn with_lineage(
         mut self,
