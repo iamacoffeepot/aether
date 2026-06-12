@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
-    InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, fs::NamespaceRoots,
-    trace::TraceDispatchCapability,
+    InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, TextCapability,
+    fs::NamespaceRoots, trace::TraceDispatchCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
@@ -309,6 +309,7 @@ impl TestBenchChassis {
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<TcpCapability>(())
             .with_actor::<RenderCapability>(render_config)
+            .with_actor::<TextCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<TestBenchCapability>(test_bench_cap_config)
             .with_actor::<LifecycleCapability>(frame_lifecycle_config());

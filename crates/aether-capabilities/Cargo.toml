@@ -58,12 +58,22 @@ native = [
 # already pulled in unconditionally (`aether-actor`, `aether-kinds`).
 render = []
 audio = []
+# ADR-0105 `aether.text` cap marker. CPU-only (no GPU dep) — it composes
+# the render texture surface entirely by mail — but gated the same two-
+# layer way so a wasm component can address it via
+# `ctx.actor::<TextCapability>()` without dragging `fontdue` into the wasm
+# graph.
+text = []
 
 # Native impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
 # marker layer + `native` so chassis builds still see the full cap.
 render-native = ["render", "native", "aether-substrate/render", "dep:wgpu"]
 audio-native = ["audio", "native", "dep:cpal", "dep:crossbeam-queue", "dep:hound"]
+# `fontdue` rides `text-native` the way `hound` rides `audio-native`:
+# the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
+# off the hot path. Implies the marker layer + `native`.
+text-native = ["text", "native", "dep:fontdue"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
@@ -128,6 +138,10 @@ crossbeam-queue = { version = "0.3", optional = true }
 # sampled instrument banks. Pure-Rust, small; rides the `audio-native`
 # feature so wasm / marker-only builds skip it.
 hound = { workspace = true, optional = true }
+# ADR-0105 §text: pure-Rust TTF parse + glyph rasterize + horizontal
+# layout metrics for the `aether.text` cap. Rides the `text-native`
+# feature so wasm / marker-only builds skip it.
+fontdue = { version = "0.9", optional = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }

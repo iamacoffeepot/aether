@@ -31,9 +31,10 @@ use std::path::Path;
 
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    CreateTexture, CreateTextureResult, Delete, DeleteResult, DrawTexturedQuads, DropComponent,
-    DropResult, FsError, List, ListResult, LoadComponent, LoadResult, MailEnvelope, Ping,
-    QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult, TexturedQuad, Write, WriteResult,
+    CreateTexture, CreateTextureResult, Delete, DeleteResult, DrawText, DrawTexturedQuads,
+    DropComponent, DropResult, FsError, List, ListResult, LoadComponent, LoadFont, LoadFontResult,
+    LoadResult, MailEnvelope, Ping, QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult,
+    TexturedQuad, Write, WriteResult,
 };
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -1206,6 +1207,119 @@ fn fs_read_unknown_path_returns_not_found() {
         } => {}
         ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
     }
+}
+
+/// ADR-0105 text surface end to end: load a real OFL TTF through the
+/// `assets` namespace, draw a `Screen`-space string, and assert the
+/// captured frame lights a region in the upper-left where top-left-
+/// anchored text lands. No component is loaded — the text is the only
+/// thing that can light a pixel.
+///
+/// The first `draw` lazily creates the atlas texture (and draws nothing
+/// that turn); `send_and_await` settles that `create_texture` round trip,
+/// so the texture id is live before the capture's pre-mail `draw`
+/// rasterizes glyphs and emits the quad batch.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn text_draws_a_screen_space_string() {
+    // The crate's vendored Roboto Mono (SIL OFL 1.1) — copied into the
+    // sandbox so the `assets` namespace can read it.
+    const TTF: &[u8] = include_bytes!("../assets/fonts/RobotoMono.ttf");
+    if !require_wgpu_only() {
+        return;
+    }
+    let sandbox = init_save_sandbox("test-bench-text");
+    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
+
+    let (frame_width, frame_height) = (128u32, 64u32);
+    let mut bench = TestBench::builder()
+        .size(frame_width, frame_height)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    // Load the font; the reply carries the session-scoped font_id.
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.text",
+                &LoadFont {
+                    namespace: "assets".to_owned(),
+                    path: "font.ttf".to_owned(),
+                },
+            ),
+        )])
+        .expect("load_font sequence");
+    let font_id = match loaded
+        .reply::<LoadFontResult>("load")
+        .expect("decode LoadFontResult")
+    {
+        LoadFontResult::Ok { font_id, .. } => font_id,
+        LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
+    };
+
+    let draw = DrawText {
+        font_id,
+        text: "Hi".to_owned(),
+        size_pixels: 32.0,
+        color: [1.0, 1.0, 1.0, 1.0],
+        space: QuadSpace::Screen,
+    };
+
+    // First draw: lazily creates the atlas texture (fire-and-forget — a
+    // `draw` has no reply). The advance pumps the `create_texture` reply
+    // back into the text cap so its texture id is live; nothing is drawn
+    // this turn.
+    bench
+        .execute(vec![
+            (
+                "prime",
+                BenchOp::send_mail::<DrawText>("aether.text", &draw),
+            ),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("prime draw");
+
+    // Now the glyphs rasterize and the quad batch reaches the renderer the
+    // same tick the capture records.
+    let pre = vec![envelope("aether.text", &draw)];
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture-with-mails");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    // Sparse but present — rules out an empty frame and a full-bleed one.
+    let drawn = coverage(&img, bg, tolerance);
+    assert!(
+        (0.005..0.40).contains(&drawn),
+        "text coverage {drawn} fell outside the expected band (0.005, 0.40); \
+         the captured frame is effectively empty or entirely filled",
+    );
+
+    // Top-left-anchored text lands in the upper-left: the lit centroid
+    // sits in the top half and left portion of the frame.
+    let (center_x, center_y) = centroid(&img, bg, tolerance).expect("a lit frame has a centroid");
+    assert!(
+        center_y < frame_height as f32 / 2.0,
+        "text centroid y={center_y} should sit in the top half (anchored at the top edge)",
+    );
+    assert!(
+        center_x < frame_width as f32 * 0.75,
+        "text centroid x={center_x} should sit toward the left (anchored at the left edge)",
+    );
+
+    // The lit box must not bleed to the far-right / bottom edges — the
+    // short string occupies only the upper-left.
+    let silhouette = bounding_box(&img, bg, tolerance).expect("a lit frame has a bounding box");
+    assert!(
+        silhouette.min_x < frame_width / 2 && silhouette.max_y < frame_height,
+        "text silhouette {silhouette:?} should bound the upper-left of the \
+         {frame_width}x{frame_height} frame",
+    );
 }
 
 // Pre-#775 the bench emitted `aether.observation.frame_stats` every

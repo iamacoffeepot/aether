@@ -71,6 +71,12 @@ pub mod tcp;
 pub mod test_bench;
 #[cfg(test)]
 pub(crate) mod test_chassis;
+// `aether.text` cap (ADR-0105). CPU-only — composes the render texture
+// surface by mail — but feature-gated the two-layer way so a wasm
+// component can address it by type without pulling `fontdue` into the
+// wasm graph.
+#[cfg(feature = "text")]
+pub mod text;
 pub mod trace;
 // ADR-0086 Phase 3b decentralized trace-tree reconstruction. Pure,
 // transport-agnostic guided walk + stitch over the per-actor trace
@@ -143,6 +149,8 @@ pub use render::RenderCapability;
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
+#[cfg(feature = "text")]
+pub use text::TextCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(not(target_arch = "wasm32"))]
 pub use trampoline::WasmTrampolineConfig;
