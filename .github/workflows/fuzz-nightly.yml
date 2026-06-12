@@ -28,6 +28,14 @@ jobs:
       # Per-run time box. 300s warm accretes coverage on top of the
       # persisted corpus rather than restarting cold each night.
       MAX_TOTAL_TIME: "300"
+      # The repo pins a stable toolchain in `rust-toolchain.toml`, which
+      # takes precedence over the nightly the step below installs as the
+      # default. cargo-fuzz builds with `-Zsanitizer=address`, a
+      # nightly-only flag, so the inner `cargo build` would resolve to
+      # stable and fail. `RUSTUP_TOOLCHAIN` sits above the toolchain file
+      # in rustup's override order and propagates to that nested build,
+      # forcing the whole fuzz build onto nightly without touching the pin.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
 
