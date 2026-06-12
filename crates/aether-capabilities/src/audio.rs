@@ -56,7 +56,9 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{NoteOff, NoteOn, PlayTrack, ReadResult, SetMasterGain, StopTrack};
+use aether_kinds::{
+    LoadInstrument, NoteOff, NoteOn, PlayTrack, ReadResult, SetMasterGain, StopTrack,
+};
 
 // `AudioConfig` rides through file root for chassis-bin consumers
 // that build it from env (`from_env`) and pass it to
@@ -74,11 +76,19 @@ pub use native::{AudioConfig, AudioConfigLayer, AudioOverlay};
 #[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
 mod decode;
 
+// ADR-0103 §5 SFZ-subset parser for sampled instrument banks (#1679).
+// Pure (`&str → BankSpec`), no I/O — the cap fetches the `.sfz` text and
+// every referenced sample through `aether.fs`, then this module turns the
+// text into structure. Native-only alongside `decode`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
+mod sfz;
+
 #[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {
     use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::f32::consts::TAU;
+    use std::str::from_utf8;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread::{self, JoinHandle};
@@ -89,13 +99,15 @@ mod native {
     use aether_actor::{OutboundReply, actor};
     use aether_data::{Kind, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_kinds::{
-        PlayTrack, PlayTrackResult, Read, ReadResult, SetMasterGainResult, StopTrack,
+        LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult, Read, ReadResult,
+        SetMasterGainResult, StopTrack,
     };
 
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
 
     use super::decode::{DecodeError, decode_wav_to_mono};
+    use super::sfz::{SfzRegion, parse_sfz};
     use super::{NoteOff, NoteOn, SetMasterGain};
 
     /// Linear fade-out duration (seconds) applied when a track is stopped,
@@ -202,6 +214,17 @@ mod native {
             sender_mailbox: MailboxId,
             namespace: String,
             path: String,
+        },
+        /// Append a loaded sampled-instrument bank to the synth's registry
+        /// (ADR-0103 §4). The cap assigns `id` from `BUILTINS.len()` upward
+        /// in load order and the synth pushes the bank in receipt order, so
+        /// the two stay in lockstep — a `note_on` whose `instrument_id`
+        /// walks past the built-ins indexes this table. `bank` is the
+        /// assembled, device-rate PCM bank behind an `Arc` (shared with the
+        /// voices it spawns).
+        RegisterInstrument {
+            id: u8,
+            bank: Arc<SampleBank>,
         },
     }
 
@@ -973,22 +996,240 @@ mod native {
         }
     }
 
-    /// Voice kernel — one of the two synthesis models, selected by the
-    /// patch at `note_on`.
-    #[derive(Copy, Clone, Debug)]
+    /// Attack ramp (seconds) wrapping a sample voice — a short swell so a
+    /// re-pitched recording doesn't click on at full level (ADR-0103 §6,
+    /// the partial bank's ramp shape).
+    const SAMPLE_ATTACK_SECS: f32 = 0.003;
+    /// Release ramp (seconds) on `note_off` for a sample voice — the
+    /// damper that ends a held note faster than the sample's natural decay.
+    const SAMPLE_RELEASE_SECS: f32 = 0.08;
+    /// Base amplitude of a sample voice before velocity scaling. Sampled
+    /// recordings already carry their own level; this trims headroom so a
+    /// dense chord doesn't clip past the soft-clip.
+    const SAMPLE_BASE_AMP: f32 = 0.6;
+
+    /// One region of a sampled instrument bank (ADR-0103 §5/§6): a
+    /// device-rate mono recording plus the inclusive MIDI key range it
+    /// covers, the inclusive velocity range it answers to, and the root
+    /// pitch it was recorded at (so a voice repitches by
+    /// `2^((pitch − pitch_keycenter) / 12)`). The PCM is `Arc`'d so every
+    /// region naming the same sample shares one buffer and a spawned voice
+    /// holds a cheap reference, not a copy.
+    #[derive(Clone, Debug)]
+    struct SampleRegion {
+        lokey: u8,
+        hikey: u8,
+        lovel: u8,
+        hivel: u8,
+        pitch_keycenter: u8,
+        pcm: Arc<[f32]>,
+    }
+
+    /// A loaded sampled-instrument bank (ADR-0103 §4/§5): the regions to
+    /// select between by `(pitch, velocity)`, the name derived from the
+    /// `.sfz` filename, and the total decoded PCM the bank holds resident
+    /// (reported in the load reply — there is no unload in v1).
+    #[derive(Debug)]
+    struct SampleBank {
+        name: String,
+        regions: Vec<SampleRegion>,
+        resident_bytes: usize,
+    }
+
+    impl SampleBank {
+        /// The first region whose key and velocity ranges both contain
+        /// `(pitch, velocity)`, or `None` when the note falls in a gap the
+        /// bank doesn't cover (the `note_on` then drops).
+        fn select(&self, pitch: u8, velocity: u8) -> Option<&SampleRegion> {
+            self.regions.iter().find(|r| {
+                (r.lokey..=r.hikey).contains(&pitch) && (r.lovel..=r.hivel).contains(&velocity)
+            })
+        }
+    }
+
+    /// The sample voice kernel (ADR-0103 §6, unlooped): walk the region's
+    /// device-rate PCM at a repitched rate with linear interpolation,
+    /// wrapped in the same short attack / `note_off`-release ramp the
+    /// partial bank uses. A held note ends when its sample runs out
+    /// (full-decay, piano-class sets) — sustain loops are #1682.
+    #[derive(Clone, Debug)]
+    struct SampleVoice {
+        /// Device-rate mono PCM of the selected region, shared with the
+        /// bank.
+        pcm: Arc<[f32]>,
+        /// Fractional read position into `pcm`, advanced by `rate` each
+        /// output sample.
+        pos: f32,
+        /// Playback rate ratio `2^((pitch − pitch_keycenter) / 12)` — the
+        /// repitch from the region's root note. The PCM is already at the
+        /// device rate, so this is the only resampling the hot loop does.
+        rate: f32,
+        /// Velocity-scaled amplitude the interpolated sample is multiplied
+        /// by.
+        amplitude: f32,
+        /// Attack / release ramp, the partial bank's shape.
+        stage: BankStage,
+        attack_s: f32,
+        release_s: f32,
+        /// Set once the read position walks off the end of the PCM (the
+        /// note's sample exhausted) or the release ramp completes.
+        finished: bool,
+    }
+
+    impl SampleVoice {
+        fn new(pitch: u8, velocity: u8, region: &SampleRegion) -> Self {
+            let semitones = f32::from(pitch) - f32::from(region.pitch_keycenter);
+            let rate = (semitones / 12.0).exp2();
+            let v = f32::from(velocity) / 127.0;
+            Self {
+                pcm: Arc::clone(&region.pcm),
+                pos: 0.0,
+                rate,
+                amplitude: SAMPLE_BASE_AMP * v,
+                stage: BankStage::Attack { t: 0.0 },
+                attack_s: SAMPLE_ATTACK_SECS,
+                release_s: SAMPLE_RELEASE_SECS,
+                finished: false,
+            }
+        }
+
+        fn note_off(&mut self) {
+            let from_level = match self.stage {
+                BankStage::Attack { t } => {
+                    if self.attack_s > 0.0 {
+                        (t / self.attack_s).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    }
+                }
+                BankStage::Sustain => 1.0,
+                BankStage::Release { .. } | BankStage::Done => return,
+            };
+            self.stage = BankStage::Release { t: 0.0, from_level };
+        }
+
+        fn done(&self) -> bool {
+            self.finished || matches!(self.stage, BankStage::Done)
+        }
+
+        /// Advance the attack/release ramp one sample, returning its current
+        /// level — the partial bank's ramp logic over the sample voice's
+        /// own attack/release times.
+        fn advance_ramp(&mut self, dt: f32) -> f32 {
+            match &mut self.stage {
+                BankStage::Attack { t } => {
+                    *t += dt;
+                    if self.attack_s <= 0.0 || *t >= self.attack_s {
+                        self.stage = BankStage::Sustain;
+                        1.0
+                    } else {
+                        *t / self.attack_s
+                    }
+                }
+                BankStage::Sustain => 1.0,
+                BankStage::Release { t, from_level } => {
+                    *t += dt;
+                    if self.release_s <= 0.0 || *t >= self.release_s {
+                        self.stage = BankStage::Done;
+                        0.0
+                    } else {
+                        *from_level * (1.0 - (*t / self.release_s))
+                    }
+                }
+                BankStage::Done => 0.0,
+            }
+        }
+
+        // Read position and PCM lengths are bounded well below 2^24 for any
+        // sane sample, so the index-to-float and float-to-index casts are
+        // exact and non-negative on the hot path.
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        fn next_sample(&mut self, dt: f32) -> f32 {
+            let ramp = self.advance_ramp(dt);
+            if self.finished {
+                return 0.0;
+            }
+            let len = self.pcm.len();
+            if len == 0 {
+                self.finished = true;
+                return 0.0;
+            }
+            let i = self.pos.floor() as usize;
+            if i >= len {
+                self.finished = true;
+                return 0.0;
+            }
+            let a = self.pcm[i];
+            let b = self.pcm[(i + 1).min(len - 1)];
+            let frac = self.pos - i as f32;
+            let s = (b - a).mul_add(frac, a) * self.amplitude * ramp;
+            self.pos += self.rate;
+            if self.pos >= len as f32 {
+                // The held note's sample ran out — the voice ends (no loop
+                // machinery in v1, ADR-0103 §6).
+                self.finished = true;
+            }
+            s
+        }
+    }
+
+    /// Voice kernel — one of the three synthesis models, selected by the
+    /// instrument at `note_on`: a built-in oscillator or partial-bank
+    /// patch, or a loaded sampled instrument (ADR-0103 §6).
+    #[derive(Clone, Debug)]
     enum VoiceKernel {
         Oscillator(OscVoice),
         PartialBank(PartialBankVoice),
+        Sample(SampleVoice),
+    }
+
+    /// Build the kernel for a built-in instrument patch (oscillator or
+    /// partial bank). Split out of [`Voice`] so the `note_on` path can
+    /// resolve a built-in or a loaded sample bank into a `VoiceKernel`
+    /// before the steal / dedup bookkeeping, then stamp one `Voice`.
+    fn build_builtin_kernel(
+        sender_mailbox: MailboxId,
+        instrument_id: u8,
+        pitch: u8,
+        velocity: u8,
+        def: &InstrumentDef,
+        sample_rate: f32,
+    ) -> VoiceKernel {
+        match def.voice {
+            VoiceDef::Oscillator { wave, adsr } => {
+                let seed = voice_seed(sender_mailbox, instrument_id, pitch);
+                let mut osc =
+                    OscVoice::new(pitch, velocity, wave, adsr, def.base_amp, sample_rate, seed);
+                if let Some(sweep) = def.pitch_sweep {
+                    osc = osc.with_pitch_sweep(sweep, sample_rate);
+                }
+                VoiceKernel::Oscillator(osc)
+            }
+            VoiceDef::PartialBank(bank) => VoiceKernel::PartialBank(PartialBankVoice::new(
+                pitch,
+                velocity,
+                &bank,
+                def.base_amp,
+                sample_rate,
+            )),
+        }
     }
 
     /// A single sounding voice: the routing key (`sender_mailbox`,
-    /// `instrument_id`, `pitch`) plus the kernel that renders it. `Copy`
-    /// and fixed-size, so the voice pool stays a flat `Vec<Voice>`.
+    /// `instrument_id`, `pitch`) plus the kernel that renders it. No longer
+    /// `Copy` — a sample voice holds a reference-counted PCM handle
+    /// (ADR-0103 §6) — but the pool was never structurally dependent on
+    /// `Copy`; it stays a flat `Vec<Voice>` mutated by `swap_remove` /
+    /// `push`.
     ///
     /// `seq` is a monotonically increasing counter stamped at allocation,
     /// used by voice-steal to locate the oldest voice regardless of the
     /// pool's current order (which `swap_remove` scrambles).
-    #[derive(Copy, Clone, Debug)]
+    #[derive(Clone, Debug)]
     struct Voice {
         sender_mailbox: MailboxId,
         instrument_id: u8,
@@ -998,46 +1239,11 @@ mod native {
     }
 
     impl Voice {
-        fn new(
-            sender_mailbox: MailboxId,
-            instrument_id: u8,
-            pitch: u8,
-            velocity: u8,
-            def: &InstrumentDef,
-            sample_rate: f32,
-            seq: u64,
-        ) -> Self {
-            let kernel = match def.voice {
-                VoiceDef::Oscillator { wave, adsr } => {
-                    let seed = voice_seed(sender_mailbox, instrument_id, pitch);
-                    let mut osc =
-                        OscVoice::new(pitch, velocity, wave, adsr, def.base_amp, sample_rate, seed);
-                    if let Some(sweep) = def.pitch_sweep {
-                        osc = osc.with_pitch_sweep(sweep, sample_rate);
-                    }
-                    VoiceKernel::Oscillator(osc)
-                }
-                VoiceDef::PartialBank(bank) => VoiceKernel::PartialBank(PartialBankVoice::new(
-                    pitch,
-                    velocity,
-                    &bank,
-                    def.base_amp,
-                    sample_rate,
-                )),
-            };
-            Self {
-                sender_mailbox,
-                instrument_id,
-                pitch,
-                seq,
-                kernel,
-            }
-        }
-
         fn note_off(&mut self) {
             match &mut self.kernel {
                 VoiceKernel::Oscillator(v) => v.note_off(),
                 VoiceKernel::PartialBank(v) => v.note_off(),
+                VoiceKernel::Sample(v) => v.note_off(),
             }
         }
 
@@ -1045,6 +1251,7 @@ mod native {
             match &self.kernel {
                 VoiceKernel::Oscillator(v) => v.done(),
                 VoiceKernel::PartialBank(v) => v.done(),
+                VoiceKernel::Sample(v) => v.done(),
             }
         }
 
@@ -1052,6 +1259,7 @@ mod native {
             match &mut self.kernel {
                 VoiceKernel::Oscillator(v) => v.next_sample(dt),
                 VoiceKernel::PartialBank(v) => v.next_sample(dt),
+                VoiceKernel::Sample(v) => v.next_sample(dt),
             }
         }
     }
@@ -1174,6 +1382,11 @@ mod native {
         /// Track playback lane (ADR-0103 §3) — separate from `voices` so a
         /// track is never counted against `MAX_VOICES` nor voice-stolen.
         tracks: Vec<TrackVoice>,
+        /// Loaded sampled-instrument banks (ADR-0103 §4), appended in load
+        /// order. Index `i` is `instrument_id` `BUILTINS.len() + i`, so a
+        /// `note_on` whose id walks past the built-ins indexes here. The cap
+        /// assigns ids the same way, so the two stay in lockstep.
+        banks: Vec<Arc<SampleBank>>,
         sample_rate: f32,
         master_gain: f32,
         /// Monotonically increasing counter stamped into each `Voice::seq`
@@ -1188,10 +1401,20 @@ mod native {
                 events,
                 voices: Vec::with_capacity(MAX_VOICES),
                 tracks: Vec::new(),
+                banks: Vec::new(),
                 sample_rate,
                 master_gain: 1.0,
                 next_seq: 0,
             }
+        }
+
+        /// Resolve a loaded sample bank by `instrument_id`, returning a
+        /// cheap `Arc` clone (or `None` for an id still inside the built-in
+        /// range or past the loaded banks). The `note_on` path falls back
+        /// to this when `instrument_by_id` misses.
+        fn bank_for(&self, instrument_id: u8) -> Option<Arc<SampleBank>> {
+            let index = (instrument_id as usize).checked_sub(BUILTINS.len())?;
+            self.banks.get(index).map(Arc::clone)
         }
 
         /// Number of output samples in the `stop_track` fade-out at this
@@ -1204,6 +1427,77 @@ mod native {
             n
         }
 
+        /// Admit a `note_on`: resolve its kernel (a built-in patch, or — when
+        /// the id walks past the built-ins — a loaded sample bank's region
+        /// selected by `(pitch, velocity)`), then steal the oldest voice if
+        /// at capacity, replace any voice already on the same key, and push.
+        /// A miss on both kernel sources (unknown id, or a bank with no
+        /// region covering the note) warn-drops without touching the pool
+        /// (ADR-0103 §6).
+        fn trigger_note_on(
+            &mut self,
+            sender_mailbox: MailboxId,
+            pitch: u8,
+            velocity: u8,
+            instrument_id: u8,
+        ) {
+            let kernel = if let Some(def) = instrument_by_id(instrument_id) {
+                Some(build_builtin_kernel(
+                    sender_mailbox,
+                    instrument_id,
+                    pitch,
+                    velocity,
+                    def,
+                    self.sample_rate,
+                ))
+            } else {
+                self.bank_for(instrument_id).and_then(|bank| {
+                    bank.select(pitch, velocity).map(|region| {
+                        VoiceKernel::Sample(SampleVoice::new(pitch, velocity, region))
+                    })
+                })
+            };
+            let Some(kernel) = kernel else {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    instrument_id,
+                    pitch,
+                    velocity,
+                    "note_on: no instrument / region for id, dropping",
+                );
+                return;
+            };
+            if self.voices.len() >= MAX_VOICES {
+                // Evict the oldest (minimum-seq) voice. swap_remove is O(1)
+                // and safe here because the pool is non-empty at capacity.
+                if let Some(oldest_idx) = self
+                    .voices
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, v)| v.seq)
+                    .map(|(i, _)| i)
+                {
+                    self.voices.swap_remove(oldest_idx);
+                }
+            }
+            if let Some(existing) = self.voices.iter().position(|v| {
+                v.sender_mailbox == sender_mailbox
+                    && v.instrument_id == instrument_id
+                    && v.pitch == pitch
+            }) {
+                self.voices.swap_remove(existing);
+            }
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            self.voices.push(Voice {
+                sender_mailbox,
+                instrument_id,
+                pitch,
+                seq,
+                kernel,
+            });
+        }
+
         fn drain_events(&mut self) {
             while let Some(ev) = self.events.pop() {
                 match ev {
@@ -1212,48 +1506,7 @@ mod native {
                         pitch,
                         velocity,
                         instrument_id,
-                    } => {
-                        let Some(def) = instrument_by_id(instrument_id) else {
-                            tracing::warn!(
-                                target: "aether_substrate::audio",
-                                instrument_id,
-                                "note_on: unknown instrument_id, dropping",
-                            );
-                            continue;
-                        };
-                        if self.voices.len() >= MAX_VOICES {
-                            // Evict the oldest (minimum-seq) voice.
-                            // swap_remove is O(1) and safe here because the
-                            // pool is always non-empty when at capacity.
-                            if let Some(oldest_idx) = self
-                                .voices
-                                .iter()
-                                .enumerate()
-                                .min_by_key(|(_, v)| v.seq)
-                                .map(|(i, _)| i)
-                            {
-                                self.voices.swap_remove(oldest_idx);
-                            }
-                        }
-                        if let Some(existing) = self.voices.iter().position(|v| {
-                            v.sender_mailbox == sender_mailbox
-                                && v.instrument_id == instrument_id
-                                && v.pitch == pitch
-                        }) {
-                            self.voices.swap_remove(existing);
-                        }
-                        let seq = self.next_seq;
-                        self.next_seq += 1;
-                        self.voices.push(Voice::new(
-                            sender_mailbox,
-                            instrument_id,
-                            pitch,
-                            velocity,
-                            def,
-                            self.sample_rate,
-                            seq,
-                        ));
-                    }
+                    } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id),
                     AudioEvent::NoteOff {
                         sender_mailbox,
                         pitch,
@@ -1283,6 +1536,24 @@ mod native {
                         namespace,
                         path,
                     } => self.stop_track(sender_mailbox, &namespace, &path),
+                    AudioEvent::RegisterInstrument { id, bank } => {
+                        // Banks arrive in load order on this single-producer
+                        // FIFO, and the cap assigns ids from `BUILTINS.len()`
+                        // upward in the same order, so the new bank's index
+                        // is exactly `id - BUILTINS.len()` == current length.
+                        // A mismatch is a wiring bug, not a runtime input —
+                        // log it but still append so lookups stay dense.
+                        let expected = BUILTINS.len() + self.banks.len();
+                        if id as usize != expected {
+                            tracing::warn!(
+                                target: "aether_substrate::audio",
+                                id,
+                                expected,
+                                "register_instrument: id out of step with load order",
+                            );
+                        }
+                        self.banks.push(bank);
+                    }
                 }
             }
         }
@@ -1385,6 +1656,11 @@ mod native {
         #[cfg(test)]
         fn track_count(&self) -> usize {
             self.tracks.len()
+        }
+
+        #[cfg(test)]
+        fn bank_count(&self) -> usize {
+            self.banks.len()
         }
     }
 
@@ -1560,6 +1836,65 @@ mod native {
     /// the decode failure to relay as `PlayTrackResult::Err`.
     type DecodeOutput = Result<Vec<f32>, DecodeError>;
 
+    /// A `load_instrument` request parked while its `.sfz` `aether.fs.read`
+    /// is in flight (ADR-0103 §2/§5). Keyed in
+    /// [`AudioCapability::pending_instruments`] by the echoed
+    /// `(namespace, path)` of the `.sfz`. Only the original requester's
+    /// reply route lives here — the namespace / path come back on the
+    /// `ReadResult`, and the bank's name is derived from the `.sfz` path.
+    struct PendingInstrument {
+        source: Source,
+    }
+
+    /// One unique sample a bank assembly is fetching: the path as written
+    /// in the `.sfz` (resolved against `default_path`), the fs path it is
+    /// read from (joined with the `.sfz`'s own directory), and its bytes
+    /// once the `aether.fs.read` lands.
+    struct SampleSlot {
+        sample_rel: String,
+        fs_path: String,
+        bytes: Option<Vec<u8>>,
+    }
+
+    /// A bank load in progress: the `.sfz` parsed into regions, fanning out
+    /// one `aether.fs.read` per unique referenced sample, assembling when
+    /// the last reply lands (ADR-0103 §2). Keyed in
+    /// [`AudioCapability::assemblies`] by a minted id; the per-sample reads
+    /// correlate back to it through [`AudioCapability::pending_samples`].
+    struct BankAssembly {
+        /// The original `load_instrument` requester — the
+        /// `LoadInstrumentResult` reply routes here.
+        source: Source,
+        /// The fs namespace the `.sfz` and its samples live in (shared).
+        namespace: String,
+        /// The `.sfz` path — echoed on an `Err` reply for correlation.
+        sfz_path: String,
+        /// Bank name, derived from the `.sfz` filename stem.
+        name: String,
+        /// The parsed regions; each names a `sample_rel` resolved at
+        /// assembly time to its decoded PCM.
+        regions: Vec<SfzRegion>,
+        /// The unique samples, fetched in parallel.
+        samples: Vec<SampleSlot>,
+        /// How many samples are still missing their bytes; the bank
+        /// assembles when this reaches zero.
+        remaining: usize,
+    }
+
+    /// Completion context the bank-assembly dispatch carries so the
+    /// `#[handler(task)]` arm can build the `Err` reply (`Ok` carries the
+    /// assembled bank's own name / id / bytes). Mirrors
+    /// [`TrackDecodeContext`] for the load path.
+    struct BankAssemblyContext {
+        namespace: String,
+        path: String,
+    }
+
+    /// Output of the bank-assembly dispatch worker — the assembled,
+    /// device-rate bank behind an `Arc`, or a human-readable decode failure
+    /// to relay as `LoadInstrumentResult::Err`.
+    type BankAssemblyOutput = Result<Arc<SampleBank>, String>;
+
     pub struct AudioCapability {
         sender: Option<AudioEventSender>,
         /// Device output rate, captured at boot — the resample target for
@@ -1570,6 +1905,22 @@ mod native {
         /// two concurrent plays of the same path correlate FIFO rather than
         /// clobbering each other.
         pending_tracks: HashMap<(String, String), VecDeque<PendingTrack>>,
+        /// `load_instrument` requests awaiting their `.sfz` read, keyed by
+        /// the echoed `(namespace, path)` of the `.sfz` (ADR-0103 §5).
+        pending_instruments: HashMap<(String, String), VecDeque<PendingInstrument>>,
+        /// Bank loads whose `.sfz` has parsed and whose sample reads are in
+        /// flight, keyed by a minted assembly id.
+        assemblies: HashMap<u64, BankAssembly>,
+        /// Sample reads in flight, keyed by the echoed `(namespace, fs_path)`
+        /// to the assembly id(s) awaiting that sample (FIFO across banks
+        /// that happen to share a sample path).
+        pending_samples: HashMap<(String, String), VecDeque<u64>>,
+        /// Monotonic source of [`BankAssembly`] keys.
+        next_assembly_id: u64,
+        /// Next instrument id to assign a loaded bank — starts at
+        /// `BUILTINS.len()` and counts up in load order (ADR-0103 §4),
+        /// matching the synth's append-only bank table.
+        next_instrument_id: u8,
         thread: Option<JoinHandle<()>>,
         shutdown: Option<mpsc::Sender<()>>,
     }
@@ -1580,6 +1931,11 @@ mod native {
                 sender: None,
                 sample_rate: None,
                 pending_tracks: HashMap::new(),
+                pending_instruments: HashMap::new(),
+                assemblies: HashMap::new(),
+                pending_samples: HashMap::new(),
+                next_assembly_id: 0,
+                next_instrument_id: builtin_id_ceiling(),
                 thread: None,
                 shutdown: None,
             }
@@ -1597,6 +1953,349 @@ mod native {
             }
             pending
         }
+
+        /// Pop the oldest `load_instrument` parked under the `.sfz`'s
+        /// `(namespace, path)`. Sibling of [`Self::take_pending`].
+        fn take_pending_instrument(
+            &mut self,
+            namespace: &str,
+            path: &str,
+        ) -> Option<PendingInstrument> {
+            let key = (namespace.to_owned(), path.to_owned());
+            let queue = self.pending_instruments.get_mut(&key)?;
+            let pending = queue.pop_front();
+            if queue.is_empty() {
+                self.pending_instruments.remove(&key);
+            }
+            pending
+        }
+
+        /// Pop the oldest assembly awaiting a sample read at
+        /// `(namespace, fs_path)`.
+        fn take_pending_sample(&mut self, namespace: &str, path: &str) -> Option<u64> {
+            let key = (namespace.to_owned(), path.to_owned());
+            let queue = self.pending_samples.get_mut(&key)?;
+            let id = queue.pop_front();
+            if queue.is_empty() {
+                self.pending_samples.remove(&key);
+            }
+            id
+        }
+
+        /// Dispatch a track's decode off the realtime path (ADR-0093),
+        /// pinning the deferred `PlayTrackResult` to the original
+        /// `play_track` caller. Split out of `on_read_result` so the one
+        /// handler can route three fetch paths.
+        fn start_track_decode(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            pending: &PendingTrack,
+            namespace: String,
+            path: String,
+            bytes: Vec<u8>,
+        ) {
+            let Some(target_rate_f32) = self.sample_rate else {
+                ctx.reply_to_target(
+                    pending.source,
+                    &PlayTrackResult::Err {
+                        namespace,
+                        path,
+                        error: "audio pipeline not initialised on this desktop substrate"
+                            .to_owned(),
+                    },
+                );
+                return;
+            };
+            // Device rates are small positive integers — the round trip back
+            // through u32 is exact.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let target_rate = target_rate_f32 as u32;
+
+            let context = TrackDecodeContext {
+                sender_mailbox: pending.sender_mailbox,
+                namespace,
+                path,
+                gain: pending.gain,
+                looping: pending.looping,
+            };
+            // Bridge the hold from this (fs-reply) turn into the decode
+            // dispatch, pinning the reply to the original `play_track` caller.
+            let hold = ctx.acquire_settlement_hold();
+            ctx.dispatch_blocking_resumed_with::<DecodeOutput, _, _>(
+                hold,
+                pending.source,
+                context,
+                move || decode_wav_to_mono(&bytes, target_rate),
+            );
+        }
+
+        /// The `.sfz` bytes landed: parse the SFZ subset and fan out one
+        /// `aether.fs.read` per unique referenced sample (ADR-0103 §5). A
+        /// bad UTF-8 / parse replies `Err` immediately; otherwise a
+        /// [`BankAssembly`] is parked until the sample reads complete.
+        fn on_sfz_loaded(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            pending: &PendingInstrument,
+            namespace: String,
+            path: String,
+            bytes: &[u8],
+        ) {
+            let Ok(text) = from_utf8(bytes) else {
+                ctx.reply_to_target(
+                    pending.source,
+                    &LoadInstrumentResult::Err {
+                        namespace,
+                        path,
+                        error: "sfz file is not valid UTF-8".to_owned(),
+                    },
+                );
+                return;
+            };
+            let spec = match parse_sfz(text) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    ctx.reply_to_target(
+                        pending.source,
+                        &LoadInstrumentResult::Err {
+                            namespace,
+                            path,
+                            error: format!("sfz parse failed: {e}"),
+                        },
+                    );
+                    return;
+                }
+            };
+
+            let dir = sfz_dir(&path);
+            let name = bank_name_from_path(&path);
+            let samples: Vec<SampleSlot> = spec
+                .sample_paths()
+                .into_iter()
+                .map(|rel| SampleSlot {
+                    fs_path: join_fs(dir, &rel),
+                    sample_rel: rel,
+                    bytes: None,
+                })
+                .collect();
+            // `parse_sfz` guarantees at least one region with a sample, so
+            // `samples` is non-empty.
+            let remaining = samples.len();
+            let assembly_id = self.next_assembly_id;
+            self.next_assembly_id += 1;
+
+            let fs_paths: Vec<String> = samples.iter().map(|s| s.fs_path.clone()).collect();
+            self.assemblies.insert(
+                assembly_id,
+                BankAssembly {
+                    source: pending.source,
+                    namespace: namespace.clone(),
+                    sfz_path: path,
+                    name,
+                    regions: spec.regions,
+                    samples,
+                    remaining,
+                },
+            );
+
+            let fs_mailbox = mailbox_id_from_name("aether.fs");
+            for fs_path in fs_paths {
+                self.pending_samples
+                    .entry((namespace.clone(), fs_path.clone()))
+                    .or_default()
+                    .push_back(assembly_id);
+                let read = Read {
+                    namespace: namespace.clone(),
+                    path: fs_path,
+                };
+                let read_bytes = read.encode_into_bytes();
+                let _ = ctx.send_envelope_traced(fs_mailbox, Read::ID, &read_bytes);
+            }
+        }
+
+        /// A sample's bytes landed: store them against its slot and, once
+        /// the last sample is in, dispatch the decode + assembly off the
+        /// realtime path (ADR-0093 / ADR-0103 §6). A late / orphan reply
+        /// (its assembly already failed) is dropped.
+        fn on_sample_loaded(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            assembly_id: u64,
+            fs_path: &str,
+            bytes: Vec<u8>,
+        ) {
+            let ready = {
+                let Some(assembly) = self.assemblies.get_mut(&assembly_id) else {
+                    return;
+                };
+                if let Some(slot) = assembly
+                    .samples
+                    .iter_mut()
+                    .find(|s| s.fs_path == fs_path && s.bytes.is_none())
+                {
+                    slot.bytes = Some(bytes);
+                    assembly.remaining = assembly.remaining.saturating_sub(1);
+                }
+                assembly.remaining == 0
+            };
+            if !ready {
+                return;
+            }
+
+            let assembly = self
+                .assemblies
+                .remove(&assembly_id)
+                .expect("assembly present — checked above");
+            let Some(target_rate_f32) = self.sample_rate else {
+                ctx.reply_to_target(
+                    assembly.source,
+                    &LoadInstrumentResult::Err {
+                        namespace: assembly.namespace,
+                        path: assembly.sfz_path,
+                        error: "audio pipeline not initialised on this desktop substrate"
+                            .to_owned(),
+                    },
+                );
+                return;
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let target_rate = target_rate_f32 as u32;
+
+            let BankAssembly {
+                source,
+                namespace,
+                sfz_path,
+                name,
+                regions,
+                samples,
+                ..
+            } = assembly;
+            let sample_bytes: Vec<(String, Vec<u8>)> = samples
+                .into_iter()
+                .map(|s| (s.sample_rel, s.bytes.unwrap_or_default()))
+                .collect();
+            let context = BankAssemblyContext {
+                namespace,
+                path: sfz_path,
+            };
+            let hold = ctx.acquire_settlement_hold();
+            ctx.dispatch_blocking_resumed_with::<BankAssemblyOutput, _, _>(
+                hold,
+                source,
+                context,
+                move || assemble_bank(name, &regions, &sample_bytes, target_rate),
+            );
+        }
+
+        /// Abandon a bank load whose sample read failed: reply `Err` to the
+        /// original requester and discard the partial assembly (ADR-0103
+        /// §2). Sibling sample reads still in flight prune from the pending
+        /// table; their replies will find no assembly and drop.
+        fn fail_assembly(&mut self, ctx: &mut NativeCtx<'_>, assembly_id: u64, error: String) {
+            let Some(assembly) = self.assemblies.remove(&assembly_id) else {
+                return;
+            };
+            ctx.reply_to_target(
+                assembly.source,
+                &LoadInstrumentResult::Err {
+                    namespace: assembly.namespace,
+                    path: assembly.sfz_path,
+                    error,
+                },
+            );
+            for queue in self.pending_samples.values_mut() {
+                queue.retain(|id| *id != assembly_id);
+            }
+            self.pending_samples.retain(|_, queue| !queue.is_empty());
+        }
+    }
+
+    /// Decode every unique sample to device-rate mono PCM and assemble the
+    /// bank (ADR-0103 §6). Pure + `Send` so it runs on the blocking-dispatch
+    /// worker, off the realtime path. A failed decode aborts with a
+    /// human-readable reason the cap relays as `LoadInstrumentResult::Err`.
+    fn assemble_bank(
+        name: String,
+        regions: &[SfzRegion],
+        sample_bytes: &[(String, Vec<u8>)],
+        target_rate: u32,
+    ) -> BankAssemblyOutput {
+        let mut decoded: Vec<(String, Arc<[f32]>)> = Vec::with_capacity(sample_bytes.len());
+        let mut resident_bytes = 0usize;
+        for (rel, bytes) in sample_bytes {
+            let pcm =
+                decode_wav_to_mono(bytes, target_rate).map_err(|e| format!("sample {rel}: {e}"))?;
+            resident_bytes += pcm.len() * size_of::<f32>();
+            decoded.push((rel.clone(), Arc::from(pcm.as_slice())));
+        }
+
+        let mut bank_regions = Vec::with_capacity(regions.len());
+        for region in regions {
+            let pcm = decoded
+                .iter()
+                .find(|(rel, _)| rel == &region.sample)
+                .map(|(_, pcm)| Arc::clone(pcm))
+                .ok_or_else(|| format!("region references unfetched sample {}", region.sample))?;
+            bank_regions.push(SampleRegion {
+                lokey: region.lokey,
+                hikey: region.hikey,
+                lovel: region.lovel,
+                hivel: region.hivel,
+                pitch_keycenter: region.pitch_keycenter,
+                pcm,
+            });
+        }
+
+        Ok(Arc::new(SampleBank {
+            name,
+            regions: bank_regions,
+            resident_bytes,
+        }))
+    }
+
+    /// The directory portion of an fs path (everything before the last
+    /// `/`), or `""` when the path has no directory. A bank's samples are
+    /// addressed relative to the `.sfz`'s own directory (ADR-0103 §5).
+    fn sfz_dir(path: &str) -> &str {
+        match path.rsplit_once('/') {
+            Some((dir, _)) => dir,
+            None => "",
+        }
+    }
+
+    /// Join a sample path onto the `.sfz`'s directory. An empty directory
+    /// leaves the sample as-is.
+    fn join_fs(dir: &str, rel: &str) -> String {
+        if dir.is_empty() {
+            rel.to_owned()
+        } else {
+            format!("{dir}/{rel}")
+        }
+    }
+
+    /// Derive a bank name from the `.sfz` filename stem (the last path
+    /// segment without its extension). Falls back to `"instrument"` for a
+    /// pathological empty stem.
+    fn bank_name_from_path(path: &str) -> String {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        if stem.is_empty() {
+            "instrument".to_owned()
+        } else {
+            stem.to_owned()
+        }
+    }
+
+    /// The first instrument id available to a loaded bank — one past the
+    /// last compiled-in built-in. The cap's `next_instrument_id` starts
+    /// here, the synth's bank table begins at the same offset.
+    fn builtin_id_ceiling() -> u8 {
+        // `BUILTINS` is a small fixed table (11 today); the length fits a
+        // `u8` with room to spare, and a load count that overflowed `u8`
+        // would be absurd.
+        #[allow(clippy::cast_possible_truncation)]
+        let n = BUILTINS.len() as u8;
+        n
     }
 
     impl Drop for AudioCapability {
@@ -1639,6 +2338,11 @@ mod native {
                     #[allow(clippy::cast_precision_loss)]
                     sample_rate: Some(sample_rate as f32),
                     pending_tracks: HashMap::new(),
+                    pending_instruments: HashMap::new(),
+                    assemblies: HashMap::new(),
+                    pending_samples: HashMap::new(),
+                    next_assembly_id: 0,
+                    next_instrument_id: builtin_id_ceiling(),
                     thread: Some(thread),
                     shutdown: Some(shutdown),
                 }),
@@ -1781,11 +2485,13 @@ mod native {
 
         /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
         ///
-        /// `Err` relays the fs error to the original requester; `Ok`
-        /// dispatches the decode off the realtime path (ADR-0093) carrying
-        /// the original reply route + track key, so the deferred
-        /// `PlayTrackResult` lands on the `play_track` caller — not the fs
-        /// mailbox the read reply came from.
+        /// One handler serves three fetch paths keyed by which pending
+        /// table the echoed `(namespace, path)` matches: a `play_track`
+        /// track, a `load_instrument` `.sfz`, or one of a bank's sample
+        /// WAVs. `Ok` routes the bytes onward (decode dispatch / parse /
+        /// accumulate); `Err` relays the fs error to whichever original
+        /// requester is waiting. The deferred reply lands on that caller —
+        /// not the fs mailbox the read reply came from.
         #[handler]
         fn on_read_result(&mut self, ctx: &mut NativeCtx<'_>, mail: ReadResult) {
             match mail {
@@ -1794,62 +2500,42 @@ mod native {
                     path,
                     bytes,
                 } => {
-                    let Some(pending) = self.take_pending(&namespace, &path) else {
-                        // No parked request for this key — a stray / late
-                        // reply. Nothing to play.
-                        return;
-                    };
-                    let Some(target_rate_f32) = self.sample_rate else {
-                        ctx.reply_to_target(
-                            pending.source,
-                            &PlayTrackResult::Err {
-                                namespace,
-                                path,
-                                error: "audio pipeline not initialised on this desktop substrate"
-                                    .to_owned(),
-                            },
-                        );
-                        return;
-                    };
-                    // Device rates are small positive integers — the round
-                    // trip back through u32 is exact.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let target_rate = target_rate_f32 as u32;
-
-                    let context = TrackDecodeContext {
-                        sender_mailbox: pending.sender_mailbox,
-                        namespace,
-                        path,
-                        gain: pending.gain,
-                        looping: pending.looping,
-                    };
-                    // Bridge the hold from this (fs-reply) turn into the
-                    // decode dispatch, pinning the reply to the original
-                    // `play_track` caller captured at accept time.
-                    let hold = ctx.acquire_settlement_hold();
-                    ctx.dispatch_blocking_resumed_with::<DecodeOutput, _, _>(
-                        hold,
-                        pending.source,
-                        context,
-                        move || decode_wav_to_mono(&bytes, target_rate),
-                    );
+                    if let Some(pending) = self.take_pending(&namespace, &path) {
+                        self.start_track_decode(ctx, &pending, namespace, path, bytes);
+                    } else if let Some(pending) = self.take_pending_instrument(&namespace, &path) {
+                        self.on_sfz_loaded(ctx, &pending, namespace, path, &bytes);
+                    } else if let Some(assembly_id) = self.take_pending_sample(&namespace, &path) {
+                        self.on_sample_loaded(ctx, assembly_id, &path, bytes);
+                    }
+                    // else: a stray / late reply with no parked request.
                 }
                 ReadResult::Err {
                     namespace,
                     path,
                     error,
                 } => {
-                    let Some(pending) = self.take_pending(&namespace, &path) else {
-                        return;
-                    };
-                    ctx.reply_to_target(
-                        pending.source,
-                        &PlayTrackResult::Err {
-                            namespace,
-                            path,
-                            error: format!("file read failed: {error:?}"),
-                        },
-                    );
+                    let reason = format!("file read failed: {error:?}");
+                    if let Some(pending) = self.take_pending(&namespace, &path) {
+                        ctx.reply_to_target(
+                            pending.source,
+                            &PlayTrackResult::Err {
+                                namespace,
+                                path,
+                                error: reason,
+                            },
+                        );
+                    } else if let Some(pending) = self.take_pending_instrument(&namespace, &path) {
+                        ctx.reply_to_target(
+                            pending.source,
+                            &LoadInstrumentResult::Err {
+                                namespace,
+                                path,
+                                error: reason,
+                            },
+                        );
+                    } else if let Some(assembly_id) = self.take_pending_sample(&namespace, &path) {
+                        self.fail_assembly(ctx, assembly_id, reason);
+                    }
                 }
             }
         }
@@ -1924,6 +2610,120 @@ mod native {
                     "event queue full — dropping track_stop",
                 );
             }
+        }
+
+        /// Load a sampled instrument bank from an `.sfz` file (ADR-0103
+        /// §4/§5).
+        ///
+        /// # Agent
+        /// Reply: `LoadInstrumentResult`. The cap forwards an
+        /// `aether.fs.read` for the `.sfz` at `namespace://path`, parses the
+        /// SFZ subset, fetches every sample it references, decodes and
+        /// resamples them off the realtime path, and appends the assembled
+        /// bank to the registry. `Ok` carries the assigned `instrument_id`
+        /// (thread it into `note_on`), the bank `name`, and `resident_bytes`;
+        /// `Err` carries the failure reason (bad path, malformed `.sfz` /
+        /// sample, or a chassis without audio). Loaded ids are
+        /// session-scoped.
+        #[handler]
+        fn on_load_instrument(&mut self, ctx: &mut NativeCtx<'_>, mail: LoadInstrument) {
+            // Nop chassis (headless / hub / disabled / no device): fail
+            // fast with a loud Err (ADR-0103 §7).
+            if self.sender.is_none() || self.sample_rate.is_none() {
+                ctx.reply(&LoadInstrumentResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                });
+                return;
+            }
+
+            let source = ctx.reply_target();
+            let key = (mail.namespace.clone(), mail.path.clone());
+            self.pending_instruments
+                .entry(key)
+                .or_default()
+                .push_back(PendingInstrument { source });
+
+            // Forward the `.sfz` read to the single fs resolver (ADR-0041);
+            // the `ReadResult` routes back to `on_read_result`, which parses
+            // it and fans out the sample reads (ADR-0103 §2/§5).
+            let read = Read {
+                namespace: mail.namespace,
+                path: mail.path,
+            };
+            let bytes = read.encode_into_bytes();
+            let fs_mailbox = mailbox_id_from_name("aether.fs");
+            let _ = ctx.send_envelope_traced(fs_mailbox, Read::ID, &bytes);
+        }
+
+        /// Bank-assembly completion (ADR-0093 §3 / ADR-0103 §4). On success
+        /// assign the next instrument id, register the bank with the synth,
+        /// and reply `Ok` with the id / name / resident bytes; on a decode
+        /// failure reply `Err`. Either way `resolve_with` re-replies through
+        /// the captured `load_instrument` caller and drops the hold.
+        #[handler(task)]
+        fn on_instrument_assembled(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            done: TaskDone<BankAssemblyOutput, BankAssemblyContext>,
+        ) {
+            // The assembled-or-failed reply value, built while the
+            // output/context borrows are live so the side effects (id
+            // assignment, register event) run before `resolve_with` consumes
+            // `done`.
+            let outcome: LoadInstrumentResult = match done.output() {
+                Ok(bank) => {
+                    if let Some(sender) = self.sender.as_ref() {
+                        let instrument_id = self.next_instrument_id;
+                        self.next_instrument_id = self.next_instrument_id.saturating_add(1);
+                        let name = bank.name.clone();
+                        // PCM byte counts are bounded well below u64.
+                        let resident_bytes = bank.resident_bytes as u64;
+                        if sender
+                            .push(AudioEvent::RegisterInstrument {
+                                id: instrument_id,
+                                bank: Arc::clone(bank),
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                target: "aether_substrate::audio",
+                                "event queue full — dropping register_instrument",
+                            );
+                        }
+                        tracing::info!(
+                            target: "aether_substrate::audio",
+                            instrument_id,
+                            name = %name,
+                            resident_bytes,
+                            "sampled instrument loaded",
+                        );
+                        LoadInstrumentResult::Ok {
+                            instrument_id,
+                            name,
+                            resident_bytes,
+                        }
+                    } else {
+                        let cx = done.context();
+                        LoadInstrumentResult::Err {
+                            namespace: cx.namespace.clone(),
+                            path: cx.path.clone(),
+                            error: "audio pipeline not initialised on this desktop substrate"
+                                .to_owned(),
+                        }
+                    }
+                }
+                Err(error) => {
+                    let cx = done.context();
+                    LoadInstrumentResult::Err {
+                        namespace: cx.namespace.clone(),
+                        path: cx.path.clone(),
+                        error: error.clone(),
+                    }
+                }
+            };
+            done.resolve_with(ctx, move |_out, _cx| outcome);
         }
     }
 
@@ -2731,6 +3531,11 @@ mod native {
                 sender: Some(event_sender),
                 sample_rate: Some(TEST_RATE),
                 pending_tracks: HashMap::new(),
+                pending_instruments: HashMap::new(),
+                assemblies: HashMap::new(),
+                pending_samples: HashMap::new(),
+                next_assembly_id: 0,
+                next_instrument_id: builtin_id_ceiling(),
                 thread: None,
                 shutdown: None,
             };
@@ -2893,6 +3698,445 @@ mod native {
         fn ramp(len: usize) -> Vec<f32> {
             #[allow(clippy::cast_precision_loss)]
             (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
+        }
+
+        // ADR-0103 sampled instrument banks (#1679). The synth-side tests
+        // drive `Synth` directly (registry + sample-voice kernel); the
+        // cap-handler tests drive `on_load_instrument` / `on_read_result` /
+        // `on_instrument_assembled` through a `new_for_test` binding, the
+        // same pattern as the track tests above.
+
+        fn test_region(
+            lokey: u8,
+            hikey: u8,
+            lovel: u8,
+            hivel: u8,
+            pitch_keycenter: u8,
+            pcm: Vec<f32>,
+        ) -> SampleRegion {
+            SampleRegion {
+                lokey,
+                hikey,
+                lovel,
+                hivel,
+                pitch_keycenter,
+                pcm: Arc::from(pcm),
+            }
+        }
+
+        fn test_bank(regions: Vec<SampleRegion>) -> Arc<SampleBank> {
+            let resident_bytes = regions.iter().map(|r| r.pcm.len() * 4).sum();
+            Arc::new(SampleBank {
+                name: "test".to_owned(),
+                regions,
+                resident_bytes,
+            })
+        }
+
+        #[test]
+        fn loaded_bank_registers_past_builtins_and_plays() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            let id = builtin_id_ceiling();
+            sender
+                .push(AudioEvent::RegisterInstrument {
+                    id,
+                    bank: test_bank(vec![test_region(0, 127, 0, 127, 60, ramp(256))]),
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(
+                synth.bank_count(),
+                1,
+                "bank not appended past the built-ins"
+            );
+
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 60,
+                    velocity: 100,
+                    instrument_id: id,
+                })
+                .unwrap();
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 1, "loaded id did not sound a voice");
+            assert!(
+                buf.iter().any(|s| s.abs() > 0.0),
+                "sampled instrument produced silence",
+            );
+        }
+
+        #[test]
+        fn banks_register_in_load_order() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            let first = builtin_id_ceiling();
+            let second = first + 1;
+            sender
+                .push(AudioEvent::RegisterInstrument {
+                    id: first,
+                    bank: test_bank(vec![test_region(60, 60, 0, 127, 60, ramp(64))]),
+                })
+                .unwrap();
+            sender
+                .push(AudioEvent::RegisterInstrument {
+                    id: second,
+                    bank: test_bank(vec![test_region(72, 72, 0, 127, 72, ramp(64))]),
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 32];
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.bank_count(), 2);
+            assert!(
+                synth.bank_for(first).unwrap().select(60, 100).is_some(),
+                "id {first} should resolve the first bank",
+            );
+            assert!(
+                synth.bank_for(second).unwrap().select(72, 100).is_some(),
+                "id {second} should resolve the second bank",
+            );
+        }
+
+        #[test]
+        fn note_on_unknown_loaded_id_drops() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // An id past the built-ins with no bank registered: no voice.
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 60,
+                    velocity: 100,
+                    instrument_id: builtin_id_ceiling() + 5,
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 0);
+        }
+
+        #[test]
+        fn note_on_outside_every_region_drops() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            sender
+                .push(AudioEvent::RegisterInstrument {
+                    id: builtin_id_ceiling(),
+                    bank: test_bank(vec![test_region(60, 60, 0, 127, 60, ramp(64))]),
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 32];
+            synth.fill(&mut buf, 1);
+            // Pitch 30 falls outside the bank's only region.
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 30,
+                    velocity: 100,
+                    instrument_id: builtin_id_ceiling(),
+                })
+                .unwrap();
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), 0, "note in an uncovered gap must drop");
+        }
+
+        #[test]
+        fn region_selected_by_pitch_and_velocity() {
+            let bank = test_bank(vec![
+                test_region(60, 71, 0, 63, 60, ramp(8)),
+                test_region(60, 71, 64, 127, 60, ramp(8)),
+            ]);
+            let soft = bank
+                .select(64, 30)
+                .expect("soft region covers low velocity");
+            let loud = bank
+                .select(64, 110)
+                .expect("loud region covers high velocity");
+            assert_eq!((soft.lovel, soft.hivel), (0, 63));
+            assert_eq!((loud.lovel, loud.hivel), (64, 127));
+            assert!(bank.select(90, 100).is_none(), "pitch above every region");
+        }
+
+        #[test]
+        fn sample_voice_ends_when_sample_exhausts() {
+            // At pitch == pitch_keycenter the rate ratio is 1.0, so the
+            // unlooped voice walks one PCM sample per output sample and ends
+            // when the 480-sample recording runs out (ADR-0103 §6).
+            let region = test_region(60, 60, 0, 127, 60, ramp(480));
+            let mut voice = SampleVoice::new(60, 100, &region);
+            let dt = 1.0 / TEST_RATE;
+            let mut n: usize = 0;
+            while !voice.done() && n < 10_000 {
+                voice.next_sample(dt);
+                n += 1;
+            }
+            assert!(voice.done(), "sample voice never finished");
+            assert!(
+                (479..=481).contains(&n),
+                "ended at {n} samples, expected ~480",
+            );
+        }
+
+        #[test]
+        fn note_off_release_ends_sample_voice_before_sample_end() {
+            // A one-second recording, released early: the 0.08s release ramp
+            // ends the voice far short of the sample's natural end.
+            let region = test_region(60, 60, 0, 127, 60, ramp(48_000));
+            let mut voice = SampleVoice::new(60, 100, &region);
+            let dt = 1.0 / TEST_RATE;
+            for _ in 0..480 {
+                voice.next_sample(dt);
+            }
+            voice.note_off();
+            let mut n: usize = 480;
+            while !voice.done() && n < 48_000 {
+                voice.next_sample(dt);
+                n += 1;
+            }
+            assert!(voice.done(), "released sample voice never ended");
+            assert!(
+                n < 10_000,
+                "release ({n}) should end well before the sample exhausts",
+            );
+        }
+
+        #[test]
+        fn sample_voices_count_against_max_voices() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            sender
+                .push(AudioEvent::RegisterInstrument {
+                    id: builtin_id_ceiling(),
+                    bank: test_bank(vec![test_region(0, 127, 0, 127, 60, ramp(48_000))]),
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 32];
+            synth.fill(&mut buf, 1);
+            // Saturate the pool with sampled voices: they steal like any other.
+            for i in 0..(MAX_VOICES as u64 + 8) {
+                sender
+                    .push(AudioEvent::NoteOn {
+                        sender_mailbox: MailboxId(i + 1),
+                        pitch: 60,
+                        velocity: 100,
+                        instrument_id: builtin_id_ceiling(),
+                    })
+                    .unwrap();
+            }
+            synth.fill(&mut buf, 1);
+            assert_eq!(
+                synth.voice_count(),
+                MAX_VOICES,
+                "sample voices must count against MAX_VOICES and steal",
+            );
+        }
+
+        fn load_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
+            NativeCtx::new(
+                transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            )
+        }
+
+        #[test]
+        fn load_instrument_happy_path_replies_ok_and_registers() {
+            let (mut cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+
+            let mut ctx = load_ctx(&transport);
+            cap.on_load_instrument(
+                &mut ctx,
+                LoadInstrument {
+                    namespace: "assets".to_owned(),
+                    path: "piano/bank.sfz".to_owned(),
+                },
+            );
+            assert_eq!(cap.pending_instruments.len(), 1, "sfz read not parked");
+
+            // The .sfz parses into two regions referencing two samples.
+            let sfz = "\
+<region>
+sample=c4.wav lokey=60 hikey=71 pitch_keycenter=60
+<region>
+sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
+";
+            let mut read_ctx = load_ctx(&transport);
+            cap.on_read_result(
+                &mut read_ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "piano/bank.sfz".to_owned(),
+                    bytes: sfz.as_bytes().to_vec(),
+                },
+            );
+            assert_eq!(cap.assemblies.len(), 1, "assembly not parked");
+            assert_eq!(
+                cap.pending_samples.len(),
+                2,
+                "both sample reads not fanned out"
+            );
+
+            // Half the device rate, so decode also resamples each sample.
+            let wav = super::super::decode::wav_int16_mono(&ramp(256), 24_000);
+            cap.on_read_result(
+                &mut read_ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "piano/c4.wav".to_owned(),
+                    bytes: wav.clone(),
+                },
+            );
+            // One sample still missing — no dispatch yet.
+            assert_eq!(cap.assemblies.len(), 1, "assembly dispatched too early");
+            cap.on_read_result(
+                &mut read_ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "piano/c5.wav".to_owned(),
+                    bytes: wav,
+                },
+            );
+            // The last sample triggers the assembly dispatch off-thread.
+            drive_task_completion(&mut cap, &transport, &rx);
+
+            match decode_session_reply::<LoadInstrumentResult>(&rx) {
+                LoadInstrumentResult::Ok {
+                    instrument_id,
+                    name,
+                    resident_bytes,
+                } => {
+                    assert_eq!(instrument_id, builtin_id_ceiling());
+                    assert_eq!(name, "bank");
+                    assert!(resident_bytes > 0, "resident bytes not reported");
+                }
+                LoadInstrumentResult::Err { error, .. } => panic!("expected Ok, got Err({error})"),
+            }
+            assert!(cap.assemblies.is_empty(), "assembly never cleared");
+            assert!(
+                cap.pending_samples.is_empty(),
+                "sample pending never cleared"
+            );
+            let event = queue.pop().expect("a register-instrument event was queued");
+            assert!(
+                matches!(event, AudioEvent::RegisterInstrument { id, .. } if id == builtin_id_ceiling()),
+                "expected RegisterInstrument, got {event:?}",
+            );
+        }
+
+        #[test]
+        fn load_instrument_missing_sample_replies_err() {
+            let (mut cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_load_instrument(
+                &mut ctx,
+                LoadInstrument {
+                    namespace: "assets".to_owned(),
+                    path: "bank.sfz".to_owned(),
+                },
+            );
+            cap.on_read_result(
+                &mut ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "bank.sfz".to_owned(),
+                    bytes: b"<region>\nsample=c4.wav\n".to_vec(),
+                },
+            );
+            // The bank's only sample fails to read — the whole load fails.
+            cap.on_read_result(
+                &mut ctx,
+                ReadResult::Err {
+                    namespace: "assets".to_owned(),
+                    path: "c4.wav".to_owned(),
+                    error: FsError::NotFound,
+                },
+            );
+            match decode_session_reply::<LoadInstrumentResult>(&rx) {
+                LoadInstrumentResult::Err { error, .. } => {
+                    assert!(error.contains("NotFound"), "fs error not surfaced: {error}");
+                }
+                LoadInstrumentResult::Ok { .. } => panic!("expected Err for a missing sample"),
+            }
+            assert!(cap.assemblies.is_empty(), "assembly never discarded");
+            assert!(
+                cap.pending_samples.is_empty(),
+                "sample pending never cleared"
+            );
+            assert!(queue.pop().is_none(), "a failed bank must not register");
+        }
+
+        #[test]
+        fn load_instrument_malformed_sfz_replies_err() {
+            let (mut cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_load_instrument(
+                &mut ctx,
+                LoadInstrument {
+                    namespace: "assets".to_owned(),
+                    path: "bank.sfz".to_owned(),
+                },
+            );
+            // A control block with no regions: the parser rejects it.
+            cap.on_read_result(
+                &mut ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "bank.sfz".to_owned(),
+                    bytes: b"<control>\ndefault_path=x/\n".to_vec(),
+                },
+            );
+            match decode_session_reply::<LoadInstrumentResult>(&rx) {
+                LoadInstrumentResult::Err { error, .. } => {
+                    assert!(error.contains("parse"), "parse error not surfaced: {error}");
+                }
+                LoadInstrumentResult::Ok { .. } => panic!("expected Err for malformed sfz"),
+            }
+            assert!(cap.assemblies.is_empty(), "no assembly should be parked");
+            assert!(queue.pop().is_none(), "a malformed bank must not register");
+        }
+
+        #[test]
+        fn load_instrument_on_nop_chassis_replies_err() {
+            let mut cap = AudioCapability::nop();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = load_ctx(&transport);
+            cap.on_load_instrument(
+                &mut ctx,
+                LoadInstrument {
+                    namespace: "assets".to_owned(),
+                    path: "bank.sfz".to_owned(),
+                },
+            );
+            match decode_session_reply::<LoadInstrumentResult>(&rx) {
+                LoadInstrumentResult::Err { .. } => {}
+                LoadInstrumentResult::Ok { .. } => panic!("nop chassis must reply Err"),
+            }
+            assert!(
+                cap.pending_instruments.is_empty(),
+                "nop chassis must not park a read",
+            );
         }
     }
 }

@@ -1682,6 +1682,55 @@ mod control_plane {
         pub path: String,
     }
 
+    // ADR-0103 sampled instrument banks. The audio cap loads a bank of
+    // pitched samples at runtime, appends it to the instrument registry
+    // past the compiled-in built-ins, and plays it through the unchanged
+    // `note_on` / `note_off` surface (a third voice kernel beside the
+    // oscillator and partial-bank patches). Postcard-shaped — the request
+    // carries `String` namespace/path, the reply a numeric id + name.
+
+    /// `aether.audio.load_instrument` — load a sampled instrument bank
+    /// from an `.sfz` file in an fs namespace. The cap fetches the `.sfz`
+    /// through `aether.fs`, parses the SFZ subset (regions, key / velocity
+    /// ranges, root pitch), fetches every WAV it references, decodes and
+    /// resamples them off the realtime path, assembles the bank, and
+    /// appends it to the registry at the next id past the built-ins. The
+    /// assigned id rides the reply; a subsequent `note_on` with that id
+    /// plays the sampled instrument. Loaded ids are session-scoped — they
+    /// depend on load order and do not survive a restart (ADR-0103 §4).
+    /// Reply: `LoadInstrumentResult`. Desktop-only — chassis without an
+    /// audio device reply `Err` (ADR-0103 §7).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.load_instrument")]
+    pub struct LoadInstrument {
+        pub namespace: String,
+        pub path: String,
+    }
+
+    /// Reply to `LoadInstrument`. `Ok` carries the `instrument_id` the
+    /// bank was assigned (thread it into `NoteOn.instrument_id` to play
+    /// it), the `name` derived from the `.sfz` filename, and
+    /// `resident_bytes` — the decoded PCM the bank holds resident, so an
+    /// agent can see what a load is spending (no bank unload in v1, ADR-0103
+    /// §4). `Err` echoes the originating `namespace` + `path` with a
+    /// human-readable reason — a typo'd path (the fs error), a malformed
+    /// `.sfz` or sample (the parse / decode error), or a chassis without
+    /// an audio device — loud rather than logged-and-dropped (ADR-0103 §2).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.load_instrument_result")]
+    pub enum LoadInstrumentResult {
+        Ok {
+            instrument_id: u8,
+            name: String,
+            resident_bytes: u64,
+        },
+        Err {
+            namespace: String,
+            path: String,
+            error: String,
+        },
+    }
+
     // ADR-0041 substrate file I/O. Four request kinds on the
     // `"aether.fs"` mailbox (read / write / delete / list), paired
     // 1:1 with reply kinds
@@ -3148,6 +3197,11 @@ mod tests {
         assert_eq!(PlayTrack::NAME, "aether.audio.play_track");
         assert_eq!(PlayTrackResult::NAME, "aether.audio.play_track_result");
         assert_eq!(StopTrack::NAME, "aether.audio.stop_track");
+        assert_eq!(LoadInstrument::NAME, "aether.audio.load_instrument");
+        assert_eq!(
+            LoadInstrumentResult::NAME,
+            "aether.audio.load_instrument_result"
+        );
         assert_eq!(MonitorNotice::NAME, "aether.actor.monitor_notice");
         assert_eq!(LogTail::NAME, "aether.log.tail");
         assert_eq!(LogTailResult::NAME, "aether.log.tail_result");
