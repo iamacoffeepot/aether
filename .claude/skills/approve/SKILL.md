@@ -32,6 +32,7 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | Design notes | body has `## Design notes` and is non-empty | "Missing or empty §Design notes." |
 | Implementation plan | body has `## Implementation plan` and is non-empty | "Missing or empty §Implementation plan." |
 | ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
+| Model label | exactly one `model:*` label present (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | AgentReady allowed | `AgentReady` field is settable (not blocked by labels like `blocked`, `wontfix`, `duplicate`) | "Issue carries label '<label>' which blocks approval." |
 
 If **all** gates pass, proceed.
