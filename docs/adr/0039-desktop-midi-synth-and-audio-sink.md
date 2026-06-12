@@ -42,7 +42,7 @@ MIDI CCs (sustain pedal, pitch bend, modulation wheel, channel volume) are not i
 
 ### 2. Instrument registry
 
-Substrate ships a small fixed set of named instruments (`"sine_lead"`, `"square_bass"`, `"triangle"`, `"pluck"`, `"noise_perc"` — exact set TBD at PR time). Each is a code-level `Instrument` implementation; `instrument_id: u8` indexes the registry at boot. Components learn the id of an instrument by name through a lookup mail (`aether.audio.resolve_instrument { name: String }` → `InstrumentId { id: u8 }`), analogous to how mailbox names become ids today.
+Substrate ships a fixed set of five built-in instruments (`"sine_lead"`, `"square_bass"`, `"triangle"`, `"saw_lead"`, `"pluck"`). Each is a code-level `InstrumentDef`; `instrument_id: u8` indexes the registry directly — `BUILTINS[id as usize]`. Registry positions are wire-stable: reordering is a breaking change; new instruments append at the end. Components and agents address instruments by raw numeric id. The id-ordered name list is surfaced in the boot log (`builtin_names` field on the `"audio pipeline started"` event) so callers can cross-reference ids without a round-trip kind.
 
 Runtime-defined patches (mailed instrument definitions) are explicitly deferred. When we need one, the shape will be a `Patch` kind carrying oscillator + envelope + filter config, interpreted by a generic voice; no substrate churn — just one new kind and one new dispatch branch in the synth.
 
@@ -95,7 +95,8 @@ Desktop chassis only. Headless and hub chassis register the `aether.audio.*` sin
 
 ## Follow-up work
 
-- **v1 PR**: cpal stream, `Instrument` trait + 4–5 built-ins, voice table, `note_on` / `note_off` / `set_master_gain` kinds, `resolve_instrument` lookup, desktop/headless/hub chassis wiring.
+- **v1 PR**: cpal stream, `InstrumentDef` registry + 5 built-ins, voice table, `note_on` / `note_off` / `set_master_gain` kinds, desktop/headless/hub chassis wiring.
+- **Parked, not committed**: `resolve_instrument` kind (`aether.audio.resolve_instrument { name: String }` → `InstrumentId { id: u8 }`). The static append-only registry makes numeric ids constant-safe for now; the kind becomes load-bearing once runtime-defined patches land, because names turn dynamic there and a stable text-to-id contract becomes necessary.
 - **Parked, not committed**: `delay_samples` on `NoteOn` for sample-exact scheduling.
 - **Parked, not committed**: runtime-defined patches (mail a `Patch` kind, synth grows a generic voice).
 - **Parked, not committed**: `capture_audio` MCP tool + automated critique pipeline (Gemini or local captioner). Revisit when manual listening becomes a bottleneck.
