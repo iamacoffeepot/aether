@@ -740,7 +740,7 @@ mod native {
             let env = self.advance_envelope(dt);
             let s = self.waveform() * self.amplitude * env;
             let ratio = 1.0 + self.sweep_offset;
-            self.phase += self.phase_step * ratio;
+            self.phase = self.phase_step.mul_add(ratio, self.phase);
             if self.phase >= 1.0 {
                 self.phase -= 1.0;
             }
