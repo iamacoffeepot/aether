@@ -88,6 +88,7 @@ mod native {
     use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::f32::consts::TAU;
+    use std::io::Cursor;
     use std::str::from_utf8;
     use std::sync::Arc;
     use std::sync::mpsc;
@@ -107,7 +108,7 @@ mod native {
     use aether_substrate::chassis::error::BootError;
 
     use super::decode::{DecodeError, decode_wav_to_mono};
-    use super::sfz::{SfzRegion, parse_sfz};
+    use super::sfz::{SfzLoop, SfzRegion, parse_sfz};
     use super::{NoteOff, NoteOn, SetMasterGain};
 
     /// Linear fade-out duration (seconds) applied when a track is stopped,
@@ -1010,13 +1011,25 @@ mod native {
     /// dense chord doesn't clip past the soft-clip.
     const SAMPLE_BASE_AMP: f32 = 0.6;
 
+    /// A region's sustain loop in device-rate coordinates (ADR-0103 §6).
+    /// The SFZ frame offsets are scaled at bank assembly by the load-time
+    /// resample ratio into these fractional positions, so the kernel wrap
+    /// interpolates sub-sample and rounding never lands a click. `start`
+    /// and `end` index the region's device-rate PCM; the voice cycles the
+    /// half-open `[start, end)` interval while it sounds.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct SampleLoop {
+        start: f32,
+        end: f32,
+    }
+
     /// One region of a sampled instrument bank (ADR-0103 §5/§6): a
     /// device-rate mono recording plus the inclusive MIDI key range it
-    /// covers, the inclusive velocity range it answers to, and the root
-    /// pitch it was recorded at (so a voice repitches by
-    /// `2^((pitch − pitch_keycenter) / 12)`). The PCM is `Arc`'d so every
-    /// region naming the same sample shares one buffer and a spawned voice
-    /// holds a cheap reference, not a copy.
+    /// covers, the inclusive velocity range it answers to, the root pitch
+    /// it was recorded at (so a voice repitches by
+    /// `2^((pitch − pitch_keycenter) / 12)`), and an optional sustain loop.
+    /// The PCM is `Arc`'d so every region naming the same sample shares one
+    /// buffer and a spawned voice holds a cheap reference, not a copy.
     #[derive(Clone, Debug)]
     struct SampleRegion {
         lokey: u8,
@@ -1025,6 +1038,9 @@ mod native {
         hivel: u8,
         pitch_keycenter: u8,
         pcm: Arc<[f32]>,
+        /// The sustain loop, or `None` for a full-decay region that plays
+        /// once and ends when its sample runs out.
+        loop_region: Option<SampleLoop>,
     }
 
     /// A loaded sampled-instrument bank (ADR-0103 §4/§5): the regions to
@@ -1049,11 +1065,15 @@ mod native {
         }
     }
 
-    /// The sample voice kernel (ADR-0103 §6, unlooped): walk the region's
-    /// device-rate PCM at a repitched rate with linear interpolation,
-    /// wrapped in the same short attack / `note_off`-release ramp the
-    /// partial bank uses. A held note ends when its sample runs out
-    /// (full-decay, piano-class sets) — sustain loops are #1682.
+    /// The sample voice kernel (ADR-0103 §6): walk the region's device-rate
+    /// PCM at a repitched rate with linear interpolation, wrapped in the
+    /// same short attack / `note_off`-release ramp the partial bank uses.
+    /// An unlooped region ends when its sample runs out (full-decay,
+    /// piano-class sets). A looped region cycles `[loop_start, loop_end)`
+    /// while it sounds — interpolating across the seam back to
+    /// `loop_start` — and holds the note indefinitely, ending only once the
+    /// `note_off` release ramp completes (the loop keeps cycling beneath
+    /// the fade).
     #[derive(Clone, Debug)]
     struct SampleVoice {
         /// Device-rate mono PCM of the selected region, shared with the
@@ -1069,12 +1089,16 @@ mod native {
         /// Velocity-scaled amplitude the interpolated sample is multiplied
         /// by.
         amplitude: f32,
+        /// The sustain loop bounds (device-rate fractional positions), or
+        /// `None` for an unlooped region.
+        loop_region: Option<SampleLoop>,
         /// Attack / release ramp, the partial bank's shape.
         stage: BankStage,
         attack_s: f32,
         release_s: f32,
-        /// Set once the read position walks off the end of the PCM (the
-        /// note's sample exhausted) or the release ramp completes.
+        /// Set once an unlooped region's read position walks off the end of
+        /// the PCM, or the release ramp completes. A looped voice never sets
+        /// it from exhaustion — it ends through the release ramp.
         finished: bool,
     }
 
@@ -1083,11 +1107,17 @@ mod native {
             let semitones = f32::from(pitch) - f32::from(region.pitch_keycenter);
             let rate = (semitones / 12.0).exp2();
             let v = f32::from(velocity) / 127.0;
+            // Drop a loop whose bounds collapsed (defensive — assembly only
+            // emits `start < end`): a non-positive span has no cycle.
+            let loop_region = region
+                .loop_region
+                .filter(|lp| lp.end > lp.start && lp.start >= 0.0);
             Self {
                 pcm: Arc::clone(&region.pcm),
                 pos: 0.0,
                 rate,
                 amplitude: SAMPLE_BASE_AMP * v,
+                loop_region,
                 stage: BankStage::Attack { t: 0.0 },
                 attack_s: SAMPLE_ATTACK_SECS,
                 release_s: SAMPLE_RELEASE_SECS,
@@ -1143,13 +1173,9 @@ mod native {
         }
 
         // Read position and PCM lengths are bounded well below 2^24 for any
-        // sane sample, so the index-to-float and float-to-index casts are
-        // exact and non-negative on the hot path.
-        #[allow(
-            clippy::cast_precision_loss,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss
-        )]
+        // sane sample, so the index-to-float and float-to-index casts in the
+        // looped / unlooped readers are exact and non-negative on the hot
+        // path.
         fn next_sample(&mut self, dt: f32) -> f32 {
             let ramp = self.advance_ramp(dt);
             if self.finished {
@@ -1160,6 +1186,20 @@ mod native {
                 self.finished = true;
                 return 0.0;
             }
+            match self.loop_region {
+                Some(lp) => self.next_looped(lp, len, ramp),
+                None => self.next_unlooped(len, ramp),
+            }
+        }
+
+        /// The unlooped read: linear interpolation over the PCM, ending the
+        /// voice once the read position walks off the end (ADR-0103 §6).
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        fn next_unlooped(&mut self, len: usize, ramp: f32) -> f32 {
             let i = self.pos.floor() as usize;
             if i >= len {
                 self.finished = true;
@@ -1171,9 +1211,48 @@ mod native {
             let s = (b - a).mul_add(frac, a) * self.amplitude * ramp;
             self.pos += self.rate;
             if self.pos >= len as f32 {
-                // The held note's sample ran out — the voice ends (no loop
-                // machinery in v1, ADR-0103 §6).
+                // The held note's sample ran out — an unlooped voice ends.
                 self.finished = true;
+            }
+            s
+        }
+
+        /// The looped read (ADR-0103 §6): interpolate within `[loop_start,
+        /// loop_end)`, wrapping back to `loop_start` at the seam so the
+        /// interpolation reads `loop_start` as the post-seam neighbour and
+        /// produces no discontinuity beyond interpolation error. The voice
+        /// never ends from exhaustion here — only the release ramp retires
+        /// it (the loop keeps cycling beneath the fade).
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        fn next_looped(&mut self, lp: SampleLoop, len: usize, ramp: f32) -> f32 {
+            // `pos < loop_end <= len` holds going in, so `i` is in range.
+            let i = (self.pos.floor() as usize).min(len - 1);
+            let a = self.pcm[i];
+            // The interpolation neighbour is the next frame — but if that
+            // frame reaches or crosses `loop_end`, the loop wraps, so read
+            // `loop_start` instead (the seam neighbour).
+            let next_index = if (i + 1) as f32 >= lp.end {
+                (lp.start.floor() as usize).min(len - 1)
+            } else {
+                i + 1
+            };
+            let b = self.pcm[next_index];
+            let frac = self.pos - i as f32;
+            let s = (b - a).mul_add(frac, a) * self.amplitude * ramp;
+
+            self.pos += self.rate;
+            if self.pos >= lp.end {
+                // Wrap the overshoot back into the loop region. Modulo the
+                // loop length so a rate larger than the span still lands in
+                // `[loop_start, loop_end)` in O(1).
+                let loop_len = lp.end - lp.start;
+                let over = self.pos - lp.end;
+                let wrapped = (over / loop_len).floor().mul_add(-loop_len, over);
+                self.pos = lp.start + wrapped;
             }
             s
         }
@@ -2259,22 +2338,29 @@ mod native {
         sample_bytes: &[(String, Vec<u8>)],
         target_rate: u32,
     ) -> BankAssemblyOutput {
-        let mut decoded: Vec<(String, Arc<[f32]>)> = Vec::with_capacity(sample_bytes.len());
+        // Decode each unique sample, carrying its source rate so loop frame
+        // offsets can be scaled by the same resample ratio applied to the
+        // PCM (ADR-0103 §6).
+        let mut decoded: Vec<(String, Arc<[f32]>, u32)> = Vec::with_capacity(sample_bytes.len());
         let mut resident_bytes = 0usize;
         for (rel, bytes) in sample_bytes {
             let pcm =
                 decode_wav_to_mono(bytes, target_rate).map_err(|e| format!("sample {rel}: {e}"))?;
+            let source_rate = wav_source_rate(bytes).map_err(|e| format!("sample {rel}: {e}"))?;
             resident_bytes += pcm.len() * size_of::<f32>();
-            decoded.push((rel.clone(), Arc::from(pcm.as_slice())));
+            decoded.push((rel.clone(), Arc::from(pcm.as_slice()), source_rate));
         }
 
         let mut bank_regions = Vec::with_capacity(regions.len());
         for region in regions {
-            let pcm = decoded
+            let (pcm, source_rate) = decoded
                 .iter()
-                .find(|(rel, _)| rel == &region.sample)
-                .map(|(_, pcm)| Arc::clone(pcm))
+                .find(|(rel, _, _)| rel == &region.sample)
+                .map(|(_, pcm, source_rate)| (Arc::clone(pcm), *source_rate))
                 .ok_or_else(|| format!("region references unfetched sample {}", region.sample))?;
+            let loop_region = region
+                .loop_spec
+                .and_then(|lp| scale_loop(lp, source_rate, target_rate, pcm.len()));
             bank_regions.push(SampleRegion {
                 lokey: region.lokey,
                 hikey: region.hikey,
@@ -2282,6 +2368,7 @@ mod native {
                 hivel: region.hivel,
                 pitch_keycenter: region.pitch_keycenter,
                 pcm,
+                loop_region,
             });
         }
 
@@ -2290,6 +2377,48 @@ mod native {
             regions: bank_regions,
             resident_bytes,
         }))
+    }
+
+    /// Read a WAV asset's source sample rate from its header (ADR-0103 §6).
+    /// Bank assembly needs it to scale a region's loop frame offsets by the
+    /// load-time resample ratio; `decode_wav_to_mono` consumes the same
+    /// header but only returns the resampled PCM. Parses the header chunk
+    /// only — the sample data is not read.
+    fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
+        let reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+        let rate = reader.spec().sample_rate;
+        if rate == 0 {
+            return Err("zero sample rate".to_owned());
+        }
+        Ok(rate)
+    }
+
+    /// Scale a region's source-frame loop bounds into device-rate fractional
+    /// positions (ADR-0103 §6): multiply by the resample ratio
+    /// `target_rate / source_rate` — the same ratio the PCM was resampled
+    /// by at load — and clamp `loop_end` to the resampled length. Returns
+    /// `None` when the resampled region is too short to loop or the bounds
+    /// collapse after clamping, degrading the region to unlooped.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn scale_loop(
+        lp: SfzLoop,
+        source_rate: u32,
+        target_rate: u32,
+        resampled_len: usize,
+    ) -> Option<SampleLoop> {
+        if resampled_len < 2 || source_rate == 0 {
+            return None;
+        }
+        let ratio = f64::from(target_rate) / f64::from(source_rate);
+        let start = f64::from(lp.start) * ratio;
+        let end = (f64::from(lp.end) * ratio).min(resampled_len as f64);
+        if start + 1.0 >= end {
+            return None;
+        }
+        Some(SampleLoop {
+            start: start as f32,
+            end: end as f32,
+        })
     }
 
     /// The directory portion of an fs path (everything before the last
@@ -3907,6 +4036,21 @@ mod native {
                 hivel,
                 pitch_keycenter,
                 pcm: Arc::from(pcm),
+                loop_region: None,
+            }
+        }
+
+        /// A full-range region carrying a device-rate sustain loop over
+        /// `[start, end)`, for the sample-voice loop tests.
+        fn looped_region(pcm: Vec<f32>, start: f32, end: f32) -> SampleRegion {
+            SampleRegion {
+                lokey: 0,
+                hikey: 127,
+                lovel: 0,
+                hivel: 127,
+                pitch_keycenter: 60,
+                pcm: Arc::from(pcm),
+                loop_region: Some(SampleLoop { start, end }),
             }
         }
 
@@ -4086,6 +4230,189 @@ mod native {
                 n < 10_000,
                 "release ({n}) should end well before the sample exhausts",
             );
+        }
+
+        #[test]
+        fn looped_sample_voice_sustains_past_sample_length() {
+            // A 480-sample recording with a sustain loop holds the note far
+            // past its own length: the voice cycles the loop region rather
+            // than exhausting (ADR-0103 §6).
+            let region = looped_region(ramp(480), 100.0, 400.0);
+            let mut voice = SampleVoice::new(60, 100, &region);
+            let dt = 1.0 / TEST_RATE;
+            // Render past 2x the sample length while the key is held.
+            let mut sounded = false;
+            for _ in 0..1200 {
+                if voice.next_sample(dt).abs() > 0.0 {
+                    sounded = true;
+                }
+            }
+            assert!(
+                !voice.done(),
+                "held looped voice ended at sample exhaustion"
+            );
+            assert!(sounded, "held looped voice produced silence");
+        }
+
+        #[test]
+        fn looped_sample_voice_ends_on_note_off_release() {
+            // The loop holds the note open; note_off arms the release ramp,
+            // which retires the voice while the loop keeps cycling beneath
+            // it (ADR-0103 §6).
+            let region = looped_region(ramp(480), 100.0, 400.0);
+            let mut voice = SampleVoice::new(60, 100, &region);
+            let dt = 1.0 / TEST_RATE;
+            for _ in 0..2000 {
+                voice.next_sample(dt);
+            }
+            assert!(!voice.done(), "voice should still be held before note_off");
+            voice.note_off();
+            let mut n = 0;
+            while !voice.done() && n < 48_000 {
+                voice.next_sample(dt);
+                n += 1;
+            }
+            assert!(voice.done(), "released looped voice never ended");
+            assert!(
+                n < 10_000,
+                "release ({n}) should retire the voice within the ramp",
+            );
+        }
+
+        #[test]
+        fn loop_seam_produces_no_discontinuity() {
+            // A sine whose loop span is an exact multiple of its period
+            // wraps phase-continuously: the per-sample output delta across
+            // the seam stays in the band of an ordinary sine step, never the
+            // near-full-amplitude jump a naive (non-interpolating) wrap would
+            // inject (ADR-0103 §6).
+            const PERIOD: usize = 64;
+            #[allow(clippy::cast_precision_loss)]
+            let pcm: Vec<f32> = (0..512)
+                .map(|i| 0.5 * (TAU * i as f32 / PERIOD as f32).sin())
+                .collect();
+            // Loop span 256 == 4 * PERIOD, aligned to the period grid.
+            let region = looped_region(pcm, 128.0, 384.0);
+            let mut voice = SampleVoice::new(60, 100, &region);
+            let dt = 1.0 / TEST_RATE;
+            let mut prev = voice.next_sample(dt);
+            let mut max_delta = 0.0f32;
+            // Skip the attack ramp; sample well into the looped region across
+            // several wraps.
+            for n in 0..3000 {
+                let s = voice.next_sample(dt);
+                if n > 300 {
+                    max_delta = max_delta.max((s - prev).abs());
+                }
+                prev = s;
+            }
+            // An ordinary sine step at this amplitude is ~0.024; a discarded
+            // seam would jump by up to ~0.47. 0.05 cleanly separates them.
+            assert!(
+                max_delta < 0.05,
+                "loop seam introduced a discontinuity (max delta {max_delta})",
+            );
+        }
+
+        #[test]
+        fn assemble_bank_scales_loop_points_by_resample_ratio() {
+            // A source WAV at half the device rate resamples 2x at load, so
+            // the source-frame loop offsets scale 2x into device-rate
+            // positions (ADR-0103 §6).
+            let region = SfzRegion {
+                sample: "a.wav".to_owned(),
+                lokey: 0,
+                hikey: 127,
+                lovel: 0,
+                hivel: 127,
+                pitch_keycenter: 60,
+                loop_spec: Some(SfzLoop {
+                    start: 100,
+                    end: 400,
+                    mode: super::super::sfz::LoopMode::Continuous,
+                }),
+            };
+            let wav = super::super::decode::wav_int16_mono(&ramp(1000), 24_000);
+            let bank = assemble_bank(
+                "test".to_owned(),
+                &[region],
+                &[("a.wav".to_owned(), wav)],
+                48_000,
+            )
+            .expect("bank assembles");
+            let lp = bank.regions[0]
+                .loop_region
+                .expect("loop scaled through to the region");
+            assert!(
+                (lp.start - 200.0).abs() < 2.0,
+                "loop_start should scale ~2x to 200, got {}",
+                lp.start,
+            );
+            assert!(
+                (lp.end - 800.0).abs() < 2.0,
+                "loop_end should scale ~2x to 800, got {}",
+                lp.end,
+            );
+        }
+
+        #[test]
+        fn assemble_bank_clamps_loop_end_to_resampled_length() {
+            // A loop_end past the sample clamps to the resampled length
+            // rather than reading out of bounds (ADR-0103 §6).
+            let region = SfzRegion {
+                sample: "a.wav".to_owned(),
+                lokey: 0,
+                hikey: 127,
+                lovel: 0,
+                hivel: 127,
+                pitch_keycenter: 60,
+                loop_spec: Some(SfzLoop {
+                    start: 10,
+                    end: 100_000,
+                    mode: super::super::sfz::LoopMode::Continuous,
+                }),
+            };
+            let wav = super::super::decode::wav_int16_mono(&ramp(1000), 24_000);
+            let bank = assemble_bank(
+                "test".to_owned(),
+                &[region],
+                &[("a.wav".to_owned(), wav)],
+                48_000,
+            )
+            .expect("bank assembles");
+            let region = &bank.regions[0];
+            let lp = region.loop_region.expect("loop scaled through");
+            #[allow(clippy::cast_precision_loss)]
+            let len = region.pcm.len() as f32;
+            assert!(
+                lp.end <= len,
+                "loop_end {} must clamp to the resampled length {len}",
+                lp.end,
+            );
+        }
+
+        #[test]
+        fn unlooped_region_assembles_without_a_loop() {
+            // A region with no loop_spec stays unlooped through assembly
+            // (the piano-class regression path).
+            let region = SfzRegion {
+                sample: "a.wav".to_owned(),
+                lokey: 0,
+                hikey: 127,
+                lovel: 0,
+                hivel: 127,
+                pitch_keycenter: 60,
+                loop_spec: None,
+            };
+            let wav = super::super::decode::wav_int16_mono(&ramp(256), 24_000);
+            let bank = assemble_bank(
+                "test".to_owned(),
+                &[region],
+                &[("a.wav".to_owned(), wav)],
+                48_000,
+            )
+            .expect("bank assembles");
+            assert_eq!(bank.regions[0].loop_region, None);
         }
 
         #[test]

@@ -15,25 +15,57 @@
 //!   Group opcodes are inherited by every following region until the next
 //!   `<group>`.
 //! - Opcodes: `sample`, `lokey` / `hikey`, `pitch_keycenter`,
-//!   `lovel` / `hivel`. The `sample` value runs to the end of the line so
-//!   filenames may carry spaces; the rest are single whitespace-delimited
-//!   tokens.
+//!   `lovel` / `hivel`, and the sustain-loop opcodes `loop_start` /
+//!   `loop_end` / `loop_mode` (ADR-0103 §5/§6, #1682). The `sample` value
+//!   runs to the end of the line so filenames may carry spaces; the rest
+//!   are single whitespace-delimited tokens.
 //! - `//` line comments are stripped.
 //!
-//! Everything outside that set — the loop opcodes (`loop_start` /
-//! `loop_end` / `loop_mode`, parked for #1682), envelope opcodes, unknown
-//! headers — warns and is ignored, so a real-world sample set loads rather
-//! than failing on the first opcode past the subset.
+//! A region carries a loop (`loop_spec`) when `loop_mode` is
+//! `loop_continuous` or `loop_sustain` and the source-frame offsets satisfy
+//! `loop_start < loop_end`; `loop_mode=no_loop`, a malformed mode value, or
+//! a degenerate offset pair warns and degrades to unlooped. Everything else
+//! outside the subset — envelope opcodes, unknown headers — warns and is
+//! ignored, so a real-world sample set loads rather than failing on the
+//! first opcode past the subset.
 
 use std::error::Error;
 use std::fmt;
 
+/// How a region's recorded sustain loops while a key is held (ADR-0103
+/// §6). The substrate approximates `Sustain` as `Continuous` (it keeps
+/// cycling through the release ramp rather than playing a post-loop tail),
+/// but the parser carries the distinction the file declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopMode {
+    /// `loop_continuous`: cycle the loop region for as long as the voice
+    /// sounds, including under the release ramp.
+    Continuous,
+    /// `loop_sustain`: cycle only while the key is down. Approximated as
+    /// `Continuous` in the kernel — see ADR-0103 §6.
+    Sustain,
+}
+
+/// A region's sustain loop (ADR-0103 §6): the half-open frame interval
+/// `start..end` to cycle while the note sounds, plus the declared mode.
+/// The offsets are in the *source* sample's frames as written in the
+/// `.sfz`; bank assembly scales them by the load-time resample ratio into
+/// fractional device-rate positions (ADR-0103 §6). A loop is only emitted
+/// when `start < end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SfzLoop {
+    pub start: u32,
+    pub end: u32,
+    pub mode: LoopMode,
+}
+
 /// One playable region of a bank: a sample, the inclusive MIDI key range
-/// it covers, the inclusive velocity range it answers to, and the root
-/// pitch the sample was recorded at (so the voice repitches by
-/// `2^((pitch − pitch_keycenter) / 12)`). `sample` is already resolved
-/// against the bank's `default_path`; the cap joins it with the `.sfz`
-/// file's own directory to address the WAV through `aether.fs`.
+/// it covers, the inclusive velocity range it answers to, the root pitch
+/// the sample was recorded at (so the voice repitches by
+/// `2^((pitch − pitch_keycenter) / 12)`), and an optional sustain loop.
+/// `sample` is already resolved against the bank's `default_path`; the cap
+/// joins it with the `.sfz` file's own directory to address the WAV
+/// through `aether.fs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SfzRegion {
     pub sample: String,
@@ -42,6 +74,9 @@ pub struct SfzRegion {
     pub lovel: u8,
     pub hivel: u8,
     pub pitch_keycenter: u8,
+    /// The sustain loop, or `None` for a full-decay (piano-class) region
+    /// that plays once and ends when its sample runs out.
+    pub loop_spec: Option<SfzLoop>,
 }
 
 /// A parsed bank: the resolved region list. The referenced sample paths
@@ -112,6 +147,25 @@ enum Section {
     Region,
 }
 
+/// The parsed `loop_mode` opcode value as accumulated on an [`OpcodeSet`].
+/// Distinguishes "never set" from an explicit `no_loop` and from a
+/// malformed value, so inheritance and the warn-and-degrade rule both work
+/// off one field.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoopModeOpcode {
+    /// No `loop_mode` opcode seen on this region or its group.
+    Unset,
+    /// `loop_mode=no_loop` — explicitly unlooped.
+    NoLoop,
+    /// `loop_mode=loop_continuous`.
+    Continuous,
+    /// `loop_mode=loop_sustain`.
+    Sustain,
+    /// An unrecognised `loop_mode=…` value — already warned, degrades to
+    /// unlooped.
+    Malformed,
+}
+
 /// The mutable opcode set a region inherits from its group and then
 /// overrides. `sample` is `Option` because a region without one is not
 /// playable (skipped with a warn).
@@ -123,6 +177,9 @@ struct OpcodeSet {
     lovel: u8,
     hivel: u8,
     pitch_keycenter: u8,
+    loop_start: Option<u32>,
+    loop_end: Option<u32>,
+    loop_mode: LoopModeOpcode,
 }
 
 impl OpcodeSet {
@@ -134,6 +191,38 @@ impl OpcodeSet {
             lovel: DEFAULT_LOVEL,
             hivel: DEFAULT_HIVEL,
             pitch_keycenter: DEFAULT_PITCH_KEYCENTER,
+            loop_start: None,
+            loop_end: None,
+            loop_mode: LoopModeOpcode::Unset,
+        }
+    }
+
+    /// Resolve the accumulated loop opcodes into a [`SfzLoop`], or `None`
+    /// when the region is unlooped or the loop is malformed. A looping
+    /// `loop_mode` with absent or degenerate (`start >= end`) offsets warns
+    /// and degrades to unlooped (ADR-0103 §5).
+    fn resolve_loop(&self) -> Option<SfzLoop> {
+        let mode = match self.loop_mode {
+            LoopModeOpcode::Continuous => LoopMode::Continuous,
+            LoopModeOpcode::Sustain => LoopMode::Sustain,
+            // Unset / NoLoop / Malformed all mean no loop; Malformed
+            // already warned at parse time.
+            LoopModeOpcode::Unset | LoopModeOpcode::NoLoop | LoopModeOpcode::Malformed => {
+                return None;
+            }
+        };
+        match (self.loop_start, self.loop_end) {
+            (Some(start), Some(end)) if start < end => Some(SfzLoop { start, end, mode }),
+            _ => {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    loop_start = ?self.loop_start,
+                    loop_end = ?self.loop_end,
+                    "sfz: looping loop_mode with missing or degenerate loop points; \
+                     degrading region to unlooped",
+                );
+                None
+            }
         }
     }
 }
@@ -259,7 +348,7 @@ fn next_token(rest: &str) -> (&str, &str) {
 }
 
 /// Apply one `key=value` opcode to the current section's state. Unknown
-/// opcodes (including the parked loop points) warn and are ignored.
+/// opcodes warn and are ignored.
 fn apply_opcode(
     section: Section,
     default_path: &mut String,
@@ -298,7 +387,32 @@ fn apply_opcode(
         "pitch_keycenter" => {
             set.pitch_keycenter = parse_key(value).unwrap_or(set.pitch_keycenter);
         }
+        // Loop opcodes are frame offsets (`u32`) and a mode enum; a
+        // non-numeric offset keeps the inherited value, an unrecognised
+        // mode warns and forces the region unlooped (ADR-0103 §5).
+        "loop_start" => set.loop_start = value.parse::<u32>().ok().or(set.loop_start),
+        "loop_end" => set.loop_end = value.parse::<u32>().ok().or(set.loop_end),
+        "loop_mode" => set.loop_mode = parse_loop_mode(value),
         _ => warn_unknown_opcode(key),
+    }
+}
+
+/// Parse a `loop_mode` opcode value into the accumulator's tri-state. An
+/// unrecognised value warns and resolves to [`LoopModeOpcode::Malformed`]
+/// so the region degrades to unlooped (ADR-0103 §5).
+fn parse_loop_mode(value: &str) -> LoopModeOpcode {
+    match value {
+        "no_loop" => LoopModeOpcode::NoLoop,
+        "loop_continuous" => LoopModeOpcode::Continuous,
+        "loop_sustain" => LoopModeOpcode::Sustain,
+        other => {
+            tracing::warn!(
+                target: "aether_substrate::audio",
+                loop_mode = other,
+                "sfz: unrecognised loop_mode value; treating region as unlooped",
+            );
+            LoopModeOpcode::Malformed
+        }
     }
 }
 
@@ -324,6 +438,8 @@ fn flush_region(current: &mut Option<OpcodeSet>, regions: &mut Vec<SfzRegion>) {
     let Some(set) = current.take() else {
         return;
     };
+    // Resolve the loop before moving `sample` out of `set`.
+    let loop_spec = set.resolve_loop();
     let Some(sample) = set.sample else {
         tracing::warn!(
             target: "aether_substrate::audio",
@@ -338,6 +454,7 @@ fn flush_region(current: &mut Option<OpcodeSet>, regions: &mut Vec<SfzRegion>) {
         lovel: set.lovel,
         hivel: set.hivel,
         pitch_keycenter: set.pitch_keycenter,
+        loop_spec,
     });
 }
 
@@ -449,10 +566,10 @@ sample=c4.wav
     }
 
     #[test]
-    fn unknown_opcodes_including_loop_points_are_ignored() {
-        // The loop opcodes are deliberately outside this subset (#1682);
-        // they must warn-and-ignore like any other unknown opcode rather
-        // than fail the parse.
+    fn loop_opcodes_parse_and_unknown_opcodes_still_ignored() {
+        // The loop opcodes are in the subset (#1682) and carry through to
+        // the region; envelope / offset opcodes outside the subset still
+        // warn-and-ignore rather than failing the parse.
         let sfz = "\
 <region>
 sample=organ.wav
@@ -465,6 +582,114 @@ offset=0
         let spec = parse_sfz(sfz).expect("parses past unknown opcodes");
         assert_eq!(spec.regions.len(), 1);
         assert_eq!(spec.regions[0].sample, "organ.wav");
+        assert_eq!(
+            spec.regions[0].loop_spec,
+            Some(SfzLoop {
+                start: 128,
+                end: 4096,
+                mode: LoopMode::Continuous,
+            }),
+        );
+    }
+
+    #[test]
+    fn region_without_loop_opcodes_is_unlooped() {
+        let spec = parse_sfz("<region>\nsample=piano.wav\n").expect("parses");
+        assert_eq!(spec.regions[0].loop_spec, None);
+    }
+
+    #[test]
+    fn loop_sustain_mode_carries_through() {
+        let sfz = "<region>\nsample=strings.wav loop_mode=loop_sustain loop_start=0 loop_end=512\n";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(
+            spec.regions[0].loop_spec,
+            Some(SfzLoop {
+                start: 0,
+                end: 512,
+                mode: LoopMode::Sustain,
+            }),
+        );
+    }
+
+    #[test]
+    fn no_loop_mode_emits_no_loop_even_with_points() {
+        // An explicit `no_loop` keeps the region unlooped regardless of any
+        // loop_start / loop_end present.
+        let sfz = "<region>\nsample=a.wav loop_mode=no_loop loop_start=10 loop_end=20\n";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(spec.regions[0].loop_spec, None);
+    }
+
+    #[test]
+    fn loop_points_without_a_looping_mode_emit_no_loop() {
+        // The subset only loops when the mode says so (ADR-0103 §5/§6);
+        // bare loop points with no loop_mode stay unlooped.
+        let sfz = "<region>\nsample=a.wav loop_start=10 loop_end=20\n";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(spec.regions[0].loop_spec, None);
+    }
+
+    #[test]
+    fn loop_opcodes_at_group_level_are_inherited() {
+        let sfz = "\
+<group>
+loop_mode=loop_continuous loop_start=64 loop_end=1024
+<region>
+sample=a.wav lokey=60 hikey=60
+<region>
+sample=b.wav lokey=62 hikey=62
+";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(spec.regions.len(), 2);
+        for r in &spec.regions {
+            assert_eq!(
+                r.loop_spec,
+                Some(SfzLoop {
+                    start: 64,
+                    end: 1024,
+                    mode: LoopMode::Continuous,
+                }),
+                "group loop not inherited by {}",
+                r.sample,
+            );
+        }
+    }
+
+    #[test]
+    fn region_loop_opcodes_override_the_group() {
+        let sfz = "\
+<group>
+loop_mode=loop_continuous loop_start=64 loop_end=1024
+<region>
+sample=a.wav loop_end=2048
+";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(
+            spec.regions[0].loop_spec,
+            Some(SfzLoop {
+                start: 64,
+                end: 2048,
+                mode: LoopMode::Continuous,
+            }),
+            "region loop_end should override the inherited group value",
+        );
+    }
+
+    #[test]
+    fn degenerate_loop_points_degrade_to_unlooped() {
+        // start >= end is malformed: warn and emit no loop.
+        let sfz =
+            "<region>\nsample=a.wav loop_mode=loop_continuous loop_start=2048 loop_end=1024\n";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(spec.regions[0].loop_spec, None);
+    }
+
+    #[test]
+    fn unknown_loop_mode_value_degrades_to_unlooped() {
+        let sfz = "<region>\nsample=a.wav loop_mode=bounce loop_start=0 loop_end=512\n";
+        let spec = parse_sfz(sfz).expect("parses");
+        assert_eq!(spec.regions[0].loop_spec, None);
     }
 
     #[test]
