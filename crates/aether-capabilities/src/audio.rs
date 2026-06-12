@@ -198,10 +198,11 @@ mod native {
         },
         /// Start (or restart) a track in the dedicated mixer lane. `pcm`
         /// is already mono and resampled to the device rate, so the
-        /// callback walks it by index. Keyed by `(sender_mailbox,
+        /// callback walks it by index. Keyed by `(sender_mailbox, lane,
         /// namespace, path)` — re-sending the same key restarts the track.
         TrackStart {
             sender_mailbox: MailboxId,
+            lane: Option<String>,
             namespace: String,
             path: String,
             pcm: Arc<[f32]>,
@@ -212,6 +213,7 @@ mod native {
         /// matches (matching `note_off`).
         TrackStop {
             sender_mailbox: MailboxId,
+            lane: Option<String>,
             namespace: String,
             path: String,
         },
@@ -1278,10 +1280,12 @@ mod native {
     /// the `Arc`'d device-rate mono PCM, a position walk, per-track gain,
     /// loop flag, and fade state. A track neither counts against
     /// `MAX_VOICES` nor participates in voice-steal — a music bed must not
-    /// be evicted by a note flurry. Keyed by `(sender_mailbox, namespace,
-    /// path)`, mirroring the voice key.
+    /// be evicted by a note flurry. Keyed by `(sender_mailbox, lane,
+    /// namespace, path)`, mirroring the voice key plus the caller-supplied
+    /// `lane` that disambiguates senders sharing a source mailbox.
     struct TrackVoice {
         sender_mailbox: MailboxId,
+        lane: Option<String>,
         namespace: String,
         path: String,
         pcm: Arc<[f32]>,
@@ -1295,6 +1299,7 @@ mod native {
     impl TrackVoice {
         fn new(
             sender_mailbox: MailboxId,
+            lane: Option<String>,
             namespace: String,
             path: String,
             pcm: Arc<[f32]>,
@@ -1303,6 +1308,7 @@ mod native {
         ) -> Self {
             Self {
                 sender_mailbox,
+                lane,
                 namespace,
                 path,
                 pcm,
@@ -1315,9 +1321,16 @@ mod native {
         }
 
         /// True when this event's key matches the track's
-        /// `(sender_mailbox, namespace, path)`.
-        fn matches(&self, sender_mailbox: MailboxId, namespace: &str, path: &str) -> bool {
+        /// `(sender_mailbox, lane, namespace, path)`.
+        fn matches(
+            &self,
+            sender_mailbox: MailboxId,
+            lane: Option<&String>,
+            namespace: &str,
+            path: &str,
+        ) -> bool {
             self.sender_mailbox == sender_mailbox
+                && self.lane.as_ref() == lane
                 && self.namespace == namespace
                 && self.path == path
         }
@@ -1525,17 +1538,21 @@ mod native {
                     }
                     AudioEvent::TrackStart {
                         sender_mailbox,
+                        lane,
                         namespace,
                         path,
                         pcm,
                         gain,
                         looping,
-                    } => self.start_track(sender_mailbox, namespace, path, pcm, gain, looping),
+                    } => {
+                        self.start_track(sender_mailbox, lane, namespace, path, pcm, gain, looping);
+                    }
                     AudioEvent::TrackStop {
                         sender_mailbox,
+                        lane,
                         namespace,
                         path,
-                    } => self.stop_track(sender_mailbox, &namespace, &path),
+                    } => self.stop_track(sender_mailbox, lane.as_ref(), &namespace, &path),
                     AudioEvent::RegisterInstrument { id, bank } => {
                         // Banks arrive in load order on this single-producer
                         // FIFO, and the cap assigns ids from `BUILTINS.len()`
@@ -1559,11 +1576,13 @@ mod native {
         }
 
         /// Start (or restart) a track in the lane. Re-playing the same
-        /// `(sender_mailbox, namespace, path)` key drops the existing track
-        /// first, so a key never stacks.
+        /// `(sender_mailbox, lane, namespace, path)` key drops the existing
+        /// track first, so a key never stacks.
+        #[allow(clippy::too_many_arguments)]
         fn start_track(
             &mut self,
             sender_mailbox: MailboxId,
+            lane: Option<String>,
             namespace: String,
             path: String,
             pcm: Arc<[f32]>,
@@ -1573,12 +1592,13 @@ mod native {
             if let Some(i) = self
                 .tracks
                 .iter()
-                .position(|t| t.matches(sender_mailbox, &namespace, &path))
+                .position(|t| t.matches(sender_mailbox, lane.as_ref(), &namespace, &path))
             {
                 self.tracks.swap_remove(i);
             }
             self.tracks.push(TrackVoice::new(
                 sender_mailbox,
+                lane,
                 namespace,
                 path,
                 pcm,
@@ -1588,12 +1608,18 @@ mod native {
         }
 
         /// Arm the fade-out on the track at this key, if one is playing.
-        fn stop_track(&mut self, sender_mailbox: MailboxId, namespace: &str, path: &str) {
+        fn stop_track(
+            &mut self,
+            sender_mailbox: MailboxId,
+            lane: Option<&String>,
+            namespace: &str,
+            path: &str,
+        ) {
             let fade = self.fade_samples();
             if let Some(t) = self
                 .tracks
                 .iter_mut()
-                .find(|t| t.matches(sender_mailbox, namespace, path))
+                .find(|t| t.matches(sender_mailbox, lane, namespace, path))
             {
                 t.stop(fade);
             }
@@ -1779,6 +1805,12 @@ mod native {
     /// sessions and substrate-internal pushes (which shouldn't reach the
     /// audio cap in practice) collapse to id `0`, sharing one voice
     /// slot per (instrument, pitch).
+    /// The track/voice key's sender component, read from the mail
+    /// envelope's reply target. Only an `EngineMailbox` source carries a
+    /// distinct id; every other source — MCP sessions, substrate-internal
+    /// mail — collapses to `MailboxId(0)`. Callers that share this id
+    /// disambiguate their tracks with the payload's `lane` field rather
+    /// than the sender (ADR-0103 keying).
     fn sender_mailbox_id(sender: Source) -> MailboxId {
         match sender.addr {
             SourceAddr::EngineMailbox { mailbox_id, .. } => mailbox_id,
@@ -1813,9 +1845,13 @@ mod native {
         /// reply routes here across the fs round-trip + decode.
         source: Source,
         /// The synth-side track key's sender component, baked into the
-        /// `TrackStart` event so the lane keys by `(sender, namespace,
-        /// path)` while the fs correlation keys by `(namespace, path)`.
+        /// `TrackStart` event so the lane keys by `(sender, lane,
+        /// namespace, path)` while the fs correlation keys by
+        /// `(namespace, path)`.
         sender_mailbox: MailboxId,
+        /// The caller-supplied lane that disambiguates senders sharing a
+        /// source mailbox; part of the synth-side track key.
+        lane: Option<String>,
         gain: f32,
         looping: bool,
     }
@@ -1826,6 +1862,7 @@ mod native {
     /// decoded PCM; this carries the synth key + play parameters alongside.
     struct TrackDecodeContext {
         sender_mailbox: MailboxId,
+        lane: Option<String>,
         namespace: String,
         path: String,
         gain: f32,
@@ -2000,6 +2037,7 @@ mod native {
                     &PlayTrackResult::Err {
                         namespace,
                         path,
+                        lane: pending.lane.clone(),
                         error: "audio pipeline not initialised on this desktop substrate"
                             .to_owned(),
                     },
@@ -2013,6 +2051,7 @@ mod native {
 
             let context = TrackDecodeContext {
                 sender_mailbox: pending.sender_mailbox,
+                lane: pending.lane.clone(),
                 namespace,
                 path,
                 gain: pending.gain,
@@ -2442,7 +2481,7 @@ mod native {
         /// realtime path, and replies `Ok` once the track has started or
         /// `Err` with the failure reason (bad path, malformed/unsupported
         /// file, or a chassis without audio). Re-playing the same
-        /// `(sender, namespace, path)` key restarts the track.
+        /// `(sender, lane, namespace, path)` key restarts the track.
         #[handler]
         fn on_play_track(&mut self, ctx: &mut NativeCtx<'_>, mail: PlayTrack) {
             // Nop chassis (headless / hub / disabled / no device): fail
@@ -2451,6 +2490,7 @@ mod native {
                 ctx.reply(&PlayTrackResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
+                    lane: mail.lane,
                     error: "audio pipeline not initialised on this desktop substrate".to_owned(),
                 });
                 return;
@@ -2465,6 +2505,7 @@ mod native {
                 .push_back(PendingTrack {
                     source,
                     sender_mailbox,
+                    lane: mail.lane,
                     gain: mail.gain,
                     looping: mail.looping,
                 });
@@ -2521,6 +2562,7 @@ mod native {
                             &PlayTrackResult::Err {
                                 namespace,
                                 path,
+                                lane: pending.lane,
                                 error: reason,
                             },
                         );
@@ -2558,6 +2600,7 @@ mod native {
                     if let Some(sender) = self.sender.as_ref() {
                         let event = AudioEvent::TrackStart {
                             sender_mailbox: cx.sender_mailbox,
+                            lane: cx.lane.clone(),
                             namespace: cx.namespace.clone(),
                             path: cx.path.clone(),
                             pcm: Arc::from(pcm.as_slice()),
@@ -2580,10 +2623,12 @@ mod native {
                 None => done.resolve_with(ctx, |_out, cx| PlayTrackResult::Ok {
                     namespace: cx.namespace.clone(),
                     path: cx.path.clone(),
+                    lane: cx.lane.clone(),
                 }),
                 Some(error) => done.resolve_with(ctx, move |_out, cx| PlayTrackResult::Err {
                     namespace: cx.namespace.clone(),
                     path: cx.path.clone(),
+                    lane: cx.lane.clone(),
                     error,
                 }),
             }
@@ -2592,7 +2637,7 @@ mod native {
         /// Fade out and retire a track started by `play_track`.
         ///
         /// # Agent
-        /// Fire-and-forget. Matched on `(sender, namespace, path)`;
+        /// Fire-and-forget. Matched on `(sender, lane, namespace, path)`;
         /// stopping a track that isn't playing is a no-op.
         #[handler]
         fn on_stop_track(&mut self, ctx: &mut NativeCtx<'_>, mail: StopTrack) {
@@ -2601,6 +2646,7 @@ mod native {
             };
             let event = AudioEvent::TrackStop {
                 sender_mailbox: sender_mailbox_id(ctx.reply_target()),
+                lane: mail.lane,
                 namespace: mail.namespace,
                 path: mail.path,
             };
@@ -3418,6 +3464,7 @@ mod native {
         fn track_start(pcm: Arc<[f32]>, looping: bool) -> AudioEvent {
             AudioEvent::TrackStart {
                 sender_mailbox: MailboxId(1),
+                lane: None,
                 namespace: "assets".to_owned(),
                 path: "track.wav".to_owned(),
                 pcm,
@@ -3470,6 +3517,7 @@ mod native {
             sender
                 .push(AudioEvent::TrackStop {
                     sender_mailbox: MailboxId(1),
+                    lane: None,
                     namespace: "assets".to_owned(),
                     path: "track.wav".to_owned(),
                 })
@@ -3515,6 +3563,80 @@ mod native {
                 synth.track_count(),
                 1,
                 "re-playing the same key must restart, not stack",
+            );
+        }
+
+        /// A `TrackStart` at an explicit sender + lane over the shared
+        /// `(namespace, path)` — the key components the collision fix
+        /// folds together.
+        fn keyed_track_start(
+            sender_mailbox: MailboxId,
+            lane: Option<&str>,
+            pcm: Arc<[f32]>,
+        ) -> AudioEvent {
+            AudioEvent::TrackStart {
+                sender_mailbox,
+                lane: lane.map(str::to_owned),
+                namespace: "assets".to_owned(),
+                path: "track.wav".to_owned(),
+                pcm,
+                gain: 1.0,
+                looping: true,
+            }
+        }
+
+        #[test]
+        fn distinct_lanes_under_one_sender_play_independently() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // Two senders that collapse to the same MailboxId(0) (MCP
+            // sessions) play the same path under distinct lanes.
+            sender
+                .push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(4_800)))
+                .unwrap();
+            sender
+                .push(keyed_track_start(MailboxId(0), Some("b"), ramp_pcm(4_800)))
+                .unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(
+                synth.track_count(),
+                2,
+                "distinct lanes must not alias to one track",
+            );
+            // Stopping lane a leaves lane b sounding.
+            sender
+                .push(AudioEvent::TrackStop {
+                    sender_mailbox: MailboxId(0),
+                    lane: Some("a".to_owned()),
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                })
+                .unwrap();
+            let mut tail = vec![0.0f32; 512];
+            synth.fill(&mut tail, 1);
+            assert_eq!(
+                synth.track_count(),
+                1,
+                "stopping one lane must not silence the other",
+            );
+        }
+
+        #[test]
+        fn same_sender_and_lane_replays_single_track() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            for _ in 0..3 {
+                sender
+                    .push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(256)))
+                    .unwrap();
+            }
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(
+                synth.track_count(),
+                1,
+                "re-playing the same (sender, lane) key must restart, not stack",
             );
         }
 
@@ -3564,6 +3686,7 @@ mod native {
                     path: "track.wav".to_owned(),
                     gain: 0.8,
                     looping: false,
+                    lane: None,
                 },
             );
             // The cap forwarded an fs.read and parked the request.
@@ -3591,9 +3714,14 @@ mod native {
             drive_task_completion(&mut cap, &transport, &rx);
 
             match decode_session_reply::<PlayTrackResult>(&rx) {
-                PlayTrackResult::Ok { namespace, path } => {
+                PlayTrackResult::Ok {
+                    namespace,
+                    path,
+                    lane,
+                } => {
                     assert_eq!(namespace, "assets");
                     assert_eq!(path, "track.wav");
+                    assert_eq!(lane, None);
                 }
                 PlayTrackResult::Err { error, .. } => panic!("expected Ok, got Err({error})"),
             }
@@ -3603,6 +3731,61 @@ mod native {
             assert!(
                 matches!(event, AudioEvent::TrackStart { ref path, .. } if path == "track.wav"),
                 "expected TrackStart, got {event:?}",
+            );
+        }
+
+        #[test]
+        fn play_track_echoes_lane_through_result_and_track_start() {
+            let (mut cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_play_track(
+                &mut ctx,
+                PlayTrack {
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                    gain: 1.0,
+                    looping: false,
+                    lane: Some("bgm".to_owned()),
+                },
+            );
+            let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
+            let mut read_ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_read_result(
+                &mut read_ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                    bytes: wav,
+                },
+            );
+            drive_task_completion(&mut cap, &transport, &rx);
+
+            match decode_session_reply::<PlayTrackResult>(&rx) {
+                PlayTrackResult::Ok { lane, .. } => {
+                    assert_eq!(lane, Some("bgm".to_owned()), "result must echo the lane");
+                }
+                PlayTrackResult::Err { error, .. } => panic!("expected Ok, got Err({error})"),
+            }
+            let event = queue.pop().expect("a track-start event was queued");
+            assert!(
+                matches!(event, AudioEvent::TrackStart { ref lane, .. } if lane.as_deref() == Some("bgm")),
+                "TrackStart must carry the lane, got {event:?}",
             );
         }
 
@@ -3628,6 +3811,7 @@ mod native {
                     path: "missing.wav".to_owned(),
                     gain: 1.0,
                     looping: false,
+                    lane: None,
                 },
             );
             cap.on_read_result(
@@ -3674,6 +3858,7 @@ mod native {
                     path: "track.wav".to_owned(),
                     gain: 1.0,
                     looping: false,
+                    lane: None,
                 },
             );
             match decode_session_reply::<PlayTrackResult>(&rx) {
@@ -3690,6 +3875,7 @@ mod native {
                 StopTrack {
                     namespace: "assets".to_owned(),
                     path: "track.wav".to_owned(),
+                    lane: None,
                 },
             );
         }

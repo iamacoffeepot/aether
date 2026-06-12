@@ -37,10 +37,10 @@ WAV is the v1 container (decoded with `hound`; 16-bit integer and 32-bit float P
 
 Three kinds join the family, schema-shaped like the fs kinds (they carry strings):
 
-- `aether.audio.play_track { namespace: String, path: String, gain: f32, looping: bool }` — replies `aether.audio.play_track_result`: `Ok { namespace, path }` / `Err { namespace, path, error }`.
-- `aether.audio.stop_track { namespace: String, path: String }` — fire-and-forget; stopping a track that isn't playing is a no-op, matching `note_off`.
+- `aether.audio.play_track { namespace: String, path: String, gain: f32, looping: bool, lane: Option<String> }` — replies `aether.audio.play_track_result`: `Ok { namespace, path, lane }` / `Err { namespace, path, lane, error }`.
+- `aether.audio.stop_track { namespace: String, path: String, lane: Option<String> }` — fire-and-forget; stopping a track that isn't playing is a no-op, matching `note_off`.
 
-Tracks mix in their own lane: the synth holds a track list beside the voice pool, and a playing track neither counts against `MAX_VOICES` nor participates in voice-steal — a music bed must not be evicted by a note flurry. Tracks are keyed by `(sender_mailbox, namespace, path)`, mirroring the voice key, so one component cannot stop another's track and re-playing the same key restarts it. `stop_track` releases through a short (~5 millisecond) linear fade rather than truncating, to avoid the click. Per-track `gain` is a kind field set at play time, not a mixer surface — running-gain automation stays user-space per ADR-0039.
+Tracks mix in their own lane: the synth holds a track list beside the voice pool, and a playing track neither counts against `MAX_VOICES` nor participates in voice-steal — a music bed must not be evicted by a note flurry. Tracks are keyed by `(sender_mailbox, lane, namespace, path)`, mirroring the voice key, so one component cannot stop another's track and re-playing the same key restarts it. The `lane` augments the sender so callers that share a source mailbox — MCP sessions and substrate-internal mail all collapse to one id — each own a distinct track under the same `(namespace, path)` by naming their own lane; a `None` lane is the unlaned default. `stop_track` releases through a short (~5 millisecond) linear fade rather than truncating, to avoid the click. Per-track `gain` is a kind field set at play time, not a mixer surface — running-gain automation stays user-space per ADR-0039.
 
 ### 4. The instrument registry goes extensible
 
