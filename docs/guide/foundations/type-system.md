@@ -29,7 +29,7 @@ stable id, and a wire encoding. You declare one with two derives and a name:
 ```rust
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
 #[kind(name = "aether.audio.note_on")]
-struct NoteOn { instrument: u8, pitch: u8, velocity: f32 }
+struct NoteOn { pitch: u8, velocity: u8, instrument_id: u8 }
 ```
 
 **Two derives, because they describe two different things.**
