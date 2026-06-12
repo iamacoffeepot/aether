@@ -56,7 +56,7 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
+use aether_kinds::{NoteOff, NoteOn, PlayTrack, ReadResult, SetMasterGain, StopTrack};
 
 // `AudioConfig` rides through file root for chassis-bin consumers
 // that build it from env (`from_env`) and pass it to
@@ -67,8 +67,17 @@ use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
 #[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
 pub use native::{AudioConfig, AudioConfigLayer, AudioOverlay};
 
+// ADR-0103 §1 decode/resample core (`crates/aether-capabilities/src/audio/decode.rs`).
+// Native-only — it pulls `hound` and `std`; the marker-only `audio`
+// build skips it. The track lane (`on_play_track`) and the future
+// sampled-instrument loader (#1679) both consume `decode_wav_to_mono`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
+mod decode;
+
 #[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {
+    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::f32::consts::TAU;
     use std::sync::Arc;
     use std::sync::mpsc;
@@ -78,13 +87,21 @@ mod native {
     use crossbeam_queue::ArrayQueue;
 
     use aether_actor::{OutboundReply, actor};
-    use aether_data::{MailboxId, Source, SourceAddr};
-    use aether_kinds::SetMasterGainResult;
+    use aether_data::{Kind, MailboxId, Source, SourceAddr, mailbox_id_from_name};
+    use aether_kinds::{
+        PlayTrack, PlayTrackResult, Read, ReadResult, SetMasterGainResult, StopTrack,
+    };
 
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
 
+    use super::decode::{DecodeError, decode_wav_to_mono};
     use super::{NoteOff, NoteOn, SetMasterGain};
+
+    /// Linear fade-out duration (seconds) applied when a track is stopped,
+    /// so `stop_track` releases through a short ramp instead of truncating
+    /// to a click (ADR-0103 §3).
+    const TRACK_FADE_SECS: f32 = 0.005;
     // confique consumes `parse_flag` through `#[config(parse_env = …)]`;
     // IntelliJ-Rust doesn't trace macro-attr path args (Qodana FP), but
     // rustc + clippy do.
@@ -147,7 +164,11 @@ mod native {
     /// Event a handler pushes into the audio callback's queue. The
     /// `sender_mailbox` is baked in here (not re-derived on the callback
     /// side) so the callback stays branch-minimal.
-    #[derive(Copy, Clone, Debug)]
+    ///
+    /// Not `Copy`: the track-start variant carries an `Arc`'d PCM buffer
+    /// (the decoded asset) and owned namespace / path strings (ADR-0103
+    /// §3). The queue never required `Copy`.
+    #[derive(Clone, Debug)]
     enum AudioEvent {
         NoteOn {
             sender_mailbox: MailboxId,
@@ -162,6 +183,25 @@ mod native {
         },
         SetMasterGain {
             gain: f32,
+        },
+        /// Start (or restart) a track in the dedicated mixer lane. `pcm`
+        /// is already mono and resampled to the device rate, so the
+        /// callback walks it by index. Keyed by `(sender_mailbox,
+        /// namespace, path)` — re-sending the same key restarts the track.
+        TrackStart {
+            sender_mailbox: MailboxId,
+            namespace: String,
+            path: String,
+            pcm: Arc<[f32]>,
+            gain: f32,
+            looping: bool,
+        },
+        /// Fade out and retire the track at this key. A no-op if no track
+        /// matches (matching `note_off`).
+        TrackStop {
+            sender_mailbox: MailboxId,
+            namespace: String,
+            path: String,
         },
     }
 
@@ -1016,11 +1056,124 @@ mod native {
         }
     }
 
+    /// Fade state of a [`TrackVoice`]. A track plays at full level until
+    /// `stop_track` arms a short linear fade-out; `remaining` counts down
+    /// per output sample and the track retires when it hits zero (ADR-0103
+    /// §3).
+    #[derive(Clone, Debug)]
+    enum TrackFade {
+        Playing,
+        FadingOut { remaining: u32, total: u32 },
+    }
+
+    /// One playing track in the dedicated mixer lane (ADR-0103 §3). Holds
+    /// the `Arc`'d device-rate mono PCM, a position walk, per-track gain,
+    /// loop flag, and fade state. A track neither counts against
+    /// `MAX_VOICES` nor participates in voice-steal — a music bed must not
+    /// be evicted by a note flurry. Keyed by `(sender_mailbox, namespace,
+    /// path)`, mirroring the voice key.
+    struct TrackVoice {
+        sender_mailbox: MailboxId,
+        namespace: String,
+        path: String,
+        pcm: Arc<[f32]>,
+        position: usize,
+        gain: f32,
+        looping: bool,
+        fade: TrackFade,
+        done: bool,
+    }
+
+    impl TrackVoice {
+        fn new(
+            sender_mailbox: MailboxId,
+            namespace: String,
+            path: String,
+            pcm: Arc<[f32]>,
+            gain: f32,
+            looping: bool,
+        ) -> Self {
+            Self {
+                sender_mailbox,
+                namespace,
+                path,
+                pcm,
+                position: 0,
+                gain,
+                looping,
+                fade: TrackFade::Playing,
+                done: false,
+            }
+        }
+
+        /// True when this event's key matches the track's
+        /// `(sender_mailbox, namespace, path)`.
+        fn matches(&self, sender_mailbox: MailboxId, namespace: &str, path: &str) -> bool {
+            self.sender_mailbox == sender_mailbox
+                && self.namespace == namespace
+                && self.path == path
+        }
+
+        /// Arm the fade-out. Idempotent — a second `stop` while already
+        /// fading keeps the first fade's progress.
+        fn stop(&mut self, fade_samples: u32) {
+            if matches!(self.fade, TrackFade::Playing) {
+                let total = fade_samples.max(1);
+                self.fade = TrackFade::FadingOut {
+                    remaining: total,
+                    total,
+                };
+            }
+        }
+
+        fn done(&self) -> bool {
+            self.done
+        }
+
+        /// Render this track's next sample (already gained + faded) and
+        /// advance the position. Returns `0.0` once retired; an empty PCM
+        /// buffer retires immediately.
+        fn next_sample(&mut self) -> f32 {
+            if self.done || self.pcm.is_empty() {
+                self.done = true;
+                return 0.0;
+            }
+            let fade_mul = match &mut self.fade {
+                TrackFade::Playing => 1.0,
+                TrackFade::FadingOut { remaining, total } => {
+                    if *remaining == 0 {
+                        self.done = true;
+                        return 0.0;
+                    }
+                    // `remaining` / `total` are small fade-window counts —
+                    // the ratio is exact in f32.
+                    #[allow(clippy::cast_precision_loss)]
+                    let mul = *remaining as f32 / *total as f32;
+                    *remaining -= 1;
+                    mul
+                }
+            };
+            let sample = self.pcm[self.position] * self.gain * fade_mul;
+            self.position += 1;
+            if self.position >= self.pcm.len() {
+                if self.looping {
+                    self.position = 0;
+                } else {
+                    self.done = true;
+                }
+            }
+            sample
+        }
+    }
+
     /// Whole-process synth state. Lives on the cpal callback thread;
     /// the cap communicates via the event queue.
     struct Synth {
         events: Arc<ArrayQueue<AudioEvent>>,
         voices: Vec<Voice>,
+        /// Track playback lane (ADR-0103 §3) — separate from `voices` so a
+        /// track is never counted against `MAX_VOICES` nor voice-stolen.
+        tracks: Vec<TrackVoice>,
         sample_rate: f32,
         master_gain: f32,
         /// Monotonically increasing counter stamped into each `Voice::seq`
@@ -1034,10 +1187,21 @@ mod native {
             Self {
                 events,
                 voices: Vec::with_capacity(MAX_VOICES),
+                tracks: Vec::new(),
                 sample_rate,
                 master_gain: 1.0,
                 next_seq: 0,
             }
+        }
+
+        /// Number of output samples in the `stop_track` fade-out at this
+        /// device rate.
+        fn fade_samples(&self) -> u32 {
+            // Fade window is a few milliseconds at audio rates — well
+            // within u32 and non-negative.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = (TRACK_FADE_SECS * self.sample_rate) as u32;
+            n
         }
 
         fn drain_events(&mut self) {
@@ -1106,7 +1270,61 @@ mod native {
                     AudioEvent::SetMasterGain { gain } => {
                         self.master_gain = gain.clamp(0.0, 1.0);
                     }
+                    AudioEvent::TrackStart {
+                        sender_mailbox,
+                        namespace,
+                        path,
+                        pcm,
+                        gain,
+                        looping,
+                    } => self.start_track(sender_mailbox, namespace, path, pcm, gain, looping),
+                    AudioEvent::TrackStop {
+                        sender_mailbox,
+                        namespace,
+                        path,
+                    } => self.stop_track(sender_mailbox, &namespace, &path),
                 }
+            }
+        }
+
+        /// Start (or restart) a track in the lane. Re-playing the same
+        /// `(sender_mailbox, namespace, path)` key drops the existing track
+        /// first, so a key never stacks.
+        fn start_track(
+            &mut self,
+            sender_mailbox: MailboxId,
+            namespace: String,
+            path: String,
+            pcm: Arc<[f32]>,
+            gain: f32,
+            looping: bool,
+        ) {
+            if let Some(i) = self
+                .tracks
+                .iter()
+                .position(|t| t.matches(sender_mailbox, &namespace, &path))
+            {
+                self.tracks.swap_remove(i);
+            }
+            self.tracks.push(TrackVoice::new(
+                sender_mailbox,
+                namespace,
+                path,
+                pcm,
+                gain,
+                looping,
+            ));
+        }
+
+        /// Arm the fade-out on the track at this key, if one is playing.
+        fn stop_track(&mut self, sender_mailbox: MailboxId, namespace: &str, path: &str) {
+            let fade = self.fade_samples();
+            if let Some(t) = self
+                .tracks
+                .iter_mut()
+                .find(|t| t.matches(sender_mailbox, namespace, path))
+            {
+                t.stop(fade);
             }
         }
 
@@ -1118,6 +1336,11 @@ mod native {
                 let mut sample = 0.0f32;
                 for voice in &mut self.voices {
                     sample += voice.next_sample(dt);
+                }
+                // Tracks mix in their own lane, summed after the voices
+                // and before master gain + the soft clip (ADR-0103 §3).
+                for track in &mut self.tracks {
+                    sample += track.next_sample();
                 }
                 sample *= self.master_gain;
                 sample = sample.tanh();
@@ -1132,6 +1355,14 @@ mod native {
                     self.voices.swap_remove(i);
                 } else {
                     i += 1;
+                }
+            }
+            let mut t = 0;
+            while t < self.tracks.len() {
+                if self.tracks[t].done() {
+                    self.tracks.swap_remove(t);
+                } else {
+                    t += 1;
                 }
             }
         }
@@ -1150,6 +1381,11 @@ mod native {
         fn master_gain_value(&self) -> f32 {
             self.master_gain
         }
+
+        #[cfg(test)]
+        fn track_count(&self) -> usize {
+            self.tracks.len()
+        }
     }
 
     /// Handle to a running cpal pipeline. Lives on the audio worker
@@ -1159,6 +1395,10 @@ mod native {
     /// down the cpal stream.
     struct AudioPipeline {
         sender: AudioEventSender,
+        /// The device output rate the synth runs at. The cap reads it back
+        /// (via the init channel) as the resample target for track decode
+        /// (ADR-0103 §1) — decode happens on the dispatcher, not here.
+        sample_rate: u32,
         _stream: cpal::Stream,
     }
 
@@ -1241,6 +1481,7 @@ mod native {
 
         Ok(AudioPipeline {
             sender,
+            sample_rate,
             _stream: stream,
         })
     }
@@ -1286,8 +1527,49 @@ mod native {
     /// ran with `&self` (Arc-shared). Post-Phase-A the dispatcher owns
     /// the cap as `Box<A>` and `Drop` runs with exclusive `&mut self`,
     /// so the wrapping mutex retires.
+    /// A `play_track` request parked while its `aether.fs.read` is in
+    /// flight (ADR-0103 §2). Keyed in [`AudioCapability::pending_tracks`]
+    /// by the echoed `(namespace, path)` the `ReadResult` carries; the
+    /// original requester's reply route + the synth-side track key live
+    /// here until the bytes land.
+    struct PendingTrack {
+        /// The original `play_track` requester — the `PlayTrackResult`
+        /// reply routes here across the fs round-trip + decode.
+        source: Source,
+        /// The synth-side track key's sender component, baked into the
+        /// `TrackStart` event so the lane keys by `(sender, namespace,
+        /// path)` while the fs correlation keys by `(namespace, path)`.
+        sender_mailbox: MailboxId,
+        gain: f32,
+        looping: bool,
+    }
+
+    /// Completion context the `play_track` decode dispatch carries so the
+    /// `#[handler(task)]` arm can build the `TrackStart` event + the reply
+    /// without re-deriving anything (ADR-0093 §5). The worker produces the
+    /// decoded PCM; this carries the synth key + play parameters alongside.
+    struct TrackDecodeContext {
+        sender_mailbox: MailboxId,
+        namespace: String,
+        path: String,
+        gain: f32,
+        looping: bool,
+    }
+
+    /// Output of the decode dispatch worker — the resampled mono PCM, or
+    /// the decode failure to relay as `PlayTrackResult::Err`.
+    type DecodeOutput = Result<Vec<f32>, DecodeError>;
+
     pub struct AudioCapability {
         sender: Option<AudioEventSender>,
+        /// Device output rate, captured at boot — the resample target for
+        /// track decode (ADR-0103 §1). `None` in nop mode (no pipeline).
+        sample_rate: Option<f32>,
+        /// `play_track` requests awaiting their `aether.fs.read` reply,
+        /// keyed by the echoed `(namespace, path)`. A `VecDeque` per key so
+        /// two concurrent plays of the same path correlate FIFO rather than
+        /// clobbering each other.
+        pending_tracks: HashMap<(String, String), VecDeque<PendingTrack>>,
         thread: Option<JoinHandle<()>>,
         shutdown: Option<mpsc::Sender<()>>,
     }
@@ -1296,9 +1578,24 @@ mod native {
         fn nop() -> Self {
             Self {
                 sender: None,
+                sample_rate: None,
+                pending_tracks: HashMap::new(),
                 thread: None,
                 shutdown: None,
             }
+        }
+
+        /// Pop the oldest `play_track` parked under `(namespace, path)` —
+        /// the FIFO correlation for the `aether.fs.read` reply. Removes the
+        /// key's queue when it empties.
+        fn take_pending(&mut self, namespace: &str, path: &str) -> Option<PendingTrack> {
+            let key = (namespace.to_owned(), path.to_owned());
+            let queue = self.pending_tracks.get_mut(&key)?;
+            let pending = queue.pop_front();
+            if queue.is_empty() {
+                self.pending_tracks.remove(&key);
+            }
+            pending
         }
     }
 
@@ -1335,8 +1632,13 @@ mod native {
                 return Ok(Self::nop());
             }
             match spawn_audio_worker(config.requested_sample_rate) {
-                Ok((sender, thread, shutdown)) => Ok(Self {
+                Ok((sender, sample_rate, thread, shutdown)) => Ok(Self {
                     sender: Some(sender),
+                    // Audio device rates are bounded well below 2^24 —
+                    // exact in f32, matching the synth's own conversion.
+                    #[allow(clippy::cast_precision_loss)]
+                    sample_rate: Some(sample_rate as f32),
+                    pending_tracks: HashMap::new(),
                     thread: Some(thread),
                     shutdown: Some(shutdown),
                 }),
@@ -1427,6 +1729,202 @@ mod native {
                 }
             }
         }
+
+        /// Fetch, decode, and play an audio asset in the track lane.
+        ///
+        /// # Agent
+        /// Reply: `PlayTrackResult`. The cap forwards an `aether.fs.read`
+        /// for `namespace://path`, decodes + resamples the bytes off the
+        /// realtime path, and replies `Ok` once the track has started or
+        /// `Err` with the failure reason (bad path, malformed/unsupported
+        /// file, or a chassis without audio). Re-playing the same
+        /// `(sender, namespace, path)` key restarts the track.
+        #[handler]
+        fn on_play_track(&mut self, ctx: &mut NativeCtx<'_>, mail: PlayTrack) {
+            // Nop chassis (headless / hub / disabled / no device): fail
+            // fast with a loud Err (ADR-0103 §7).
+            if self.sender.is_none() || self.sample_rate.is_none() {
+                ctx.reply(&PlayTrackResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                });
+                return;
+            }
+
+            let source = ctx.reply_target();
+            let sender_mailbox = sender_mailbox_id(source);
+            let key = (mail.namespace.clone(), mail.path.clone());
+            self.pending_tracks
+                .entry(key)
+                .or_default()
+                .push_back(PendingTrack {
+                    source,
+                    sender_mailbox,
+                    gain: mail.gain,
+                    looping: mail.looping,
+                });
+
+            // Forward the read to the single fs resolver (ADR-0041) — the
+            // reply (`ReadResult`) routes back to this cap's own mailbox,
+            // where `on_read_result` correlates it. Keeping the read on the
+            // fs cap means the audio cap never grows a second namespace
+            // registry (ADR-0103 §2).
+            let read = Read {
+                namespace: mail.namespace,
+                path: mail.path,
+            };
+            let bytes = read.encode_into_bytes();
+            let fs_mailbox = mailbox_id_from_name("aether.fs");
+            let _ = ctx.send_envelope_traced(fs_mailbox, Read::ID, &bytes);
+        }
+
+        /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
+        ///
+        /// `Err` relays the fs error to the original requester; `Ok`
+        /// dispatches the decode off the realtime path (ADR-0093) carrying
+        /// the original reply route + track key, so the deferred
+        /// `PlayTrackResult` lands on the `play_track` caller — not the fs
+        /// mailbox the read reply came from.
+        #[handler]
+        fn on_read_result(&mut self, ctx: &mut NativeCtx<'_>, mail: ReadResult) {
+            match mail {
+                ReadResult::Ok {
+                    namespace,
+                    path,
+                    bytes,
+                } => {
+                    let Some(pending) = self.take_pending(&namespace, &path) else {
+                        // No parked request for this key — a stray / late
+                        // reply. Nothing to play.
+                        return;
+                    };
+                    let Some(target_rate_f32) = self.sample_rate else {
+                        ctx.reply_to_target(
+                            pending.source,
+                            &PlayTrackResult::Err {
+                                namespace,
+                                path,
+                                error: "audio pipeline not initialised on this desktop substrate"
+                                    .to_owned(),
+                            },
+                        );
+                        return;
+                    };
+                    // Device rates are small positive integers — the round
+                    // trip back through u32 is exact.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let target_rate = target_rate_f32 as u32;
+
+                    let context = TrackDecodeContext {
+                        sender_mailbox: pending.sender_mailbox,
+                        namespace,
+                        path,
+                        gain: pending.gain,
+                        looping: pending.looping,
+                    };
+                    // Bridge the hold from this (fs-reply) turn into the
+                    // decode dispatch, pinning the reply to the original
+                    // `play_track` caller captured at accept time.
+                    let hold = ctx.acquire_settlement_hold();
+                    ctx.dispatch_blocking_resumed_with::<DecodeOutput, _, _>(
+                        hold,
+                        pending.source,
+                        context,
+                        move || decode_wav_to_mono(&bytes, target_rate),
+                    );
+                }
+                ReadResult::Err {
+                    namespace,
+                    path,
+                    error,
+                } => {
+                    let Some(pending) = self.take_pending(&namespace, &path) else {
+                        return;
+                    };
+                    ctx.reply_to_target(
+                        pending.source,
+                        &PlayTrackResult::Err {
+                            namespace,
+                            path,
+                            error: format!("file read failed: {error:?}"),
+                        },
+                    );
+                }
+            }
+        }
+
+        /// Decode completion (ADR-0093 §3). On success push the decoded
+        /// PCM into the track lane and reply `Ok`; on a decode failure
+        /// reply `Err`. Either way `resolve_with` re-replies through the
+        /// captured `play_track` caller and drops the hold.
+        #[handler(task)]
+        fn on_track_decoded(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            done: TaskDone<DecodeOutput, TrackDecodeContext>,
+        ) {
+            // Build the lane event while the output/context borrows are
+            // live, then end them before `resolve_with` consumes `done`.
+            let decode_err = match done.output() {
+                Ok(pcm) => {
+                    let cx = done.context();
+                    if let Some(sender) = self.sender.as_ref() {
+                        let event = AudioEvent::TrackStart {
+                            sender_mailbox: cx.sender_mailbox,
+                            namespace: cx.namespace.clone(),
+                            path: cx.path.clone(),
+                            pcm: Arc::from(pcm.as_slice()),
+                            gain: cx.gain,
+                            looping: cx.looping,
+                        };
+                        if sender.push(event).is_err() {
+                            tracing::warn!(
+                                target: "aether_substrate::audio",
+                                "event queue full — dropping track_start",
+                            );
+                        }
+                    }
+                    None
+                }
+                Err(error) => Some(error.to_string()),
+            };
+
+            match decode_err {
+                None => done.resolve_with(ctx, |_out, cx| PlayTrackResult::Ok {
+                    namespace: cx.namespace.clone(),
+                    path: cx.path.clone(),
+                }),
+                Some(error) => done.resolve_with(ctx, move |_out, cx| PlayTrackResult::Err {
+                    namespace: cx.namespace.clone(),
+                    path: cx.path.clone(),
+                    error,
+                }),
+            }
+        }
+
+        /// Fade out and retire a track started by `play_track`.
+        ///
+        /// # Agent
+        /// Fire-and-forget. Matched on `(sender, namespace, path)`;
+        /// stopping a track that isn't playing is a no-op.
+        #[handler]
+        fn on_stop_track(&mut self, ctx: &mut NativeCtx<'_>, mail: StopTrack) {
+            let Some(sender) = self.sender.as_ref() else {
+                return;
+            };
+            let event = AudioEvent::TrackStop {
+                sender_mailbox: sender_mailbox_id(ctx.reply_target()),
+                namespace: mail.namespace,
+                path: mail.path,
+            };
+            if sender.push(event).is_err() {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    "event queue full — dropping track_stop",
+                );
+            }
+        }
     }
 
     /// Spawn the audio worker thread that owns `cpal::Stream` for the
@@ -1444,8 +1942,9 @@ mod native {
     /// caller sees the error.
     fn spawn_audio_worker(
         requested_sample_rate: Option<u32>,
-    ) -> Result<(AudioEventSender, JoinHandle<()>, mpsc::Sender<()>), AudioBuildError> {
-        let (init_tx, init_rx) = mpsc::channel::<Result<AudioEventSender, AudioBuildError>>();
+    ) -> Result<(AudioEventSender, u32, JoinHandle<()>, mpsc::Sender<()>), AudioBuildError> {
+        let (init_tx, init_rx) =
+            mpsc::channel::<Result<(AudioEventSender, u32), AudioBuildError>>();
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
         // cpal device-callback thread, owned by the audio backend — not actor work,
@@ -1456,7 +1955,7 @@ mod native {
             .spawn(move || {
                 match try_build_pipeline(requested_sample_rate) {
                     Ok(pipeline) => {
-                        let _ = init_tx.send(Ok(pipeline.sender.clone()));
+                        let _ = init_tx.send(Ok((pipeline.sender.clone(), pipeline.sample_rate)));
                         drop(init_tx);
                         let _ = shutdown_rx.recv();
                         drop(pipeline); // cpal::Stream tears down here
@@ -1471,7 +1970,7 @@ mod native {
             })?;
 
         match init_rx.recv() {
-            Ok(Ok(sender)) => Ok((sender, thread, shutdown_tx)),
+            Ok(Ok((sender, sample_rate))) => Ok((sender, sample_rate, thread, shutdown_tx)),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -1493,8 +1992,14 @@ mod native {
         #![allow(clippy::unwrap_used)]
 
         use super::*;
-        use crate::test_chassis::{TestChassis, boot_test_chassis_with, fresh_substrate};
+        use crate::test_chassis::{
+            TestChassis, boot_test_chassis_with, decode_session_reply, drive_task_completion,
+            fresh_substrate, test_mailer_and_rx,
+        };
         use aether_actor::Actor;
+        use aether_data::{SessionToken, Source, SourceAddr, Uuid};
+        use aether_kinds::FsError;
+        use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::registry;
@@ -2092,6 +2597,302 @@ mod native {
                 BootError::MailboxAlreadyClaimed { ref name }
                     if name == AudioCapability::NAMESPACE
             ));
+        }
+
+        // ADR-0103 track lane. The synth-side tests drive `Synth` directly
+        // (the same pattern as the note tests); the cap-handler tests drive
+        // the `on_play_track` / `on_read_result` / `on_track_decoded` /
+        // `on_stop_track` arms through a `new_for_test` binding.
+
+        const TEST_RATE: f32 = 48_000.0;
+
+        /// A short ramp track at the device rate — long enough to span a
+        /// few `fill` blocks but cheap to play to completion.
+        fn ramp_pcm(len: usize) -> Arc<[f32]> {
+            // Index-to-float over a small range — exact in f32.
+            #[allow(clippy::cast_precision_loss)]
+            let v: Vec<f32> = (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect();
+            Arc::from(v)
+        }
+
+        fn track_start(pcm: Arc<[f32]>, looping: bool) -> AudioEvent {
+            AudioEvent::TrackStart {
+                sender_mailbox: MailboxId(1),
+                namespace: "assets".to_owned(),
+                path: "track.wav".to_owned(),
+                pcm,
+                gain: 1.0,
+                looping,
+            }
+        }
+
+        #[test]
+        fn track_plays_to_completion_then_retires() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            sender.push(track_start(ramp_pcm(256), false)).unwrap();
+            let mut buf = vec![0.0f32; 64];
+            // First block starts the track and produces sound.
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.track_count(), 1);
+            assert!(buf.iter().any(|s| s.abs() > 0.0), "track produced silence");
+            // 256 samples / 64-sample blocks: a few more blocks retire it.
+            for _ in 0..8 {
+                synth.fill(&mut buf, 1);
+            }
+            assert_eq!(synth.track_count(), 0, "finished track never retired");
+        }
+
+        #[test]
+        fn looping_track_outlives_its_length() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            sender.push(track_start(ramp_pcm(128), true)).unwrap();
+            let mut buf = vec![0.0f32; 128];
+            // Play well past the PCM length — a looping track wraps rather
+            // than retiring.
+            for _ in 0..10 {
+                synth.fill(&mut buf, 1);
+            }
+            assert_eq!(synth.track_count(), 1, "looping track retired early");
+        }
+
+        #[test]
+        fn stop_track_fades_then_retires() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            sender.push(track_start(ramp_pcm(4_800), true)).unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.track_count(), 1);
+            // Stop, then fill past the ~5ms fade window (240 samples at
+            // 48kHz): the track fades out and retires.
+            sender
+                .push(AudioEvent::TrackStop {
+                    sender_mailbox: MailboxId(1),
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                })
+                .unwrap();
+            let mut tail = vec![0.0f32; 512];
+            synth.fill(&mut tail, 1);
+            assert_eq!(synth.track_count(), 0, "stopped track never retired");
+        }
+
+        #[test]
+        fn track_does_not_count_against_max_voices() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            // Saturate the voice pool.
+            for i in 0..(MAX_VOICES as u64 + 8) {
+                sender
+                    .push(AudioEvent::NoteOn {
+                        sender_mailbox: MailboxId(i + 1),
+                        pitch: 60,
+                        velocity: 100,
+                        instrument_id: 0,
+                    })
+                    .unwrap();
+            }
+            // A track plays alongside without being stolen or counted.
+            sender.push(track_start(ramp_pcm(4_800), true)).unwrap();
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(synth.voice_count(), MAX_VOICES, "voice cap shifted");
+            assert_eq!(synth.track_count(), 1, "track not playing in its own lane");
+        }
+
+        #[test]
+        fn replay_same_key_restarts_single_track() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, TEST_RATE);
+            for _ in 0..3 {
+                sender.push(track_start(ramp_pcm(256), true)).unwrap();
+            }
+            let mut buf = vec![0.0f32; 64];
+            synth.fill(&mut buf, 1);
+            assert_eq!(
+                synth.track_count(),
+                1,
+                "re-playing the same key must restart, not stack",
+            );
+        }
+
+        fn session_sender() -> Source {
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
+        }
+
+        /// Build a cap with a live event queue but no cpal worker — the
+        /// synth-side queue is exercised directly while the handler path
+        /// runs as it would on a desktop substrate.
+        fn live_cap() -> (AudioCapability, Arc<ArrayQueue<AudioEvent>>) {
+            let (event_sender, queue) = new_event_channel();
+            let cap = AudioCapability {
+                sender: Some(event_sender),
+                sample_rate: Some(TEST_RATE),
+                pending_tracks: HashMap::new(),
+                thread: None,
+                shutdown: None,
+            };
+            (cap, queue)
+        }
+
+        #[test]
+        fn play_track_happy_path_replies_ok_and_starts_a_track() {
+            let (mut cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_play_track(
+                &mut ctx,
+                PlayTrack {
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                    gain: 0.8,
+                    looping: false,
+                },
+            );
+            // The cap forwarded an fs.read and parked the request.
+            assert_eq!(cap.pending_tracks.len(), 1, "request not parked");
+
+            // Synthesize the fs reply with a real WAV asset (at half the
+            // device rate, so decode also resamples).
+            let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
+            let mut read_ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_read_result(
+                &mut read_ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                    bytes: wav,
+                },
+            );
+            // The decode worker runs off-thread and pushes the completion
+            // wake; route it through the cap's #[handler(task)] arm.
+            drive_task_completion(&mut cap, &transport, &rx);
+
+            match decode_session_reply::<PlayTrackResult>(&rx) {
+                PlayTrackResult::Ok { namespace, path } => {
+                    assert_eq!(namespace, "assets");
+                    assert_eq!(path, "track.wav");
+                }
+                PlayTrackResult::Err { error, .. } => panic!("expected Ok, got Err({error})"),
+            }
+            assert!(cap.pending_tracks.is_empty(), "pending entry never cleared");
+            // The decoded track reached the synth queue as a TrackStart.
+            let event = queue.pop().expect("a track-start event was queued");
+            assert!(
+                matches!(event, AudioEvent::TrackStart { ref path, .. } if path == "track.wav"),
+                "expected TrackStart, got {event:?}",
+            );
+        }
+
+        #[test]
+        fn play_track_missing_file_replies_err_with_fs_error() {
+            let (mut cap, queue) = live_cap();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_play_track(
+                &mut ctx,
+                PlayTrack {
+                    namespace: "assets".to_owned(),
+                    path: "missing.wav".to_owned(),
+                    gain: 1.0,
+                    looping: false,
+                },
+            );
+            cap.on_read_result(
+                &mut ctx,
+                ReadResult::Err {
+                    namespace: "assets".to_owned(),
+                    path: "missing.wav".to_owned(),
+                    error: FsError::NotFound,
+                },
+            );
+
+            match decode_session_reply::<PlayTrackResult>(&rx) {
+                PlayTrackResult::Err { path, error, .. } => {
+                    assert_eq!(path, "missing.wav");
+                    assert!(error.contains("NotFound"), "fs error not surfaced: {error}");
+                }
+                PlayTrackResult::Ok { .. } => panic!("expected Err for a missing file"),
+            }
+            assert!(cap.pending_tracks.is_empty(), "pending entry never cleared");
+            assert!(
+                queue.pop().is_none(),
+                "a failed read must not start a track"
+            );
+        }
+
+        #[test]
+        fn play_track_on_nop_chassis_replies_err() {
+            let mut cap = AudioCapability::nop();
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_play_track(
+                &mut ctx,
+                PlayTrack {
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                    gain: 1.0,
+                    looping: false,
+                },
+            );
+            match decode_session_reply::<PlayTrackResult>(&rx) {
+                PlayTrackResult::Err { .. } => {}
+                PlayTrackResult::Ok { .. } => panic!("nop chassis must reply Err"),
+            }
+            assert!(
+                cap.pending_tracks.is_empty(),
+                "nop chassis must not park a read"
+            );
+            // stop_track on a nop chassis is a silent no-op (no panic).
+            cap.on_stop_track(
+                &mut ctx,
+                StopTrack {
+                    namespace: "assets".to_owned(),
+                    path: "track.wav".to_owned(),
+                },
+            );
+        }
+
+        /// Mono ramp samples for an in-memory WAV fixture.
+        fn ramp(len: usize) -> Vec<f32> {
+            #[allow(clippy::cast_precision_loss)]
+            (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
         }
     }
 }

@@ -63,7 +63,7 @@ audio = []
 # atop the marker layer. Chassis bins activate these. Each implies its
 # marker layer + `native` so chassis builds still see the full cap.
 render-native = ["render", "native", "aether-substrate/render", "dep:wgpu"]
-audio-native = ["audio", "native", "dep:cpal", "dep:crossbeam-queue"]
+audio-native = ["audio", "native", "dep:cpal", "dep:crossbeam-queue", "dep:hound"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
@@ -124,6 +124,10 @@ wasmtime = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
 crossbeam-queue = { version = "0.3", optional = true }
+# ADR-0103 §1: WAV decode for the audio cap's track lane + (future)
+# sampled instrument banks. Pure-Rust, small; rides the `audio-native`
+# feature so wasm / marker-only builds skip it.
+hound = { workspace = true, optional = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
