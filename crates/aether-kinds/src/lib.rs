@@ -1622,6 +1622,66 @@ mod control_plane {
         Err { error: String },
     }
 
+    // ADR-0103 track playback. The audio cap plays a decoded audio asset
+    // (music, ambience) in its own mixer lane, addressed by fs namespace
+    // + path the way the rest of the substrate addresses files (ADR-0041).
+    // Postcard-shaped because every field is a `String` / `f32` / `bool`,
+    // not a cast-eligible `#[repr(C)]` body like `NoteOn`.
+
+    /// `aether.audio.play_track` — fetch, decode, and play an audio asset
+    /// through the audio cap. The cap forwards an `aether.fs.read` for
+    /// `namespace://path`, decodes + resamples the bytes off the realtime
+    /// path, and mixes the track in its own lane — never counted against
+    /// the voice pool, never voice-stolen. `gain` is a linear per-track
+    /// scalar applied at play time; `looping` wraps the track to its start
+    /// on completion instead of retiring it. Re-playing the same
+    /// `(sender, namespace, path)` key restarts the track. Reply:
+    /// `PlayTrackResult`. Desktop-only — chassis without an audio device
+    /// reply `Err` (ADR-0103 §7).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.play_track")]
+    pub struct PlayTrack {
+        pub namespace: String,
+        pub path: String,
+        pub gain: f32,
+        pub looping: bool,
+    }
+
+    /// Reply to `PlayTrack`. Both arms echo the originating `namespace` +
+    /// `path` for correlation. `Ok` fires once the asset has decoded and
+    /// the track started in the mixer lane; `Err` carries a human-readable
+    /// reason — a typo'd path (the fs error), a malformed / unsupported
+    /// file (the decode error), or a chassis without an audio device. A
+    /// bad path comes back loud rather than logged-and-dropped because it
+    /// is the common agent failure (ADR-0103 §2).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.play_track_result")]
+    pub enum PlayTrackResult {
+        Ok {
+            namespace: String,
+            path: String,
+        },
+        Err {
+            namespace: String,
+            path: String,
+            error: String,
+        },
+    }
+
+    /// `aether.audio.stop_track` — fade out and retire a track started by
+    /// `PlayTrack`. Matched on `(sender, namespace, path)` — the sender is
+    /// taken from the mail envelope, not the payload — so one component
+    /// cannot stop another's track. Releases through a short (~5
+    /// millisecond) linear fade to avoid a click. Stopping a track that
+    /// isn't playing is a no-op, matching `note_off`. Fire-and-forget; no
+    /// reply.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.stop_track")]
+    pub struct StopTrack {
+        pub namespace: String,
+        pub path: String,
+    }
+
     // ADR-0041 substrate file I/O. Four request kinds on the
     // `"aether.fs"` mailbox (read / write / delete / list), paired
     // 1:1 with reply kinds
@@ -3085,6 +3145,9 @@ mod tests {
             SetMasterGainResult::NAME,
             "aether.audio.set_master_gain_result"
         );
+        assert_eq!(PlayTrack::NAME, "aether.audio.play_track");
+        assert_eq!(PlayTrackResult::NAME, "aether.audio.play_track_result");
+        assert_eq!(StopTrack::NAME, "aether.audio.stop_track");
         assert_eq!(MonitorNotice::NAME, "aether.actor.monitor_notice");
         assert_eq!(LogTail::NAME, "aether.log.tail");
         assert_eq!(LogTailResult::NAME, "aether.log.tail_result");
