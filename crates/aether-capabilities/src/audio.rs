@@ -8,10 +8,13 @@
 //! hand-rolled synth, built-in instrument registry — plus the
 //! [`AudioCapability`] itself.
 //!
-//! Synthesis is hand-rolled (no `SoundFont`, no DSP graph library): a
-//! waveform oscillator + ADSR envelope per voice, summed flat, scaled
-//! by master gain. 5 built-in instruments cover the common shapes
-//! (sine / square / triangle / saw + a pluck-flavoured sawtooth).
+//! Synthesis is hand-rolled (no `SoundFont`, no DSP graph library):
+//! each voice runs one of two kernels — a waveform oscillator through a
+//! linear ADSR, or a fixed bank of inharmonic sine partials with
+//! per-partial exponential decay — summed flat and scaled by master
+//! gain. 8 built-in instruments cover the oscillator shapes (sine /
+//! square / triangle / saw + a pluck-flavoured sawtooth) plus a
+//! partial-bank piano, electric piano, and a slow-swell pad.
 //! Per-source / bus-level mixing is deliberately not here — ADR-0039
 //! commits to composing that in user-space via mixer components.
 //!
@@ -206,14 +209,73 @@ mod native {
         release_s: f32,
     }
 
+    /// Number of sine partials in a partial-bank voice. Fixed so the
+    /// voice stays `Copy` and stack-friendly in the pool; the hot loop is
+    /// one `sin`, one multiply-accumulate, and one decay multiply per
+    /// partial.
+    const PARTIAL_COUNT: usize = 8;
+
+    /// Reference pitch (MIDI C4) for partial-bank decay scaling. A note's
+    /// per-partial decay rates scale by `f0 / REFERENCE_FREQ`, so higher
+    /// notes ring shorter and lower notes longer.
+    const REFERENCE_FREQ: f32 = 261.625_57;
+
+    /// Relative amplitude below which a sustaining (un-released)
+    /// partial-bank voice frees itself. Piano partials decay
+    /// exponentially and never reach exactly zero, so the voice retires
+    /// once its summed partial energy crosses this floor.
+    const PARTIAL_SILENCE_FLOOR: f32 = 1.0e-4;
+
+    /// A struck/sustained partial-bank voice patch. Partial `n` is tuned
+    /// to `n * f0 * sqrt(1 + inharmonicity * n^2)` plus a small
+    /// per-partial detune; `partial_amps` is the spectral shape (tilted
+    /// toward upper partials by velocity via `brightness_tilt`); each
+    /// partial decays at `decay_base * (1 + i * decay_spread)` scaled by
+    /// pitch. A global attack/release ramp wraps the bank.
+    #[derive(Copy, Clone, Debug)]
+    struct PartialBankDef {
+        /// Stiffness coefficient `B`: stretches overtone `n` to
+        /// `n * f0 * sqrt(1 + B * n^2)`. `0.0` is perfectly harmonic.
+        inharmonicity: f32,
+        /// Per-partial base amplitude (the spectral shape). Normalised at
+        /// `note_on` so overall level comes from velocity, not this sum.
+        partial_amps: [f32; PARTIAL_COUNT],
+        /// Fundamental decay rate (per second) at the reference pitch.
+        /// `0.0` sustains indefinitely (the pad).
+        decay_base: f32,
+        /// Per-partial-index decay multiplier: partial `i` decays at
+        /// `decay_base * (1 + i * decay_spread)`, so upper partials fade
+        /// first (a string's brightness dropping as it rings).
+        decay_spread: f32,
+        /// Per-partial detune fraction. Alternating ± across partials
+        /// gives the slow beating of a multi-string course.
+        detune: f32,
+        /// Velocity-to-brightness tilt. Higher velocity multiplies the
+        /// upper partials' share so a harder strike reads brighter.
+        brightness_tilt: f32,
+        /// Global attack ramp (seconds). Near-zero for a struck string,
+        /// long for the pad's slow swell.
+        attack_s: f32,
+        /// Global release ramp (seconds) on `note_off` — the damper.
+        release_s: f32,
+    }
+
+    /// Voice kernel a patch selects. The five original patches stay
+    /// `Oscillator`; the partial-bank patches add struck-string and
+    /// sustained timbres without a wire change.
+    #[derive(Copy, Clone, Debug)]
+    enum VoiceDef {
+        Oscillator { wave: Wave, adsr: Adsr },
+        PartialBank(PartialBankDef),
+    }
+
     /// Full instrument patch. Agents address instruments by numeric id
     /// into the built-in registry; the registry hands the voice a copy of
     /// this struct at `note_on` time so each voice is self-contained.
     #[derive(Copy, Clone, Debug)]
     struct InstrumentDef {
         name: &'static str,
-        wave: Wave,
-        adsr: Adsr,
+        voice: VoiceDef,
         base_amp: f32,
     }
 
@@ -224,58 +286,119 @@ mod native {
     const BUILTINS: &[InstrumentDef] = &[
         InstrumentDef {
             name: "sine_lead",
-            wave: Wave::Sine,
-            adsr: Adsr {
-                attack_s: 0.01,
-                decay_s: 0.08,
-                sustain: 0.7,
-                release_s: 0.18,
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Sine,
+                adsr: Adsr {
+                    attack_s: 0.01,
+                    decay_s: 0.08,
+                    sustain: 0.7,
+                    release_s: 0.18,
+                },
             },
             base_amp: 0.35,
         },
         InstrumentDef {
             name: "square_bass",
-            wave: Wave::Square,
-            adsr: Adsr {
-                attack_s: 0.005,
-                decay_s: 0.12,
-                sustain: 0.6,
-                release_s: 0.12,
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Square,
+                adsr: Adsr {
+                    attack_s: 0.005,
+                    decay_s: 0.12,
+                    sustain: 0.6,
+                    release_s: 0.12,
+                },
             },
             base_amp: 0.22,
         },
         InstrumentDef {
             name: "triangle",
-            wave: Wave::Triangle,
-            adsr: Adsr {
-                attack_s: 0.02,
-                decay_s: 0.1,
-                sustain: 0.7,
-                release_s: 0.2,
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Triangle,
+                adsr: Adsr {
+                    attack_s: 0.02,
+                    decay_s: 0.1,
+                    sustain: 0.7,
+                    release_s: 0.2,
+                },
             },
             base_amp: 0.32,
         },
         InstrumentDef {
             name: "saw_lead",
-            wave: Wave::Saw,
-            adsr: Adsr {
-                attack_s: 0.01,
-                decay_s: 0.15,
-                sustain: 0.55,
-                release_s: 0.15,
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Saw,
+                adsr: Adsr {
+                    attack_s: 0.01,
+                    decay_s: 0.15,
+                    sustain: 0.55,
+                    release_s: 0.15,
+                },
             },
             base_amp: 0.2,
         },
         InstrumentDef {
             name: "pluck",
-            wave: Wave::Saw,
-            adsr: Adsr {
-                attack_s: 0.002,
-                decay_s: 0.35,
-                sustain: 0.0,
-                release_s: 0.05,
+            voice: VoiceDef::Oscillator {
+                wave: Wave::Saw,
+                adsr: Adsr {
+                    attack_s: 0.002,
+                    decay_s: 0.35,
+                    sustain: 0.0,
+                    release_s: 0.05,
+                },
             },
             base_amp: 0.3,
+        },
+        // id 5: struck-string piano. Slightly stretched partials, a
+        // bright-to-mellow decay (upper partials fade first), and a fast
+        // damper release on note_off.
+        InstrumentDef {
+            name: "piano",
+            voice: VoiceDef::PartialBank(PartialBankDef {
+                inharmonicity: 0.000_4,
+                partial_amps: [1.0, 0.6, 0.4, 0.25, 0.18, 0.12, 0.08, 0.05],
+                decay_base: 3.0,
+                decay_spread: 0.6,
+                detune: 0.000_8,
+                brightness_tilt: 0.5,
+                attack_s: 0.002,
+                release_s: 0.15,
+            }),
+            base_amp: 0.3,
+        },
+        // id 6: electric piano. Same partial-bank shape, more inharmonic
+        // (bell-like), faster decay, and a brighter velocity response —
+        // a pure patch-table entry, no new machinery.
+        InstrumentDef {
+            name: "electric_piano",
+            voice: VoiceDef::PartialBank(PartialBankDef {
+                inharmonicity: 0.001,
+                partial_amps: [1.0, 0.3, 0.5, 0.2, 0.3, 0.15, 0.1, 0.06],
+                decay_base: 4.0,
+                decay_spread: 0.4,
+                detune: 0.001_2,
+                brightness_tilt: 0.7,
+                attack_s: 0.003,
+                release_s: 0.1,
+            }),
+            base_amp: 0.28,
+        },
+        // id 7: slow-swell pad. Harmonic partials, a long attack, near-
+        // zero partial decay so it sustains while held, and a long
+        // release — the warm sustained bed no oscillator patch can do.
+        InstrumentDef {
+            name: "pad",
+            voice: VoiceDef::PartialBank(PartialBankDef {
+                inharmonicity: 0.0,
+                partial_amps: [1.0, 0.7, 0.5, 0.4, 0.3, 0.25, 0.2, 0.15],
+                decay_base: 0.0,
+                decay_spread: 0.0,
+                detune: 0.000_6,
+                brightness_tilt: 0.25,
+                attack_s: 0.8,
+                release_s: 0.6,
+            }),
+            base_amp: 0.18,
         },
     ];
 
@@ -307,14 +430,11 @@ mod native {
         Done,
     }
 
-    /// A single sounding voice. Sized for stack allocation in the voice
-    /// pool — the hot loop iterates `&mut [Voice]` and every field is
-    /// touched per sample, so keeping the struct compact helps cache.
+    /// The oscillator voice kernel — a periodic waveform through a linear
+    /// ADSR. Every field is touched per sample, so the struct stays
+    /// compact for cache friendliness in the voice pool.
     #[derive(Copy, Clone, Debug)]
-    struct Voice {
-        sender_mailbox: MailboxId,
-        instrument_id: u8,
-        pitch: u8,
+    struct OscVoice {
         /// Oscillator phase in turns (`[0.0, 1.0)`), incremented by
         /// `freq / sample_rate` per sample.
         phase: f32,
@@ -328,28 +448,25 @@ mod native {
         envelope: EnvelopeStage,
     }
 
-    impl Voice {
+    impl OscVoice {
         fn new(
-            sender_mailbox: MailboxId,
-            instrument_id: u8,
             pitch: u8,
             velocity: u8,
-            def: &InstrumentDef,
+            wave: Wave,
+            adsr: Adsr,
+            base_amp: f32,
             sample_rate: f32,
         ) -> Self {
             let freq = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
             let phase_step = freq / sample_rate;
             let v = f32::from(velocity) / 127.0;
-            let amplitude = def.base_amp * v * v;
+            let amplitude = base_amp * v * v;
             Self {
-                sender_mailbox,
-                instrument_id,
-                pitch,
                 phase: 0.0,
                 phase_step,
                 amplitude,
-                wave: def.wave,
-                adsr: def.adsr,
+                wave,
+                adsr,
                 envelope: EnvelopeStage::Attack { t: 0.0 },
             }
         }
@@ -444,6 +561,265 @@ mod native {
                 self.phase -= 1.0;
             }
             s
+        }
+    }
+
+    /// One sine partial of a partial-bank voice. `amp` decays toward zero
+    /// each sample by `decay_mul = exp(-rate * dt)`, so the hot loop holds
+    /// no transcendentals beyond the `sin`.
+    #[derive(Copy, Clone, Debug)]
+    struct Partial {
+        phase: f32,
+        phase_step: f32,
+        amp: f32,
+        decay_mul: f32,
+    }
+
+    impl Partial {
+        const SILENT: Self = Self {
+            phase: 0.0,
+            phase_step: 0.0,
+            amp: 0.0,
+            decay_mul: 1.0,
+        };
+    }
+
+    /// Global attack/release ramp wrapping a partial bank. The partials
+    /// carry their own per-sample decay; this ramp swells the voice in at
+    /// `note_on` and damps it out at `note_off`.
+    #[derive(Copy, Clone, Debug)]
+    enum BankStage {
+        Attack { t: f32 },
+        Sustain,
+        Release { t: f32, from_level: f32 },
+        Done,
+    }
+
+    /// The partial-bank voice kernel — a fixed array of inharmonic sine
+    /// partials with per-partial exponential decay, wrapped by a global
+    /// attack/release ramp. Built once at `note_on`; the per-sample path
+    /// is `sin` + multiply-accumulate + decay multiply per partial.
+    #[derive(Copy, Clone, Debug)]
+    struct PartialBankVoice {
+        partials: [Partial; PARTIAL_COUNT],
+        /// Overall level after velocity scaling; the partial amps carry
+        /// the (normalised) spectral shape, this carries the loudness.
+        amplitude: f32,
+        stage: BankStage,
+        attack_s: f32,
+        release_s: f32,
+    }
+
+    impl PartialBankVoice {
+        fn new(
+            pitch: u8,
+            velocity: u8,
+            def: &PartialBankDef,
+            base_amp: f32,
+            sample_rate: f32,
+        ) -> Self {
+            let f0 = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
+            let v = f32::from(velocity) / 127.0;
+            let amplitude = base_amp * v;
+            let pitch_scale = f0 / REFERENCE_FREQ;
+            let dt = 1.0 / sample_rate;
+
+            let mut partials = [Partial::SILENT; PARTIAL_COUNT];
+            let mut total = 0.0f32;
+            for (i, p) in partials.iter_mut().enumerate() {
+                // PARTIAL_COUNT is 8 — the index-to-float casts are exact.
+                #[allow(clippy::cast_precision_loss)]
+                let i_f = i as f32;
+                let n = i_f + 1.0;
+                let stretch = (def.inharmonicity * n).mul_add(n, 1.0).sqrt();
+                let detune = if i % 2 == 0 {
+                    1.0 + def.detune
+                } else {
+                    1.0 - def.detune
+                };
+                p.phase_step = (n * f0 * stretch * detune) / sample_rate;
+                let rate = def.decay_base * i_f.mul_add(def.decay_spread, 1.0) * pitch_scale;
+                p.decay_mul = (-rate * dt).exp();
+                let amp = def.partial_amps[i] * i_f.mul_add(def.brightness_tilt * v, 1.0);
+                p.amp = amp;
+                total += amp;
+            }
+            if total > 0.0 {
+                let norm = 1.0 / total;
+                for p in &mut partials {
+                    p.amp *= norm;
+                }
+            }
+
+            Self {
+                partials,
+                amplitude,
+                stage: BankStage::Attack { t: 0.0 },
+                attack_s: def.attack_s,
+                release_s: def.release_s,
+            }
+        }
+
+        fn note_off(&mut self) {
+            let from_level = match self.stage {
+                BankStage::Attack { t } => {
+                    if self.attack_s > 0.0 {
+                        (t / self.attack_s).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    }
+                }
+                BankStage::Sustain => 1.0,
+                BankStage::Release { .. } | BankStage::Done => return,
+            };
+            self.stage = BankStage::Release { t: 0.0, from_level };
+        }
+
+        fn done(&self) -> bool {
+            matches!(self.stage, BankStage::Done)
+        }
+
+        fn advance_ramp(&mut self, dt: f32) -> f32 {
+            match &mut self.stage {
+                BankStage::Attack { t } => {
+                    *t += dt;
+                    if self.attack_s <= 0.0 || *t >= self.attack_s {
+                        self.stage = BankStage::Sustain;
+                        1.0
+                    } else {
+                        *t / self.attack_s
+                    }
+                }
+                BankStage::Sustain => 1.0,
+                BankStage::Release { t, from_level } => {
+                    *t += dt;
+                    if self.release_s <= 0.0 || *t >= self.release_s {
+                        self.stage = BankStage::Done;
+                        0.0
+                    } else {
+                        *from_level * (1.0 - (*t / self.release_s))
+                    }
+                }
+                BankStage::Done => 0.0,
+            }
+        }
+
+        fn next_sample(&mut self, dt: f32) -> f32 {
+            let ramp = self.advance_ramp(dt);
+            let mut acc = 0.0f32;
+            let mut amp_sum = 0.0f32;
+            for p in &mut self.partials {
+                acc = (p.phase * TAU).sin().mul_add(p.amp, acc);
+                p.phase += p.phase_step;
+                if p.phase >= 1.0 {
+                    p.phase -= 1.0;
+                }
+                p.amp *= p.decay_mul;
+                amp_sum += p.amp.abs();
+            }
+            // A held voice whose partials have rung out frees itself; a
+            // pad (zero partial decay) only ends once its release ramp
+            // completes.
+            if matches!(self.stage, BankStage::Sustain)
+                && amp_sum * self.amplitude < PARTIAL_SILENCE_FLOOR
+            {
+                self.stage = BankStage::Done;
+            }
+            acc * self.amplitude * ramp
+        }
+
+        #[cfg(test)]
+        fn envelope_level(&self) -> f32 {
+            self.partials.iter().map(|p| p.amp.abs()).sum()
+        }
+
+        #[cfg(test)]
+        fn partial_amps(&self) -> [f32; PARTIAL_COUNT] {
+            let mut out = [0.0f32; PARTIAL_COUNT];
+            for (slot, p) in out.iter_mut().zip(self.partials.iter()) {
+                *slot = p.amp;
+            }
+            out
+        }
+
+        #[cfg(test)]
+        fn in_sustain(&self) -> bool {
+            matches!(self.stage, BankStage::Sustain)
+        }
+    }
+
+    /// Voice kernel — one of the two synthesis models, selected by the
+    /// patch at `note_on`.
+    #[derive(Copy, Clone, Debug)]
+    enum VoiceKernel {
+        Oscillator(OscVoice),
+        PartialBank(PartialBankVoice),
+    }
+
+    /// A single sounding voice: the routing key (`sender_mailbox`,
+    /// `instrument_id`, `pitch`) plus the kernel that renders it. `Copy`
+    /// and fixed-size, so the voice pool stays a flat `Vec<Voice>`.
+    #[derive(Copy, Clone, Debug)]
+    struct Voice {
+        sender_mailbox: MailboxId,
+        instrument_id: u8,
+        pitch: u8,
+        kernel: VoiceKernel,
+    }
+
+    impl Voice {
+        fn new(
+            sender_mailbox: MailboxId,
+            instrument_id: u8,
+            pitch: u8,
+            velocity: u8,
+            def: &InstrumentDef,
+            sample_rate: f32,
+        ) -> Self {
+            let kernel = match def.voice {
+                VoiceDef::Oscillator { wave, adsr } => VoiceKernel::Oscillator(OscVoice::new(
+                    pitch,
+                    velocity,
+                    wave,
+                    adsr,
+                    def.base_amp,
+                    sample_rate,
+                )),
+                VoiceDef::PartialBank(bank) => VoiceKernel::PartialBank(PartialBankVoice::new(
+                    pitch,
+                    velocity,
+                    &bank,
+                    def.base_amp,
+                    sample_rate,
+                )),
+            };
+            Self {
+                sender_mailbox,
+                instrument_id,
+                pitch,
+                kernel,
+            }
+        }
+
+        fn note_off(&mut self) {
+            match &mut self.kernel {
+                VoiceKernel::Oscillator(v) => v.note_off(),
+                VoiceKernel::PartialBank(v) => v.note_off(),
+            }
+        }
+
+        fn done(&self) -> bool {
+            match &self.kernel {
+                VoiceKernel::Oscillator(v) => v.done(),
+                VoiceKernel::PartialBank(v) => v.done(),
+            }
+        }
+
+        fn next_sample(&mut self, dt: f32) -> f32 {
+            match &mut self.kernel {
+                VoiceKernel::Oscillator(v) => v.next_sample(dt),
+                VoiceKernel::PartialBank(v) => v.next_sample(dt),
+            }
         }
     }
 
@@ -906,11 +1282,198 @@ mod native {
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::registry;
 
+        /// Ids 0–4 are wire-stable: reordering or re-patching them breaks
+        /// every `NoteOn.instrument_id` already in the wild. This pins
+        /// their names and oscillator waves so an accidental edit fails
+        /// loudly. Adds (piano / `electric_piano` / pad) go at the end.
         #[test]
-        fn builtin_registry_covers_five_patches() {
-            assert_eq!(builtin_count(), 5);
-            assert_eq!(BUILTINS[0].name, "sine_lead");
-            assert_eq!(BUILTINS[4].name, "pluck");
+        fn oscillator_ids_zero_through_four_are_wire_stable() {
+            let waves = [
+                ("sine_lead", Wave::Sine),
+                ("square_bass", Wave::Square),
+                ("triangle", Wave::Triangle),
+                ("saw_lead", Wave::Saw),
+                ("pluck", Wave::Saw),
+            ];
+            for (id, (name, wave)) in waves.iter().enumerate() {
+                let def = &BUILTINS[id];
+                assert_eq!(def.name, *name, "id {id} name drifted");
+                match def.voice {
+                    VoiceDef::Oscillator { wave: w, .. } => assert!(
+                        matches!(
+                            (w, wave),
+                            (Wave::Sine, Wave::Sine)
+                                | (Wave::Square, Wave::Square)
+                                | (Wave::Triangle, Wave::Triangle)
+                                | (Wave::Saw, Wave::Saw)
+                        ),
+                        "id {id} wave drifted",
+                    ),
+                    VoiceDef::PartialBank(_) => panic!("id {id} must stay an oscillator patch"),
+                }
+            }
+        }
+
+        #[test]
+        fn builtin_registry_lists_eight_patches() {
+            assert_eq!(builtin_count(), 8);
+            assert_eq!(
+                builtin_names(),
+                vec![
+                    "sine_lead",
+                    "square_bass",
+                    "triangle",
+                    "saw_lead",
+                    "pluck",
+                    "piano",
+                    "electric_piano",
+                    "pad",
+                ],
+            );
+        }
+
+        /// Pull a `PartialBankDef` out of the registry by name for the
+        /// kernel tests. Panics if the named patch is not a partial bank.
+        fn partial_bank_def(name: &str) -> PartialBankDef {
+            let def = BUILTINS
+                .iter()
+                .find(|d| d.name == name)
+                .expect("named builtin exists");
+            match def.voice {
+                VoiceDef::PartialBank(bank) => bank,
+                VoiceDef::Oscillator { .. } => panic!("{name} is not a partial-bank patch"),
+            }
+        }
+
+        /// Drive a kernel until it frees itself, returning the sample
+        /// count. Caps iterations so a stuck voice fails the test instead
+        /// of hanging.
+        fn samples_until_done(voice: &mut PartialBankVoice, sample_rate: f32) -> usize {
+            let dt = 1.0 / sample_rate;
+            // 30 s cap at the test rate — exact for usize.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let cap = (sample_rate * 30.0) as usize;
+            let mut n = 0;
+            while !voice.done() && n < cap {
+                voice.next_sample(dt);
+                n += 1;
+            }
+            assert!(voice.done(), "voice did not free itself within the cap");
+            n
+        }
+
+        #[test]
+        fn partial_bank_envelope_decreases_after_attack() {
+            let def = partial_bank_def("piano");
+            let mut voice = PartialBankVoice::new(60, 100, &def, 0.3, 48_000.0);
+            let dt = 1.0 / 48_000.0;
+            // Run past the (near-zero) attack into sustain.
+            while !voice.in_sustain() {
+                voice.next_sample(dt);
+            }
+            let mut last = voice.envelope_level();
+            for _ in 0..4_000 {
+                voice.next_sample(dt);
+                let level = voice.envelope_level();
+                assert!(
+                    level <= last + f32::EPSILON,
+                    "partial envelope must not rise in sustain: {level} > {last}",
+                );
+                last = level;
+            }
+        }
+
+        #[test]
+        fn higher_pitch_decays_in_fewer_samples() {
+            let def = partial_bank_def("piano");
+            let mut low = PartialBankVoice::new(40, 100, &def, 0.3, 48_000.0);
+            let mut high = PartialBankVoice::new(84, 100, &def, 0.3, 48_000.0);
+            let low_samples = samples_until_done(&mut low, 48_000.0);
+            let high_samples = samples_until_done(&mut high, 48_000.0);
+            assert!(
+                high_samples < low_samples,
+                "high pitch ({high_samples}) should ring shorter than low ({low_samples})",
+            );
+        }
+
+        #[test]
+        fn upper_partial_energy_rises_with_velocity() {
+            let def = partial_bank_def("piano");
+            let soft = PartialBankVoice::new(60, 20, &def, 0.3, 48_000.0);
+            let hard = PartialBankVoice::new(60, 120, &def, 0.3, 48_000.0);
+            let upper_share = |v: &PartialBankVoice| -> f32 {
+                let amps = v.partial_amps();
+                let upper: f32 = amps[PARTIAL_COUNT / 2..].iter().map(|a| a.abs()).sum();
+                let total: f32 = amps.iter().map(|a| a.abs()).sum();
+                upper / total
+            };
+            assert!(
+                upper_share(&hard) > upper_share(&soft),
+                "harder strike must shift energy toward upper partials",
+            );
+        }
+
+        #[test]
+        fn note_off_silences_faster_than_natural_decay() {
+            let def = partial_bank_def("piano");
+            let mut undamped = PartialBankVoice::new(60, 100, &def, 0.3, 48_000.0);
+            let mut damped = PartialBankVoice::new(60, 100, &def, 0.3, 48_000.0);
+            let dt = 1.0 / 48_000.0;
+            // Let both ring briefly, then release only the damped one.
+            for _ in 0..480 {
+                undamped.next_sample(dt);
+                damped.next_sample(dt);
+            }
+            damped.note_off();
+            let damped_samples = 480 + samples_until_done(&mut damped, 48_000.0);
+            let undamped_samples = 480 + samples_until_done(&mut undamped, 48_000.0);
+            assert!(
+                damped_samples < undamped_samples,
+                "note_off damper ({damped_samples}) should beat natural decay ({undamped_samples})",
+            );
+        }
+
+        #[test]
+        fn partial_bank_voice_frees_itself_when_silent() {
+            let (sender, queue) = new_event_channel();
+            let mut synth = Synth::new(queue, 48_000.0);
+            // id 5 is piano; high pitch rings out quickly.
+            sender
+                .push(AudioEvent::NoteOn {
+                    sender_mailbox: MailboxId(1),
+                    pitch: 96,
+                    velocity: 100,
+                    instrument_id: 5,
+                })
+                .unwrap();
+            let mut buf = vec![0.0f32; 4_800];
+            for _ in 0..200 {
+                synth.fill(&mut buf, 1);
+                if synth.voice_count() == 0 {
+                    break;
+                }
+            }
+            assert_eq!(synth.voice_count(), 0, "held piano voice never freed");
+        }
+
+        #[test]
+        fn pad_holds_level_through_sustain() {
+            let def = partial_bank_def("pad");
+            let mut voice = PartialBankVoice::new(60, 100, &def, 0.18, 48_000.0);
+            let dt = 1.0 / 48_000.0;
+            // Drive through the long attack into sustain.
+            while !voice.in_sustain() {
+                voice.next_sample(dt);
+            }
+            let level = voice.envelope_level();
+            for _ in 0..48_000 {
+                voice.next_sample(dt);
+            }
+            let after = voice.envelope_level();
+            assert!(
+                (after - level).abs() < 1.0e-3,
+                "pad must sustain its level while held: {level} -> {after}",
+            );
         }
 
         // ADR-0090: the confique migration is byte-identical to the prior
