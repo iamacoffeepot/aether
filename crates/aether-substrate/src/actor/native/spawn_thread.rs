@@ -161,6 +161,9 @@ impl<A: Actor> MailSender for InheritCtx<A> {
     }
 
     //noinspection DuplicatedCode
+    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
+    #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
@@ -239,6 +242,9 @@ impl<A: Actor> MailSender for RootCtx<A> {
         );
     }
 
+    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
+    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
+    #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(

@@ -144,7 +144,10 @@ pub const fn resolve<K: Kind>() -> KindId<K> {
 /// stable hash) and the kind id is `K::ID` (ADR-0030 Phase 2). No
 /// host-fn round trip, no requirement that the target mailbox or
 /// kind already exist on the substrate side at init time.
+// SDK compile-time name→id primitive (the documented `Mailbox<K>` token
+// path) — `mailbox_name` is a const, resolved before any runtime carry exists.
 #[must_use]
+#[allow(clippy::disallowed_methods)]
 pub const fn resolve_mailbox<K: Kind>(mailbox_name: &str) -> Mailbox<K> {
     Mailbox::__new(mailbox_id_from_name(mailbox_name).0, K::ID.0)
 }
@@ -185,6 +188,9 @@ mod tests {
         assert_eq!(s.kind(), 11);
     }
 
+    // Asserts `resolve_mailbox` matches the name hash — the primitive is the
+    // reference value under test.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn resolve_mailbox_uses_name_hash_and_kind_id() {
         let s = resolve_mailbox::<FakeKind>("hand.rolled");

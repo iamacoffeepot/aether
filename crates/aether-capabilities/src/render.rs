@@ -1194,6 +1194,9 @@ mod native {
         /// value it had before the lineage fold, regardless of the caller's
         /// carry. Guards the frozen-vocabulary claim: #1431 must not move any
         /// root-cap id.
+        // Asserts the cap's resolved id against the frozen depth-1 name hash —
+        // the primitive is the reference value under test.
+        #[allow(clippy::disallowed_methods)]
         #[test]
         fn render_capability_resolves_to_frozen_depth_one_id() {
             use aether_actor::Singleton;

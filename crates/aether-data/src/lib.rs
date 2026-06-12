@@ -1088,6 +1088,9 @@ mod tests {
         ));
     }
 
+    // Exercises the name→id primitive directly — it is the unit under test,
+    // not a sibling-cap address.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn mailbox_id_is_deterministic_and_name_specific() {
         let a = mailbox_id_from_name("hub.claude.broadcast");

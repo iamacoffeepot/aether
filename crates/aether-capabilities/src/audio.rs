@@ -100,7 +100,7 @@ mod native {
     use crossbeam_queue::ArrayQueue;
 
     use aether_actor::{OutboundReply, actor};
-    use aether_data::{Kind, MailboxId, Source, SourceAddr, mailbox_id_from_name};
+    use aether_data::{MailboxId, Source, SourceAddr};
     use aether_kinds::{
         LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult, Read, ReadResult,
         Schedule, ScheduleResult, ScheduledEvent, ScheduledNote, SetMasterGainResult, StopTrack,
@@ -108,6 +108,8 @@ mod native {
 
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
+
+    use crate::fs::FsCapability;
 
     use super::decode::{DecodeError, decode_wav_to_mono};
     use super::sfz::{SfzLoop, SfzRegion, parse_sfz};
@@ -2372,7 +2374,10 @@ mod native {
                 },
             );
 
-            let fs_mailbox = mailbox_id_from_name("aether.fs");
+            // Address the fs cap through the lineage-correct resolver
+            // (ADR-0099); `send_traced` propagates this handler's chain so
+            // each `ReadResult` settles back into it.
+            let fs = ctx.actor::<FsCapability>();
             for fs_path in fs_paths {
                 self.pending_samples
                     .entry((namespace.clone(), fs_path.clone()))
@@ -2382,8 +2387,7 @@ mod native {
                     namespace: namespace.clone(),
                     path: fs_path,
                 };
-                let read_bytes = read.encode_into_bytes();
-                let _ = ctx.send_envelope_traced(fs_mailbox, Read::ID, &read_bytes);
+                let _ = fs.send_traced(ctx, &read);
             }
         }
 
@@ -2868,9 +2872,7 @@ mod native {
                 namespace: mail.namespace,
                 path: mail.path,
             };
-            let bytes = read.encode_into_bytes();
-            let fs_mailbox = mailbox_id_from_name("aether.fs");
-            let _ = ctx.send_envelope_traced(fs_mailbox, Read::ID, &bytes);
+            let _ = ctx.actor::<FsCapability>().send_traced(ctx, &read);
         }
 
         /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
@@ -3047,9 +3049,7 @@ mod native {
                 namespace: mail.namespace,
                 path: mail.path,
             };
-            let bytes = read.encode_into_bytes();
-            let fs_mailbox = mailbox_id_from_name("aether.fs");
-            let _ = ctx.send_envelope_traced(fs_mailbox, Read::ID, &bytes);
+            let _ = ctx.actor::<FsCapability>().send_traced(ctx, &read);
         }
 
         /// Bank-assembly completion (ADR-0093 §3 / ADR-0103 §4). On success

@@ -66,7 +66,10 @@ impl<R> FfiActorMailbox<R> {
     /// method so cap-owned ext traits (which only have a mailbox in
     /// hand, not a ctx) can hand back peer handles without rethreading
     /// the ctx.
+    // Runtime-name escape hatch (the by-name peer-resolution counterpart of
+    // `FfiCtx::resolve_actor`): the peer name is supplied at runtime.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> FfiActorMailbox<Peer> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
     }

@@ -212,7 +212,10 @@ const RELAY_NS: &str = "mlat.relay";
 /// whole topology can be wired from precomputed ids before any actor is
 /// spawned (sidesteps spawn-ordering between a relay and its
 /// downstreams).
+// Harness wires its synthetic relay topology from precomputed name-hashed ids
+// before any actor spawns — id derivation, not sibling-cap addressing.
 #[must_use]
+#[allow(clippy::disallowed_methods)]
 pub fn relay_id(i: usize) -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{RELAY_NS}:{i}")).0)
 }
@@ -290,7 +293,10 @@ impl NativeDispatch for TickSource {
 const TICKSRC_NS: &str = "mlat.ticksrc";
 
 /// Deterministic id for the single tick source (subname `"src"`).
+// Harness derives the single tick-source id from its name to wire the topology
+// — id derivation, not sibling-cap addressing.
 #[must_use]
+#[allow(clippy::disallowed_methods)]
 pub fn ticksrc_id() -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{TICKSRC_NS}:src")).0)
 }

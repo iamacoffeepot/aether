@@ -17,6 +17,9 @@
 //! carry).
 
 #![allow(clippy::unwrap_used)]
+// `mbx::<A>()` derives a test actor's mailbox id from its NAMESPACE for fixture
+// wiring — reference id derivation, not sibling-cap addressing.
+#![allow(clippy::disallowed_methods)]
 
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;

@@ -8,6 +8,10 @@
 //! the mechanism through a fixture; wiring real shipped components (e.g.
 //! `aether-camera`) to expose a peer-nameable marker is follow-up.
 
+// Asserts the host-class fold differs from the bare-NAMESPACE hash — the
+// primitive yields the reference id under test, not a sibling-cap address.
+#![allow(clippy::disallowed_methods)]
+
 use aether_actor::{Actor, Embeddable, Singleton};
 use aether_capabilities::resolve_embedded;
 use aether_data::{mailbox_id_from_name, mailbox_id_from_path};

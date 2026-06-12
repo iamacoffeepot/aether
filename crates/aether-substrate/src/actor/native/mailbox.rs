@@ -82,7 +82,10 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// ctx) can hand back peer handles without rethreading the ctx.
     /// Threads the existing `'a` binding ref, so the returned handle
     /// inherits the parent mailbox's borrow lifetime.
+    // Runtime-name escape hatch (the by-name peer-resolution counterpart of
+    // `NativeCtx::resolve_actor`): the peer name is supplied at runtime.
     #[must_use]
+    #[allow(clippy::disallowed_methods)]
     pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
         NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }

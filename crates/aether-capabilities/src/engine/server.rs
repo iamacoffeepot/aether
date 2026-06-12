@@ -611,6 +611,9 @@ mod sink {
 
 #[cfg(test)]
 mod tests {
+    // Test harness resolves the server/sink actor mailboxes by their NAMESPACE
+    // for fixture wiring — reference id derivation, not sibling-cap addressing.
+    #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
     use crate::test_chassis::TestChassis;
     use aether_actor::Actor;

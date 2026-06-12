@@ -347,6 +347,10 @@ impl TestBench {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
+        // Chassis route-freezing: the test bench wires its loopback driver to
+        // the lifecycle cap's own id (its NAMESPACE) — ctx-less harness setup,
+        // no sibling resolver in scope.
+        #[allow(clippy::disallowed_methods)]
         let lifecycle_mailbox = aether_data::mailbox_id_from_name(
             <aether_capabilities::LifecycleCapability as Actor>::NAMESPACE,
         );
@@ -657,6 +661,9 @@ impl TestBench {
         // (chassis_handler closure) onto `aether.test_bench`
         // (`TestBenchCapability`).
         self.push_to_mailbox(
+            // Harness route to the bench's own `TestBenchCapability` mailbox by
+            // its well-known name — ctx-less driver-side push, no resolver here.
+            #[allow(clippy::disallowed_methods)]
             aether_data::mailbox_id_from_name("aether.test_bench"),
             &Advance { ticks },
             cid,
@@ -705,6 +712,9 @@ impl TestBench {
         // landed on `aether.control` and routed through the
         // chassis_handler closure.
         self.push_to_mailbox(
+            // Harness route to the render cap's own id (its NAMESPACE) —
+            // ctx-less driver-side push, no resolver here.
+            #[allow(clippy::disallowed_methods)]
             aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE),
             &CaptureFrame {
                 mails: pre,
@@ -1099,6 +1109,9 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 // extracting helpers would scatter the staging context across files.
 // Tests also hold capture `Mutex` guards across the assertion block
 // so the snapshot reads atomically against the concurrent push path.
+// Tests assert spawned-child ids against the name hash — the primitive is
+// the reference value under test, not sibling-cap addressing.
+#[allow(clippy::disallowed_methods)]
 #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
 mod tests {
     use super::*;

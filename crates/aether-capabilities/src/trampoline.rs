@@ -407,6 +407,10 @@ mod native {
                 self.actor_caps
                     .iter()
                     .find(|actor| {
+                        // Runtime-name match: hash each loaded actor's declared
+                        // namespace (from module metadata) to find the one whose
+                        // tag the spawn requested — not a hardcoded sibling.
+                        #[allow(clippy::disallowed_methods)]
                         actor.namespace.as_deref().is_some_and(|ns| {
                             aether_data::mailbox_id_from_name(ns).0 == pending.tag
                         })
@@ -470,6 +474,10 @@ mod native {
                     .map(|a| a.capabilities.clone())
                     .unwrap_or_default(),
                 Some(tag) => match actors.iter().find(|a| {
+                    // Runtime-name match: hash each replacement actor's declared
+                    // namespace to find the one whose tag was loaded — not a
+                    // hardcoded sibling.
+                    #[allow(clippy::disallowed_methods)]
                     a.namespace
                         .as_deref()
                         .is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)

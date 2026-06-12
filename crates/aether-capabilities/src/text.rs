@@ -45,13 +45,16 @@ mod native {
     use std::sync::Arc;
 
     use aether_actor::{OutboundReply, actor};
-    use aether_data::{Kind, Source, mailbox_id_from_name};
+    use aether_data::Source;
     use aether_kinds::{
         CreateTexture, DrawTexturedQuads, LoadFontResult, QuadSpace, Read, TexturedQuad,
         UpdateTexture,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
+
+    use crate::fs::FsCapability;
+    use crate::render::RenderCapability;
 
     use super::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
     use super::{CreateTextureResult, DrawText, LoadFont, ReadResult};
@@ -141,9 +144,10 @@ mod native {
                 height: ATLAS_SIZE,
                 pixels: self.atlas.pixels().to_vec(),
             };
-            let bytes = create.encode_into_bytes();
-            let render = mailbox_id_from_name("aether.render");
-            let _ = ctx.send_envelope_traced(render, CreateTexture::ID, &bytes);
+            // Address the render cap through the lineage-correct resolver
+            // (ADR-0099); `send_traced` propagates this handler's chain so the
+            // `CreateTextureResult` reply settles back into it.
+            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &create);
             self.atlas_create_inflight = true;
         }
 
@@ -157,9 +161,7 @@ mod native {
                 height: entry.height,
                 pixels: self.atlas.rect_rgba(entry),
             };
-            let bytes = update.encode_into_bytes();
-            let render = mailbox_id_from_name("aether.render");
-            let _ = ctx.send_envelope_traced(render, UpdateTexture::ID, &bytes);
+            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &update);
         }
     }
 
@@ -198,9 +200,7 @@ mod native {
                 namespace: mail.namespace,
                 path: mail.path,
             };
-            let bytes = read.encode_into_bytes();
-            let fs = mailbox_id_from_name("aether.fs");
-            let _ = ctx.send_envelope_traced(fs, Read::ID, &bytes);
+            let _ = ctx.actor::<FsCapability>().send_traced(ctx, &read);
         }
 
         /// Correlate a forwarded `aether.fs.read` reply. `Ok` dispatches the
@@ -425,9 +425,7 @@ mod native {
             space,
             quads,
         };
-        let bytes = draw.encode_into_bytes();
-        let render = mailbox_id_from_name("aether.render");
-        let _ = ctx.send_envelope_traced(render, DrawTexturedQuads::ID, &bytes);
+        let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &draw);
     }
 
     /// A glyph bitmap's pixel dimensions. fontdue bounds these well below
@@ -494,7 +492,7 @@ mod native {
             test_mailer_and_rx,
         };
         use aether_actor::Actor;
-        use aether_data::{MailId, SessionToken, SourceAddr, Uuid};
+        use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
         use aether_kinds::FsError;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
