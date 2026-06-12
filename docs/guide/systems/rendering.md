@@ -42,18 +42,35 @@ system without coordinating.
 
 ## What it does
 
-**One mailbox, three kinds.** Everything addresses `aether.render`, owned by the
-`RenderCapability` actor. It handles three payload kinds:
+**One mailbox, a small kind set.** Everything addresses `aether.render`, owned by
+the `RenderCapability` actor. It handles these payload kinds:
 
 | Kind | Shape | Semantics |
 |---|---|---|
 | `aether.draw_triangle` | `{ verts: [Vertex; 3] }`, cast-shaped | per-tick geometry; accumulates into the frame |
 | `aether.camera` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
+| `aether.render.create_texture` | `{ width, height, pixels }` → `create_texture_result` | register an RGBA8 texture; reply carries the `texture_id` |
+| `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
+| `aether.render.draw_textured_quads` | `{ texture_id, space, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
 
 A `Vertex` is `{ x, y, z, r, g, b }` — a world-space position plus a per-vertex
 color. One `DrawTriangle` is three of them; a component batches many per envelope
 via `send_many` (each triangle is `DRAW_TRIANGLE_BYTES` on the wire).
+
+**Textured quads are the generic image surface** ([ADR-0105](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0105-text-rendering.md)).
+`create_texture` stages RGBA8 pixels under a session-scoped `texture_id` (the
+reply hands it back); `draw_textured_quads` then draws a batch of quads sampling
+that texture, each carrying a pixel-unit rect, a uv sub-rect, and an RGBA tint.
+Quads draw through a second alpha-blended pipeline in an overlay pass recorded
+after the world pass, so they always land on top. The accumulate-per-frame
+contract matches `draw_triangle`: resend the batch every frame it should appear.
+The batch's `space` selects the projection — `Screen` rects are window pixels
+drawn under an ortho derived from the surface size; `World` anchors the quad in
+the scene through the camera's `view_proj`. `Screen`-space quads draw today; the
+`World` projection rides the same vocabulary and lands with the world-anchor
+path. Sprites, HUD images, and the `aether.text` capability all compose this
+surface.
 
 **The `view_proj` uniform, latest wins.** The substrate holds one column-major
 4×4 matrix and uploads it verbatim to the shader each frame (column-major matches
@@ -77,9 +94,10 @@ last live frame drew.
 
 **Headless absorbs draw and camera mail.** The headless and hub chassis have no
 GPU, so they compose `HeadlessRenderCapability` on the same `aether.render`
-mailbox: `DrawTriangle` and `aether.camera` no-op (a desktop-built component
-mailing them every frame doesn't warn-storm), and `aether.render.capture_frame`
-replies `Err` so an MCP `capture_frame` fails fast instead of hanging.
+mailbox: `DrawTriangle`, `aether.camera`, `update_texture`, and
+`draw_textured_quads` no-op (a desktop-built component mailing them every frame
+doesn't warn-storm), and `aether.render.capture_frame` and `create_texture`
+reply `Err` so an MCP call fails fast instead of hanging.
 
 ## How to use it
 
@@ -153,6 +171,9 @@ frame.
   [ADR-0066](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0066-per-component-trunk-rlibs-for-shared-types.md).
 - Camera folding into the render mailbox —
   [ADR-0074 §Decision 7](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md).
+- The textured-quad surface text and sprites compose, and the screen-vs-world
+  projection split —
+  [ADR-0105](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0105-text-rendering.md).
 - The `Tick` / `Render` frame stages and why submission waits for settlement —
   [ADR-0082](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0082-application-declared-lifecycle-sequence.md);
   the `wire` hook and writing handlers — [Components & lifecycle](components.md).
