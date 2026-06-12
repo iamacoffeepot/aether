@@ -3192,12 +3192,17 @@ mod native {
             fresh_substrate, test_mailer_and_rx,
         };
         use aether_actor::Actor;
-        use aether_data::{SessionToken, Source, SourceAddr, Uuid};
+        use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
         use aether_kinds::FsError;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
+        use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry;
+        use aether_substrate::{
+            EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry,
+        };
+        use std::time::Duration;
 
         /// Ids 0–4 are wire-stable: reordering or re-patching them breaks
         /// every `NoteOn.instrument_id` already in the wild. This pins
@@ -4172,6 +4177,36 @@ mod native {
             (cap, queue)
         }
 
+        /// Substrate with a registry, settlement counter, egress rx (for
+        /// `drive_task_completion`), and a registered component inbox.
+        ///
+        /// The inbox handler discharges the ADR-0094 obligation before
+        /// forwarding so the caller can observe the `OwnedDispatch` (and
+        /// call `record_finished`) without tripping the debug guard on drop.
+        ///
+        /// Returns `(mailer, egress_rx, caller_mailbox, reply_rx)`.
+        fn settlement_substrate() -> (
+            Arc<Mailer>,
+            mpsc::Receiver<EgressEvent>,
+            MailboxId,
+            mpsc::Receiver<OwnedDispatch>,
+        ) {
+            let reg = Arc::new(Registry::new());
+            let (outbound, egress_rx) = HubOutbound::attached_loopback();
+            let store = Arc::new(HandleStore::new(1024 * 1024));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&reg), store).with_outbound(outbound));
+            let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+            let caller_mailbox = reg.register_inbox(
+                "test.audio.settlement.caller",
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    // ADR-0094: terminal consumer — discharge before forwarding.
+                    dispatch.discharge();
+                    let _ = reply_tx.send(dispatch);
+                }) as Arc<dyn InboxHandler>,
+            );
+            (mailer, egress_rx, caller_mailbox, reply_rx)
+        }
+
         #[test]
         fn play_track_happy_path_replies_ok_and_starts_a_track() {
             let (mut cap, queue) = live_cap();
@@ -4181,12 +4216,8 @@ mod native {
                 MailboxId(0),
             ));
 
-            let mut ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let root = MailId::new(MailboxId(0xC0), 1);
+            let mut ctx = NativeCtx::new(&transport, session_sender(), root, root);
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4203,12 +4234,7 @@ mod native {
             // Synthesize the fs reply with a real WAV asset (at half the
             // device rate, so decode also resamples).
             let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
-            let mut read_ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut read_ctx = NativeCtx::new(&transport, session_sender(), root, root);
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Ok {
@@ -4251,12 +4277,7 @@ mod native {
                 MailboxId(0),
             ));
 
-            let mut ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4268,12 +4289,8 @@ mod native {
                 },
             );
             let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
-            let mut read_ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut read_ctx =
+                NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Ok {
@@ -4306,12 +4323,7 @@ mod native {
                 MailboxId(0),
             ));
 
-            let mut ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4353,12 +4365,7 @@ mod native {
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let mut ctx = NativeCtx::new(
-                &transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4999,12 +5006,7 @@ mod native {
         }
 
         fn load_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
-            NativeCtx::new(
-                transport,
-                session_sender(),
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            )
+            NativeCtx::new(transport, session_sender(), MailId::NONE, MailId::NONE)
         }
 
         #[test]
@@ -5201,6 +5203,287 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             assert!(
                 cap.pending_instruments.is_empty(),
                 "nop chassis must not park a read",
+            );
+        }
+
+        /// #1693 / #1701 regression: a deferred `play_track` reply
+        /// (read → decode worker → resolve) must inherit the caller's
+        /// root and keep the chain UNSETTLED (`live_roots == 1`) until
+        /// the reply's `Finished` fires; `live_roots == 0` after.
+        ///
+        /// Before the fix the reply carried `MailId::NONE` as root, so
+        /// `record_sent_inflight` was a no-op and the chain settled
+        /// prematurely (caller's settlement window closed too early).
+        #[test]
+        fn play_track_deferred_reply_settles_caller_chain() {
+            let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
+            let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let (mut cap, _queue) = live_cap();
+            let root = MailId::new(MailboxId(0xC0), 1);
+            let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 1);
+
+            {
+                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_play_track(
+                    &mut ctx,
+                    PlayTrack {
+                        namespace: "assets".to_owned(),
+                        path: "track.wav".to_owned(),
+                        gain: 0.8,
+                        looping: false,
+                        lane: None,
+                    },
+                );
+            }
+
+            let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
+            {
+                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_read_result(
+                    &mut read_ctx,
+                    ReadResult::Ok {
+                        namespace: "assets".to_owned(),
+                        path: "track.wav".to_owned(),
+                        bytes: wav,
+                    },
+                );
+            }
+
+            drive_task_completion(&mut cap, &transport, &rx);
+
+            // The settlement hold was released inside resolve_with, but the
+            // reply is now in-flight on the caller root — live_roots must
+            // stay at 1. Pre-fix: root was MailId::NONE so record_sent_inflight
+            // was a no-op and live_roots dropped to 0 here (premature settle).
+            assert_eq!(
+                counter.live_roots(),
+                1,
+                "deferred reply holds the caller chain open after hold releases",
+            );
+
+            let dispatch = reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("reply reached the caller inbox");
+            assert_eq!(dispatch.root, root, "reply inherits the caller's root");
+            mailer.record_finished(dispatch.mail_id, dispatch.root);
+            assert_eq!(
+                counter.live_roots(),
+                0,
+                "chain settles after the reply's Finished fires",
+            );
+        }
+
+        /// #1693 / #1701 regression: a decode failure takes the same
+        /// deferred reply path; the `Err` reply must also keep the chain
+        /// live until `Finished`.
+        #[test]
+        fn play_track_decode_failure_settles_caller_chain() {
+            let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
+            let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let (mut cap, _queue) = live_cap();
+            let root = MailId::new(MailboxId(0xC0), 2);
+            let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 2);
+
+            {
+                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_play_track(
+                    &mut ctx,
+                    PlayTrack {
+                        namespace: "assets".to_owned(),
+                        path: "bad.wav".to_owned(),
+                        gain: 0.8,
+                        looping: false,
+                        lane: None,
+                    },
+                );
+            }
+
+            {
+                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_read_result(
+                    &mut read_ctx,
+                    ReadResult::Ok {
+                        namespace: "assets".to_owned(),
+                        path: "bad.wav".to_owned(),
+                        bytes: b"not a valid wav file".to_vec(),
+                    },
+                );
+            }
+
+            drive_task_completion(&mut cap, &transport, &rx);
+
+            assert_eq!(
+                counter.live_roots(),
+                1,
+                "decode-error reply holds the caller chain open",
+            );
+
+            let dispatch = reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("error reply reached the caller inbox");
+            assert_eq!(
+                dispatch.root, root,
+                "error reply inherits the caller's root"
+            );
+            mailer.record_finished(dispatch.mail_id, dispatch.root);
+            assert_eq!(
+                counter.live_roots(),
+                0,
+                "chain settles after the error reply's Finished fires",
+            );
+        }
+
+        /// #1693 / #1701 regression: `load_instrument`'s deferred assembly
+        /// reply (sfz.read → sample reads → assembly dispatch → resolve)
+        /// must keep the chain UNSETTLED until the reply's `Finished` fires.
+        #[test]
+        fn load_instrument_deferred_reply_settles_caller_chain() {
+            let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
+            let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let (mut cap, _queue) = live_cap();
+            let root = MailId::new(MailboxId(0xC0), 3);
+            let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 3);
+
+            {
+                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_load_instrument(
+                    &mut ctx,
+                    LoadInstrument {
+                        namespace: "assets".to_owned(),
+                        path: "piano/bank.sfz".to_owned(),
+                    },
+                );
+            }
+
+            let sfz = "\
+<region>
+sample=c4.wav lokey=60 hikey=71 pitch_keycenter=60
+<region>
+sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
+";
+            let wav = super::super::decode::wav_int16_mono(&ramp(256), 24_000);
+            {
+                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_read_result(
+                    &mut read_ctx,
+                    ReadResult::Ok {
+                        namespace: "assets".to_owned(),
+                        path: "piano/bank.sfz".to_owned(),
+                        bytes: sfz.as_bytes().to_vec(),
+                    },
+                );
+                cap.on_read_result(
+                    &mut read_ctx,
+                    ReadResult::Ok {
+                        namespace: "assets".to_owned(),
+                        path: "piano/c4.wav".to_owned(),
+                        bytes: wav.clone(),
+                    },
+                );
+                // Last sample — triggers assembly dispatch and hold acquisition.
+                cap.on_read_result(
+                    &mut read_ctx,
+                    ReadResult::Ok {
+                        namespace: "assets".to_owned(),
+                        path: "piano/c5.wav".to_owned(),
+                        bytes: wav,
+                    },
+                );
+            }
+
+            drive_task_completion(&mut cap, &transport, &rx);
+
+            assert_eq!(
+                counter.live_roots(),
+                1,
+                "assembly reply holds the caller chain open after hold releases",
+            );
+
+            let dispatch = reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("reply reached the caller inbox");
+            assert_eq!(
+                dispatch.root, root,
+                "assembly reply inherits the caller's root"
+            );
+            mailer.record_finished(dispatch.mail_id, dispatch.root);
+            assert_eq!(
+                counter.live_roots(),
+                0,
+                "chain settles after the reply's Finished fires",
+            );
+        }
+
+        /// #1693 / #1701 regression: a synchronous sfz-parse failure
+        /// issues a direct `reply_to` — the `Err` reply must carry the
+        /// caller's root and keep the chain UNSETTLED until `Finished`.
+        #[test]
+        fn load_instrument_sfz_parse_failure_settles_caller_chain() {
+            let (mailer, _rx, caller_mailbox, reply_rx) = settlement_substrate();
+            let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let (mut cap, _queue) = live_cap();
+            let root = MailId::new(MailboxId(0xC0), 4);
+            let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 4);
+
+            {
+                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_load_instrument(
+                    &mut ctx,
+                    LoadInstrument {
+                        namespace: "assets".to_owned(),
+                        path: "bank.sfz".to_owned(),
+                    },
+                );
+            }
+
+            {
+                // A <control> block with no regions fails to parse.
+                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                cap.on_read_result(
+                    &mut read_ctx,
+                    ReadResult::Ok {
+                        namespace: "assets".to_owned(),
+                        path: "bank.sfz".to_owned(),
+                        bytes: b"<control>\ndefault_path=x/\n".to_vec(),
+                    },
+                );
+            }
+
+            // The parse error reply is sent synchronously — the chain is live.
+            assert_eq!(
+                counter.live_roots(),
+                1,
+                "parse-error reply holds the caller chain open",
+            );
+
+            let dispatch = reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("error reply reached the caller inbox");
+            assert_eq!(
+                dispatch.root, root,
+                "parse-error reply inherits the caller's root",
+            );
+            mailer.record_finished(dispatch.mail_id, dispatch.root);
+            assert_eq!(
+                counter.live_roots(),
+                0,
+                "chain settles after the error reply's Finished fires",
             );
         }
     }
