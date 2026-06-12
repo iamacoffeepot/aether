@@ -80,17 +80,20 @@ see. The hold table on [Concurrency & blocking](../systems/concurrency.md)
 matches each primitive to the shape of work it covers. `acquire_settlement_hold`
 is the explicit handle for the rare hand-rolled buffer-and-drain case.
 
-**B. Owned drain that dropped its finish obligation.** The frontier is a
-mailbox drained by hand off the pool — a capability that took an *owned*
-dispatch and was supposed to record it `Finished` or transfer the obligation
-downstream, and did neither. In debug builds the obligation guard
+**B. Owned dispatch that dropped its finish obligation.** The frontier is a
+mailbox where a capability took an *owned* dispatch and was supposed to record it
+`Finished` or transfer the obligation downstream, and did neither. The
+claimed-mailbox drain handles this by construction now — a `ClaimedInbox` yields
+each mail as a guard that settles on scope exit ([ADR-0106](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0106-settlement-safe-by-construction.md)), so the live
+suspects are the in-crate relay / park / fan-out seams that move a dispatch onward
+by hand. In debug builds the obligation guard
 ([ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md))
-turns this into an immediate panic at the leaking seam, naming the `mail_id`,
-kind, and mailbox — so check engine stderr for that panic before anything else;
-it points straight at the drain. In a release build the guard is absent and the
-chain just hangs, leaving the frontier-plus-logs walk as the way in. The rule
-for any hand-rolled drain: discharge what ends with you, transfer what you pass
-on.
+turns a dropped obligation into an immediate panic at the leaking seam, naming the
+`mail_id`, kind, and mailbox — so check engine stderr for that panic before
+anything else; it points straight at the seam. In a release build the guard is
+absent and the chain just hangs, leaving the frontier-plus-logs walk as the way
+in. The rule for any relay you write: discharge what ends with you, transfer what
+you pass on.
 
 **C. The chain is merely slow.** No handler is stuck — the frontier keeps
 advancing across re-reads and the timing spans show a real, long hop (a
@@ -106,10 +109,11 @@ To stage a hung chain deliberately — to confirm a fix or to study the frontier
 shape — inject the offending mail under `send_mail_traced` against a fresh
 engine from `spawn_substrate`, with a short `settlement_timeout_ms` so the
 `"timeout"` lands fast. A handler that defers a reply without taking a hold, or
-a hand-rolled drain that skips its `Finished`, reproduces fault A or B
-respectively; the desktop chassis's `aether.window` driver is the one owned
-drain in the tree today, so window ops are the live example of the obligation
-shape.
+a relay closure that skips its `transfer`, reproduces fault A or B respectively.
+The desktop chassis's `aether.window` driver is the lead claimed-mailbox drain in
+the tree, so window ops are the live example of the settle-by-construction
+shape — its guards close the chain whether the op applies, the payload fails to
+decode, or the window is torn down mid-drain.
 
 ## Gotcha — read the trace promptly
 

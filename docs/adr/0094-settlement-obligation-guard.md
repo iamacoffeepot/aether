@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-04
+- **Amended by:** [ADR-0106](0106-settlement-safe-by-construction.md) — seals the claimed-mailbox consumer seam behind one framework drain (`ClaimedInbox` / `InboundMail`) so the bracket this guard only *detects* a leak in is now discharged *by construction* at that seam. The guard stays — it still covers the in-crate relay / park / fan-out seams the drain does not subsume.
 
 Amends **ADR-0080 §2 / §12** (and the post-ADR-0086 settlement model). It does not change the settlement *semantics* — `(in_flight == 0 && held_open == 0)` is still the exact settled signal, the producer-site `Sent`/`Finished` brackets are unchanged — it adds a **debug-build runtime check** that enforces the §2 "every `OwnedDispatch` must have `Finished` recorded" obligation at its weakest seam, and names the **transfer-vs-discharge** vocabulary every hand-rolled drain must now follow.
 

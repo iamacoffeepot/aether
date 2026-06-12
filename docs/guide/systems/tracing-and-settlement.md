@@ -96,31 +96,41 @@ opts work *out* of settlement — lives on
 
 ## The obligation guard
 
-There is a second way to break a chain, on the receiving side. A capability that
-owns an **inbox** mailbox — one that takes an *owned* dispatch and is expected to
-move it onward to a downstream channel — carries the finish obligation itself: it
-must record the inbound mail as `Finished`, or its chain never closes. The
+There is a second way a chain closes, on the receiving side. A capability that
+owns an **inbox** mailbox — one that takes an *owned* dispatch off a downstream
+channel — owes that inbound mail its `Finished`, or the chain never closes. The
 substrate brackets the two synchronous mailbox shapes automatically — an inline
 handler, and the standard actor dispatcher at handler exit — so an ordinary actor
-never has to think about this. What's on its own is a mailbox drained *by hand*,
-off the pool, and the engine has exactly one such case today: the **desktop
-chassis's window driver**. Window operations have to run on the OS event-loop
-thread rather than a pool worker, so `aether.window` is registered as an inbox the
-event loop drains itself, recording each inbound mail's `Finished` as it applies
-the op and sends the reply ([Window](window.md) covers that mailbox's surface).
-That's the lone precedent — but the same obligation lands on any future driver
-that owns and drains its own mailbox off-thread.
+never has to think about this. The third shape is a mailbox drained *by hand*,
+off the pool: a capability that claims a mailbox and drives the drain itself,
+the way the **desktop chassis's window driver** does. Window operations have to
+run on the OS event-loop thread rather than a pool worker, so `aether.window` is
+claimed as an inbox the event loop drains between frames ([Window](window.md)
+covers that mailbox's surface).
 
-Forget it and you get the worst diagnostic the runtime offers: a silent
-multi-second hang with no actor and no mail named, ending only when the
-settlement or MCP timeout fires. [ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md) converts that into an immediate, located
-failure in debug builds. Every owned dispatch must end one of two ways —
+A claimed mailbox is settle-safe by construction ([ADR-0106](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0106-settlement-safe-by-construction.md)). The claim hands the
+capability a `ClaimedInbox`, not a raw receiver, and its drain methods yield each
+mail as an `InboundMail` guard that records `Finished` and replies along the
+inbound's causal chain. The guard settles when it falls out of scope — on every
+arm, including a decode error, an unrecognised kind, an early return, or teardown
+of the drain with mail still queued — so a leak at this seam is unrepresentable in
+the consumer's code, the same way the standard dispatcher's unconditional discharge
+tail keeps an actor author from leaking. Settling on scope exit rather than on
+payload access is deliberate: a reply's `Sent` must be recorded before the
+inbound's `Finished`, and `InboundMail::reply` sends inside the guard's scope, so
+the reply joins the chain before the drop closes it.
+
+Underneath, every owned dispatch still ends one of two ways —
 **discharged** (*the obligation ends here; I am recording `Finished`*) or
-**transferred** (*the obligation moves with the work onto a downstream
-envelope*) — and an owned dispatch dropped while still armed panics at the leaking
-seam, naming the `mail_id`, kind, and mailbox. Release builds carry no field and
-no check, so the guard costs nothing where it isn't wanted. The rule for any drain
-you write: discharge what ends with you, transfer what you pass on.
+**transferred** (*the obligation moves with the work onto a downstream envelope*).
+The framework drain does the discharge; the relay closures that move a dispatch
+onward to a pool actor do the transfer. An owned dispatch dropped while still armed
+panics at the leaking seam in debug builds, naming the `mail_id`, kind, and mailbox
+([ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md)); release builds carry no field and no check, so the guard
+costs nothing. The guard now backs the in-crate relay and park seams rather than
+the claimed-mailbox drain, which no longer needs it — forget it on a relay you
+write and you still get an immediate, located failure instead of the silent
+multi-second hang the chain would otherwise wedge into.
 
 ## The trace tree
 

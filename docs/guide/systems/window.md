@@ -84,11 +84,13 @@ desktop-only surface.
 **The window mailbox is drained by hand, on the event-loop thread.** Window
 operations have to run on the OS event-loop thread rather than a pool worker, so
 the desktop chassis claims `aether.window` as an inbox the event loop drains
-itself. That makes it the engine's one mailbox drained off the scheduler pool,
-and it carries the finish obligation a pooled actor gets for free: the driver
-records each inbound mail as `Finished` as it applies the op and sends the reply,
-or the mail's chain never settles. It's the lone in-tree precedent for the
-obligation guard, covered in detail on
+itself between frames. The claim hands the driver a `ClaimedInbox`, so the finish
+obligation a pooled actor gets for free is carried by construction here too: each
+inbound mail arrives as a guard that records `Finished` and replies along the
+caller's chain when it falls out of scope, whether the op applied cleanly, the
+payload failed to decode, or the kind was unrecognised. The driver applies the op
+and replies; the settle rides the guard. It's the lead example of the
+claimed-mailbox drain, covered in detail on
 [Tracing & settlement](tracing-and-settlement.md#the-obligation-guard).
 
 ## How to use it
@@ -150,8 +152,8 @@ when the platform layer underneath moves.
 
 - The substrate/chassis split that makes window an opt-in desktop capability —
   [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md).
-- Why the hand-drained window mailbox must discharge its finish obligation, and
-  the guard that catches a leak —
+- How the claimed window mailbox settles its finish obligation by construction,
+  and the guard that backs the relay seams —
   [Tracing & settlement](tracing-and-settlement.md#the-obligation-guard).
 - Why a single `send_mail` returns the applied value, and the `capture_frame`
   that pairs with `focus` — [The MCP harness](../mcp-harness.md).
