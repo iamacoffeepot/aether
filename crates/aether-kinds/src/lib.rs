@@ -1635,9 +1635,20 @@ mod control_plane {
     /// the voice pool, never voice-stolen. `gain` is a linear per-track
     /// scalar applied at play time; `looping` wraps the track to its start
     /// on completion instead of retiring it. Re-playing the same
-    /// `(sender, namespace, path)` key restarts the track. Reply:
+    /// `(sender, lane, namespace, path)` key restarts the track. Reply:
     /// `PlayTrackResult`. Desktop-only — chassis without an audio device
     /// reply `Err` (ADR-0103 §7).
+    ///
+    /// `lane` augments the track key so callers that share a source
+    /// mailbox can each own a distinct track under the same
+    /// `(namespace, path)`. Senders are distinguished by their envelope
+    /// mailbox, but non-component senders — MCP sessions, substrate-
+    /// internal mail — all collapse to one mailbox id, so two such callers
+    /// would otherwise alias to a single track and stop or restart each
+    /// other. Each passes its own `lane` string to stay isolated; `None`
+    /// is exactly the unlaned behavior. Isolation is cooperative, not
+    /// enforced — a sender that names another's `(sender, lane)` collides
+    /// deliberately, which is the right strength inside one trust domain.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.audio.play_track")]
     pub struct PlayTrack {
@@ -1645,41 +1656,49 @@ mod control_plane {
         pub path: String,
         pub gain: f32,
         pub looping: bool,
+        pub lane: Option<String>,
     }
 
-    /// Reply to `PlayTrack`. Both arms echo the originating `namespace` +
-    /// `path` for correlation. `Ok` fires once the asset has decoded and
-    /// the track started in the mixer lane; `Err` carries a human-readable
-    /// reason — a typo'd path (the fs error), a malformed / unsupported
-    /// file (the decode error), or a chassis without an audio device. A
-    /// bad path comes back loud rather than logged-and-dropped because it
-    /// is the common agent failure (ADR-0103 §2).
+    /// Reply to `PlayTrack`. Both arms echo the originating `lane` +
+    /// `namespace` + `path` for correlation — a caller running several
+    /// lanes over the same path tells the replies apart by `lane`. `Ok`
+    /// fires once the asset has decoded and the track started in the mixer
+    /// lane; `Err` carries a human-readable reason — a typo'd path (the fs
+    /// error), a malformed / unsupported file (the decode error), or a
+    /// chassis without an audio device. A bad path comes back loud rather
+    /// than logged-and-dropped because it is the common agent failure
+    /// (ADR-0103 §2).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.audio.play_track_result")]
     pub enum PlayTrackResult {
         Ok {
             namespace: String,
             path: String,
+            lane: Option<String>,
         },
         Err {
             namespace: String,
             path: String,
+            lane: Option<String>,
             error: String,
         },
     }
 
     /// `aether.audio.stop_track` — fade out and retire a track started by
-    /// `PlayTrack`. Matched on `(sender, namespace, path)` — the sender is
-    /// taken from the mail envelope, not the payload — so one component
-    /// cannot stop another's track. Releases through a short (~5
-    /// millisecond) linear fade to avoid a click. Stopping a track that
-    /// isn't playing is a no-op, matching `note_off`. Fire-and-forget; no
-    /// reply.
+    /// `PlayTrack`. Matched on `(sender, lane, namespace, path)` — the
+    /// sender is taken from the mail envelope, not the payload — so one
+    /// component cannot stop another's track. `lane` must match the value
+    /// the `PlayTrack` carried (an unlaned track stops with `None`); it
+    /// lets callers that share a source mailbox stop only their own lane.
+    /// Releases through a short (~5 millisecond) linear fade to avoid a
+    /// click. Stopping a track that isn't playing is a no-op, matching
+    /// `note_off`. Fire-and-forget; no reply.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.audio.stop_track")]
     pub struct StopTrack {
         pub namespace: String,
         pub path: String,
+        pub lane: Option<String>,
     }
 
     // ADR-0103 sampled instrument banks. The audio cap loads a bank of
