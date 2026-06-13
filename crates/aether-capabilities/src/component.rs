@@ -125,7 +125,6 @@ mod native {
 
     use aether_actor::Actor;
     use aether_actor::actor;
-    use aether_actor::actor::ctx::OutboundReply;
     use aether_data::Kind;
     use aether_kinds::{ComponentCapabilities, LoadResult};
     use wasmtime::{Engine, Linker, Module};
@@ -220,9 +219,15 @@ mod native {
         /// invalid wasm, instantiation trap) come back as
         /// `LoadResult::Err`.
         #[handler]
-        fn on_load_component(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) {
-            let result = self.handle_load(ctx, payload);
-            ctx.reply(&result);
+        fn on_load_component(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            payload: LoadComponent,
+        ) -> LoadResult {
+            // ADR-0109: the return type is the reply contract — the
+            // `#[actor]` macro routes this `LoadResult` back to the sender
+            // through `OutboundReply::reply`, so no manual `ctx.reply`.
+            self.handle_load(ctx, payload)
         }
 
         /// Drop a component by its mailbox id. Forwards

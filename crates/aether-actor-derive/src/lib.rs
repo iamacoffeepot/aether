@@ -49,8 +49,8 @@ use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
-    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, Lit, Meta, PathArguments, Signature, Type,
-    parse_macro_input,
+    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, Lit, Meta, PathArguments, ReturnType,
+    Signature, Type, parse_macro_input,
 };
 
 #[proc_macro_derive(Kind, attributes(kind))]
@@ -1508,6 +1508,10 @@ struct HandlerFn {
     method: syn::ImplItemFn,
     kind_ty: Type,
     agent_doc: Option<String>,
+    /// ADR-0109: the handler's reply contract, classified from its
+    /// return type. Drives the auto-emitted `ctx.reply` and the reply
+    /// kind id on the inputs manifest record.
+    reply: HandlerReply,
 }
 
 struct FallbackFn {
@@ -1793,11 +1797,13 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     }
                     let kind_ty = extract_handler_kind_type(&f.sig)?;
                     let agent_doc = extract_agent_doc(&f.attrs);
+                    let reply = classify_handler_reply(&f.sig.output);
                     f.attrs.remove(idx);
                     handlers.push(HandlerFn {
                         method: f,
                         kind_ty,
                         agent_doc,
+                        reply,
                     });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -2176,10 +2182,12 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     match variant {
                         HandlerVariant::Mail => {
                             let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig)?;
+                            let reply = classify_handler_reply(&f.sig.output);
                             handlers.push(NativeActorHandlerFn {
                                 method: f,
                                 kind_ty,
                                 is_slice,
+                                reply,
                             });
                         }
                         HandlerVariant::Task => {
@@ -2408,6 +2416,20 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
+        // ADR-0109: a `-> R` handler auto-replies its return value
+        // through `OutboundReply::reply` (UFCS so the trait need not be
+        // imported at the emission site). `-> ()` and `-> Pending<R>`
+        // discard the return value — the deferred `Pending` send is the
+        // follow-on (#1805).
+        let call = match &h.reply {
+            HandlerReply::Sync(_) => quote! {
+                let __aether_reply = self.#method_ident(__aether_ctx, __aether_decoded);
+                ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
+            },
+            HandlerReply::None | HandlerReply::Deferred(_) => quote! {
+                self.#method_ident(__aether_ctx, __aether_decoded);
+            },
+        };
         if h.is_slice {
             // Slice handler — payload is `count * size_of::<K>()`
             // contiguous bytes (ADR-0019 batch wire). Cast to `&[K]`
@@ -2418,7 +2440,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     if let Some(__aether_decoded) =
                         ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(__aether_payload)
                     {
-                        self.#method_ident(__aether_ctx, __aether_decoded);
+                        #call
                         return ::core::option::Option::Some(());
                     }
                     return ::core::option::Option::None;
@@ -2430,7 +2452,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     if let Some(__aether_decoded) =
                         <#kind_ty as ::aether_data::Kind>::decode_from_bytes(__aether_payload)
                     {
-                        self.#method_ident(__aether_ctx, __aether_decoded);
+                        #call
                         return ::core::option::Option::Some(());
                     }
                     return ::core::option::Option::None;
@@ -2520,11 +2542,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // so this is independent of rustdoc extraction.
     let capability_handler_entries = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
+        // ADR-0109 §5: native chassis caps don't yet surface a
+        // per-handler reply contract — that needs a native handler
+        // manifest (a follow-on). Leave `reply: None` until then; the
+        // wasm `describe_component` path carries the contract today.
         quote! {
             ::aether_substrate::actor::native::HandlerCapability {
                 id: <#kind_ty as ::aether_data::Kind>::ID,
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
+                reply: ::core::option::Option::None,
             }
         }
     });
@@ -2613,6 +2640,10 @@ struct NativeActorHandlerFn {
     /// than `K`. The dispatcher decodes via `decode_cast_slice` so a
     /// single envelope with `count > 1` reaches the handler intact.
     is_slice: bool,
+    /// ADR-0109: the handler's reply contract, classified from its
+    /// return type. A `-> R` native handler auto-replies `R` through
+    /// `OutboundReply::reply`, the same path a manual `ctx.reply` takes.
+    reply: HandlerReply,
 }
 
 /// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
@@ -2764,6 +2795,65 @@ fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
     Ok((*pt.ty).clone())
 }
 
+/// ADR-0109: a `#[handler]`'s reply contract, read off its return type.
+/// The return type is the single source of truth for what a handler
+/// replies — there is no separate `#[handler(reply = X)]` annotation.
+enum HandlerReply {
+    /// `-> ()` or no return type — fire-and-forget, replies nothing.
+    None,
+    /// `-> R: Kind` — reply `R` to the inbound sender synchronously on
+    /// handler return, routed through the inbound guard's reply path.
+    Sync(Type),
+    /// `-> Pending<R>` — `R` is the deferred reply kind, discharged
+    /// later via ADR-0093's hold ledger. The classifier recognizes the
+    /// shape and publishes `R` to the manifest; the deferred send
+    /// itself is wired in a follow-on (iamacoffeepot/aether#1805), so no
+    /// synchronous reply is emitted for this arm here.
+    Deferred(Type),
+}
+
+impl HandlerReply {
+    /// The reply kind published to the `aether.kinds.inputs` manifest:
+    /// `R` for both the synchronous and deferred arms (ADR-0109 §4 reads
+    /// the inner `R` off `-> Pending<R>`), `None` for `-> ()`.
+    fn manifest_kind(&self) -> Option<&Type> {
+        match self {
+            Self::None => None,
+            Self::Sync(ty) | Self::Deferred(ty) => Some(ty),
+        }
+    }
+}
+
+/// Classify a handler's return type into a [`HandlerReply`] (ADR-0109).
+/// `-> ()` (or an omitted return) is fire-and-forget; `-> Pending<R>`
+/// — a path whose last segment is `Pending<R>` — is the deferred arm;
+/// anything else is a synchronous `-> R` reply. The classifier is
+/// purely syntactic (the macro has no type resolution): `R`'s `Kind`
+/// bound is checked at the generated `ctx.reply(&r)` call site / the
+/// `<R as Kind>::ID` manifest term.
+fn classify_handler_reply(output: &ReturnType) -> HandlerReply {
+    let ty = match output {
+        ReturnType::Default => return HandlerReply::None,
+        ReturnType::Type(_, ty) => ty.as_ref(),
+    };
+    // `-> ()` — the empty tuple — replies nothing, same as no return.
+    if let Type::Tuple(tuple) = ty
+        && tuple.elems.is_empty()
+    {
+        return HandlerReply::None;
+    }
+    // `-> Pending<R>` — last path segment `Pending` with one type arg.
+    if let Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+        && seg.ident == "Pending"
+        && let PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(GenericArgument::Type(inner)) = args.args.first()
+    {
+        return HandlerReply::Deferred(inner.clone());
+    }
+    HandlerReply::Sync(ty.clone())
+}
+
 /// Soft validation that a `#[fallback]` method's signature is shaped
 /// for `Mail<'_>`. We don't do deep type equality against
 /// `::aether_actor::Mail<'_>` — the synthesized dispatcher's call
@@ -2806,6 +2896,20 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
+        // ADR-0109: a `-> R` handler replies its return value through
+        // `OutboundReply::reply` (UFCS so the trait need not be in scope
+        // at the emission site) — the same discharge path a manual
+        // `ctx.reply` takes. `-> ()` and `-> Pending<R>` discard the
+        // return value (the deferred `Pending` send is #1805).
+        let call = match &h.reply {
+            HandlerReply::Sync(_) => quote! {
+                let __aether_reply = self.#method(__aether_ctx, __aether_decoded);
+                ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
+            },
+            HandlerReply::None | HandlerReply::Deferred(_) => quote! {
+                self.#method(__aether_ctx, __aether_decoded);
+            },
+        };
         // `Mail::kind()` returns the raw `u64` the FFI carried; `Kind::ID`
         // is typed `KindId` post-issue 466, so we drop into `.0` for the
         // comparison.
@@ -2814,7 +2918,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
                 if let ::core::option::Option::Some(__aether_decoded) =
                     __aether_mail.decode_kind::<#k>()
                 {
-                    self.#method(__aether_ctx, __aether_decoded);
+                    #call
                 }
                 return ::aether_actor::DISPATCH_HANDLED;
             }
@@ -2848,7 +2952,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// `__AETHER_INPUTS_MANIFEST_LEN: usize` and
 /// `__AETHER_INPUTS_MANIFEST: [u8; …LEN]` — carrying the
 /// concatenated `aether.kinds.inputs` record bytes. Each record is
-/// `[INPUTS_SECTION_VERSION (0x02), ..postcard(InputsRecord)..]`,
+/// `[INPUTS_SECTION_VERSION (0x03), ..postcard(InputsRecord)..]`,
 /// assembled at const-eval via the hub-protocol const-fn encoders.
 /// `aether_actor::export!()` reads these consts and emits the
 /// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
@@ -2872,6 +2976,18 @@ fn build_inputs_manifest_consts(
     for h in handlers {
         let k = &h.kind_ty;
         let doc_expr = option_str_token(h.agent_doc.as_ref());
+        // ADR-0109: the reply kind id rides the handler record as an
+        // `Option<u64>` — `Some(<R as Kind>::ID.0)` for a `-> R` or
+        // `-> Pending<R>` handler (the inner `R`), `None` for `-> ()`.
+        let reply_expr = if let Some(r) = h.reply.manifest_kind() {
+            quote! {
+                ::core::option::Option::Some(
+                    <#r as ::aether_actor::__macro_internals::Kind>::ID.0
+                )
+            }
+        } else {
+            quote! { ::core::option::Option::None }
+        };
         // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
         // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so
         // we drop into `.0` here.
@@ -2880,6 +2996,7 @@ fn build_inputs_manifest_consts(
                 <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                 <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                 #doc_expr,
+                #reply_expr,
             ))
         });
         copy_blocks.push(quote! {
@@ -2889,17 +3006,20 @@ fn build_inputs_manifest_consts(
                         <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
+                        #reply_expr,
                     );
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
                         <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
+                        #reply_expr,
                     );
-                // ADR-0090 (issue 1257): per-record section version byte
-                // bumped 0x01 -> 0x02 alongside the new `Config` variant.
-                // Keep this in lockstep with `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x02;
+                // Per-record section version byte, bumped to 0x03 by
+                // ADR-0109 (issue 1803) — the `Handler` variant gained
+                // the `reply` kind id. Keep in lockstep with
+                // `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x03;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -2922,10 +3042,11 @@ fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
-                // ADR-0090 (issue 1257): per-record section version byte
-                // bumped 0x01 -> 0x02 alongside the new `Config` variant.
-                // Keep this in lockstep with `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x02;
+                // Per-record section version byte, bumped to 0x03 by
+                // ADR-0109 (issue 1803) — the `Handler` variant gained
+                // the `reply` kind id. Keep in lockstep with
+                // `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x03;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -2948,10 +3069,11 @@ fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit);
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
-                // ADR-0090 (issue 1257): per-record section version byte
-                // bumped 0x01 -> 0x02 alongside the new `Config` variant.
-                // Keep this in lockstep with `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x02;
+                // Per-record section version byte, bumped to 0x03 by
+                // ADR-0109 (issue 1803) — the `Handler` variant gained
+                // the `reply` kind id. Keep in lockstep with
+                // `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x03;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -2987,7 +3109,9 @@ fn build_inputs_manifest_consts(
                         <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
                     );
-                out[pos] = 0x02;
+                // Per-record section version byte (0x03), in lockstep
+                // with `INPUTS_SECTION_VERSION` (ADR-0109 / issue 1803).
+                out[pos] = 0x03;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {

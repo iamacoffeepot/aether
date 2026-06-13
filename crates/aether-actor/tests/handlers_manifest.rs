@@ -38,6 +38,13 @@ struct Ping {
     seq: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.pong")]
+struct Pong {
+    seq: u32,
+}
+
 // Minimal fixture, mirrored from `examples/hello.rs`. Lives here as a
 // duplicate (rather than reused) because `examples/*.rs` declare
 // `crate-type = ["cdylib"]` and only build for `wasm32-unknown-unknown`
@@ -63,8 +70,13 @@ impl FfiActor for ManifestProbe {
     #[handler]
     fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {}
 
+    // ADR-0109: a `-> R` handler — the return type is the reply
+    // contract, so the macro auto-replies `Pong` and threads its kind id
+    // onto this handler's inputs-manifest record.
     #[handler]
-    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, ping: Ping) -> Pong {
+        Pong { seq: ping.seq }
+    }
 
     /// # Agent
     /// Catch-all for anything else.
@@ -106,15 +118,29 @@ fn manifest_const_round_trips_to_expected_records() {
 
     for rec in &records {
         match rec {
-            InputsRecord::Handler { id, name, doc } => {
+            InputsRecord::Handler {
+                id,
+                name,
+                doc,
+                reply,
+            } => {
                 handler_count += 1;
                 match name.as_ref() {
                     "test.tick" => {
                         assert_eq!(*id, <Tick as Kind>::ID);
                         tick_doc = doc.as_ref().map(ToString::to_string);
+                        // ADR-0109: a `-> ()` handler declares no reply.
+                        assert_eq!(*reply, None, "on_tick returns () — no reply kind");
                     }
                     "test.ping" => {
                         assert_eq!(*id, <Ping as Kind>::ID);
+                        // ADR-0109: a `-> Pong` handler publishes Pong's
+                        // kind id as its reply contract.
+                        assert_eq!(
+                            *reply,
+                            Some(<Pong as Kind>::ID),
+                            "on_ping returns Pong — its reply kind rides the manifest"
+                        );
                     }
                     other => panic!("unexpected handler name: {other}"),
                 }

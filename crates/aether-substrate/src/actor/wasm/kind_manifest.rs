@@ -209,7 +209,7 @@ pub struct ActorInputs {
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033 /
 /// ADR-0096) into one [`ActorInputs`] per exported actor type. The
-/// record stream is `[0x02][postcard(InputsRecord)]` back-to-back; an
+/// record stream is `[0x03][postcard(InputsRecord)]` back-to-back; an
 /// `ActorBoundary { namespace }` record opens a new group and the
 /// Handler / Fallback / Component / Config records that follow belong
 /// to it, in declaration order. A single-actor module emits no
@@ -245,13 +245,19 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                     capabilities: ComponentCapabilities::default(),
                 });
             }
-            InputsRecord::Handler { id, name, doc } => {
+            InputsRecord::Handler {
+                id,
+                name,
+                doc,
+                reply,
+            } => {
                 current_capabilities(&mut groups)
                     .handlers
                     .push(HandlerCapability {
                         id,
                         name: name.into_owned(),
                         doc: doc.map(Cow::into_owned),
+                        reply,
                     });
             }
             InputsRecord::Fallback { doc } => {
@@ -1003,11 +1009,14 @@ mod tests {
                 id: aether_data::KindId(42),
                 name: "aether.tick".into(),
                 doc: Some("substrate drives this".into()),
+                // ADR-0109: a `-> R` handler's reply kind reads back.
+                reply: Some(aether_data::KindId(0xbeef)),
             },
             InputsRecord::Handler {
                 id: aether_data::KindId(0xff),
                 name: "aether.ping".into(),
                 doc: None,
+                reply: None,
             },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
@@ -1020,9 +1029,11 @@ mod tests {
             caps.handlers[0].doc.as_deref(),
             Some("substrate drives this")
         );
+        assert_eq!(caps.handlers[0].reply, Some(aether_data::KindId(0xbeef)));
         assert_eq!(caps.handlers[1].id, aether_data::KindId(0xff));
         assert_eq!(caps.handlers[1].name, "aether.ping");
         assert!(caps.handlers[1].doc.is_none());
+        assert!(caps.handlers[1].reply.is_none());
         assert!(caps.fallback.is_none());
     }
 
@@ -1035,6 +1046,7 @@ mod tests {
                 id: aether_data::KindId(7),
                 name: "aether.config_query".into(),
                 doc: None,
+                reply: None,
             },
             InputsRecord::Config {
                 id: aether_data::KindId(0x00c0_ffee),
@@ -1072,6 +1084,7 @@ mod tests {
             id: aether_data::KindId(7),
             name: "aether.tick".into(),
             doc: None,
+            reply: None,
         }]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let caps = read_inputs_from_bytes(&wasm).unwrap();
@@ -1109,6 +1122,7 @@ mod tests {
                 id: aether_data::KindId(1),
                 name: "ui.click".into(),
                 doc: None,
+                reply: None,
             },
             InputsRecord::ActorBoundary {
                 namespace: "ui.panel".into(),
@@ -1117,6 +1131,7 @@ mod tests {
                 id: aether_data::KindId(2),
                 name: "ui.draw".into(),
                 doc: None,
+                reply: None,
             },
             InputsRecord::Fallback {
                 doc: Some("catchall".into()),
@@ -1149,6 +1164,7 @@ mod tests {
             id: aether_data::KindId(7),
             name: "aether.tick".into(),
             doc: None,
+            reply: None,
         }]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let actors = read_actor_inputs_from_bytes(&wasm).unwrap();

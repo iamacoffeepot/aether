@@ -2344,13 +2344,25 @@ mod tests {
             "an uncached component should be a tool error"
         );
 
-        // Seed the cache, then it round-trips.
+        // Seed the cache with a handler that declares a `-> R` reply
+        // contract (ADR-0109). `describe_component` surfaces the `reply`
+        // kind id verbatim through serde, so a caller reads `In -> Out`
+        // before issuing the call.
         let engine =
             EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
+        let seeded = ComponentCapabilities {
+            handlers: vec![aether_kinds::HandlerCapability {
+                id: KindId(0x11),
+                name: "test.request".to_owned(),
+                doc: None,
+                reply: Some(KindId(0x22)),
+            }],
+            ..ComponentCapabilities::default()
+        };
         mcp.components
             .lock()
             .expect("test setup: component cache mutex is never poisoned")
-            .insert((engine, mailbox), ComponentCapabilities::default());
+            .insert((engine, mailbox), seeded);
         let hit = mcp
             .describe_component(Parameters(DescribeComponentArgs {
                 engine_id: engine_id.to_owned(),
@@ -2360,6 +2372,10 @@ mod tests {
             .expect("cached component describes");
         let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
         assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
+        assert!(
+            !caps["handlers"][0]["reply"].is_null(),
+            "the handler's ADR-0109 reply contract is surfaced: {hit}"
+        );
     }
 
     /// `parse_level` round-trips every documented spelling and rejects

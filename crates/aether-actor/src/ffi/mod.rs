@@ -904,9 +904,9 @@ macro_rules! __export_multi_internal {
                         $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BOUNDARY_LEN>(
                             <$component as $crate::Actor>::NAMESPACE,
                         );
-                    // Per-record section version byte (0x02), in lockstep
-                    // with `INPUTS_SECTION_VERSION`.
-                    out[pos] = 0x02;
+                    // Per-record section version byte (0x03), in lockstep
+                    // with `INPUTS_SECTION_VERSION` (ADR-0109 / issue 1803).
+                    out[pos] = 0x03;
                     pos += 1;
                     let mut i = 0;
                     while i < BOUNDARY_LEN {

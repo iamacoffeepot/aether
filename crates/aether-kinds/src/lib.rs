@@ -1284,6 +1284,14 @@ mod control_plane {
         pub id: aether_data::KindId,
         pub name: String,
         pub doc: Option<String>,
+        /// ADR-0109: the handler's reply kind, read off its return type —
+        /// `Some` of the reply `KindId` for a `-> R` (synchronous) or
+        /// `-> Pending<R>` (deferred) handler, `None` for a `-> ()`
+        /// fire-and-forget handler. Lets `describe_component` report
+        /// `In -> Out` so a caller reads what a call returns before
+        /// issuing it. Native chassis caps leave this `None` until the
+        /// native handler manifest lands (ADR-0109 §5, a follow-on).
+        pub reply: Option<aether_data::KindId>,
     }
 
     /// A `#[fallback]` method's advertised presence + optional doc.

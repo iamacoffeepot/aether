@@ -150,6 +150,7 @@ mod tests {
                     id: KindId(id),
                     name: format!("test.kind.{id}"),
                     doc: None,
+                    reply: None,
                 })
                 .collect(),
             fallback: fallback.then_some(FallbackCapability { doc: None }),

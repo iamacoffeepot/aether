@@ -615,6 +615,98 @@ mod tests {
         reply_env.discharge();
     }
 
+    use crate::{BootError, NativeActor, NativeDispatch, NativeInitCtx};
+    use aether_data::Schema;
+
+    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
+    #[kind(name = "test.adr0109.request")]
+    struct ReplyRequest {
+        seq: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Kind, Schema)]
+    #[kind(name = "test.adr0109.ack")]
+    struct ReplyAck {
+        seq: u32,
+    }
+
+    /// A native actor whose handler declares its reply via the return
+    /// type (ADR-0109) — the `#[actor]` macro emits the `ReplyAck` reply,
+    /// so the body carries no `ctx.reply`.
+    struct ReplyProbe;
+
+    #[aether_actor::actor]
+    impl NativeActor for ReplyProbe {
+        const NAMESPACE: &'static str = "test.adr0109.probe";
+        type Config = ();
+
+        fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        #[handler]
+        #[allow(clippy::unused_self)]
+        fn on_request(&mut self, _ctx: &mut NativeCtx<'_>, req: ReplyRequest) -> ReplyAck {
+            ReplyAck { seq: req.seq }
+        }
+    }
+
+    /// ADR-0109: a `-> R` `#[actor]` handler replies its return value by
+    /// construction. The macro routes the returned `ReplyAck` back to the
+    /// inbound sender through `OutboundReply::reply` — the same discharge
+    /// path a manual `ctx.reply` took, emitted from the return type. Drive
+    /// the macro-generated native dispatch and assert the reply lands at
+    /// the caller carrying the declared reply kind + value.
+    #[test]
+    fn return_type_handler_replies_through_the_macro() {
+        let (registry, mailer, _settlement) = test_env();
+
+        // The caller: a registered inbox we observe the reply landing on.
+        let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
+        let sink: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+            // ADR-0094 terminal test consumer: discharge before forwarding.
+            d.discharge();
+            let _ = reply_tx.send(d);
+        });
+        let caller = registry.register_inbox("test.adr0109.caller", sink);
+
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId(0x1803_0001),
+        ));
+        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 5);
+
+        let mut cap = ReplyProbe;
+        {
+            let mut ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+            let handled = cap.__aether_dispatch_envelope(
+                &mut ctx,
+                ReplyRequest::ID,
+                &ReplyRequest { seq: 9 }.encode_into_bytes(),
+            );
+            assert_eq!(handled, Some(()), "the -> R handler ran for its kind");
+        }
+
+        let reply = reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the -> R handler replied to the inbound sender");
+        assert_eq!(
+            reply.kind,
+            ReplyAck::ID,
+            "the reply carries the handler's declared return kind",
+        );
+        assert_eq!(
+            reply.sender.correlation_id, 5,
+            "the caller's correlation is echoed onto the reply",
+        );
+        let ack = ReplyAck::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
+        assert_eq!(
+            ack,
+            ReplyAck { seq: 9 },
+            "the value the handler returned is what was replied",
+        );
+    }
+
     /// #1757: `NativeCtx::take_inbound` moves the *single* dispatched
     /// envelope out of the ctx, so the dispatcher's settlement tail
     /// (`take_raw_inbound`) sees `None` and does not also discharge it.

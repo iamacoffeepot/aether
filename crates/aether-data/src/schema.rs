@@ -814,6 +814,12 @@ pub enum InputsRecord {
         id: KindId,
         name: Cow<'static, str>,
         doc: Option<Cow<'static, str>>,
+        /// ADR-0109: the handler's reply kind id, read off its return
+        /// type — `Some(<R as Kind>::ID)` for a `-> R` (synchronous) or
+        /// `-> Pending<R>` (deferred) handler, `None` for a `-> ()`
+        /// fire-and-forget handler. Lets a caller read `In -> Out` before
+        /// issuing the call.
+        reply: Option<KindId>,
     },
     /// A `#[fallback]` method's presence and optional description.
     Fallback { doc: Option<Cow<'static, str>> },
@@ -846,8 +852,9 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// Version byte prefixing every record in the `aether.kinds.inputs`
 /// section. Follows ADR-0028's per-record versioning convention —
 /// unknown versions abort the read rather than silently skip. v0x02
-/// (ADR-0090 / issue 1257) added the `InputsRecord::Config` variant; a
-/// substrate that understands config delivery and a component built
-/// before it would otherwise silently disagree on the config seam, so
-/// the reader rejects v0x01 loudly — a hard rebuild boundary.
-pub const INPUTS_SECTION_VERSION: u8 = 0x02;
+/// (ADR-0090 / issue 1257) added the `InputsRecord::Config` variant;
+/// v0x03 (ADR-0109 / issue 1803) added the `reply` kind id to the
+/// `Handler` variant. A component built before either and a substrate
+/// after would otherwise disagree on the record shape, so the reader
+/// rejects an older version byte loudly — a hard rebuild boundary.
+pub const INPUTS_SECTION_VERSION: u8 = 0x03;

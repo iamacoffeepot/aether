@@ -98,6 +98,7 @@ fn register_caps_with_fallback(
                 id,
                 name: format!("test.kind.{}", id.0),
                 doc: None,
+                reply: None,
             })
             .collect(),
         fallback: fallback.then_some(aether_kinds::FallbackCapability { doc: None }),
