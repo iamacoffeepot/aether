@@ -510,47 +510,47 @@ mod native {
                 }
             }
 
-            // ADR-0086 §12 / iamacoffeepot/aether#1273: capture is a
-            // deferred reply — the render thread sends the reply after
-            // the cap handler has returned. Acquire the settlement hold
-            // *before* the queue handoff so `HoldOpen` is visible to
-            // the settlement counter ahead of this handler's
-            // `Finished`; the hold rides on `PendingCapture` and drops
-            // with `req` after `outbound.send_reply` on the render
-            // thread (`desktop/driver.rs` line ~568, `test_bench/
-            // bench.rs` line ~1019). Mirrors the ADR-0093
-            // hold-until-resolve dispatch's eager-acquire. The
-            // early-return branches above reply
-            // synchronously inside this handler's own dispatch window,
-            // so they're naturally covered by the handler's in-flight
-            // `Finished` bracket and don't need the hold.
-            let hold = ctx.mailer().acquire_settlement_hold(ctx.in_flight_root());
+            // ADR-0106 / iamacoffeepot/aether#1758: capture is a deferred
+            // reply — the render thread sends the reply a frame later, off
+            // this handler's dispatch window. Retain the dispatched
+            // `CaptureFrame` envelope as an `InboundMail` guard via
+            // `take_inbound`: the dispatcher's settlement tail then sees
+            // `None` and does not discharge, so the guard's un-fired
+            // `record_finished` keeps the inbound's chain open until the
+            // render thread replies through `reply.reply(&result)` and
+            // drops it (recording the reply's `Sent` before the inbound's
+            // `Finished`, ADR-0080 §6). This retires the hand-rolled
+            // `SettlementHold` + reply-id mint (#1273 / #1719). The
+            // early-return branches above reply synchronously inside this
+            // handler's own dispatch window, so they leave the inbound for
+            // the dispatcher's tail to settle and don't take the guard.
+            let inbound = ctx.take_inbound();
             let pending = PendingCapture {
-                reply_to: sender,
+                reply: inbound,
                 after_mails: after,
                 pre_settlements,
-                hold,
             };
-            if !backend.queue.request(pending) {
-                backend.outbound.send_reply(
-                    sender,
-                    &CaptureFrameResult::Err {
-                        error: "capture already pending; try again once the in-flight \
-                            request completes"
-                            .to_owned(),
-                    },
-                );
+            // A rejected request (`Err`) is handed back so its retained
+            // guard can carry the synchronous `Err` reply before it drops
+            // — settling after the reply, ADR-0080 §6.
+            if let Err(rejected) = backend.queue.request(pending) {
+                rejected.reply.reply(&CaptureFrameResult::Err {
+                    error: "capture already pending; try again once the in-flight \
+                        request completes"
+                        .to_owned(),
+                });
                 return;
             }
 
-            if let Err(reason) = (backend.wake)() {
-                let _ = backend.queue.take();
-                backend.outbound.send_reply(
-                    sender,
-                    &CaptureFrameResult::Err {
-                        error: reason.to_owned(),
-                    },
-                );
+            if let Err(reason) = (backend.wake)()
+                && let Some(rejected) = backend.queue.take()
+            {
+                // The wake never reached the render thread, so the request
+                // is still parked: take it back and reply `Err` through its
+                // retained guard, which then drops and settles the chain.
+                rejected.reply.reply(&CaptureFrameResult::Err {
+                    error: reason.to_owned(),
+                });
             }
         }
 

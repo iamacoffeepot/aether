@@ -258,7 +258,11 @@ fn run_frame(
             for mail in req.after_mails {
                 queue.push(mail);
             }
-            outbound.send_reply(req.reply_to, &result);
+            // Reply through the retained inbound guard (ADR-0106 / #1758),
+            // then let `req` drop at end of this arm — *after* `reply`
+            // returns — so the inbound's `Finished` records after the
+            // reply's `Sent` (ADR-0080 §6).
+            req.reply.reply(&result);
         }
         None => {
             gpu.render();

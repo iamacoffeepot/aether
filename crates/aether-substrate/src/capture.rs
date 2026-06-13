@@ -29,11 +29,11 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Receiver;
 
-use crate::mail::{Mail, Source};
-use crate::runtime::trace::SettlementHold;
+use crate::chassis::inbox::InboundMail;
+use crate::mail::Mail;
 
-/// One pending capture request. Carries the reply handle so the
-/// render thread can reply once it has bytes, plus a resolved list
+/// One pending capture request. Carries the retained inbound guard so
+/// the render thread can reply once it has bytes, plus a resolved list
 /// of `after_mails` the control plane already validated; the
 /// render thread pushes them onto the queue after readback, before
 /// replying.
@@ -48,26 +48,21 @@ use crate::runtime::trace::SettlementHold;
 /// a settlement registry (in which case the driver renders
 /// immediately, preserving pre-fix behaviour on test fixtures).
 pub struct PendingCapture {
-    pub reply_to: Source,
+    /// The retained inbound guard (ADR-0106 / iamacoffeepot/aether#1758).
+    /// `RenderCapability::on_capture_frame` takes the dispatched
+    /// `CaptureFrame` envelope out of its ctx via
+    /// [`NativeCtx::take_inbound`](crate::actor::native::ctx::NativeCtx::take_inbound)
+    /// and parks it here, so the render thread can reply a frame later
+    /// through `reply.reply(&result)`. The guard's un-fired
+    /// `record_finished` *is* the settlement hold: it keeps the inbound's
+    /// chain open until the render thread replies and drops it, recording
+    /// the reply's `Sent` before the inbound's `Finished` (ADR-0080 §6).
+    /// This retires the hand-rolled `SettlementHold` + reply-id mint the
+    /// deferred capture reply used to carry (iamacoffeepot/aether#1273 /
+    /// #1719).
+    pub reply: InboundMail,
     pub after_mails: Vec<Mail>,
     pub pre_settlements: Vec<Receiver<()>>,
-    /// ADR-0086 §12 settlement hold: held from `on_capture_frame` accept
-    /// until the render thread's `send_reply` returns; drops with
-    /// `PendingCapture` at end of the reply scope, firing `Release` so
-    /// `Settled{root}` becomes exact post-reply. Without this guard the
-    /// cap handler's `Finished` lands before the readback reply, the
-    /// trace observer settles the chain, and the wire `Call` ends with
-    /// zero reply events (iamacoffeepot/aether#1273). The pattern
-    /// mirrors the ADR-0093 hold-until-resolve dispatch (acquired before
-    /// the queue handoff so `HoldOpen` is visible to the settlement
-    /// counter ahead of `Finished`).
-    ///
-    /// The field is never read — its sole job is to keep the
-    /// [`SettlementHold`]'s `Drop` impl tied to the lifetime of this
-    /// `PendingCapture`. `SettlementHold` carries `#[must_use]`, so
-    /// stashing it on a named field (rather than `_`) is the only way
-    /// to keep it alive across the queue handoff.
-    pub hold: SettlementHold,
 }
 
 /// Single-slot queue. Cheaply cloneable (wraps an `Arc`), shared
@@ -83,25 +78,33 @@ impl CaptureQueue {
         Self::default()
     }
 
-    /// Try to install `pending` as the pending capture. Returns `true`
-    /// if the slot was empty and the request is now pending; `false`
-    /// if a capture is already in flight. The caller wakes the event
-    /// loop on success — `CaptureQueue` itself stays chassis-agnostic.
+    /// Try to install `pending` as the pending capture. Returns `Ok(())`
+    /// if the slot was empty and the request is now pending; `Err(pending)`
+    /// hands the request back (boxed — it owns a large retained guard) when
+    /// a capture is already in flight, so the caller can reply `Err`
+    /// through the rejected request's retained `reply` guard before it
+    /// drops (keeping the reply-before-`Finished` order, ADR-0080 §6). The
+    /// caller wakes the event loop on success — `CaptureQueue` itself stays
+    /// chassis-agnostic.
     ///
     /// # Panics
     /// Panics if the slot `Mutex` is poisoned — fail-fast per ADR-0063:
     /// a poisoned mutex means a prior holder panicked under the guard.
-    #[must_use]
-    pub fn request(&self, pending: PendingCapture) -> bool {
+    #[must_use = "a rejected request still owns its inbound guard; reply through it before it drops"]
+    pub fn request(&self, pending: PendingCapture) -> Result<(), Box<PendingCapture>> {
         let mut slot = self
             .slot
             .lock()
             .expect("capture slot mutex poisoned; fail-fast per ADR-0063");
         if slot.is_some() {
-            return false;
+            return Err(Box::new(pending));
         }
         *slot = Some(pending);
-        true
+        // Release the slot lock before returning — the retained guard in
+        // `pending` has a significant `Drop`, so tighten the critical
+        // section to just the check-and-set (clippy::significant_drop_tightening).
+        drop(slot);
+        Ok(())
     }
 
     /// Take the pending capture if one is set. Called by the render
@@ -123,44 +126,69 @@ impl CaptureQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SourceAddr;
-    use crate::runtime::trace::TraceHandle;
-    use aether_data::{MailId, SessionToken, Uuid};
+    use crate::actor::native::envelope::Envelope;
+    use crate::chassis::inbox::SettlingInbox;
+    use crate::handle_store::HandleStore;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::registry::{OwnedDispatch, Registry};
+    use crate::mail::{MailRef, Source};
+    use aether_data::{KindId, MailId, MailboxId};
+    use aether_kinds::trace::Nanos;
+    use std::sync::mpsc;
 
-    fn reply_to(u: u128) -> Source {
-        Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(u))))
-    }
-
-    fn pending(u: u128) -> PendingCapture {
-        // Sentinel `MailId::NONE` keeps the acquire/release pair a no-op
-        // in the settlement counter — the test exercises queue mechanics,
-        // not the trace pipeline. `TraceHandle::new()` builds a stand-
-        // alone handle with no installed registry.
-        let hold = TraceHandle::new().acquire_settlement_hold(MailId::NONE);
+    /// A `PendingCapture` whose retained `reply` guard wraps a NONE-lineage
+    /// disarmed inbound — dropping it records nothing and never panics, so
+    /// these slot-mechanics tests need no settlement registry. The inbound
+    /// is sent straight onto the `SettlingInbox`'s channel (no `Mailer`
+    /// route), then drained to the guard.
+    fn pending() -> PendingCapture {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(registry, store));
+        let id = MailboxId(0x0CA8);
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        tx.send(OwnedDispatch::disarmed(
+            KindId(0),
+            "test.capture.pending".to_owned(),
+            None,
+            Source::NONE,
+            MailRef::from(Vec::new()),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            id,
+        ))
+        .expect("queue the inbound");
+        let inbox = SettlingInbox::new(id, rx, mailer);
+        let reply = inbox.try_next().expect("one queued");
         PendingCapture {
-            reply_to: reply_to(u),
+            reply,
             after_mails: Vec::new(),
             pre_settlements: Vec::new(),
-            hold,
         }
     }
 
     #[test]
     fn second_request_rejected_while_pending() {
         let q = CaptureQueue::new();
-        assert!(q.request(pending(1)));
-        assert!(!q.request(pending(2)));
+        assert!(q.request(pending()).is_ok());
+        assert!(
+            q.request(pending()).is_err(),
+            "a second request is rejected (and handed back) while one is pending",
+        );
     }
 
     #[test]
     fn take_clears_slot_for_next_request() {
         let q = CaptureQueue::new();
-        assert!(q.request(pending(1)));
-        let got = q.take().expect("pending");
-        assert_eq!(got.reply_to, reply_to(1));
+        assert!(q.request(pending()).is_ok());
+        assert!(q.take().is_some(), "the pending capture is taken");
         // Slot is empty again.
         assert!(q.take().is_none());
         // Next request lands.
-        assert!(q.request(pending(2)));
+        assert!(q.request(pending()).is_ok());
     }
 }
