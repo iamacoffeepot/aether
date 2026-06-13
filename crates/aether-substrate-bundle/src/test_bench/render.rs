@@ -8,10 +8,17 @@
 use std::sync::Arc;
 
 use aether_capabilities::{RenderGpu, RenderHandles};
-use aether_substrate::render::RenderError;
+use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_substrate::render::{RenderError, encode_png};
 
+use crate::visual;
 pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
 use std::iter;
+
+/// PNG bytes plus the optional [`FrameVerdict`] `render_and_capture`
+/// produces — the verdict is `Some` iff the request carried `checks`
+/// (iamacoffeepot/aether#1777).
+type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>), String>;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-
@@ -114,7 +121,9 @@ impl Gpu {
     }
 
     /// Variant of `render` that also copies the offscreen texture
-    /// into a readback buffer, maps it, and returns an encoded PNG.
+    /// into a readback buffer, maps it, and returns an encoded PNG
+    /// plus an optional [`FrameVerdict`] scored on the same raw RGBA
+    /// (present iff `checks` is non-empty; iamacoffeepot/aether#1777).
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
     ///
@@ -126,7 +135,7 @@ impl Gpu {
     /// iamacoffeepot/aether#847 retired the historical `nudge_tick`
     /// boilerplate that worked around the prior consume-and-discard
     /// behaviour.
-    pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
+    pub fn render_and_capture(&mut self, checks: &[FrameCheck]) -> CaptureOutcome {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -145,6 +154,13 @@ impl Gpu {
         self.render_handles.record_overlay_pass(&mut encoder, true);
         let meta = self.render_handles.record_capture_copy(&mut encoder);
         queue.submit(iter::once(encoder.finish()));
-        self.render_handles.finish_capture(&meta)
+        // Map the readback once; encode the PNG and score the verdict
+        // from the same de-padded RGBA so a verdict scores the exact
+        // bytes the PNG carries (iamacoffeepot/aether#1777).
+        let rgba = self.render_handles.map_capture_rgba(&meta)?;
+        let png = encode_png(&rgba, meta.width, meta.height)?;
+        let verdict =
+            (!checks.is_empty()).then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
+        Ok((png, verdict))
     }
 }

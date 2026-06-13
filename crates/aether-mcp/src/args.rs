@@ -481,6 +481,27 @@ pub struct MailNodeJson {
     pub thread_name: Option<String>,
 }
 
+/// One frame check in a `capture_frame` `checks` list. Names a
+/// substrate-side reduction the render thread scores on the raw RGBA
+/// the PNG is built from, so a smoke demo asserts without decoding the
+/// returned PNG (iamacoffeepot/aether#1777).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureCheckSpec {
+    /// Which reduction to run: `"not_all_black"`,
+    /// `"differs_from_background"`, `"coverage"`, `"centroid"`, or
+    /// `"bounding_box"`.
+    pub reduction: String,
+    /// Per-channel tolerance (0-255) for the lit/background partition
+    /// the silhouette reductions share. Defaults to 0.
+    #[serde(default)]
+    pub tolerance: u8,
+    /// Explicit background RGB the reduction partitions against. Omit
+    /// or `null` to use the frame's top-left pixel (the
+    /// `differs_from_background` convention).
+    #[serde(default)]
+    pub background: Option<[u8; 3]>,
+}
+
 /// `capture_frame` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CaptureFrameArgs {
@@ -495,6 +516,11 @@ pub struct CaptureFrameArgs {
     /// flag the caller flipped for the capture.
     #[serde(default)]
     pub after_mails: Vec<CaptureMailSpec>,
+    /// Reductions to score substrate-side on the captured frame's raw
+    /// RGBA, returned as a `verdict` alongside the PNG. Omit for a
+    /// PNG-only capture (iamacoffeepot/aether#1777).
+    #[serde(default)]
+    pub checks: Vec<CaptureCheckSpec>,
 }
 
 // `SubmitDagArgs` lives in its own module so a *scoped*

@@ -15,14 +15,22 @@
 use std::sync::Arc;
 
 use aether_capabilities::{RenderGpu, RenderHandles};
-use aether_substrate::render::{self, RenderError, vertex_buffer_layout};
+use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_substrate::render::{self, RenderError, encode_png, vertex_buffer_layout};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
+
+use crate::visual;
 
 pub use render::VERTEX_BUFFER_BYTES;
 use std::env;
 use std::iter;
 use std::slice;
+
+/// PNG bytes plus the optional [`FrameVerdict`] `render_and_capture`
+/// produces — the verdict is `Some` iff the request carried `checks`
+/// (iamacoffeepot/aether#1777).
+type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>), String>;
 
 /// Wireframe-overlay shader: same vertex layout as the main shader so
 /// the pipeline shares the existing vertex buffer. The fragment stage
@@ -308,27 +316,29 @@ impl Gpu {
     }
 
     pub fn render(&mut self) {
-        let _ = self.render_impl(false);
+        let _ = self.render_impl(None);
     }
 
     /// Variant of `render` that also copies the offscreen texture into
-    /// a readback buffer, maps it, and returns an encoded PNG. On any
+    /// a readback buffer, maps it, and returns an encoded PNG plus an
+    /// optional [`FrameVerdict`] scored on the same raw RGBA (present
+    /// iff `checks` is non-empty; iamacoffeepot/aether#1777). On any
     /// capture-path failure, returns `Err(reason)`; the frame itself
     /// still renders and (if the surface is available) presents, since
     /// capture is a side channel.
-    pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
-        self.render_impl(true)
+    pub fn render_and_capture(&mut self, checks: &[FrameCheck]) -> CaptureOutcome {
+        self.render_impl(Some(checks))
             .ok_or_else(|| "capture did not produce a result".to_owned())?
     }
 
     /// Draw the current accumulator vertices into the offscreen target
     /// with the latest camera view-proj, optionally encode a capture
     /// copy, then best-effort blit to the swapchain and present.
-    /// Returns `Some(Ok(png))` / `Some(Err(reason))` when `capture` is
-    /// set; `None` when `capture` is false or the capture path
-    /// couldn't allocate. Surface unavailability does *not* prevent
-    /// capture — offscreen is the source of truth.
-    fn render_impl(&mut self, capture: bool) -> Option<Result<Vec<u8>, String>> {
+    /// Returns `Some(Ok((png, verdict)))` / `Some(Err(reason))` when
+    /// `capture` is `Some(checks)`; `None` when capture wasn't requested
+    /// or the capture path couldn't allocate. Surface unavailability
+    /// does *not* prevent capture — offscreen is the source of truth.
+    fn render_impl(&mut self, capture: Option<&[FrameCheck]>) -> Option<CaptureOutcome> {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
 
@@ -384,7 +394,7 @@ impl Gpu {
         // Capture path: the copy runs against the offscreen texture,
         // which is unaffected by whether a swapchain image is available
         // this frame. That decouples capture from window visibility.
-        let capture_meta = if capture {
+        let capture_meta = if capture.is_some() {
             Some(self.render_handles.record_capture_copy(&mut encoder))
         } else {
             None
@@ -429,7 +439,20 @@ impl Gpu {
             tex.present();
         }
 
-        capture_meta.map(|meta| self.render_handles.finish_capture(&meta))
+        // Map the readback once; encode the PNG and (when checks were
+        // requested) score the verdict from the same de-padded RGBA so
+        // the verdict scores the exact bytes the PNG carries
+        // (iamacoffeepot/aether#1777). `capture_meta` is `Some` iff
+        // `capture` is `Some`, so `unwrap_or(&[])` only papers over an
+        // unreachable case.
+        capture_meta.map(|meta| {
+            let rgba = self.render_handles.map_capture_rgba(&meta)?;
+            let png = encode_png(&rgba, meta.width, meta.height)?;
+            let checks = capture.unwrap_or(&[]);
+            let verdict = (!checks.is_empty())
+                .then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
+            Ok((png, verdict))
+        })
     }
 
     /// Try to get the current swapchain texture. Reconfigures the

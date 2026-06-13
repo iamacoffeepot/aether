@@ -30,10 +30,10 @@ use aether_data::{
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
-    CostTailResult, ListEngines, ListEnginesResult, ListKinds, ListKindsResult, LoadComponent,
-    LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent, ReplaceResult, SpawnEngine,
-    SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
-    TerminateEngineResult,
+    CostTailResult, FrameCheck, FrameReduction, ListEngines, ListEnginesResult, ListKinds,
+    ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent,
+    ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult,
+    TerminateEngine, TerminateEngineResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -52,8 +52,8 @@ use crate::args::ActorLogsArgs;
 use crate::args::ActorLogsResponse;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
-    CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagDescriptorArg, DagStatusArgs,
-    DescribeComponentArgs, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
+    CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagDescriptorArg,
+    DagStatusArgs, DescribeComponentArgs, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
     HandleSummaryJson, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NodeArg,
     ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
     SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
@@ -567,7 +567,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves."
+        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves. Optionally carries `checks`: substrate-side reductions (not_all_black, differs_from_background, coverage, centroid, bounding_box) scored on the exact RGBA the PNG is built from and returned as a `verdict` text block alongside the image — a one-call spawn -> drive -> assert with no caller-side PNG decode."
     )]
     pub async fn capture_frame(
         &self,
@@ -592,22 +592,40 @@ impl Mcp {
             .map_err(|e| {
                 McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
             })?;
+        // Map the verdict request: an unknown reduction name is a clean
+        // invalid-params error before the capture touches the wire.
+        let checks = args
+            .checks
+            .iter()
+            .map(capture_check)
+            .collect::<Result<Vec<FrameCheck>, McpError>>()?;
         let reply = self
             .session
             .call_one(engine_envelope(
                 engine,
                 RENDER_CAP,
-                &CaptureFrame { mails, after_mails },
+                &CaptureFrame {
+                    mails,
+                    after_mails,
+                    checks,
+                },
             ))
             .await
             .map_err(internal)?;
         match CaptureFrameResult::decode_from_bytes(&reply.payload) {
-            Some(CaptureFrameResult::Ok { png }) => {
+            Some(CaptureFrameResult::Ok { png, verdict }) => {
                 let encoded = STANDARD.encode(&png);
-                Ok(CallToolResult::success(vec![Content::image(
-                    encoded,
-                    "image/png",
-                )]))
+                let mut content = vec![Content::image(encoded, "image/png")];
+                // Surface the verdict as a JSON text block so the caller
+                // reads the reductions' results without decoding the PNG
+                // (iamacoffeepot/aether#1777). Absent when no `checks`
+                // were requested.
+                if let Some(verdict) = verdict {
+                    let json = serde_json::to_string(&verdict)
+                        .map_err(|e| internal_msg(&format!("verdict serialize: {e}")))?;
+                    content.push(Content::text(json));
+                }
+                Ok(CallToolResult::success(content))
             }
             Some(CaptureFrameResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable CaptureFrameResult")),
@@ -1383,6 +1401,34 @@ fn engine_envelope_by_id<K: Kind>(engine: EngineId, mailbox: MailboxId, kind: &K
     }
 }
 
+/// Map a `capture_frame` check spec onto a wire [`FrameCheck`],
+/// resolving the reduction name. An unknown name is an invalid-params
+/// error so a typo aborts the capture cleanly before it reaches the
+/// wire (iamacoffeepot/aether#1777).
+fn capture_check(spec: &CaptureCheckSpec) -> Result<FrameCheck, McpError> {
+    let reduction = match spec.reduction.as_str() {
+        "not_all_black" => FrameReduction::NotAllBlack,
+        "differs_from_background" => FrameReduction::DiffersFromBackground,
+        "coverage" => FrameReduction::Coverage,
+        "centroid" => FrameReduction::Centroid,
+        "bounding_box" => FrameReduction::BoundingBox,
+        other => {
+            return Err(McpError::invalid_params(
+                format!(
+                    "capture_frame check: unknown reduction {other:?}; expected one of \
+                     not_all_black, differs_from_background, coverage, centroid, bounding_box"
+                ),
+                None,
+            ));
+        }
+    };
+    Ok(FrameCheck {
+        reduction,
+        tolerance: spec.tolerance,
+        background: spec.background,
+    })
+}
+
 /// Parse a UUID-string `engine_id` (from `list_engines` /
 /// `spawn_substrate`) into an `EngineId`.
 fn parse_engine_id(s: &str) -> Result<EngineId, McpError> {
@@ -2130,6 +2176,7 @@ mod tests {
                     params: None,
                 }],
                 after_mails: vec![],
+                checks: vec![],
             }))
             .await;
         assert!(

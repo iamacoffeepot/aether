@@ -100,14 +100,45 @@ pub fn prepare_capture_copy(
 }
 
 /// Map the readback buffer (after the encoder's submit has run),
-/// strip row padding, swizzle BGRA → RGBA when the offscreen is in
-/// a BGRA format, and PNG-encode the bytes.
+/// strip row padding, swizzle BGRA → RGBA when the offscreen is in a
+/// BGRA format, and PNG-encode the bytes.
+///
+/// A thin compose of [`map_capture_rgba`] + [`encode_png`] kept
+/// byte-identical to the prior single-pass form: the same map / strip /
+/// swizzle feeds the same encoder. Callers that also want a verdict on
+/// the raw pixels (iamacoffeepot/aether#1777) reach for `map_capture_rgba`
+/// directly and encode the returned bytes with `encode_png`, so the
+/// buffer is mapped exactly once.
 ///
 /// Blocks the calling thread on `device.poll(wait_indefinitely)` —
 /// callers that can't tolerate the stall (the desktop render loop)
 /// should not call this on the hot path; capture is one frame per
 /// MCP request, not per frame.
 pub fn finish_capture(
+    device: &wgpu::Device,
+    targets: &Targets,
+    meta: &CaptureMeta,
+) -> Result<Vec<u8>, String> {
+    encode_png(
+        &map_capture_rgba(device, targets, meta)?,
+        meta.width,
+        meta.height,
+    )
+}
+
+/// Map the readback buffer (after the encoder's submit has run), strip
+/// row padding, and swizzle BGRA → RGBA when the offscreen is in a BGRA
+/// format. Returns the de-padded, top-down RGBA8 frame — the exact
+/// bytes [`encode_png`] turns into the captured PNG. Splitting the map
+/// out of [`finish_capture`] lets the render thread score a verdict on
+/// these pixels before they're consumed by the encode
+/// (iamacoffeepot/aether#1777), mapping the buffer just once.
+///
+/// Blocks the calling thread on `device.poll(wait_indefinitely)` —
+/// callers that can't tolerate the stall (the desktop render loop)
+/// should not call this on the hot path; capture is one frame per
+/// MCP request, not per frame.
+pub fn map_capture_rgba(
     device: &wgpu::Device,
     targets: &Targets,
     meta: &CaptureMeta,
@@ -150,10 +181,14 @@ pub fn finish_capture(
     drop(mapped);
     readback.buffer.unmap();
 
-    encode_png(&rgba, meta.width, meta.height)
+    Ok(rgba)
 }
 
-fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+/// PNG-encode a de-padded RGBA8 frame (the bytes [`map_capture_rgba`]
+/// returns). Public so the bundle render thread can encode the same
+/// buffer it scored a verdict on, mapping the readback only once
+/// (iamacoffeepot/aether#1777).
+pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
