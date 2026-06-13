@@ -1074,14 +1074,18 @@ impl TestBench {
                 for mail in req.after_mails {
                     self.queue.push(mail);
                 }
-                self.outbound.send_reply(req.reply_to, &result);
-                // iamacoffeepot/aether#1273: `req` still owns
-                // `PendingCapture._hold` after the partial moves above; the
-                // field drops at end of this match arm — *after*
-                // `send_reply` returns — firing `Release` on the trace
-                // root so `Settled{root}` is exact at post-reply. Don't
-                // restructure to move the reply below other work in this
-                // arm.
+                // Reply through the retained inbound guard (ADR-0106 /
+                // #1758). The bench's capture reply target is a `Session`,
+                // so the guard's `reply` routes through the same `outbound`
+                // egress `send_reply` did (the `RecordingBackend` loopback
+                // picks it up by correlation).
+                req.reply.reply(&result);
+                // iamacoffeepot/aether#1273 / #1758: `req` still owns
+                // `req.reply` after the partial moves above; the retained
+                // inbound guard drops at end of this match arm — *after*
+                // `reply` returns — so the inbound's `Finished` records
+                // after the reply's `Sent` (ADR-0080 §6). Don't restructure
+                // to move the reply below other work in this arm.
             }
             None => {
                 self.gpu.render();
