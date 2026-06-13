@@ -1,0 +1,70 @@
+# ADR-0108: Substrate HTTP server capability
+
+- **Status:** Proposed
+- **Date:** 2026-06-12
+
+Mirrors **ADR-0043** (the substrate HTTP egress sink) on the inbound side: where ADR-0043 turns a component's outbound `Fetch` mail into an HTTP request, this turns an inbound HTTP request into mail to a handler component. It reuses ADR-0043's `HttpMethod` / `HttpHeader` shapes and its buffered-body decision, joins the socket-binding capability family of **ADR-0079** (the `aether.tcp` listener / session actors), drives its response close through the settlement machinery of **ADR-0080** and **ADR-0106**, follows the I/O-cap-as-mail-sink and config-layering template of **ADR-0041** and **ADR-0090**, and takes the `RpcServerCapability` (issue 750) as its literal code template.
+
+## Context
+
+The substrate is a general application host — file and game servers, tools, and games run on one substrate — and it already owns outbound HTTP as a mail sink (`aether.http`, ADR-0043). It binds listening sockets in two places: the `aether.rpc.server` capability (issue 750) and the `aether.tcp` listener family (ADR-0079). What it cannot do is accept an inbound HTTP request and hand it to a component as mail. A component that wants to be a web endpoint has no path to one — wasm32 has no socket primitives, and the substrate exposes no server-side surface.
+
+This is the missing half of the substrate-as-general-application-host story. A file server, a tool endpoint, a game's admin/control plane, and a status page all want the same shape: bind a port, turn each inbound request into a typed mail to a handler actor, turn the handler's reply into the HTTP response. The handler stays pure mail — no `TcpStream`, no parser, no socket lifecycle. The capability owns the OS resource and the request/response framing; the component owns only the request→response logic.
+
+The `RpcServerCapability` (`crates/aether-capabilities/src/rpc/server.rs`) already runs exactly that round trip for the engine's RPC wire: it binds a `TcpListener` at init, runs an accept sidecar that hands each socket to a per-connection reader thread, frames inbound messages and wakes the dispatcher over an internal mpsc (`RpcInboundReady`), dispatches each request as a fresh causal chain via `NativeCtx::send_envelope_as_root`, holds a `HashMap<correlation_id, in_flight>` keyed by the dispatch's `MailId.correlation_id`, intercepts the downstream reply mail when it lands back at the cap, and writes the terminal frame when the request chain settles (`SettlementRegistry::subscribe_settlement_mail`). The HTTP server needs the same machinery with HTTP/1.1 framing in place of postcard length-prefix framing, and a fixed one-request-kind → one-handler → one-response-kind shape in place of the RPC server's arbitrary wire-borne mailbox+kind addressing.
+
+## Decision
+
+Ship a new self-contained singleton capability, `HttpServerCapability` (`NAMESPACE = "aether.http.server"`), modeled directly on `RpcServerCapability`. It binds a configured port, parses each inbound HTTP/1.1 request into an `HttpServerRequest` mail dispatched to a configured handler mailbox, holds the response socket open across the async boundary, and writes the handler's `HttpServerResponse` reply back as the HTTP response.
+
+### 1. A flat singleton capability, modeled on the RPC server
+
+`HttpServerCapability` is a `#[aether_actor::bridge(singleton)]` native capability that binds its `TcpListener` at init — surfacing a bind failure synchronously, and publishing the bound port as a handle for tests as `RpcServerHandle` does. An accept sidecar thread hands each accepted socket to a per-connection reader thread; the reader parses one HTTP/1.1 request (request line + headers + a bounded `Content-Length` body) and pushes it over the cap's internal mpsc, then fires an `HttpInboundReady` wake mail at the cap's own mailbox. The cap owns the connection map and the in-flight correlation table; the handler component owns only the request→response logic. The `aether.tcp` family stays the raw-socket primitive; the HTTP server is a sibling capability that owns its own listener.
+
+### 2. Kind vocabulary — two public kinds, reusing the client's shapes
+
+Two new public kinds in `aether-kinds`, reusing the ADR-0043 `HttpMethod` and `HttpHeader` shapes for symmetry with the client:
+
+- `HttpServerRequest` (`aether.http.server.request`) — the inbound request the cap dispatches to the handler:
+  - `method: HttpMethod` — the typed verb enum (`Get` / `Post` / `Put` / `Delete` / `Patch` / `Head` / `Options`), identical to `Fetch.method`. A request whose method falls outside the enum is answered `501 Not Implemented` by the cap before any dispatch, so the handler only ever sees an enumerated verb.
+  - `path: String` — the decoded path component (e.g. `/users/42`), query stripped.
+  - `query: String` — the raw query string after `?`, always present and empty when the request carried none. Every field is addressed explicitly rather than left absent, so a component or LLM reader never has to infer from a missing field. The component parses it; the cap imposes no key/value model in v1.
+  - `headers: Vec<HttpHeader>` — the request headers as an ordered list of `{ name, value }`, preserving order and duplicates as received. The same shape as the client.
+  - `body: Vec<u8>` — the request body as raw bytes, never forced to UTF-8 (a byte payload, like `Fetch.body`).
+- `HttpServerResponse` (`aether.http.server.response`) — the handler's reply, intercepted by the cap and written as the HTTP response:
+  - `status: u16` — the HTTP status code, symmetric with `FetchResult::Ok.status`.
+  - `headers: Vec<HttpHeader>` — response headers the handler supplies (content-type, cache, and so on); the cap supplies `Content-Length`, `Date`, and `Connection` itself.
+  - `body: Vec<u8>` — the response body as raw bytes.
+
+### 3. Routing — one configured handler, the path in the kind
+
+The cap config names a single handler mailbox (a string, e.g. `aether.component/aether.embedded:web`). Every request goes to that one mailbox with the path carried in `HttpServerRequest.path`, and the handler dispatches on the path with an ordinary `match`. This keeps routing policy inside the component where an author reads and edits it, rather than encoding a path→mailbox table in substrate env/CLI config. The handler mailbox resolves by name at dispatch time — late binding — through the sanctioned runtime-name escape hatch, the same form the RPC server uses to forward to `aether.engine` by name, so the handler component loads, replaces, or reloads independently of the server's lifetime. A request that arrives while the configured mailbox resolves to nothing is answered `503 Service Unavailable`.
+
+### 4. Whole bodies, buffered both directions
+
+v1 reads the full request body — bounded by a configured byte cap — before building and dispatching the request mail, and writes the full response body in one pass from the reply kind. Mail is message-shaped — one kind carries one whole value — and this matches the client's buffered-body decision (ADR-0043) and the audio cap's decode-off-the-hot-path stance. A streaming body would require a chunk-kind protocol with backpressure that the mail layer does not model today. Chunked transfer, server-sent events, and websocket upgrade are parked as a future streaming surface; the buffered shape demos a working endpoint without reopening the mail boundary.
+
+### 5. Response round trip and correlation
+
+The cap's wake handler drains the mpsc; for each request it resolves the handler mailbox by name and dispatches the `HttpServerRequest` as a fresh root via `ctx.send_envelope_as_root(handler, HttpServerRequest::ID, &payload)`, then records `in_flight[mail_id.correlation_id] = PendingRequest { conn_id }` — the open response socket correlated to the dispatch chain. The handler replies `ctx.reply(&HttpServerResponse { .. })`; the reply routes back to the cap (the dispatch's reply target is the cap's own mailbox) carrying `env.sender.correlation_id == mail_id.correlation_id`, and the cap's reply-interception handler matches the in-flight entry, formats the HTTP/1.1 response, and writes it to the held socket.
+
+This inverts the client's correlation. The client cap echoes the request `url` in `FetchResult` so the calling component correlates reply to request without a pending table; here the server cap holds the pending table keyed by dispatch correlation plus socket, because it cannot echo an opaque token through an untrusted handler. A settlement subscription on the dispatched root (the RPC server's `subscribe_settlement_mail` path) is the safety net: if the chain settles with no `HttpServerResponse` produced — the handler has no handler for the kind, or drops it — the cap writes `502 Bad Gateway` and clears the entry instead of leaking the held socket, and a configured per-request timeout writes `504 Gateway Timeout`. Because the cap is an ordinary scheduled actor, the request-chain reply rides the standard dispatcher discharge; it opens no new claimed-inbox drain seam (ADR-0106), so it carries none of the settlement-leak surface that seam would, and `unwire` plus the per-connection close path clear `in_flight` and tear down reader threads exactly as the RPC server does.
+
+### 6. Inbound HTTP is untrusted external input
+
+External peers are adversarial by default, so the cap enforces, before anything reaches the handler: a max request-line + header byte cap (`414` / `431` on exceed), a max header count, a max body-byte cap with a bounded read that never allocates unboundedly (`413` on exceed, mirroring the RPC reader's frame-size ceiling), and socket read/idle timeouts so a slow-loris peer cannot pin a reader thread. The bind address defaults to loopback (`127.0.0.1`); binding a public interface is an explicit operator config choice — the deny-by-default posture symmetric with the client's allowlist. The handler component owns its own validation — path allowlisting, auth, body parsing, content negotiation; the cap guarantees only that what reaches the handler is size-bounded and is well-formed HTTP with an enumerated method.
+
+## Consequences
+
+- **Positive** — a component becomes a web endpoint with no socket code: a wasm handler with one `#[handler] fn on_http_request(&mut self, ctx, req: HttpServerRequest)` that replies `HttpServerResponse` serves real HTTP. The substrate-as-general-application-host story gains its inbound half, and the codebase carries two framings — `aether.rpc.server` and `aether.http.server` — of one accept→dispatch→reply pattern, which keeps the pattern legible by example. The capability is symmetric with the ADR-0043 client: outbound is `Fetch` → `FetchResult`, inbound is `HttpServerRequest` → `HttpServerResponse`, both reusing `HttpMethod` / `HttpHeader`.
+- **Neutral / cost** — a new capability joins `aether-capabilities`, plus two public kinds, a listening socket on the desktop and headless chassis, and a config layer (`bind_addr`, `handler_mailbox`, `max_request_bytes`, `max_header_bytes`, `request_timeout_millis`). The reader-side parse adds `httparse` (already a transitive dependency) plus a manual `Content-Length` body read. The cap registers only when a bind is configured, so an unconfigured chassis binds nothing.
+- **Negative / risk** — v1 buffers whole bodies, so a large upload or download holds its bytes in memory bounded by the byte cap; a genuinely large-payload endpoint waits on the streaming surface. Single-handler routing means a multi-route endpoint expresses its routes as a `match` in the component rather than as substrate config. Per-connection reader threads cost one OS thread per open connection, the same cost the RPC server already pays; a high-connection-count public endpoint would want an async accept loop, which v1 does not provide.
+- **Follow-on** — a streaming body surface (chunked transfer / SSE / websocket upgrade) is its own chunk-kind protocol with backpressure and is the natural next change. A path→mailbox route table in config, or a router component in front of several handlers, refines routing once a multi-handler endpoint earns it. An async accept loop replaces the per-connection thread model if connection count ever demands it.
+
+## Alternatives considered
+
+- **Build the HTTP server on the existing `aether.tcp` session cap (ADR-0079).** The `TcpSessionActor` does not surface inbound bytes as mail, so wiring HTTP through it would mean re-adding a per-session data→mail observer and layering an HTTP parser on the raw stream, with parse state spread across the `aether.tcp` listener and session actors. The `RpcServerCapability` already proved the flat singleton model — one cap owns the connection map and reader threads — for exactly this deferred-reply round trip; mirroring it is lower-risk. The `aether.tcp` family stays the raw-socket primitive; the HTTP server is a sibling that owns its own listener.
+- **A path→mailbox route table in the cap config.** Pushing routing into substrate env/CLI config makes a multi-route endpoint awkward to author and duplicates a `match path` the handler already expresses. v1 ships one configured handler with the path in the kind; a config-driven route table is the parked refinement.
+- **Carry the method as a free-form `String`.** A string method drifts (`get` / `GET` / `Get`) and forces every handler to normalize. Reusing the ADR-0043 `HttpMethod` enum keeps the wire canonical and symmetric with the client; non-enumerated methods are answered `501` at the cap rather than handed down as text.
+- **Body as `String`.** Forcing UTF-8 on the body breaks binary uploads and diverges from the client's byte-vector bodies. `Vec<u8>` in both directions.
+- **Streaming bodies in v1.** Chunked / SSE / websocket framing needs a chunk-kind protocol and backpressure the mail layer does not model. Whole buffered bodies demo a working endpoint; streaming is the parked future surface.
