@@ -823,14 +823,29 @@ impl Drainable for BlobWork {
 impl Drop for BlobWork {
     fn drop(&mut self) {
         // The initialized slots are exactly `[0, len)` (see the `groups`
-        // field doc): each is a `Group` that must be dropped — a bare
-        // `MaybeUninit` would otherwise leak it. `[len, cap)` are uninit.
-        // All `Arc` refs are gone (we are in `Drop`), so no slot is
-        // concurrently accessed.
+        // field doc). All `Arc` refs are gone (we are in `Drop`), so no
+        // slot is concurrently accessed.
         let len = self.lifecycle.peek_len();
-        for slot in &self.groups[..len] {
-            // SAFETY: slot `< len` is initialized and no longer shared.
-            unsafe { (*slot.cell.get()).assume_init_drop() };
+        for i in 0..len {
+            // SAFETY: slot `< len` is initialized and no longer shared;
+            // `assume_init_read` moves the Group out so we can drain its
+            // remaining mail before the Group drops. The slot is logically
+            // uninitialized afterward; we do not access it again.
+            let group = unsafe { (*self.groups[i].cell.get()).assume_init_read() };
+            // Record Finished for each Mail still buffered (un-demuxed).
+            // A worker that drained a group runs `take_or_close` until the
+            // buffer is empty and then closes it, so a fully-drained group
+            // yields an empty Vec here — the drained and dropped paths are
+            // mutually exclusive per mail. `record_finished` no-ops on
+            // `MailId::NONE`, so a lineage-less mail settles nothing (parity
+            // with the chassis-root push sentinel). No obligation guard to
+            // disarm: blob mail is a plain `Mail`, not an `OwnedDispatch`;
+            // arming happens at demux time inside `dispatch_one` or
+            // `route_mail`, never on the buffered `Mail` itself.
+            for mail in group.into_mails() {
+                self.mailer.record_finished(mail.mail_id, mail.root);
+            }
+            // `group` is already consumed by `into_mails` above.
         }
     }
 }
@@ -1048,12 +1063,14 @@ fn recruit_extra(outcome: &FlushOutcome, w: usize) -> usize {
 )]
 mod tests {
     use super::*;
+    use crate::chassis::settlement::SettlementRegistry;
+    use crate::handle_store::HandleStore;
     use crate::mail::Registry;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::mail::{KindId, MailRef};
     use crate::scheduler::{SeizeSeed, SlotState, SpinPark};
     use crate::test_util::fresh_substrate;
-    use aether_data::{KindDescriptor, SchemaCell, SchemaType};
+    use aether_data::{KindDescriptor, MailId, SchemaCell, SchemaType};
     use crossbeam_deque::{Injector, Steal};
     use std::sync::mpsc;
 
@@ -1454,6 +1471,85 @@ mod tests {
             drain_injector(&injector),
             0,
             "no work scheduled for an empty flush"
+        );
+    }
+
+    /// A mailer wired to a settlement registry on both seams — the same two
+    /// installs the chassis builder performs at boot. Mirrors
+    /// `chassis::inbox::tests::test_env`; blob tests that exercise the
+    /// drop-settles path need settlement observable.
+    fn settlement_env() -> (Arc<Registry>, Arc<Mailer>, Arc<SettlementRegistry>) {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.install_settlement_registry(Arc::clone(&settlement));
+        mailer
+            .trace_handle()
+            .install_settlement_registry(Arc::clone(&settlement));
+        (registry, mailer, settlement)
+    }
+
+    /// A `BlobWork` dropped with un-demuxed mail settles each mail's root so
+    /// traced waiters fire `Settled` rather than hanging to timeout.
+    #[test]
+    fn dropped_blob_settles_undemuxed_mail() {
+        let (_registry, mailer, settlement) = settlement_env();
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let recipient = MailboxId(0x200);
+        let producer = MailboxId(0x201);
+
+        let root = MailId::new(producer, 1);
+        mailer.record_sent_inflight(root);
+        let settle = settlement.subscribe_settlement(root);
+
+        // Build a blob and append one lineage-stamped mail — never drained.
+        let blob = BlobWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
+        let mail_id = MailId::new(producer, 11);
+        let mut index = FxHashMap::default();
+        blob.append_flush(
+            vec![
+                Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)
+                    .with_lineage(mail_id, root, None),
+            ],
+            &mut index,
+        );
+
+        // Drop the blob without draining: Drop should record Finished.
+        drop(blob);
+
+        settle
+            .recv()
+            .expect("dropped blob records Finished for un-demuxed mail");
+    }
+
+    /// A `BlobWork` dropped with a `MailId::NONE` mail settles nothing — the
+    /// no-op parity `record_finished` provides for lineage-less mail.
+    #[test]
+    fn dropped_blob_none_mail_id_settles_nothing() {
+        let (_registry, mailer, settlement) = settlement_env();
+        let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
+        let recipient = MailboxId(0x202);
+        let producer = MailboxId(0x203);
+
+        // A sentinel root to detect spurious settlement.
+        let guard_root = MailId::new(producer, 99);
+        mailer.record_sent_inflight(guard_root);
+        let guard_rx = settlement.subscribe_settlement(guard_root);
+
+        let blob = BlobWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
+        let mut index = FxHashMap::default();
+        // Mail with MailId::NONE — no lineage stamped.
+        blob.append_flush(
+            vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)],
+            &mut index,
+        );
+
+        drop(blob);
+
+        assert!(
+            guard_rx.try_recv().is_err(),
+            "MailId::NONE mail does not settle any root",
         );
     }
 
