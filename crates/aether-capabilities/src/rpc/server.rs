@@ -36,10 +36,11 @@ use aether_rpc::rpc::PeerKind;
 #[aether_actor::bridge(singleton)]
 mod server_native {
     use super::{PeerKind, RpcInboundReady, Settled};
+    use crate::engine::EngineServer;
     use crate::rpc::{
         Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
     };
-    use aether_actor::actor;
+    use aether_actor::{Actor, actor};
     use aether_codec::frame::FrameError;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
@@ -633,7 +634,7 @@ mod server_native {
                 // holds opaque MailboxId/KindId/bytes, with no compile-time
                 // sibling type to resolve through.
                 #[allow(clippy::disallowed_methods)]
-                let engine_cap = mailbox_id_from_name("aether.engine");
+                let engine_cap = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
                 let mail_id = ctx.send_envelope_as_root(
                     engine_cap,
                     <RouteEnvelope as Kind>::ID,

@@ -48,11 +48,12 @@ pub use proxy_native::{EngineProxyConfig, HeartbeatParams};
 #[aether_actor::bridge(instanced, one_per = "engine")]
 mod proxy_native {
     use super::{EngineHeartbeatTick, ForwardEnvelope, RpcInboundReady, TerminateEngine};
+    use crate::engine::EngineServer;
     use crate::rpc::{
         MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcError,
         WireFrame,
     };
-    use aether_actor::actor;
+    use aether_actor::{Actor, actor};
     use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
     use aether_kinds::{CallSettled, EngineAlive, EngineDied};
     use aether_substrate::Mail;
@@ -70,15 +71,15 @@ mod proxy_native {
 
     /// Mailbox of the engines cap (`aether.engine`) — where a proxy
     /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
-    /// issue 1339). A compile-time const from the well-known name, so no
-    /// host round-trip; matches the `RpcServerCapability`'s own
-    /// `mailbox_id_from_name("aether.engine")` route lookup.
+    /// issue 1339). A compile-time const derived from
+    /// `<EngineServer as Actor>::NAMESPACE`, so no host round-trip; matches
+    /// the `RpcServerCapability`'s own route lookup.
     // Well-known engines-cap route shared with `RpcServerCapability`'s own
     // lookup; a ctx-less free helper in the proxy bridge mod, so there is no
     // sibling `ctx.actor::<_>()` to resolve through.
     #[allow(clippy::disallowed_methods)]
     fn engine_cap_mailbox() -> MailboxId {
-        mailbox_id_from_name("aether.engine")
+        mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE)
     }
 
     /// Total time [`connect_proxy`] keeps retrying a refused dial when
