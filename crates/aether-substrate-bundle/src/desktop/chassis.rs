@@ -398,6 +398,10 @@ impl DesktopChassis {
                 }),
                 outbound: Arc::clone(&boot.outbound),
             }),
+            // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
+            // reads its reference image from the same `assets` root the fs
+            // cap serves, so the render cap loads it off the hot path.
+            assets_dir: Some(namespace_roots.assets.clone()),
             ..RenderConfig::default()
         };
 

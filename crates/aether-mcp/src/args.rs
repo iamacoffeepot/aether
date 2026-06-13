@@ -537,6 +537,24 @@ pub struct CaptureCheckSpec {
     pub background: Option<[u8; 3]>,
 }
 
+/// Optional reference-image similarity check for `capture_frame`. The
+/// render thread scores the captured RGBA against a decoded reference
+/// image with a normalised mean-absolute-error metric and returns
+/// `similarity_score` / `similarity_pass` alongside the PNG
+/// (iamacoffeepot/aether#1780).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureSimilaritySpec {
+    /// Filesystem namespace the reference image lives in (the same
+    /// namespaces `aether.fs` exposes, e.g. `"assets"`).
+    pub namespace: String,
+    /// Path to the reference image within `namespace`.
+    pub reference_path: String,
+    /// Maximum normalised MAE in `[0.0, 1.0]` that still counts as a
+    /// match: `similarity_pass` is `true` when the score is `<=` this.
+    /// `0.0` demands an exact match; `1.0` passes any frame.
+    pub threshold: f32,
+}
+
 /// `capture_frame` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CaptureFrameArgs {
@@ -556,6 +574,12 @@ pub struct CaptureFrameArgs {
     /// PNG-only capture (iamacoffeepot/aether#1777).
     #[serde(default)]
     pub checks: Vec<CaptureCheckSpec>,
+    /// Optional reference-image similarity check scored on the captured
+    /// frame's raw RGBA, returned as `similarity_score` /
+    /// `similarity_pass`. Omit for no comparison
+    /// (iamacoffeepot/aether#1780).
+    #[serde(default)]
+    pub similarity: Option<CaptureSimilaritySpec>,
 }
 
 // `SubmitDagArgs` lives in its own module so a *scoped*

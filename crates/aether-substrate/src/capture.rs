@@ -68,6 +68,23 @@ pub struct PendingCapture {
     /// RGBA after readback and lands the verdict on the reply
     /// (iamacoffeepot/aether#1777). Empty when no verdict was requested.
     pub checks: Vec<aether_kinds::FrameCheck>,
+    /// Pre-fetched reference PNG for a similarity check
+    /// (iamacoffeepot/aether#1780). The cap handler reads the file from
+    /// the assets directory before parking, keeping I/O off the render
+    /// thread. `None` when no `similarity` was requested.
+    pub reference: Option<ReferenceCapture>,
+}
+
+/// Pre-fetched reference image for a similarity check
+/// (iamacoffeepot/aether#1780). The `RenderCapability` capture handler
+/// reads the reference PNG from the assets directory before dispatching
+/// to the render thread, keeping filesystem I/O off the render thread.
+/// The render thread decodes the PNG bytes and runs the MAE comparison.
+pub struct ReferenceCapture {
+    /// Raw PNG bytes read from the assets directory.
+    pub png_bytes: Vec<u8>,
+    /// Maximum normalised MAE `[0.0, 1.0]` that counts as a pass.
+    pub threshold: f32,
 }
 
 /// Single-slot queue. Cheaply cloneable (wraps an `Arc`), shared
@@ -174,6 +191,7 @@ mod tests {
             after_mails: Vec::new(),
             pre_settlements: Vec::new(),
             checks: Vec::new(),
+            reference: None,
         }
     }
 

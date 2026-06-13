@@ -215,6 +215,7 @@ impl TestBenchChassis {
         let render_config = RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds: observed_kinds.clone(),
+            assets_dir: None,
             capture_backend: Some(CaptureBackend {
                 queue: capture_queue,
                 wake: Arc::new(move || {

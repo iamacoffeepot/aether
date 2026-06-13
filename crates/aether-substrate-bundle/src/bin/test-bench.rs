@@ -252,7 +252,11 @@ fn run_frame(
                 }
             }
             let result = pre_failed.map_or_else(
-                || CaptureFrameResult::from(gpu.render_and_capture(&req.checks)),
+                || {
+                    CaptureFrameResult::from(
+                        gpu.render_and_capture(&req.checks, req.reference.as_ref()),
+                    )
+                },
                 |error| CaptureFrameResult::Err { error },
             );
             for mail in req.after_mails {

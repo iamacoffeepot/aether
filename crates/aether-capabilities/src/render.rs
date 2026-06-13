@@ -56,6 +56,8 @@ pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 #[aether_actor::bridge(singleton, feature = "render-native")]
 mod native {
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
@@ -64,10 +66,10 @@ mod native {
     use aether_data::Kind;
     use aether_kinds::{
         CaptureFrameResult, CreateTextureResult, DRAW_TRIANGLE_BYTES, QuadScale, QuadSpace,
-        SolidQuad, TexturedQuad,
+        SimilarityCheck, SolidQuad, TexturedQuad,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::capture::{CaptureQueue, PendingCapture};
+    use aether_substrate::capture::{CaptureQueue, PendingCapture, ReferenceCapture};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::helpers::resolve_bundle;
     use aether_substrate::mail::mailer::Mailer;
@@ -115,6 +117,14 @@ mod native {
         /// distinct `HeadlessRenderCapability` instead, so this `None`
         /// branch is exercised only in the test fixtures here.
         pub capture_backend: Option<CaptureBackend>,
+        /// Resolved path for the `"assets"` namespace, used by the
+        /// `capture_frame` handler to read reference images for
+        /// similarity checks (iamacoffeepot/aether#1780). The handler
+        /// reads the reference PNG synchronously (on the cap dispatcher
+        /// thread, not the render thread) and passes the raw bytes
+        /// through `PendingCapture.reference`. `None` disables
+        /// similarity checks with a descriptive `Err` reply.
+        pub assets_dir: Option<PathBuf>,
     }
 
     impl Default for RenderConfig {
@@ -123,6 +133,7 @@ mod native {
                 vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
                 observed_kinds: None,
                 capture_backend: None,
+                assets_dir: None,
             }
         }
     }
@@ -524,12 +535,32 @@ mod native {
             // early-return branches above reply synchronously inside this
             // handler's own dispatch window, so they leave the inbound for
             // the dispatcher's tail to settle and don't take the guard.
+
+            // iamacoffeepot/aether#1780: read the reference PNG synchronously
+            // on the cap dispatcher thread (not the render thread) so all
+            // filesystem I/O stays off the render hot path. The render thread
+            // only runs the CPU-side MAE comparison against the pre-fetched
+            // bytes.
+            let reference = match resolve_reference(
+                self.config.assets_dir.as_deref(),
+                mail.similarity.as_ref(),
+            ) {
+                Ok(reference) => reference,
+                Err(error) => {
+                    backend
+                        .outbound
+                        .send_reply(sender, &CaptureFrameResult::Err { error });
+                    return;
+                }
+            };
+
             let inbound = ctx.take_inbound();
             let pending = PendingCapture {
                 reply: inbound,
                 after_mails: after,
                 pre_settlements,
                 checks: mail.checks,
+                reference,
             };
             // A rejected request (`Err`) is handed back so its retained
             // guard can carry the synchronous `Err` reply before it drops
@@ -747,6 +778,56 @@ mod native {
                     space: mail.space,
                     quads,
                 });
+        }
+    }
+
+    /// Resolve the optional reference image for a `#1780` similarity
+    /// check, reading it synchronously on the cap dispatcher thread so all
+    /// filesystem I/O stays off the render hot path. `Ok(None)` when no
+    /// check was requested; `Err(message)` when the reference can't be
+    /// used (unsupported namespace, no assets dir, forbidden path, or an
+    /// unreadable file) — the caller replies that message as
+    /// `CaptureFrameResult::Err`.
+    fn resolve_reference(
+        assets_dir: Option<&Path>,
+        similarity: Option<&SimilarityCheck>,
+    ) -> Result<Option<ReferenceCapture>, String> {
+        let Some(sim) = similarity else {
+            return Ok(None);
+        };
+        // Only the "assets" namespace is supported in v1.
+        if sim.namespace != "assets" {
+            return Err(format!(
+                "capture_frame similarity: namespace {:?} is not supported in v1 — use \"assets\"",
+                sim.namespace,
+            ));
+        }
+        let Some(assets_dir) = assets_dir else {
+            return Err(
+                "capture_frame similarity: no assets directory is configured on this \
+                        chassis; similarity checks are unavailable"
+                    .to_owned(),
+            );
+        };
+        // Reject path components that would escape the assets root
+        // (mirrors `LocalFileAdapter::resolve`).
+        if sim.reference_path.starts_with('/') || sim.reference_path.split('/').any(|c| c == "..") {
+            return Err(format!(
+                "capture_frame similarity: reference_path {:?} is forbidden (contains '..' or \
+                 starts with '/')",
+                sim.reference_path,
+            ));
+        }
+        let full_path = assets_dir.join(&sim.reference_path);
+        match fs::read(&full_path) {
+            Ok(bytes) => Ok(Some(ReferenceCapture {
+                png_bytes: bytes,
+                threshold: sim.threshold,
+            })),
+            Err(e) => Err(format!(
+                "capture_frame similarity: could not read reference {:?}: {e}",
+                sim.reference_path,
+            )),
         }
     }
 

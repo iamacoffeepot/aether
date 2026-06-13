@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use aether_capabilities::{RenderGpu, RenderHandles};
 use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{self, RenderError, encode_png, vertex_buffer_layout};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -27,10 +28,12 @@ use std::env;
 use std::iter;
 use std::slice;
 
-/// PNG bytes plus the optional [`FrameVerdict`] `render_and_capture`
-/// produces — the verdict is `Some` iff the request carried `checks`
-/// (iamacoffeepot/aether#1777).
-type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>), String>;
+/// PNG bytes, optional [`FrameVerdict`], optional similarity score, and
+/// optional similarity pass that `render_and_capture` produces
+/// (iamacoffeepot/aether#1777, #1780). `verdict` is `Some` iff the
+/// request carried `checks`; `similarity_score` / `similarity_pass` are
+/// `Some` iff the request carried `similarity`.
+type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
 
 /// Wireframe-overlay shader: same vertex layout as the main shader so
 /// the pipeline shares the existing vertex buffer. The fragment stage
@@ -316,29 +319,39 @@ impl Gpu {
     }
 
     pub fn render(&mut self) {
-        let _ = self.render_impl(None);
+        let _ = self.render_impl(None, None);
     }
 
     /// Variant of `render` that also copies the offscreen texture into
     /// a readback buffer, maps it, and returns an encoded PNG plus an
     /// optional [`FrameVerdict`] scored on the same raw RGBA (present
-    /// iff `checks` is non-empty; iamacoffeepot/aether#1777). On any
-    /// capture-path failure, returns `Err(reason)`; the frame itself
-    /// still renders and (if the surface is available) presents, since
-    /// capture is a side channel.
-    pub fn render_and_capture(&mut self, checks: &[FrameCheck]) -> CaptureOutcome {
-        self.render_impl(Some(checks))
+    /// iff `checks` is non-empty, iamacoffeepot/aether#1777) and an
+    /// optional similarity score (present iff `reference` is `Some`,
+    /// iamacoffeepot/aether#1780). On any capture-path failure, returns
+    /// `Err(reason)`; the frame itself still renders and (if the surface
+    /// is available) presents, since capture is a side channel.
+    pub fn render_and_capture(
+        &mut self,
+        checks: &[FrameCheck],
+        reference: Option<&ReferenceCapture>,
+    ) -> CaptureOutcome {
+        self.render_impl(Some(checks), reference)
             .ok_or_else(|| "capture did not produce a result".to_owned())?
     }
 
     /// Draw the current accumulator vertices into the offscreen target
     /// with the latest camera view-proj, optionally encode a capture
     /// copy, then best-effort blit to the swapchain and present.
-    /// Returns `Some(Ok((png, verdict)))` / `Some(Err(reason))` when
-    /// `capture` is `Some(checks)`; `None` when capture wasn't requested
-    /// or the capture path couldn't allocate. Surface unavailability
-    /// does *not* prevent capture — offscreen is the source of truth.
-    fn render_impl(&mut self, capture: Option<&[FrameCheck]>) -> Option<CaptureOutcome> {
+    /// Returns `Some(Ok((png, verdict, score, pass)))` /
+    /// `Some(Err(reason))` when `capture` is `Some(checks)`; `None`
+    /// when capture wasn't requested or the capture path couldn't
+    /// allocate. Surface unavailability does *not* prevent capture —
+    /// offscreen is the source of truth.
+    fn render_impl(
+        &mut self,
+        capture: Option<&[FrameCheck]>,
+        reference: Option<&ReferenceCapture>,
+    ) -> Option<CaptureOutcome> {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
 
@@ -439,19 +452,26 @@ impl Gpu {
             tex.present();
         }
 
-        // Map the readback once; encode the PNG and (when checks were
-        // requested) score the verdict from the same de-padded RGBA so
-        // the verdict scores the exact bytes the PNG carries
-        // (iamacoffeepot/aether#1777). `capture_meta` is `Some` iff
-        // `capture` is `Some`, so `unwrap_or(&[])` only papers over an
-        // unreachable case.
+        // Map the readback once; encode the PNG, (when checks were
+        // requested) score the verdict, and (when a reference was
+        // provided) score the MAE similarity — all from the same
+        // de-padded RGBA so every check sees the exact bytes the PNG
+        // carries (iamacoffeepot/aether#1777, #1780).
+        // `capture_meta` is `Some` iff `capture` is `Some`, so
+        // `unwrap_or(&[])` only papers over an unreachable case.
         capture_meta.map(|meta| {
             let rgba = self.render_handles.map_capture_rgba(&meta)?;
             let png = encode_png(&rgba, meta.width, meta.height)?;
+
+            // Score the similarity check before `run_checks` consumes
+            // `rgba` (#1780). `score_similarity` clones the slice it needs.
+            let (similarity_score, similarity_pass) =
+                visual::score_similarity(&rgba, meta.width, meta.height, reference)?;
+
             let checks = capture.unwrap_or(&[]);
             let verdict = (!checks.is_empty())
                 .then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
-            Ok((png, verdict))
+            Ok((png, verdict, similarity_score, similarity_pass))
         })
     }
 

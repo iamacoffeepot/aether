@@ -9,16 +9,19 @@ use std::sync::Arc;
 
 use aether_capabilities::{RenderGpu, RenderHandles};
 use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{RenderError, encode_png};
 
 use crate::visual;
 pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
 use std::iter;
 
-/// PNG bytes plus the optional [`FrameVerdict`] `render_and_capture`
-/// produces — the verdict is `Some` iff the request carried `checks`
-/// (iamacoffeepot/aether#1777).
-type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>), String>;
+/// PNG bytes, optional [`FrameVerdict`], optional similarity score, and
+/// optional similarity pass that `render_and_capture` produces. The
+/// verdict is `Some` iff the request carried `checks`
+/// (iamacoffeepot/aether#1777); the similarity score / pass are `Some`
+/// iff the request carried a `reference` (iamacoffeepot/aether#1780).
+type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-
@@ -135,7 +138,11 @@ impl Gpu {
     /// iamacoffeepot/aether#847 retired the historical `nudge_tick`
     /// boilerplate that worked around the prior consume-and-discard
     /// behaviour.
-    pub fn render_and_capture(&mut self, checks: &[FrameCheck]) -> CaptureOutcome {
+    pub fn render_and_capture(
+        &mut self,
+        checks: &[FrameCheck],
+        reference: Option<&ReferenceCapture>,
+    ) -> CaptureOutcome {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -159,8 +166,12 @@ impl Gpu {
         // bytes the PNG carries (iamacoffeepot/aether#1777).
         let rgba = self.render_handles.map_capture_rgba(&meta)?;
         let png = encode_png(&rgba, meta.width, meta.height)?;
+        // Score the similarity check before `run_checks` consumes `rgba`
+        // (iamacoffeepot/aether#1780). `score_similarity` clones internally.
+        let (similarity_score, similarity_pass) =
+            visual::score_similarity(&rgba, meta.width, meta.height, reference)?;
         let verdict =
             (!checks.is_empty()).then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
-        Ok((png, verdict))
+        Ok((png, verdict, similarity_score, similarity_pass))
     }
 }

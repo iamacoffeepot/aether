@@ -855,6 +855,9 @@ fn solid_quad_draws_screen_space_rect() {
 /// scores them, but computed in the render thread.
 #[test]
 #[allow(clippy::cast_precision_loss)]
+// A single long end-to-end scenario (build → draw → capture → assert each
+// reduction); splitting it would scatter the one linear story.
+#[allow(clippy::too_many_lines)]
 fn capture_frame_checks_return_substrate_verdict() {
     if !require_wgpu_only() {
         return;
@@ -901,13 +904,14 @@ fn capture_frame_checks_return_substrate_verdict() {
                         mk_check(FrameReduction::Centroid),
                         mk_check(FrameReduction::BoundingBox),
                     ],
+                    similarity: None,
                 },
             ),
         )])
         .expect("send_and_await(CaptureFrame) with checks");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let verdict = match reply {
-        CaptureFrameResult::Ok { png, verdict } => {
+        CaptureFrameResult::Ok { png, verdict, .. } => {
             assert!(
                 png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                 "the PNG still rides back alongside the verdict",
