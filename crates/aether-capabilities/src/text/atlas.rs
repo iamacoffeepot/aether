@@ -8,8 +8,14 @@
 //! sub-rect per newly-placed glyph via `update_texture` — so a glyph
 //! costs an upload the first frame it appears and is a cache hit after.
 //!
-//! When the atlas fills, further new glyphs log-and-drop for the session
-//! (eviction is an ADR-0105 non-goal).
+//! When the atlas fills, `is_full()` returns `true`. The text cap calls
+//! `reset()` at the top of the next `draw` to zero the buffer, clear the
+//! glyph cache, and reset the shelf cursor — then re-rasterizes the
+//! requested glyphs into the fresh atlas. One full-rect `update_texture`
+//! re-syncs the GPU side; every glyph is a cache miss that frame and each
+//! emits its per-glyph upload, exactly as on first draw. The result is at
+//! most one frame of missing overflow glyphs (on the saturating frame),
+//! then full rendering resumes.
 
 use std::collections::HashMap;
 
@@ -55,8 +61,9 @@ pub enum GlyphSlot {
     /// The glyph has no coverage (a space, or a zero-area raster) —
     /// nothing to draw, advance the pen and move on.
     Empty,
-    /// The atlas is full and could not place this glyph — dropped for the
-    /// session.
+    /// The atlas is full and could not place this glyph. The text cap
+    /// resets the atlas at the top of the next draw so the glyph can be
+    /// re-placed then.
     Full,
 }
 
@@ -103,6 +110,27 @@ impl Atlas {
     /// The full RGBA8 buffer — uploaded once via `create_texture`.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// `true` once any glyph failed to pack into the atlas. The text cap
+    /// checks this before each draw and calls [`Self::reset`] to free
+    /// space for the next frame's glyphs.
+    pub fn is_full(&self) -> bool {
+        self.full
+    }
+
+    /// Zero the pixel buffer, clear the glyph cache, and reset the shelf
+    /// cursor so the atlas can accept new glyphs again. The text cap
+    /// re-syncs the GPU side by emitting one full-rect `update_texture`
+    /// immediately after, then re-rasterizes the frame's glyphs into the
+    /// fresh atlas as cache misses.
+    pub fn reset(&mut self) {
+        self.pixels.fill(0);
+        self.cache.clear();
+        self.shelf_x = 0;
+        self.shelf_y = 0;
+        self.shelf_height = 0;
+        self.full = false;
     }
 
     /// Cheap cache probe: the cached slot for `key`, or `None` if the
@@ -313,5 +341,36 @@ mod tests {
             }
         }
         assert!(saw_full, "the atlas should report Full once it cannot grow");
+    }
+
+    #[test]
+    fn reset_clears_full_flag_and_accepts_new_glyphs() {
+        let mut atlas = Atlas::new();
+        // Fill the atlas until it signals full.
+        let band_height = 64u32;
+        let coverage = vec![255u8; (ATLAS_SIZE * band_height) as usize];
+        for glyph_index in 0..32u16 {
+            match atlas.get_or_insert(key(glyph_index), ATLAS_SIZE, band_height, &coverage) {
+                GlyphSlot::Placed { .. } => {}
+                GlyphSlot::Full => break,
+                GlyphSlot::Empty => panic!("a full band is not empty"),
+            }
+        }
+        assert!(atlas.is_full(), "atlas must be full before reset");
+
+        atlas.reset();
+
+        assert!(!atlas.is_full(), "is_full must be false after reset");
+        // A fresh insert that previously could not place must now land at the
+        // origin — the shelf cursor reset to (0, 0).
+        let small_coverage = vec![255u8; (4 * 4) as usize];
+        match atlas.get_or_insert(key(200), 4, 4, &small_coverage) {
+            GlyphSlot::Placed { entry, uploaded } => {
+                assert!(uploaded, "post-reset glyph must report an upload");
+                assert_eq!((entry.x, entry.y), (0, 0), "shelf cursor reset to origin");
+            }
+            GlyphSlot::Full => panic!("reset atlas must accept new glyphs"),
+            GlyphSlot::Empty => panic!("4×4 glyph is not empty"),
+        }
     }
 }

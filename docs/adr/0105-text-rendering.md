@@ -35,11 +35,11 @@ A native capability with no GPU access — it only sends mail.
 - `aether.text.load_font { namespace, path }` → `aether.text.load_font_result` (`Ok { font_id, name, resident_bytes }` / `Err { namespace, path, error }`). Mirrors `aether.audio.load_instrument`: park the request, fetch bytes via `aether.fs.read`, correlate on `aether.fs.read_result`, parse and rasterize off the hot path in a task handler, register under a session-scoped `font_id`.
 - `aether.text.draw { font_id, text, size_pixels, color, space }` — fire-and-forget, immediate-mode per frame. The capability lays out glyphs, rasterizes any unseen `(font_id, glyph, size)` into its atlas (emitting one `update_texture`), and sends the quad batch to `aether.render` the same tick. `color` is RGBA; `space` is the render-surface discriminant above, passed through.
 
-Rasterization uses `fontdue` (pure-Rust TTF parse + rasterize + horizontal layout). The atlas is a single shelf-packed RGBA8 texture with glyph coverage in alpha; when it fills, further new glyphs log and drop for the session.
+Rasterization uses `fontdue` (pure-Rust TTF parse + rasterize + horizontal layout). The atlas is a single shelf-packed RGBA8 texture with glyph coverage in alpha. When the atlas fills, the cap resets it at the top of the next `draw` (zero pixels, clear cache, reset shelf cursor) and re-syncs the GPU side with one full-rect `update_texture`. Every glyph that frame is a cache miss and re-uploads exactly as on first draw. The cost is at most one frame of missing overflow glyphs on the saturating frame; rendering fully recovers the next frame. Atlas eviction was a v1 non-goal when the ADR was written; the whole-atlas reset replaced it without a kind-surface change.
 
 ### Non-goals for v1
 
-Shaping, BiDi, and emoji; SDF/MSDF atlases; atlas eviction; retained text objects; in-plane world text that skews with the camera (a `world_size` variant can extend `scale` later). All sit behind the kind surface, so any of them can replace the internals without a vocabulary change.
+Shaping, BiDi, and emoji; SDF/MSDF atlases; retained text objects; in-plane world text that skews with the camera (a `world_size` variant can extend `scale` later). All sit behind the kind surface, so any of them can replace the internals without a vocabulary change.
 
 ## Consequences
 

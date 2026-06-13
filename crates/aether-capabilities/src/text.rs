@@ -20,6 +20,13 @@
 //! `create_texture_result` reply onto the cap's own mailbox. Until the id
 //! lands the cap draws nothing; immediate mode resends every frame, so the
 //! string appears the moment the texture exists.
+//!
+//! When the atlas fills, the cap resets it at the top of the next `draw`:
+//! zeros the pixel buffer, clears the glyph cache, resets the shelf
+//! cursor, and emits one full-rect `update_texture` to re-sync the GPU
+//! side. Every glyph for that frame is then a cache miss and re-uploads
+//! normally. The cost is at most one frame of missing overflow glyphs on
+//! the saturating frame; the next frame fully recovers.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the decoded
@@ -160,6 +167,22 @@ mod native {
                 width: entry.width,
                 height: entry.height,
                 pixels: self.atlas.rect_rgba(entry),
+            };
+            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &update);
+        }
+
+        /// Re-sync the GPU side after an atlas reset by uploading the full
+        /// zeroed buffer. This ensures the render cap's staged pixels are a
+        /// clean mirror of the reset CPU atlas before per-glyph uploads layer
+        /// on top. Uses the same `update_texture` path as `upload_glyph`.
+        fn resync_atlas(&self, ctx: &mut NativeCtx<'_>, texture_id: u32) {
+            let update = UpdateTexture {
+                texture_id,
+                x: 0,
+                y: 0,
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                pixels: self.atlas.pixels().to_vec(),
             };
             let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &update);
         }
@@ -332,9 +355,13 @@ mod native {
         /// Fire-and-forget. Rasterizes any unseen glyph into the atlas
         /// (one `update_texture` each) and sends the `draw_textured_quads`
         /// batch to `aether.render` the same tick. An unknown `font_id`
-        /// warn-drops; a full atlas drops the overflow glyphs. The first
-        /// `draw` lazily creates the atlas texture and draws nothing until
-        /// the reply lands — resend every frame (immediate-mode contract).
+        /// warn-drops. When the atlas is full it is reset at the top of this
+        /// call: the GPU side is re-synced with one full-rect `update_texture`
+        /// and all glyphs for this frame are re-rasterized as cache misses.
+        /// The cost is at most one frame of partial text on the saturating
+        /// frame; the next frame recovers fully. The first `draw` lazily
+        /// creates the atlas texture and draws nothing until the reply lands —
+        /// resend every frame (immediate-mode contract).
         #[handler]
         fn on_draw_text(&mut self, ctx: &mut NativeCtx<'_>, mail: DrawText) {
             let Some(font) = self.fonts.get(&mail.font_id).cloned() else {
@@ -354,6 +381,20 @@ mod native {
                 self.ensure_atlas_texture(ctx);
                 return;
             };
+
+            // Reset the atlas when full so the frame's glyphs can re-pack
+            // from a clean slate. The render cap's staged buffer is re-synced
+            // with one full-rect upload; per-glyph uploads follow as cache
+            // misses. This costs one frame of partial text (the overflow
+            // glyphs missing on the saturating frame) and then fully recovers.
+            if self.atlas.is_full() {
+                tracing::info!(
+                    target: "aether_substrate::text",
+                    "glyph atlas full; resetting for next frame",
+                );
+                self.atlas.reset();
+                self.resync_atlas(ctx, texture_id);
+            }
 
             let size = mail.size_pixels;
             // Quantize the size for the glyph cache key — two draws at the
@@ -393,13 +434,11 @@ mod native {
                         }
                         quads.push(glyph_quad(&metrics, pen_x, baseline, &entry, mail.color));
                     }
-                    GlyphSlot::Empty => {}
-                    GlyphSlot::Full => {
-                        tracing::warn!(
-                            target: "aether_substrate::text",
-                            "glyph atlas full; dropping glyph for the session",
-                        );
-                    }
+                    // Empty: no pixels, just advance the pen.
+                    // Full: the atlas saturated during this frame's layout pass;
+                    // the reset fires at the top of the next draw so this
+                    // glyph will re-pack and render then.
+                    GlyphSlot::Empty | GlyphSlot::Full => {}
                 }
                 pen_x += metrics.advance_width;
             }
@@ -708,6 +747,72 @@ mod native {
             );
             // A printable glyph rasterizes once: first an update_texture for
             // the new glyph, then the draw_textured_quads batch.
+            assert_next_send_kind::<UpdateTexture>(&binding, &rx);
+            assert_next_send_kind::<DrawTexturedQuads>(&binding, &rx);
+        }
+
+        #[test]
+        fn draw_after_atlas_full_resets_and_renders_glyph() {
+            let mut cap = TextCapability::new();
+            cap.fonts.insert(0, Arc::new(test_font()));
+            cap.atlas_create_inflight = true;
+            let (binding, rx) = ctx_binding();
+            {
+                let mut ctx =
+                    NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+                cap.on_create_texture_result(&mut ctx, CreateTextureResult::Ok { texture_id: 3 });
+            }
+            assert_eq!(cap.atlas_texture_id, Some(3));
+
+            // Fill the atlas by directly calling get_or_insert with wide bands
+            // until the atlas reports full. `ATLAS_SIZE`, `GlyphKey`, and
+            // `GlyphSlot` are in scope via `use super::*` (imported from
+            // `mod native`'s own `use super::atlas::{…}` line).
+            {
+                let band_height = 64u32;
+                let coverage = vec![255u8; (ATLAS_SIZE * band_height) as usize];
+                for glyph_index in 0..32u16 {
+                    let key = GlyphKey {
+                        font_id: 99,
+                        glyph_index,
+                        size_pixels: 64,
+                    };
+                    match cap
+                        .atlas
+                        .get_or_insert(key, ATLAS_SIZE, band_height, &coverage)
+                    {
+                        GlyphSlot::Placed { .. } => {}
+                        GlyphSlot::Full => break,
+                        GlyphSlot::Empty => panic!("band coverage is not empty"),
+                    }
+                }
+            }
+            assert!(cap.atlas.is_full(), "atlas must be full before draw");
+
+            // A draw now: the cap should reset the atlas (emitting a full-rect
+            // update_texture for the resync), rasterize the glyph (another
+            // update_texture), then send draw_textured_quads. The glyph renders
+            // rather than drops — proving the reset freed space.
+            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_draw_text(
+                &mut ctx,
+                DrawText {
+                    font_id: 0,
+                    text: "A".to_owned(),
+                    size_pixels: 48.0,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    space: QuadSpace::Screen,
+                },
+            );
+
+            assert!(
+                !cap.atlas.is_full(),
+                "atlas must be clear after reset-triggered draw"
+            );
+
+            // The full-rect resync and the per-glyph upload both arrive as
+            // UpdateTexture; the quad batch follows as DrawTexturedQuads.
+            assert_next_send_kind::<UpdateTexture>(&binding, &rx);
             assert_next_send_kind::<UpdateTexture>(&binding, &rx);
             assert_next_send_kind::<DrawTexturedQuads>(&binding, &rx);
         }
