@@ -102,5 +102,13 @@ crate-type = ["cdylib"]
 name = "ui_widget"
 crate-type = ["cdylib"]
 
+# Issue 1762: reference HTTP handler fixture for the serving-http e2e
+# test and recipe. Handles `aether.http.server.request` with a path
+# match (/ → 200, else 404) and replies `aether.http.server.response`.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/http_handler.wasm
+[[example]]
+name = "http_handler"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true
