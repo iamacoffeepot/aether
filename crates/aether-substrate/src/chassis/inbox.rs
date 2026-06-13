@@ -247,6 +247,30 @@ pub struct InboundMail {
 }
 
 impl InboundMail {
+    /// #1757: build a guard for a native dispatcher's *retained* inbound
+    /// (via [`NativeCtx::take_inbound`](crate::actor::native::ctx::NativeCtx::take_inbound)).
+    /// Mirrors [`SettlingInbox::wrap`], but the mailer / claimed mailbox /
+    /// reply-lineage are passed explicitly because the native dispatcher
+    /// owns those on its
+    /// [`NativeBinding`](crate::actor::native::NativeBinding) rather than
+    /// on a `SettlingInbox`. The returned guard settles the inbound's
+    /// chain on `Drop` exactly as a sink-face guard does, so a deferred
+    /// reply joins the same chain the dispatcher would otherwise have
+    /// closed at its tail.
+    pub(crate) fn from_dispatched(
+        env: Envelope,
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+        reply_counter: ReplyLineage,
+    ) -> Self {
+        Self {
+            env,
+            mailer,
+            self_mailbox,
+            reply_counter,
+        }
+    }
+
     /// The mail's kind id.
     #[must_use]
     pub fn kind(&self) -> KindId {
@@ -332,6 +356,17 @@ impl Drop for InboundMail {
     }
 }
 
+/// #1757: a retained [`InboundMail`] crosses to a worker thread for a
+/// deferred reply (the desktop capture readback path retains the guard in
+/// one handler turn and `reply`s + drops it from the render thread), so it
+/// must be `Send`. The compile is the assertion — if a future field makes
+/// `InboundMail` `!Send`, this stops compiling rather than failing at the
+/// `take_inbound` move site.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<InboundMail>();
+};
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -340,6 +375,8 @@ impl Drop for InboundMail {
 mod tests {
     use super::*;
 
+    use crate::actor::native::binding::NativeBinding;
+    use crate::actor::native::ctx::NativeCtx;
     use crate::chassis::settlement::SettlementRegistry;
     use crate::handle_store::HandleStore;
     use crate::mail::MailRef;
@@ -576,5 +613,142 @@ mod tests {
             "reply id is stamped with the claimed mailbox",
         );
         reply_env.discharge();
+    }
+
+    /// #1757: `NativeCtx::take_inbound` moves the *single* dispatched
+    /// envelope out of the ctx, so the dispatcher's settlement tail
+    /// (`take_raw_inbound`) sees `None` and does not also discharge it.
+    /// One envelope in one place — the detector is `Option::is_some`, so a
+    /// double-settle is structurally unrepresentable. A `MailId::NONE`
+    /// inbound carries no obligation, so the guard's drop is a clean
+    /// no-op; this asserts the ownership mechanics, not settlement.
+    #[test]
+    fn take_inbound_moves_the_single_envelope_out_of_the_ctx() {
+        let (_registry, mailer, _settlement) = test_env();
+        let id = MailboxId(0x1757_0001);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
+        let env = armed_env(id, MailId::NONE, MailId::NONE, Source::NONE);
+        let mut ctx =
+            NativeCtx::with_inbound(&binding, Source::NONE, MailId::NONE, MailId::NONE, env);
+
+        let guard = ctx.take_inbound();
+        assert!(
+            ctx.take_raw_inbound().is_none(),
+            "take_inbound moved the single envelope out — the tail sees None and never re-settles",
+        );
+        // NONE obligation: dropping the retained guard records nothing and
+        // never panics (parity with `record_finished`'s NONE no-op).
+        drop(guard);
+    }
+
+    /// #1757 / ADR-0094: single ownership must not weaken the leak
+    /// detector. An armed inbound left in the ctx and dropped without
+    /// being taken (the dispatcher forgot to settle it, or no handler
+    /// retained it) still trips the obligation guard — settlement is not a
+    /// silent self-disarming no-op. Debug-only (the guard is compiled out
+    /// in release).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "settlement-obligation leak")]
+    fn undispatched_armed_inbound_panics_on_ctx_drop() {
+        let (_registry, mailer, _settlement) = test_env();
+        let id = MailboxId(0x1757_0002);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
+        let mail_id = MailId::new(id, 7);
+        let env = armed_env(id, mail_id, mail_id, Source::NONE);
+        let ctx = NativeCtx::with_inbound(&binding, Source::NONE, mail_id, mail_id, env);
+        // Drop the ctx without taking the inbound — the single armed
+        // envelope is dropped *inside* the ctx, so its ADR-0094 guard
+        // panics rather than leaking.
+        drop(ctx);
+    }
+
+    mod heavy {
+        use super::*;
+        use std::thread;
+
+        /// #1757: the headline gate. A handler defers its reply by
+        /// retaining the inbound guard (`take_inbound`), the dispatcher's
+        /// tail sees `None` and does not settle, and the reply is sent
+        /// across a worker thread. The chain settles **exactly once** —
+        /// not prematurely (the retained guard holds the inbound's
+        /// `Finished` until after the reply's `Sent`, ADR-0080 §6) and not
+        /// twice (single ownership: only the retained guard ever settles
+        /// this inbound). `mod heavy` because the cross-thread settlement
+        /// needs timely progress.
+        #[test]
+        fn deferred_reply_across_thread_settles_exactly_once() {
+            let (registry, mailer, settlement) = test_env();
+            let id = MailboxId(0x1757_0010);
+            let reply_target = MailboxId(0x1757_0011);
+
+            // Register a reply target so the deferred reply routes
+            // somewhere we can pick it up and finish it.
+            let (rtx, rrx) = mpsc::channel::<Envelope>();
+            let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+                let _ = rtx.send(d);
+            });
+            let reply_target = registry
+                .try_register_inbox_with_id(reply_target, "test.inbox.deferred_target", handler)
+                .expect("register reply target");
+
+            let root = MailId::new(id, 1);
+            mailer.record_sent_inflight(root);
+            let settle = settlement.subscribe_settlement(root);
+
+            let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
+            let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
+            let env = armed_env(id, MailId::new(id, 21), root, sender);
+            let mut ctx = NativeCtx::with_inbound(&binding, sender, MailId::new(id, 21), root, env);
+
+            // Handler defers: retain the guard, then the dispatcher tail
+            // observes the inbound was taken (single ownership).
+            let guard = ctx.take_inbound();
+            assert!(
+                ctx.take_raw_inbound().is_none(),
+                "the handler retained the single envelope — the tail must not also settle it",
+            );
+            drop(ctx);
+
+            // Reply + settle the inbound from a worker thread (the capture
+            // readback shape). `InboundMail: Send`, so the guard crosses.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test infra thread below the actor/mail layer — models the off-thread deferred reply"
+            )]
+            let worker = thread::spawn(move || {
+                assert!(
+                    guard.reply(&LifecycleAdvanceComplete {
+                        completed: 1,
+                        next: 42,
+                    }),
+                    "deferred reply routed to the component target",
+                );
+                // Dropping the guard records the inbound's `Finished`
+                // (after the reply's `Sent`) — the chain stays open until
+                // the reply itself finishes.
+                drop(guard);
+            });
+            worker.join().expect("worker thread");
+
+            assert!(
+                settle.try_recv().is_err(),
+                "the reply's Sent holds the chain open — no premature settle",
+            );
+
+            // Finish the reply the way its eventual recipient's dispatcher
+            // would; only now does the root settle — exactly once.
+            let reply_env = rrx.recv().expect("reply routed to the target inbox");
+            let reply_id = reply_env.mail_id;
+            reply_env.discharge();
+            mailer.record_finished(reply_id, root);
+            settle
+                .recv()
+                .expect("root settles once the deferred reply finishes");
+            assert!(
+                settle.try_recv().is_err(),
+                "the chain settles exactly once — no double-settle",
+            );
+        }
     }
 }

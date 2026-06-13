@@ -214,10 +214,6 @@ where
     /// the ADR-0081 `ActorLogRing`) resolve to this actor's slots.
     /// ADR-0081 retired the prior `log_install::with_actor_dispatch`
     /// wrap + per-handler flush hop.
-    // `env` is taken by value because dispatch may move fields out
-    // (reply_to, payload) into the actor; the helper here doesn't
-    // happen to, but the surface mirrors the owning dispatch loop.
-    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_one(&self, actor: &mut Box<A>, env: Envelope) {
         // iamacoffeepot/aether#1160: note this envelope against the
         // worker's local-drain burst *before* running the handler, so a
@@ -226,7 +222,16 @@ where
         // With the time valve on, the burst's first mail anchors the start
         // (one clock read per burst); with it off, this is a no-op.
         burst_note_mail(time_budget());
-        let inbound_mail_id = env.mail_id;
+        // #1757: the single dispatched envelope moves into `ctx.inbound`
+        // below, so read its `Copy` trace/settlement fields out first —
+        // the `Received` / `Finished` / cost brackets and the settlement
+        // tail run off these locals and never re-borrow the moved value.
+        let mail_id = env.mail_id;
+        let root = env.root;
+        let kind = env.kind;
+        let t_enqueue = env.t_enqueue;
+        let enqueue_depth = env.enqueue_depth;
+        let sender = env.sender;
         // Issue 734 / ADR-0088 §7: stamp the dispatching thread's
         // name-hashed `ThreadId` (a `Copy` u64) onto the `Received`
         // event. Resolved once per worker thread via a thread-local
@@ -236,7 +241,7 @@ where
         // the pool (issue 635 / issue 1187), so this is always the
         // worker's `aether-worker-N`.
         let thread_id = thread_name::current_thread_id();
-        local::with_stamped(&self.slots, || {
+        let inbound = local::with_stamped(&self.slots, || {
             // ADR-0086 Phase 3: `Received` / `Finished` land in this
             // (recipient) actor's trace ring — only inside this
             // `with_stamped` is its `ActorSlots` stamped.
@@ -246,39 +251,55 @@ where
             // no new timestamp on the hot path.
             let t_received = th.now_nanos();
             th.push_trace_ring(
-                env.root,
+                root,
                 TraceEvent::Received {
-                    mail_id: inbound_mail_id,
+                    mail_id,
                     t: t_received,
                     // iamacoffeepot/aether#1134: surface the deposit
                     // instant + scheduler backlog the producer stamped at
                     // `route_mail`, so the hop splits into send→enqueue +
                     // queue residence.
-                    t_enqueue: env.t_enqueue,
-                    enqueue_depth: env.enqueue_depth,
+                    t_enqueue,
+                    enqueue_depth,
                     thread_id,
                 },
             );
-            let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
+            // #1757 / ADR-0094: the dispatched envelope lives in exactly
+            // one place — `ctx.inbound`. The dispatch arms read a disarmed
+            // *view* (a clone whose obligation never fires), so the single
+            // armed envelope settles exactly once: either the settlement
+            // tail below discharges it, or a handler retained it via
+            // `take_inbound`. A copied-metadata `take_inbound` against a
+            // separately-held original would silently double-settle (both
+            // disarm cleanly, the chain settles before the deferred reply,
+            // the caller times out); single ownership makes that
+            // unrepresentable.
+            let view = env.clone();
+            let mut ctx = NativeCtx::with_inbound(&self.binding, sender, mail_id, root, env);
             // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128
             // framework-built-in dispatch arms for `aether.log.tail` +
             // `aether.trace.tail` + `aether.cost.tail`. See the helper
             // docs in `dispatch`.
-            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &env)
-                && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, &env)
-                && !super::dispatch::dispatch_cost_tail_if_matching(&self.binding, &mut ctx, &env)
+            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &view)
+                && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, &view)
+                && !super::dispatch::dispatch_cost_tail_if_matching(&self.binding, &mut ctx, &view)
             {
-                super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &env);
+                super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &view);
             }
+            // #1757: reclaim the single envelope before the ctx (and its
+            // handler-end flush) drops, so an armed inbound is never
+            // dropped *inside* the ctx — that would trip the ADR-0094
+            // guard. `None` means a handler retained it via `take_inbound`.
+            let inbound = ctx.take_raw_inbound();
             // iamacoffeepot/aether#1150: flush before `Finished` so a
             // child `Sent` (stamped at flush-begin on `ctx` drop) precedes
             // its parent's `Finished`.
             drop(ctx);
             let t_finished = th.now_nanos();
             th.push_trace_ring(
-                env.root,
+                root,
                 TraceEvent::Finished {
-                    mail_id: inbound_mail_id,
+                    mail_id,
                     t: t_finished,
                 },
             );
@@ -287,16 +308,20 @@ where
             // per-actor cache; framework / fallback kinds skipped).
             // Measure-only — no scheduling change. See
             // `dispatch::fold_handler_cost`.
-            super::dispatch::fold_handler_cost(env.kind, t_received, t_finished);
+            super::dispatch::fold_handler_cost(kind, t_received, t_finished);
+            inbound
         });
-        self.binding
-            .mailer()
-            .record_finished(inbound_mail_id, env.root);
-        // ADR-0094: discharge the obligation guard beside the
-        // `record_finished` that consumes this envelope. The canonical
-        // discharge site — every wasm component and native actor (issue
-        // 634 Phase 4) drains through here.
-        env.discharge();
+        // #1757 / ADR-0080 §2 / ADR-0094: settle the single envelope
+        // exactly once. `Some` is the normal path — `record_finished`
+        // beside `discharge`, the canonical settle site every wasm
+        // component and native actor drains through. `None` means a
+        // handler retained the guard via `take_inbound`; its own un-fired
+        // `record_finished` rides the retained `InboundMail` and closes
+        // the chain when that guard drops, after its deferred reply.
+        if let Some(env) = inbound {
+            self.binding.mailer().record_finished(mail_id, root);
+            env.discharge();
+        }
     }
 
     /// The close hook in the slot teardown sequence. Wraps `actor.unwire`
