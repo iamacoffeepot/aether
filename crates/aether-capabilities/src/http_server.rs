@@ -79,6 +79,11 @@ pub use server_native::HttpServerHandle;
     config(env_prefix = "AETHER_HTTP_SERVER", cli_prefix = "http-server")
 )]
 pub struct HttpServerConfig {
+    /// Whether to bind the listening socket at all. Default `false` —
+    /// the HTTP server is opt-in, so an unconfigured chassis binds no
+    /// port. The remaining fields are consulted only when this is `true`.
+    #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+    pub enabled: bool,
     /// Address to bind the listening socket. Defaults to loopback
     /// ([`DEFAULT_BIND_ADDR`]); a public interface is an explicit choice.
     #[cfg_attr(
@@ -118,6 +123,7 @@ pub struct HttpServerConfig {
 impl Default for HttpServerConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
             handler_mailbox: String::new(),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
@@ -132,6 +138,9 @@ impl Default for HttpServerConfig {
 // unparseable numeric folds back to the default (soft, like the engines
 // cap's heartbeat parse; the ADR-0090 §4 strict/erroring variant is a
 // follow-up). Hence the per-fn `unnecessary_wraps` allow.
+
+#[cfg(feature = "native")]
+use crate::config_env::parse_flag;
 
 #[cfg(feature = "native")]
 #[allow(clippy::unnecessary_wraps)]

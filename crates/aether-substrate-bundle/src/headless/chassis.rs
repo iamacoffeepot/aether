@@ -20,8 +20,8 @@ use std::time::Duration;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     AnthropicConfig, ComponentHostConfig, GeminiConfig, HeadlessRenderCapability,
-    HeadlessWindowCapability, InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf,
+    HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability,
+    fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
 use aether_kinds::{SetMasterGain, SetMasterGainResult, Tick};
@@ -32,8 +32,8 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use super::driver::{HeadlessTimerDriverCapability, parse_tick_hz_env};
 use crate::autoload::{AutoloadComponent, autoload_mail};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_rpc_server, parse_workers_env,
-    resolve_persist_state, tick_only_lifecycle_config, with_common_caps,
+    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_http_server, maybe_with_rpc_server,
+    parse_workers_env, resolve_persist_state, tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -71,6 +71,11 @@ pub struct HeadlessEnv {
     /// `GEMINI_API_KEY` + `AETHER_GEMINI_*`.
     pub gemini: GeminiConfig,
     pub tick_period: Duration,
+    /// Issue 1761: optional `aether.http.server` init config (ADR-0108).
+    /// `Some` iff the cap's `enabled` flag is set (`AETHER_HTTP_SERVER_ENABLED`
+    /// / `--http-server-enabled`); `None` (default) skips booting
+    /// `HttpServerCapability` so an unconfigured chassis binds no HTTP port.
+    pub http_server: Option<HttpServerConfig>,
     /// Issue 763 P2: optional `aether.rpc.server` bind address.
     /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
     /// `RpcServerCapability` so existing chassis behavior is unchanged.
@@ -134,6 +139,7 @@ impl HeadlessEnv {
         } = cli;
         let CommonOverlay {
             http,
+            http_server: http_server_overlay,
             fs,
             anthropic,
             gemini,
@@ -145,6 +151,12 @@ impl HeadlessEnv {
         let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
         let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
+        // The HTTP server is opt-in: resolve its config and boot the cap
+        // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
+        // so an unconfigured chassis binds no HTTP port.
+        let http_server_config =
+            HttpServerConfig::try_from_argv_then_env(http_server_overlay.into_layer())?;
+        let http_server = http_server_config.enabled.then_some(http_server_config);
         // Persistence overlay shared with desktop (issue 1258); headless
         // opts into on-disk persistence per ADR-0049 §9.
         let persist_state = resolve_persist_state(&persist);
@@ -163,6 +175,7 @@ impl HeadlessEnv {
         Ok(Self {
             namespace_roots,
             http,
+            http_server,
             anthropic,
             gemini,
             tick_period,
@@ -187,6 +200,7 @@ impl HeadlessChassis {
         let HeadlessEnv {
             namespace_roots,
             http,
+            http_server,
             anthropic,
             gemini,
             tick_period,
@@ -297,6 +311,7 @@ impl HeadlessChassis {
             .with_actor::<UnsupportedTestBenchCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_config());
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
+        let builder = maybe_with_http_server(builder, http_server);
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load

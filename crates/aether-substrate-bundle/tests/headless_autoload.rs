@@ -78,6 +78,7 @@ mod tests {
             let env = HeadlessEnv {
                 namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
                 http: HttpConfig::default(),
+                http_server: None,
                 anthropic: AnthropicConfig::default(),
                 gemini: GeminiConfig::default(),
                 tick_period: Duration::from_millis(16),

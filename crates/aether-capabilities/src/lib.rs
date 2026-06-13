@@ -135,12 +135,14 @@ pub use engine::{EngineConfig, EngineOverlay};
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
-// always-on domain struct; the `Config`-derive `HttpServerConfigLayer` and
-// the bound-port `HttpServerHandle` are native-only.
+// always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /
+// `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
 #[cfg(feature = "native")]
 pub use http_server::HttpServerConfigLayer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use http_server::HttpServerHandle;
+#[cfg(feature = "native")]
+pub use http_server::HttpServerOverlay;
 pub use http_server::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
