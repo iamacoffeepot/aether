@@ -40,6 +40,7 @@ native = [
     "dep:clap",
     "dep:confique",
     "dep:dirs",
+    "dep:httparse",
     "dep:postcard",
     "dep:serde_json",
     "dep:tracing",
@@ -112,6 +113,10 @@ clap = { workspace = true, optional = true }
 # no TOML/YAML file parsers until ADR-0090's config-file step.
 confique = { workspace = true, optional = true }
 dirs = { version = "6", optional = true }
+# ADR-0108 §1: the inbound HTTP/1.1 request-line + header parser for the
+# `aether.http.server` cap. Pure-Rust, no_std-capable, already a transitive
+# dependency; rides the `native` feature so wasm / marker-only builds skip it.
+httparse = { version = "1", optional = true }
 postcard = { workspace = true, optional = true, features = ["alloc", "heapless-cas"] }
 # JSON request/response bodies for the content-gen provider APIs
 # (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.

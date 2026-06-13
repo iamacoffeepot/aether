@@ -55,6 +55,11 @@ pub mod fs;
 pub mod gemini;
 pub mod handle;
 pub mod http;
+// `aether.http.server` inbound HTTP server cap (ADR-0108, issue 1760).
+// Native singleton modeled on `RpcServerCapability`: binds a port, parses
+// each HTTP/1.1 request into mail to a handler component, writes the
+// handler's reply back as the HTTP response.
+pub mod http_server;
 pub mod input;
 // `aether.inventory` reverse-lookup inventory cap (ADR-0088 §6, issue
 // 1122). Serves the per-build name/template manifest + dynamic-instance
@@ -129,6 +134,14 @@ pub use engine::EngineServer;
 pub use engine::{EngineConfig, EngineOverlay};
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
+// ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
+// always-on domain struct; the `Config`-derive `HttpServerConfigLayer` and
+// the bound-port `HttpServerHandle` are native-only.
+#[cfg(feature = "native")]
+pub use http_server::HttpServerConfigLayer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use http_server::HttpServerHandle;
+pub use http_server::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
