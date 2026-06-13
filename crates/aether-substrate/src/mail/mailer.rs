@@ -414,20 +414,33 @@ impl Mailer {
         Ok(())
     }
 
-    /// Route a chassis-bound mailbox's `*Result` reply to `sender` with
-    /// a single encode and no inherited lineage — the reply opens as a
-    /// fresh, lineage-less mail (the `MailId::NONE` triple). This is the
-    /// shape for substrate-internal synthesized replies and chassis caps
-    /// that manage their own settlement (the desktop window / render
-    /// drivers); handler replies that should join the caller's ADR-0080
-    /// causal chain go through [`Self::send_reply_with_lineage`] (the
-    /// `NativeBinding::send_reply_for_handler` path).
+    /// Route a `*Result` reply to `sender` with a single encode and **no
+    /// inherited lineage** — the reply opens as a fresh, lineage-less mail
+    /// (the `MailId::NONE` triple), detached from any caller settlement
+    /// chain. The name says so loudly: detachment is a deliberate choice,
+    /// not the default a short name invites.
+    ///
+    /// Reach for this only on the two arms where lineage is structurally
+    /// moot: wire-terminal replies whose `sender` is a `Session` /
+    /// `EngineMailbox` (the hub-wire boundary is terminal for engine-side
+    /// chain accounting — the lineage would not be applied anyway), and
+    /// substrate-internal synthesized replies with no caller chain to join.
+    ///
+    /// A reply that should join the caller's ADR-0080 causal chain goes
+    /// through the lineage-carrying path instead:
+    /// [`Self::send_reply_with_lineage`] (the
+    /// `NativeBinding::send_reply_for_handler` form),
+    /// [`InboundMail::reply`](crate::chassis::inbox::InboundMail::reply)
+    /// (the claimed-inbox drain guard), or the typed `ctx.reply()` on a
+    /// handler context. Routing a `Component`-addressed reply through this
+    /// unchained form silently detaches it from the caller's settlement
+    /// window — the bug class #1701 fixed for handler replies.
     ///
     /// Equivalent to [`Self::send_reply_with_lineage`] with a `NONE`
     /// triple — the bare-vs-lineage split mirrors
     /// [`NativeBinding::send_mail`](crate::actor::native::NativeBinding)'s
     /// `send_mail` / `send_mail_with_lineage` pair.
-    pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
+    pub fn send_reply_unchained<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,
     {
@@ -463,7 +476,7 @@ impl Mailer {
     /// `NativeBinding::send_reply_for_handler`. A `MailId::NONE`
     /// `reply_id` skips the hook and stamps the `NONE` triple,
     /// reproducing the pre-lineage reply shape for callers without a
-    /// handler chain (the bare [`Self::send_reply`]).
+    /// handler chain (the bare [`Self::send_reply_unchained`]).
     pub fn send_reply_with_lineage<K>(
         &self,
         sender: Source,
@@ -493,7 +506,7 @@ impl Mailer {
                 // ADR-0080 §2 producer hook: record the reply's `Sent`
                 // before pushing it, so the caller's `root` counts the
                 // reply in-flight until its `Finished`. Skipped for the
-                // `NONE` reply id (the bare `send_reply` lineage-less path).
+                // `NONE` reply id (the bare `send_reply_unchained` path).
                 if reply_id != aether_data::MailId::NONE {
                     self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, K::ID);
                 }
@@ -1214,7 +1227,7 @@ mod tests {
         }
     }
 
-    /// ADR-0100: `Mailer::send_reply` to a `Component` target encodes the
+    /// ADR-0100: `Mailer::send_reply_unchained` to a `Component` target encodes the
     /// reply through `Kind::encode_into_bytes`. A cast reply kind reaches
     /// the sink as its raw cast image, not a postcard varint image — and
     /// a `Pod`-without-`Serialize` kind is repliable at all.
@@ -1229,7 +1242,7 @@ mod tests {
             flag: 0xABCD,
             _pad: 0,
         };
-        let sent = mailer.send_reply(
+        let sent = mailer.send_reply_unchained(
             Source::with_correlation(SourceAddr::Component(sink_id), 1),
             &reply,
         );

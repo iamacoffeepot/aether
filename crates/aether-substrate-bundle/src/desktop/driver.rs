@@ -31,6 +31,9 @@ use aether_kinds::{
     MouseButton, MouseMove, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, Tick, WindowMode, WindowSize, keycode,
 };
+// Only the unit tests name the `Envelope` (aka `OwnedDispatch`) type now —
+// `try_framework_dispatch` reaches it through `InboundMail::envelope()`.
+#[cfg(test)]
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{
     dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free,
@@ -110,8 +113,9 @@ pub struct App {
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
     /// `render_and_capture`, then reply to the sender via
-    /// `queue.send_reply` (the `Mailer`, which routes every
-    /// `SourceAddr` — see `outbound`).
+    /// `queue.send_reply_unchained` (the `Mailer`, which routes every
+    /// `SourceAddr` — see `outbound`; the capture reply is wire-terminal,
+    /// so lineage is moot, #1710).
     capture_queue: CaptureQueue,
     /// Hub outbound — held for log egress to the hub and
     /// `lifecycle::fatal_abort`. NOT used for chassis replies:
@@ -119,10 +123,11 @@ pub struct App {
     /// targets and silently drops `SourceAddr::Component`, but mail
     /// dispatched by this engine's own `RpcServerCapability` (every
     /// hub/MCP call lands via the proxy → local RPC server) carries a
-    /// `Component(rpc_server)` reply target. Replies go through
-    /// `self.queue.send_reply` (the `Mailer`) instead, which pushes the
-    /// reply as local mail so the RPC server's `on_any` lifts it into a
-    /// `ReplyEvent` (iamacoffeepot/aether#1316).
+    /// `Component(rpc_server)` reply target. Replies go through the
+    /// `Mailer` instead (`mail.reply` for the chain-joined window arms,
+    /// `self.queue.send_reply_unchained` for the wire-terminal capture
+    /// replies), which pushes the reply as local mail so the RPC server's
+    /// `on_any` lifts it into a `ReplyEvent` (iamacoffeepot/aether#1316).
     outbound: Arc<HubOutbound>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -364,11 +369,16 @@ fn resolve_fullscreen(
     }
 }
 
-/// iamacoffeepot/aether#1272: route an inbound `aether.window` envelope
-/// through the framework-built-in dispatch arms (`aether.log.tail` /
-/// `aether.trace.tail` / `aether.cost.tail`) before the driver-specific
-/// `SetWindowMode` / `SetWindowTitle` arms get their turn. Returns
-/// `true` when one of the framework arms matched (a reply has already
+/// iamacoffeepot/aether#1272 / #1710: route an inbound `aether.window`
+/// envelope through the framework-built-in dispatch arms
+/// (`aether.log.tail` / `aether.trace.tail` / `aether.cost.tail`) before
+/// the driver-specific `SetWindowMode` / `SetWindowTitle` arms get their
+/// turn. Each helper computes-and-returns its `*TailResult`; on a match
+/// the reply rides the inbound's drain guard — [`InboundMail::reply`]
+/// mints the reply id on the drain-owned counter and stamps the
+/// inbound's `root` / parent, so the framework-arm reply joins the
+/// caller's ADR-0080 chain exactly like the window-mode / title arms.
+/// Returns `true` when one of the framework arms matched (the reply has
 /// been routed); `false` otherwise. ADR-0081 §1 promises every mailbox
 /// serves these kinds — see the issue body for the contract.
 ///
@@ -377,11 +387,25 @@ fn resolve_fullscreen(
 /// log / trace arms reach the driver's per-actor ring. Factored out of
 /// [`App::dispatch_window_envelope`] so the unit test directly drives
 /// the routing shape without standing up a winit `App`.
-fn try_framework_dispatch(mailer: &Arc<Mailer>, self_mailbox: MailboxId, env: &Envelope) -> bool {
-    let m = mailer.as_ref();
-    dispatch_log_tail_if_matching_free(m, env.sender, env)
-        || dispatch_trace_tail_if_matching_free(m, env.sender, env)
-        || dispatch_cost_tail_if_matching_free(m, env.sender, self_mailbox, env)
+fn try_framework_dispatch(
+    mailer: &Arc<Mailer>,
+    self_mailbox: MailboxId,
+    mail: &InboundMail,
+) -> bool {
+    let env = mail.envelope();
+    if let Some(result) = dispatch_log_tail_if_matching_free(env) {
+        mail.reply(&result);
+        return true;
+    }
+    if let Some(result) = dispatch_trace_tail_if_matching_free(env) {
+        mail.reply(&result);
+        return true;
+    }
+    if let Some(result) = dispatch_cost_tail_if_matching_free(mailer.as_ref(), self_mailbox, env) {
+        mail.reply(&result);
+        return true;
+    }
+    false
 }
 
 /// The disposition of one consumed `aether.lifecycle.advance_reply`
@@ -789,8 +813,9 @@ impl App {
         // `DispatcherSlot::run_cycle`'s ordering. Factored into a free
         // fn so the desktop-driver unit test exercises the routing shape
         // directly without standing up a winit `App`. On a match the
-        // free fn has already replied; the guard settles on return.
-        if try_framework_dispatch(&self.queue, self.window_mailbox, mail.envelope()) {
+        // helper has already replied through `mail`'s drain guard (the
+        // chain-joined path, #1710); the guard settles on return.
+        if try_framework_dispatch(&self.queue, self.window_mailbox, &mail) {
             return;
         }
         if mail.kind() == self.kind_set_window_mode {
@@ -851,10 +876,14 @@ impl App {
     /// the wire `Call` would hang on its settlement hold until timeout.
     /// Here we take the parked entry, drain its `after_mails` (parity with
     /// the `RedrawRequested` service arm), reply `Err` via the `Mailer`
-    /// (`self.queue.send_reply`, never `self.outbound` — `HubOutbound`
-    /// drops `SourceAddr::Component`, iamacoffeepot/aether#1316), then let
-    /// the request drop *after* the reply so the ADR-0086 §12 settlement
-    /// hold's `Release` fires post-reply (iamacoffeepot/aether#1273).
+    /// (`self.queue.send_reply_unchained`, never `self.outbound` —
+    /// `HubOutbound` drops `SourceAddr::Component`,
+    /// iamacoffeepot/aether#1316), then let the request drop *after* the
+    /// reply so the ADR-0086 §12 settlement hold's `Release` fires
+    /// post-reply (iamacoffeepot/aether#1273). The capture reply is
+    /// wire-terminal — its settlement is the ADR-0086 hold above, not an
+    /// ADR-0080 inbound chain — so the lineage-less unchained form is the
+    /// right one (#1710).
     ///
     /// The slot is taken only when occluded, so a visible-window wake never
     /// steals the entry `RedrawRequested` is about to service.
@@ -873,11 +902,11 @@ impl App {
                 }
                 // `reply_to` is `Copy`, so this read leaves `request` whole;
                 // it (and its `PendingCapture._hold`) drops at end of this
-                // scope — *after* `send_reply` returns — firing `Release` on
-                // the trace root so `Settled{root}` is exact post-reply.
-                // Don't restructure to move the reply below other work
-                // (iamacoffeepot/aether#1273 drop-order discipline).
-                self.queue.send_reply(request.reply_to, &result);
+                // scope — *after* `send_reply_unchained` returns — firing
+                // `Release` on the trace root so `Settled{root}` is exact
+                // post-reply. Don't restructure to move the reply below
+                // other work (iamacoffeepot/aether#1273 drop-order discipline).
+                self.queue.send_reply_unchained(request.reply_to, &result);
                 true
             }
         }
@@ -1117,11 +1146,15 @@ impl ApplicationHandler<UserEvent> for App {
                                 //noinspection DuplicatedCode
                                 self.queue.push(mail);
                             }
-                            self.queue.send_reply(req.reply_to, &result);
+                            // Wire-terminal capture reply: its settlement is
+                            // the ADR-0086 §12 hold `req` owns, not an
+                            // ADR-0080 inbound chain, so the lineage-less
+                            // unchained form is correct (#1710).
+                            self.queue.send_reply_unchained(req.reply_to, &result);
                             // iamacoffeepot/aether#1273: `req` still owns
                             // `PendingCapture._hold` after the partial moves
                             // above; the field drops at end of this scope —
-                            // *after* `send_reply` returns — firing
+                            // *after* `send_reply_unchained` returns — firing
                             // `Release` on the trace root so `Settled{root}`
                             // is exact at post-reply. Don't restructure to
                             // move the reply below other work in this arm.
@@ -1131,7 +1164,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 } else if let Some(req) = pending_capture {
-                    self.queue.send_reply(
+                    // Wire-terminal capture reply (#1710): lineage is moot.
+                    self.queue.send_reply_unchained(
                         req.reply_to,
                         &CaptureFrameResult::Err {
                             error: "capture requested before GPU initialized".to_owned(),
@@ -1518,131 +1552,170 @@ mod tests {
         assert!(matches!(m, WindowMode::Windowed));
     }
 
-    /// iamacoffeepot/aether#1272: a `LogTail` envelope routed at the
-    /// driver's `aether.window` mailbox produces a `LogTailResult`
-    /// reply via the framework-built-in dispatch arm. Pre-fix the
-    /// driver's bespoke "unrecognised kind → warn-drop" tail ate the
-    /// envelope and `actor_logs aether.window` hung waiting for a
-    /// reply that never came; this test pins the fix at the
-    /// driver-dispatch layer without standing up wgpu/winit.
+    /// iamacoffeepot/aether#1272 / #1710: a `LogTail` Call drained at the
+    /// driver's `aether.window` mailbox produces a `LogTailResult` reply
+    /// through the inbound's drain guard — and that reply joins the
+    /// inbound's ADR-0080 causal chain (it carries the inbound's `root`)
+    /// rather than minting the lineage-less `MailId::NONE` triple the
+    /// pre-#1710 bare `Mailer::send_reply` form did. Drives a real armed
+    /// Call through a `ClaimedInbox` (mirroring
+    /// `window_inbox_drain_settles_root_on_guard_drop`), routes the reply
+    /// at a captured `Component` inbox, and reads the delivered reply's
+    /// `root` — without standing up wgpu/winit.
     #[test]
     fn try_framework_dispatch_replies_to_log_tail() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
         use aether_actor::local::{ActorSlots, with_stamped};
-        use aether_data::KindId;
-        use aether_data::{MailId, SessionToken};
+        use aether_data::MailId;
         use aether_kinds::descriptors;
-        use aether_kinds::trace::Nanos;
         use aether_kinds::{LogTail, LogTailResult};
+        use aether_substrate::ClaimedInbox;
+        use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
-        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
-        use aether_substrate::mail::registry::Registry;
-        use aether_substrate::mail::{MailRef, Source, SourceAddr};
+        use aether_substrate::mail::Mail;
+        use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+        use aether_substrate::mail::{Source, SourceAddr};
 
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let (outbound, rx) = HubOutbound::attached_loopback();
         let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
-        let request = LogTail {
+        // Wire one settlement registry into both seams (the chassis builder
+        // does both installs at boot) so an armed Call drains cleanly.
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.install_settlement_registry(Arc::clone(&settlement));
+        mailer
+            .trace_handle()
+            .install_settlement_registry(Arc::clone(&settlement));
+
+        // A `Component` caller inbox captures the reply so the test reads
+        // its delivered `root`.
+        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+        let caller_mailbox = registry.register_inbox(
+            "test.window.log_tail.caller",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                dispatch.discharge();
+                let _ = reply_tx.send(dispatch);
+            }) as Arc<dyn InboxHandler>,
+        );
+
+        // The window inbox forwards armed envelopes onto the
+        // `ClaimedInbox`'s channel, exactly as `claim_mailbox` does.
+        let window_mailbox = mailbox_id_from_name("aether.window");
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+            let _ = tx.send(d);
+        });
+        registry
+            .try_register_inbox_with_id(window_mailbox, "aether.window", handler)
+            .expect("register the window inbox");
+        let inbox = ClaimedInbox::new(window_mailbox, rx, Arc::clone(&mailer));
+
+        // Push a real armed `LogTail` Call whose reply target is the
+        // caller inbox, then drain it to an `InboundMail` guard.
+        let root = MailId::new(window_mailbox, 1);
+        let mail_id = MailId::new(window_mailbox, 2);
+        mailer.record_sent_inflight(root);
+        let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 0x99);
+        let bytes = postcard::to_allocvec(&LogTail {
             max: 8,
             min_level: None,
             since: None,
-        };
-        let bytes = postcard::to_allocvec(&request).expect("encode LogTail");
-        let session = SessionToken::NIL;
-        let reply_to = Source::with_correlation(SourceAddr::Session(session), 0x99);
-        let env = Envelope::disarmed(
-            KindId(<LogTail as Kind>::ID.0),
-            <LogTail as Kind>::NAME.to_owned(),
-            None,
-            reply_to,
-            MailRef::from(bytes),
-            1,
-            MailId::NONE,
-            MailId::NONE,
-            None,
-            Nanos(0),
-            0,
-            MailboxId(0),
+        })
+        .expect("encode LogTail");
+        mailer.push(
+            Mail::new(window_mailbox, <LogTail as Kind>::ID, bytes, 1)
+                .with_reply_to(caller_source)
+                .with_lineage(mail_id, root, None),
         );
+        let mail = inbox.try_next().expect("the armed LogTail Call is queued");
 
-        let window_mailbox = mailbox_id_from_name("aether.window");
         let slots = ActorSlots::new();
         let matched = with_stamped(&slots, || {
-            try_framework_dispatch(&mailer, window_mailbox, &env)
+            try_framework_dispatch(&mailer, window_mailbox, &mail)
         });
         assert!(
             matched,
-            "framework dispatch arm must match a LogTail envelope at aether.window",
+            "framework dispatch arm must match a LogTail Call at aether.window",
         );
 
-        let event = rx.try_recv().expect("framework arm routed a reply");
-        match event {
-            EgressEvent::ToSession {
-                kind_name,
-                correlation_id,
-                ..
-            } => {
-                assert_eq!(kind_name, <LogTailResult as Kind>::NAME);
-                assert_eq!(correlation_id, 0x99);
-            }
-            other => panic!("expected ToSession reply, got {other:?}"),
-        }
+        let dispatch = reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("framework arm routed a reply to the caller inbox");
+        assert_eq!(
+            dispatch.kind_name,
+            <LogTailResult as Kind>::NAME,
+            "the reply is a LogTailResult",
+        );
+        assert_eq!(
+            dispatch.root, root,
+            "the framework-arm reply joins the inbound's causal chain (#1710)",
+        );
+
+        // Drop the guard last so its `Finished` records after the reply's
+        // `Sent` (ADR-0080 §6) — settlement bookkeeping stays balanced.
+        drop(mail);
     }
 
     /// A non-framework kind (here `SetWindowTitle`) does NOT trip the
     /// framework arms — the driver-specific path keeps its turn so
     /// `actor_logs`-style queries don't shadow the existing window
-    /// controls.
+    /// controls. The helpers return `None` and the driver dispatch
+    /// continues; nothing is replied here.
     #[test]
     fn try_framework_dispatch_skips_window_kinds() {
+        use std::sync::mpsc;
+
         use aether_actor::local::{ActorSlots, with_stamped};
-        use aether_data::KindId;
         use aether_data::MailId;
         use aether_kinds::descriptors;
-        use aether_kinds::trace::Nanos;
+        use aether_substrate::ClaimedInbox;
         use aether_substrate::handle_store::HandleStore;
-        use aether_substrate::mail::outbound::HubOutbound;
-        use aether_substrate::mail::registry::Registry;
-        use aether_substrate::mail::{MailRef, Source};
+        use aether_substrate::mail::Mail;
+        use aether_substrate::mail::registry::{InboxHandler, Registry};
 
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let (outbound, rx) = HubOutbound::attached_loopback();
         let store = Arc::new(HandleStore::new(1024 * 1024));
-        let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
+        let window_mailbox = mailbox_id_from_name("aether.window");
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+            let _ = tx.send(d);
+        });
+        registry
+            .try_register_inbox_with_id(window_mailbox, "aether.window", handler)
+            .expect("register the window inbox");
+        let inbox = ClaimedInbox::new(window_mailbox, rx, Arc::clone(&mailer));
+
+        // A `MailId::NONE` push keeps the drained guard disarmed (no armed
+        // Call to settle) — the test pins only the skip verdict.
         let payload = postcard::to_allocvec(&SetWindowTitle {
             title: "ignored".to_owned(),
         })
         .expect("encode SetWindowTitle");
-        let env = Envelope::disarmed(
-            KindId(<SetWindowTitle as Kind>::ID.0),
-            <SetWindowTitle as Kind>::NAME.to_owned(),
-            None,
-            Source::NONE,
-            MailRef::from(payload),
-            1,
-            MailId::NONE,
-            MailId::NONE,
-            None,
-            Nanos(0),
-            0,
-            MailboxId(0),
+        mailer.push(
+            Mail::new(window_mailbox, <SetWindowTitle as Kind>::ID, payload, 1).with_lineage(
+                MailId::NONE,
+                MailId::NONE,
+                None,
+            ),
         );
+        let mail = inbox.try_next().expect("the SetWindowTitle push is queued");
 
-        let window_mailbox = mailbox_id_from_name("aether.window");
         let slots = ActorSlots::new();
         let matched = with_stamped(&slots, || {
-            try_framework_dispatch(&mailer, window_mailbox, &env)
+            try_framework_dispatch(&mailer, window_mailbox, &mail)
         });
         assert!(!matched, "SetWindowTitle is a driver-specific kind");
-        assert!(rx.try_recv().is_err(), "no reply emitted on skip path");
     }
 
     /// iamacoffeepot/aether#1325, re-homed on ADR-0106: the window inbox
@@ -1858,7 +1931,7 @@ mod tests {
 
     /// iamacoffeepot/aether#1317: the occluded-capture branch selection.
     /// This is the CI-runnable core of the fail-fast — the winit wiring
-    /// (`fail_capture_if_occluded` → `take` → `send_reply` → drop) stays
+    /// (`fail_capture_if_occluded` → `take` → `send_reply_unchained` → drop) stays
     /// MCP-manual because `ControlFlow::Wait` + `RedrawRequested`
     /// suppression has no CI display surface. Here we pin only the pure
     /// branch logic: occluded-with-parked-capture selects an `Err` reply,
