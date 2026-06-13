@@ -778,7 +778,10 @@ mod native {
                         glyph_index,
                         size_pixels: 64,
                     };
-                    match cap.atlas.get_or_insert(key, ATLAS_SIZE, band_height, &coverage) {
+                    match cap
+                        .atlas
+                        .get_or_insert(key, ATLAS_SIZE, band_height, &coverage)
+                    {
                         GlyphSlot::Placed { .. } => {}
                         GlyphSlot::Full => break,
                         GlyphSlot::Empty => panic!("band coverage is not empty"),
