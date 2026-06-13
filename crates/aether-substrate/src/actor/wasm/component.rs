@@ -309,7 +309,27 @@ impl ComponentCtx {
         // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
         // which uses one counter for both.
         let mail_id = MailId::new(self.sender, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id);
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false);
+    }
+
+    /// ADR-0080 §7 fire-and-forget escape hatch: the detached
+    /// counterpart of [`Self::send`]. Routes the guest's send without
+    /// inheriting the in-flight dispatch's lineage, so the recipient
+    /// starts a fresh causal chain. Reached from the `send_mail_p32`
+    /// host fn when the guest sets the detached flag (`FfiActorMailbox::
+    /// send_detached`). Correlation / reply-routing are identical to
+    /// `send` — only the trace lineage differs.
+    pub fn send_detached(
+        &self,
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+    ) {
+        let correlation = self.mint_correlation();
+        let reply_to = Source::with_correlation(SourceAddr::Component(self.sender), correlation);
+        let mail_id = MailId::new(self.sender, correlation);
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true);
     }
 
     /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
@@ -342,7 +362,7 @@ impl ComponentCtx {
     ) {
         let reply_to = Source::with_correlation(SourceAddr::None, correlation);
         let mail_id = MailId::new(self.sender, self.next_reply_lineage());
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id);
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false);
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
@@ -352,6 +372,15 @@ impl ComponentCtx {
     /// (fresh `Component(self)` correlation for a send, echoed inbound
     /// correlation with target `None` for a reply) and the lineage
     /// `mail_id`.
+    ///
+    /// `force_detach` (ADR-0080 §7) suppresses the in-flight lineage
+    /// inheritance: `true` (a guest `send_detached`) starts a fresh
+    /// causal chain regardless of the in-flight cells; `false` (the
+    /// default `send` / a reply) inherits the dispatch's chain.
+    // The arg list is the routing surface `send` / `send_detached` /
+    // `reply` all funnel through; bundling it into a struct would only
+    // move the same fields one indirection away with no call-site win.
+    #[allow(clippy::too_many_arguments)]
     fn send_routed(
         &self,
         recipient: MailboxId,
@@ -360,18 +389,25 @@ impl ComponentCtx {
         count: u32,
         reply_to: Source,
         mail_id: MailId,
+        force_detach: bool,
     ) {
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
         // cells were populated by `Component::deliver` for guest-triggered
         // sends (and remain `NONE` for substrate-internal call sites that
-        // bypass `deliver`, e.g. test fixtures).
-        let parent_mail = match self.in_flight_mail_id.get() {
-            id if id == MailId::NONE => None,
-            id => Some(id),
-        };
-        let inherited_root = match self.in_flight_root.get() {
-            id if id == MailId::NONE => None,
-            id => Some(id),
+        // bypass `deliver`, e.g. test fixtures). ADR-0080 §7: a detached
+        // send ignores them and opens its own chain.
+        let (parent_mail, inherited_root) = if force_detach {
+            (None, None)
+        } else {
+            let parent_mail = match self.in_flight_mail_id.get() {
+                id if id == MailId::NONE => None,
+                id => Some(id),
+            };
+            let inherited_root = match self.in_flight_root.get() {
+                id if id == MailId::NONE => None,
+                id => Some(id),
+            };
+            (parent_mail, inherited_root)
         };
         let root = inherited_root.unwrap_or(mail_id);
         self.queue
@@ -2286,6 +2322,47 @@ mod tests {
         let (mail_id, root, parent) = captured[0];
         assert!(parent.is_none(), "no inbound -> no parent edge");
         assert_eq!(root, mail_id, "fresh chain: root == mail_id");
+        assert_eq!(mail_id.sender, sender);
+    }
+
+    /// ADR-0080 §7 (issue 1802): even with an in-flight inbound chain
+    /// set, `ComponentCtx::send_detached` (the guest's `send_detached`,
+    /// routed by the `send_mail_p32` host fn when its detached flag is
+    /// set) ignores the lineage and opens a fresh chain — `parent_mail`
+    /// is `None` and `root == mail_id`, the same shape as a no-inbound
+    /// send. This is the wasm-side opt-out that mirrors the native
+    /// `NativeActorMailbox::send_detached`.
+    #[test]
+    fn send_detached_mints_fresh_chain_despite_in_flight() {
+        let registry = Arc::new(Registry::new());
+        let (captured, sink_id) =
+            register_lineage_capture_sink(&registry, "issue_1802_detached_sink");
+
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x55));
+        let ctx = ComponentCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            HubOutbound::disconnected(),
+        );
+
+        // Set an in-flight chain the default `send` would inherit.
+        let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
+        let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
+        ctx.set_in_flight(inbound_mail, inbound_root);
+
+        ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "sink should have been called once");
+        let (mail_id, root, parent) = captured[0];
+        assert!(
+            parent.is_none(),
+            "detached send carries no parent edge despite in-flight"
+        );
+        assert_eq!(root, mail_id, "detached send is its own root");
         assert_eq!(mail_id.sender, sender);
     }
 }

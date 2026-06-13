@@ -59,7 +59,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          kind: u64,
          ptr: u32,
          len: u32,
-         count: u32|
+         count: u32,
+         detached: u32|
          -> u32 {
             let Some(memory) = caller
                 .get_export("memory")
@@ -78,8 +79,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let payload = data[start..end].to_vec();
 
+            // ADR-0080 §7: the host stamps the in-flight dispatch
+            // lineage onto the guest's send by default; `detached != 0`
+            // (the guest's `send_detached`) opts out and starts a fresh
+            // causal chain.
             let ctx = caller.data();
-            ctx.send(MailboxId(recipient), KindId(kind), payload, count);
+            let recipient = MailboxId(recipient);
+            let kind = KindId(kind);
+            if detached == 0 {
+                ctx.send(recipient, kind, payload, count);
+            } else {
+                ctx.send_detached(recipient, kind, payload, count);
+            }
             0
         },
     )?;

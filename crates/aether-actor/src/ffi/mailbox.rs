@@ -100,6 +100,14 @@ impl<R: Actor> FfiActorMailbox<R> {
     /// against `R: HandlesKind<K>` — wrong-kind sends are rejected at
     /// the call site.
     ///
+    /// Inherits the handler's in-flight causal chain by default
+    /// (ADR-0080 §7): the host stamps the dispatch's `parent`/`root`
+    /// onto this send, so the recipient's work settles back into the
+    /// caller's chain. A guest holds no trace ids, so the inherit-vs-
+    /// detach choice rides as a flag on the `send_mail` bridge and the
+    /// host does the stamping. Reach for [`Self::send_detached`] for
+    /// the rare fire-and-forget send that should start its own chain.
+    ///
     /// Wire shape (cast or postcard) follows `Kind::encode_into_bytes`
     /// — same single source of truth as the kind-typed sends per
     /// issue #240.
@@ -109,18 +117,37 @@ impl<R: Actor> FfiActorMailbox<R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, &bytes, 1, false);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
     /// see [`crate::actor::ctx::MailSender::send_many`] for the
-    /// wire-shape rationale.
+    /// wire-shape rationale. Inherits the handler's causal chain like
+    /// [`Self::send`].
     pub fn send_many<K>(&self, payloads: &[K])
     where
         R: HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32);
+        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32, false);
+    }
+
+    /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`
+    /// without inheriting the handler's in-flight causal chain. The
+    /// host mints a fresh root, so the recipient processes the mail as
+    /// the start of a new tree.
+    ///
+    /// **Fire-and-forget only.** A detached send mints no parent
+    /// linkage, so any reply the recipient issues inherits the
+    /// *recipient's* tree rather than the sender's. Reply-correlated
+    /// requests always go through [`Self::send`].
+    pub fn send_detached<K>(&self, payload: &K)
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.send_mail(self.mailbox, K::ID.0, &bytes, 1, true);
     }
 }

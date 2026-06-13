@@ -34,6 +34,14 @@ impl MailBridge {
     /// batch (cast-only — postcard has no efficient batched wire
     /// shape, see `MailBridgebox::send_many`).
     ///
+    /// `detached` carries the ADR-0080 §7 lineage signal. `false` (the
+    /// default `send` path) lets the host stamp the in-flight
+    /// dispatch's `parent`/`root` onto this send, so the recipient's
+    /// work stays in the caller's causal chain. `true` (`send_detached`)
+    /// suppresses inheritance — the host mints a fresh root chain. The
+    /// guest holds no trace ids, so the flag is all it can contribute;
+    /// the host owns the stamping.
+    ///
     /// Returns `0` on success; `1` on substrate-side recipient
     /// lookup miss. Other non-zero values are reserved for future
     /// host-side failure surfaces.
@@ -48,7 +56,14 @@ impl MailBridge {
         clippy::must_use_candidate,
         reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
     )]
-    pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+    pub fn send_mail(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        detached: bool,
+    ) -> u32 {
         // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
         // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
         // derived from the `&[u8]` slice we just received, which the
@@ -61,6 +76,7 @@ impl MailBridge {
                 bytes.as_ptr().addr() as u32,
                 bytes.len() as u32,
                 count,
+                u32::from(detached),
             )
         }
     }

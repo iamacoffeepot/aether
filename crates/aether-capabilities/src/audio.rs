@@ -2375,8 +2375,8 @@ mod native {
             );
 
             // Address the fs cap through the lineage-correct resolver
-            // (ADR-0099); `send_traced` propagates this handler's chain so
-            // each `ReadResult` settles back into it.
+            // (ADR-0099); `send` propagates this handler's chain by default
+            // so each `ReadResult` settles back into it.
             let fs = ctx.actor::<FsCapability>();
             for fs_path in fs_paths {
                 self.pending_samples
@@ -2387,7 +2387,7 @@ mod native {
                     namespace: namespace.clone(),
                     path: fs_path,
                 };
-                let _ = fs.send_traced(ctx, &read);
+                fs.send(&read);
             }
         }
 
@@ -2872,7 +2872,7 @@ mod native {
                 namespace: mail.namespace,
                 path: mail.path,
             };
-            let _ = ctx.actor::<FsCapability>().send_traced(ctx, &read);
+            ctx.actor::<FsCapability>().send(&read);
         }
 
         /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
@@ -3049,7 +3049,7 @@ mod native {
                 namespace: mail.namespace,
                 path: mail.path,
             };
-            let _ = ctx.actor::<FsCapability>().send_traced(ctx, &read);
+            ctx.actor::<FsCapability>().send(&read);
         }
 
         /// Bank-assembly completion (ADR-0093 §3 / ADR-0103 §4). On success

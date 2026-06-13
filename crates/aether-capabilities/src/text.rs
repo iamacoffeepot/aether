@@ -152,9 +152,9 @@ mod native {
                 pixels: self.atlas.pixels().to_vec(),
             };
             // Address the render cap through the lineage-correct resolver
-            // (ADR-0099); `send_traced` propagates this handler's chain so the
-            // `CreateTextureResult` reply settles back into it.
-            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &create);
+            // (ADR-0099); `send` propagates this handler's chain by default
+            // so the `CreateTextureResult` reply settles back into it.
+            ctx.actor::<RenderCapability>().send(&create);
             self.atlas_create_inflight = true;
         }
 
@@ -168,7 +168,7 @@ mod native {
                 height: entry.height,
                 pixels: self.atlas.rect_rgba(entry),
             };
-            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &update);
+            ctx.actor::<RenderCapability>().send(&update);
         }
 
         /// Re-sync the GPU side after an atlas reset by uploading the full
@@ -184,7 +184,7 @@ mod native {
                 height: ATLAS_SIZE,
                 pixels: self.atlas.pixels().to_vec(),
             };
-            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &update);
+            ctx.actor::<RenderCapability>().send(&update);
         }
     }
 
@@ -223,7 +223,7 @@ mod native {
                 namespace: mail.namespace,
                 path: mail.path,
             };
-            let _ = ctx.actor::<FsCapability>().send_traced(ctx, &read);
+            ctx.actor::<FsCapability>().send(&read);
         }
 
         /// Correlate a forwarded `aether.fs.read` reply. `Ok` dispatches the
@@ -486,7 +486,7 @@ mod native {
             space,
             quads,
         };
-        let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &draw);
+        ctx.actor::<RenderCapability>().send(&draw);
     }
 
     /// A glyph bitmap's pixel dimensions. fontdue bounds these well below
