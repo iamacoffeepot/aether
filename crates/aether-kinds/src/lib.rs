@@ -2527,6 +2527,38 @@ mod control_plane {
         },
     }
 
+    // ADR-0108 HTTP server kinds. Two public kinds shared by the server
+    // capability (#1760) and the handler component (#1762): an inbound
+    // request delivered to the handler, and an outbound response returned
+    // by the handler. Both reuse `HttpMethod` / `HttpHeader` from ADR-0043
+    // so the inbound vocabulary is symmetric with the client.
+
+    /// Inbound HTTP request delivered to a handler component by the server
+    /// capability (ADR-0108). `query` is always present — empty string when
+    /// the URL carries no query component. `body` is raw bytes so binary
+    /// uploads round-trip without loss.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.http.server.request")]
+    pub struct HttpServerRequest {
+        pub method: HttpMethod,
+        pub path: String,
+        pub query: String,
+        pub headers: Vec<HttpHeader>,
+        pub body: Vec<u8>,
+    }
+
+    /// Outbound HTTP response produced by a handler component and forwarded
+    /// to the waiting client by the server capability (ADR-0108). `status`
+    /// is the raw HTTP status code; `body` is raw bytes so binary responses
+    /// round-trip without loss.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.http.server.response")]
+    pub struct HttpServerResponse {
+        pub status: u16,
+        pub headers: Vec<HttpHeader>,
+        pub body: Vec<u8>,
+    }
+
     // ADR-0045 typed-handle store. Four request kinds on the
     // `"aether.handle"` sink (`publish` / `release` / `pin` / `unpin`),
     // paired 1:1 with reply kinds. Components mail `HandlePublish`
@@ -4184,6 +4216,76 @@ mod tests {
                     .expect("test setup: postcard decodes HttpMethod variant");
                 assert_eq!(back, m);
             }
+        }
+
+        #[test]
+        fn http_server_request_roundtrip() {
+            assert_eq!(HttpServerRequest::NAME, "aether.http.server.request");
+            let r = HttpServerRequest {
+                method: HttpMethod::Post,
+                path: "/api/v1/things".to_string(),
+                query: "foo=bar&baz=1".to_string(),
+                headers: sample_headers(),
+                body: vec![0x01, 0x02, 0x03],
+            };
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes HttpServerRequest");
+            let back: HttpServerRequest = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes HttpServerRequest");
+            assert_eq!(back.method, HttpMethod::Post);
+            assert_eq!(back.path, "/api/v1/things");
+            assert_eq!(back.query, "foo=bar&baz=1");
+            assert_eq!(back.headers, r.headers);
+            assert_eq!(back.body, vec![0x01, 0x02, 0x03]);
+        }
+
+        #[test]
+        fn http_server_request_empty_query_roundtrip() {
+            let r = HttpServerRequest {
+                method: HttpMethod::Get,
+                path: "/health".to_string(),
+                query: String::new(),
+                headers: vec![],
+                body: vec![],
+            };
+            let bytes = postcard::to_allocvec(&r)
+                .expect("test setup: postcard encodes HttpServerRequest (empty query)");
+            let back: HttpServerRequest = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes HttpServerRequest (empty query)");
+            assert_eq!(back.query, "");
+            assert_eq!(back.method, HttpMethod::Get);
+        }
+
+        #[test]
+        fn http_server_response_roundtrip() {
+            assert_eq!(HttpServerResponse::NAME, "aether.http.server.response");
+            let r = HttpServerResponse {
+                status: 200,
+                headers: sample_headers(),
+                body: vec![0xde, 0xad, 0xbe, 0xef],
+            };
+            let bytes =
+                postcard::to_allocvec(&r).expect("test setup: postcard encodes HttpServerResponse");
+            let back: HttpServerResponse = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes HttpServerResponse");
+            assert_eq!(back.status, 200);
+            assert_eq!(back.headers, r.headers);
+            assert_eq!(back.body, vec![0xde, 0xad, 0xbe, 0xef]);
+        }
+
+        #[test]
+        fn http_server_response_error_status_roundtrip() {
+            let r = HttpServerResponse {
+                status: 404,
+                headers: vec![],
+                body: b"not found".to_vec(),
+            };
+            let bytes = postcard::to_allocvec(&r)
+                .expect("test setup: postcard encodes HttpServerResponse (404)");
+            let back: HttpServerResponse = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes HttpServerResponse (404)");
+            assert_eq!(back.status, 404);
+            assert_eq!(back.body, b"not found");
         }
     }
 
