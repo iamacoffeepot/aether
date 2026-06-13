@@ -1012,6 +1012,10 @@ impl MailSender for NativeCtx<'_> {
         );
     }
 
+    fn prev_correlation(&self) -> u64 {
+        self.binding.prev_correlation()
+    }
+
     //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
@@ -1044,10 +1048,6 @@ impl MailSender for NativeCtx<'_> {
             None,
             None,
         );
-    }
-
-    fn prev_correlation(&self) -> u64 {
-        self.binding.prev_correlation()
     }
 }
 

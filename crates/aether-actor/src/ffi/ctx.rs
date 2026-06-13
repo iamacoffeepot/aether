@@ -301,6 +301,10 @@ impl MailSender for FfiCtx<'_> {
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
     }
 
+    fn prev_correlation(&self) -> u64 {
+        MAIL_BRIDGE.prev_correlation()
+    }
+
     //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
@@ -317,10 +321,6 @@ impl MailSender for FfiCtx<'_> {
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
-    }
-
-    fn prev_correlation(&self) -> u64 {
-        MAIL_BRIDGE.prev_correlation()
     }
 }
 
@@ -432,6 +432,10 @@ impl MailSender for FfiDropCtx<'_> {
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
     }
 
+    fn prev_correlation(&self) -> u64 {
+        MAIL_BRIDGE.prev_correlation()
+    }
+
     //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
@@ -448,10 +452,6 @@ impl MailSender for FfiDropCtx<'_> {
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
-    }
-
-    fn prev_correlation(&self) -> u64 {
-        MAIL_BRIDGE.prev_correlation()
     }
 }
 
