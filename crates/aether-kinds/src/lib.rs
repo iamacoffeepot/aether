@@ -1458,12 +1458,21 @@ mod control_plane {
     /// is dispatched and the reply is `CaptureFrameResult::Err`. The
     /// whole request aborts before touching the queue.
     ///
+    /// `checks` requests a substrate-side verdict scored on the exact
+    /// RGBA the PNG is built from — the de-padded, swizzled frame the
+    /// render thread maps before the PNG encode (ADR-0105 capture path,
+    /// iamacoffeepot/aether#1777). Each entry names one
+    /// `test_bench::visual` reduction plus its lit/background partition
+    /// params; the results ride back on `CaptureFrameResult::Ok.verdict`.
+    /// Empty means "PNG only, no verdict" — the prior behaviour.
+    ///
     /// Reply: `CaptureFrameResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.render.capture_frame")]
     pub struct CaptureFrame {
         pub mails: Vec<MailEnvelope>,
         pub after_mails: Vec<MailEnvelope>,
+        pub checks: Vec<FrameCheck>,
     }
 
     /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors
@@ -1482,28 +1491,121 @@ mod control_plane {
     }
 
     /// Reply to `CaptureFrame`. `Ok` carries the PNG bytes for the
-    /// captured frame; `Err` carries a free-form reason — capture not
-    /// supported on this surface, map failed, encode failed, or a
-    /// bundle-resolution failure (unknown kind / mailbox) aborting
+    /// captured frame plus an optional [`FrameVerdict`] (present iff the
+    /// request carried `checks`); `Err` carries a free-form reason —
+    /// capture not supported on this surface, map failed, encode failed,
+    /// or a bundle-resolution failure (unknown kind / mailbox) aborting
     /// before any mail was dispatched.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.render.capture_frame_result")]
     pub enum CaptureFrameResult {
-        Ok { png: Vec<u8> },
-        Err { error: String },
+        Ok {
+            png: Vec<u8>,
+            verdict: Option<FrameVerdict>,
+        },
+        Err {
+            error: String,
+        },
     }
 
     /// Build a [`CaptureFrameResult`] from the raw GPU `render_and_capture`
     /// result shape. Every capture handler in `aether-substrate-bundle`
     /// (test-bench inline, in-process bench, desktop driver) needs this
-    /// same `Ok(png) → Ok { png }` / `Err(error) → Err { error }` flip.
-    impl From<Result<Vec<u8>, String>> for CaptureFrameResult {
-        fn from(result: Result<Vec<u8>, String>) -> Self {
+    /// same `Ok((png, verdict)) → Ok { png, verdict }` / `Err(error) → Err
+    /// { error }` flip. `verdict` is `None` when the request carried no
+    /// `checks`.
+    impl From<Result<(Vec<u8>, Option<FrameVerdict>), String>> for CaptureFrameResult {
+        fn from(result: Result<(Vec<u8>, Option<FrameVerdict>), String>) -> Self {
             match result {
-                Ok(png) => Self::Ok { png },
+                Ok((png, verdict)) => Self::Ok { png, verdict },
                 Err(error) => Self::Err { error },
             }
         }
+    }
+
+    /// One reduction requested in a [`CaptureFrame::checks`] list. The
+    /// `reduction` names which `test_bench::visual` check to run;
+    /// `tolerance` is the per-channel threshold that partitions pixels
+    /// into the lit/background mask the silhouette reductions share; and
+    /// `background` pins the reference RGB — `None` falls back to the
+    /// frame's top-left pixel, the `differs_from_background` convention.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct FrameCheck {
+        pub reduction: FrameReduction,
+        pub tolerance: u8,
+        pub background: Option<[u8; 3]>,
+    }
+
+    /// Which `test_bench::visual` reduction a [`FrameCheck`] runs. The
+    /// names mirror the public reduction functions one-for-one.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FrameReduction {
+        /// `not_all_black` — at least one pixel has a non-zero RGB.
+        NotAllBlack,
+        /// `differs_from_background` — at least one pixel exceeds the
+        /// tolerance band around the background reference.
+        DiffersFromBackground,
+        /// `coverage` — lit fraction of the frame in `[0.0, 1.0]`.
+        Coverage,
+        /// `centroid` — mean lit-pixel `(x, y)`.
+        Centroid,
+        /// `bounding_box` — inclusive lit-pixel extent.
+        BoundingBox,
+    }
+
+    /// Substrate-side verdict over a captured frame: the frame
+    /// dimensions plus one [`FrameCheckResult`] per requested reduction,
+    /// scored on the exact de-padded RGBA the PNG was encoded from
+    /// (iamacoffeepot/aether#1777). Rides on `CaptureFrameResult::Ok`
+    /// when the request carried `checks`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct FrameVerdict {
+        pub width: u32,
+        pub height: u32,
+        pub results: Vec<FrameCheckResult>,
+    }
+
+    /// Result of one requested reduction. The variant matches the
+    /// [`FrameReduction`] requested; the assertion-style checks
+    /// (`NotAllBlack` / `DiffersFromBackground`) report `passed` plus a
+    /// `detail` failure string (`None` on pass), and the silhouette
+    /// reductions echo the `background` they partitioned against
+    /// alongside their scalar / coordinate result (`None` when the lit
+    /// mask was empty).
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub enum FrameCheckResult {
+        NotAllBlack {
+            passed: bool,
+            detail: Option<String>,
+        },
+        DiffersFromBackground {
+            passed: bool,
+            detail: Option<String>,
+        },
+        Coverage {
+            background: [u8; 3],
+            fraction: f32,
+        },
+        Centroid {
+            background: [u8; 3],
+            centroid: Option<[f32; 2]>,
+        },
+        BoundingBox {
+            background: [u8; 3],
+            rect: Option<FrameRect>,
+        },
+    }
+
+    /// Inclusive axis-aligned pixel extent of a lit region — the wire
+    /// mirror of `test_bench::visual::Rect`. `min`/`max` are the smallest
+    /// and largest lit column (`x`) and row (`y`); a single lit pixel
+    /// yields `min == max`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FrameRect {
+        pub min_x: u32,
+        pub min_y: u32,
+        pub max_x: u32,
+        pub max_y: u32,
     }
 
     // ADR-0105 textured-quad render surface. Three kinds on the
@@ -3645,6 +3747,133 @@ mod tests {
             assert_eq!(nested_fields[0].name, "x");
             assert_eq!(nested_fields[2].name, "z");
             assert_eq!(nested_fields[5].name, "b");
+        }
+    }
+
+    // iamacoffeepot/aether#1777 capture-verdict kind roundtrips. The
+    // request gains an optional-background `checks` list and the result
+    // gains an optional `verdict` carrying scalar / coordinate reduction
+    // results; postcard roundtrip proves the derived Serialize/Deserialize
+    // agree on the wire for the new shapes.
+    mod capture_verdict_roundtrips {
+        use super::*;
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        #[test]
+        fn capture_frame_checks_roundtrip() {
+            let frame = CaptureFrame {
+                mails: vec![],
+                after_mails: vec![],
+                checks: vec![
+                    FrameCheck {
+                        reduction: FrameReduction::NotAllBlack,
+                        tolerance: 0,
+                        background: None,
+                    },
+                    FrameCheck {
+                        reduction: FrameReduction::Coverage,
+                        tolerance: 5,
+                        background: Some([69, 79, 105]),
+                    },
+                ],
+            };
+            let bytes =
+                postcard::to_allocvec(&frame).expect("test setup: postcard encodes CaptureFrame");
+            let back: CaptureFrame =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes CaptureFrame");
+            assert_eq!(back.checks.len(), 2);
+            assert_eq!(back.checks[0].reduction, FrameReduction::NotAllBlack);
+            assert_eq!(back.checks[0].background, None);
+            assert_eq!(back.checks[1].reduction, FrameReduction::Coverage);
+            assert_eq!(back.checks[1].tolerance, 5);
+            assert_eq!(back.checks[1].background, Some([69, 79, 105]));
+        }
+
+        #[test]
+        fn capture_frame_result_verdict_roundtrip() {
+            let ok = CaptureFrameResult::Ok {
+                png: vec![0x89, 0x50, 0x4E, 0x47],
+                verdict: Some(FrameVerdict {
+                    width: 64,
+                    height: 48,
+                    results: vec![
+                        FrameCheckResult::NotAllBlack {
+                            passed: true,
+                            detail: None,
+                        },
+                        FrameCheckResult::DiffersFromBackground {
+                            passed: false,
+                            detail: Some("all pixels within tolerance".to_string()),
+                        },
+                        FrameCheckResult::Coverage {
+                            background: [69, 79, 105],
+                            fraction: 0.25,
+                        },
+                        FrameCheckResult::Centroid {
+                            background: [69, 79, 105],
+                            centroid: Some([31.5, 23.5]),
+                        },
+                        FrameCheckResult::BoundingBox {
+                            background: [69, 79, 105],
+                            rect: Some(FrameRect {
+                                min_x: 16,
+                                min_y: 12,
+                                max_x: 40,
+                                max_y: 30,
+                            }),
+                        },
+                    ],
+                }),
+            };
+            let bytes = postcard::to_allocvec(&ok)
+                .expect("test setup: postcard encodes CaptureFrameResult::Ok");
+            let back: CaptureFrameResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CaptureFrameResult::Ok");
+            match back {
+                CaptureFrameResult::Ok { png, verdict } => {
+                    assert_eq!(png, vec![0x89, 0x50, 0x4E, 0x47]);
+                    let verdict = verdict.expect("verdict survives the roundtrip");
+                    assert_eq!((verdict.width, verdict.height), (64, 48));
+                    assert_eq!(verdict.results.len(), 5);
+                    assert_eq!(
+                        verdict.results[2],
+                        FrameCheckResult::Coverage {
+                            background: [69, 79, 105],
+                            fraction: 0.25,
+                        },
+                    );
+                    assert_eq!(
+                        verdict.results[4],
+                        FrameCheckResult::BoundingBox {
+                            background: [69, 79, 105],
+                            rect: Some(FrameRect {
+                                min_x: 16,
+                                min_y: 12,
+                                max_x: 40,
+                                max_y: 30,
+                            }),
+                        },
+                    );
+                }
+                CaptureFrameResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn capture_frame_result_no_verdict_roundtrip() {
+            let ok = CaptureFrameResult::Ok {
+                png: vec![1, 2, 3],
+                verdict: None,
+            };
+            let bytes = postcard::to_allocvec(&ok)
+                .expect("test setup: postcard encodes CaptureFrameResult::Ok");
+            let back: CaptureFrameResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CaptureFrameResult::Ok");
+            match back {
+                CaptureFrameResult::Ok { verdict, .. } => assert!(verdict.is_none()),
+                CaptureFrameResult::Err { .. } => panic!("expected Ok"),
+            }
         }
     }
 

@@ -31,8 +31,9 @@ use std::path::Path;
 
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    Camera, CreateTexture, CreateTextureResult, Delete, DeleteResult, DrawSolidQuads, DrawText,
-    DrawTexturedQuads, DropComponent, DropResult, FsError, List, ListResult, LoadComponent,
+    Camera, CaptureFrame, CaptureFrameResult, CreateTexture, CreateTextureResult, Delete,
+    DeleteResult, DrawSolidQuads, DrawText, DrawTexturedQuads, DropComponent, DropResult,
+    FrameCheck, FrameCheckResult, FrameReduction, FsError, List, ListResult, LoadComponent,
     LoadFont, LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale, QuadSpace, Read,
     ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, Write, WriteResult,
 };
@@ -843,6 +844,126 @@ fn solid_quad_draws_screen_space_rect() {
         "after the solid quad stopped being sent the frame should be uniform clear color, \
          but coverage was {cleared_coverage} (immediate-mode clear did not run)",
     );
+}
+
+/// iamacoffeepot/aether#1777: a `capture_frame` carrying a `checks`
+/// request returns a substrate-side verdict scored on the exact RGBA
+/// the PNG is built from — no caller-side PNG decode. Draws a known
+/// solid quad as a capture pre-mail and asserts the verdict's
+/// reductions (`not_all_black`, `coverage`, `centroid`, `bounding_box`)
+/// land the same way the decode-based `solid_quad_draws_screen_space_rect`
+/// scores them, but computed in the render thread.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn capture_frame_checks_return_substrate_verdict() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    // Known screen rect: top-left (16, 12), size 24×18 — the same draw
+    // `solid_quad_draws_screen_space_rect` decodes the PNG to score.
+    let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
+    let draw = envelope(
+        "aether.render",
+        &DrawSolidQuads {
+            space: QuadSpace::Screen,
+            quads: vec![SolidQuad {
+                x: quad_x,
+                y: quad_y,
+                width: quad_w,
+                height: quad_h,
+                color: [1.0, 1.0, 1.0, 1.0],
+            }],
+        },
+    );
+    let tolerance = 5u8;
+    let mk_check = |reduction| FrameCheck {
+        reduction,
+        tolerance,
+        // None → partition against the frame's top-left pixel (the clear
+        // color), matching the decode-based scenarios' convention.
+        background: None,
+    };
+
+    let result = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CaptureFrame {
+                    mails: vec![draw],
+                    after_mails: vec![],
+                    checks: vec![
+                        mk_check(FrameReduction::NotAllBlack),
+                        mk_check(FrameReduction::Coverage),
+                        mk_check(FrameReduction::Centroid),
+                        mk_check(FrameReduction::BoundingBox),
+                    ],
+                },
+            ),
+        )])
+        .expect("send_and_await(CaptureFrame) with checks");
+    let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
+    let verdict = match reply {
+        CaptureFrameResult::Ok { png, verdict } => {
+            assert!(
+                png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+                "the PNG still rides back alongside the verdict",
+            );
+            verdict.expect("a checks request returns a verdict")
+        }
+        CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
+    };
+    assert_eq!((verdict.width, verdict.height), (frame_width, frame_height));
+    assert_eq!(verdict.results.len(), 4);
+
+    match &verdict.results[0] {
+        FrameCheckResult::NotAllBlack { passed, detail } => {
+            assert!(passed, "the white quad lights pixels: {detail:?}");
+        }
+        other => panic!("expected NotAllBlack result, got {other:?}"),
+    }
+    match &verdict.results[1] {
+        FrameCheckResult::Coverage { fraction, .. } => {
+            // 24*18 / 64*48 ≈ 0.14 — the same band the decode test asserts.
+            assert!(
+                (0.08..0.22).contains(fraction),
+                "solid quad coverage {fraction} fell outside the expected band",
+            );
+        }
+        other => panic!("expected Coverage result, got {other:?}"),
+    }
+    match &verdict.results[2] {
+        FrameCheckResult::Centroid { centroid, .. } => {
+            let [cx, cy] = centroid.expect("a lit frame has a centroid");
+            let pad = 4.0f32;
+            assert!(
+                cx >= quad_x - pad
+                    && cx <= quad_x + quad_w + pad
+                    && cy >= quad_y - pad
+                    && cy <= quad_y + quad_h + pad,
+                "verdict centroid ({cx}, {cy}) should sit inside the screen rect",
+            );
+        }
+        other => panic!("expected Centroid result, got {other:?}"),
+    }
+    match &verdict.results[3] {
+        FrameCheckResult::BoundingBox { rect, .. } => {
+            let rect = rect.expect("a lit frame has a bounding box");
+            let pad = 4.0f32;
+            let (min_x, max_x) = (rect.min_x as f32, rect.max_x as f32);
+            assert!(
+                min_x >= quad_x - pad
+                    && min_x <= quad_x + pad
+                    && max_x <= quad_x + quad_w + pad
+                    && max_x >= quad_x + quad_w - pad,
+                "verdict bounding box {rect:?} should hug the drawn rect's x-extent",
+            );
+        }
+        other => panic!("expected BoundingBox result, got {other:?}"),
+    }
 }
 
 /// `replace_component` preserves the mailbox identity across the

@@ -719,11 +719,15 @@ impl TestBench {
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,
+                // The `TestBench::capture` API returns the PNG only; the
+                // substrate-side verdict path (iamacoffeepot/aether#1777)
+                // is exercised through `BenchOp::send_and_await` scenarios.
+                checks: Vec::new(),
             },
             cid,
         );
         match self.pump_until_reply::<CaptureFrameResult>(cid, "CaptureFrameResult")? {
-            CaptureFrameResult::Ok { png } => Ok(png),
+            CaptureFrameResult::Ok { png, .. } => Ok(png),
             CaptureFrameResult::Err { error } => Err(TestBenchError::Capture(error)),
         }
     }
@@ -1070,7 +1074,7 @@ impl TestBench {
                         });
                     }
                 }
-                let result = CaptureFrameResult::from(self.gpu.render_and_capture());
+                let result = CaptureFrameResult::from(self.gpu.render_and_capture(&req.checks));
                 for mail in req.after_mails {
                     self.queue.push(mail);
                 }
@@ -1195,6 +1199,7 @@ mod tests {
                             &CaptureFrame {
                                 mails: Vec::new(),
                                 after_mails: Vec::new(),
+                                checks: Vec::new(),
                             },
                         ),
                     ),
@@ -1204,7 +1209,11 @@ mod tests {
                 .reply("capture")
                 .expect("capture step replied with CaptureFrameResult");
             match reply {
-                CaptureFrameResult::Ok { png } => {
+                CaptureFrameResult::Ok { png, verdict } => {
+                    assert!(
+                        verdict.is_none(),
+                        "no checks were requested, so the verdict must be absent",
+                    );
                     assert!(
                         png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                         "captured bytes are not a PNG: first 8 bytes={:?}",

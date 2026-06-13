@@ -63,6 +63,11 @@ pub struct PendingCapture {
     pub reply: InboundMail,
     pub after_mails: Vec<Mail>,
     pub pre_settlements: Vec<Receiver<()>>,
+    /// The `CaptureFrame.checks` request copied through from the cap
+    /// handler. The render thread scores these reductions on the raw
+    /// RGBA after readback and lands the verdict on the reply
+    /// (iamacoffeepot/aether#1777). Empty when no verdict was requested.
+    pub checks: Vec<aether_kinds::FrameCheck>,
 }
 
 /// Single-slot queue. Cheaply cloneable (wraps an `Arc`), shared
@@ -168,6 +173,7 @@ mod tests {
             reply,
             after_mails: Vec::new(),
             pre_settlements: Vec::new(),
+            checks: Vec::new(),
         }
     }
 

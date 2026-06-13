@@ -76,9 +76,9 @@ mod native {
     use aether_substrate::render::{
         CaptureMeta, IDENTITY_VIEW_PROJ, OverlayDraw, Pipeline, QUAD_VERTEX_STRIDE,
         QUAD_VERTICES_PER_QUAD, QuadPipeline, RealizedTexture, RenderError, Targets,
-        build_main_pipeline, build_quad_pipeline, finish_capture, prepare_capture_copy,
-        push_screen_quad_vertices, push_world_quad_vertices, realize_texture, record_main_pass,
-        record_quad_overlay_pass, upload_texture_full,
+        build_main_pipeline, build_quad_pipeline, finish_capture, map_capture_rgba,
+        prepare_capture_copy, push_screen_quad_vertices, push_world_quad_vertices, realize_texture,
+        record_main_pass, record_quad_overlay_pass, upload_texture_full,
     };
 
     use super::{
@@ -529,6 +529,7 @@ mod native {
                 reply: inbound,
                 after_mails: after,
                 pre_settlements,
+                checks: mail.checks,
             };
             // A rejected request (`Err`) is handed back so its retained
             // guard can carry the synchronous `Err` reply before it drops
@@ -1135,6 +1136,26 @@ mod native {
                 .lock()
                 .expect("mutex poisoned; fail-fast per ADR-0063");
             finish_capture(&gpu.device, &targets, meta)
+        }
+
+        /// Map the readback buffer prepared by [`Self::record_capture_copy`]
+        /// and return the raw de-padded RGBA8 frame — the exact pixels
+        /// [`Self::finish_capture`] PNG-encodes. The bundle render thread
+        /// scores a verdict on these bytes and encodes the PNG from the
+        /// same buffer, so the readback is mapped just once
+        /// (iamacoffeepot/aether#1777). Call after the encoder containing
+        /// the matching `record_capture_copy` has been submitted.
+        ///
+        /// # Panics
+        /// Panics if `install_gpu` hasn't been called or if the targets
+        /// mutex is poisoned — fail-fast per ADR-0063.
+        pub fn map_capture_rgba(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
+            let gpu = self.expect_gpu();
+            let targets = gpu
+                .targets
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
+            map_capture_rgba(&gpu.device, &targets, meta)
         }
 
         /// Resize the offscreen color + depth targets. Idempotent on

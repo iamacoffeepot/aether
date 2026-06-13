@@ -21,7 +21,9 @@ mod pipeline;
 mod quad;
 mod targets;
 
-pub use capture::{CaptureMeta, finish_capture, prepare_capture_copy};
+pub use capture::{
+    CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy,
+};
 pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
 pub use quad::{
     OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,

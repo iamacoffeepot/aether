@@ -6,6 +6,7 @@
 
 use std::io::Cursor;
 
+use aether_kinds::{FrameCheck, FrameCheckResult, FrameRect, FrameReduction, FrameVerdict};
 use thiserror::Error;
 
 /// Decoded frame: RGBA8 pixels in row-major top-down order, width
@@ -224,6 +225,73 @@ pub fn background_top_left(image: &Image) -> [u8; 3] {
         return [0, 0, 0];
     }
     [image.rgba[0], image.rgba[1], image.rgba[2]]
+}
+
+/// Score a `CaptureFrame.checks` request against a freshly-mapped
+/// RGBA8 frame (the exact bytes the PNG is encoded from) and return the
+/// wire [`FrameVerdict`]. This is the substrate-side verdict the MCP
+/// `capture_frame` tool surfaces alongside the PNG
+/// (iamacoffeepot/aether#1777): the render thread reaches the raw RGBA
+/// and the reductions in one place, so a smoke demo asserts on the
+/// precise pixels rendered without decoding the returned PNG.
+///
+/// Each check resolves its own background — explicit when the request
+/// pins one, otherwise the frame's top-left pixel
+/// (`differs_from_background`'s convention). `rgba` is consumed to build
+/// the working `Image` so the verdict runs without copying the buffer.
+#[must_use]
+pub fn run_checks(rgba: Vec<u8>, width: u32, height: u32, checks: &[FrameCheck]) -> FrameVerdict {
+    let image = Image {
+        width,
+        height,
+        rgba,
+    };
+    let results = checks
+        .iter()
+        .map(|check| {
+            let bg = check
+                .background
+                .unwrap_or_else(|| background_top_left(&image));
+            match check.reduction {
+                FrameReduction::NotAllBlack => {
+                    let (passed, detail) = match not_all_black(&image) {
+                        Ok(()) => (true, None),
+                        Err(detail) => (false, Some(detail)),
+                    };
+                    FrameCheckResult::NotAllBlack { passed, detail }
+                }
+                FrameReduction::DiffersFromBackground => {
+                    let (passed, detail) = match differs_from_background(&image, check.tolerance) {
+                        Ok(()) => (true, None),
+                        Err(detail) => (false, Some(detail)),
+                    };
+                    FrameCheckResult::DiffersFromBackground { passed, detail }
+                }
+                FrameReduction::Coverage => FrameCheckResult::Coverage {
+                    background: bg,
+                    fraction: coverage(&image, bg, check.tolerance),
+                },
+                FrameReduction::Centroid => FrameCheckResult::Centroid {
+                    background: bg,
+                    centroid: centroid(&image, bg, check.tolerance).map(<[f32; 2]>::from),
+                },
+                FrameReduction::BoundingBox => FrameCheckResult::BoundingBox {
+                    background: bg,
+                    rect: bounding_box(&image, bg, check.tolerance).map(|r| FrameRect {
+                        min_x: r.min_x,
+                        min_y: r.min_y,
+                        max_x: r.max_x,
+                        max_y: r.max_y,
+                    }),
+                },
+            }
+        })
+        .collect();
+    FrameVerdict {
+        width,
+        height,
+        results,
+    }
 }
 
 #[cfg(test)]
