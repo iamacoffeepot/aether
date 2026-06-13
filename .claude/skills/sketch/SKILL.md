@@ -15,7 +15,7 @@ This skill is the single definition of issue-filing mechanics (title, labels, bo
 /sketch <idea text>                  file an issue from the idea
 /sketch <idea text> --type <t>       override the inferred type prefix
 /sketch <idea text> --crate <c>      override the inferred crate scope
-/sketch <idea text> --label <l,...>  extra labels (e.g. papercut, design)
+/sketch <idea text> --label <l,...>  extra labels (e.g. papercut)
 /sketch <idea text> --no-board       file the issue, skip board placement
 ```
 
@@ -46,7 +46,7 @@ Apply the labels on the issue-create call itself — the REST `POST …/issues` 
 
 - `type:<t>` mirrors the title prefix. All seven allowed types have a matching label: `type:feat`, `type:fix`, `type:chore`, `type:docs`, `type:perf`, `type:refactor`, `type:flake`.
 - `crate:<short>` for the crate scope. **If the crate is new and has no label, create it first** (`gh label create "crate:<short>" --color bfdadc --description "<full crate name>"`) — PRs against a crate with no label trip the title lint (Pattern E).
-- `papercut` / `design` when the idea is a gotcha/rough-edge or a work-in-progress design, respectively — pass via `--label` or infer when the idea text says so.
+- `papercut` when the idea is a gotcha/rough-edge — pass via `--label` or infer when the idea text says so.
 - No `phase:*` label — Backlog carries none by convention.
 
 ## Body — light expansion
