@@ -586,7 +586,7 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// mailbox via
 /// [`ChassisCtx::claim_mailbox`](crate::chassis::ctx::ChassisCtx::claim_mailbox)
 /// no longer hand-rolls this bracket: the claim carries a
-/// [`ClaimedInbox`](crate::chassis::inbox::ClaimedInbox) whose drain
+/// [`SettlingInbox`](crate::chassis::inbox::SettlingInbox) whose drain
 /// methods yield each mail as an
 /// [`InboundMail`](crate::chassis::inbox::InboundMail) guard that records
 /// `Finished` + disarms on scope exit, so every arm settles by

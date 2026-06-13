@@ -1,10 +1,12 @@
-//! ADR-0106: the framework drain that seals the claimed-mailbox surface.
+//! ADR-0106: the framework drain that backs every `Receiver<Envelope>` in
+//! the substrate (the universal `SettlingInbox`).
 //!
 //! A mailbox claimed via [`ChassisCtx::claim_mailbox`](crate::chassis::ctx::ChassisCtx::claim_mailbox)
-//! no longer hands the capability a raw `mpsc::Receiver<Envelope>`. It
-//! carries a [`ClaimedInbox`] — the receiver plus the `Arc<Mailer>` and
-//! the claim's [`MailboxId`] — and the only way to reach an inbound
-//! envelope is one of its drain methods, each of which yields an
+//! carries a [`SettlingInbox`] — the receiver plus the `Arc<Mailer>`,
+//! the claim's [`MailboxId`], and a drain-owned reply-id counter.
+//! The only way to reach an inbound envelope on the **sink face** is one
+//! of [`SettlingInbox::try_next`], [`SettlingInbox::recv_timeout`], or
+//! [`SettlingInbox::drain`], each of which wraps the envelope in an
 //! [`InboundMail`] guard. The guard's `Drop` records `Finished` and
 //! disarms the ADR-0094 obligation in one motion, so every consumer arm
 //! — match, decode error, unrecognised kind, early return, panic-unwind,
@@ -13,6 +15,14 @@
 //! unconditional discharge tail (the standard actor path), so a leak at
 //! this seam is unrepresentable in consumer code rather than detected
 //! after the fact (the recurring #846 / #1325 / #1704 class).
+//!
+//! The **dispatcher face** (`recv_blocking` / `try_recv`) yields the raw
+//! [`Envelope`] so the native actor dispatcher
+//! ([`NativeBinding`](crate::actor::native::NativeBinding)) keeps its
+//! existing explicit `record_finished` + `discharge` tail unchanged.
+//! Teardown still settles: `Drop` drains whatever is still queued and
+//! settles each guard, so an armed envelope left in the dispatcher's inbox
+//! at binding teardown settles rather than leaking (#1716).
 //!
 //! Settling on scope exit rather than on payload access is load-bearing:
 //! ADR-0080 §6 requires a reply's `Sent` to be recorded before the
@@ -33,56 +43,111 @@ use aether_data::{Kind, KindId, MailId, MailboxId, Source};
 use crate::actor::native::envelope::Envelope;
 use crate::mail::mailer::Mailer;
 
-/// Base of the drain's reply-lineage id space (ADR-0080 §5 / #1701).
+/// Monotonic counter for the reply-lineage id space (ADR-0080 §5 / #1701).
+///
 /// Sits in the top half of the `u64` space, disjoint from the `send`
 /// correlation counters that start at `0`, so a reply id minted here
-/// never collides with a `send` id. Mirrors
-/// [`NativeBinding`](crate::actor::native::NativeBinding)'s and the wasm
-/// trampoline's reply-lineage base, so the claimed-mailbox reply path
-/// derives reply ids the same way every other reply site does.
-const REPLY_LINEAGE_BASE: u64 = 1 << 63;
+/// never collides with a `send` id. Both the native actor binding
+/// ([`NativeBinding`](crate::actor::native::NativeBinding)) and the
+/// [`SettlingInbox`] sink face mint from this type, so the one
+/// `BASE` value (`1 << 63`) is the only copy in the substrate.
+///
+/// Cloning produces a second handle to the **same** counter (Arc clone),
+/// so a [`SettlingInbox`] shared with its host
+/// [`NativeBinding`](crate::actor::native::NativeBinding) mints reply ids
+/// in one coherent disjoint space.
+#[derive(Clone)]
+pub(crate) struct ReplyLineage(Arc<AtomicU64>);
 
-/// The sealed inbound surface of a claimed mailbox (ADR-0106).
+impl ReplyLineage {
+    /// The starting value: the top half of the `u64` space, above the
+    /// `send` correlation counter (which starts at `0`). Mirrors the
+    /// wasm trampoline's `ComponentCtx::reply_lineage_counter` base so
+    /// the native and guest reply paths derive reply ids the same way. A
+    /// run would need `2^63` sends to reach this base, so the two spaces
+    /// stay disjoint in practice.
+    pub(crate) const BASE: u64 = 1 << 63;
+
+    /// Construct a fresh counter starting at [`Self::BASE`].
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(Self::BASE)))
+    }
+
+    /// Mint the next reply id, advancing the counter by one.
+    pub(crate) fn mint(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::AcqRel)
+    }
+}
+
+/// The sealed inbound surface that backs every `Receiver<Envelope>` in
+/// the substrate (ADR-0106 + #1716).
 ///
 /// Owns the inbox receiver, an `Arc<Mailer>` (for settlement discharge
 /// and lineage-joined replies), the claim's [`MailboxId`], and a
-/// drain-owned reply-id counter. The raw receiver never escapes — every
-/// inbound envelope is reached through [`Self::try_next`],
-/// [`Self::recv_timeout`], or [`Self::drain`], each of which wraps the
-/// envelope in an [`InboundMail`] guard that settles on `Drop`.
+/// reply-id counter.
 ///
-/// Dropping a `ClaimedInbox` drains whatever is still queued and lets
+/// **Sink face** — for out-of-crate caps and the desktop window driver:
+/// [`Self::try_next`], [`Self::recv_timeout`], [`Self::drain`]. Each
+/// yields an [`InboundMail`] guard that settles on `Drop`.
+///
+/// **Dispatcher face** (`pub(crate)`) — for the native actor dispatcher
+/// ([`NativeBinding`](crate::actor::native::NativeBinding)):
+/// `recv_blocking` / `try_recv`. Each yields a raw [`Envelope`] so the
+/// dispatcher keeps its explicit `record_finished` + `discharge` tail.
+///
+/// Dropping a `SettlingInbox` drains whatever is still queued and lets
 /// each guard settle, so a teardown that abandons mail (the #1704 shape:
-/// a queued reply envelope dropped on driver teardown) becomes a settled
-/// drain instead of an armed drop.
-pub struct ClaimedInbox {
+/// a queued reply envelope dropped on driver teardown, or an armed
+/// envelope in the dispatcher's inbox at binding teardown — #1716)
+/// becomes a settled drain instead of an armed drop.
+pub struct SettlingInbox {
     id: MailboxId,
     receiver: mpsc::Receiver<Envelope>,
     mailer: Arc<Mailer>,
-    reply_counter: Arc<AtomicU64>,
+    reply_counter: ReplyLineage,
 }
 
-impl fmt::Debug for ClaimedInbox {
+impl fmt::Debug for SettlingInbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ClaimedInbox")
+        f.debug_struct("SettlingInbox")
             .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }
 
-impl ClaimedInbox {
-    /// Build a `ClaimedInbox` over `receiver`. Production callers receive
-    /// one already built on the [`MailboxClaim`](crate::chassis::ctx::MailboxClaim)
-    /// returned by `claim_mailbox`; the explicit constructor is `pub` so
-    /// out-of-crate tests can pair a channel with a registered inbox
-    /// handler and drive the guard directly.
+impl SettlingInbox {
+    /// Build a `SettlingInbox` over `receiver` with a fresh reply-id
+    /// counter. Production callers receive one already built on the
+    /// [`MailboxClaim`](crate::chassis::ctx::MailboxClaim) returned by
+    /// `claim_mailbox`; the explicit constructor is `pub` so out-of-crate
+    /// tests can pair a channel with a registered inbox handler and drive
+    /// the guard directly.
     #[must_use]
     pub fn new(id: MailboxId, receiver: mpsc::Receiver<Envelope>, mailer: Arc<Mailer>) -> Self {
         Self {
             id,
             receiver,
             mailer,
-            reply_counter: Arc::new(AtomicU64::new(REPLY_LINEAGE_BASE)),
+            reply_counter: ReplyLineage::new(),
+        }
+    }
+
+    /// Build a `SettlingInbox` over `receiver`, sharing the given
+    /// `reply_lineage` counter. Used by
+    /// [`NativeBinding::install_inbox`](crate::actor::native::NativeBinding::install_inbox)
+    /// so the dispatcher's inbox and the binding's reply allocator draw
+    /// from one coherent disjoint id space.
+    pub(crate) fn new_with_lineage(
+        id: MailboxId,
+        receiver: mpsc::Receiver<Envelope>,
+        mailer: Arc<Mailer>,
+        reply_lineage: ReplyLineage,
+    ) -> Self {
+        Self {
+            id,
+            receiver,
+            mailer,
+            reply_counter: reply_lineage,
         }
     }
 
@@ -97,7 +162,7 @@ impl ClaimedInbox {
             env,
             mailer: Arc::clone(&self.mailer),
             self_mailbox: self.id,
-            reply_counter: Arc::clone(&self.reply_counter),
+            reply_counter: self.reply_counter.clone(),
         }
     }
 
@@ -133,20 +198,35 @@ impl ClaimedInbox {
             on_mail(self.wrap(env));
         }
     }
+
+    /// Dispatcher face: block until the next envelope arrives, yielding
+    /// the raw [`Envelope`]. Returns `None` on channel disconnect. The
+    /// native actor dispatcher uses this to keep its explicit
+    /// `record_finished` + `discharge` tail unchanged.
+    pub(crate) fn recv_blocking(&self) -> Option<Envelope> {
+        self.receiver.recv().ok()
+    }
+
+    /// Dispatcher face: take the next queued envelope without blocking,
+    /// yielding the raw [`Envelope`]. Returns `None` when the inbox is
+    /// empty or disconnected.
+    pub(crate) fn try_recv(&self) -> Option<Envelope> {
+        self.receiver.try_recv().ok()
+    }
 }
 
-impl Drop for ClaimedInbox {
+impl Drop for SettlingInbox {
     fn drop(&mut self) {
         // Settle anything still queued: each wrapped envelope's guard
         // records `Finished` + disarms on drop, so teardown is a settled
-        // drain rather than an armed drop (#1704).
+        // drain rather than an armed drop (#1704, #1716).
         while let Ok(env) = self.receiver.try_recv() {
             drop(self.wrap(env));
         }
     }
 }
 
-/// A single inbound envelope drained from a [`ClaimedInbox`], with its
+/// A single inbound envelope drained from a [`SettlingInbox`], with its
 /// ADR-0080 §2 settlement bracket fused to the value's lifetime.
 ///
 /// Exposes the envelope's fields by borrow and replies through
@@ -156,14 +236,14 @@ impl Drop for ClaimedInbox {
 /// `Sent` before this inbound's `Finished` (ADR-0080 §6).
 ///
 /// Owns its envelope and an `Arc` clone of the drain's mailer + reply
-/// counter rather than borrowing the [`ClaimedInbox`], so a consumer can
+/// counter rather than borrowing the [`SettlingInbox`], so a consumer can
 /// hold the guard while still reaching the surrounding `&mut self` (the
 /// desktop window driver dispatches each mail against `&mut App`).
 pub struct InboundMail {
     env: Envelope,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
-    reply_counter: Arc<AtomicU64>,
+    reply_counter: ReplyLineage,
 }
 
 impl InboundMail {
@@ -213,15 +293,15 @@ impl InboundMail {
 
     /// Reply to the mail's sender, joining the inbound's causal chain
     /// (ADR-0080 §5/§6). Mints the reply id from the drain-owned
-    /// counter in the disjoint reply-lineage id space and stamps the
-    /// inbound's `root` / parent, routing through
+    /// reply-id counter in the disjoint reply-lineage space (`1 << 63`
+    /// base) and stamps the inbound's `root` / parent, routing through
     /// [`Mailer::send_reply_with_lineage`]. Returns whether the reply
     /// was routed (`false` for a `SourceAddr::None` sender — nobody
     /// asked for a reply). The reply's `Sent` is recorded here, before
     /// this guard's `Drop` records the inbound's `Finished`, so the §6
     /// hold ordering holds by construction.
     pub fn reply<K: Kind>(&self, result: &K) -> bool {
-        let correlation = self.reply_counter.fetch_add(1, Ordering::AcqRel);
+        let correlation = self.reply_counter.mint();
         let reply_id = MailId::new(self.self_mailbox, correlation);
         // ADR-0080 §5: collapse a NONE parent to `None` (chassis-root /
         // lineage-less inbound), mirroring `NativeCtx::outbound_parent`.
@@ -307,7 +387,7 @@ mod tests {
 
     /// Every consumer arm settles the inbound: a payload-reading consume,
     /// an unmatched drop (fields never touched), a closure `drain`, and
-    /// teardown of the `ClaimedInbox` itself with mail still queued.
+    /// teardown of the `SettlingInbox` itself with mail still queued.
     #[test]
     fn every_arm_settles() {
         let (_registry, mailer, settlement) = test_env();
@@ -316,7 +396,7 @@ mod tests {
         // (1) consume — read the payload, then drop.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 1);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -331,7 +411,7 @@ mod tests {
         // (2) unmatched drop — never touch the fields, just drop.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 2);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -344,7 +424,7 @@ mod tests {
         // (3) closure drain.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 3);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -354,10 +434,10 @@ mod tests {
             settle.recv().expect("drain arm settles the root");
         }
 
-        // (4) teardown — mail queued, ClaimedInbox dropped.
+        // (4) teardown — mail queued, SettlingInbox dropped.
         {
             let (tx, rx) = mpsc::channel();
-            let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+            let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
             let root = MailId::new(id, 4);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
@@ -382,7 +462,7 @@ mod tests {
         let guard_rx = settlement.subscribe_settlement(guard_root);
 
         let (tx, rx) = mpsc::channel();
-        let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
         tx.send(armed_env(id, MailId::NONE, guard_root, Source::NONE))
             .unwrap();
         // Drop without reading — a NONE inbound must not settle anything.
@@ -418,7 +498,7 @@ mod tests {
         let settle = settlement.subscribe_settlement(root);
 
         let (tx, rx) = mpsc::channel();
-        let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
         tx.send(armed_env(id, MailId::new(id, 21), root, sender))
             .unwrap();
@@ -455,8 +535,8 @@ mod tests {
     }
 
     /// `InboundMail::reply` mints its reply id in the disjoint
-    /// reply-lineage id space (`1 << 63` base), stamped with the claimed
-    /// mailbox as the sender.
+    /// reply-lineage id space ([`ReplyLineage::BASE`]), stamped with the
+    /// claimed mailbox as the sender.
     #[test]
     fn reply_id_minted_in_reply_lineage_space() {
         let (registry, mailer, _settlement) = test_env();
@@ -472,7 +552,7 @@ mod tests {
             .expect("register reply target");
 
         let (tx, rx) = mpsc::channel();
-        let inbox = ClaimedInbox::new(id, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(id, rx, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 1);
         // A lineage-less inbound (root NONE) still mints a high-space
         // reply id — the id space is the drain's, not the inbound's.
@@ -488,7 +568,7 @@ mod tests {
 
         let reply_env = rrx.recv().expect("reply routed");
         assert!(
-            reply_env.mail_id.correlation_id >= REPLY_LINEAGE_BASE,
+            reply_env.mail_id.correlation_id >= ReplyLineage::BASE,
             "reply id sits in the reply-lineage space",
         );
         assert_eq!(

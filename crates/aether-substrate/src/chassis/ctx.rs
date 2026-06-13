@@ -13,7 +13,7 @@ use aether_actor::local::ActorSlots;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::error::BootError;
-use crate::chassis::inbox::ClaimedInbox;
+use crate::chassis::inbox::SettlingInbox;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
@@ -51,11 +51,11 @@ pub struct MailboxClaim {
     pub id: MailboxId,
     /// ADR-0106: the sealed inbound surface. Replaces the raw
     /// `mpsc::Receiver<Envelope>` the claim used to expose — a capability
-    /// reaches inbound envelopes only through the [`ClaimedInbox`]'s drain
+    /// reaches inbound envelopes only through the [`SettlingInbox`]'s drain
     /// methods, each of which settles the ADR-0080 §2 bracket on scope
     /// exit. Outside `aether-substrate` it is no longer possible to obtain
     /// an armed [`Envelope`] from a claim.
-    pub inbox: ClaimedInbox,
+    pub inbox: SettlingInbox,
     pub actor_slots: SharedActorSlots,
     /// Optional wake hook fired by the registry sink after each
     /// accepted send (iamacoffeepot/aether#1318). The plain claim path
@@ -439,7 +439,7 @@ impl<'a> ChassisCtx<'a> {
         // arms reach the actor's per-actor `Local<T>` rings.
         Ok(MailboxClaim {
             id,
-            inbox: ClaimedInbox::new(id, rx, Arc::clone(self.mailer)),
+            inbox: SettlingInbox::new(id, rx, Arc::clone(self.mailer)),
             actor_slots: SharedActorSlots::new(),
             wake_slot,
         })

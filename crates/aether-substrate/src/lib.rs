@@ -80,7 +80,7 @@ pub use chassis::ctx::{
     ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, SharedActorSlots,
 };
 pub use chassis::error::BootError;
-pub use chassis::inbox::{ClaimedInbox, InboundMail};
+pub use chassis::inbox::{InboundMail, SettlingInbox};
 pub use config::{
     ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, dump_config, known_keys,
     validate_env,
