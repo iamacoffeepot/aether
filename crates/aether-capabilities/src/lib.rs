@@ -83,6 +83,8 @@ pub(crate) mod test_chassis;
 #[cfg(feature = "text")]
 pub mod text;
 pub mod trace;
+#[cfg(feature = "ui")]
+pub mod ui;
 // ADR-0086 Phase 3b decentralized trace-tree reconstruction. Pure,
 // transport-agnostic guided walk + stitch over the per-actor trace
 // rings; the MCP and the in-process harness each supply their own
@@ -169,6 +171,8 @@ pub use text::TextCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(not(target_arch = "wasm32"))]
 pub use trampoline::WasmTrampolineConfig;
+#[cfg(feature = "ui")]
+pub use ui::UiCapability;
 pub use window::HeadlessWindowCapability;
 
 #[cfg(all(test, feature = "native"))]

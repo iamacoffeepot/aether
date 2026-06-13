@@ -65,6 +65,11 @@ audio = []
 # `ctx.actor::<TextCapability>()` without dragging `fontdue` into the wasm
 # graph.
 text = []
+# ADR-0107 `aether.ui` cap marker. CPU-only — it composes the render
+# solid-quad and text surfaces entirely by mail — gated the same two-
+# layer way so a wasm component can address it via
+# `ctx.actor::<UiCapability>()` without pulling native deps.
+ui = []
 
 # Native impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
@@ -75,6 +80,10 @@ audio-native = ["audio", "native", "dep:cpal", "dep:crossbeam-queue", "dep:hound
 # the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
 # off the hot path. Implies the marker layer + `native`.
 text-native = ["text", "native", "dep:fontdue"]
+# `ui-native` has no heavy deps — the cap only sends mail to the render
+# and text caps. Implies the marker layer + `native` + the two surface
+# marker layers the native impl addresses.
+ui-native = ["ui", "native", "render", "text"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
