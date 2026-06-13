@@ -47,6 +47,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
 use std::io::{Error as IoError, ErrorKind, Write as _};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1875,6 +1876,31 @@ impl HandleStore {
         inner.parked.remove(&id).map_or_else(Vec::new, Into::into)
     }
 
+    /// Drain every parked queue and return all held mails, flattened in
+    /// FIFO order within each handle's queue (cross-handle order is
+    /// unspecified). The `parked` map is replaced with an empty one so
+    /// every subsequent [`Self::parked_count`] call returns 0.
+    ///
+    /// This is the teardown-only counterpart to [`Self::take_parked`],
+    /// which drains a single handle's queue for live replay. Call it
+    /// from the terminal owner of parked mail (the `Mailer`'s `Drop`)
+    /// once routing can no longer replay any parked entry.
+    ///
+    /// # Panics
+    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// ADR-0063: a poisoned lock means a prior holder panicked under
+    /// the guard.
+    pub fn drain_all_parked(&self) -> Vec<Mail> {
+        let mut inner = self
+            .inner
+            .write()
+            .expect("handle store lock poisoned; fail-fast per ADR-0063");
+        mem::take(&mut inner.parked)
+            .into_values()
+            .flatten()
+            .collect()
+    }
+
     /// Sum of `bytes.len()` across every entry in the store.
     ///
     /// # Panics
@@ -2624,6 +2650,26 @@ mod tests {
         assert_eq!(drained[0].kind, KindId(1));
         assert_eq!(drained[1].kind, KindId(2));
         assert_eq!(store.parked_count(HandleId(42)), 0);
+    }
+
+    #[test]
+    fn drain_all_parked_returns_all_queues_and_clears() {
+        let store = HandleStore::new(64);
+        // Park two mails under one handle and one under another.
+        let m1 = Mail::new(MailboxId(0x01), KindId(10), vec![10], 0);
+        let m2 = Mail::new(MailboxId(0x02), KindId(11), vec![11], 0);
+        let m3 = Mail::new(MailboxId(0x03), KindId(12), vec![12], 0);
+        store.park(HandleId(1), m1);
+        store.park(HandleId(1), m2);
+        store.park(HandleId(2), m3);
+        assert_eq!(store.parked_count(HandleId(1)), 2);
+        assert_eq!(store.parked_count(HandleId(2)), 1);
+
+        let drained = store.drain_all_parked();
+        assert_eq!(drained.len(), 3, "all three mails must be returned");
+        // Every queue is cleared after the drain.
+        assert_eq!(store.parked_count(HandleId(1)), 0);
+        assert_eq!(store.parked_count(HandleId(2)), 0);
     }
 
     #[test]

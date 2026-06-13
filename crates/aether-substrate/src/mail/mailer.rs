@@ -521,6 +521,25 @@ impl Mailer {
     }
 }
 
+impl Drop for Mailer {
+    fn drop(&mut self) {
+        // The `Mailer` is the terminal owner of parked mail: once the last
+        // `Arc<Mailer>` drops, no routing call can reach `resolve_handle`
+        // and replay a parked entry. Every mail still parked at this point
+        // will never be delivered, so its `Sent` must be balanced with a
+        // `Finished` to settle the caller's chain (ADR-0080 §12 / ADR-0094).
+        //
+        // Parked mail is unarmed — it carries no `OwnedDispatch` obligation
+        // guard — so the settle is the single `record_finished` call, with
+        // no `discharge` half (contrast `InboundMail::drop`, where both
+        // fire). `record_finished` no-ops on `MailId::NONE`, so
+        // lineage-less parked mail is skipped with no double-count.
+        for mail in self.handle_store.drain_all_parked() {
+            self.trace_handle.record_finished(mail.mail_id, mail.root);
+        }
+    }
+}
+
 /// Resolve `mail.recipient` against the registry and dispatch
 /// inline. `Inbox`-bound mailboxes forward to an actor's mpsc on the caller
 /// thread (or fan out via the cap's mpsc, depending on the closure).
@@ -1565,6 +1584,81 @@ mod tests {
         assert!(
             rx.try_recv().is_ok(),
             "after publish, the resumed inline dispatch records Finished and the chain settles (issue 838)"
+        );
+    }
+
+    /// Counterpart to `ref_walk_parked_defers_finished_until_handle_publish`:
+    /// when a handle never resolves and the `Mailer` tears down, every
+    /// still-parked mail must settle rather than hanging the chain to the
+    /// 600-second MCP timeout. `Mailer::drop` drains the park table and
+    /// records `Finished` for each entry — the same `record_finished` the
+    /// ref-walk `Err` arm calls, and the same balance `InboundMail::drop`
+    /// records for armed inbox mail (parked mail is unarmed, so there is no
+    /// `discharge` half). No threads, no timing: the `try_recv` after the
+    /// explicit `Mailer` drop is deterministic.
+    #[test]
+    fn parked_mail_settles_at_mailer_teardown() {
+        let sender = MailboxId(0x8380_0007_0000_0000);
+        let root = MailId::new(sender, 1);
+
+        let (registry, mailer, store) = make_mailer();
+        let rx = settle_probe(&mailer, root);
+
+        let outer_kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: HeldNote::NAME.into(),
+                schema: held_note_schema(),
+            })
+            .unwrap();
+        let inner_kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: Note::NAME.into(),
+                schema: note_schema(),
+            })
+            .unwrap();
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_inline("test.teardown.park_settle", sink.inline_handler());
+
+        // Build a payload that references a handle that will never be put
+        // into the store — the walker returns `Parked`, mail held.
+        let never_handle = HandleId(0xDEAD_0000_CAFE_BABE);
+        let held: HeldNote = HeldNote {
+            held: Ref::Handle {
+                id: never_handle.0,
+                kind_id: inner_kind_id.0,
+            },
+            seq: 42,
+        };
+        let payload = postcard::to_allocvec(&held).unwrap();
+
+        let mail = Mail::new(sink_id, outer_kind_id, payload, 1).with_lineage(root, root, None);
+        mailer.push(mail);
+
+        // Mail is parked. Chain must NOT have settled yet.
+        assert_eq!(
+            store.parked_count(never_handle),
+            1,
+            "mail should be parked under the never-resolving handle"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "chain must stay elevated while the Mailer is live"
+        );
+
+        // Drop the store Arc first (the Mailer holds the other ref); this
+        // proves settlement fires from the Mailer's drop, not the store's.
+        drop(store);
+        assert!(
+            rx.try_recv().is_err(),
+            "dropping the store Arc alone must not settle the chain"
+        );
+
+        // Drop the Mailer — triggers `impl Drop for Mailer`, which drains
+        // the park table and records `Finished` for the held mail.
+        drop(mailer);
+        assert!(
+            rx.try_recv().is_ok(),
+            "parked mail must settle when the Mailer tears down (issue 1718)"
         );
     }
 
