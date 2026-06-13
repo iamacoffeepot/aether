@@ -36,7 +36,8 @@
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
 use aether_kinds::{
-    Camera, CaptureFrame, CreateTexture, DrawTexturedQuads, DrawTriangle, UpdateTexture,
+    Camera, CaptureFrame, CreateTexture, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
+    UpdateTexture,
 };
 
 // Auxiliary native-only types the chassis driver consumes alongside
@@ -63,7 +64,7 @@ mod native {
     use aether_data::Kind;
     use aether_kinds::{
         CaptureFrameResult, CreateTextureResult, DRAW_TRIANGLE_BYTES, QuadScale, QuadSpace,
-        TexturedQuad,
+        SolidQuad, TexturedQuad,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::capture::{CaptureQueue, PendingCapture};
@@ -81,7 +82,8 @@ mod native {
     };
 
     use super::{
-        Camera, CaptureFrame, CreateTexture, DrawTexturedQuads, DrawTriangle, UpdateTexture,
+        Camera, CaptureFrame, CreateTexture, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
+        UpdateTexture,
     };
     use aether_substrate::render::VERTEX_BUFFER_BYTES;
     use std::mem;
@@ -242,6 +244,13 @@ mod native {
             self.dirty = false;
         }
     }
+
+    /// Reserved sentinel `texture_id` for the internal 1×1 white texture
+    /// used by `on_draw_solid_quads`. `create_texture` starts at `0` and
+    /// increments, so `u32::MAX` is outside the range any caller-visible id
+    /// occupies — the white texture is never handed to a caller and never
+    /// collides with a user-created texture.
+    const WHITE_TEXTURE_ID: u32 = u32::MAX;
 
     /// Session-scoped texture registry. `next_id` hands out the
     /// `texture_id` a `create_texture` reply carries — assigned in
@@ -668,6 +677,74 @@ mod native {
                     texture_id: mail.texture_id,
                     space: mail.space,
                     quads: mail.quads,
+                });
+        }
+
+        /// `DrawSolidQuads` handler (ADR-0107 §4). Expands each `SolidQuad`
+        /// into a `TexturedQuad` covering the full uv of a reserved internal
+        /// 1×1 white texture, tinted by `color` — so the white texel ×
+        /// tint produces the flat fill color with no new GPU pipeline.
+        /// Lazily inserts the white texture into the registry on first call.
+        /// Accumulates into the same `quad_frame` accumulator as
+        /// `on_draw_textured_quads`; immediate-mode contract is identical.
+        ///
+        /// # Agent
+        /// Mail `aether.render.draw_solid_quads { space, quads }` every
+        /// frame the rects should appear; no reply.
+        #[handler]
+        fn on_draw_solid_quads(&self, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
+            if let Some(obs) = &self.config.observed_kinds {
+                obs.lock()
+                    .expect("mutex poisoned; fail-fast per ADR-0063")
+                    .push(<DrawSolidQuads as Kind>::NAME.into());
+            }
+            let mut registry = self
+                .handles
+                .textures
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
+            registry
+                .entries
+                .entry(WHITE_TEXTURE_ID)
+                .or_insert_with(|| StagedTexture {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![255, 255, 255, 255],
+                    realized: None,
+                    dirty: true,
+                });
+            drop(registry);
+            let quads: Vec<TexturedQuad> = mail
+                .quads
+                .into_iter()
+                .map(
+                    |SolidQuad {
+                         x,
+                         y,
+                         width,
+                         height,
+                         color,
+                     }| TexturedQuad {
+                        x,
+                        y,
+                        width,
+                        height,
+                        u0: 0.0,
+                        v0: 0.0,
+                        u1: 1.0,
+                        v1: 1.0,
+                        tint: color,
+                    },
+                )
+                .collect();
+            self.handles
+                .quad_frame
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063")
+                .push(QuadBatch {
+                    texture_id: WHITE_TEXTURE_ID,
+                    space: mail.space,
+                    quads,
                 });
         }
     }
@@ -1347,6 +1424,95 @@ mod native {
             assert!(!texture.apply_subrect(0, 0, 0, 1, &[]));
         }
 
+        /// ADR-0107 §4: `draw_solid_quads` accumulates into `quad_frame` under
+        /// the reserved `WHITE_TEXTURE_ID` and records its kind name in
+        /// `observed_kinds`. Verifies the expand-to-TexturedQuad path and the
+        /// lazy white-texture insertion without a GPU.
+        #[test]
+        fn draw_solid_quads_accumulates_and_observed() {
+            let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+            let config = RenderConfig {
+                observed_kinds: Some(Arc::clone(&observed)),
+                ..RenderConfig::default()
+            };
+            let (registry, mailer) = fresh_substrate();
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<RenderCapability>(config)
+                .build_passive()
+                .expect("build succeeds");
+            let handles = chassis
+                .handle::<RenderHandles>()
+                .expect("RenderCapability publishes RenderHandles");
+
+            let mail = DrawSolidQuads {
+                space: QuadSpace::Screen,
+                quads: vec![SolidQuad {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 30.0,
+                    height: 40.0,
+                    color: [1.0, 0.0, 0.5, 0.8],
+                }],
+            };
+            let payload = postcard::to_allocvec(&mail).expect("encode DrawSolidQuads");
+            deliver(
+                &registry,
+                RenderCapability::NAMESPACE,
+                <DrawSolidQuads as Kind>::ID,
+                &payload,
+            );
+
+            thread::sleep(Duration::from_millis(50));
+
+            let seen = observed
+                .lock()
+                .expect("observed_kinds mutex is not poisoned")
+                .clone();
+            assert!(
+                seen.contains(&DrawSolidQuads::NAME.to_owned()),
+                "draw_solid_quads handler should push its kind name; observed: {seen:?}",
+            );
+
+            let batches = handles
+                .quad_frame
+                .lock()
+                .expect("quad_frame mutex is not poisoned")
+                .clone();
+            assert_eq!(
+                batches.len(),
+                1,
+                "one QuadBatch should be in the accumulator"
+            );
+            assert_eq!(
+                batches[0].texture_id, WHITE_TEXTURE_ID,
+                "batch must use the reserved white texture id",
+            );
+            assert_eq!(
+                batches[0].quads.len(),
+                1,
+                "batch must contain the one expanded quad"
+            );
+            assert_eq!(
+                batches[0].quads[0].tint,
+                [1.0, 0.0, 0.5, 0.8],
+                "expanded quad tint must match the SolidQuad color",
+            );
+            assert_eq!(batches[0].quads[0].width, 30.0);
+
+            let tex_present = handles
+                .textures
+                .lock()
+                .expect("textures mutex is not poisoned")
+                .entries
+                .contains_key(&WHITE_TEXTURE_ID);
+            assert!(
+                tex_present,
+                "white texture must be lazily inserted on first send"
+            );
+
+            drop(chassis);
+        }
+
         #[test]
         fn camera_kind_drops_wrong_length_payload() {
             let (registry, mailer) = fresh_substrate();
@@ -1383,7 +1549,8 @@ mod native_headless {
     use aether_substrate::mail::outbound::HubOutbound;
 
     use super::{
-        Camera, CaptureFrame, CreateTexture, DrawTexturedQuads, DrawTriangle, UpdateTexture,
+        Camera, CaptureFrame, CreateTexture, DrawSolidQuads, DrawTexturedQuads, DrawTriangle,
+        UpdateTexture,
     };
     use std::io;
 
@@ -1476,6 +1643,12 @@ mod native_headless {
         #[allow(clippy::unused_self)]
         #[handler]
         fn on_draw_textured_quads(&self, _ctx: &mut NativeCtx<'_>, _mail: DrawTexturedQuads) {}
+
+        /// `DrawSolidQuads` lands here as a no-op for the same reason
+        /// as `on_draw_textured_quads`.
+        #[allow(clippy::unused_self)]
+        #[handler]
+        fn on_draw_solid_quads(&self, _ctx: &mut NativeCtx<'_>, _mail: DrawSolidQuads) {}
     }
 
     #[cfg(test)]
@@ -1528,6 +1701,39 @@ mod native_headless {
                     panic!("headless create_texture must reply Err, not assign an id")
                 }
             }
+        }
+
+        /// ADR-0107 §4: `draw_solid_quads` on the headless chassis is a
+        /// no-op — no panic, no reply, nothing accumulated. Mirrors the
+        /// `on_draw_textured_quads` no-op contract.
+        #[test]
+        fn headless_draw_solid_quads_is_noop() {
+            use aether_kinds::{DrawSolidQuads, QuadSpace};
+
+            let (mailer, _rx) = test_mailer_and_rx();
+            let outbound = mailer
+                .outbound()
+                .cloned()
+                .expect("test_mailer_and_rx wires a loopback outbound");
+            let cap = HeadlessRenderCapability { outbound };
+            let transport = Arc::new(NativeBinding::new_for_test(
+                Arc::clone(&mailer),
+                MailboxId(0),
+            ));
+            let mut ctx = NativeCtx::new(
+                &transport,
+                Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
+            cap.on_draw_solid_quads(
+                &mut ctx,
+                DrawSolidQuads {
+                    space: QuadSpace::Screen,
+                    quads: vec![],
+                },
+            );
+            // No panic and no reply enqueued — the no-op dropped the mail cleanly.
         }
     }
 }

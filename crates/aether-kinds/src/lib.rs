@@ -1629,6 +1629,35 @@ mod control_plane {
         pub quads: Vec<TexturedQuad>,
     }
 
+    /// One flat-colored quad in a `DrawSolidQuads` batch. `(x, y)` is the
+    /// top-left corner and `(width, height)` the size, both in the unit
+    /// the batch's `space` selects — window pixels for `Screen`, pixel
+    /// offsets from the anchor for `World`. `color` is a linear RGBA value;
+    /// the alpha channel scales the blend. Not a kind on its own — only
+    /// addressable inside `DrawSolidQuads.quads`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct SolidQuad {
+        pub x: f32,
+        pub y: f32,
+        pub width: f32,
+        pub height: f32,
+        pub color: [f32; 4],
+    }
+
+    /// `aether.render.draw_solid_quads` — draw a batch of flat-colored,
+    /// alpha-blended quads in the projection `space` selects. Accumulated
+    /// per frame with the same immediate-mode contract as
+    /// `aether.draw_triangle`: send it every frame the quads should appear,
+    /// or they vanish next frame. Reuses the textured-quad overlay pipeline
+    /// with a reserved internal 1×1 white texture tinted by `color` — no
+    /// new GPU pipeline. Fire-and-forget; no reply.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.render.draw_solid_quads")]
+    pub struct DrawSolidQuads {
+        pub space: QuadSpace,
+        pub quads: Vec<SolidQuad>,
+    }
+
     // ADR-0105 text surface. The `aether.text` capability composes the
     // textured-quad surface above into glyphs: load a TTF off the hot
     // path under a session-scoped `font_id`, then draw a string every
@@ -3476,6 +3505,7 @@ mod tests {
         );
         assert_eq!(UpdateTexture::NAME, "aether.render.update_texture");
         assert_eq!(DrawTexturedQuads::NAME, "aether.render.draw_textured_quads");
+        assert_eq!(DrawSolidQuads::NAME, "aether.render.draw_solid_quads");
         assert_eq!(LoadFont::NAME, "aether.text.load_font");
         assert_eq!(LoadFontResult::NAME, "aether.text.load_font_result");
         assert_eq!(DrawText::NAME, "aether.text.draw");
@@ -3721,6 +3751,28 @@ mod tests {
                 }
                 QuadSpace::Screen => panic!("expected World"),
             }
+        }
+
+        #[test]
+        fn draw_solid_quads_screen_roundtrip() {
+            let d = DrawSolidQuads {
+                space: QuadSpace::Screen,
+                quads: vec![SolidQuad {
+                    x: 10.0,
+                    y: 8.0,
+                    width: 20.0,
+                    height: 16.0,
+                    color: [1.0, 0.0, 0.5, 1.0],
+                }],
+            };
+            let bytes =
+                postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawSolidQuads");
+            let back: DrawSolidQuads =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes DrawSolidQuads");
+            assert_eq!(back.space, QuadSpace::Screen);
+            assert_eq!(back.quads.len(), 1);
+            assert_eq!(back.quads[0].width, 20.0);
+            assert_eq!(back.quads[0].color, [1.0, 0.0, 0.5, 1.0]);
         }
 
         #[test]

@@ -31,10 +31,10 @@ use std::path::Path;
 
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    Camera, CreateTexture, CreateTextureResult, Delete, DeleteResult, DrawText, DrawTexturedQuads,
-    DropComponent, DropResult, FsError, List, ListResult, LoadComponent, LoadFont, LoadFontResult,
-    LoadResult, MailEnvelope, Ping, QuadScale, QuadSpace, Read, ReadResult, ReplaceComponent,
-    ReplaceResult, TexturedQuad, Write, WriteResult,
+    Camera, CreateTexture, CreateTextureResult, Delete, DeleteResult, DrawSolidQuads, DrawText,
+    DrawTexturedQuads, DropComponent, DropResult, FsError, List, ListResult, LoadComponent,
+    LoadFont, LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale, QuadSpace, Read,
+    ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, Write, WriteResult,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{
@@ -762,6 +762,83 @@ fn textured_quad_draws_screen_space_rect() {
     assert!(
         cleared_coverage < 0.01,
         "after the quad stopped being sent the frame should be uniform clear color, \
+         but coverage was {cleared_coverage} (immediate-mode clear did not run)",
+    );
+}
+
+/// ADR-0107 §4 flat-fill primitive: a `draw_solid_quads` batch draws an
+/// opaque screen-space rect in the overlay pass without a caller-created
+/// texture. The test dispatches a single `SolidQuad` covering a known
+/// pixel rect and asserts `coverage > 0` and `centroid` inside the rect.
+/// A second capture after an advance with no resent quads asserts the
+/// immediate-mode clear — exactly the same contract as
+/// `textured_quad_draws_screen_space_rect`.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn solid_quad_draws_screen_space_rect() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    // Known screen rect: top-left (16, 12), size 24×18.
+    let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawSolidQuads {
+            space: QuadSpace::Screen,
+            quads: vec![SolidQuad {
+                x: quad_x,
+                y: quad_y,
+                width: quad_w,
+                height: quad_h,
+                color: [1.0, 1.0, 1.0, 1.0],
+            }],
+        },
+    )];
+
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture-with-mails");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    // Coverage band around the quad's area fraction (24*18 / 64*48 ≈ 0.14).
+    let drawn = coverage(&img, bg, tolerance);
+    assert!(
+        (0.08..0.22).contains(&drawn),
+        "solid quad coverage {drawn} fell outside the expected band (0.08, 0.22); \
+         the captured frame is effectively empty or entirely filled",
+    );
+
+    // The lit centroid must land inside the requested rect — ruling out a misplaced fill.
+    let (cx, cy) = centroid(&img, bg, tolerance).expect("a lit frame has a centroid");
+    let pad = 4.0f32;
+    assert!(
+        cx >= quad_x - pad
+            && cx <= quad_x + quad_w + pad
+            && cy >= quad_y - pad
+            && cy <= quad_y + quad_h + pad,
+        "solid quad centroid ({cx}, {cy}) should sit inside the screen rect \
+         ({quad_x},{quad_y})+({quad_w}x{quad_h}) of the {frame_width}x{frame_height} frame",
+    );
+
+    // Immediate-mode clear: advance with no quad resent, next capture returns to clear color.
+    let cleared = bench
+        .execute(vec![
+            ("clear_advance", BenchOp::advance(1)),
+            ("snap2", BenchOp::capture()),
+        ])
+        .expect("advance + capture");
+    let png2 = cleared.captured("snap2").expect("snap2 step ran");
+    let img2 = decode_png(png2).expect("decode cleared png");
+    let cleared_coverage = coverage(&img2, background_top_left(&img2), tolerance);
+    assert!(
+        cleared_coverage < 0.01,
+        "after the solid quad stopped being sent the frame should be uniform clear color, \
          but coverage was {cleared_coverage} (immediate-mode clear did not run)",
     );
 }
