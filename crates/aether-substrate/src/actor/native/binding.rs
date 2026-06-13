@@ -46,6 +46,7 @@ use aether_kinds::trace::Nanos;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
+use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
@@ -60,17 +61,6 @@ use crate::runtime::trace::SettlementHold;
 /// than blocking — the large-payload zero-copy path is the deferred fork
 /// on iamacoffeepot/aether#1101.
 const ACTOR_RING_BYTES: usize = 64 * 1024;
-
-/// Starting value of [`NativeBinding::reply_lineage`] (ADR-0080 §5 / #1695).
-/// Sits at the top half of the `u64` space, above the `send` correlation
-/// counter (which starts at `0` and increments once per send), so a
-/// reply's lineage `MailId` never collides with one this actor minted for
-/// a `send` — and minting it leaves the `prev_correlation` the
-/// send counter reports untouched. Mirrors the wasm trampoline's
-/// `ComponentCtx::reply_lineage_counter` base so the native and guest
-/// reply paths derive reply ids the same way. A run would need `2^63`
-/// sends to reach this base, so the two spaces stay disjoint in practice.
-const REPLY_LINEAGE_BASE: u64 = 1 << 63;
 
 /// Where a buffered mail's payload lives until flush (2c,
 /// iamacoffeepot/aether#1110).
@@ -170,25 +160,28 @@ pub struct NativeBinding {
     /// is the depth-1 fixed point: its carry is its own `ActorId.0`
     /// (== `self_mailbox.0`), so it keeps the exact id it has today.
     carry: u64,
-    /// The actor's inbox receiver, drained by the dispatcher via
-    /// [`Self::recv_blocking`] / [`Self::try_recv`]. Held in a `Mutex`
-    /// so the `&self` receiver can take exclusive access. Wrapped in
-    /// `OnceLock` so the inbox can be installed lazily after
-    /// construction (capabilities sometimes have to thread the receiver
-    /// through a builder before the transport sees it). `OnceLock::get()`
-    /// returns `None` until [`NativeBinding::install_inbox`] runs.
-    inbox: OnceLock<Mutex<Receiver<Envelope>>>,
+    /// The actor's inbox, drained by the dispatcher via
+    /// [`Self::recv_blocking`] / [`Self::try_recv`]. [`SettlingInbox`]'s
+    /// drop settles any residue queued at teardown, closing the #1716
+    /// leak. Held in a `Mutex` so the `&self` dispatcher can take
+    /// exclusive access. Wrapped in `OnceLock` so the inbox can be
+    /// installed lazily after construction (capabilities sometimes have to
+    /// thread the receiver through a builder before the transport sees it).
+    /// `OnceLock::get()` returns `None` until
+    /// [`NativeBinding::install_inbox`] runs.
+    inbox: OnceLock<Mutex<SettlingInbox>>,
     /// Monotonic correlation counter — atomic so `&self` can mint
     /// new ids without `&mut`.
     correlation: AtomicU64,
-    /// ADR-0080 §5 / #1695: monotonic counter for a reply's lineage
-    /// `MailId`, disjoint from [`Self::correlation`] (starts at
-    /// [`REPLY_LINEAGE_BASE`]). [`Self::send_reply_for_handler`] mints
+    /// ADR-0080 §5 / #1695: reply-id allocator in the disjoint top-half
+    /// space (see [`ReplyLineage`]). [`Self::send_reply_for_handler`] mints
     /// from it so a reply's trace id never merges with one of this
     /// actor's own sends, and minting a reply leaves the `send`
     /// correlation [`Self::prev_correlation`] reports untouched —
     /// symmetric with the wasm trampoline's reply-lineage counter.
-    reply_lineage: AtomicU64,
+    /// Cloned into the inbox [`SettlingInbox`] at
+    /// [`Self::install_inbox`] so both share one coherent counter.
+    reply_lineage: ReplyLineage,
     /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] —
     /// invoked by [`Self::fatal_abort`] when a wasm guest traps so a
     /// faulty component brings the substrate down cleanly. Cloned from
@@ -272,7 +265,7 @@ impl NativeBinding {
             carry,
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
-            reply_lineage: AtomicU64::new(REPLY_LINEAGE_BASE),
+            reply_lineage: ReplyLineage::new(),
             aborter,
             spawner,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
@@ -331,8 +324,14 @@ impl NativeBinding {
     /// inbox slot is single-claim, so a second install indicates a
     /// chassis-wiring bug.
     pub fn install_inbox(&self, inbox: Receiver<Envelope>) {
+        let settling = SettlingInbox::new_with_lineage(
+            self.self_mailbox,
+            inbox,
+            Arc::clone(&self.mailer),
+            self.reply_lineage.clone(),
+        );
         self.inbox
-            .set(Mutex::new(inbox))
+            .set(Mutex::new(settling))
             .unwrap_or_else(|_| panic!("NativeBinding::install_inbox called twice"));
     }
 
@@ -423,14 +422,13 @@ impl NativeBinding {
     /// guard, which is itself a substrate-level invariant violation.
     pub fn recv_blocking(&self) -> Option<Envelope> {
         let inbox = self.inbox.get()?;
-        // The mutex guard stays held across `recv()`. Dispatcher
+        // The mutex guard stays held across the blocking recv. Dispatcher
         // threads are single-tasked while parked here; nothing else
         // on this thread contends.
         inbox
             .lock()
             .expect("inbox mutex poisoned; fail-fast per ADR-0063")
-            .recv()
-            .ok()
+            .recv_blocking()
     }
 
     /// Non-blocking variant of [`Self::recv_blocking`]. Returns
@@ -448,7 +446,6 @@ impl NativeBinding {
             .lock()
             .expect("inbox mutex poisoned; fail-fast per ADR-0063")
             .try_recv()
-            .ok()
     }
 
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
@@ -477,7 +474,7 @@ impl NativeBinding {
     ) where
         K: aether_data::Kind,
     {
-        let correlation = self.reply_lineage.fetch_add(1, Ordering::AcqRel);
+        let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox, correlation);
         self.mailer
             .send_reply_with_lineage(sender, payload, reply_id, root, parent);
@@ -1255,6 +1252,96 @@ mod tests {
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx1);
         transport.install_inbox(rx2);
+    }
+
+    /// #1716 / step 2: an armed envelope left queued in the dispatcher's
+    /// inbox at binding teardown settles (no ADR-0094 guard panic,
+    /// `Finished` observed). Dropping the `NativeBinding` drops the
+    /// `OnceLock<Mutex<SettlingInbox>>`, which drops the `SettlingInbox`,
+    /// whose `Drop` drains and settles residue.
+    #[test]
+    fn binding_teardown_settles_queued_armed_envelope() {
+        use crate::chassis::settlement::SettlementRegistry;
+
+        let (_registry, mailer) = fresh_substrate();
+        let settlement = Arc::new(SettlementRegistry::new());
+        mailer.install_settlement_registry(Arc::clone(&settlement));
+        mailer
+            .trace_handle()
+            .install_settlement_registry(Arc::clone(&settlement));
+
+        let id = MailboxId(0x1756);
+        let (tx, rx) = mpsc::channel::<Envelope>();
+
+        let root = MailId::new(id, 1);
+        mailer.record_sent_inflight(root);
+        let settle = settlement.subscribe_settlement(root);
+
+        let transport = NativeBinding::new_for_test(Arc::clone(&mailer), id);
+        transport.install_inbox(rx);
+
+        // Queue an armed envelope directly — bypasses the registry sink,
+        // mirrors the production route_mail Inbox arm result.
+        let armed = OwnedDispatch::armed(
+            KindId(7),
+            "test.binding.teardown".to_owned(),
+            None,
+            Source::NONE,
+            MailRef::from(Vec::new()),
+            1,
+            MailId::new(id, 11),
+            root,
+            None,
+            Nanos(0),
+            0,
+            id,
+        );
+        tx.send(armed).unwrap();
+
+        // Drop the transport; the SettlingInbox inside settles the queued mail.
+        drop(transport);
+        settle
+            .recv()
+            .expect("binding teardown settles queued armed mail (#1716)");
+    }
+
+    /// Step 3: reply ids minted via `send_reply_for_handler` still sit in
+    /// the disjoint reply-lineage space ([`ReplyLineage::BASE`]), and minting
+    /// a reply does not advance `prev_correlation` (the send counter).
+    #[test]
+    fn reply_mints_in_disjoint_space_and_does_not_advance_send_correlation() {
+        use crate::actor::native::ctx::NativeCtx;
+        use aether_actor::OutboundReply;
+        use aether_kinds::Tick;
+
+        let (registry, mailer) = fresh_substrate();
+        let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
+        let caller = registry.register_inbox(
+            "test.binding.reply_space.caller",
+            forward_to_envelope_sender(reply_tx),
+        );
+
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF03)));
+        assert_eq!(binding.prev_correlation(), 0);
+
+        let root = MailId::new(MailboxId(0xC0), 1);
+        let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
+        {
+            let mut ctx = NativeCtx::new(&binding, caller_source, root, root);
+            OutboundReply::reply(&mut ctx, &Tick);
+        }
+
+        let reply_env = reply_rx.try_recv().expect("reply routed to the caller");
+        assert!(
+            reply_env.mail_id.correlation_id >= ReplyLineage::BASE,
+            "reply id sits in the disjoint reply-lineage space",
+        );
+        assert_eq!(
+            binding.prev_correlation(),
+            0,
+            "minting a reply must not advance the send correlation counter"
+        );
+        reply_env.discharge();
     }
 
     /// 2b: the buffered send path holds mail until flush, then forms one

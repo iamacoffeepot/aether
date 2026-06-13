@@ -46,7 +46,7 @@ use aether_substrate::chassis::settlement::{
 };
 use aether_substrate::runtime::lifecycle;
 use aether_substrate::{
-    ClaimedInbox, HubOutbound, InboundMail, Mailer, SharedActorSlots, Source, SourceAddr,
+    HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr,
     SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
@@ -96,7 +96,7 @@ pub struct App {
     /// — keeps the back-to-back advances from racing the cap's overlap
     /// guard (the same reply-gate the test-bench frame loop uses,
     /// iamacoffeepot/aether#999).
-    lifecycle_reply_inbox: ClaimedInbox,
+    lifecycle_reply_inbox: SettlingInbox,
     /// Mailbox id of [`Self::lifecycle_reply_inbox`], used as the
     /// `Component` reply target stamped onto each `LifecycleAdvance`.
     lifecycle_reply_mailbox: MailboxId,
@@ -162,7 +162,7 @@ pub struct App {
     /// runs and drains even under `ControlFlow::Wait` (set when the
     /// window occludes) — the case `aether.window.focus` most needs,
     /// since the loop is otherwise parked until a winit event arrives.
-    window_inbox: ClaimedInbox,
+    window_inbox: SettlingInbox,
     /// Per-actor [`local::ActorSlots`] carried out of the
     /// [`aether_substrate::MailboxClaim`] this driver produced at boot.
     /// Stamped into TLS via [`local::with_stamped`] around
@@ -1558,7 +1558,7 @@ mod tests {
     /// inbound's ADR-0080 causal chain (it carries the inbound's `root`)
     /// rather than minting the lineage-less `MailId::NONE` triple the
     /// pre-#1710 bare `Mailer::send_reply` form did. Drives a real armed
-    /// Call through a `ClaimedInbox` (mirroring
+    /// Call through a `SettlingInbox` (mirroring
     /// `window_inbox_drain_settles_root_on_guard_drop`), routes the reply
     /// at a captured `Component` inbox, and reads the delivered reply's
     /// `root` — without standing up wgpu/winit.
@@ -1571,7 +1571,7 @@ mod tests {
         use aether_data::MailId;
         use aether_kinds::descriptors;
         use aether_kinds::{LogTail, LogTailResult};
-        use aether_substrate::ClaimedInbox;
+
         use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;
@@ -1605,7 +1605,7 @@ mod tests {
         );
 
         // The window inbox forwards armed envelopes onto the
-        // `ClaimedInbox`'s channel, exactly as `claim_mailbox` does.
+        // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
         let window_mailbox = mailbox_id_from_name("aether.window");
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
@@ -1614,7 +1614,7 @@ mod tests {
         registry
             .try_register_inbox_with_id(window_mailbox, "aether.window", handler)
             .expect("register the window inbox");
-        let inbox = ClaimedInbox::new(window_mailbox, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(window_mailbox, rx, Arc::clone(&mailer));
 
         // Push a real armed `LogTail` Call whose reply target is the
         // caller inbox, then drain it to an `InboundMail` guard.
@@ -1674,7 +1674,7 @@ mod tests {
         use aether_actor::local::{ActorSlots, with_stamped};
         use aether_data::MailId;
         use aether_kinds::descriptors;
-        use aether_substrate::ClaimedInbox;
+
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
@@ -1694,7 +1694,7 @@ mod tests {
         registry
             .try_register_inbox_with_id(window_mailbox, "aether.window", handler)
             .expect("register the window inbox");
-        let inbox = ClaimedInbox::new(window_mailbox, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(window_mailbox, rx, Arc::clone(&mailer));
 
         // A `MailId::NONE` push keeps the drained guard disarmed (no armed
         // Call to settle) — the test pins only the skip verdict.
@@ -1722,7 +1722,7 @@ mod tests {
     /// drain owns the ADR-0080 §2 settlement bracket for every inbound
     /// envelope (the `Inbox` mailbox records none on the producer side),
     /// now by construction — draining a real armed Call through a
-    /// `ClaimedInbox` and letting the `InboundMail` guard fall out of
+    /// `SettlingInbox` and letting the `InboundMail` guard fall out of
     /// scope settles the root and disarms the ADR-0094 guard (no #1704
     /// abort). The CI-runnable regression guard for the window drain
     /// without standing up winit/wgpu; the windowed end-to-end
@@ -1733,7 +1733,7 @@ mod tests {
 
         use aether_data::{Kind, MailId};
         use aether_kinds::descriptors;
-        use aether_substrate::ClaimedInbox;
+
         use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::Mail;
@@ -1763,7 +1763,7 @@ mod tests {
             .install_settlement_registry(Arc::clone(&settlement));
 
         // Register the window mailbox forwarding armed envelopes onto the
-        // `ClaimedInbox`'s channel, exactly as `claim_mailbox` does.
+        // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
         let window_mailbox = mailbox_id_from_name("aether.window");
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
@@ -1772,7 +1772,7 @@ mod tests {
         registry
             .try_register_inbox_with_id(window_mailbox, "aether.window", handler)
             .expect("register the window inbox");
-        let inbox = ClaimedInbox::new(window_mailbox, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(window_mailbox, rx, Arc::clone(&mailer));
 
         // A real armed Call: seed the root, push through the mailer so the
         // `route_mail` Inbox arm arms the obligation guard with `mail_id`,
@@ -1835,7 +1835,7 @@ mod tests {
         use std::sync::mpsc;
 
         use aether_data::MailId;
-        use aether_substrate::ClaimedInbox;
+
         use aether_substrate::chassis::settlement::SettlementRegistry;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::registry::{InboxHandler, Registry};
@@ -1854,7 +1854,7 @@ mod tests {
             .install_settlement_registry(Arc::clone(&settlement));
 
         // Register the reply inbox exactly as `claim_mailbox` does: forward
-        // the obligation-armed envelope onto the `ClaimedInbox`'s channel,
+        // the obligation-armed envelope onto the `SettlingInbox`'s channel,
         // carrying its guard with it so the framework drain owns the
         // discharge.
         let (tx, rx) = mpsc::channel::<Envelope>();
@@ -1864,7 +1864,7 @@ mod tests {
         let reply_mailbox = registry
             .try_register_inbox("aether.lifecycle.advance_reply", handler)
             .expect("register the reply inbox");
-        let inbox = ClaimedInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
+        let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
         let cap_mailbox = mailbox_id_from_name("aether.lifecycle");
 
