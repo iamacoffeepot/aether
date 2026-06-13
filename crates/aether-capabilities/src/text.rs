@@ -408,6 +408,19 @@ mod native {
                 self.upload_glyph(ctx, texture_id, &entry);
             }
             if !quads.is_empty() {
+                // World quads carry pixel offsets relative to the
+                // anchor, not absolute screen positions. Center the
+                // string horizontally and shift so the baseline sits
+                // at y=0 — the anchor is the baseline point, and text
+                // appears above it (negative y in screen y-down
+                // convention = above the anchor in world space).
+                if matches!(mail.space, QuadSpace::World { .. }) {
+                    let half_width = pen_x / 2.0;
+                    for q in &mut quads {
+                        q.x -= half_width;
+                        q.y -= baseline;
+                    }
+                }
                 emit_draw(ctx, texture_id, mail.space, quads);
             }
         }

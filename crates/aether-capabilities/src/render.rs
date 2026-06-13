@@ -56,13 +56,14 @@ pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 mod native {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use aether_actor::{OutboundReply, actor};
     use aether_data::Kind;
     use aether_kinds::{
-        CaptureFrameResult, CreateTextureResult, DRAW_TRIANGLE_BYTES, QuadSpace, TexturedQuad,
+        CaptureFrameResult, CreateTextureResult, DRAW_TRIANGLE_BYTES, QuadScale, QuadSpace,
+        TexturedQuad,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::capture::{CaptureQueue, PendingCapture};
@@ -75,8 +76,8 @@ mod native {
         CaptureMeta, IDENTITY_VIEW_PROJ, OverlayDraw, Pipeline, QUAD_VERTEX_STRIDE,
         QUAD_VERTICES_PER_QUAD, QuadPipeline, RealizedTexture, RenderError, Targets,
         build_main_pipeline, build_quad_pipeline, finish_capture, prepare_capture_copy,
-        push_screen_quad_vertices, realize_texture, record_main_pass, record_quad_overlay_pass,
-        upload_texture_full,
+        push_screen_quad_vertices, push_world_quad_vertices, realize_texture, record_main_pass,
+        record_quad_overlay_pass, upload_texture_full,
     };
 
     use super::{
@@ -326,7 +327,6 @@ mod native {
                 quad_frame: Arc::new(Mutex::new(Vec::new())),
                 quad_last_submitted: Arc::new(Mutex::new(Vec::new())),
                 textures: Arc::new(Mutex::new(TextureRegistry::new())),
-                world_quads_warned: Arc::new(AtomicBool::new(false)),
                 gpu: Arc::new(OnceLock::new()),
             };
             let mailer = ctx.mailer();
@@ -724,10 +724,6 @@ mod native {
         /// (`create_texture` / `update_texture`), realized + read by the
         /// driver thread at record time.
         textures: Arc<Mutex<TextureRegistry>>,
-        /// One-shot guard so a `World`-space quad batch (unimplemented
-        /// until #1699) warns once at encode rather than every frame a
-        /// producer resends it.
-        world_quads_warned: Arc<AtomicBool>,
         /// wgpu state, installed post-cap-construction by the driver via
         /// [`Self::install_gpu`]. Boots empty because winit 0.30's
         /// `ActiveEventLoop::create_window` only fires inside `resumed`,
@@ -885,14 +881,19 @@ mod native {
         ///
         /// Each batch realizes its texture lazily (creating the wgpu
         /// texture + bind group on first use, re-uploading on a dirtied
-        /// staging buffer), expands its quads into screen-space vertices,
-        /// and draws with that texture's bind group. An unknown
-        /// `texture_id` warn-drops the batch; a `World`-space batch
-        /// warn-drops once (the world-anchor path lands in #1699).
+        /// staging buffer), expands its quads into vertices, and draws
+        /// with that texture's bind group. An unknown `texture_id`
+        /// warn-drops the batch. `World`-space quads transform their
+        /// anchor through the latest `view_proj` (ADR-0105).
         ///
         /// # Panics
         /// Panics if `install_gpu` hasn't been called, or if any internal
         /// mutex is poisoned — fail-fast per ADR-0063.
+        // Two-pass texture realization + quad expansion in a single
+        // function avoids threading split borrows through multiple
+        // helpers; the line count reflects the World/Screen branching
+        // added in #1699.
+        #[allow(clippy::too_many_lines)]
         pub fn record_overlay_pass(
             &self,
             encoder: &mut wgpu::CommandEncoder,
@@ -931,24 +932,20 @@ mod native {
             #[allow(clippy::cast_precision_loss)]
             let viewport = [targets.width() as f32, targets.height() as f32];
 
+            let view_proj = *self
+                .camera_state
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063");
+
             let mut registry = self
                 .textures
                 .lock()
                 .expect("mutex poisoned; fail-fast per ADR-0063");
 
-            // First pass: realize / re-upload every Screen texture the
-            // frame references, mutably borrowing the registry.
+            // First pass: realize / re-upload every texture the frame
+            // references (Screen and World batches share the same atlas),
+            // mutably borrowing the registry.
             for batch in &batches {
-                if matches!(batch.space, QuadSpace::World { .. }) {
-                    if !self.world_quads_warned.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(
-                            target: "aether_capabilities::render",
-                            "draw_textured_quads with World space is not yet implemented \
-                             (lands in #1699); dropping the batch",
-                        );
-                    }
-                    continue;
-                }
                 if let Some(entry) = registry.entries.get_mut(&batch.texture_id) {
                     entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.quad_pipeline);
                 } else {
@@ -965,9 +962,6 @@ mod native {
             let mut vertex_bytes = Vec::new();
             let mut draws: Vec<OverlayDraw<'_>> = Vec::new();
             for batch in &batches {
-                if matches!(batch.space, QuadSpace::World { .. }) {
-                    continue;
-                }
                 let Some(entry) = registry.entries.get(&batch.texture_id) else {
                     continue;
                 };
@@ -976,13 +970,37 @@ mod native {
                 };
                 #[allow(clippy::cast_possible_truncation)]
                 let first_vertex = (vertex_bytes.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-                for quad in &batch.quads {
-                    push_screen_quad_vertices(
-                        &mut vertex_bytes,
-                        [quad.x, quad.y, quad.width, quad.height],
-                        [quad.u0, quad.v0, quad.u1, quad.v1],
-                        quad.tint,
-                    );
+                match &batch.space {
+                    QuadSpace::Screen => {
+                        for quad in &batch.quads {
+                            push_screen_quad_vertices(
+                                &mut vertex_bytes,
+                                [quad.x, quad.y, quad.width, quad.height],
+                                [quad.u0, quad.v0, quad.u1, quad.v1],
+                                quad.tint,
+                            );
+                        }
+                    }
+                    QuadSpace::World { anchor, scale } => {
+                        // k < 0 => Pixels mode (shader uses clip.w for
+                        // constant on-screen size). k > 0 => Distance mode
+                        // (constant k, label shrinks with depth; holds its
+                        // size at reference_distance).
+                        let k = match scale {
+                            QuadScale::Pixels => -1.0_f32,
+                            QuadScale::Distance { reference_distance } => *reference_distance,
+                        };
+                        for quad in &batch.quads {
+                            push_world_quad_vertices(
+                                &mut vertex_bytes,
+                                *anchor,
+                                [quad.x, quad.y, quad.width, quad.height],
+                                [quad.u0, quad.v0, quad.u1, quad.v1],
+                                quad.tint,
+                                k,
+                            );
+                        }
+                    }
                 }
                 #[allow(clippy::cast_possible_truncation)]
                 let vertex_count = (batch.quads.len() * QUAD_VERTICES_PER_QUAD) as u32;
@@ -1004,6 +1022,7 @@ mod native {
                 &vertex_bytes,
                 &draws,
                 viewport,
+                view_proj,
             );
         }
 

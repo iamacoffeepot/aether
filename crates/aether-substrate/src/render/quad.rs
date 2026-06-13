@@ -19,10 +19,12 @@
 use super::targets::Targets;
 use std::slice;
 
-/// Bytes per expanded quad vertex: `pos vec2<f32>` (8) + `uv vec2<f32>`
-/// (8) + `tint vec4<f32>` (16) = 32. [`push_screen_quad_vertices`]
-/// writes exactly this stride per vertex.
-pub const QUAD_VERTEX_STRIDE: u64 = 32;
+/// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
+/// `offset_px vec2<f32>` (8) + `uv vec2<f32>` (8) + `tint vec4<f32>`
+/// (16) + `k f32` (4) + `is_screen u32` (4) = 52.
+/// [`push_screen_quad_vertices`] and [`push_world_quad_vertices`] both
+/// write exactly this stride per vertex.
+pub const QUAD_VERTEX_STRIDE: u64 = 52;
 
 /// Vertices one quad expands to: two triangles, six vertices.
 pub const QUAD_VERTICES_PER_QUAD: usize = 6;
@@ -32,9 +34,10 @@ pub const QUAD_VERTICES_PER_QUAD: usize = 6;
 /// GPU buffer if a frame's expanded quad bytes exceed this.
 pub const QUAD_VERTEX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-/// Viewport uniform buffer size: `vec2<f32>` size plus `vec2<f32>` pad
-/// = 16 bytes (the WGSL `Viewport` struct).
-pub const QUAD_VIEWPORT_UNIFORM_BYTES: u64 = 16;
+/// Quad overlay uniform buffer size: `mat4x4<f32>` `view_proj` (64) +
+/// `vec2<f32>` viewport size (8) + `vec2<f32>` pad (8) = 80 bytes (the
+/// WGSL `Viewport` struct).
+pub const QUAD_UNIFORM_BYTES: u64 = 80;
 
 /// Source for the quad overlay shader.
 pub const QUAD_SHADER_WGSL: &str = include_str!("quad.wgsl");
@@ -114,7 +117,7 @@ pub fn build_quad_pipeline(
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(QUAD_VIEWPORT_UNIFORM_BYTES),
+                    min_binding_size: wgpu::BufferSize::new(QUAD_UNIFORM_BYTES),
                 },
                 count: None,
             }],
@@ -145,7 +148,7 @@ pub fn build_quad_pipeline(
 
     let viewport_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("quad viewport uniform"),
-        size: QUAD_VIEWPORT_UNIFORM_BYTES,
+        size: QUAD_UNIFORM_BYTES,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -183,20 +186,41 @@ pub fn build_quad_pipeline(
         array_stride: QUAD_VERTEX_STRIDE,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
+            // anchor: vec3<f32> at offset 0
             wgpu::VertexAttribute {
                 offset: 0,
                 shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
+                format: wgpu::VertexFormat::Float32x3,
             },
+            // offset_px: vec2<f32> at offset 12
             wgpu::VertexAttribute {
-                offset: 8,
+                offset: 12,
                 shader_location: 1,
                 format: wgpu::VertexFormat::Float32x2,
             },
+            // uv: vec2<f32> at offset 20
             wgpu::VertexAttribute {
-                offset: 16,
+                offset: 20,
                 shader_location: 2,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            // tint: vec4<f32> at offset 28
+            wgpu::VertexAttribute {
+                offset: 28,
+                shader_location: 3,
                 format: wgpu::VertexFormat::Float32x4,
+            },
+            // k: f32 at offset 44
+            wgpu::VertexAttribute {
+                offset: 44,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32,
+            },
+            // is_screen: u32 at offset 48
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Uint32,
             },
         ],
     };
@@ -337,12 +361,12 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
 }
 
 /// Push the six vertices (two triangles) for one screen-space quad into
-/// `out` as raw bytes — each vertex is `pos vec2`, `uv vec2`, `tint
-/// vec4` (32 bytes, [`QUAD_VERTEX_STRIDE`]). Positions are window
-/// pixels; the shader's viewport uniform maps them to clip space. `rect`
-/// is `[x, y, width, height]` (top-left + size); `uv` is `[u0, v0, u1,
-/// v1]` (the matching uv sub-rect); `tint` is the per-vertex RGBA
-/// multiplier.
+/// `out` as raw bytes — each vertex is 52 bytes
+/// ([`QUAD_VERTEX_STRIDE`]) in the unified world-aware layout: `anchor
+/// vec3` (zeroed), `offset_px vec2` (absolute pixel position), `uv
+/// vec2`, `tint vec4`, `k f32` (zeroed), `is_screen u32` (1). `rect`
+/// is `[x, y, width, height]` (top-left + size in window pixels); `uv`
+/// is `[u0, v0, u1, v1]`; `tint` is the per-vertex RGBA multiplier.
 pub fn push_screen_quad_vertices(out: &mut Vec<u8>, rect: [f32; 4], uv: [f32; 4], tint: [f32; 4]) {
     let [x, y, width, height] = rect;
     let [u0, v0, u1, v1] = uv;
@@ -362,17 +386,79 @@ pub fn push_screen_quad_vertices(out: &mut Vec<u8>, rect: [f32; 4], uv: [f32; 4]
         (x1, y0, u1, v0),
     ];
     for (px, py, u, v) in corners {
-        let vertex: [f32; 8] = [px, py, u, v, tint[0], tint[1], tint[2], tint[3]];
-        out.extend_from_slice(bytemuck::cast_slice(&vertex));
+        // anchor (0,0,0) + offset_px (pixel pos) + uv + tint + k=0
+        let floats: [f32; 12] = [
+            0.0, 0.0, 0.0, // anchor (unused on screen path)
+            px, py, // offset_px: absolute pixel position
+            u, v, // uv
+            tint[0], tint[1], tint[2], tint[3], // tint
+            0.0,     // k (unused on screen path)
+        ];
+        out.extend_from_slice(bytemuck::cast_slice(&floats));
+        let is_screen: u32 = 1;
+        out.extend_from_slice(bytemuck::cast_slice(&[is_screen]));
     }
 }
 
-/// Record the overlay pass: upload `vertex_bytes` + the `viewport` size,
-/// then draw each `OverlayDraw` range with its texture bind group into
-/// the offscreen color target. The pass loads (does not clear) the
-/// existing color so the world pass beneath shows through, and binds no
-/// depth target. Empty `draws` is a no-op; `vertex_bytes` exceeding
-/// [`QUAD_VERTEX_BUFFER_BYTES`] drops the pass with a warn.
+/// Push the six vertices (two triangles) for one world-anchored quad
+/// into `out` as raw bytes — each vertex is 52 bytes
+/// ([`QUAD_VERTEX_STRIDE`]) in the unified world-aware layout: `anchor
+/// vec3` (world-space anchor, same for all six vertices), `offset_px
+/// vec2` (pixel offset from the projected anchor in screen y-down
+/// convention), `uv vec2`, `tint vec4`, `k f32` (scale factor), and
+/// `is_screen u32` (0). `rect` is `[x, y, width, height]` (top-left
+/// pixel offset from anchor + pixel size); `uv` is `[u0, v0, u1, v1]`;
+/// `tint` is the per-vertex RGBA multiplier. `k < 0` selects Pixels
+/// mode (shader uses `clip.w`, constant on-screen size); `k > 0` is the
+/// reference distance for Distance mode (label holds its size at that
+/// depth).
+pub fn push_world_quad_vertices(
+    out: &mut Vec<u8>,
+    anchor: [f32; 3],
+    rect: [f32; 4],
+    uv: [f32; 4],
+    tint: [f32; 4],
+    k: f32,
+) {
+    let [x, y, width, height] = rect;
+    let [u0, v0, u1, v1] = uv;
+    let x0 = x;
+    let y0 = y;
+    let x1 = x + width;
+    let y1 = y + height;
+    let corners = [
+        (x0, y0, u0, v0),
+        (x0, y1, u0, v1),
+        (x1, y1, u1, v1),
+        (x0, y0, u0, v0),
+        (x1, y1, u1, v1),
+        (x1, y0, u1, v0),
+    ];
+    for (ox, oy, u, v) in corners {
+        let floats: [f32; 12] = [
+            anchor[0], anchor[1], anchor[2], // anchor: world-space point
+            ox, oy, // offset_px: pixel offset (y-down)
+            u, v, // uv
+            tint[0], tint[1], tint[2], tint[3], // tint
+            k,       // scale factor
+        ];
+        out.extend_from_slice(bytemuck::cast_slice(&floats));
+        let is_screen: u32 = 0;
+        out.extend_from_slice(bytemuck::cast_slice(&[is_screen]));
+    }
+}
+
+/// Record the overlay pass: upload `vertex_bytes` + the `view_proj` /
+/// `viewport` uniform, then draw each `OverlayDraw` range with its
+/// texture bind group into the offscreen color target. The pass loads
+/// (does not clear) the existing color so the world pass beneath shows
+/// through, and binds no depth target. Empty `draws` is a no-op;
+/// `vertex_bytes` exceeding [`QUAD_VERTEX_BUFFER_BYTES`] drops the pass
+/// with a warn. `view_proj` is column-major — the World quad path
+/// transforms anchors through it in the vertex shader.
+// Eight arguments mirror the same all-in-one pattern `record_main_pass`
+// uses; bundling into a struct here for one call site adds no clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn record_quad_overlay_pass(
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -381,6 +467,7 @@ pub fn record_quad_overlay_pass(
     vertex_bytes: &[u8],
     draws: &[OverlayDraw<'_>],
     viewport: [f32; 2],
+    view_proj: [f32; 16],
 ) {
     if draws.is_empty() || vertex_bytes.is_empty() {
         return;
@@ -395,7 +482,12 @@ pub fn record_quad_overlay_pass(
         return;
     }
     queue.write_buffer(&pipeline.vertex_buffer, 0, vertex_bytes);
-    let uniform: [f32; 4] = [viewport[0], viewport[1], 0.0, 0.0];
+    // Viewport uniform: view_proj (16 f32 = 64 bytes) + size (2 f32 =
+    // 8 bytes) + pad (2 f32 = 8 bytes) = 80 bytes total.
+    let mut uniform = [0f32; 20];
+    uniform[..16].copy_from_slice(&view_proj);
+    uniform[16] = viewport[0];
+    uniform[17] = viewport[1];
     queue.write_buffer(&pipeline.viewport_buffer, 0, bytemuck::cast_slice(&uniform));
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
