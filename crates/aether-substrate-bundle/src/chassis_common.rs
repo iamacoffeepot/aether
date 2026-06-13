@@ -504,6 +504,10 @@ mod tests {
         // flag `AETHER_HTTP_SERVER_*` env vars set by operators.
         let known = chassis_known_keys();
         assert!(
+            known.contains("AETHER_HTTP_SERVER_ENABLED"),
+            "AETHER_HTTP_SERVER_ENABLED must be a known key",
+        );
+        assert!(
             known.contains("AETHER_HTTP_SERVER_BIND_ADDR"),
             "AETHER_HTTP_SERVER_BIND_ADDR must be a known key",
         );

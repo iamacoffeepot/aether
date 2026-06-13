@@ -13,7 +13,6 @@
 //! deleted as a kind in Phase 4 — no replacement, no MCP path until
 //! issue 603 §F2 revives the per-domain shape.
 
-use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,9 +72,9 @@ pub struct HeadlessEnv {
     pub gemini: GeminiConfig,
     pub tick_period: Duration,
     /// Issue 1761: optional `aether.http.server` init config (ADR-0108).
-    /// Populated from `AETHER_HTTP_SERVER_BIND_ADDR` (or `--http-server-bind-addr`);
-    /// `None` (default) skips booting `HttpServerCapability` so an
-    /// unconfigured chassis binds no HTTP port.
+    /// `Some` iff the cap's `enabled` flag is set (`AETHER_HTTP_SERVER_ENABLED`
+    /// / `--http-server-enabled`); `None` (default) skips booting
+    /// `HttpServerCapability` so an unconfigured chassis binds no HTTP port.
     pub http_server: Option<HttpServerConfig>,
     /// Issue 763 P2: optional `aether.rpc.server` bind address.
     /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
@@ -152,19 +151,12 @@ impl HeadlessEnv {
         let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
         let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
         let namespace_roots = NamespaceRoots::from_argv_then_env(fs.into_layer());
-        // Bind the HTTP server only when explicitly configured: either
-        // `--http-server-bind-addr` is set on argv, or
-        // `AETHER_HTTP_SERVER_BIND_ADDR` is present in the environment.
-        // An unconfigured chassis binds no HTTP port (ADR-0108 / issue 1761).
-        let bind_addr_configured = http_server_overlay.bind_addr.is_some()
-            || env::var("AETHER_HTTP_SERVER_BIND_ADDR").is_ok_and(|v| !v.trim().is_empty());
-        let http_server = if bind_addr_configured {
-            Some(HttpServerConfig::try_from_argv_then_env(
-                http_server_overlay.into_layer(),
-            )?)
-        } else {
-            None
-        };
+        // The HTTP server is opt-in: resolve its config and boot the cap
+        // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
+        // so an unconfigured chassis binds no HTTP port.
+        let http_server_config =
+            HttpServerConfig::try_from_argv_then_env(http_server_overlay.into_layer())?;
+        let http_server = http_server_config.enabled.then_some(http_server_config);
         // Persistence overlay shared with desktop (issue 1258); headless
         // opts into on-disk persistence per ADR-0049 §9.
         let persist_state = resolve_persist_state(&persist);
