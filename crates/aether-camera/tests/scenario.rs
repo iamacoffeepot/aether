@@ -20,11 +20,8 @@
 
 use aether_camera::CameraDestroy;
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
-    test_helpers::require_runtime,
-    visual::{decode_png, not_all_black},
-};
+use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::visual::{decode_png, not_all_black};
 
 // Force linkage of `aether-camera`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as

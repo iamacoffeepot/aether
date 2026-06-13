@@ -35,6 +35,7 @@ pub mod headless;
 pub mod hub;
 pub mod perf;
 pub mod test_bench;
+pub mod visual;
 
 pub use aether_capabilities as capabilities;
 pub use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
