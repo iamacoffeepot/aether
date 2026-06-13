@@ -1606,7 +1606,9 @@ mod tests {
 
         // The window inbox forwards armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
-        let window_mailbox = mailbox_id_from_name("aether.window");
+        let window_mailbox = mailbox_id_from_name(
+            <aether_capabilities::HeadlessWindowCapability as Actor>::NAMESPACE,
+        );
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -1686,7 +1688,9 @@ mod tests {
         let store = Arc::new(HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
-        let window_mailbox = mailbox_id_from_name("aether.window");
+        let window_mailbox = mailbox_id_from_name(
+            <aether_capabilities::HeadlessWindowCapability as Actor>::NAMESPACE,
+        );
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -1764,7 +1768,9 @@ mod tests {
 
         // Register the window mailbox forwarding armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
-        let window_mailbox = mailbox_id_from_name("aether.window");
+        let window_mailbox = mailbox_id_from_name(
+            <aether_capabilities::HeadlessWindowCapability as Actor>::NAMESPACE,
+        );
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -1866,7 +1872,8 @@ mod tests {
             .expect("register the reply inbox");
         let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
-        let cap_mailbox = mailbox_id_from_name("aether.lifecycle");
+        let cap_mailbox =
+            mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Actor>::NAMESPACE);
 
         // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against

@@ -9,6 +9,8 @@
 //! address the hub's `load_component` and the test bench load through
 //! — which is what makes the mechanism chassis-agnostic.
 
+use aether_actor::Actor;
+use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind as _, mailbox_id_from_name};
 use aether_kinds::LoadComponent;
 use aether_substrate::Mail;
@@ -53,7 +55,7 @@ pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
         // ctx-less free fn, the same address the hub and test bench load
         // through, with no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
-        mailbox_id_from_name("aether.component"),
+        mailbox_id_from_name(<ComponentHostCapability as Actor>::NAMESPACE),
         LoadComponent::ID,
         payload,
         1,
@@ -77,7 +79,10 @@ mod tests {
             name: Some("loco-motion".to_owned()),
             export: None,
         });
-        assert_eq!(mail.recipient, mailbox_id_from_name("aether.component"));
+        assert_eq!(
+            mail.recipient,
+            mailbox_id_from_name(<ComponentHostCapability as Actor>::NAMESPACE)
+        );
         assert_eq!(mail.kind, LoadComponent::ID);
     }
 }
