@@ -554,4 +554,35 @@ mod tests {
         assert!(dump.contains("AETHER_WORKERS")); // bare chassis knob
         assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
     }
+
+    /// Regression guard for the enable / disable convention (#1791): a
+    /// capability's enable/disable flag is resolved through its
+    /// derive-`Config` (`*Config::from_argv_then_env`), never a raw
+    /// `env::var` read in a chassis builder. This is the shape #1761 put
+    /// the http server on; the guard keeps a future cap from regressing to
+    /// presence-inference or a hand-rolled env read.
+    ///
+    /// Scoped to the cap *flag* keys on purpose — `AETHER_WINDOW_MODE` /
+    /// `AETHER_WINDOW_TITLE` are hand-parsed desktop boot overrides, not
+    /// derive-`Config` knobs, and are read via `env::var` by design, so a
+    /// blanket "no `env::var` of a known key" scan would false-positive.
+    #[test]
+    fn chassis_builders_resolve_cap_enable_flags_via_config() {
+        // Enable / disable env keys owned by a derive-`Config` cap. Add a
+        // cap's flag key here when a new opt-in / opt-out cap lands.
+        const CAP_FLAG_KEYS: &[&str] = &["AETHER_HTTP_SERVER_ENABLED", "AETHER_AUDIO_DISABLE"];
+        let desktop = include_str!("desktop/chassis.rs");
+        let headless = include_str!("headless/chassis.rs");
+        for key in CAP_FLAG_KEYS {
+            let raw_read = format!("env::var(\"{key}\")");
+            for (chassis, src) in [("desktop", desktop), ("headless", headless)] {
+                assert!(
+                    !src.contains(&raw_read),
+                    "{chassis} chassis reads {key} via raw env::var — route it through the \
+                     cap's config API instead (see the `config` module's \
+                     \"Enable / disable convention\")",
+                );
+            }
+        }
+    }
 }

@@ -29,6 +29,31 @@ which is the common case — the struct's layer is already registered for
 discovery, so a new field joins the `--config` dump for free. Adding a
 **brand-new** config struct takes two extra steps, called out at the end.
 
+## Enable / disable flags
+
+A capability that ships off (or on) by default exposes that switch as one
+config-API `bool`, resolved through the same derive as every other knob —
+not inferred from another field (a bound address, a configured path) and
+not read out of `env::var` directly. Declare it with a `false` literal
+default and the shared `parse_flag` parser:
+
+```rust
+#[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+pub enabled: bool,
+```
+
+Name it for the intent: an opt-in cap that stays off until asked for calls
+the field `enabled`, while an opt-out cap that runs until suppressed calls
+it `disabled`. Both default to `false`, so the literal default reads as the
+unsurprising state, and a chassis turns the behaviour on from one
+documented `AETHER_…` key (or its CLI flag). At the composition site the
+chassis maps the resolved flag to its structural choice —
+`cfg.enabled.then_some(cfg)` for an opt-in cap — keeping the flag the
+single source of the on/off decision. `parse_flag` (in
+`aether-capabilities/src/config_env.rs`) accepts `1` / `true` / `yes` /
+`on`. `PersistConfig` is the one documented exception, for the reasons its
+`config` module doc records.
+
 ## Steps
 
 ### 1. Declare the field with a `#[config(...)]` hint

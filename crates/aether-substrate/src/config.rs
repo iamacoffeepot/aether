@@ -40,6 +40,31 @@
 //! derive emits an impl of it. Hand-written impls remain valid where
 //! the derive doesn't fit.
 //!
+//! # Enable / disable convention
+//!
+//! A capability that is off (or on) by default carries its on/off state
+//! as a single config-API `bool` field. It is resolved like every other
+//! knob — through the derive, with a literal `false` default — so the
+//! decision flows from one documented `AETHER_…` key (or its CLI flag),
+//! never from presence-inference (a bound address, a configured path) and
+//! never from a raw `env::var` read of a key the config layer already
+//! owns:
+//!
+//! ```ignore
+//! #[cfg_attr(feature = "native", config(default = false, parse = parse_flag))]
+//! pub enabled: bool,
+//! ```
+//!
+//! Polarity follows intent rather than a fixed keyword. An opt-in cap —
+//! off until asked for — names the field `enabled`; an opt-out cap — on
+//! until suppressed — names it `disabled`. Both default to `false`, so
+//! the literal default always reads as the unsurprising state, and the
+//! chassis maps the resolved `bool` to its structural choice at the one
+//! composition site (`cfg.enabled.then_some(cfg)`). The `parse_flag`
+//! helper accepts the usual `1` / `true` / `yes` / `on` spellings.
+//! `PersistConfig` is the documented exception below; every other cap
+//! follows this shape.
+//!
 //! # Why not `PersistConfig` too?
 //!
 //! `aether_substrate::handle_store::PersistConfig::from_argv_then_env`
