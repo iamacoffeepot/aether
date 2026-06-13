@@ -1942,6 +1942,45 @@ mod control_plane {
         pub color: [f32; 4],
     }
 
+    /// `aether.ui.button` — draw a clickable button at `rect` in
+    /// screen-pixel space (ADR-0107 §3). The cap forwards the fill
+    /// (`color`) as a panel quad and the `text` label, and records the
+    /// rect + `id` + the sending component for hit-testing. A left-click
+    /// inside the rect replies `aether.ui.clicked { id }` to the sender
+    /// within one frame (topmost button wins on overlap). v1: the mouse-
+    /// button stream carries no button discriminant or release, so the
+    /// button activates on left-press only. Fire-and-forget; resend every
+    /// frame — `id` is the caller's stable handle for the widget.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.ui.button")]
+    pub struct UiButton {
+        /// Caller-stable widget id echoed back in `UiClicked` on a hit.
+        pub id: u32,
+        /// `[x, y, width, height]` in window pixels.
+        pub rect: [f32; 4],
+        /// Background fill, linear RGBA.
+        pub color: [f32; 4],
+        /// Font for the label, registered via `aether.text.load_font`.
+        pub font_id: u32,
+        /// Label drawn at the button's top-left corner.
+        pub text: String,
+        pub size_pixels: f32,
+        /// Label color, linear RGBA.
+        pub text_color: [f32; 4],
+    }
+
+    /// `aether.ui.clicked` — the cap's interaction reply (ADR-0107 §3).
+    /// Sent to the component that drew the `UiButton` carrying the same
+    /// `id` when a left-click lands inside that button's rect. Delivered
+    /// by id to the recorded owner — the button mail's sender — within one
+    /// frame of the click.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.ui.clicked")]
+    pub struct UiClicked {
+        /// The `id` of the `UiButton` that was clicked.
+        pub id: u32,
+    }
+
     /// The three window presentation modes. `Windowed` has no fields —
     /// the current size lives on `SetWindowModeResult`.
     /// `FullscreenExclusive` carries the specific video mode; the
@@ -3784,6 +3823,8 @@ mod tests {
         assert_eq!(UiPanel::NAME, "aether.ui.panel");
         assert_eq!(UiBar::NAME, "aether.ui.bar");
         assert_eq!(UiLabel::NAME, "aether.ui.label");
+        assert_eq!(UiButton::NAME, "aether.ui.button");
+        assert_eq!(UiClicked::NAME, "aether.ui.clicked");
         assert_eq!(SetWindowMode::NAME, "aether.window.set_mode");
         assert_eq!(SetWindowModeResult::NAME, "aether.window.set_mode_result");
         assert_eq!(SetWindowTitle::NAME, "aether.window.set_title");
@@ -4381,6 +4422,38 @@ mod tests {
             assert_eq!(back.text, "HP: 100");
             assert_eq!(back.size_pixels, 16.0);
             assert_eq!(back.color, [1.0, 1.0, 1.0, 1.0]);
+        }
+
+        #[test]
+        fn ui_button_roundtrip() {
+            let b = UiButton {
+                id: 7,
+                rect: [4.0, 8.0, 120.0, 32.0],
+                color: [0.15, 0.15, 0.2, 1.0],
+                font_id: 1,
+                text: "Play".to_string(),
+                size_pixels: 18.0,
+                text_color: [0.9, 0.9, 0.9, 1.0],
+            };
+            let bytes = postcard::to_allocvec(&b).expect("test setup: postcard encodes UiButton");
+            let back: UiButton =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiButton");
+            assert_eq!(back.id, 7);
+            assert_eq!(back.rect, [4.0, 8.0, 120.0, 32.0]);
+            assert_eq!(back.color, [0.15, 0.15, 0.2, 1.0]);
+            assert_eq!(back.font_id, 1);
+            assert_eq!(back.text, "Play");
+            assert_eq!(back.size_pixels, 18.0);
+            assert_eq!(back.text_color, [0.9, 0.9, 0.9, 1.0]);
+        }
+
+        #[test]
+        fn ui_clicked_roundtrip() {
+            let c = UiClicked { id: 7 };
+            let bytes = postcard::to_allocvec(&c).expect("test setup: postcard encodes UiClicked");
+            let back: UiClicked =
+                postcard::from_bytes(&bytes).expect("test setup: postcard decodes UiClicked");
+            assert_eq!(back.id, 7);
         }
     }
 
