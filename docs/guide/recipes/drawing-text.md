@@ -74,11 +74,48 @@ string into the returned PNG:
 }
 ```
 
+## 4. Float a label above a character
+
+To draw a label at a world-space position — above a character's head, for
+instance — use `World { anchor, scale }` instead of `Screen`.
+
+```jsonc
+// send_mail → aether.text  (kind: aether.text.draw), fire-and-forget
+{
+  "font_id": 0,
+  "text": "Player",
+  "size_pixels": 18.0,
+  "color": [1.0, 1.0, 0.8, 1.0],
+  "space": {
+    "World": {
+      "anchor": [0.0, 2.0, 0.0],
+      "scale": { "Distance": { "reference_distance": 10.0 } }
+    }
+  }
+}
+```
+
+`anchor` is the world-space point the label floats above. The string is
+centered horizontally on the anchor, with the baseline sitting at the anchor's
+projected screen position and glyphs extending upward.
+
+`scale` controls how the label's apparent size relates to camera distance:
+
+- `{ "Distance": { "reference_distance": 10.0 } }` — the label holds its
+  `size_pixels` exactly when the anchor is 10 units from the camera and shrinks
+  proportionally as it recedes. This is the above-the-head mode: the label
+  looks natural from any distance.
+- `"Pixels"` — the label keeps a fixed on-screen pixel size regardless of
+  distance. Useful for HUD-style labels that must stay readable at any range.
+
+Both modes use the current `aether.camera` view-projection matrix, so the label
+always faces the camera and never skews as the camera orbits. Send the draw
+every frame the label should appear, the same as `Screen` text.
+
 ## What it does not do yet
 
 - **Screen text anchors at the top-left.** There is no per-draw screen origin in
-  the vocabulary yet; the string starts at pixel `(0, 0)`. Position beyond that
-  rides the `World { anchor, scale }` space for above-the-head labels.
+  the vocabulary yet; the string starts at pixel `(0, 0)`.
 - **One font, one size, one run per `draw`.** No shaping, bidirectional text, or
   emoji — the layout is fontdue's horizontal advance metrics.
 - **The atlas does not evict.** When it fills, further new glyphs log and drop
