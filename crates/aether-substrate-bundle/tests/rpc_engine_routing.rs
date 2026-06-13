@@ -136,86 +136,96 @@ fn call_round_trip<K: Kind>(
     }
 }
 
-#[test]
-fn hub_routes_engine_addressed_calls_to_a_real_substrate() {
-    let (_chassis, hub_port) = boot_hub();
-    let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
+/// Contention-sensitive: boots a real `PassiveChassis` substrate + hub
+/// routing and round-trips an engine-addressed call across threads.
+/// Wrapped in `mod heavy` so nextest's `serial-heavy` test-group
+/// (`max-threads = 1`, `.config/nextest.toml`) serializes it against the
+/// rest of the heavy set under a saturated `--workspace` run (issue 1772).
+mod heavy {
+    use super::*;
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{hub_port}")).expect("connect to hub");
-    // Generous: a forwarded call's first step is forking a real
-    // substrate and waiting for it to bind its RPC port.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .expect("test setup: setting socket read timeout on a connected stream succeeds");
+    #[test]
+    fn hub_routes_engine_addressed_calls_to_a_real_substrate() {
+        let (_chassis, hub_port) = boot_hub();
+        let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
 
-    // Handshake.
-    write_frame(
-        &mut stream,
-        &WireFrame::Hello(Hello {
-            wire_version: WIRE_VERSION,
-            peer: PeerKind::Client {
-                client_name: "rpc-engine-routing-test".into(),
-                client_version: "0.0.1".into(),
-            },
-        }),
-    )
-    .expect("write Hello");
-    match read_frame(&mut stream).expect("read HelloAck") {
-        WireFrame::HelloAck(HelloAck { wire_version, .. }) => {
-            assert_eq!(wire_version, WIRE_VERSION);
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{hub_port}")).expect("connect to hub");
+        // Generous: a forwarded call's first step is forking a real
+        // substrate and waiting for it to bind its RPC port.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("test setup: setting socket read timeout on a connected stream succeeds");
+
+        // Handshake.
+        write_frame(
+            &mut stream,
+            &WireFrame::Hello(Hello {
+                wire_version: WIRE_VERSION,
+                peer: PeerKind::Client {
+                    client_name: "rpc-engine-routing-test".into(),
+                    client_version: "0.0.1".into(),
+                },
+            }),
+        )
+        .expect("write Hello");
+        match read_frame(&mut stream).expect("read HelloAck") {
+            WireFrame::HelloAck(HelloAck { wire_version, .. }) => {
+                assert_eq!(wire_version, WIRE_VERSION);
+            }
+            other => panic!("expected HelloAck, got {other:?}"),
         }
-        other => panic!("expected HelloAck, got {other:?}"),
+
+        // 1. engine = None: spawn a real headless substrate via the
+        //    hub-local engines cap. Dispatches locally on the hub.
+        let (spawn_kind, spawn_payload) = call_round_trip(
+            &mut stream,
+            1,
+            None,
+            "aether.engine",
+            &SpawnEngine {
+                binary_path: headless.to_owned(),
+                args: vec![],
+            },
+        );
+        assert_eq!(spawn_kind, <SpawnEngineResult as Kind>::ID);
+        let engine_id = match SpawnEngineResult::decode_from_bytes(&spawn_payload) {
+            Some(SpawnEngineResult::Ok { engine_id, .. }) => engine_id,
+            Some(SpawnEngineResult::Err { error }) => panic!("spawn failed: {error}"),
+            None => panic!("undecodable SpawnEngineResult"),
+        };
+        let engine_id = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses"));
+
+        // 2. engine = Some(_): a ROUTED call. The hub forwards it through
+        //    aether.engine -> proxy -> (RPC) -> the substrate's aether.fs
+        //    -> back. This is the P5a proof.
+        let (routed_kind, _routed_payload) = call_round_trip(
+            &mut stream,
+            2,
+            Some(engine_id),
+            "aether.fs",
+            &List {
+                namespace: "save".to_owned(),
+                prefix: String::new(),
+            },
+        );
+        assert_eq!(
+            routed_kind,
+            <ListResult as Kind>::ID,
+            "routed call should return the substrate's aether.fs ListResult",
+        );
+
+        // 3. engine = None: terminate the engine — proxy SIGKILLs + reaps
+        //    the child, so the test leaves no orphaned substrate.
+        let (term_kind, _term_payload) = call_round_trip(
+            &mut stream,
+            3,
+            None,
+            "aether.engine",
+            &TerminateEngine {
+                engine_id: engine_id.0.to_string(),
+            },
+        );
+        assert_eq!(term_kind, <aether_kinds::TerminateEngineResult as Kind>::ID);
     }
-
-    // 1. engine = None: spawn a real headless substrate via the
-    //    hub-local engines cap. Dispatches locally on the hub.
-    let (spawn_kind, spawn_payload) = call_round_trip(
-        &mut stream,
-        1,
-        None,
-        "aether.engine",
-        &SpawnEngine {
-            binary_path: headless.to_owned(),
-            args: vec![],
-        },
-    );
-    assert_eq!(spawn_kind, <SpawnEngineResult as Kind>::ID);
-    let engine_id = match SpawnEngineResult::decode_from_bytes(&spawn_payload) {
-        Some(SpawnEngineResult::Ok { engine_id, .. }) => engine_id,
-        Some(SpawnEngineResult::Err { error }) => panic!("spawn failed: {error}"),
-        None => panic!("undecodable SpawnEngineResult"),
-    };
-    let engine_id = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses"));
-
-    // 2. engine = Some(_): a ROUTED call. The hub forwards it through
-    //    aether.engine -> proxy -> (RPC) -> the substrate's aether.fs
-    //    -> back. This is the P5a proof.
-    let (routed_kind, _routed_payload) = call_round_trip(
-        &mut stream,
-        2,
-        Some(engine_id),
-        "aether.fs",
-        &List {
-            namespace: "save".to_owned(),
-            prefix: String::new(),
-        },
-    );
-    assert_eq!(
-        routed_kind,
-        <ListResult as Kind>::ID,
-        "routed call should return the substrate's aether.fs ListResult",
-    );
-
-    // 3. engine = None: terminate the engine — proxy SIGKILLs + reaps
-    //    the child, so the test leaves no orphaned substrate.
-    let (term_kind, _term_payload) = call_round_trip(
-        &mut stream,
-        3,
-        None,
-        "aether.engine",
-        &TerminateEngine {
-            engine_id: engine_id.0.to_string(),
-        },
-    );
-    assert_eq!(term_kind, <aether_kinds::TerminateEngineResult as Kind>::ID);
 }
