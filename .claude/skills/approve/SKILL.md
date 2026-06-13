@@ -1,17 +1,54 @@
 ---
 name: approve
-description: Plan → Ready gate. Validates that an issue's scope artifacts are complete and any drafted ADR has merged, then sets AgentReady=Yes and advances Phase to Ready. Does NOT dispatch implementation — that's /implement's job. Idempotent on re-run.
+description: Plan → Ready gate. Validates that an issue's scope artifacts are complete and any drafted ADR has merged, then sets AgentReady=Yes and advances Phase to Ready. Does NOT dispatch implementation — that's /implement's job. Idempotent on re-run. `--sweep` discovers and batch-approves every Plan-complete issue behind one confirmation.
 ---
 
 # /approve — Plan → Ready gate
 
 The primary human review point of the release flow. The user invokes `/approve <issue>` after reading the scope artifacts that `/scope` produced. The skill validates the gates and flips the issue to Ready; from there `/implement` (or the Phase C orchestrator) picks it up.
 
+## Sweep approve
+
+`/approve --sweep` is the batched discovery entry point: instead of taking issue numbers, it enumerates every Plan-complete issue, validates each against the same gates the single-issue path runs, and waits for one confirmation before flipping any to Ready. It mirrors `/implement --sweep` (the dispatch-side discovery mode) so a reviewer clears a whole scoped batch in one pass instead of typing each number.
+
+1. **Enumerate over REST, in one call.** `phase:plan` is set only by `/scope` when it lands an issue at Plan, so the label alone is the eligibility signal — no GraphQL board read:
+
+   ```bash
+   gh api 'repos/iamacoffeepot/aether/issues?labels=phase:plan&state=open' --jq '.[].number'
+   ```
+
+   This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
+
+2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, `AgentReady` not blocked by a label. Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
+
+3. **Print the approve plan and wait for confirmation.** A batch board write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
+
+   ```
+   Sweep: 6 Plan issues, 2 dropped, 4 to approve.
+
+   Approve → Ready:
+     #1756  back every actor inbox with the settling-inbox primitive   size:m  model:sonnet
+     #1757  single-ownership dispatched envelope via take_inbound       size:m  model:opus
+     #1758  migrate capture replies to the retained inbound guard       size:l  model:opus
+     #1754  close mail lineage … (umbrella — plan approved, not dispatched)
+
+   Dropped:
+     #1719  Phase=Design, not Plan
+     #1740  ADR PR #1738 not merged (approve singly with /approve 1740 --skip-adr to override)
+
+   Confirm approve? (no board write happens until your go-ahead)
+   ```
+
+4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set in one aliased `gh api graphql` request — 2N `updateProjectV2ItemFieldValue` mutations (`Phase=Ready` + `AgentReady=Yes` per issue) — then reconcile each issue's label to `phase:ready`. The sweep never auto-confirms.
+
+`--sweep` takes no issue argument — it discovers them. It does not combine with `--note` or `--skip-adr`, both single-issue concerns.
+
 ## Invocation
 
 ```
 /approve <issue>                    standard (single issue)
 /approve <issue> [<issue> …]        batch — validate each, write all board fields in one aliased request
+/approve --sweep                    discover every Plan-complete issue, validate each, confirm, approve all
 /approve <issue> --note "<text>"    posts the text as a comment on the issue
 /approve <issue> --skip-adr         bypass the ADR-merged check (emergency override)
 ```
