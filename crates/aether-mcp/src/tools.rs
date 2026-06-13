@@ -13,6 +13,7 @@
 //! cache populated by `load_component` / `replace_component`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 // `tokio::sync::Mutex` (the async one used by the per-engine refresh-
@@ -52,11 +53,12 @@ use crate::args::ActorLogsArgs;
 use crate::args::ActorLogsResponse;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
-    CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, DagCancelArgs, DagDescriptorArg,
-    DagStatusArgs, DescribeComponentArgs, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
-    HandleSummaryJson, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus, NodeArg,
-    ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
-    SpawnSubstrateArgs, SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
+    CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
+    DagDescriptorArg, DagStatusArgs, DescribeComponentArgs, DescribeHandlesArgs,
+    DescribeHandlesResponse, EngineInfo, HandleSummaryJson, LoadComponentArgs, MailIdJson,
+    MailNodeJson, MailSpec, MailStatus, NodeArg, ReplaceComponentArgs, ReplyEventJson,
+    SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
+    TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -206,12 +208,26 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub. The hub assigns the substrate a free localhost RPC port, injects it as AETHER_RPC_PORT, forks the binary, and connects a proxy. Returns the engine_id and rpc_port on success."
+        description = "Fork+exec a substrate binary as a child of the hub. The hub assigns the substrate a free localhost RPC port, injects it as AETHER_RPC_PORT, forks the binary, and connects a proxy. Returns the engine_id and rpc_port on success. Pass `components` (each {binary_path, name?, config_path?, export?}) to bring the engine up with those components already loaded in one call — aether-mcp stages a temp boot-manifest the hub injects as AETHER_BOOT_MANIFEST, and the spawned substrate reads the listed wasm itself (single-host), so no follow-up load_component is needed."
     )]
     pub async fn spawn_substrate(
         &self,
         Parameters(args): Parameters<SpawnSubstrateArgs>,
     ) -> Result<String, McpError> {
+        // A boot list rides in as a temp boot-manifest JSON of file
+        // paths; the hub injects its path as AETHER_BOOT_MANIFEST and the
+        // single-host substrate reads the wasm itself (issue 1776). Hold
+        // the temp file across the spawn call — the substrate reads it at
+        // boot, before the spawn reply returns — then clean it up.
+        let manifest = if args.components.is_empty() {
+            None
+        } else {
+            Some(
+                stage_boot_manifest(&args.components)
+                    .await
+                    .map_err(internal)?,
+            )
+        };
         let reply = self
             .session
             .call_one(local_envelope(
@@ -219,10 +235,15 @@ impl Mcp {
                 &SpawnEngine {
                     binary_path: args.binary_path,
                     args: args.args,
+                    boot_manifest: manifest.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 },
             ))
-            .await
-            .map_err(internal)?;
+            .await;
+        if let Some(path) = &manifest {
+            // Best-effort cleanup; the substrate has already read it.
+            let _ = fs::remove_file(path).await;
+        }
+        let reply = reply.map_err(internal)?;
         match SpawnEngineResult::decode_from_bytes(&reply.payload) {
             Some(SpawnEngineResult::Ok {
                 engine_id,
@@ -1364,6 +1385,50 @@ fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Build the boot-manifest JSON for a `spawn_substrate` component list
+/// (issue 1776). Mirrors the bundle crate's `BundleManifest` schema,
+/// serialized with `serde_json::json!` so `aether-mcp` needn't depend on
+/// the bundle crate — the same approach `cargo xtask bundle` takes on the
+/// write side. Factored from [`stage_boot_manifest`] so the shape is
+/// unit-testable without staging a file. Optional spec fields are only
+/// emitted when set, matching the manifest's `#[serde(default)]` fields.
+fn component_manifest_json(components: &[ComponentSpec]) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = components
+        .iter()
+        .map(|spec| {
+            let mut entry = serde_json::json!({ "wasm": spec.binary_path });
+            if let Some(name) = &spec.name {
+                entry["name"] = serde_json::json!(name);
+            }
+            if let Some(config) = &spec.config_path {
+                entry["config"] = serde_json::json!(config);
+            }
+            if let Some(export) = &spec.export {
+                entry["export"] = serde_json::json!(export);
+            }
+            entry
+        })
+        .collect();
+    serde_json::json!({ "components": entries })
+}
+
+/// Stage the `spawn_substrate` boot list as a temporary boot-manifest
+/// JSON file and return its path (issue 1776). The hub injects the path
+/// as `AETHER_BOOT_MANIFEST` at the fork; the caller removes the file
+/// once the spawn settles. The filename is per-process-unique so
+/// concurrent spawns never collide.
+async fn stage_boot_manifest(components: &[ComponentSpec]) -> anyhow::Result<PathBuf> {
+    use std::env;
+    use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
+    let bytes = serde_json::to_vec(&component_manifest_json(components))?;
+    fs::write(&path, bytes).await?;
+    Ok(path)
+}
+
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
 /// (`engine = None`) carrying a typed kind.
 fn local_envelope<K: Kind>(mailbox: &str, kind: &K) -> MailEnvelope {
@@ -1852,8 +1917,8 @@ fn level_to_str(level: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::args::{
-        CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, LoadComponentArgs, MailSpec,
-        ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
+        CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, LoadComponentArgs,
+        MailSpec, ReplaceComponentArgs, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
         TerminateSubstrateArgs, TracedMailSpec,
     };
     use aether_capabilities::rpc::{
@@ -2013,9 +2078,54 @@ mod tests {
             .spawn_substrate(Parameters(SpawnSubstrateArgs {
                 binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
                 args: vec![],
+                components: vec![],
             }))
             .await;
         assert!(result.is_err(), "a missing binary should be a tool error");
+    }
+
+    /// The temp boot-manifest `spawn_substrate` stages from its
+    /// `components` list is a well-formed `BundleManifest` JSON: list
+    /// order is preserved, `binary_path` maps to `wasm`, and the optional
+    /// `config_path` / `name` / `export` ride only when set (issue 1776).
+    #[test]
+    fn component_manifest_json_is_well_formed() {
+        let specs = vec![
+            ComponentSpec {
+                binary_path: "/abs/camera.wasm".to_owned(),
+                name: Some("camera".to_owned()),
+                config_path: Some("/abs/camera.cfg".to_owned()),
+                export: None,
+            },
+            ComponentSpec {
+                binary_path: "/abs/ui.wasm".to_owned(),
+                name: None,
+                config_path: None,
+                export: Some("ui.panel".to_owned()),
+            },
+        ];
+        let manifest = component_manifest_json(&specs);
+        let components = manifest["components"]
+            .as_array()
+            .expect("components is an array");
+        assert_eq!(components.len(), 2);
+
+        assert_eq!(components[0]["wasm"], "/abs/camera.wasm");
+        assert_eq!(components[0]["name"], "camera");
+        assert_eq!(components[0]["config"], "/abs/camera.cfg");
+        assert!(components[0].get("export").is_none());
+
+        assert_eq!(components[1]["wasm"], "/abs/ui.wasm");
+        assert_eq!(components[1]["export"], "ui.panel");
+        assert!(components[1].get("name").is_none());
+        assert!(components[1].get("config").is_none());
+
+        // The staged JSON parses back through the chassis manifest schema
+        // shape (components array of {wasm, ...}).
+        let serialized = serde_json::to_string(&manifest).expect("serialize manifest");
+        let reparsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("reparse manifest");
+        assert_eq!(reparsed["components"].as_array().unwrap().len(), 2);
     }
 
     /// `terminate_substrate` with a malformed `engine_id` surfaces the

@@ -186,6 +186,7 @@ mod heavy {
             &SpawnEngine {
                 binary_path: headless.to_owned(),
                 args: vec![],
+                boot_manifest: None,
             },
         );
         assert_eq!(spawn_kind, <SpawnEngineResult as Kind>::ID);

@@ -17,6 +17,41 @@ pub struct SpawnSubstrateArgs {
     /// verbatim. `AETHER_RPC_PORT` is injected by the hub regardless.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Components to auto-load at boot, in order. When non-empty,
+    /// `aether-mcp` stages a temporary boot-manifest JSON of these specs
+    /// and hands its path to the hub, which injects it as
+    /// `AETHER_BOOT_MANIFEST` at the fork — so the spawned engine comes
+    /// up with these components already loading, in one call, with no
+    /// follow-up `load_component`. Spawn is single-host, so the substrate
+    /// reads each `binary_path` (and `config_path`) itself — pass paths
+    /// that exist on the host running the fleet. Empty (default) boots a
+    /// bare engine.
+    #[serde(default)]
+    pub components: Vec<ComponentSpec>,
+}
+
+/// One component in a `spawn_substrate` boot list. Mirrors the
+/// `load_component` arguments (path-addressed, ADR-0096 export
+/// selector), but the substrate reads the files itself at boot rather
+/// than `aether-mcp` forwarding the bytes.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ComponentSpec {
+    /// Absolute path to the component's `.wasm` on the fleet host.
+    pub binary_path: String,
+    /// Optional human-readable load name. The substrate defaults one
+    /// from the wasm if omitted.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional absolute path to a file holding the component's
+    /// init-config bytes (ADR-0090), already encoded to the component's
+    /// `Config` kind wire shape. Omit for a no-config component.
+    #[serde(default)]
+    pub config_path: Option<String>,
+    /// ADR-0096: which exported actor type to instantiate from a
+    /// multi-actor module, named by its `Actor::NAMESPACE`. Omit to load
+    /// the module's entry type.
+    #[serde(default)]
+    pub export: Option<String>,
 }
 
 /// `terminate_substrate` arguments.

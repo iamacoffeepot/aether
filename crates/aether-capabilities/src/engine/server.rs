@@ -236,7 +236,7 @@ mod server_native {
         /// Fork+exec a substrate binary and connect a proxy to it.
         ///
         /// # Agent
-        /// Send `SpawnEngine { binary_path, args }`. The cap assigns a
+        /// Send `SpawnEngine { binary_path, args, boot_manifest }`. The cap assigns a
         /// free localhost port for the substrate's RPC server, injects
         /// it as `AETHER_RPC_PORT`, forks the binary, then boots an
         /// `aether.engine.proxy:<id>` actor that dials it. Reply:
@@ -265,13 +265,20 @@ mod server_native {
             self.next_engine_seq += 1;
             let engine_store_dir = engine_store_root().join(engine_id.0.simple().to_string());
 
-            let child = match Command::new(&mail.binary_path)
+            let mut command = Command::new(&mail.binary_path);
+            command
                 .args(&mail.args)
                 .env("AETHER_RPC_PORT", rpc_port.to_string())
                 .env("AETHER_HANDLE_STORE_DIR", &engine_store_dir)
-                .stdin(Stdio::null())
-                .spawn()
-            {
+                .stdin(Stdio::null());
+            // A spawn carrying a component list rides in as a boot-manifest
+            // path; inject it the same way as the RPC port so the spawned
+            // chassis reads the listed wasm itself and comes up with those
+            // components already loading (issue 1776).
+            if let Some(boot_manifest) = &mail.boot_manifest {
+                command.env("AETHER_BOOT_MANIFEST", boot_manifest);
+            }
+            let child = match command.spawn() {
                 Ok(child) => child,
                 Err(e) => {
                     ctx.reply(&SpawnEngineResult::Err {
@@ -725,6 +732,7 @@ mod tests {
                 &SpawnEngine {
                     binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
                     args: vec![],
+                    boot_manifest: None,
                 },
                 || {
                     cells

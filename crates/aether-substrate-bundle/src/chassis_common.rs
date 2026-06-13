@@ -71,6 +71,14 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
         kind: KnobKind::HandRegistered,
     },
     KnobRecord {
+        env_key: "AETHER_BOOT_MANIFEST",
+        doc: "Path to a BundleManifest JSON of components to auto-load at boot \
+              (the runtime twin of the standalone-bundle compile-time pack; \
+              injected by the engines cap on a spawn_substrate carrying components).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    },
+    KnobRecord {
         env_key: "AETHER_WINDOW_MODE",
         doc: "Desktop window mode: windowed[:WxH] / fullscreen-borderless / exclusive:WxH@HZ.",
         default: None,
@@ -318,8 +326,8 @@ pub fn maybe_with_rpc_server<C: Chassis>(
 }
 
 /// Issue 1761: boot the HTTP server only when `config` is `Some` (i.e.
-/// `AETHER_HTTP_SERVER_BIND_ADDR` or `--http-server-bind-addr` was set).
-/// Mirrors [`maybe_with_rpc_server`]: an unconfigured chassis binds nothing.
+/// the cap's `enabled` flag is set). Mirrors [`maybe_with_rpc_server`]:
+/// an unconfigured chassis binds nothing.
 pub fn maybe_with_http_server<C: Chassis>(
     builder: Builder<C>,
     config: Option<HttpServerConfig>,
@@ -328,6 +336,19 @@ pub fn maybe_with_http_server<C: Chassis>(
         return builder;
     };
     builder.with_actor::<HttpServerCapability>(config)
+}
+
+/// Read `AETHER_BOOT_MANIFEST` into the optional boot-manifest path —
+/// a `BundleManifest` JSON of components to auto-load at boot. `None`
+/// when unset; the chassis then boots componentless (the bare-spawn /
+/// hub-load path). Mirrors [`crate::hub::rpc_port_from_env`]: the env
+/// read is the fallback for an absent `--boot-manifest` CLI flag.
+/// Shared by the desktop + headless chassis.
+#[must_use]
+pub fn boot_manifest_from_env() -> Option<String> {
+    env::var("AETHER_BOOT_MANIFEST")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
 /// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to

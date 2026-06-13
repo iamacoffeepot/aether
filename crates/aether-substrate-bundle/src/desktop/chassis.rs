@@ -32,11 +32,11 @@ use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, parse_window_mode_env};
-use crate::autoload::{AutoloadComponent, autoload_mail};
+use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, chassis_known_keys, frame_lifecycle_config,
-    maybe_with_http_server, maybe_with_rpc_server, parse_workers_env, resolve_persist_state,
-    with_common_caps,
+    CommonBoot, PersistOverride, boot_manifest_from_env, chassis_known_keys,
+    frame_lifecycle_config, maybe_with_http_server, maybe_with_rpc_server, parse_workers_env,
+    resolve_persist_state, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
@@ -44,6 +44,7 @@ use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::env;
+use std::path::Path;
 use winit::event_loop::ControlFlow;
 
 /// Desktop chassis env-resolution failure (ADR-0090 §4 / issue #571).
@@ -235,7 +236,17 @@ impl DesktopEnv {
             persist,
             workers: cli_workers,
             rpc_port: cli_rpc_port,
+            boot_manifest: cli_boot_manifest,
         } = common;
+
+        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST`. When set,
+        // the listed components' wasm + config are read into the autoload
+        // list `build_inner` drains into `aether.component.load`; an
+        // unreadable manifest aborts boot (ADR-0090 §4) via `ConfigError`.
+        let autoload = match cli_boot_manifest.or_else(boot_manifest_from_env) {
+            Some(path) => boot_manifest_autoload(Path::new(&path))?,
+            None => Vec::new(),
+        };
 
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Poll);
@@ -321,7 +332,7 @@ impl DesktopEnv {
             workers,
             persist: persist_state,
             handle_store_max_bytes,
-            autoload: Vec::new(),
+            autoload,
         })
     }
 }

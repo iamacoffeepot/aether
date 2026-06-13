@@ -30,10 +30,11 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerDriverCapability, parse_tick_hz_env};
-use crate::autoload::{AutoloadComponent, autoload_mail};
+use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    CommonBoot, PersistOverride, chassis_known_keys, maybe_with_http_server, maybe_with_rpc_server,
-    parse_workers_env, resolve_persist_state, tick_only_lifecycle_config, with_common_caps,
+    CommonBoot, PersistOverride, boot_manifest_from_env, chassis_known_keys,
+    maybe_with_http_server, maybe_with_rpc_server, parse_workers_env, resolve_persist_state,
+    tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -41,6 +42,7 @@ use aether_substrate::config::{ConfigError, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
+use std::path::Path;
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -146,7 +148,16 @@ impl HeadlessEnv {
             persist,
             workers: cli_workers,
             rpc_port: cli_rpc_port,
+            boot_manifest: cli_boot_manifest,
         } = common;
+        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST`. When set,
+        // the listed components' wasm + config are read into the autoload
+        // list `build_inner` drains into `aether.component.load`; an
+        // unreadable manifest aborts boot (ADR-0090 §4) via `ConfigError`.
+        let autoload = match cli_boot_manifest.or_else(boot_manifest_from_env) {
+            Some(path) => boot_manifest_autoload(Path::new(&path))?,
+            None => Vec::new(),
+        };
         let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
         let anthropic = AnthropicConfig::try_from_argv_then_env(anthropic.into_layer())?;
         let gemini = GeminiConfig::try_from_argv_then_env(gemini.into_layer())?;
@@ -183,7 +194,7 @@ impl HeadlessEnv {
             workers,
             persist: persist_state,
             handle_store_max_bytes,
-            autoload: Vec::new(),
+            autoload,
         })
     }
 }

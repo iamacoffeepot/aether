@@ -1054,11 +1054,20 @@ mod engine {
     /// `binary_path` with `args` forwarded verbatim, then boots an
     /// `aether.engine.proxy:<id>` actor that dials it. Reply:
     /// [`SpawnEngineResult`].
+    ///
+    /// `boot_manifest` (when `Some`) is the absolute path to a
+    /// `BundleManifest` JSON of components to auto-load at boot; the cap
+    /// injects it as `AETHER_BOOT_MANIFEST` alongside `AETHER_RPC_PORT`,
+    /// and the spawned chassis reads the listed wasm itself (spawn is
+    /// single-host) so the engine comes up with those components already
+    /// loading — no follow-up `load_component` round-trips. `None` boots
+    /// a bare engine, the pre-existing behaviour.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.spawn")]
     pub struct SpawnEngine {
         pub binary_path: String,
         pub args: Vec<String>,
+        pub boot_manifest: Option<String>,
     }
 
     /// Reply to [`SpawnEngine`]. Issue 763 P4.
@@ -3543,6 +3552,39 @@ mod tests {
         let back: MouseMove =
             decode(&bytes).expect("test setup: MouseMove cast round-trip decodes");
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn spawn_engine_roundtrip_carries_boot_manifest() {
+        // `boot_manifest` rides the wire (postcard path — non-`repr(C)`
+        // struct with `Vec<String>` + `Option<String>`); both `Some`
+        // (a spawn carrying a component list) and `None` (a bare spawn)
+        // must survive the engines-cap encode/decode.
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        let spawn = SpawnEngine {
+            binary_path: "/abs/aether-substrate-headless".to_string(),
+            args: vec!["--tick-hz".to_string(), "30".to_string()],
+            boot_manifest: Some("/tmp/aether-boot-manifest.json".to_string()),
+        };
+        let back = SpawnEngine::decode_from_bytes(&spawn.encode_into_bytes())
+            .expect("test setup: SpawnEngine decodes");
+        assert_eq!(back.binary_path, spawn.binary_path);
+        assert_eq!(back.args, spawn.args);
+        assert_eq!(
+            back.boot_manifest.as_deref(),
+            Some("/tmp/aether-boot-manifest.json"),
+        );
+
+        let bare = SpawnEngine {
+            binary_path: "/abs/aether-substrate".to_string(),
+            args: vec![],
+            boot_manifest: None,
+        };
+        let back = SpawnEngine::decode_from_bytes(&bare.encode_into_bytes())
+            .expect("test setup: bare SpawnEngine decodes");
+        assert_eq!(back.boot_manifest, None);
     }
 
     #[test]

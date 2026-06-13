@@ -182,6 +182,7 @@ impl FleetBench {
             &SpawnEngine {
                 binary_path: headless.to_owned(),
                 args: vec![],
+                boot_manifest: None,
             },
         );
         let payload = single_reply(&replies, "SpawnEngine");
