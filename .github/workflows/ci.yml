@@ -141,7 +141,7 @@ jobs:
       # most headroom. Swap is kept (swap-storage: false) to avoid
       # degrading the linker under memory pressure.
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           android: 'true'
           dotnet: 'true'
