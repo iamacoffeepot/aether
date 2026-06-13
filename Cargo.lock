@@ -96,6 +96,7 @@ dependencies = [
  "dirs",
  "fontdue",
  "hound",
+ "httparse",
  "postcard",
  "serde",
  "serde_json",

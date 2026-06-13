@@ -2588,6 +2588,20 @@ mod control_plane {
         pub body: Vec<u8>,
     }
 
+    /// `aether.http.server.inbound_ready` — accept / reader sidecar →
+    /// `HttpServerCapability` dispatcher wake (ADR-0108, issue 1760).
+    /// The HTTP-server analog of `RpcInboundReady`: the sidecar pushes
+    /// the live work (an accepted `TcpStream`, a parsed request, a close
+    /// reason) over the cap's internal mpsc and fires this empty-payload
+    /// mail at the cap's own mailbox so the dispatcher handler drains the
+    /// queue. A `TcpStream` isn't wire-shaped and a request body may be
+    /// large, so the mail is only the wakeup signal.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.http.server.inbound_ready")]
+    pub struct HttpInboundReady {}
+
     // ADR-0045 typed-handle store. Four request kinds on the
     // `"aether.handle"` sink (`publish` / `release` / `pin` / `unpin`),
     // paired 1:1 with reply kinds. Components mail `HandlePublish`
