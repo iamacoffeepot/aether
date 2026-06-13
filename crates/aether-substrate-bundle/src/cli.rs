@@ -49,6 +49,7 @@ pub use aether_capabilities::audio::AudioOverlay;
 pub use aether_capabilities::fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_capabilities::gemini::GeminiOverlay;
 pub use aether_capabilities::http::HttpOverlay;
+pub use aether_capabilities::http_server::HttpServerOverlay;
 
 /// Argv overlay for the ADR-0049 handle-store persistence knobs. The
 /// `dir` / `persist_disable` flags shadow `AETHER_HANDLE_STORE_DIR` /
@@ -117,6 +118,8 @@ impl PersistOverlay {
 pub struct CommonOverlay {
     #[command(flatten)]
     pub http: HttpOverlay,
+    #[command(flatten)]
+    pub http_server: HttpServerOverlay,
     #[command(flatten)]
     pub fs: FsOverlay,
     #[command(flatten)]

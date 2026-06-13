@@ -20,13 +20,15 @@ use aether_capabilities::audio::AudioConfigLayer;
 use aether_capabilities::fs::NamespaceRootsLayer;
 use aether_capabilities::gemini::GeminiConfigLayer;
 use aether_capabilities::http::HttpConfigLayer;
+use aether_capabilities::http_server::HttpServerConfigLayer;
 use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
-    InputCapability, InputConfig, InventoryCapability, LifecycleConfig, TcpCapability,
-    TextCapability, fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
+    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
+    LifecycleConfig, TcpCapability, TextCapability, fs::NamespaceRoots, http::HttpConfig,
+    trace::TraceDispatchCapability,
 };
 use aether_kinds::{Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
@@ -116,6 +118,7 @@ pub fn chassis_known_keys() -> KnownKeys {
 fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
     const METAS: &[&Meta] = &[
         &HttpConfigLayer::META,
+        &HttpServerConfigLayer::META,
         &GeminiConfigLayer::META,
         &AnthropicConfigLayer::META,
         &AudioConfigLayer::META,
@@ -314,6 +317,19 @@ pub fn maybe_with_rpc_server<C: Chassis>(
     })
 }
 
+/// Issue 1761: boot the HTTP server only when `config` is `Some` (i.e.
+/// `AETHER_HTTP_SERVER_BIND_ADDR` or `--http-server-bind-addr` was set).
+/// Mirrors [`maybe_with_rpc_server`]: an unconfigured chassis binds nothing.
+pub fn maybe_with_http_server<C: Chassis>(
+    builder: Builder<C>,
+    config: Option<HttpServerConfig>,
+) -> Builder<C> {
+    let Some(config) = config else {
+        return builder;
+    };
+    builder.with_actor::<HttpServerCapability>(config)
+}
+
 /// Parse `AETHER_WORKERS`. Unset → `None` (chassis falls back to
 /// [`aether_substrate::scheduler::PoolConfig::default`]); positive →
 /// `Some(n)`; `0` → `Some(1)` with a warn (the pool requires at least
@@ -482,6 +498,22 @@ mod tests {
     }
 
     #[test]
+    fn chassis_known_keys_includes_http_server_keys() {
+        // Issue 1761: `HttpServerConfigLayer::META` must join the
+        // chassis registry so the unknown-AETHER_* sweep (e1) doesn't
+        // flag `AETHER_HTTP_SERVER_*` env vars set by operators.
+        let known = chassis_known_keys();
+        assert!(
+            known.contains("AETHER_HTTP_SERVER_BIND_ADDR"),
+            "AETHER_HTTP_SERVER_BIND_ADDR must be a known key",
+        );
+        assert!(
+            known.contains("AETHER_HTTP_SERVER_HANDLER_MAILBOX"),
+            "AETHER_HTTP_SERVER_HANDLER_MAILBOX must be a known key",
+        );
+    }
+
+    #[test]
     fn chassis_config_dump_lists_a_knob_from_each_cap_plus_scheduler() {
         // ADR-0090 §4 `--config`: the dump walks the same registry as
         // the sweep, so it lists a representative knob from each cap, a
@@ -490,6 +522,7 @@ mod tests {
         let dump = super::chassis_config_dump();
         assert!(dump.contains("KEY"));
         assert!(dump.contains("AETHER_HTTP_DISABLE")); // http cap
+        assert!(dump.contains("AETHER_HTTP_SERVER_BIND_ADDR")); // http server cap
         assert!(dump.contains("AETHER_GEMINI_TIMEOUT_MS")); // gemini cap
         assert!(dump.contains("AETHER_AUDIO_DISABLE")); // audio cap
         assert!(dump.contains("AETHER_WORKERS")); // bare chassis knob
