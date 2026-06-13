@@ -2579,6 +2579,43 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     };
 
+    // ADR-0109 §5: the native analogue of the wasm `aether.kinds.inputs`
+    // custom section. Submit one link-time `HandlerEntry` per
+    // `#[handler]` — the owning `NAMESPACE`, the input kind (id + name),
+    // and the reply kind id read off the return type (the same
+    // `classify_handler_reply` the auto-reply arm uses). The
+    // `aether.inventory` cap folds these into the
+    // `aether.inventory.handlers` reply, so a native cap surfaces its
+    // `In -> Out` the way `describe_component` does for a wasm component.
+    // Gated on `not(wasm32)` to match the rest of the native surface
+    // (the `inventory` crate doesn't link on wasm32). Skipped for a
+    // generic native actor — none exist, and `<Self as Actor>::NAMESPACE`
+    // wouldn't const-resolve in the non-generic inventory static.
+    let handler_inventory = if generics.params.is_empty() {
+        let submissions = handlers.iter().map(|h| {
+            let kind_ty = &h.kind_ty;
+            let reply_expr = if let Some(reply_ty) = h.reply.manifest_kind() {
+                quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
+            } else {
+                quote! { ::core::option::Option::None }
+            };
+            quote! {
+                #[cfg(not(target_arch = "wasm32"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::HandlerEntry {
+                        namespace: <#self_ty as ::aether_actor::Actor>::NAMESPACE,
+                        id: <#kind_ty as ::aether_data::Kind>::ID,
+                        name: <#kind_ty as ::aether_data::Kind>::NAME,
+                        reply: #reply_expr,
+                    }
+                }
+            }
+        });
+        quote! { #(#submissions)* }
+    } else {
+        quote! {}
+    };
+
     // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
     // handler-method impl all reach for `::aether_substrate::*` paths
     // and native-only types in their bodies. They're emitted under
@@ -2597,6 +2634,8 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         #actor_impl
 
         #(#handles_kind_impls)*
+
+        #handler_inventory
 
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics #trait_path for #self_ty #where_clause {

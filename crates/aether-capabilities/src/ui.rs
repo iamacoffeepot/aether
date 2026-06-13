@@ -213,7 +213,7 @@ mod native {
                     color: mail.color,
                 }],
             };
-            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &fill);
+            ctx.actor::<RenderCapability>().send(&fill);
             let label = DrawText {
                 font_id: mail.font_id,
                 text: mail.text,
@@ -222,7 +222,7 @@ mod native {
                 origin: [x, y],
                 space: QuadSpace::Screen,
             };
-            let _ = ctx.actor::<TextCapability>().send_traced(ctx, &label);
+            ctx.actor::<TextCapability>().send(&label);
         }
 
         /// Cache the cursor position.

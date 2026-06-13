@@ -59,6 +59,7 @@ use alloc::string::{String, ToString};
 
 use crate::__inventory::DescriptorEntry;
 use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
+use crate::ids::KindId;
 use crate::tagged_id::{Tag, with_tag};
 use crate::transform::TransformEntry;
 
@@ -210,6 +211,39 @@ pub fn name_entries() -> impl Iterator<Item = &'static NameEntry> {
 /// Iterate every [`TemplateEntry`] collected at link time.
 pub fn template_entries() -> impl Iterator<Item = &'static TemplateEntry> {
     inventory::iter::<TemplateEntry>.into_iter()
+}
+
+/// A native actor's per-handler reply contract, collected at link time
+/// (ADR-0109 §5) — the native analogue of the wasm `aether.kinds.inputs`
+/// custom section's handler record. The `#[actor]` macro submits one
+/// entry per `#[handler]` on a native actor: the owning actor's
+/// `NAMESPACE` (the mailbox the handler is reached at), the handler's
+/// input kind (id + name), and the reply kind id read off the return
+/// type (`None` for a `-> ()` fire-and-forget handler, `Some` for a
+/// `-> R` synchronous or `-> Pending<R>` deferred reply). The
+/// `aether.inventory` cap folds these into the
+/// `aether.inventory.handlers` reply so a driver reads a native cap's
+/// `In -> Out` the way `describe_component` reads a wasm component's.
+///
+/// Owns nothing but `'static` data (`KindId` is a `Copy` `u64` newtype),
+/// so it is const-constructible from `inventory::submit!`.
+pub struct HandlerEntry {
+    /// The owning actor's `NAMESPACE` const (e.g. `"aether.fs"`).
+    pub namespace: &'static str,
+    /// The handler's input kind id (`<K as Kind>::ID`).
+    pub id: KindId,
+    /// The handler's input kind name (`<K as Kind>::NAME`).
+    pub name: &'static str,
+    /// The handler's declared reply kind id — the `R` of `-> R` /
+    /// `-> Pending<R>` — or `None` for a `-> ()` fire-and-forget handler.
+    pub reply: Option<KindId>,
+}
+
+inventory::collect!(HandlerEntry);
+
+/// Iterate every native [`HandlerEntry`] collected at link time.
+pub fn handler_entries() -> impl Iterator<Item = &'static HandlerEntry> {
+    inventory::iter::<HandlerEntry>.into_iter()
 }
 
 /// Map a byte-domain prefix to the ADR-0064 [`Tag`] a reconstructed id

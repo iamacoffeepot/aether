@@ -4,7 +4,7 @@
 //! (the MCP harness) reads the running substrate's **own, per-build**
 //! state instead of a drift-prone compiled-in copy.
 //!
-//! Three request kinds, each replying synchronously via `ctx.reply`:
+//! Four request kinds, each replying synchronously via `ctx.reply`:
 //!
 //! - [`Manifest`] → [`ManifestResult`]: the compile-time manifest —
 //!   every link-time [`NameEntry`](aether_data::name_inventory::NameEntry)
@@ -28,6 +28,16 @@
 //!   component-defined kind encodes correctly the moment the
 //!   `aether.component.load` returns — no per-kind hand-promotion into
 //!   `aether-kinds`.
+//! - [`ListHandlers`] → [`HandlersResult`] (ADR-0109 §5): the native
+//!   handler manifest — every `#[handler]`'s `{ namespace, input kind,
+//!   reply kind }` across every native actor linked into the substrate,
+//!   read from the link-time
+//!   [`HandlerEntry`](aether_data::name_inventory::HandlerEntry)
+//!   inventory the `#[actor]` macro populates. The native analogue of
+//!   the wasm `aether.kinds.inputs` custom section: the harness folds
+//!   the reply per `namespace` so a native cap (`aether.fs`,
+//!   `aether.render`, …) surfaces its `In -> Out` the way
+//!   `describe_component` surfaces a wasm component's.
 //!
 //! The cap holds a clone of the substrate's `Arc<Registry>` (taken in
 //! `init` via `NativeInitCtx::mailer().registry()` — the same `Arc` the
@@ -39,20 +49,28 @@
 //! `NameEntry` for `NAMESPACE`, so `aether.inventory` reverses through
 //! the same static map it serves.
 
-use aether_kinds::{ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve, ResolveResult};
+use aether_kinds::{
+    HandlersResult, ListHandlers, ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve,
+    ResolveResult,
+};
 
 #[aether_actor::bridge(singleton)]
 mod native {
-    use super::{ListKinds, ListKindsResult, Manifest, ManifestResult, Resolve, ResolveResult};
+    use super::{
+        HandlersResult, ListHandlers, ListKinds, ListKindsResult, Manifest, ManifestResult,
+        Resolve, ResolveResult,
+    };
 
     use aether_actor::{OutboundReply, actor};
     use aether_data::KindId;
     use aether_data::canonical::kind_id_from_parts;
-    use aether_data::name_inventory::{Cardinality, ParamKind, name_entries, template_entries};
+    use aether_data::name_inventory::{
+        Cardinality, ParamKind, handler_entries, name_entries, template_entries,
+    };
     use aether_data::tagged_id;
     use aether_kinds::{
-        CardinalityWire, KindDescriptorWire, NameEntryWire, ParamKindWire, ResolvedName,
-        TemplateEntryWire,
+        CardinalityWire, HandlerEntryWire, KindDescriptorWire, NameEntryWire, ParamKindWire,
+        ResolvedName, TemplateEntryWire,
     };
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -225,6 +243,39 @@ mod native {
                 })
                 .collect();
             ctx.reply(&ResolveResult { resolved });
+        }
+
+        /// Reply with the native handler manifest (ADR-0109 §5): every
+        /// `#[handler]` across every native actor linked into the
+        /// substrate, each carrying its owning `namespace`, input kind
+        /// (id + name), and declared reply kind id. Read from the
+        /// process-global link-time
+        /// [`HandlerEntry`](aether_data::name_inventory::HandlerEntry)
+        /// inventory the `#[actor]` macro populates — the native
+        /// analogue of the wasm `aether.kinds.inputs` custom section.
+        ///
+        /// # Agent
+        /// Reply: `HandlersResult`. One `HandlerEntryWire` per native
+        /// handler; `reply` is the kind a `-> R` handler answers with
+        /// (`None` for a fire-and-forget `-> ()` handler). Fold per
+        /// `namespace` to read each native cap (`aether.fs`,
+        /// `aether.render`, …) as a `describe_component`-style
+        /// `In -> Out` handler list.
+        // The manifest is read from the process-global link-time
+        // inventory — `&mut self` is the `#[handler]` dispatch signature,
+        // not a state read.
+        #[allow(clippy::unused_self)]
+        #[handler]
+        fn on_handlers(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListHandlers) {
+            let handlers = handler_entries()
+                .map(|entry| HandlerEntryWire {
+                    namespace: entry.namespace.into(),
+                    id: entry.id,
+                    name: entry.name.into(),
+                    reply: entry.reply,
+                })
+                .collect();
+            ctx.reply(&HandlersResult { handlers });
         }
     }
 
@@ -487,6 +538,103 @@ mod native {
             assert_eq!(
                 result.resolved[3].name, None,
                 "a malformed id reports None without aborting the batch",
+            );
+        }
+
+        /// A native test cap with a synchronous `-> R` handler — the
+        /// surface ADR-0109 §5 makes `aether.inventory.handlers` carry.
+        /// Its `#[actor]` expansion submits a link-time `HandlerEntry`
+        /// declaring `ProbeReq -> ProbeReply`.
+        #[derive(
+            serde::Serialize,
+            serde::Deserialize,
+            aether_data::Kind,
+            aether_data::Schema,
+            Debug,
+            Clone,
+        )]
+        #[kind(name = "aether.test.inventory_handlers.req")]
+        struct ProbeReq {}
+
+        #[derive(
+            serde::Serialize,
+            serde::Deserialize,
+            aether_data::Kind,
+            aether_data::Schema,
+            Debug,
+            Clone,
+        )]
+        #[kind(name = "aether.test.inventory_handlers.reply")]
+        struct ProbeReply {}
+
+        struct ReplyProbeCap;
+
+        #[actor]
+        impl NativeActor for ReplyProbeCap {
+            type Config = ();
+            const NAMESPACE: &'static str = "aether.test.inventory_handlers.probe";
+
+            fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+
+            /// A synchronous `-> ProbeReply` handler — the reply contract
+            /// the link-time inventory captures. Stateless: the link-time
+            /// `HandlerEntry` is what the test reads, not handler state.
+            #[allow(clippy::unused_self)]
+            #[handler]
+            fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
+                ProbeReply {}
+            }
+        }
+
+        /// ADR-0109 §5: a native cap's `-> R` handler surfaces `In -> Out`
+        /// through `aether.inventory.handlers`. `on_handlers` projects the
+        /// process-global link-time `HandlerEntry` inventory onto
+        /// `HandlersResult`; the `ReplyProbeCap` entry round-trips its
+        /// input kind (id + name) and its `Some(ProbeReply)` reply
+        /// contract.
+        #[test]
+        fn handlers_surfaces_native_reply_contract() {
+            use aether_actor::Actor;
+            use aether_data::Kind;
+            // Force `ReplyProbeCap`'s `#[actor]` HandlerEntry submission to
+            // link into this test binary.
+            assert_eq!(
+                ReplyProbeCap::NAMESPACE,
+                "aether.test.inventory_handlers.probe"
+            );
+
+            let mut fix = fixture();
+            let mut ctx = session_ctx(&fix.transport);
+            fix.cap.on_handlers(&mut ctx, ListHandlers {});
+            drop(ctx);
+
+            let result = decode_reply::<HandlersResult>(&fix.rx);
+            let entry = result
+                .handlers
+                .iter()
+                .find(|h| h.namespace == ReplyProbeCap::NAMESPACE && h.id == <ProbeReq as Kind>::ID)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "HandlersResult should carry the ReplyProbeCap probe handler; \
+                         namespaces: {:?}",
+                        result
+                            .handlers
+                            .iter()
+                            .map(|h| &h.namespace)
+                            .collect::<Vec<_>>(),
+                    )
+                });
+            assert_eq!(
+                entry.name,
+                <ProbeReq as Kind>::NAME,
+                "input kind name round-trips"
+            );
+            assert_eq!(
+                entry.reply,
+                Some(<ProbeReply as Kind>::ID),
+                "a `-> ProbeReply` handler surfaces ProbeReply as its reply (In -> Out)",
             );
         }
     }

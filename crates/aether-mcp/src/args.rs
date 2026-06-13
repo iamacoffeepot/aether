@@ -399,6 +399,45 @@ pub struct DescribeHandlesResponse {
     pub top_by_recency: Vec<HandleSummaryJson>,
 }
 
+/// `describe_handlers` arguments (ADR-0109 §5) — describe a substrate's
+/// native chassis caps' reply contracts, the native analogue of
+/// `describe_component`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeHandlersArgs {
+    /// Engine UUID to query (from `list_engines`).
+    pub engine_id: String,
+}
+
+/// One native `#[handler]`'s reply contract as `describe_handlers`
+/// renders it (ADR-0109 §5). `input_id` / `reply_id` are tagged-id
+/// strings (`knd-XXXX-XXXX-XXXX`). `reply_id` / `reply_name` are `null`
+/// for a fire-and-forget `-> ()` handler; `reply_name` is `null` for a
+/// component-defined reply kind the static substrate vocabulary can't
+/// name.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NativeHandlerJson {
+    pub input_id: String,
+    pub input_name: String,
+    pub reply_id: Option<String>,
+    pub reply_name: Option<String>,
+}
+
+/// One native cap's handlers, grouped under its mailbox `namespace`
+/// (ADR-0109 §5) — the `describe_component`-style view for a native cap.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NativeCapHandlers {
+    pub namespace: String,
+    pub handlers: Vec<NativeHandlerJson>,
+}
+
+/// `describe_handlers` response — the native handler manifest folded per
+/// mailbox namespace (ADR-0109 §5).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DescribeHandlersResponse {
+    pub engine_id: String,
+    pub caps: Vec<NativeCapHandlers>,
+}
+
 /// `send_mail_traced` arguments — atomic batched dispatch with a shared
 /// trace root (issue iamacoffeepot/aether#749). Every spec lands on the
 /// same engine and inherits the same chassis root, so the response carries one

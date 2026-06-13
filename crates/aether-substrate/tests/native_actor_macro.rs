@@ -586,3 +586,76 @@ impl NativeActor for TaskRouteCap {
         done.resolve(ctx);
     }
 }
+
+// ADR-0109 §5: the `#[actor]` macro submits a process-global link-time
+// `HandlerEntry` for each native `#[handler]`, carrying the owning
+// `NAMESPACE`, the input kind (id + name), and the reply kind read off
+// the return type. This is the native analogue of the wasm
+// `aether.kinds.inputs` custom section — the `aether.inventory.handlers`
+// query projects it onto the wire.
+
+/// Reply kind for the link-time native-handler-manifest macro test.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.pong")]
+struct Pong {
+    echoed: u32,
+}
+
+/// A cap with a synchronous `-> R` handler. Its `#[actor]` expansion
+/// submits a link-time `HandlerEntry` declaring `Greet -> Pong`.
+struct ReplyMacroCap;
+
+#[aether_data::actor]
+impl NativeActor for ReplyMacroCap {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.macro_native_actor.reply";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    /// A synchronous `-> Pong` handler — the reply contract ADR-0109
+    /// captures from the return type. Stateless: the link-time
+    /// `HandlerEntry` (not handler behaviour) is what this cap exists to
+    /// exercise.
+    #[allow(clippy::unused_self)]
+    #[aether_data::handler]
+    fn on_greet_reply(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) -> Pong {
+        Pong { echoed: mail.tag }
+    }
+}
+
+/// ADR-0109 §5: the macro emits a link-time `HandlerEntry` for each
+/// native `#[handler]`, carrying the owning `NAMESPACE`, the input kind
+/// (id + name), and the reply kind read off the return type. A `-> Pong`
+/// handler surfaces `Greet -> Pong`; the round-trip reads the same entry
+/// back out of the process-global inventory.
+#[test]
+fn macro_emits_native_handler_reply_manifest() {
+    use aether_data::name_inventory::handler_entries;
+    // Reference the cap so its `#[actor]` HandlerEntry submission links
+    // into this test binary.
+    assert_eq!(ReplyMacroCap::NAMESPACE, "test.macro_native_actor.reply");
+
+    let entry = handler_entries()
+        .find(|e| e.namespace == ReplyMacroCap::NAMESPACE && e.id == <Greet as Kind>::ID)
+        .expect("the macro should submit a HandlerEntry for the Greet -> Pong handler");
+    assert_eq!(
+        entry.name,
+        <Greet as Kind>::NAME,
+        "input kind name round-trips"
+    );
+    assert_eq!(
+        entry.reply,
+        Some(<Pong as Kind>::ID),
+        "the `-> Pong` return type is captured as the reply contract (In -> Out)",
+    );
+}
