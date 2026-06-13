@@ -7,6 +7,7 @@
 use std::io::Cursor;
 
 use aether_kinds::{FrameCheck, FrameCheckResult, FrameRect, FrameReduction, FrameVerdict};
+use aether_substrate::capture::ReferenceCapture;
 use thiserror::Error;
 
 /// Decoded frame: RGBA8 pixels in row-major top-down order, width
@@ -227,6 +228,84 @@ pub fn background_top_left(image: &Image) -> [u8; 3] {
     [image.rgba[0], image.rgba[1], image.rgba[2]]
 }
 
+/// Pixel-similarity metric for `mean_absolute_error`. Slots in as the
+/// v1 choice in `CaptureFrame.similarity`; `Ssim` and `PHashHamming`
+/// are the documented upgrade path for structural / perceptual checks
+/// (iamacoffeepot/aether#1780).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Metric {
+    /// Mean absolute error per channel, normalized to `[0.0, 1.0]`
+    /// (0 = identical, 1 = maximally different). Robust for
+    /// "did the demo break" smoke checks once a tolerance absorbs
+    /// minor GPU / anti-aliasing nondeterminism.
+    MeanAbsoluteError,
+}
+
+/// Score the mean absolute error between two `Image`s, normalized to
+/// `[0.0, 1.0]` per channel (0 = identical, 1 = maximally different).
+/// Only RGB channels contribute; alpha is ignored, matching the
+/// `not_all_black` / silhouette reduction conventions.
+///
+/// Returns `Err` when the images differ in dimensions — the caller
+/// should surface this as a `CaptureFrameResult::Err` with a
+/// descriptive message rather than silently assigning a score.
+///
+/// # Unit test coverage
+///
+/// `tests::mae_identical_images_score_zero` and
+/// `tests::mae_known_delta_images_score_expected` verify the two
+/// invariants the implementation plan calls out.
+#[allow(clippy::cast_precision_loss)]
+pub fn mean_absolute_error(a: &Image, b: &Image) -> Result<f32, String> {
+    if a.width != b.width || a.height != b.height {
+        return Err(format!(
+            "dimension mismatch: reference is {}x{} but captured frame is {}x{}",
+            b.width, b.height, a.width, a.height,
+        ));
+    }
+    let pixel_count = u64::from(a.width) * u64::from(a.height);
+    if pixel_count == 0 {
+        return Ok(0.0);
+    }
+    let total: u64 = a
+        .rgba
+        .chunks_exact(4)
+        .zip(b.rgba.chunks_exact(4))
+        .map(|(ac, bc)| {
+            u64::from(ac[0].abs_diff(bc[0]))
+                + u64::from(ac[1].abs_diff(bc[1]))
+                + u64::from(ac[2].abs_diff(bc[2]))
+        })
+        .sum();
+    Ok(total as f32 / (pixel_count as f32 * 3.0 * 255.0))
+}
+
+/// Score the optional reference-image similarity check (#1780) for a
+/// freshly-mapped RGBA frame: decode the reference PNG, compute the
+/// normalised MAE against `rgba`, and pass when it is `<= threshold`.
+/// Returns `(None, None)` when no reference was requested. Shared by every
+/// capture render path so the scoring lives in one place.
+pub fn score_similarity(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    reference: Option<&ReferenceCapture>,
+) -> Result<(Option<f32>, Option<bool>), String> {
+    let Some(ref_capture) = reference else {
+        return Ok((None, None));
+    };
+    let ref_image = decode_png(&ref_capture.png_bytes)
+        .map_err(|e| format!("similarity reference decode failed: {e}"))?;
+    let captured = Image {
+        width,
+        height,
+        rgba: rgba.to_vec(),
+    };
+    let score = mean_absolute_error(&captured, &ref_image)
+        .map_err(|e| format!("similarity comparison failed: {e}"))?;
+    Ok((Some(score), Some(score <= ref_capture.threshold)))
+}
+
 /// Score a `CaptureFrame.checks` request against a freshly-mapped
 /// RGBA8 frame (the exact bytes the PNG is encoded from) and return the
 /// wire [`FrameVerdict`]. This is the substrate-side verdict the MCP
@@ -435,6 +514,47 @@ mod tests {
         let mut img = solid(2, 2, [0, 0, 0, 255]);
         img.rgba[8] = 1; // R channel of pixel index 2
         assert!(not_all_black(&img).is_ok());
+    }
+
+    #[test]
+    fn mae_identical_images_score_zero() {
+        let img = solid(4, 4, [100, 150, 200, 255]);
+        let score = mean_absolute_error(&img, &img).expect("test setup: same dims");
+        assert_eq!(score, 0.0, "identical images must score exactly 0");
+    }
+
+    #[test]
+    fn mae_known_delta_images_score_expected() {
+        // a = solid red [255, 0, 0, 255], b = solid black [0, 0, 0, 255].
+        // Per-pixel RGB diff: 255 + 0 + 0 = 255. Normalized: 255 / (3 * 255) = 1/3.
+        let a = solid(2, 2, [255, 0, 0, 255]);
+        let b = solid(2, 2, [0, 0, 0, 255]);
+        let score = mean_absolute_error(&a, &b).expect("test setup: same dims");
+        let expected = 1.0_f32 / 3.0;
+        assert!(
+            (score - expected).abs() < 1e-6,
+            "red vs black MAE was {score}, expected {expected}",
+        );
+    }
+
+    #[test]
+    fn mae_dimension_mismatch_returns_err() {
+        let a = solid(4, 4, [0, 0, 0, 255]);
+        let b = solid(8, 8, [0, 0, 0, 255]);
+        let err = mean_absolute_error(&a, &b).expect_err("test setup: different dims must err");
+        assert!(
+            err.contains("dimension mismatch"),
+            "error message should describe the mismatch: {err}",
+        );
+    }
+
+    #[test]
+    fn mae_ignores_alpha_channel() {
+        // Differ only in alpha; RGB is identical. Score should be 0.
+        let a = solid(2, 2, [50, 100, 150, 0]);
+        let b = solid(2, 2, [50, 100, 150, 255]);
+        let score = mean_absolute_error(&a, &b).expect("test setup: same dims");
+        assert_eq!(score, 0.0, "alpha difference must not affect the MAE score");
     }
 
     #[test]

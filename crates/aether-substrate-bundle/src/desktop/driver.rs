@@ -1148,7 +1148,11 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                             let result = pre_failed.map_or_else(
-                                || CaptureFrameResult::from(gpu.render_and_capture(&req.checks)),
+                                || {
+                                    CaptureFrameResult::from(
+                                        gpu.render_and_capture(&req.checks, req.reference.as_ref()),
+                                    )
+                                },
                                 |error| CaptureFrameResult::Err { error },
                             );
                             for mail in req.after_mails {
@@ -1993,6 +1997,7 @@ mod tests {
                 after_mails: Vec::new(),
                 pre_settlements: Vec::new(),
                 checks: Vec::new(),
+                reference: None,
             }
         }
 
@@ -2117,6 +2122,7 @@ mod tests {
             after_mails: Vec::new(),
             pre_settlements: Vec::new(),
             checks: Vec::new(),
+            reference: None,
         };
 
         // The driver's reply path: reply through the retained guard, then

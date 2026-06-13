@@ -1449,6 +1449,25 @@ mod control_plane {
         pub mailbox: aether_data::MailboxId,
     }
 
+    /// Reference-image comparison for a `CaptureFrame.similarity` request
+    /// (iamacoffeepot/aether#1780). The capture handler reads the PNG at
+    /// `reference_path` from the `namespace` assets directory before
+    /// dispatching to the render thread; the render thread scores the
+    /// captured RGBA against the decoded reference and returns
+    /// `similarity_score` + `similarity_pass` on
+    /// `CaptureFrameResult::Ok`. Only the `"assets"` namespace is
+    /// supported in v1. `threshold` is the maximum normalised MAE
+    /// `[0.0, 1.0]` that still counts as a match (`0` = identical only;
+    /// `1` = any frame passes); `similarity_pass` is `true` when
+    /// `similarity_score <= threshold`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct SimilarityCheck {
+        pub namespace: String,
+        pub reference_path: String,
+        /// Maximum normalised MAE `[0.0, 1.0]` that counts as a match.
+        pub threshold: f32,
+    }
+
     /// `aether.render.capture_frame` — request the substrate grab the
     /// current frame contents and reply-to-sender with an encoded
     /// PNG. Carries two optional bundles: `mails` dispatched *before*
@@ -1475,6 +1494,13 @@ mod control_plane {
     /// params; the results ride back on `CaptureFrameResult::Ok.verdict`.
     /// Empty means "PNG only, no verdict" — the prior behaviour.
     ///
+    /// `similarity` requests a reference-image MAE comparison scored on
+    /// the same raw RGBA (iamacoffeepot/aether#1780). The handler reads
+    /// the reference PNG from the assets namespace before dispatching to
+    /// the render thread; the render thread runs the comparison and
+    /// returns `similarity_score` / `similarity_pass` on
+    /// `CaptureFrameResult::Ok`. `None` means "no similarity check".
+    ///
     /// Reply: `CaptureFrameResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.render.capture_frame")]
@@ -1482,6 +1508,9 @@ mod control_plane {
         pub mails: Vec<MailEnvelope>,
         pub after_mails: Vec<MailEnvelope>,
         pub checks: Vec<FrameCheck>,
+        /// Optional reference-image similarity check
+        /// (iamacoffeepot/aether#1780). `None` means no comparison.
+        pub similarity: Option<SimilarityCheck>,
     }
 
     /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors
@@ -1501,16 +1530,28 @@ mod control_plane {
 
     /// Reply to `CaptureFrame`. `Ok` carries the PNG bytes for the
     /// captured frame plus an optional [`FrameVerdict`] (present iff the
-    /// request carried `checks`); `Err` carries a free-form reason —
-    /// capture not supported on this surface, map failed, encode failed,
-    /// or a bundle-resolution failure (unknown kind / mailbox) aborting
-    /// before any mail was dispatched.
+    /// request carried `checks`) and an optional similarity score (present
+    /// iff the request carried `similarity`); `Err` carries a free-form
+    /// reason — capture not supported on this surface, map failed, encode
+    /// failed, reference image not found / undecodable, or a
+    /// bundle-resolution failure aborting before any mail was dispatched.
+    ///
+    /// `similarity_score` is the normalised MAE in `[0.0, 1.0]`
+    /// (0 = identical, 1 = maximally different).
+    /// `similarity_pass` is `true` when `similarity_score <=
+    /// SimilarityCheck.threshold` (iamacoffeepot/aether#1780).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.render.capture_frame_result")]
     pub enum CaptureFrameResult {
         Ok {
             png: Vec<u8>,
             verdict: Option<FrameVerdict>,
+            /// Normalised MAE score `[0.0, 1.0]`; `None` when no
+            /// `similarity` was requested.
+            similarity_score: Option<f32>,
+            /// `true` when `similarity_score <= threshold`; `None` when
+            /// no `similarity` was requested.
+            similarity_pass: Option<bool>,
         },
         Err {
             error: String,
@@ -1520,13 +1561,24 @@ mod control_plane {
     /// Build a [`CaptureFrameResult`] from the raw GPU `render_and_capture`
     /// result shape. Every capture handler in `aether-substrate-bundle`
     /// (test-bench inline, in-process bench, desktop driver) needs this
-    /// same `Ok((png, verdict)) → Ok { png, verdict }` / `Err(error) → Err
-    /// { error }` flip. `verdict` is `None` when the request carried no
-    /// `checks`.
-    impl From<Result<(Vec<u8>, Option<FrameVerdict>), String>> for CaptureFrameResult {
-        fn from(result: Result<(Vec<u8>, Option<FrameVerdict>), String>) -> Self {
+    /// same `Ok((png, verdict, score, pass)) → Ok { … }` /
+    /// `Err(error) → Err { error }` flip. `verdict` is `None` when the
+    /// request carried no `checks`; `similarity_score` / `similarity_pass`
+    /// are `None` when no `similarity` was requested
+    /// (iamacoffeepot/aether#1780).
+    impl From<Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>>
+        for CaptureFrameResult
+    {
+        fn from(
+            result: Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>,
+        ) -> Self {
             match result {
-                Ok((png, verdict)) => Self::Ok { png, verdict },
+                Ok((png, verdict, similarity_score, similarity_pass)) => Self::Ok {
+                    png,
+                    verdict,
+                    similarity_score,
+                    similarity_pass,
+                },
                 Err(error) => Self::Err { error },
             }
         }
@@ -3868,6 +3920,7 @@ mod tests {
                         background: Some([69, 79, 105]),
                     },
                 ],
+                similarity: None,
             };
             let bytes =
                 postcard::to_allocvec(&frame).expect("test setup: postcard encodes CaptureFrame");
@@ -3885,6 +3938,8 @@ mod tests {
         fn capture_frame_result_verdict_roundtrip() {
             let ok = CaptureFrameResult::Ok {
                 png: vec![0x89, 0x50, 0x4E, 0x47],
+                similarity_score: None,
+                similarity_pass: None,
                 verdict: Some(FrameVerdict {
                     width: 64,
                     height: 48,
@@ -3922,8 +3977,21 @@ mod tests {
             let back: CaptureFrameResult = postcard::from_bytes(&bytes)
                 .expect("test setup: postcard decodes CaptureFrameResult::Ok");
             match back {
-                CaptureFrameResult::Ok { png, verdict } => {
+                CaptureFrameResult::Ok {
+                    png,
+                    verdict,
+                    similarity_score,
+                    similarity_pass,
+                } => {
                     assert_eq!(png, vec![0x89, 0x50, 0x4E, 0x47]);
+                    assert!(
+                        similarity_score.is_none(),
+                        "no similarity was requested; score must be absent",
+                    );
+                    assert!(
+                        similarity_pass.is_none(),
+                        "no similarity was requested; pass must be absent",
+                    );
                     let verdict = verdict.expect("verdict survives the roundtrip");
                     assert_eq!((verdict.width, verdict.height), (64, 48));
                     assert_eq!(verdict.results.len(), 5);
@@ -3956,6 +4024,8 @@ mod tests {
             let ok = CaptureFrameResult::Ok {
                 png: vec![1, 2, 3],
                 verdict: None,
+                similarity_score: None,
+                similarity_pass: None,
             };
             let bytes = postcard::to_allocvec(&ok)
                 .expect("test setup: postcard encodes CaptureFrameResult::Ok");
@@ -3963,6 +4033,54 @@ mod tests {
                 .expect("test setup: postcard decodes CaptureFrameResult::Ok");
             match back {
                 CaptureFrameResult::Ok { verdict, .. } => assert!(verdict.is_none()),
+                CaptureFrameResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn capture_frame_similarity_check_roundtrip() {
+            // A `CaptureFrame` that carries a similarity check and a
+            // `CaptureFrameResult::Ok` with populated score + pass survive
+            // a postcard roundtrip (iamacoffeepot/aether#1780).
+            let frame = CaptureFrame {
+                mails: vec![],
+                after_mails: vec![],
+                checks: vec![],
+                similarity: Some(SimilarityCheck {
+                    namespace: "assets".to_string(),
+                    reference_path: "golden/demo.png".to_string(),
+                    threshold: 0.02,
+                }),
+            };
+            let bytes = postcard::to_allocvec(&frame)
+                .expect("test setup: postcard encodes CaptureFrame with similarity");
+            let back: CaptureFrame = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CaptureFrame with similarity");
+            let sim = back.similarity.expect("similarity survives the roundtrip");
+            assert_eq!(sim.namespace, "assets");
+            assert_eq!(sim.reference_path, "golden/demo.png");
+            assert!((sim.threshold - 0.02).abs() < 1e-6);
+
+            let result = CaptureFrameResult::Ok {
+                png: vec![0x89, 0x50],
+                verdict: None,
+                similarity_score: Some(0.005),
+                similarity_pass: Some(true),
+            };
+            let rbytes = postcard::to_allocvec(&result)
+                .expect("test setup: postcard encodes CaptureFrameResult with similarity");
+            let rback: CaptureFrameResult = postcard::from_bytes(&rbytes)
+                .expect("test setup: postcard decodes CaptureFrameResult with similarity");
+            match rback {
+                CaptureFrameResult::Ok {
+                    similarity_score,
+                    similarity_pass,
+                    ..
+                } => {
+                    let score = similarity_score.expect("score survives roundtrip");
+                    assert!((score - 0.005).abs() < 1e-6, "score was {score}");
+                    assert_eq!(similarity_pass, Some(true));
+                }
                 CaptureFrameResult::Err { .. } => panic!("expected Ok"),
             }
         }

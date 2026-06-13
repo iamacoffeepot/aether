@@ -721,8 +721,10 @@ impl TestBench {
                 after_mails: after,
                 // The `TestBench::capture` API returns the PNG only; the
                 // substrate-side verdict path (iamacoffeepot/aether#1777)
-                // is exercised through `BenchOp::send_and_await` scenarios.
+                // and similarity path (iamacoffeepot/aether#1780) are
+                // exercised through `BenchOp::send_and_await` scenarios.
                 checks: Vec::new(),
+                similarity: None,
             },
             cid,
         );
@@ -1074,7 +1076,10 @@ impl TestBench {
                         });
                     }
                 }
-                let result = CaptureFrameResult::from(self.gpu.render_and_capture(&req.checks));
+                let result = CaptureFrameResult::from(
+                    self.gpu
+                        .render_and_capture(&req.checks, req.reference.as_ref()),
+                );
                 for mail in req.after_mails {
                     self.queue.push(mail);
                 }
@@ -1200,6 +1205,7 @@ mod tests {
                                 mails: Vec::new(),
                                 after_mails: Vec::new(),
                                 checks: Vec::new(),
+                                similarity: None,
                             },
                         ),
                     ),
@@ -1209,7 +1215,7 @@ mod tests {
                 .reply("capture")
                 .expect("capture step replied with CaptureFrameResult");
             match reply {
-                CaptureFrameResult::Ok { png, verdict } => {
+                CaptureFrameResult::Ok { png, verdict, .. } => {
                     assert!(
                         verdict.is_none(),
                         "no checks were requested, so the verdict must be absent",

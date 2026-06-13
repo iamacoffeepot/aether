@@ -33,8 +33,8 @@ use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
     CostTailResult, FrameCheck, FrameReduction, ListEngines, ListEnginesResult, ListKinds,
     ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent,
-    ReplaceResult, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult,
-    TerminateEngine, TerminateEngineResult,
+    ReplaceResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
+    SubmitResult, TerminateEngine, TerminateEngineResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -588,7 +588,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves. Optionally carries `checks`: substrate-side reductions (not_all_black, differs_from_background, coverage, centroid, bounding_box) scored on the exact RGBA the PNG is built from and returned as a `verdict` text block alongside the image — a one-call spawn -> drive -> assert with no caller-side PNG decode."
+        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves. Optionally carries `checks`: substrate-side reductions (not_all_black, differs_from_background, coverage, centroid, bounding_box) scored on the exact RGBA the PNG is built from and returned as a `verdict` text block alongside the image — a one-call spawn -> drive -> assert with no caller-side PNG decode. Optionally carries `similarity`: a reference-image check (`namespace` + `reference_path` + `threshold`) the render thread scores as a normalised mean-absolute-error against the captured RGBA, returned as `similarity_score` / `similarity_pass` text blocks alongside the image."
     )]
     pub async fn capture_frame(
         &self,
@@ -620,6 +620,14 @@ impl Mcp {
             .iter()
             .map(capture_check)
             .collect::<Result<Vec<FrameCheck>, McpError>>()?;
+        // Map the optional reference-image similarity check
+        // (iamacoffeepot/aether#1780); the render thread loads the
+        // reference and scores the captured RGBA against it.
+        let similarity = args.similarity.as_ref().map(|s| SimilarityCheck {
+            namespace: s.namespace.clone(),
+            reference_path: s.reference_path.clone(),
+            threshold: s.threshold,
+        });
         let reply = self
             .session
             .call_one(engine_envelope(
@@ -629,12 +637,18 @@ impl Mcp {
                     mails,
                     after_mails,
                     checks,
+                    similarity,
                 },
             ))
             .await
             .map_err(internal)?;
         match CaptureFrameResult::decode_from_bytes(&reply.payload) {
-            Some(CaptureFrameResult::Ok { png, verdict }) => {
+            Some(CaptureFrameResult::Ok {
+                png,
+                verdict,
+                similarity_score,
+                similarity_pass,
+            }) => {
                 let encoded = STANDARD.encode(&png);
                 let mut content = vec![Content::image(encoded, "image/png")];
                 // Surface the verdict as a JSON text block so the caller
@@ -644,6 +658,16 @@ impl Mcp {
                 if let Some(verdict) = verdict {
                     let json = serde_json::to_string(&verdict)
                         .map_err(|e| internal_msg(&format!("verdict serialize: {e}")))?;
+                    content.push(Content::text(json));
+                }
+                // Surface the similarity verdict as its own JSON block
+                // when a `similarity` check ran (iamacoffeepot/aether#1780).
+                if similarity_score.is_some() || similarity_pass.is_some() {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "similarity_score": similarity_score,
+                        "similarity_pass": similarity_pass,
+                    }))
+                    .map_err(|e| internal_msg(&format!("similarity serialize: {e}")))?;
                     content.push(Content::text(json));
                 }
                 Ok(CallToolResult::success(content))
@@ -2287,6 +2311,7 @@ mod tests {
                 }],
                 after_mails: vec![],
                 checks: vec![],
+                similarity: None,
             }))
             .await;
         assert!(
