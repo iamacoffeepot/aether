@@ -138,6 +138,12 @@ pub struct CommonOverlay {
     /// server entirely; hub falls back to `DEFAULT_RPC_PORT`).
     #[arg(long = "rpc-port")]
     pub rpc_port: Option<u16>,
+
+    /// `AETHER_BOOT_MANIFEST` — path to a `BundleManifest` JSON of
+    /// components to auto-load at boot (the runtime twin of the
+    /// standalone-bundle compile-time pack). Absent → boot componentless.
+    #[arg(long = "boot-manifest")]
+    pub boot_manifest: Option<String>,
 }
 
 /// Desktop chassis CLI root.

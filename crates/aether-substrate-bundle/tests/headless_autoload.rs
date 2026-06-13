@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::PersistOverride;
+use aether_substrate_bundle::autoload::boot_manifest_autoload;
 use aether_substrate_bundle::bundle_pack::{
     ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack,
 };
@@ -110,6 +111,73 @@ mod tests {
                 thread::sleep(Duration::from_millis(25));
             }
             // Dropping `built` shuts the passives down in reverse boot order.
+        }
+
+        #[test]
+        fn autoloaded_component_from_runtime_manifest_comes_up() {
+            // The runtime-manifest twin of the embed test above: a real
+            // `BundleManifest` JSON of *paths* is read by
+            // `boot_manifest_autoload` — the same reader the chassis runs
+            // for `AETHER_BOOT_MANIFEST`, the path a `spawn_substrate`
+            // carrying a component list drives — and the resolved autoload
+            // brings the probe up with no hub.
+            let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+            let Some(wasm_path) = locate_component_wasm("probe") else {
+                assert!(
+                    !strict,
+                    "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+                );
+                eprintln!(
+                    "skipping: probe.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples`",
+                );
+                return;
+            };
+
+            // Write a boot manifest of paths next to the test sandbox; the
+            // reader resolves the wasm bytes itself.
+            let sandbox = init_save_sandbox("headless-runtime-manifest");
+            let manifest_path = sandbox.join("boot-manifest.json");
+            let manifest_json = serde_json::json!({
+                "components": [{ "wasm": wasm_path, "name": "probe" }],
+            });
+            fs::write(
+                &manifest_path,
+                serde_json::to_vec(&manifest_json).expect("serialize boot manifest"),
+            )
+            .expect("write boot manifest");
+
+            let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
+            assert_eq!(autoload.len(), 1, "one component listed in the manifest");
+
+            let env = HeadlessEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                http: HttpConfig::default(),
+                http_server: None,
+                anthropic: AnthropicConfig::default(),
+                gemini: GeminiConfig::default(),
+                tick_period: Duration::from_millis(16),
+                rpc_addr: None,
+                workers: None,
+                persist: PersistOverride::Argv(None),
+                handle_store_max_bytes: None,
+                autoload,
+            };
+
+            let built = HeadlessChassis::build(env).expect("build headless chassis");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if built.resolve_actor::<WasmTrampoline>("probe").is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "runtime-manifest probe trampoline did not come up within 30s; live instances: {:?}",
+                    built.resolve_actors::<WasmTrampoline>(),
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
         }
     }
 }

@@ -9,13 +9,16 @@
 //! address the hub's `load_component` and the test bench load through
 //! — which is what makes the mechanism chassis-agnostic.
 
+use std::path::Path;
+
 use aether_actor::Actor;
 use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind as _, mailbox_id_from_name};
 use aether_kinds::LoadComponent;
 use aether_substrate::Mail;
+use aether_substrate::config::ConfigError;
 
-use crate::bundle_pack::PackedComponent;
+use crate::bundle_pack::{self, PackedComponent};
 
 /// A component to auto-load on boot — its wasm bytes, optional init-config
 /// bytes (ADR-0090; empty for none), and the optional load name / export
@@ -37,6 +40,34 @@ impl From<PackedComponent> for AutoloadComponent {
             export: packed.export,
         }
     }
+}
+
+/// Read the boot manifest at `path` into the [`AutoloadComponent`] list
+/// the chassis env's `autoload` field carries — the runtime twin of the
+/// compile-time pack the standalone bundle bins embed. Both paths feed
+/// the same `env.autoload` (one from a runtime manifest of file paths,
+/// one from a compile-time pack of bytes), which `build_inner` drains
+/// into `aether.component.load`.
+///
+/// Reached from `DesktopEnv::from_env_with_argv` / its headless twin
+/// when `AETHER_BOOT_MANIFEST` (or `--boot-manifest`) is set; the engines
+/// cap injects that env var at the fork so a `spawn_substrate` carrying a
+/// component list comes up with those components already loading.
+///
+/// # Errors
+///
+/// Returns a hard [`ConfigError`] (the ADR-0090 §4 "known knob, bad
+/// value" path — boot aborts loudly) when the manifest or any wasm /
+/// config file it names can't be read or parsed.
+pub fn boot_manifest_autoload(path: &Path) -> Result<Vec<AutoloadComponent>, ConfigError> {
+    let pack = bundle_pack::pack_from_manifest(path).map_err(|e| {
+        ConfigError::unparseable("AETHER_BOOT_MANIFEST", path.display().to_string(), e)
+    })?;
+    Ok(pack
+        .components
+        .into_iter()
+        .map(AutoloadComponent::from)
+        .collect())
 }
 
 /// Build the `aether.component.load` mail that auto-loads `component`,
