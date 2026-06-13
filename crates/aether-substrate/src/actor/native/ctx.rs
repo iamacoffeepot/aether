@@ -206,6 +206,16 @@ impl<'a> NativeCtx<'a> {
         self.inbound.take()
     }
 
+    /// #1774: read-only borrow of the dispatched envelope. The cold
+    /// fallback/warn miss path in `typed_then_fallback_or_warn` clones
+    /// from here so the full envelope is available to `#[fallback]` and
+    /// the warn without paying the per-dispatch allocation the hot path
+    /// never needs. `None` for ctxs that carry no inbound (init /
+    /// close-hook / chassis-root / cap-test fixtures).
+    pub(crate) fn inbound(&self) -> Option<&Envelope> {
+        self.inbound.as_ref()
+    }
+
     /// Borrow the wired `Mailer`. Issue 953: surfaced so cap handlers
     /// (`TraceDispatchCapability` is the motivating consumer) can
     /// reach the per-chassis trace handle for `now_nanos` without

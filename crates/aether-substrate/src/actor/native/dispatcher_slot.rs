@@ -274,17 +274,29 @@ where
             // disarm cleanly, the chain settles before the deferred reply,
             // the caller times out); single ownership makes that
             // unrepresentable.
-            let view = env.clone();
+            //
+            // #1774: replace the full envelope clone with a `MailRef`-only
+            // clone (an Arc-bump for `InRing`, bytes-copy only for the rare
+            // `Owned`). The dispatch arms take `(kind, payload)` — the only
+            // fields they read on the hot path. The cold fallback/warn path
+            // clones the full envelope from `ctx.inbound()` on a miss.
+            let payload_view = env.payload.clone();
             let mut ctx = NativeCtx::with_inbound(&self.binding, sender, mail_id, root, env);
+            let payload = payload_view.bytes();
             // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128
             // framework-built-in dispatch arms for `aether.log.tail` +
             // `aether.trace.tail` + `aether.cost.tail`. See the helper
             // docs in `dispatch`.
-            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, &view)
-                && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, &view)
-                && !super::dispatch::dispatch_cost_tail_if_matching(&self.binding, &mut ctx, &view)
+            if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, kind, payload)
+                && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, kind, payload)
+                && !super::dispatch::dispatch_cost_tail_if_matching(
+                    &self.binding,
+                    &mut ctx,
+                    kind,
+                    payload,
+                )
             {
-                super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, &view);
+                super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, kind, payload);
             }
             // #1757: reclaim the single envelope before the ctx (and its
             // handler-end flush) drops, so an armed inbound is never
