@@ -211,6 +211,33 @@ pub struct CountReport {
     pub count: u32,
 }
 
+/// Typed config for the `ui_widget` fixture (issue 1793 widget-actor
+/// cost spike). `redraw_each_tick` selects the per-frame cost profile:
+/// `true` re-emits the full `DrawSolidQuads` batch across the wasm
+/// boundary every tick (the naive actor-backed widget), `false`
+/// early-returns on tick (the stable-frame floor a host-cached-replay
+/// widget pays before the host replays its retained batch — the guest is
+/// still dispatched, it just emits nothing). `quad_count` is the draw
+/// weight: how many `SolidQuad`s the batch carries when it does emit, so
+/// the measurement can scale the per-frame re-emit cost with widget
+/// visual complexity.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.test_fixtures.ui_widget_config")]
+pub struct UiWidgetConfig {
+    pub redraw_each_tick: bool,
+    pub quad_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use aether_data::{Kind, Ref};
