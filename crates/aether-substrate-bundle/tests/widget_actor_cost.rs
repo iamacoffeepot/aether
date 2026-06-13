@@ -13,6 +13,14 @@
 //! per-widget mean is one widget's per-frame cost; multiplied by the widget
 //! count it is the aggregate the 60fps frame budget has to absorb.
 //!
+//! Two measurements live here: `widget_actor_per_frame_cost` sweeps the
+//! widget count in both profiles, and `widget_cost_vs_draw_weight` sweeps the
+//! draw weight (quads per batch) at a fixed count and fits a line to split the
+//! fixed per-frame floor (intercept — boundary + dispatch, not reducible by
+//! optimizing the draw) from the marginal per-draw-item cost (slope — guest
+//! batch build + host mail encode, where wasm JIT/AOT tuning and real widget
+//! complexity move the number).
+//!
 //! This is an on-demand MEASUREMENT, not a CI gate: it is `#[ignore]`d
 //! (zero CI cost, same as `lifecycle_latency_observe`) and prints a table
 //! on stderr. Run it with:
@@ -72,6 +80,10 @@ use aether_test_fixtures as _;
 /// cost has to fit inside.
 const FRAME_BUDGET_NANOS: u64 = 16_666_667;
 
+/// Widgets loaded per draw-weight cell in the fixed-vs-variable fit, averaged
+/// to smooth per-instance noise.
+const FIT_WIDGET_COUNT: usize = 4;
+
 /// Load `count` instances of the `ui_widget` fixture under one profile,
 /// returning their mailbox ids. Each load carries a distinct name so the
 /// instances register as separate mailboxes with their own cost cells.
@@ -127,6 +139,36 @@ fn tick_mean_nanos(bench: &TestBench, mbox: MailboxId) -> u64 {
         .map_or(0, |r| r.mean_nanos)
 }
 
+/// Mean per-widget `Tick` cost across a set of loaded widgets, in nanoseconds.
+fn widget_mean_nanos(bench: &TestBench, ids: &[MailboxId]) -> u64 {
+    let loaded = u64::try_from(ids.len()).unwrap_or(0);
+    let total: u64 = ids.iter().map(|&m| tick_mean_nanos(bench, m)).sum();
+    total.checked_div(loaded).unwrap_or(0)
+}
+
+/// Least-squares line `y = intercept + slope * x` over `(x, y)` samples,
+/// returning `(intercept, slope)`.
+#[allow(clippy::cast_precision_loss)] // nanos costs + tiny sample counts fit f64 exactly; this is a measurement aid.
+fn linear_fit(samples: &[(u32, u64)]) -> (f64, f64) {
+    let n = samples.len() as f64;
+    if n == 0.0 {
+        return (0.0, 0.0);
+    }
+    let xs: Vec<f64> = samples.iter().map(|&(x, _)| f64::from(x)).collect();
+    let ys: Vec<f64> = samples.iter().map(|&(_, y)| y as f64).collect();
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        let dx = x - mean_x;
+        num = dx.mul_add(y - mean_y, num);
+        den = dx.mul_add(dx, den);
+    }
+    let slope = if den == 0.0 { 0.0 } else { num / den };
+    (mean_y - slope * mean_x, slope)
+}
+
 /// Parse a `u32` env override, falling back to `default`.
 fn env_or(key: &str, default: u32) -> u32 {
     env::var(key)
@@ -135,15 +177,15 @@ fn env_or(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-/// Parse a comma-separated widget-count sweep from the env, dropping
-/// non-positive entries; falls back to `default` when unset or empty.
-fn env_widget_counts(key: &str, default: &[usize]) -> Vec<usize> {
+/// Parse a comma-separated count sweep from the env, dropping entries below
+/// `min`; falls back to `default` when unset or empty.
+fn env_counts(key: &str, default: &[usize], min: usize) -> Vec<usize> {
     let parsed: Vec<usize> = env::var(key)
         .ok()
         .map(|v| {
             v.split(',')
                 .filter_map(|s| s.trim().parse::<usize>().ok())
-                .filter(|&n| n > 0)
+                .filter(|&n| n >= min)
                 .collect()
         })
         .unwrap_or_default();
@@ -164,7 +206,7 @@ fn widget_actor_per_frame_cost() {
 
     let ticks = env_or("AETHER_UI_COST_TICKS", 600);
     let quad_count = env_or("AETHER_UI_COST_QUADS", 8);
-    let counts = env_widget_counts("AETHER_UI_COST_WIDGETS", &[1, 8, 32, 64]);
+    let counts = env_counts("AETHER_UI_COST_WIDGETS", &[1, 8, 32, 64], 1);
 
     eprintln!();
     eprintln!(
@@ -187,10 +229,8 @@ fn widget_actor_per_frame_cost() {
                 .expect("advance");
             let wall_millis = start.elapsed().as_secs_f64() * 1000.0;
 
-            let loaded = u64::try_from(ids.len()).unwrap_or(0);
-            let total: u64 = ids.iter().map(|&m| tick_mean_nanos(&bench, m)).sum();
-            let per_widget = total.checked_div(loaded).unwrap_or(0);
-            let aggregate = per_widget.saturating_mul(loaded);
+            let per_widget = widget_mean_nanos(&bench, &ids);
+            let aggregate = per_widget.saturating_mul(u64::try_from(ids.len()).unwrap_or(0));
             let affordable = FRAME_BUDGET_NANOS
                 .checked_div(per_widget)
                 .unwrap_or(u64::MAX);
@@ -208,5 +248,55 @@ fn widget_actor_per_frame_cost() {
          per_widget delta is the per-frame boundary + emit cost host-cached replay removes. A true \
          host-replay widget pays ~0 guest nanos/frame (the host replays the retained batch), so the \
          affordable actor-backed count is bounded by host replay cost, not the guest crossing.",
+    );
+}
+
+/// Splits the naive per-frame cost into its fixed and variable parts by
+/// sweeping the draw weight (quads per batch) at a fixed widget count and
+/// fitting a line. The intercept is the fixed boundary + dispatch + empty-send
+/// floor that optimizing the draw cannot remove; the slope is the marginal
+/// per-draw-item cost (guest batch build + host mail encode), the part that
+/// grows with widget complexity and where wasm JIT/AOT tuning moves the number.
+#[test]
+#[ignore = "on-demand --release measurement; run with --ignored --nocapture"]
+fn widget_cost_vs_draw_weight() {
+    let Some(wasm_path) = require_runtime("ui_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read ui_widget wasm");
+
+    let ticks = env_or("AETHER_UI_COST_TICKS", 600);
+    let weights = env_counts("AETHER_UI_COST_QUAD_SWEEP", &[0, 4, 16, 64, 256], 0);
+
+    eprintln!();
+    eprintln!(
+        "widget-actor cost vs draw weight (issue 1793): {ticks} ticks, {FIT_WIDGET_COUNT} naive \
+         widgets/cell, sweeping quads/draw to split fixed boundary cost from variable per-draw cost",
+    );
+    eprintln!("{:>12}  {:>16}", "quads/draw", "per_widget_nanos");
+
+    let mut samples: Vec<(u32, u64)> = Vec::with_capacity(weights.len());
+    for &weight in &weights {
+        let quads = u32::try_from(weight).unwrap_or(u32::MAX);
+        let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+        let ids = load_widgets(&mut bench, &wasm, FIT_WIDGET_COUNT, true, quads);
+        bench
+            .execute(vec![("advance", BenchOp::advance(ticks))])
+            .expect("advance");
+        let per_widget = widget_mean_nanos(&bench, &ids);
+        samples.push((quads, per_widget));
+        eprintln!("{quads:>12}  {per_widget:>16}");
+    }
+
+    let (intercept, slope) = linear_fit(&samples);
+    eprintln!();
+    eprintln!("linear fit  cost(quads) = {intercept:.0} + {slope:.1} * quads  (nanos)");
+    eprintln!(
+        "intercept {intercept:.0} nanos is the fixed per-frame floor (boundary crossing + dispatch + \
+         empty-batch send) that optimizing the draw cannot remove. slope {slope:.1} nanos/quad is the \
+         marginal per-draw-item cost (guest batch build + host mail encode); the guest-build share is \
+         where wasm JIT/AOT tuning and a compute-heavy real widget move the number, the host-encode \
+         share is native already. At the default 8 quads the fixed floor dominates, so a trivial \
+         widget is mostly boundary cost and the slope is what grows with widget complexity.",
     );
 }
