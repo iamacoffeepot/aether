@@ -116,7 +116,10 @@ jobs:
       # build — keeps the linker OOM (collect2: ld terminated with
       # signal 7) off the ubuntu runner. CI-scoped so dev machines
       # are unaffected. Companion to the free-disk-space step below.
-      RUSTFLAGS: -Clink-arg=-fuse-ld=mold
+      # Target-scoped to the native host triple: the wasm32 component
+      # cross-build links with rust-lld, which rejects -fuse-ld=mold,
+      # so a job-wide RUSTFLAGS would break it.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Clink-arg=-fuse-ld=mold
       # line-tables-only (instead of full DWARF) shrinks test
       # binaries and the linked artifacts on disk, reducing the
       # chance of hitting "no space left on device" even after
