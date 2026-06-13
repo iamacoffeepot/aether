@@ -111,6 +111,20 @@ jobs:
     # default 6h quota before anyone notices. If this tripping
     # becomes routine, lower it — routine failure is a signal.
     timeout-minutes: 15
+    env:
+      # Use mold to reduce peak link memory and speed up the test
+      # build — keeps the linker OOM (collect2: ld terminated with
+      # signal 7) off the ubuntu runner. CI-scoped so dev machines
+      # are unaffected. Companion to the free-disk-space step below.
+      # Target-scoped to the native host triple: the wasm32 component
+      # cross-build links with rust-lld, which rejects -fuse-ld=mold,
+      # so a job-wide RUSTFLAGS would break it.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Clink-arg=-fuse-ld=mold
+      # line-tables-only (instead of full DWARF) shrinks test
+      # binaries and the linked artifacts on disk, reducing the
+      # chance of hitting "no space left on device" even after
+      # the free-disk-space reclaim.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       # Issue #612: fetch-depth 2 (PR) / 0 (push) so the changed-crate
       # filter in `Run tests` can `git diff HEAD^1 HEAD` (or against
@@ -124,12 +138,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+      # Reclaim ~20–30 GB by removing preinstalled Android / .NET /
+      # Haskell tooling that the build never uses. Runs before the
+      # rust-toolchain step so cargo's own build artifacts have the
+      # most headroom. Swap is kept (swap-storage: false) to avoid
+      # degrading the linker under memory pressure.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          android: 'true'
+          dotnet: 'true'
+          haskell: 'true'
+          swap-storage: 'false'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
+      - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu, mold linker)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-          mesa-vulkan-drivers
+          mesa-vulkan-drivers mold
       - uses: Swatinem/rust-cache@v2
       # Pre-build the packaged artifact tree the scenario runner loads
       # at test time. Without this, ADR-0067 per-component scenarios
