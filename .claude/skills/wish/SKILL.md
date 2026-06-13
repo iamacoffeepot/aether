@@ -242,11 +242,55 @@ The user reads top-down:
                                     as shallow sibling files under alternatives/
 /wish --under <wish-path>           drill into one subtree (chosen or alternative)
                                     from a prior pass
+/wish --deep <theme>                deep mode: best-first fan-out drilling (workflow-backed)
+/wish --deep <theme> --beam N       fan-out width per round (default 3) — the shape knob
+/wish --deep <theme> --budget N     max driller agents the loop spawns (default 40) — the size knob
 ```
 
-No `--depth`, no `--count` flags. Depth is whatever the chains produce; count is whatever survives producibility + filter.
+No `--depth`, no `--count` flags. Depth is whatever the chains produce; count is whatever survives producibility + filter. `--deep` keeps that rule — its depth is emergent from best-first scoring, not a dialed target; see [Deep mode](#deep-mode---deep).
 
 Roles: `player`, `designer`, `agent`, `operator`, `developer`. Skip `substrate-developer` — engine-internals work isn't surfaced as a use-case wish.
+
+## Deep mode (`--deep`)
+
+Default `/wish` drills the whole tree in a single main-context pass. That pass is cheap and right for most themes, and **it is unchanged** — deep mode is opt-in. Reach for `--deep` when you want visibly deeper trees: high-leverage branches drilled all the way to real producibility while low-leverage ones stay stubs, with no branch abandoned to "good enough" while a hidden unknown remains.
+
+### Why the agent boundary
+
+The single-context ceiling is the constraint plain mode hits. As a branch goes deeper its accumulated reasoning crowds the one window, so the pass surfaces five or six levels and then settles a branch with "good enough" rather than reaching producibility — truncated by context pressure, not by the chain actually bottoming out at "I can write this."
+
+Deep mode moves drilling into a `Workflow`-orchestrated best-first fan-out (`.claude/workflows/wish-deep.js`) where each node is drilled by its own fresh-context agent. That fresh context is the erasure: a driller's heavy reasoning dies with its context and never reaches the orchestrator, which holds only a lightweight scored frontier in JS and sees only a bounded self-summary per node. The bounded summary is the lineage hand-down — a child driller inherits its ancestors' summaries, not their full `wish.md` bodies, so the chain stays coherent without re-accumulating the window. The orchestrator script has no filesystem access; every `wish.md` and the final `index.md` is written by the agents themselves.
+
+### The loop
+
+A global best-first priority frontier of scored nodes, seeded from the roots the main context generated inline:
+
+1. Each round sorts the frontier by score (highest first), pops up to `--beam N` nodes, and drills them in parallel.
+2. Each driller articulates the shape at its depth, grep-grounds every engine surface it leans on (the same grounding discipline as plain mode, carried into the agent prompt), writes its full `wish.md` to the path the orchestrator computes from the node's slug chain, and returns `{producible, summary, grounded_surfaces, children}`.
+3. Each child is scored and pushed back onto the frontier.
+4. The loop ends when the frontier empties or the drill budget is exhausted.
+
+### Scoring
+
+`score = doors_opened (leverage) × unresolvedness`. A branch that unlocks a lot downstream **and** is still far from a plan scores highest, so budget flows to high-leverage unresolved spines while low-leverage branches stay stubs — the non-uniform depth the mode exists to grow. Root-proximity (shallower depth) is the tie-break, so when scores tie the search stays anchored to the original felt absence rather than wandering off into a deep side-branch.
+
+### Adversarial terminality
+
+When a driller claims `producible: true`, an adversarial skeptic agent must **fail** to find a hidden unknown before the node counts terminal. The skeptic verifies the claimed surfaces against current code and hunts for a glossed assumption, an un-grounded surface, or a "known mean" that is really another wish. If it finds one, that unknown becomes a child and the node keeps drilling. This is the mechanism that kills the "good enough" shortcut: a branch is never settled as a plan while a hidden absence remains.
+
+### Synthesis
+
+After the frontier drains, a final agent reads every node's bounded summary and writes `index.md` with the cross-branch coherence the fan-out spends — which branches drilled deep vs stayed stubs and why, the skeptic-demoted nodes, and the navigation surface over the tree.
+
+### Knobs — `--beam` (shape), `--budget` (size), no `--depth`
+
+- **`--beam N`** (default 3) is the **shape** knob. A small beam keeps re-drilling the single best branch, so the tree grows deep spines; a large beam spreads each round's budget across siblings, so the tree grows broad and shallow.
+- **`--budget N`** (default 40) is the **size** knob: an explicit cap on how many driller agents the loop spawns. It is predictable and self-documenting in the invocation line. Underneath it, the harness per-turn token budget stays a runtime backstop ceiling, so a large `--budget` cannot outrun a tighter "+N" turn directive.
+- **No `--depth` knob, deliberately.** Depth in deep mode is emergent from best-first scoring — deep where `doors_opened × unresolvedness` stays high — not a dialed target. A depth cap would truncate exactly the high-leverage spines the mode exists to grow. Size is `--budget`, shape is `--beam`, depth is a consequence.
+
+### Resumability
+
+The on-disk wish tree persists across sessions, so a deep wish becomes resumable: a later `/wish --under <wish-path>` drills a subtree further, complementing the in-session Workflow journal. The file tree is the durable record; the journal is the live one.
 
 ## Steps the agent runs
 
@@ -280,6 +324,18 @@ For each root, recursively:
 4. **Name doors opened and doors closed.** Two short paragraphs. What does this choice unlock? What does it commit to?
 5. **Coherence check.** Children must compose into the parent's plan; if a child wouldn't satisfy the parent, restate.
 6. **Recurse on sub-wishes** until each leaf is producible.
+
+### 3-deep. Dispatch the deep-mode workflow (on `--deep`)
+
+On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in the main context — the judgment-and-memory-bound front of the pass — then hand drilling to the `wish-deep` workflow instead of recursing inline. The hand-off:
+
+1. **Score each root.** For every root from step 2, assign an initial `doors_opened` (leverage, 1-5) and `unresolvedness` (distance-from-plan, 1-5). These seed the frontier's scoring.
+2. **Compute `wishDir`.** The absolute path to `wishes/<YYYY-MM-DD>-<theme-slug>/`. Create the directory so the drillers have a place to write.
+3. **Gather `groundingNotes`.** The grep-confirmed engine surfaces from step 1, as a short shared block, so the drillers extend the grounding rather than each re-deriving it.
+4. **Call the workflow.** `Workflow({name: "wish-deep", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
+5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
+
+Deep mode does not run steps 4-7 inline — filtering, alternatives, and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 8's report template has a deep-mode variant.
 
 ### 4. Filter against existing work (tree-aware)
 
@@ -341,6 +397,21 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
 Read the index, drill into the wishes that interest you.
 Materialize a wish's alternatives: /wish --compare <wish-path>
 Drill an alternative or sub-wish deeper: /wish --under <wish-path>
+File leaf plans you want to commit to as Backlog-Phase issues.
+```
+
+Deep mode (`--deep`) reports from the workflow's returned stats instead:
+
+```
+✓ Deep wish pass complete.
+  Theme: <theme>[, as <role>]   (deep mode — beam <N>, budget <M>)
+  Tree: <rootCount> roots, <totalNodes> nodes drilled, max depth <maxDepth>
+  Plans (leaves): <leafCount>     Skeptic demotions: <skepticDemotions> (caught "good enough")
+  Frontier left undrilled (budget-bounded stubs): <undrilled>
+  Index: wishes/<date>-<theme>/index.md
+
+The tree is on disk and resumable across sessions.
+Drill a subtree deeper in a later pass: /wish --under <wish-path>
 File leaf plans you want to commit to as Backlog-Phase issues.
 ```
 
