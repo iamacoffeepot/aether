@@ -1409,6 +1409,17 @@ impl<C: Chassis> BuiltChassis<C> {
         &self.booted.actor_registry
     }
 
+    /// Retrieve a clone of a cap-published handle bundle of type `H`.
+    /// Mirrors [`PassiveChassis::handle`] for chassis that were built
+    /// with a driver (via [`Builder::build`]). `None` if no cap
+    /// published a handle of that type. Useful for embedder tests that
+    /// drive a full-stack chassis and need to read a cap's published
+    /// handle (e.g. `HttpServerHandle::local_port`).
+    #[must_use]
+    pub fn handle<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
+        self.booted.handles.get::<H>()
+    }
+
     /// Block on the driver's run loop. On clean return, shut down
     /// every passive in reverse boot order. Driver errors propagate
     /// as [`RunError`]; passives still tear down before the error
