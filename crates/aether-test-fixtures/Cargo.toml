@@ -92,5 +92,15 @@ crate-type = ["cdylib"]
 name = "vec4_observer"
 crate-type = ["cdylib"]
 
+# Issue 1793 widget-actor cost spike: a synthetic UI widget that
+# subscribes Tick and, per its `UiWidgetConfig`, either re-emits a
+# `DrawSolidQuads` batch every frame (naive actor-backed) or early-returns
+# (the stable-frame floor host-cached replay would pay). Loaded N× by the
+# `widget_actor_cost` measurement to read per-widget per-frame cost.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/ui_widget.wasm
+[[example]]
+name = "ui_widget"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true
