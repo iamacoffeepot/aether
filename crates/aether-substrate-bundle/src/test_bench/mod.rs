@@ -22,7 +22,6 @@ mod execute;
 mod mail_latency;
 pub mod render;
 pub mod test_helpers;
-pub mod visual;
 
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 pub use cap::{TestBenchCapConfig, TestBenchCapability};

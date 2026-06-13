@@ -25,8 +25,8 @@ use aether_mesh_viewer::LoadMesh;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
-    visual::{decode_png, differs_from_background},
 };
+use aether_substrate_bundle::visual::{decode_png, differs_from_background};
 
 // Force linkage of `aether-mesh-viewer`'s `inventory::submit!`
 // `KindDescriptor` entries into this test binary. Cargo treats

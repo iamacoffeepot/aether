@@ -16,11 +16,8 @@
 //! (issues 460 + 821).
 
 use aether_kinds::{Key, LoadComponent, LoadResult, keycode};
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
-    test_helpers::require_runtime,
-    visual::{decode_png, differs_from_background},
-};
+use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::visual::{decode_png, differs_from_background};
 
 // Force linkage of this crate's own rlib so its `inventory::submit!`
 // `KindDescriptor` entries reach `aether_kinds::descriptors::all()`

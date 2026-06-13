@@ -106,9 +106,10 @@ postcard = { workspace = true, default-features = false, features = ["alloc"] }
 serde = { workspace = true, features = ["derive", "std"] }
 # Trial reports + comparison output are JSON (perf tooling, #1077).
 serde_json = { workspace = true }
-# `test_bench::visual::ImageError` derives `thiserror::Error` (moved
-# from `aether-scenario` per issue 821). New runtime dep here because
-# `aether-substrate-bundle` had no prior thiserror consumer.
+# `visual::ImageError` derives `thiserror::Error` (moved from
+# `aether-scenario` per issue 821, promoted to crate root per issue 1781).
+# New runtime dep here because `aether-substrate-bundle` had no prior
+# thiserror consumer.
 thiserror = "2"
 tracing = { workspace = true, features = ["std", "attributes"] }
 wgpu = { workspace = true }

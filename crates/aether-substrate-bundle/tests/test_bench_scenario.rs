@@ -40,7 +40,9 @@ use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
-    visual::{background_top_left, bounding_box, centroid, coverage, decode_png},
+};
+use aether_substrate_bundle::visual::{
+    background_top_left, bounding_box, centroid, coverage, decode_png,
 };
 use aether_test_fixtures::{Bump, CountQuery, CountReport, SetRender};
 
