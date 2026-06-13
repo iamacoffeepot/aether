@@ -447,17 +447,26 @@ mod native {
                 self.upload_glyph(ctx, texture_id, &entry);
             }
             if !quads.is_empty() {
-                // World quads carry pixel offsets relative to the
-                // anchor, not absolute screen positions. Center the
-                // string horizontally and shift so the baseline sits
-                // at y=0 — the anchor is the baseline point, and text
-                // appears above it (negative y in screen y-down
-                // convention = above the anchor in world space).
                 if matches!(mail.space, QuadSpace::World { .. }) {
+                    // World quads carry pixel offsets relative to the
+                    // anchor, not absolute screen positions. Center the
+                    // string horizontally and shift so the baseline sits
+                    // at y=0 — the anchor is the baseline point, and text
+                    // appears above it (negative y in screen y-down
+                    // convention = above the anchor in world space).
                     let half_width = pen_x / 2.0;
                     for q in &mut quads {
                         q.x -= half_width;
                         q.y -= baseline;
+                    }
+                } else {
+                    // Screen quads flow from the top-left of the window by
+                    // default (pen starts at 0,0). Apply the caller's origin
+                    // offset so a string can sit at an arbitrary screen pixel.
+                    let [ox, oy] = mail.origin;
+                    for q in &mut quads {
+                        q.x += ox;
+                        q.y += oy;
                     }
                 }
                 emit_draw(ctx, texture_id, mail.space, quads);
@@ -681,6 +690,7 @@ mod native {
                     text: "hi".to_owned(),
                     size_pixels: 32.0,
                     color: [1.0; 4],
+                    origin: [0.0, 0.0],
                     space: QuadSpace::Screen,
                 },
             );
@@ -706,6 +716,7 @@ mod native {
                     text: "hi".to_owned(),
                     size_pixels: 32.0,
                     color: [1.0; 4],
+                    origin: [0.0, 0.0],
                     space: QuadSpace::Screen,
                 },
             );
@@ -742,6 +753,7 @@ mod native {
                     text: "A".to_owned(),
                     size_pixels: 48.0,
                     color: [1.0, 1.0, 1.0, 1.0],
+                    origin: [0.0, 0.0],
                     space: QuadSpace::Screen,
                 },
             );
@@ -801,6 +813,7 @@ mod native {
                     text: "A".to_owned(),
                     size_pixels: 48.0,
                     color: [1.0, 1.0, 1.0, 1.0],
+                    origin: [0.0, 0.0],
                     space: QuadSpace::Screen,
                 },
             );
@@ -815,6 +828,100 @@ mod native {
             assert_next_send_kind::<UpdateTexture>(&binding, &rx);
             assert_next_send_kind::<UpdateTexture>(&binding, &rx);
             assert_next_send_kind::<DrawTexturedQuads>(&binding, &rx);
+        }
+
+        /// `Screen` draws at a non-zero `origin` shift every glyph quad by
+        /// that offset. Draw the same string twice — once at `[0,0]` and once
+        /// at `[ox, oy]` — and assert each quad in the offset batch sits
+        /// exactly `(ox, oy)` further right/down than its zero-origin peer.
+        #[test]
+        fn screen_origin_shifts_quad_positions() {
+            let mut cap = TextCapability::new();
+            cap.fonts.insert(0, Arc::new(test_font()));
+            cap.atlas_create_inflight = true;
+            let (binding, rx) = ctx_binding();
+            {
+                let mut ctx =
+                    NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+                cap.on_create_texture_result(&mut ctx, CreateTextureResult::Ok { texture_id: 1 });
+            }
+            assert_eq!(cap.atlas_texture_id, Some(1));
+
+            // Draw at origin [0, 0] — the glyph rasterizes on the first draw
+            // (cache miss), so drain UpdateTexture before collecting quads.
+            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_draw_text(
+                &mut ctx,
+                DrawText {
+                    font_id: 0,
+                    text: "A".to_owned(),
+                    size_pixels: 24.0,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    origin: [0.0, 0.0],
+                    space: QuadSpace::Screen,
+                },
+            );
+            let quads_zero = collect_draw_textured_quads(&binding, &rx).quads;
+
+            // Second draw at a non-zero origin — glyph is cached, so only
+            // DrawTexturedQuads is emitted (no UpdateTexture).
+            let ox = 30.0f32;
+            let oy = 50.0f32;
+            let mut ctx2 = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_draw_text(
+                &mut ctx2,
+                DrawText {
+                    font_id: 0,
+                    text: "A".to_owned(),
+                    size_pixels: 24.0,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    origin: [ox, oy],
+                    space: QuadSpace::Screen,
+                },
+            );
+            let quads_offset = collect_draw_textured_quads(&binding, &rx).quads;
+
+            assert_eq!(
+                quads_zero.len(),
+                quads_offset.len(),
+                "same text must produce the same number of quads",
+            );
+            for (z, o) in quads_zero.iter().zip(quads_offset.iter()) {
+                assert!(
+                    (o.x - z.x - ox).abs() < 0.01,
+                    "quad x should shift by {ox}: zero={}, offset={}",
+                    z.x,
+                    o.x,
+                );
+                assert!(
+                    (o.y - z.y - oy).abs() < 0.01,
+                    "quad y should shift by {oy}: zero={}, offset={}",
+                    z.y,
+                    o.y,
+                );
+            }
+        }
+
+        /// Drain egress until the next `DrawTexturedQuads` `UnresolvedMail`
+        /// arrives, skipping any prior `UpdateTexture` or other sends.
+        fn collect_draw_textured_quads(
+            binding: &NativeBinding,
+            rx: &Receiver<EgressEvent>,
+        ) -> DrawTexturedQuads {
+            binding.flush_outbound();
+            loop {
+                let event = rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("test: egress event arrives within deadline");
+                if let EgressEvent::UnresolvedMail {
+                    kind_id, payload, ..
+                } = event
+                    && kind_id == DrawTexturedQuads::ID
+                {
+                    return postcard::from_bytes(&payload)
+                        .expect("test: DrawTexturedQuads payload decodes via postcard");
+                }
+            }
         }
 
         /// Builder rejects a duplicate claim of the well-known mailbox.

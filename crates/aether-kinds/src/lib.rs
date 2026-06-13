@@ -1703,10 +1703,14 @@ mod control_plane {
     /// (the same immediate-mode contract as `aether.draw_triangle`: send
     /// it each frame or it vanishes). `color` is a linear RGBA multiplier
     /// over the glyph coverage — the alpha channel scales the blend.
-    /// `space` selects the projection: `Screen` flows the string from the
-    /// window's top-left corner along the baseline; `World { anchor,
-    /// scale }` anchors it in the scene. An unknown `font_id` warn-drops.
-    /// Fire-and-forget; no reply.
+    /// `origin` is the screen-pixel top-left the string flows from along
+    /// the baseline in `Screen` mode — `[0.0, 0.0]` is the window's
+    /// top-left corner, the same as the pre-origin behavior. In `World`
+    /// mode `origin` is ignored; the `anchor` positions the string there.
+    /// `space` selects the projection: `Screen` flows the string from
+    /// `origin` along the baseline; `World { anchor, scale }` anchors it
+    /// in the scene. An unknown `font_id` warn-drops. Fire-and-forget; no
+    /// reply.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.text.draw")]
     pub struct DrawText {
@@ -1714,6 +1718,10 @@ mod control_plane {
         pub text: String,
         pub size_pixels: f32,
         pub color: [f32; 4],
+        /// Screen-pixel top-left the string flows from in `Screen` mode.
+        /// `[0.0, 0.0]` is the window's top-left corner. Ignored in
+        /// `World` mode — the `anchor` positions there.
+        pub origin: [f32; 2],
         pub space: QuadSpace,
     }
 
@@ -3856,6 +3864,7 @@ mod tests {
                 text: "hello aether".to_string(),
                 size_pixels: 32.0,
                 color: [1.0, 0.5, 0.25, 1.0],
+                origin: [24.0, 48.0],
                 space: QuadSpace::Screen,
             };
             let bytes = postcard::to_allocvec(&d).expect("test setup: postcard encodes DrawText");
@@ -3865,6 +3874,7 @@ mod tests {
             assert_eq!(back.text, "hello aether");
             assert_eq!(back.size_pixels, 32.0);
             assert_eq!(back.color, [1.0, 0.5, 0.25, 1.0]);
+            assert_eq!(back.origin, [24.0, 48.0]);
             assert_eq!(back.space, QuadSpace::Screen);
         }
     }

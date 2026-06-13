@@ -1342,6 +1342,7 @@ fn text_draws_a_screen_space_string() {
         text: "Hi".to_owned(),
         size_pixels: 32.0,
         color: [1.0, 1.0, 1.0, 1.0],
+        origin: [0.0, 0.0],
         space: QuadSpace::Screen,
     };
 
@@ -1397,6 +1398,129 @@ fn text_draws_a_screen_space_string() {
         silhouette.min_x < frame_width / 2 && silhouette.max_y < frame_height,
         "text silhouette {silhouette:?} should bound the upper-left of the \
          {frame_width}x{frame_height} frame",
+    );
+}
+
+/// ADR-0105 screen-space text origin (issue 1773): drawing `Screen` text
+/// at a non-zero `origin` shifts the lit centroid by the offset, so the
+/// string no longer sits at the window top-left.
+///
+/// Two captures back-to-back — one at `origin = [0, 0]` and one at
+/// `origin = [ox, oy]` — are taken in the same bench session (font and
+/// atlas are already live by the time the second capture fires). The
+/// centroid of the offset capture must sit further right and further down
+/// than the zero-origin centroid by at least half the applied offset,
+/// ruling out a no-op implementation.
+///
+/// Skipped on driverless runners.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn text_screen_origin_shifts_centroid() {
+    const TTF: &[u8] = include_bytes!("../assets/fonts/RobotoMono.ttf");
+    if !require_wgpu_only() {
+        return;
+    }
+    let sandbox = init_save_sandbox("test-bench-text-origin");
+    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
+
+    let (frame_width, frame_height) = (256u32, 128u32);
+    let mut bench = TestBench::builder()
+        .size(frame_width, frame_height)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    // Load the font.
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.text",
+                &LoadFont {
+                    namespace: "assets".to_owned(),
+                    path: "font.ttf".to_owned(),
+                },
+            ),
+        )])
+        .expect("load_font sequence");
+    let font_id = match loaded
+        .reply::<LoadFontResult>("load")
+        .expect("decode LoadFontResult")
+    {
+        LoadFontResult::Ok { font_id, .. } => font_id,
+        LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
+    };
+
+    let draw_zero = DrawText {
+        font_id,
+        text: "Hi".to_owned(),
+        size_pixels: 24.0,
+        color: [1.0, 1.0, 1.0, 1.0],
+        origin: [0.0, 0.0],
+        space: QuadSpace::Screen,
+    };
+
+    // Prime pass: lazily creates the atlas texture; nothing draws yet.
+    bench
+        .execute(vec![
+            (
+                "prime",
+                BenchOp::send_mail::<DrawText>("aether.text", &draw_zero),
+            ),
+            ("settle", BenchOp::advance(2)),
+        ])
+        .expect("prime draw");
+
+    // Capture at origin [0, 0].
+    let pre_zero = vec![envelope("aether.text", &draw_zero)];
+    let snap_zero = bench
+        .execute(vec![(
+            "snap0",
+            BenchOp::capture_with_mails(pre_zero, vec![]),
+        )])
+        .expect("capture zero-origin");
+    let img_zero = decode_png(snap_zero.captured("snap0").expect("snap0 ran"))
+        .expect("decode zero-origin png");
+    let bg = background_top_left(&img_zero);
+    let tolerance = 5;
+    let base_center = centroid(&img_zero, bg, tolerance).expect("zero-origin frame has lit pixels");
+
+    // Capture at a shifted origin — well inside the frame so glyphs render.
+    let ox = (frame_width / 2) as f32;
+    let oy = (frame_height / 2) as f32;
+    let draw_offset = DrawText {
+        origin: [ox, oy],
+        ..draw_zero
+    };
+    let pre_offset = vec![envelope("aether.text", &draw_offset)];
+    let snap_offset = bench
+        .execute(vec![(
+            "snap1",
+            BenchOp::capture_with_mails(pre_offset, vec![]),
+        )])
+        .expect("capture offset-origin");
+    let img_offset = decode_png(snap_offset.captured("snap1").expect("snap1 ran"))
+        .expect("decode offset-origin png");
+    let shifted_center =
+        centroid(&img_offset, bg, tolerance).expect("offset-origin frame has lit pixels");
+
+    // The shifted centroid must sit at least half the applied offset further
+    // right and down — a strict half-delta guard that would catch a no-op.
+    assert!(
+        shifted_center.0 > base_center.0 + ox / 2.0,
+        "offset centroid x={} should be right of zero centroid x={} \
+         by at least {} (applied offset {ox})",
+        shifted_center.0,
+        base_center.0,
+        ox / 2.0,
+    );
+    assert!(
+        shifted_center.1 > base_center.1 + oy / 2.0,
+        "offset centroid y={} should be below zero centroid y={} \
+         by at least {} (applied offset {oy})",
+        shifted_center.1,
+        base_center.1,
+        oy / 2.0,
     );
 }
 
@@ -1474,6 +1598,7 @@ fn text_draws_world_space_label() {
         text: "Hy".to_owned(),
         size_pixels: 24.0,
         color: [1.0, 1.0, 1.0, 1.0],
+        origin: [0.0, 0.0],
         space: QuadSpace::World {
             anchor,
             scale: QuadScale::Distance {
@@ -1486,6 +1611,7 @@ fn text_draws_world_space_label() {
         text: "Hy".to_owned(),
         size_pixels: 24.0,
         color: [1.0, 1.0, 1.0, 1.0],
+        origin: [0.0, 0.0],
         space: QuadSpace::World {
             anchor,
             scale: QuadScale::Pixels,
