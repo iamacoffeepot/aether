@@ -70,7 +70,7 @@ mod native {
                     color: mail.color,
                 }],
             };
-            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &draw);
+            ctx.actor::<RenderCapability>().send(&draw);
         }
 
         /// Draw a two-layer progress bar.
@@ -106,7 +106,7 @@ mod native {
                     },
                 ],
             };
-            let _ = ctx.actor::<RenderCapability>().send_traced(ctx, &draw);
+            ctx.actor::<RenderCapability>().send(&draw);
         }
 
         /// Draw a text label.
@@ -129,7 +129,7 @@ mod native {
                 origin: [mail.x, mail.y],
                 space: QuadSpace::Screen,
             };
-            let _ = ctx.actor::<TextCapability>().send_traced(ctx, &draw);
+            ctx.actor::<TextCapability>().send(&draw);
         }
     }
 

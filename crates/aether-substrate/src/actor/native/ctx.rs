@@ -91,20 +91,35 @@ pub struct NativeCtx<'a> {
 macro_rules! native_sender_methods {
     () => {
         /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
-        /// addressing the unique instance of receiver actor `R`.
+        /// addressing the unique instance of receiver actor `R`. The
+        /// handle captures this ctx's in-flight lineage (ADR-0080 §7) so
+        /// a `send` from it inherits the handler's causal chain.
         #[must_use]
         pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
-            NativeActorMailbox::__new(R::resolve(self.binding.carry()).0, self.binding)
+            let (parent, root) = self.outbound_lineage();
+            NativeActorMailbox::__new_in_flight(
+                R::resolve(self.binding.carry()).0,
+                self.binding,
+                parent,
+                root,
+            )
         }
 
         /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
-        /// from a runtime instance name.
+        /// from a runtime instance name. Captures the in-flight lineage
+        /// like [`Self::actor`].
         // Runtime-name escape hatch: the instance name is only known at
         // runtime, so there is no `R::resolve` lineage carry to route through.
         #[must_use]
         #[allow(clippy::disallowed_methods)]
         pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-            NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
+            let (parent, root) = self.outbound_lineage();
+            NativeActorMailbox::__new_in_flight(
+                mailbox_id_from_name(name).0,
+                self.binding,
+                parent,
+                root,
+            )
         }
 
         /// Address an actor by a [`MailboxId`] already in hand — the id a
@@ -112,10 +127,12 @@ macro_rules! native_sender_methods {
         /// a hosted / nested actor's id is the lineage fold, not
         /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
         /// that tracks its children's ids addresses them through this rather
-        /// than re-resolving by name.
+        /// than re-resolving by name. Captures the in-flight lineage like
+        /// [`Self::actor`].
         #[must_use]
         pub fn actor_at<R: Actor>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
-            NativeActorMailbox::__new(id.0, self.binding)
+            let (parent, root) = self.outbound_lineage();
+            NativeActorMailbox::__new_in_flight(id.0, self.binding, parent, root)
         }
     };
 }
@@ -657,6 +674,15 @@ impl NativeCtx<'_> {
             Some(self.in_flight_root)
         }
     }
+
+    /// The `(parent, root)` pair a [`NativeActorMailbox`] captures at
+    /// construction so a `send` from the handle inherits this handler's
+    /// causal chain (ADR-0080 §7). The `native_sender_methods!` macro
+    /// reads it; [`NativeInitCtx`] provides a `(None, None)` counterpart
+    /// (init has no inbound chain to inherit).
+    fn outbound_lineage(&self) -> (Option<MailId>, Option<MailId>) {
+        (self.outbound_parent(), self.outbound_root())
+    }
 }
 
 impl NativeCtx<'_> {
@@ -696,12 +722,12 @@ impl NativeCtx<'_> {
         }
     }
 
-    /// Untyped sibling of [`NativeActorMailbox::send_traced`]: dispatch
+    /// Untyped sibling of [`NativeActorMailbox::send_tracked`]: dispatch
     /// an already-encoded mail payload with runtime `recipient` /
     /// `kind` ids and return the minted [`MailId`] for settlement
     /// subscription.
     ///
-    /// Issue 750: the typed `send_traced` path is gated on
+    /// Issue 750: the typed `send_tracked` path is gated on
     /// `R: HandlesKind<K>`, which requires the kind and receiver to be
     /// known at compile site. Endpoints that route mail with runtime
     /// ids (the RPC server forwarding `Call.envelope` from the wire is
@@ -903,6 +929,15 @@ impl<'a> NativeInitCtx<'a> {
             .insert(TypeId::of::<H>(), Box::new(handle));
     }
 
+    /// Init has no inbound chain to inherit, so a handle built here is
+    /// always detached — the `(None, None)` counterpart of
+    /// [`NativeCtx::outbound_lineage`] the `native_sender_methods!`
+    /// macro reads.
+    #[allow(clippy::unused_self)]
+    fn outbound_lineage(&self) -> (Option<MailId>, Option<MailId>) {
+        (None, None)
+    }
+
     native_sender_methods!();
 }
 
@@ -912,10 +947,11 @@ impl<'a> NativeInitCtx<'a> {
 // `wire`, where `NativeCtx` provides the full mail surface.
 
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`
-// / `LifecycleControl`). Default-impl bodies on
-// `MailSender` cover `send_detached` / `send_detached_to_named`,
-// so each impl below spells out the stage-specific accessors and
-// routing methods. `LifecycleControl::shutdown` /
+// / `LifecycleControl`). `send` / `send_many` / `send_to_named` inherit
+// this handler's in-flight lineage (ADR-0080 §7); `send_detached` /
+// `send_detached_to_named` are spelled out below to suppress it (the
+// trait default delegates to the now-inheriting `send`, so it can't
+// detach on its own). `LifecycleControl::shutdown` /
 // `monitor` forward to the existing inherent methods that today
 // reach into the substrate-internal spawner + actor registry; future
 // FFI-side wiring (issue 607 phase 4 / ADR-0079) will program against
@@ -973,6 +1009,40 @@ impl MailSender for NativeCtx<'_> {
             1,
             self.outbound_parent(),
             self.outbound_root(),
+        );
+    }
+
+    //noinspection DuplicatedCode
+    fn send_detached<R, K>(&mut self, payload: &K)
+    where
+        R: Singleton + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        // ADR-0080 §7: suppress the in-flight lineage so the recipient
+        // starts a fresh causal chain (the trait default would inherit).
+        self.binding.push_envelope_buffered(
+            R::resolve(self.binding.carry()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            None,
+        );
+    }
+
+    //noinspection DuplicatedCode
+    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
+    #[allow(clippy::disallowed_methods)]
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding.push_envelope_buffered(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            None,
         );
     }
 
@@ -1191,6 +1261,82 @@ mod tests {
         fn encode_into_bytes(&self) -> Vec<u8> {
             bytemuck::bytes_of(self).to_vec()
         }
+    }
+
+    impl HandlesKind<CastOnly> for StubActor {}
+
+    /// ADR-0080 §7 (issue 1802): a handler's `ctx.actor::<R>().send()`
+    /// inherits the in-flight causal chain — the recipient mail lands
+    /// under the caller's root with the handled mail as its parent —
+    /// while `send_detached()` opens a fresh chain regardless of the
+    /// in-flight lineage. The buffered send routes at handler end
+    /// (`NativeCtx`'s `Drop` flush), so the assertions read the routed
+    /// dispatch's lineage off the registered sink.
+    #[test]
+    fn handle_send_inherits_chain_detached_mints_fresh() {
+        use crate::mail::registry::OwnedDispatch;
+        use crate::test_util::fresh_substrate;
+        use std::sync::mpsc;
+
+        let (registry, mailer) = fresh_substrate();
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let recipient = registry.register_inbox(
+            "test.issue_1802.sink",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                // Terminal test sink (ADR-0094): discharge before observing.
+                dispatch.discharge();
+                let _ = tx.send(dispatch);
+            }),
+        );
+
+        let actor_mailbox = MailboxId(0x00BE_EF02);
+        let binding = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            actor_mailbox,
+        ));
+
+        // The chassis-driven chain this handler is running inside.
+        let in_flight_root = MailId::new(MailboxId(0xC0), 7);
+        let in_flight_mail = MailId::new(MailboxId(0x99), 42);
+        let source = Source::with_correlation(SourceAddr::None, 0);
+
+        // Default `send` inherits the caller's chain.
+        {
+            let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+            ctx.actor_at::<StubActor>(recipient)
+                .send(&CastOnly { code: 1 });
+            // ctx drops here → `flush_outbound` routes the buffered send.
+        }
+        let inherited = rx.try_recv().expect("default send routed at flush");
+        assert_eq!(
+            inherited.root, in_flight_root,
+            "send inherits the caller's root"
+        );
+        assert_eq!(
+            inherited.parent_mail,
+            Some(in_flight_mail),
+            "send's parent is the in-flight mail"
+        );
+        assert_ne!(
+            inherited.mail_id, in_flight_mail,
+            "the outbound mail_id is fresh"
+        );
+
+        // `send_detached` opens a fresh chain despite the in-flight lineage.
+        {
+            let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+            ctx.actor_at::<StubActor>(recipient)
+                .send_detached(&CastOnly { code: 2 });
+        }
+        let detached = rx.try_recv().expect("detached send routed at flush");
+        assert!(
+            detached.parent_mail.is_none(),
+            "detached send carries no parent edge"
+        );
+        assert_eq!(
+            detached.root, detached.mail_id,
+            "detached send is its own root"
+        );
     }
 
     /// Type-level proof (ADR-0100): a `Pod`-without-`Serialize` cast kind

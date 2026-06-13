@@ -25,8 +25,20 @@
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "aether")]
 unsafe extern "C" {
+    /// `detached` is the ADR-0080 §7 lineage signal: `0` inherits the
+    /// in-flight dispatch's `parent`/`root` (the host stamps them onto
+    /// this send), `1` suppresses inheritance so the host mints a fresh
+    /// causal chain. The default guest path passes `0`; `send_detached`
+    /// passes `1`.
     #[link_name = "send_mail_p32"]
-    pub fn send_mail(recipient: u64, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
+    pub fn send_mail(
+        recipient: u64,
+        kind: u64,
+        ptr: u32,
+        len: u32,
+        count: u32,
+        detached: u32,
+    ) -> u32;
     #[link_name = "reply_mail_p32"]
     pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
     #[link_name = "save_state_p32"]
@@ -98,7 +110,14 @@ unsafe extern "C" {
 /// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
+pub unsafe fn send_mail(
+    _recipient: u64,
+    _kind: u64,
+    _ptr: u32,
+    _len: u32,
+    _count: u32,
+    _detached: u32,
+) -> u32 {
     panic!("aether-actor: send_mail called outside the FFI guest");
 }
 

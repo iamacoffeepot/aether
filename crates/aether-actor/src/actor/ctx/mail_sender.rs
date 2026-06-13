@@ -37,6 +37,13 @@ pub trait MailSender {
     /// Send a single payload of kind `K` to the singleton instance of
     /// receiver actor `R`, resolved via `R::resolve` against the
     /// caller's lineage carry (ADR-0099 §5).
+    ///
+    /// Inherits the handler's in-flight causal chain by default
+    /// (ADR-0080 §7): the recipient's work settles back into the
+    /// caller's chain, so an outbound send now arms a settlement
+    /// obligation rather than truncating the trace at the send. The
+    /// rare fire-and-forget send that should start its own chain goes
+    /// through [`Self::send_detached`].
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + HandlesKind<K>,
@@ -73,11 +80,13 @@ pub trait MailSender {
     /// tree rather than the sender's. Reply-correlated requests always
     /// go through [`Self::send`].
     ///
-    /// Ships only the API surface (default body delegates to
-    /// [`Self::send`]); a tracing-aware impl can specialise it to
-    /// suppress the `TraceEvent::Sent` push that `send` would otherwise
-    /// emit, for chassis-internal mail that must not appear in the causal
-    /// trace.
+    /// The default body delegates to [`Self::send`], which now inherits
+    /// lineage — so every concrete ctx specialises this to actually
+    /// suppress the inheritance (native passes a `None`/`None` lineage
+    /// to the binding; the FFI ctx sets the detached flag on the
+    /// `send_mail` bridge so the host mints a fresh root). The default
+    /// is a fallback for a hypothetical impl that has no causal chain to
+    /// detach from.
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + HandlesKind<K>,
@@ -87,7 +96,8 @@ pub trait MailSender {
     }
 
     /// String-keyed counterpart to [`Self::send_detached`]. Same
-    /// fire-and-forget contract; same default-body delegation in PR 1.
+    /// fire-and-forget contract; each concrete ctx specialises it to
+    /// suppress lineage the same way as [`Self::send_detached`].
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         self.send_to_named::<K>(name, payload);
     }

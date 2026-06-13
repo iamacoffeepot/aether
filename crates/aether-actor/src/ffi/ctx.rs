@@ -273,7 +273,7 @@ impl MailSender for FfiCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
     }
 
     //noinspection DuplicatedCode
@@ -288,6 +288,7 @@ impl MailSender for FfiCtx<'_> {
             K::ID.0,
             bytes,
             payloads.len() as u32,
+            false,
         );
     }
 
@@ -297,7 +298,25 @@ impl MailSender for FfiCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+    }
+
+    //noinspection DuplicatedCode
+    fn send_detached<R, K>(&mut self, payload: &K)
+    where
+        R: Singleton + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+    }
+
+    //noinspection DuplicatedCode
+    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
+    #[allow(clippy::disallowed_methods)]
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -385,7 +404,7 @@ impl MailSender for FfiDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, false);
     }
 
     //noinspection DuplicatedCode
@@ -400,6 +419,7 @@ impl MailSender for FfiDropCtx<'_> {
             K::ID.0,
             bytes,
             payloads.len() as u32,
+            false,
         );
     }
 
@@ -409,7 +429,25 @@ impl MailSender for FfiDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
+        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false);
+    }
+
+    //noinspection DuplicatedCode
+    fn send_detached<R, K>(&mut self, payload: &K)
+    where
+        R: Singleton + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.send_mail(R::resolve(self.mailbox).0, K::ID.0, &bytes, 1, true);
+    }
+
+    //noinspection DuplicatedCode
+    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
+    #[allow(clippy::disallowed_methods)]
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true);
     }
 
     fn prev_correlation(&self) -> u64 {
