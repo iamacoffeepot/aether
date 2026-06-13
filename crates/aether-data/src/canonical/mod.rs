@@ -407,14 +407,22 @@ mod tests {
         const ID: u64 = 0xdead_beef_cafe_f00d;
         const NAME: &str = "aether.tick";
         const DOC: Option<&str> = Some("Not useful to send manually.");
-        const N: usize = inputs_handler_len(ID, NAME, DOC);
-        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC);
+        // ADR-0109: a synchronous `-> R` handler carries its reply kind id.
+        const REPLY: Option<u64> = Some(0x00c0_ffee_0bad_f00d);
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY);
         let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
         match decoded {
-            InputsRecord::Handler { id, name, doc } => {
+            InputsRecord::Handler {
+                id,
+                name,
+                doc,
+                reply,
+            } => {
                 assert_eq!(id, KindId(ID));
                 assert_eq!(name, NAME);
                 assert_eq!(doc.as_deref(), DOC);
+                assert_eq!(reply, Some(KindId(0x00c0_ffee_0bad_f00d)));
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -425,8 +433,10 @@ mod tests {
         const ID: u64 = 1;
         const NAME: &str = "test.ping";
         const DOC: Option<&str> = None;
-        const N: usize = inputs_handler_len(ID, NAME, DOC);
-        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC);
+        // ADR-0109: a `-> ()` fire-and-forget handler carries no reply id.
+        const REPLY: Option<u64> = None;
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY);
         let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
@@ -434,6 +444,7 @@ mod tests {
                 id: KindId(ID),
                 name: NAME.into(),
                 doc: None,
+                reply: None,
             }
         );
     }

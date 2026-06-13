@@ -9,26 +9,36 @@
 //! `postcard::take_from_bytes` symmetrically.
 
 use super::primitives::{
-    option_borrowed_str_len, str_len, varint_u64_len, write_option_borrowed_str, write_str,
-    write_varint_u64,
+    option_borrowed_str_len, option_varint_u64_len, str_len, varint_u64_len,
+    write_option_borrowed_str, write_option_varint_u64, write_str, write_varint_u64,
 };
 
 /// Byte length of a `Handler` record's postcard encoding. One-byte
 /// enum-variant tag (`0x00`) + `varint(id)` + `postcard(name)` +
-/// `option_str(doc)`.
+/// `option_str(doc)` + `option_varint(reply)` — the ADR-0109 reply
+/// kind id (`None` for a `-> ()` handler).
 #[must_use]
-pub const fn inputs_handler_len(id: u64, name: &str, doc: Option<&str>) -> usize {
-    1 + varint_u64_len(id) + str_len(name) + option_borrowed_str_len(doc)
+pub const fn inputs_handler_len(
+    id: u64,
+    name: &str,
+    doc: Option<&str>,
+    reply: Option<u64>,
+) -> usize {
+    1 + varint_u64_len(id)
+        + str_len(name)
+        + option_borrowed_str_len(doc)
+        + option_varint_u64_len(reply)
 }
 
 /// Serialize an `InputsRecord::Handler` into a fixed-size array sized
 /// by `inputs_handler_len`. Exact postcard wire shape for
-/// `InputsRecord::Handler { id, name, doc }`.
+/// `InputsRecord::Handler { id, name, doc, reply }`.
 #[must_use]
 pub const fn write_inputs_handler<const N: usize>(
     id: u64,
     name: &str,
     doc: Option<&str>,
+    reply: Option<u64>,
 ) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = 0usize;
@@ -37,6 +47,7 @@ pub const fn write_inputs_handler<const N: usize>(
     pos = write_varint_u64(id, &mut out, pos);
     pos = write_str(name, &mut out, pos);
     pos = write_option_borrowed_str(doc, &mut out, pos);
+    pos = write_option_varint_u64(reply, &mut out, pos);
     // Silence "assigned but never read" warning on the final write.
     let _ = pos;
     out
