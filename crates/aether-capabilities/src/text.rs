@@ -434,12 +434,11 @@ mod native {
                         }
                         quads.push(glyph_quad(&metrics, pen_x, baseline, &entry, mail.color));
                     }
-                    GlyphSlot::Empty => {}
-                    GlyphSlot::Full => {
-                        // The atlas saturated during this frame's layout pass.
-                        // The reset fires at the top of the next draw so this
-                        // glyph will re-pack and render then.
-                    }
+                    // Empty: no pixels, just advance the pen.
+                    // Full: the atlas saturated during this frame's layout pass;
+                    // the reset fires at the top of the next draw so this
+                    // glyph will re-pack and render then.
+                    GlyphSlot::Empty | GlyphSlot::Full => {}
                 }
                 pen_x += metrics.advance_width;
             }
