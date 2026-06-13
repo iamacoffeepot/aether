@@ -42,15 +42,37 @@ use crate::mail::{KindId, MailboxId};
 /// Issue 576 framing: catch-all caps that own a `#[fallback]` return
 /// `true` after their fallback runs, which suppresses the warn.
 /// Strict receivers keep the default (`false`) so the miss surfaces.
-pub fn typed_then_fallback_or_warn<A>(actor: &mut Box<A>, ctx: &mut NativeCtx<'_>, env: &Envelope)
-where
+///
+/// #1774: takes `(kind, payload)` instead of `&Envelope` so the hot
+/// typed-match path pays no `kind_name`/`origin` allocation. On a miss
+/// (typed arm returns `None`) the full envelope is cloned from
+/// `ctx.inbound()` — the cold path, where the old per-dispatch cost
+/// now fires only when actually needed. The clone-then-`&mut`-ctx
+/// borrows are sequential (clone borrows `&ctx`, drops; the fallback
+/// call borrows `&mut ctx`), so no borrow conflict.
+pub fn typed_then_fallback_or_warn<A>(
+    actor: &mut Box<A>,
+    ctx: &mut NativeCtx<'_>,
+    kind: KindId,
+    payload: &[u8],
+) where
     A: NativeActor + NativeDispatch,
 {
     if actor
-        .__aether_dispatch_envelope(ctx, env.kind, env.payload.bytes())
-        .is_none()
-        && !actor.__aether_dispatch_fallback(ctx, env)
+        .__aether_dispatch_envelope(ctx, kind, payload)
+        .is_some()
     {
+        return;
+    }
+    let Some(env) = ctx.inbound().cloned() else {
+        tracing::warn!(
+            target: "aether_substrate::dispatch",
+            actor = A::NAMESPACE,
+            "actor dispatch missed: no inbound envelope in ctx",
+        );
+        return;
+    };
+    if !actor.__aether_dispatch_fallback(ctx, &env) {
         tracing::warn!(
             target: "aether_substrate::dispatch",
             actor = A::NAMESPACE,
@@ -73,11 +95,18 @@ where
 /// failure mode; today the per-actor ring is initialised in the
 /// dispatcher's `local::with_stamped` setup unconditionally, so a
 /// missing ring would be a substrate-level invariant violation.
-pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
-    if env.kind.0 != <LogTail as Kind>::ID.0 {
+///
+/// #1774: takes `(kind, payload)` instead of `&Envelope` — the
+/// only fields this arm reads.
+pub fn dispatch_log_tail_if_matching(
+    ctx: &mut NativeCtx<'_>,
+    kind: KindId,
+    payload: &[u8],
+) -> bool {
+    if kind.0 != <LogTail as Kind>::ID.0 {
         return false;
     }
-    let Some(request) = <LogTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+    let Some(request) = <LogTail as Kind>::decode_from_bytes(payload) else {
         ctx.reply(&LogTailResult::Err {
             error: "aether.log.tail: payload failed to decode".to_owned(),
         });
@@ -98,11 +127,18 @@ pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) ->
 /// replies inline; the dispatcher then skips the user's typed/fallback
 /// dispatch for this envelope. The trace-tree coordinator fans this out
 /// across live actors and stitches the per-ring slices.
-pub fn dispatch_trace_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
-    if env.kind.0 != <TraceTail as Kind>::ID.0 {
+///
+/// #1774: takes `(kind, payload)` instead of `&Envelope` — the
+/// only fields this arm reads.
+pub fn dispatch_trace_tail_if_matching(
+    ctx: &mut NativeCtx<'_>,
+    kind: KindId,
+    payload: &[u8],
+) -> bool {
+    if kind.0 != <TraceTail as Kind>::ID.0 {
         return false;
     }
-    let Some(request) = <TraceTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+    let Some(request) = <TraceTail as Kind>::decode_from_bytes(payload) else {
         ctx.reply(&TraceTailResult::Err {
             error: "aether.trace.tail: payload failed to decode".to_owned(),
         });
@@ -126,15 +162,19 @@ pub fn dispatch_trace_tail_if_matching(ctx: &mut NativeCtx<'_>, env: &Envelope) 
 /// user's typed/fallback dispatch for this envelope. Cold path — read
 /// lock fine (the per-dispatch fold runs lock-free through the per-actor
 /// `CostCells` cache, never here).
+///
+/// #1774: takes `(kind, payload)` instead of `&Envelope` — the
+/// only fields this arm reads.
 pub fn dispatch_cost_tail_if_matching(
     binding: &NativeBinding,
     ctx: &mut NativeCtx<'_>,
-    env: &Envelope,
+    kind: KindId,
+    payload: &[u8],
 ) -> bool {
-    if env.kind.0 != <CostTail as Kind>::ID.0 {
+    if kind.0 != <CostTail as Kind>::ID.0 {
         return false;
     }
-    let Some(request) = <CostTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
+    let Some(request) = <CostTail as Kind>::decode_from_bytes(payload) else {
         ctx.reply(&CostTailResult::Err {
             error: "aether.cost.tail: payload failed to decode".to_owned(),
         });
