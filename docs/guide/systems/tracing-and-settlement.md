@@ -130,7 +130,10 @@ panics at the leaking seam in debug builds, naming the `mail_id`, kind, and mail
 costs nothing. The guard now backs the in-crate relay and park seams rather than
 the claimed-mailbox drain, which no longer needs it — forget it on a relay you
 write and you still get an immediate, located failure instead of the silent
-multi-second hang the chain would otherwise wedge into.
+multi-second hang the chain would otherwise wedge into. Parked mail is unarmed
+(the obligation guard does not apply), but it is still settled: when the `Mailer`
+tears down, every mail still parked on a never-resolving handle receives its
+`Finished`, so the upstream chain closes rather than hanging.
 
 ## The trace tree
 

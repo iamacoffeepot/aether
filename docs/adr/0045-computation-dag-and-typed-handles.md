@@ -189,6 +189,8 @@ This is why §1 commits to handles being typed over reply kinds (`Handle<ReadRes
 
 DAG-level failures (validation rejection, cancellation, transform panic) surface through the `aether.dag.status_result::Failed` reply kind on the originating session. A panicking transform is an unrecoverable DAG failure — the DAG aborts, downstream handles never resolve, parked mail is dropped with a `CapabilityDenied`-shaped diagnostic on the affected sinks. Per-DAG state recovery is a Phase 4+ concern.
 
+Park lifecycle note (issue 1718): a mail parked on a handle that never resolves — DAG abort, actor death, engine teardown — is settled by `Mailer::drop`. The `Mailer` is the terminal owner of parked mail (once the last `Arc<Mailer>` drops, no routing call can replay a parked entry), so its drop drains the park table and records `Finished` for each held mail, balancing the upstream `Sent` so traced wait chains settle instead of hanging.
+
 ### 9. Handle lifecycle and refcounts
 
 - **Component-held handles.** A `Handle<K>` value in a guest is just an `(id, PhantomData<K>)`. The SDK acquires the slot by mailing the substrate-owned `"handle"` sink (`aether.handle.publish` request → `aether.handle.publish_result { id }` reply, sync via `send_postcard` + `wait_reply` like the io / net sinks). Refcount adjustments and pin / unpin are paired sink kinds (`aether.handle.{release,pin,unpin}`). Auto-`Drop` mails `aether.handle.release` fire-and-forget so a panicking wait can't poison teardown. Mail rather than host-fn shims keeps the privileged FFI surface small (ADR-0002), gives Claude observability into handle traffic for free, and folds capability gating (ADR-0044) into the existing per-sink permission model.
