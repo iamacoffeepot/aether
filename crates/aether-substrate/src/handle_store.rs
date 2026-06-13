@@ -47,6 +47,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
 use std::io::{Error as IoError, ErrorKind, Write as _};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1894,7 +1895,7 @@ impl HandleStore {
             .inner
             .write()
             .expect("handle store lock poisoned; fail-fast per ADR-0063");
-        std::mem::take(&mut inner.parked)
+        mem::take(&mut inner.parked)
             .into_values()
             .flatten()
             .collect()
