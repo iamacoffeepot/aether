@@ -38,7 +38,9 @@ use super::{NativeActor, NativeDispatch};
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
 use crate::actor::native::dispatch_blocking::{DispatchId, TaskCompletionWake, TaskDone};
+use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn_thread;
+use crate::chassis::inbox::InboundMail;
 use crate::mail::{Mail, SourceAddr};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
@@ -67,6 +69,18 @@ pub struct NativeCtx<'a> {
     /// an inbound — those sends mint a fresh root from their own
     /// `mail_id` in `NativeBinding::send_mail`.
     in_flight_root: MailId,
+    /// #1757 / ADR-0094: the single dispatched [`Envelope`], owned here
+    /// for the duration of the handler. The dispatcher moves it in at
+    /// construction ([`Self::with_inbound`]) and takes it back at its
+    /// settlement tail ([`Self::take_raw_inbound`]) to record `Finished` +
+    /// `discharge` exactly once — unless a handler first retained it via
+    /// [`Self::take_inbound`], moving the obligation into an
+    /// [`InboundMail`] guard for a deferred reply. One envelope in one
+    /// place: the detector for a missed settlement is `Option::is_some`,
+    /// so a double-settle is structurally unrepresentable. `None` for the
+    /// ctxs that dispatch nothing (init / close-hook / chassis-root /
+    /// cap-test fixtures built through [`Self::new`]).
+    inbound: Option<Envelope>,
 }
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
@@ -123,7 +137,73 @@ impl<'a> NativeCtx<'a> {
             source: sender,
             in_flight_mail_id,
             in_flight_root,
+            inbound: None,
         }
+    }
+
+    /// #1757: the per-dispatch constructor — moves the single dispatched
+    /// [`Envelope`] into the ctx so a handler can retain it via
+    /// [`Self::take_inbound`] (and so the dispatcher's settlement tail
+    /// settles exactly one owner). Only the native dispatcher
+    /// ([`DispatcherSlot::dispatch_one`](crate::actor::native::dispatcher_slot))
+    /// builds these; the inbound-less [`Self::new`] backs the
+    /// close-hook / chassis-root / cap-test ctxs that dispatch nothing.
+    pub(crate) fn with_inbound(
+        binding: &'a Arc<NativeBinding>,
+        sender: Source,
+        in_flight_mail_id: MailId,
+        in_flight_root: MailId,
+        inbound: Envelope,
+    ) -> Self {
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            inbound: Some(inbound),
+        }
+    }
+
+    /// #1757 / ADR-0106: retain this handler's inbound mail as an
+    /// [`InboundMail`] guard to defer its reply past the handler's return
+    /// — the by-construction replacement for a hand-rolled
+    /// [`SettlementHold`]. Moving the single dispatched envelope out of
+    /// the ctx means the dispatcher's settlement tail sees `None` and does
+    /// not discharge: the returned guard now owns the obligation, and its
+    /// `Drop` records the inbound's `Finished` after any `reply` it sent
+    /// (ADR-0080 §6), settling the chain exactly once. The guard is
+    /// `Send`, so the deferred reply may be sent from a worker thread (the
+    /// desktop capture readback is the motivating consumer).
+    ///
+    /// # Panics
+    /// Panics if there is no dispatched envelope to take — a call from an
+    /// init / close-hook / chassis-root ctx (those carry none), or a
+    /// second `take_inbound` after the first already moved it out.
+    /// Fail-fast per ADR-0063: a correct handler takes its inbound at most
+    /// once.
+    #[must_use]
+    pub fn take_inbound(&mut self) -> InboundMail {
+        let env = self
+            .inbound
+            .take()
+            .expect("take_inbound: no dispatched envelope (init/close-hook ctx, or already taken)");
+        InboundMail::from_dispatched(
+            env,
+            Arc::clone(self.binding.mailer()),
+            self.binding.self_mailbox(),
+            self.binding.reply_lineage(),
+        )
+    }
+
+    /// #1757: hand the dispatched envelope back to the dispatcher's
+    /// settlement tail. `Some` on the normal path (the dispatcher records
+    /// `Finished` + `discharge`s the single owner); `None` when a handler
+    /// retained the guard via [`Self::take_inbound`], whose own un-fired
+    /// `record_finished` then closes the chain when it drops. Called once,
+    /// just before the ctx's handler-end flush, so an armed inbound is
+    /// never dropped inside the ctx (which would trip the ADR-0094 guard).
+    pub(crate) fn take_raw_inbound(&mut self) -> Option<Envelope> {
+        self.inbound.take()
     }
 
     /// Borrow the wired `Mailer`. Issue 953: surfaced so cap handlers

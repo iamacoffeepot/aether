@@ -360,6 +360,17 @@ impl NativeBinding {
         &self.mailer
     }
 
+    /// #1757: the actor's reply-lineage allocator (a shared-counter
+    /// clone). Surfaced so a handler that retains its inbound via
+    /// [`NativeCtx::take_inbound`](super::ctx::NativeCtx::take_inbound)
+    /// mints the deferred reply's id from the same disjoint
+    /// [`ReplyLineage`] space as the binding's own
+    /// [`Self::send_reply_for_handler`] path, rather than a fresh
+    /// counter that could collide.
+    pub(crate) fn reply_lineage(&self) -> ReplyLineage {
+        self.reply_lineage.clone()
+    }
+
     /// The chassis's [`crate::Spawner`], if one was wired in at
     /// construction. `Some` for production transports built through
     /// [`Self::from_ctx`] (the chassis builds + threads its `Spawner`
