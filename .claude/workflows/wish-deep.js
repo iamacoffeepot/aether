@@ -61,7 +61,7 @@ const DRILL_SCHEMA = {
     grounded_surfaces: { type: 'array', items: { type: 'string' }, description: 'engine surfaces this wish builds on, each grep-confirmed and cited crate/path or file:line' },
     children: {
       type: 'array',
-      description: 'the absences — each becomes a sub-wish. EMPTY when producible:true.',
+      description: 'the wish-worthy absences — each becomes a sub-wish. A child is ONLY a genuine production-blocking gap (an un-grep-confirmed surface, a step not writable within current resources, or a "known mean" that is really another wish). Field existence, parameter defaults, naming, and "parent not built yet" are inline decisions resolved in this wish.md prose, NEVER children. EMPTY when producible:true.',
       items: {
         type: 'object',
         additionalProperties: false,
@@ -150,7 +150,11 @@ const drillPrompt = (node, file) => {
     '2. ' + GROUND_DISCIPLINE + '\n' +
     '3. Producibility check: can this shape be written with known, verified means within current resources ' +
     '(one engineer + Claude, modest API budget, no GPU cluster)? If yes, this wish IS a plan (producible:true, children empty). ' +
-    'If no, name the absences — each becomes a child sub-wish with a doors_opened (leverage 1-5) and unresolvedness (distance-from-plan 1-5) estimate.\n' +
+    'If no, name the absences — but ONLY wish-worthy ones: a genuine production-blocking gap (an un-grep-confirmed surface, ' +
+    'a step not writable within current resources, or a "known mean" that is really another wish). ' +
+    'Field existence, parameter defaults, naming, and "parent not built yet" are NOT absences — resolve each inline by ' +
+    'picking an obvious default and recording it in this wish.md prose, never as a child. ' +
+    'Each genuine absence becomes a child sub-wish with a doors_opened (leverage 1-5) and unresolvedness (distance-from-plan 1-5) estimate.\n' +
     '4. Write your full wish.md to the EXACT path:\n   ' + file + '\n' +
     '   ' + WISH_MD_SHAPE + '\n' +
     '5. Return the compact struct: producible, a bounded 2-4 sentence summary (your children inherit it as lineage — do not dump your whole reasoning), ' +
@@ -163,24 +167,34 @@ const drillPrompt = (node, file) => {
 const skepticPrompt = (node, res) =>
   '## Adversarial terminality skeptic\n\n' +
   'A driller claims this wish is now PRODUCIBLE — that it can be written with known, verified means. ' +
-  'Your job is to FALSIFY that: find ONE hidden unknown the driller glossed — a surface it assumed exists ' +
-  'without grep-confirming it, a step that is not actually writable within current resources, an integration ' +
-  'seam left implicit, or a "known mean" that is really another wish. Default to finding a gap if uncertain.\n\n' +
+  'Gate that claim against ONE bar: is there a hidden unknown that is itself WISH-WORTHY — a genuine ' +
+  'production-blocking gap, not a decision the driller could resolve inline by picking an obvious default? ' +
+  'A wish-worthy unknown is one of: a surface the driller assumed exists but did not grep-confirm (and you ' +
+  'cannot confirm it either), a step that is not actually writable within current resources, or a "known mean" ' +
+  'that is really another wish.\n\n' +
+  'These are NOT unknowns — they are inline decisions the driller records in its own wish.md, never children: ' +
+  'whether a struct carries some field, what a parameter defaults to, what something is named, or that a ' +
+  '"parent is not built yet" (true of every node above a leaf). Do NOT manufacture a child out of one.\n\n' +
+  'The default is TERMINAL: return hidden_unknown_found:false unless you can point at a specific ' +
+  'production-blocking gap. There is always some unverified nit, and a nit is not a wish — finding one ' +
+  'is not the job.\n\n' +
   'Theme: ' + theme + (role ? ' (as ' + role + ')' : '') + '\n' +
   'Wish: ' + node.wish + '\n' +
   'Driller summary: ' + res.summary + '\n' +
   'Claimed grounded surfaces: ' + (res.grounded_surfaces || []).join('; ') + '\n\n' +
   'Verify the claimed surfaces against current code in crates/aether-*/src/ (grep/read — you have read-only tools). ' +
-  'If you find a hidden unknown, return hidden_unknown_found:true and the unknown as a sub-wish ' +
-  '(slug, wish phrased "I wish ... so that ...", doors_opened 1-5, unresolvedness 1-5). ' +
-  'If the producibility claim genuinely holds — every leaned-on surface checks out and nothing is left implicit — ' +
+  'If you find a wish-worthy hidden unknown, return hidden_unknown_found:true and the unknown as a sub-wish ' +
+  '(slug, wish phrased "I wish ... so that ...", doors_opened 1-5, unresolvedness 1-5), with a rationale stating ' +
+  'why it is production-blocking rather than an inline default. ' +
+  'Otherwise — every leaned-on surface checks out and what remains is inline decisions — ' +
   'return hidden_unknown_found:false and unknown:null with a rationale naming what you verified.\n\nStructured output only.'
 
-const synthPrompt = (indexPath, nodeBlock, stats) =>
+const synthPrompt = (indexPath, nodeBlock, stubBlock, stats) =>
   '## Wish-tree synthesis — write the index\n\n' +
   'A /wish --deep pass drilled this tree node by node; each node below is one bounded summary (the fan-out spent ' +
   'the cross-branch coherence, your job is to recover it). Theme: ' + theme + (role ? ' (as ' + role + ')' : '') + '.\n\n' +
   '## Nodes (path · producible · wish · summary)\n' + nodeBlock + '\n\n' +
+  '## Diminishing-returns stubs (recorded undrilled — score collapsed below half the parent past depth 3; resumable via /wish --under)\n' + stubBlock + '\n\n' +
   '## Stats\n' +
   'roots: ' + stats.rootCount + '  ·  drilled nodes: ' + stats.totalNodes + '  ·  plans (leaves): ' + stats.leafCount +
   '  ·  max depth: ' + stats.maxDepth + '  ·  skeptic demotions: ' + stats.skepticDemotions +
@@ -189,6 +203,7 @@ const synthPrompt = (indexPath, nodeBlock, stats) =>
   'It is the navigation surface, not a duplicate of the wish bodies. Include: date, theme, role; the list of root ' +
   'wishes with one-line summaries; the deep-spine map (which high-leverage branches drilled deep vs which stayed ' +
   'stubs, and WHY — the cross-branch coherence); the skeptic-demoted nodes (where "good enough" was caught); the ' +
+  'diminishing-returns stub list above (collapsing-score branches that self-terminated, resumable via /wish --under); the ' +
   'stats above; and a short notes paragraph. Then STOP — return a one-line confirmation that index.md was written.\n\n' +
   'You MUST write the index.md file.'
 
@@ -207,6 +222,7 @@ let frontier = roots.map(r => ({
 }))
 
 const summaries = []   // { slug, slugChain, wish, summary, producible }
+const stubs = []       // diminishing-returns stubs: { slug, slugChain, wish, score, parentScore } — recorded, not drilled
 let drills = 0
 let maxDepth = 0
 let leafCount = 0
@@ -261,16 +277,27 @@ while (frontier.length > 0 && drills < drillBudget) {
       leafCount++
       continue
     }
-    // push children back onto the frontier, scored doors_opened × unresolvedness
+    // push children back onto the frontier, scored doors_opened × unresolvedness.
+    // Diminishing-returns backstop: past a small depth (parent at depth 3+), a child
+    // whose score has collapsed below half its parent's is recorded as a stub instead
+    // of drilled — a score-trend guard that self-terminates a spine whose leverage is
+    // fading, resumable later via `/wish --under`. This holds even if the skeptic over-fires.
     const childAncestors = node.ancestors.concat([{ slug: node.slug, summary: res.summary }])
     for (const c of children) {
+      const childScore = (c.doors_opened || 1) * (c.unresolvedness || 1)
+      const childChain = node.slugChain.concat([c.slug])
+      if (node.slugChain.length >= 3 && childScore < 0.5 * node.score) {
+        stubs.push({ slug: c.slug, slugChain: childChain, wish: c.wish, score: childScore, parentScore: node.score })
+        log('diminishing-returns stub [' + c.slug + ']: score ' + childScore + ' < 0.5 × parent ' + node.score)
+        continue
+      }
       frontier.push({
         slug: c.slug,
         wish: c.wish,
         doors_opened: c.doors_opened,
         unresolvedness: c.unresolvedness,
-        score: (c.doors_opened || 1) * (c.unresolvedness || 1),
-        slugChain: node.slugChain.concat([c.slug]),
+        score: childScore,
+        slugChain: childChain,
         ancestors: childAncestors,
       })
     }
@@ -284,7 +311,7 @@ const stats = {
   maxDepth,
   skepticDemotions,
   drills,
-  undrilled: frontier.length,   // named-but-not-materialized (budget-bounded stubs)
+  undrilled: frontier.length + stubs.length,   // named-but-not-materialized: budget-bounded frontier + diminishing-returns stubs
 }
 log('Drill done: ' + stats.totalNodes + ' nodes drilled, ' + stats.leafCount + ' plans, max depth ' +
   stats.maxDepth + ', ' + stats.skepticDemotions + ' skeptic demotions, ' + stats.undrilled + ' frontier left')
@@ -301,8 +328,16 @@ const nodeBlock = summaries
   .map(s => '- [' + s.slugChain.join('/') + '] (' + (s.producible ? 'plan' : 'wish') + ') ' + s.wish + '\n    ' + s.summary)
   .join('\n')
 
+const stubBlock = stubs.length
+  ? stubs
+      .slice()
+      .sort((a, b) => a.slugChain.join('/').localeCompare(b.slugChain.join('/')))
+      .map(s => '- [' + s.slugChain.join('/') + '] (stub · score ' + s.score + ' < 0.5 × parent ' + s.parentScore + ') ' + s.wish)
+      .join('\n')
+  : '(none)'
+
 const indexPath = wishDir + '/index.md'
-const synth = await agent(synthPrompt(indexPath, nodeBlock, stats), { label: 'synthesize', phase: 'Synthesize' })
+const synth = await agent(synthPrompt(indexPath, nodeBlock, stubBlock, stats), { label: 'synthesize', phase: 'Synthesize' })
 
 return {
   ...stats,
