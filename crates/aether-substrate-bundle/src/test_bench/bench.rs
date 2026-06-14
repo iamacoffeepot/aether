@@ -1465,7 +1465,7 @@ mod tests {
             impl NativeDispatch for Child {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {

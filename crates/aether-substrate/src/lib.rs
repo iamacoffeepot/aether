@@ -61,6 +61,9 @@ mod test_util;
 pub use actor::monitor::MonitorHandle;
 pub use actor::native::binding::NativeBinding;
 pub use actor::native::ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
+// ADR-0112: the per-handler ctx reply-mode markers, re-exported next to
+// `NativeCtx` so chassis / harness code naming `NativeCtx<'_, Manual>`
+// reaches them without an `aether_actor` import.
 pub use actor::native::envelope::Envelope;
 pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use actor::native::{NativeActor, NativeDispatch};
@@ -68,6 +71,7 @@ pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError}
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::Actor;
+pub use aether_actor::{Manual, ReplyMode, Single, Stream};
 pub use aether_derive::Config;
 #[cfg(feature = "wasm")]
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};

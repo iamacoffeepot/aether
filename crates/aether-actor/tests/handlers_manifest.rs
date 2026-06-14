@@ -21,9 +21,9 @@
 // `&mut self` to match the dispatch ABI but don't read state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Manual, Resolver, actor};
 use aether_data::Kind;
-use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
+use aether_data::{INPUTS_SECTION_VERSION, InputsRecord, ReplyContract};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -42,6 +42,13 @@ struct Ping {
 #[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.pong")]
 struct Pong {
+    seq: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.poke")]
+struct Poke {
     seq: u32,
 }
 
@@ -78,6 +85,12 @@ impl FfiActor for ManifestProbe {
         Pong { seq: ping.seq }
     }
 
+    // ADR-0112: a manual-class handler — it receives the `Manual` ctx and
+    // issues its own replies, so the manifest reports `ReplyContract::Manual`
+    // (no single static reply kind).
+    #[handler::manual]
+    fn on_poke(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _poke: Poke) {}
+
     /// # Agent
     /// Catch-all for anything else.
     #[fallback]
@@ -106,7 +119,7 @@ fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
 #[test]
 fn manifest_const_round_trips_to_expected_records() {
     const LEN: usize = ManifestProbe::__AETHER_INPUTS_MANIFEST_LEN;
-    const { assert!(LEN > 0, "ManifestProbe declares two handlers + fallback") };
+    const { assert!(LEN > 0, "ManifestProbe declares three handlers + fallback") };
     let bytes: &[u8] = &ManifestProbe::__AETHER_INPUTS_MANIFEST;
     assert_eq!(bytes.len(), LEN);
 
@@ -129,17 +142,29 @@ fn manifest_const_round_trips_to_expected_records() {
                     "test.tick" => {
                         assert_eq!(*id, <Tick as Kind>::ID);
                         tick_doc = doc.as_ref().map(ToString::to_string);
-                        // ADR-0109: a `-> ()` handler declares no reply.
-                        assert_eq!(*reply, None, "on_tick returns () — no reply kind");
+                        // ADR-0112: a single `-> ()` handler is `None`.
+                        assert_eq!(
+                            *reply,
+                            ReplyContract::None,
+                            "on_tick returns () — no reply kind"
+                        );
                     }
                     "test.ping" => {
                         assert_eq!(*id, <Ping as Kind>::ID);
-                        // ADR-0109: a `-> Pong` handler publishes Pong's
-                        // kind id as its reply contract.
+                        // ADR-0112: a single `-> Pong` handler is `One(Pong)`.
                         assert_eq!(
                             *reply,
-                            Some(<Pong as Kind>::ID),
+                            ReplyContract::One(<Pong as Kind>::ID),
                             "on_ping returns Pong — its reply kind rides the manifest"
+                        );
+                    }
+                    "test.poke" => {
+                        assert_eq!(*id, <Poke as Kind>::ID);
+                        // ADR-0112: a `#[handler::manual]` handler is `Manual`.
+                        assert_eq!(
+                            *reply,
+                            ReplyContract::Manual,
+                            "on_poke is manual-class — the manifest reports Manual"
                         );
                     }
                     other => panic!("unexpected handler name: {other}"),
@@ -159,7 +184,7 @@ fn manifest_const_round_trips_to_expected_records() {
         }
     }
 
-    assert_eq!(handler_count, 2, "expected two #[handler] records");
+    assert_eq!(handler_count, 3, "expected three #[handler] records");
     assert_eq!(fallback_count, 1, "expected one #[fallback] record");
     assert_eq!(
         tick_doc.as_deref(),

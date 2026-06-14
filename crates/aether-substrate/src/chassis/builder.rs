@@ -1615,7 +1615,7 @@ mod tests {
     impl NativeDispatch for StubLog {
         fn __aether_dispatch_envelope(
             &mut self,
-            _ctx: &mut NativeCtx<'_>,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -1734,7 +1734,7 @@ mod tests {
         impl NativeDispatch for FailingCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut NativeCtx<'_>,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -1833,7 +1833,7 @@ mod tests {
             impl NativeDispatch for ProbeCap {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -1964,7 +1964,7 @@ mod tests {
             impl NativeDispatch for LocalProbe {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -2095,7 +2095,7 @@ mod tests {
             impl NativeDispatch for ChildCap {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -2132,7 +2132,7 @@ mod tests {
             impl NativeDispatch for ParentCap {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -2271,7 +2271,7 @@ mod tests {
             impl NativeDispatch for Closer {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -2392,7 +2392,7 @@ mod tests {
             impl NativeDispatch for Quiet {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     _kind: KindId,
                     _payload: &[u8],
                 ) -> Option<()> {
@@ -2466,7 +2466,7 @@ mod tests {
             impl NativeDispatch for Quiet {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     _kind: KindId,
                     _payload: &[u8],
                 ) -> Option<()> {
@@ -2530,7 +2530,7 @@ mod tests {
             impl NativeDispatch for Foo {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     _kind: KindId,
                     _payload: &[u8],
                 ) -> Option<()> {
@@ -2552,7 +2552,7 @@ mod tests {
             impl NativeDispatch for Bar {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     _kind: KindId,
                     _payload: &[u8],
                 ) -> Option<()> {
@@ -2658,7 +2658,7 @@ mod tests {
             impl NativeDispatch for Target {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -2701,7 +2701,7 @@ mod tests {
             impl NativeDispatch for Watcher {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -2908,7 +2908,7 @@ mod tests {
             impl NativeDispatch for Target {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     _kind: KindId,
                     _payload: &[u8],
                 ) -> Option<()> {
@@ -2944,7 +2944,7 @@ mod tests {
             impl NativeDispatch for Watcher {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -3106,7 +3106,7 @@ mod tests {
             impl NativeDispatch for Member {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -3315,7 +3315,7 @@ mod tests {
             impl NativeDispatch for Grandchild {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -3351,7 +3351,7 @@ mod tests {
             impl NativeDispatch for Parent {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    ctx: &mut NativeCtx<'_>,
+                    ctx: &mut NativeCtx<'_, crate::Manual>,
                     kind: KindId,
                     payload: &[u8],
                 ) -> Option<()> {
@@ -3537,7 +3537,7 @@ mod tests {
             impl NativeDispatch for WireSpawnProbe {
                 fn __aether_dispatch_envelope(
                     &mut self,
-                    _ctx: &mut NativeCtx<'_>,
+                    _ctx: &mut NativeCtx<'_, crate::Manual>,
                     _kind: KindId,
                     _payload: &[u8],
                 ) -> Option<()> {
@@ -3593,7 +3593,7 @@ mod tests {
         impl NativeDispatch for WireProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut NativeCtx<'_>,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -3664,7 +3664,7 @@ mod tests {
         impl NativeDispatch for Pinger {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut NativeCtx<'_>,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
                 _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -3689,7 +3689,7 @@ mod tests {
         impl NativeDispatch for Ponger {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut NativeCtx<'_>,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {

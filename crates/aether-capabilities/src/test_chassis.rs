@@ -145,7 +145,9 @@ pub fn drive_task_completion<A>(
             break payload;
         }
     };
-    let mut ctx = NativeCtx::new(
+    // ADR-0112: route through the macro dispatch seam, which carries the
+    // `Manual` ctx — build it via `new_dispatching`, not `new`.
+    let mut ctx = NativeCtx::new_dispatching(
         binding,
         Source::NONE,
         aether_data::MailId::NONE,

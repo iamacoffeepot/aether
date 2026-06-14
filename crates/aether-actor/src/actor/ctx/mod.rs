@@ -23,10 +23,12 @@ pub mod lifecycle;
 pub mod mail_sender;
 pub mod outbound_reply;
 pub mod persistence;
+pub mod reply_mode;
 pub mod resolver;
 
 pub use lifecycle::LifecycleControl;
 pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;
+pub use reply_mode::{Manual, ReplyMode, Single, Stream};
 pub use resolver::Resolver;

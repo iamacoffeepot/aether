@@ -319,7 +319,13 @@ impl Mcp {
                         caps.handlers
                             .iter()
                             .find(|h| h.name == spec.kind_name)
-                            .and_then(|h| h.reply)
+                            // ADR-0112: only a single-class handler names one
+                            // static reply kind to search the cache for; a
+                            // manual / silent handler yields no declared kind.
+                            .and_then(|h| match h.reply {
+                                aether_data::ReplyContract::One(id) => Some(id),
+                                _ => None,
+                            })
                     })
                 });
                 match self.deliver_one(spec).await {
@@ -2487,7 +2493,7 @@ mod tests {
                 id: KindId(0x11),
                 name: "test.request".to_owned(),
                 doc: None,
-                reply: Some(KindId(0x22)),
+                reply: aether_data::ReplyContract::One(KindId(0x22)),
             }],
             ..ComponentCapabilities::default()
         };

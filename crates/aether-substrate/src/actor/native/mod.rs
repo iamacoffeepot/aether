@@ -181,9 +181,13 @@ pub trait NativeActor: Actor {
 /// caller wants a typed `dispatch_kind::<K>` entry, but Phase A
 /// doesn't need it.
 pub trait NativeDispatch: Send + 'static {
+    // ADR-0112: the dispatch seam carries the most-permissive `Manual`
+    // ctx so a `#[handler::manual]` arm reaches the reply surface; the
+    // macro downgrades to `Single` per single-class handler. Every impl
+    // (macro-emitted and hand-written test fixtures) spells `Manual` here.
     fn __aether_dispatch_envelope(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, crate::Manual>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()>;
@@ -197,7 +201,7 @@ pub trait NativeDispatch: Send + 'static {
     /// log.
     fn __aether_dispatch_fallback(
         &mut self,
-        _ctx: &mut NativeCtx<'_>,
+        _ctx: &mut NativeCtx<'_, crate::Manual>,
         _envelope: &Envelope,
     ) -> bool {
         false

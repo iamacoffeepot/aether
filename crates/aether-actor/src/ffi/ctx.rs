@@ -17,12 +17,14 @@
 //! and dispatch goes through the bridge statics directly.
 
 use core::marker::PhantomData;
+use core::ptr;
 
 use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
 use crate::actor::ctx::mail_sender::MailSender;
 use crate::actor::ctx::outbound_reply::OutboundReply;
 use crate::actor::ctx::persistence::Persistence;
+use crate::actor::ctx::reply_mode::{Manual, ReplyMode, Single, Stream};
 use crate::actor::ctx::resolver::Resolver;
 use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
@@ -121,14 +123,21 @@ pub enum SpawnError {
 /// `mailbox_id` field so `wire`-stage explicit subscribes
 /// (sending [`SubscribeInput`](aether_kinds::SubscribeInput) to the
 /// `InputCapability`) can self-address.
-pub struct FfiCtx<'a> {
+pub struct FfiCtx<'a, M: ReplyMode = Single> {
     mailbox: u64,
     sender: Option<u32>,
     _borrow: PhantomData<&'a ()>,
+    /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
+    /// selects which reply surface this ctx exposes. Defaults to
+    /// [`Single`], so the common `FfiCtx<'_>` signature is unchanged.
+    _mode: PhantomData<M>,
 }
 
-impl FfiCtx<'_> {
+impl<'a> FfiCtx<'a, Manual> {
     /// Not part of the public API; called only by [`crate::export!`].
+    /// The runtime builds the most-permissive [`Manual`] view; the
+    /// `#[actor]` dispatcher / lifecycle shims downgrade it per handler
+    /// class with [`Self::as_single`].
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64) -> Self {
@@ -136,9 +145,42 @@ impl FfiCtx<'_> {
             mailbox,
             sender: None,
             _borrow: PhantomData,
+            _mode: PhantomData,
         }
     }
 
+    /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
+    /// [`Single`] ctx, dropping the `OutboundReply` surface. The
+    /// `#[actor]` macro hands a single-class handler this view, so a
+    /// handler whose marker disagrees with its class fails to unify.
+    /// There is deliberately no `as_manual` — the runtime only ever
+    /// downgrades.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_single(&mut self) -> &mut FfiCtx<'a, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `FfiCtx<'a, Manual>` and
+        // `FfiCtx<'a, Single>` are layout-identical (the marker field is a
+        // ZST for every `M` — see `reply_mode_types_are_zsts` and
+        // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
+        // marker without touching any real field and only removes
+        // capability, never adds it.
+        unsafe { &mut *ptr::from_mut(self).cast::<FfiCtx<'a, Single>>() }
+    }
+
+    /// ADR-0112 forward-only coercion to the reserved [`Stream`] view.
+    /// `#[handler::stream]` is rejected by the macro today, so this has
+    /// no in-tree caller yet; it exists so the stream class has its
+    /// downgrade path the day the emit surface lands.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_stream(&mut self) -> &mut FfiCtx<'a, Stream> {
+        // SAFETY: same as `as_single` — `M` is `PhantomData`-only, so the
+        // marker swap is a layout-identity reborrow.
+        unsafe { &mut *ptr::from_mut(self).cast::<FfiCtx<'a, Stream>>() }
+    }
+}
+
+impl<M: ReplyMode> FfiCtx<'_, M> {
     /// Not part of the public API; called only by the `#[actor]`
     /// dispatcher. Accepts `None` or `Some(ReplyHandle)` — the dispatcher
     /// passes `mail.reply_handle()` verbatim so component-origin and
@@ -251,7 +293,7 @@ impl FfiCtx<'_> {
     }
 }
 
-impl Resolver for FfiCtx<'_> {
+impl<M: ReplyMode> Resolver for FfiCtx<'_, M> {
     fn mailbox_id(&self) -> u64 {
         self.mailbox
     }
@@ -265,7 +307,7 @@ impl Resolver for FfiCtx<'_> {
     }
 }
 
-impl MailSender for FfiCtx<'_> {
+impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -324,7 +366,38 @@ impl MailSender for FfiCtx<'_> {
     }
 }
 
-impl OutboundReply for FfiCtx<'_> {
+// ADR-0112: the reply surface is per-mode. `Manual` carries it
+// permanently (a manual-class handler issues its own replies); `Single`
+// carries the identical body **transitionally** so the ~350 existing
+// `#[handler]` bodies that hand-call `ctx.reply` keep compiling — that
+// impl is dropped when `single` is locked (a separate follow-on issue).
+impl OutboundReply for FfiCtx<'_, Manual> {
+    type ReplyHandle = ReplyHandle;
+
+    fn reply_target(&self) -> Option<ReplyHandle> {
+        self.sender.map(ReplyHandle::__from_raw)
+    }
+
+    fn source_mailbox(&self) -> Option<MailboxId> {
+        None
+    }
+
+    //noinspection DuplicatedCode
+    fn reply<K: Kind>(&mut self, payload: &K) {
+        if let Some(raw) = self.sender {
+            let bytes = payload.encode_into_bytes();
+            MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
+        }
+    }
+
+    fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
+    }
+}
+
+// TRANSITIONAL (ADR-0112): dropped when single is locked.
+impl OutboundReply for FfiCtx<'_, Single> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {
@@ -462,5 +535,37 @@ impl Persistence for FfiDropCtx<'_> {
             status, 0,
             "aether-actor: save_state failed (status {status})"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FfiCtx, Manual, Single};
+    use crate::actor::ctx::OutboundReply;
+    use core::mem::{align_of, size_of};
+
+    /// ADR-0112: the mode marker is layout-neutral — the `Single` and
+    /// `Manual` views have identical size + alignment. This is the
+    /// invariant the `as_single` / `as_stream` pointer reborrows rest on.
+    #[test]
+    fn ffi_ctx_layout_identical_across_modes() {
+        assert_eq!(
+            size_of::<FfiCtx<'static, Single>>(),
+            size_of::<FfiCtx<'static, Manual>>(),
+        );
+        assert_eq!(
+            align_of::<FfiCtx<'static, Single>>(),
+            align_of::<FfiCtx<'static, Manual>>(),
+        );
+    }
+
+    /// ADR-0112 step 3: `OutboundReply` is reachable from both the
+    /// permanent `Manual` ctx and the transitional `Single` ctx (the
+    /// latter keeps the existing hand-`ctx.reply` handlers compiling).
+    #[test]
+    fn outbound_reply_present_on_single_and_manual() {
+        fn assert_impls<C: OutboundReply>() {}
+        assert_impls::<FfiCtx<'static, Single>>();
+        assert_impls::<FfiCtx<'static, Manual>>();
     }
 }
