@@ -37,6 +37,7 @@ spikes/*/target/
 !.claude/skills/sketch/
 !.claude/skills/secretary/
 !.claude/skills/sweep/
+!.claude/skills/land/
 # Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run
 # markdown, not part of the source tree. Read locally, file the wishes you
 # like as issues, discard the file.
