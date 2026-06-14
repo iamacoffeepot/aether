@@ -8,21 +8,22 @@
 #   (a) Role gate (all tools) — the active role's deny table matches the
 #       invoked skill (its slash-command form) or the git/gh verb that stands
 #       in for it (merge / push / issue-creation must be prevented, not
-#       detected after the fact) against the Bash command, and blocks a hit.
+#       detected after the fact) against the Bash command, and asks to confirm.
 #         dreamer / scoper -> approve, implement, merge, code-push
 #         orchestrator     -> wish, sketch, issue-creation
 #         everything       -> nothing
 #   (b) Edit-path gate (Edit/Write/MultiEdit/NotebookEdit) — resolves the
-#       target file_path to absolute and blocks a write that lands in the main
-#       worktree, allowing /tmp scratch and the session's own worktree
-#       (.claude/worktrees/<session-id>). Reads dirty nothing, so they are
-#       never gated; the open-ended ways a Bash command can dirty main are
-#       caught after the fact by check-worktree-clean.sh.
+#       target file_path to absolute and asks to confirm a write that would
+#       dirty the main worktree. /tmp scratch, the session's own worktree
+#       (.claude/worktrees/<session-id>), and any aether-gitignored path are
+#       allowed silently — a gitignored path never shows in `git status`,
+#       matching the PostToolUse tripwire check-worktree-clean.sh.
 #
 # Reads the PreToolUse tool-call JSON from stdin (Claude Code hook protocol).
-# Exits 0 to allow, 2 to block (stderr body returns to Claude). Fails open
-# (exit 0) when the role marker is absent, so an unbound session is never
-# bricked and enforcement degrades to the pre-ADR no-op.
+# A crossing is surfaced as an ask-to-confirm prompt (ADR-0111): the hook prints
+# a `permissionDecision: "ask"` decision on stdout and exits 0, so the tool runs
+# only if the operator confirms. Fails open (plain exit 0, no prompt) when the
+# role marker is absent, so an unbound session is never gated.
 #
 # Stays bash 3.2 compatible (the macOS system bash): no associative arrays,
 # the deny table is expressed as case-statement data functions.
@@ -103,17 +104,26 @@ role_remedy() {
     esac
 }
 
+# Surface a boundary crossing as a PreToolUse ask-to-confirm decision (ADR-0111):
+# print the hook JSON carrying the reason on stdout and exit 0, so the tool runs
+# only if the operator confirms. Supersedes the old `exit 2` hard deny.
+emit_ask() {
+    jq -nc --arg r "$1" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"ask",permissionDecisionReason:$r}}'
+    exit 0
+}
+
 # Role gate — match the command against each action the active role denies.
 if [[ -n "$command" ]]; then
     for action in $(role_actions "$role"); do
         if printf '%s' "$command" | grep -qE "$(action_regex "$action")"; then
-            {
-                printf '[role boundary] the %s role may not %s.\n\n' "$role" "$(action_label "$action")"
-                printf 'ADR-0110 binds this session to the %s role; that boundary is enforced,\n' "$role"
-                printf 'not advisory.\n\n'
-                printf '%s\n' "$(role_remedy "$role")"
-            } >&2
-            exit 2
+            reason=$(
+                printf '[role boundary] the %s role does not normally %s.\n\n' "$role" "$(action_label "$action")"
+                printf 'ADR-0110 binds this session to the %s role. Confirm only if you mean to\n' "$role"
+                printf 'cross that boundary.\n\n'
+                printf '%s' "$(role_remedy "$role")"
+            )
+            emit_ask "$reason"
         fi
     done
 fi
@@ -159,18 +169,24 @@ esac
 case "$target" in
     "$session_worktree"/* | "$session_worktree") exit 0 ;;
 esac
-# Block anything else under the main worktree — that is what would dirty main.
+# Under the main worktree: ask before a write that would actually dirty aether's
+# tracked state. A path aether gitignores never shows in `git status` (matching
+# the PostToolUse tripwire), so allow it silently — no prompt.
 case "$target" in
     "$main_root"/* | "$main_root")
-        {
-            printf '[worktree boundary] blocked an edit to a path in the main worktree:\n\n'
+        if command -v git >/dev/null 2>&1 \
+            && git -C "$main_root" rev-parse --git-dir >/dev/null 2>&1 \
+            && git -C "$main_root" check-ignore -q "$target" 2>/dev/null; then
+            exit 0
+        fi
+        reason=$(
+            printf '[worktree boundary] this edit lands in the main worktree:\n\n'
             printf '    %s\n\n' "$target"
-            printf 'ADR-0110 holds every role to the don'\''t-dirty-main rule: edits land in\n'
-            printf 'this session'\''s own worktree (reads anywhere and /tmp scratch are fine).\n\n'
-            printf 'Redo the edit under:\n\n'
-            printf '    %s\n' "$session_worktree"
-        } >&2
-        exit 2
+            printf 'ADR-0110 holds every role to the don'\''t-dirty-main rule. Confirm only if\n'
+            printf 'you mean to dirty the main checkout; otherwise redo it under:\n\n'
+            printf '    %s' "$session_worktree"
+        )
+        emit_ask "$reason"
         ;;
 esac
 
