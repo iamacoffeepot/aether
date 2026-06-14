@@ -43,6 +43,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Mutex;
 
 use aether_data::{Kind, KindId, MailId};
@@ -60,6 +61,48 @@ use super::ctx::NativeCtx;
 /// cancellation — the happy path ignores it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DispatchId(pub u64);
+
+/// A type-level "receipt" for a deferred reply (ADR-0109). Returned by
+/// [`dispatch_blocking`](NativeCtx::dispatch_blocking) in place of a bare
+/// [`DispatchId`] so a request handler can declare `-> Pending<R>`: the
+/// reply is an `R`, sent later from the matching `#[handler(task)]`
+/// completion rather than synchronously on this handler's return.
+///
+/// Phantom over `R` only — the actual hold and reply target live in the
+/// in-flight ledger, not here, so a `Pending<R>` carries just the
+/// [`DispatchId`] (reachable via [`Pending::dispatch_id`] for *optional*
+/// cancellation) plus the reply-kind marker. Framework-constructed: only
+/// `dispatch_blocking` mints one, so a signature that declares
+/// `Pending<R>` implies an obligation for `R` was actually armed
+/// (ADR-0109 §3) — it is not user-fabricable.
+pub struct Pending<R: Kind> {
+    dispatch_id: DispatchId,
+    /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
+    /// `Send`/`Sync` regardless of `R` — it owns no `R`, it only names
+    /// the reply kind.
+    _reply: PhantomData<fn() -> R>,
+}
+
+impl<R: Kind> Pending<R> {
+    /// Wrap the armed dispatch's [`DispatchId`]. Crate-internal — only
+    /// [`dispatch_blocking`](NativeCtx::dispatch_blocking) constructs a
+    /// `Pending`, which is what makes the `-> Pending<R>` contract
+    /// non-forgeable (ADR-0109 §3).
+    pub(crate) fn new(dispatch_id: DispatchId) -> Self {
+        Self {
+            dispatch_id,
+            _reply: PhantomData,
+        }
+    }
+
+    /// The [`DispatchId`] of the armed dispatch, for *optional*
+    /// cancellation. The happy path ignores it — the completion routes
+    /// back through the in-flight ledger without it.
+    #[must_use]
+    pub fn dispatch_id(&self) -> DispatchId {
+        self.dispatch_id
+    }
+}
 
 /// Substrate-internal framework kind the dispatch worker pushes to the
 /// actor's own mailbox when its blocking closure finishes. Carries only
@@ -238,6 +281,32 @@ impl<O, C> TaskDone<O, C> {
     {
         let reply = f(&self.output, &self.context);
         ctx.reply_to_target(self.reply_to, &reply, self.hold_root(), None);
+        self.release();
+    }
+
+    /// Send a precomputed `reply` value through the carried `reply_to`,
+    /// then release the hold (ADR-0109). The deferred-contract form: the
+    /// `#[handler(task)]` completion handler *borrows* the `TaskDone` and
+    /// **returns** the reply, and the `#[actor]` macro hands that value
+    /// here — [`resolve_with`](Self::resolve_with) with the value already
+    /// computed by the handler rather than built in a ctx-less closure.
+    /// Re-replies **first**, then releases the hold (`Sent` before
+    /// `Release`, ADR-0080 §12), like the rest of the `resolve*` family.
+    pub fn resolve_value<R>(mut self, ctx: &mut NativeCtx<'_>, reply: &R)
+    where
+        R: Kind + serde::Serialize,
+    {
+        ctx.reply_to_target(self.reply_to, reply, self.hold_root(), None);
+        self.release();
+    }
+
+    /// Release the hold **without** sending any reply — the sanctioned
+    /// no-reply completion (ADR-0109): a `#[handler(task)]` that borrows
+    /// the `TaskDone` and returns `()` discharges the chain without
+    /// replying. Unlike dropping an un-resolved `TaskDone` (a silent lost
+    /// reply), this is a deliberate signature choice, so it releases
+    /// cleanly and skips the lost-reply `debug_assert`.
+    pub fn release_no_reply(mut self) {
         self.release();
     }
 
@@ -522,7 +591,9 @@ mod tests {
         // worker, return.
         {
             let mut ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, root);
-            let _id = ctx.dispatch_blocking(move || Answer { value: 42 });
+            // The bare `dispatch_blocking` now returns a `Pending<R>`
+            // (ADR-0109); `R` is the declared reply kind (here `Answer`).
+            let _pending = ctx.dispatch_blocking::<Answer, Answer, _>(move || Answer { value: 42 });
         }
 
         // The handler returned but the chain is held: settlement is

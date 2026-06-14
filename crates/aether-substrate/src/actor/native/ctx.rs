@@ -37,7 +37,7 @@ use crate::runtime::trace::SettlementHold;
 use super::{NativeActor, NativeDispatch};
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
-use crate::actor::native::dispatch_blocking::{DispatchId, TaskCompletionWake, TaskDone};
+use crate::actor::native::dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn_thread;
 use crate::chassis::inbox::InboundMail;
@@ -312,14 +312,21 @@ impl<'a> NativeCtx<'a> {
     /// [`Self::take_task_done`] to rebuild the [`TaskDone`], then
     /// `resolve`s it.
     ///
-    /// Returns the [`DispatchId`] for *optional* cancellation; the happy
-    /// path ignores it.
-    pub fn dispatch_blocking<O, F>(&mut self, f: F) -> DispatchId
+    /// Returns a [`Pending<R>`] (ADR-0109) — the type-level receipt a
+    /// request handler returns to declare `-> Pending<R>`, naming `R` as
+    /// the reply kind the matching `#[handler(task)]` completion sends.
+    /// The inner [`DispatchId`] is reachable via [`Pending::dispatch_id`]
+    /// for *optional* cancellation; the happy path ignores it. `R` is
+    /// independent of the worker output `O` — the completion handler maps
+    /// `O` to the reply `R` it returns.
+    pub fn dispatch_blocking<O, R, F>(&mut self, f: F) -> Pending<R>
     where
         O: Send + 'static,
+        R: Kind,
         F: FnOnce() -> O + Send + 'static,
     {
-        self.dispatch_blocking_with::<O, (), F>((), f)
+        let id = self.dispatch_blocking_with::<O, (), F>((), f);
+        Pending::new(id)
     }
 
     /// Context-carrying variant of [`Self::dispatch_blocking`]

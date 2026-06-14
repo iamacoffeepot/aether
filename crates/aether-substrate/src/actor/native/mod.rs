@@ -76,7 +76,7 @@ pub mod spawn_thread;
 
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
-pub use dispatch_blocking::{DispatchId, TaskCompletionWake, TaskDone};
+pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
 // iamacoffeepot/aether#1272: driver-as-actor capabilities that own
 // their inbox drain inline (today only the desktop window driver)
 // reach for the `NativeCtx`-free variants of the framework dispatch

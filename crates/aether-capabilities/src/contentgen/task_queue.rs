@@ -83,7 +83,7 @@ impl TaskQueue {
     }
 
     /// Accept a unit of blocking work. Under the bound, dispatch it now
-    /// via [`NativeCtx::dispatch_blocking`] (which acquires the hold +
+    /// via [`NativeCtx::dispatch_blocking_with`] (which acquires the hold +
     /// reply target from `ctx`). Over the bound, capture the chain
     /// context *now* — a [`SettlementHold`](aether_substrate::runtime::trace::SettlementHold)
     /// on the current root plus this handler's reply target — and buffer
@@ -97,7 +97,12 @@ impl TaskQueue {
         F: FnOnce() -> O + Send + 'static,
     {
         if self.in_flight < self.max {
-            ctx.dispatch_blocking(work);
+            // `dispatch_blocking_with` (not the bare `dispatch_blocking`,
+            // which now returns a `Pending<R>` and so needs the reply kind
+            // `R` declared, ADR-0109): `TaskQueue` is reply-kind-agnostic
+            // plumbing — its completion handler re-replies the carried
+            // output via `done.resolve`, so there is no `R` to thread here.
+            ctx.dispatch_blocking_with((), work);
             self.in_flight += 1;
         } else {
             // Capture the hold + reply target at accept time so the
