@@ -35,7 +35,8 @@ use aether_kinds::{
     DeleteResult, DrawSolidQuads, DrawText, DrawTexturedQuads, DropComponent, DropResult,
     FrameCheck, FrameCheckResult, FrameReduction, FsError, List, ListResult, LoadComponent,
     LoadFont, LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale, QuadSpace, Read,
-    ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, Write, WriteResult,
+    ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, UiBar, UiPanel, Write,
+    WriteResult,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{
@@ -842,6 +843,95 @@ fn solid_quad_draws_screen_space_rect() {
     assert!(
         cleared_coverage < 0.01,
         "after the solid quad stopped being sent the frame should be uniform clear color, \
+         but coverage was {cleared_coverage} (immediate-mode clear did not run)",
+    );
+}
+
+/// iamacoffeepot/aether#1740: the locomotion HUD composes on the
+/// `aether.ui` cap in screen space. This drives the same widget mail the
+/// kit now sends — a dark `UiPanel` backing plate under a `UiBar` health
+/// fill in a centered strip near the top edge — and asserts the bar lands
+/// where a screen-anchored HUD should: a coverage band (a bar is drawn,
+/// the frame is neither empty nor full) with the lit centroid sitting in
+/// the top of the frame and horizontally centered. A second capture after
+/// an advance with nothing resent asserts the immediate-mode clear.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn ui_hud_draws_screen_space_health_bar() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (128u32, 96u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    // A centered strip near the top edge, mirroring the kit's HUD layout:
+    // the dark plate, then the health fill inset within it.
+    let plate_color = [0.10, 0.10, 0.13, 1.0];
+    let pre = vec![
+        envelope(
+            "aether.ui",
+            &UiPanel {
+                rect: [29.0, 8.0, 70.0, 12.0],
+                color: plate_color,
+            },
+        ),
+        envelope(
+            "aether.ui",
+            &UiBar {
+                rect: [31.0, 10.0, 66.0, 8.0],
+                frac: 0.7,
+                track_color: plate_color,
+                // A bright fill so the bar reads clearly against the plate.
+                fill_color: [0.25, 0.82, 0.32, 1.0],
+            },
+        ),
+    ];
+
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+        .expect("capture-with-mails");
+    let png = captured.captured("snap").expect("snap step ran");
+    let img = decode_png(png).expect("decode capture png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    // A bar is drawn: coverage sits in a band, neither an empty frame nor a
+    // fully filled one.
+    let drawn = coverage(&img, bg, tolerance);
+    assert!(
+        (0.02..0.40).contains(&drawn),
+        "HUD bar coverage {drawn} fell outside the expected band (0.02, 0.40); \
+         the captured frame is effectively empty or entirely filled",
+    );
+
+    // Screen-anchored at the top: the lit centroid lands in the top of the
+    // frame and stays horizontally centered.
+    let (cx, cy) = centroid(&img, bg, tolerance).expect("a lit frame has a centroid");
+    assert!(
+        cy < frame_height as f32 * 0.4,
+        "HUD centroid y={cy} should sit in the top of the {frame_height}-tall frame \
+         (the bar is anchored near the top edge)",
+    );
+    assert!(
+        (frame_width as f32 * 0.2..frame_width as f32 * 0.8).contains(&cx),
+        "HUD centroid x={cx} should sit toward the horizontal center of the \
+         {frame_width}-wide frame (the bar is centered)",
+    );
+
+    // Immediate-mode clear: advance with nothing resent, next capture
+    // returns to the clear color.
+    let cleared = bench
+        .execute(vec![
+            ("clear_advance", BenchOp::advance(1)),
+            ("snap2", BenchOp::capture()),
+        ])
+        .expect("advance + capture");
+    let png2 = cleared.captured("snap2").expect("snap2 step ran");
+    let img2 = decode_png(png2).expect("decode cleared png");
+    let cleared_coverage = coverage(&img2, background_top_left(&img2), tolerance);
+    assert!(
+        cleared_coverage < 0.01,
+        "after the HUD widgets stopped being sent the frame should be uniform clear color, \
          but coverage was {cleared_coverage} (immediate-mode clear did not run)",
     );
 }

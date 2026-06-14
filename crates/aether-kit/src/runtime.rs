@@ -77,10 +77,10 @@ use std::collections::{BinaryHeap, VecDeque};
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
+use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability, UiCapability};
 use aether_kinds::{
-    Camera, DrawTriangle, Key, KeyRelease, MouseButton, MouseMove, Render, Tick, Vertex,
-    WindowSize, keycode,
+    Camera, DrawTriangle, Key, KeyRelease, MouseButton, MouseMove, Render, Tick, UiBar, UiPanel,
+    Vertex, WindowSize, keycode,
 };
 use aether_math::{Mat4, Vec3};
 
@@ -436,6 +436,9 @@ impl FfiActor for Locomotion {
             view_proj: self.view_proj(),
         });
         render.send_many(&self.render_triangles());
+        // The HUD composes on the `aether.ui` cap in screen space, kept
+        // separate from the world geometry above.
+        self.send_hud(ctx);
     }
 
     #[handler]
@@ -838,87 +841,48 @@ impl Locomotion {
         let ax = self.mover.x as f32 / OCTIMETERS_PER_TILE as f32;
         let az = self.mover.z as f32 / OCTIMETERS_PER_TILE as f32;
         push_capsule(&mut out, ax, az, mover_color(self.cell));
-        // HUD: a health bar pinned to the top of the screen, drawn last so it
-        // sits over the scene. A dark backing plate, then a fill that shrinks
-        // and reddens as health drops.
-        let hud = Hud::new(self.camera_eye_target(), self.aspect());
-        hud.quad(
-            &mut out,
-            [-0.55, 0.55, 0.84, 0.92],
-            0.50,
-            (0.10, 0.10, 0.13),
-        );
-        let frac = self.health as f32 / HEALTH_MAX as f32;
-        if frac > 0.0 {
-            // A touch closer than the backing so it wins the depth test.
-            let rect = [-0.52, frac.mul_add(1.04, -0.52), 0.855, 0.905];
-            hud.quad(&mut out, rect, 0.49, health_color(frac));
-        }
         out
     }
-}
 
-/// A projector for screen-pinned HUD quads: it places a quad given in NDC at a
-/// fixed depth along the camera ray, so the quad holds its screen position as
-/// the camera orbits.
-struct Hud {
-    eye: Vec3,
-    fwd: Vec3,
-    right: Vec3,
-    up: Vec3,
-    scale_x: f32,
-    scale_y: f32,
-}
-
-impl Hud {
-    /// Build from the camera's eye/target and the viewport aspect — the same
-    /// basis `pick_world` derives, reused to project the other way.
-    fn new((eye, target): (Vec3, Vec3), aspect: f32) -> Self {
-        let fwd = (target - eye).normalize();
-        let right = fwd.cross(Vec3::Y).normalize();
-        let up = right.cross(fwd);
-        let tan = (CAMERA_FOV_Y * 0.5).tan();
-        Self {
-            eye,
-            fwd,
-            right,
-            up,
-            scale_x: tan * aspect,
-            scale_y: tan,
+    /// Mail the screen-anchored health HUD to the `aether.ui` cap: a dark
+    /// backing `panel` plate under a health `bar` whose fill shrinks and
+    /// reddens as health drops. The rects are screen-pixel rects derived from
+    /// the cached window size and resent every frame in immediate mode.
+    /// Skipped in preview (the parameter contact sheet carries no mover or
+    /// HUD) and before the first `WindowSize` establishes a real viewport.
+    fn send_hud(&self, ctx: &mut FfiCtx<'_>) {
+        if self.preview != 0 {
+            return;
         }
-    }
-
-    /// Append a flat-coloured quad covering the NDC rectangle `[x0, x1, y0, y1]`
-    /// at `depth` along the camera ray — smaller depth draws nearer, so layered
-    /// HUD pieces win the depth test in order.
-    fn quad(&self, out: &mut Vec<DrawTriangle>, rect: [f32; 4], depth: f32, rgb: (f32, f32, f32)) {
-        let [x0, x1, y0, y1] = rect;
-        let corner = |nx: f32, ny: f32| {
-            self.eye
-                + self.fwd * depth
-                + self.right * (nx * self.scale_x * depth)
-                + self.up * (ny * self.scale_y * depth)
-        };
-        let (r, g, b) = rgb;
-        let v = |p: Vec3| Vertex {
-            x: p.x,
-            y: p.y,
-            z: p.z,
-            r,
-            g,
-            b,
-        };
-        let (p00, p10, p11, p01) = (
-            corner(x0, y0),
-            corner(x1, y0),
-            corner(x1, y1),
-            corner(x0, y1),
-        );
-        out.push(DrawTriangle {
-            verts: [v(p00), v(p10), v(p11)],
+        let (width, height) = self.window;
+        if width == 0 || height == 0 {
+            return;
+        }
+        let (width, height) = (width as f32, height as f32);
+        // A centered strip near the top edge: the dark plate, then a fill
+        // track inset within it. Both are fractions of the window so the HUD
+        // holds its screen position at any size — the anchoring the
+        // camera-ray projector used to stand in for.
+        let plate = [0.225 * width, 0.040 * height, 0.550 * width, 0.040 * height];
+        let track = [
+            0.240 * width,
+            0.0475 * height,
+            0.520 * width,
+            0.025 * height,
+        ];
+        let frac = self.health as f32 / HEALTH_MAX as f32;
+        let (fill_r, fill_g, fill_b) = health_color(frac);
+        let plate_color = [0.10, 0.10, 0.13, 1.0];
+        let ui = ctx.actor::<UiCapability>();
+        ui.send(&UiPanel {
+            rect: plate,
+            color: plate_color,
         });
-        out.push(DrawTriangle {
-            verts: [v(p00), v(p11), v(p01)],
+        ui.send(&UiBar {
+            rect: track,
+            frac,
+            track_color: plate_color,
+            fill_color: [fill_r, fill_g, fill_b, 1.0],
         });
     }
 }

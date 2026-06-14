@@ -44,6 +44,7 @@
   - [Adding a config knob](recipes/adding-a-config-knob.md)
   - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
   - [Drawing your first text](recipes/drawing-text.md)
+  - [Drawing your first UI](recipes/drawing-ui.md)
   - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
   - [Writing a component](recipes/writing-a-component.md)
