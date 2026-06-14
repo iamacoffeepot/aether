@@ -45,7 +45,7 @@ if (!theme || !wishDir || roots.length === 0) {
   return { error: 'wish-deep needs args = { theme, wishDir, roots:[...] }. Call it from /wish --deep, which runs the adversity + root-generation front of the pass inline and hands the roots over.' }
 }
 
-// ─── Schemas (the load-bearing driller / skeptic contract) ───
+// ─── Schemas (the load-bearing driller / skeptic / synthesis contract) ───
 
 // A driller writes its own wish.md and returns this compact struct. `summary` is
 // the bounded lineage hand-down its children inherit. `grounded_surfaces` is the
@@ -71,6 +71,33 @@ const DRILL_SCHEMA = {
           wish: { type: 'string', description: 'the sub-wish, phrased "I wish I could X so that I could Y."' },
           doors_opened: { type: 'number', description: 'leverage 1-5: how much downstream this child unlocks if resolved' },
           unresolvedness: { type: 'number', description: 'how far from producible 1-5: 5 = a deep unknown, 1 = nearly a plan already' },
+        },
+      },
+    },
+  },
+}
+
+// The synthesis agent returns per-leaf weights so the workflow can build a
+// structured sketches array without a second agent pass. One entry per terminal
+// leaf (producible:true && no children). Weight follows the /scope Size rubric:
+// skinny = S/M/L (one focused PR), fat = XL (multi-PR arc, decompose first).
+const SKETCH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['sketches'],
+  properties: {
+    sketches: {
+      type: 'array',
+      description: 'one entry per terminal leaf (producible && no children), in slug-chain order',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['slugChain', 'wish', 'weight', 'recommendation'],
+        properties: {
+          slugChain: { type: 'array', items: { type: 'string' }, description: 'path from root to this leaf, e.g. ["root-slug", "leaf-slug"]' },
+          wish: { type: 'string', description: 'the leaf wish text' },
+          weight: { type: 'string', enum: ['S', 'M', 'L', 'XL'], description: 'S/M/L = skinny (one focused PR); XL = fat (multi-PR arc)' },
+          recommendation: { type: 'string', description: 'one-line filing recommendation' },
         },
       },
     },
@@ -189,12 +216,13 @@ const skepticPrompt = (node, res) =>
   'Otherwise — every leaned-on surface checks out and what remains is inline decisions — ' +
   'return hidden_unknown_found:false and unknown:null with a rationale naming what you verified.\n\nStructured output only.'
 
-const synthPrompt = (indexPath, nodeBlock, stubBlock, stats) =>
+const synthPrompt = (indexPath, nodeBlock, stubBlock, leafBlock, stats) =>
   '## Wish-tree synthesis — write the index\n\n' +
   'A /wish --deep pass drilled this tree node by node; each node below is one bounded summary (the fan-out spent ' +
   'the cross-branch coherence, your job is to recover it). Theme: ' + theme + (role ? ' (as ' + role + ')' : '') + '.\n\n' +
   '## Nodes (path · producible · wish · summary)\n' + nodeBlock + '\n\n' +
   '## Diminishing-returns stubs (recorded undrilled — score collapsed below half the parent past depth 3; resumable via /wish --under)\n' + stubBlock + '\n\n' +
+  '## Terminal leaves to weigh (producible plans — assign skinny/fat weight)\n' + leafBlock + '\n\n' +
   '## Stats\n' +
   'roots: ' + stats.rootCount + '  ·  drilled nodes: ' + stats.totalNodes + '  ·  plans (leaves): ' + stats.leafCount +
   '  ·  max depth: ' + stats.maxDepth + '  ·  skeptic demotions: ' + stats.skepticDemotions +
@@ -204,7 +232,15 @@ const synthPrompt = (indexPath, nodeBlock, stubBlock, stats) =>
   'wishes with one-line summaries; the deep-spine map (which high-leverage branches drilled deep vs which stayed ' +
   'stubs, and WHY — the cross-branch coherence); the skeptic-demoted nodes (where "good enough" was caught); the ' +
   'diminishing-returns stub list above (collapsing-score branches that self-terminated, resumable via /wish --under); the ' +
-  'stats above; and a short notes paragraph. Then STOP — return a one-line confirmation that index.md was written.\n\n' +
+  'stats above; and a short notes paragraph.\n\n' +
+  'Additionally, write a ## Weighted sketches section at the end of index.md — one bullet per terminal leaf ' +
+  '(the leaves listed in "Terminal leaves to weigh" above). Each bullet: `- [slug-path] (WEIGHT) wish-text — recommendation`. ' +
+  'Assign weight using the /scope Size rubric: S = single-file/concept change (one small PR); M = single-crate/multiple files; ' +
+  'L = cross-crate or architectural change; XL = multi-PR arc that must be decomposed before scoping. ' +
+  'S/M/L = skinny (one focused PR, ready for /sketch then /scope). XL = fat (decompose first via /wish --under or file fat for sweep fat). ' +
+  'The recommendation line is one sentence: skinny leaves get "Ready to /sketch then /scope"; fat leaves get ' +
+  '"Decompose via /wish --under <path> or file fat for sweep fat."\n\n' +
+  'After writing index.md, return the structured sketch list (one entry per leaf) using the schema provided. ' +
   'You MUST write the index.md file.'
 
 // ─── Phase: Drill (best-first frontier) ───
@@ -336,13 +372,32 @@ const stubBlock = stubs.length
       .join('\n')
   : '(none)'
 
+// Terminal leaves: same predicate the drill loop uses for leafCount (producible && no children).
+// The drill loop pushes children onto the frontier after a non-producible node, so a node that
+// landed in summaries with producible:true had children:[] at that point — leafCount captured
+// exactly these. We reconstruct them here from the summaries array for the synthesis prompt.
+const leaves = summaries.filter(s => s.producible)
+
+const leafBlock = leaves.length
+  ? leaves
+      .slice()
+      .sort((a, b) => a.slugChain.join('/').localeCompare(b.slugChain.join('/')))
+      .map(s => '- [' + s.slugChain.join('/') + '] ' + s.wish + '\n    summary: ' + s.summary)
+      .join('\n')
+  : '(no terminal leaves — all nodes still have children or all were stubs)'
+
 const indexPath = wishDir + '/index.md'
-const synth = await agent(synthPrompt(indexPath, nodeBlock, stubBlock, stats), { label: 'synthesize', phase: 'Synthesize' })
+const synth = await agent(synthPrompt(indexPath, nodeBlock, stubBlock, leafBlock, stats), { label: 'synthesize', phase: 'Synthesize', schema: SKETCH_SCHEMA })
+
+// Build the sketches array from the synth agent's structured output.
+// If the agent did not return a conforming schema (e.g. no leaves), fall back to an empty array.
+const sketches = (synth && Array.isArray(synth.sketches)) ? synth.sketches : []
 
 return {
   ...stats,
   wishDir,
   indexWritten: !!synth,
+  sketches,
   // surfaced to the skill for its report
   roots: roots.map(r => r.slug),
 }
