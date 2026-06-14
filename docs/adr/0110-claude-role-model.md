@@ -1,6 +1,6 @@
 # ADR-0110: Claude Role Model
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 
 ## Context
