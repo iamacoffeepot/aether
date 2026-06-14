@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use aether_actor::OutboundReply;
 use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
@@ -31,8 +32,9 @@ use aether_substrate::handle_store::HandleStore;
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::{
-    Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
-    NativeInitCtx, NeverDriver, PassiveChassis, Registry, mail::MailboxId,
+    Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, Manual, NativeActor, NativeBinding,
+    NativeCtx, NativeDispatch, NativeInitCtx, NeverDriver, PassiveChassis, Registry,
+    mail::MailboxId,
 };
 use std::thread;
 
@@ -974,4 +976,116 @@ impl NativeActor for DeferredReplyCap {
             .store(done.output().value, AtomicOrdering::SeqCst);
         self.obs.silent_calls.fetch_add(1, AtomicOrdering::SeqCst);
     }
+}
+
+/// ADR-0112 manual reply class: input kind for the manual handler.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.manual_ping")]
+struct ManualPing {
+    seq: u32,
+}
+
+/// ADR-0112 manual reply class: the kind the manual handler replies with.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.manual_ack")]
+struct ManualAck {
+    seq: u32,
+}
+
+/// ADR-0112: a manual-class cap — it receives the `Manual` ctx and issues
+/// its own reply by hand via `OutboundReply::reply`, rather than via a
+/// `-> R` return value.
+struct ManualReplyCap;
+
+#[aether_data::actor]
+impl NativeActor for ManualReplyCap {
+    const NAMESPACE: &'static str = "test.macro_native_actor.manual_reply";
+    type Config = ();
+
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_data::handler::manual]
+    #[allow(clippy::unused_self)]
+    fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Manual>, ping: ManualPing) {
+        ctx.reply(&ManualAck { seq: ping.seq });
+    }
+}
+
+/// ADR-0112: a `#[handler::manual]` handler receives the `Manual` ctx and
+/// replies through `ctx.reply` — drive it through the macro dispatch seam
+/// (`new_dispatching` + `__aether_dispatch_envelope`) and assert the ack
+/// lands at the caller carrying the declared correlation.
+#[test]
+fn manual_handler_replies_through_ctx() {
+    let (registry, mailer) = fresh_substrate();
+
+    let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+    let caller = registry.register_inbox(
+        "test.macro_native_actor.manual_caller",
+        forward_to(reply_tx),
+    );
+
+    let binding = Arc::new(NativeBinding::new_for_test(
+        Arc::clone(&mailer),
+        MailboxId(0x1850_0001),
+    ));
+    let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 91);
+
+    let mut cap = ManualReplyCap;
+    {
+        // ADR-0112: the dispatch seam carries the `Manual` ctx — build it
+        // via `new_dispatching`.
+        let mut ctx =
+            NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+        let handled = cap.__aether_dispatch_envelope(
+            &mut ctx,
+            ManualPing::ID,
+            &ManualPing { seq: 9 }.encode_into_bytes(),
+        );
+        assert_eq!(handled, Some(()), "the manual handler ran for its kind");
+        // Drop the ctx (flushing buffered outbound) before reading the reply.
+    }
+
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the manual handler replied to the inbound sender via ctx.reply");
+    assert_eq!(
+        reply.kind,
+        ManualAck::ID,
+        "the reply carries the manual handler's ack kind",
+    );
+    assert_eq!(
+        reply.sender.correlation_id, 91,
+        "the caller's correlation is echoed onto the manual reply",
+    );
+    let ack = ManualAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
+    assert_eq!(
+        ack,
+        ManualAck { seq: 9 },
+        "the manual reply carries the ping seq"
+    );
 }

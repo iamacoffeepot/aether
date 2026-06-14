@@ -210,35 +210,6 @@ pub(super) const fn write_option_str(
     pos
 }
 
-/// `Option<u64>` length/write — used by the `InputsRecord::Handler`
-/// encoder for the ADR-0109 reply kind id (`None` for a `-> ()`
-/// handler, `Some(KindId.0)` otherwise). Postcard encodes an `Option`
-/// as a one-byte discriminant (`0` None / `1` Some) followed by the
-/// varint payload when present.
-pub(super) const fn option_varint_u64_len(val: Option<u64>) -> usize {
-    match val {
-        None => 1,
-        Some(v) => 1 + varint_u64_len(v),
-    }
-}
-
-pub(super) const fn write_option_varint_u64(
-    val: Option<u64>,
-    out: &mut [u8],
-    cursor: usize,
-) -> usize {
-    match val {
-        None => {
-            out[cursor] = 0;
-            cursor + 1
-        }
-        Some(v) => {
-            out[cursor] = 1;
-            write_varint_u64(v, out, cursor + 1)
-        }
-    }
-}
-
 /// `Option<&'static str>` length/write — used by the `InputsRecord`
 /// encoders where the macro captures doc strings as plain `&str`
 /// without a `Cow` wrapper.

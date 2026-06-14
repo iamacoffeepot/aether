@@ -268,19 +268,31 @@ pub trait ErasedFfiActor {
     fn erased_namespace(&self) -> &'static str;
 
     /// Forwards to the `#[actor]`-synthesized `__aether_dispatch`.
-    fn erased_dispatch(&mut self, ctx: &mut FfiCtx<'_>, mail: crate::Mail<'_>) -> u32;
+    /// ADR-0112: the object-safe seam carries the most-permissive
+    /// [`Manual`](crate::Manual) view; the synthesized dispatcher
+    /// downgrades per handler class.
+    fn erased_dispatch(
+        &mut self,
+        ctx: &mut FfiCtx<'_, crate::Manual>,
+        mail: crate::Mail<'_>,
+    ) -> u32;
 
-    /// Forwards to [`FfiActor::wire`].
-    fn erased_wire(&mut self, ctx: &mut FfiCtx<'_>);
+    /// Forwards to [`FfiActor::wire`] (the synthesized impl downgrades
+    /// the carried [`Manual`](crate::Manual) ctx to `Single`).
+    fn erased_wire(&mut self, ctx: &mut FfiCtx<'_, crate::Manual>);
 
     /// Forwards to [`FfiActor::unwire`].
-    fn erased_unwire(&mut self, ctx: &mut FfiCtx<'_>);
+    fn erased_unwire(&mut self, ctx: &mut FfiCtx<'_, crate::Manual>);
 
     /// Forwards to [`FfiActor::on_dehydrate`].
     fn erased_on_dehydrate(&mut self, ctx: &mut FfiDropCtx<'_>);
 
     /// Forwards to [`FfiActor::on_rehydrate`].
-    fn erased_on_rehydrate(&mut self, ctx: &mut FfiCtx<'_>, prior: crate::PriorState<'_>);
+    fn erased_on_rehydrate(
+        &mut self,
+        ctx: &mut FfiCtx<'_, crate::Manual>,
+        prior: crate::PriorState<'_>,
+    );
 }
 
 /// Stage a guest init-failure message into the substrate via
@@ -709,8 +721,10 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
-            <$component as $crate::FfiActor>::wire(instance, &mut ctx);
+            // ADR-0112: the runtime builds the `Manual` view; `wire`'s
+            // default signature is `FfiCtx<'_>` (= Single), so downgrade.
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            <$component as $crate::FfiActor>::wire(instance, ctx.as_single());
             0
         }
 
@@ -725,8 +739,8 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
-            <$component as $crate::FfiActor>::unwire(instance, &mut ctx);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+            <$component as $crate::FfiActor>::unwire(instance, ctx.as_single());
             0
         }
 
@@ -753,7 +767,9 @@ macro_rules! __export_internal {
                 <$component as $crate::Actor>::NAMESPACE,
             )
             .0;
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            // ADR-0112: dispatch receives the full `Manual` ctx; the
+            // synthesized `__aether_dispatch` downgrades per handler class.
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             instance.__aether_dispatch(&mut ctx, mail)
         }
@@ -830,9 +846,9 @@ macro_rules! __export_internal {
                 <$component as $crate::Actor>::NAMESPACE,
             )
             .0;
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
-            <$component as $crate::FfiActor>::on_rehydrate(instance, &mut ctx, prior);
+            <$component as $crate::FfiActor>::on_rehydrate(instance, ctx.as_single(), prior);
             0
         }
     };
@@ -904,9 +920,12 @@ macro_rules! __export_multi_internal {
                         $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BOUNDARY_LEN>(
                             <$component as $crate::Actor>::NAMESPACE,
                         );
-                    // Per-record section version byte (0x03), in lockstep
-                    // with `INPUTS_SECTION_VERSION` (ADR-0109 / issue 1803).
-                    out[pos] = 0x03;
+                    // Per-record section version byte, in lockstep with
+                    // `INPUTS_SECTION_VERSION` (0x04, bumped by ADR-0112 /
+                    // issue 1850; the multi-actor boundary record is a
+                    // per-record frame and tracks the same version as the
+                    // single-actor records emitted by the derive macro).
+                    out[pos] = 0x04;
                     pos += 1;
                     let mut i = 0;
                     while i < BOUNDARY_LEN {
@@ -1014,7 +1033,9 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
+            // view; the synthesized impl downgrades to `Single` per hook.
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             instance.erased_wire(&mut ctx);
             0
         }
@@ -1025,7 +1046,9 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
+            // view; the synthesized impl downgrades to `Single` per hook.
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             instance.erased_unwire(&mut ctx);
             0
         }
@@ -1050,7 +1073,9 @@ macro_rules! __export_multi_internal {
                 instance.erased_namespace(),
             )
             .0;
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
+            // view; the synthesized impl downgrades to `Single` per hook.
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             instance.erased_dispatch(&mut ctx, mail)
         }
@@ -1118,7 +1143,9 @@ macro_rules! __export_multi_internal {
                 instance.erased_namespace(),
             )
             .0;
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
+            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
+            // view; the synthesized impl downgrades to `Single` per hook.
+            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             instance.erased_on_rehydrate(&mut ctx, prior);
             0

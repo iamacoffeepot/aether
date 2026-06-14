@@ -43,8 +43,8 @@ mod schema;
 
 pub use inputs::{
     inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_fallback_len,
-    inputs_handler_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
-    write_inputs_fallback, write_inputs_handler,
+    inputs_handler_len, reply_contract_len, write_inputs_actor_boundary, write_inputs_component,
+    write_inputs_config, write_inputs_fallback, write_inputs_handler, write_reply_contract,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use primitives::{varint_u32_len, varint_u64_len, varint_usize_len};
@@ -404,13 +404,16 @@ mod tests {
 
     #[test]
     fn inputs_handler_const_round_trips() {
+        use crate::schema::ReplyContract;
         const ID: u64 = 0xdead_beef_cafe_f00d;
         const NAME: &str = "aether.tick";
         const DOC: Option<&str> = Some("Not useful to send manually.");
-        // ADR-0109: a synchronous `-> R` handler carries its reply kind id.
-        const REPLY: Option<u64> = Some(0x00c0_ffee_0bad_f00d);
-        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY);
-        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY);
+        // ADR-0112: a single `-> R` handler carries `ReplyContract::One`
+        // — `(tag = 1, id)`.
+        const REPLY_TAG: u8 = 1;
+        const REPLY_ID: u64 = 0x00c0_ffee_0bad_f00d;
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
         let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
         match decoded {
             InputsRecord::Handler {
@@ -422,7 +425,7 @@ mod tests {
                 assert_eq!(id, KindId(ID));
                 assert_eq!(name, NAME);
                 assert_eq!(doc.as_deref(), DOC);
-                assert_eq!(reply, Some(KindId(0x00c0_ffee_0bad_f00d)));
+                assert_eq!(reply, ReplyContract::One(KindId(REPLY_ID)));
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -430,13 +433,16 @@ mod tests {
 
     #[test]
     fn inputs_handler_without_doc_const_round_trips() {
+        use crate::schema::ReplyContract;
         const ID: u64 = 1;
         const NAME: &str = "test.ping";
         const DOC: Option<&str> = None;
-        // ADR-0109: a `-> ()` fire-and-forget handler carries no reply id.
-        const REPLY: Option<u64> = None;
-        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY);
-        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY);
+        // ADR-0112: a `-> ()` fire-and-forget handler is `ReplyContract::None`
+        // — `(tag = 0, id = 0)`.
+        const REPLY_TAG: u8 = 0;
+        const REPLY_ID: u64 = 0;
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
         let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
@@ -444,9 +450,34 @@ mod tests {
                 id: KindId(ID),
                 name: NAME.into(),
                 doc: None,
-                reply: None,
+                reply: ReplyContract::None,
             }
         );
+    }
+
+    #[test]
+    fn reply_contract_postcard_roundtrip() {
+        use crate::schema::ReplyContract;
+        // ADR-0112: the const-fn `(tag, id)` encoder matches
+        // `postcard(ReplyContract)` byte-for-byte, and the leading byte is
+        // the variant discriminant — `None` = 0, `One` = 1, `Stream` = 2,
+        // `Manual` = 3.
+        fn check(tag: u8, id: u64, expect: ReplyContract, expect_disc: u8) {
+            // Reuse a fixed-cap scratch buffer; `reply_contract_len` <= 11.
+            let len = reply_contract_len(tag, id);
+            let mut buf = [0u8; 16];
+            let written = write_reply_contract(tag, id, &mut buf, 0);
+            assert_eq!(written, len, "cursor advance matches reported length");
+            assert_eq!(buf[0], expect_disc, "leading byte is the discriminant");
+            let from_postcard = postcard::to_allocvec(&expect).expect("encode");
+            assert_eq!(&buf[..len], from_postcard.as_slice(), "matches postcard");
+            let decoded: ReplyContract = postcard::from_bytes(&buf[..len]).expect("decode");
+            assert_eq!(decoded, expect);
+        }
+        check(0, 0, ReplyContract::None, 0);
+        check(1, 0xabcd, ReplyContract::One(KindId(0xabcd)), 1);
+        check(2, 0x1234, ReplyContract::Stream(KindId(0x1234)), 2);
+        check(3, 0, ReplyContract::Manual, 3);
     }
 
     #[test]

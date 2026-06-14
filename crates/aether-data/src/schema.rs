@@ -799,6 +799,91 @@ pub struct KindLabels {
     pub root: LabelNode,
 }
 
+/// A handler's reply class as reported by the manifest (ADR-0112). The
+/// successor to ADR-0109's `Option<KindId>` reply field: a single-class
+/// handler reports `None` (`-> ()`) or `One(R)` (`-> R` / `-> Pending<R>`);
+/// a manual-class handler reports `Manual` (it issues its own replies, so
+/// no single static reply kind); a stream-class handler reports
+/// `Stream(R)` (reserved — the class isn't built yet). `describe_*`
+/// surfaces this so a caller reads the real reply shape, not a `None`
+/// that lies for a handler that replies by hand.
+///
+/// **Variant order is the postcard discriminant** — `None` = 0,
+/// `One` = 1, `Stream` = 2, `Manual` = 3. The const-fn encoders in
+/// [`crate::canonical`] and the macro emission depend on it; do not
+/// reorder.
+///
+/// The `Schema` impl is hand-written (aether-data has no
+/// `extern crate self` alias and never self-derives `Schema`, which is
+/// behind the optional `derive` feature). The shape mirrors what the
+/// derive would emit for this enum so `describe_kinds` renders it the
+/// same as any derived enum.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplyContract {
+    /// `-> ()` — a single-class handler that replies nothing.
+    None,
+    /// `-> R` / `-> Pending<R>` — a single-class handler whose reply kind
+    /// is `R`.
+    One(KindId),
+    /// Reserved (ADR-0112): a stream-class handler emitting `R` replies
+    /// over time. Not yet reachable — the macro rejects `#[handler::stream]`.
+    Stream(KindId),
+    /// A manual-class handler that issues its own replies — no single
+    /// static reply kind to report.
+    Manual,
+}
+
+impl crate::Schema for ReplyContract {
+    const SCHEMA: SchemaType = SchemaType::Enum {
+        variants: Cow::Borrowed(&[
+            EnumVariant::Unit {
+                name: Cow::Borrowed("None"),
+                discriminant: 0,
+            },
+            EnumVariant::Tuple {
+                name: Cow::Borrowed("One"),
+                discriminant: 1,
+                fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
+            },
+            EnumVariant::Tuple {
+                name: Cow::Borrowed("Stream"),
+                discriminant: 2,
+                fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
+            },
+            EnumVariant::Unit {
+                name: Cow::Borrowed("Manual"),
+                discriminant: 3,
+            },
+        ]),
+    };
+
+    const LABEL: Option<&'static str> = Some("ReplyContract");
+
+    // Parallel-shape label tree mirroring `SCHEMA`. The `One` / `Stream`
+    // fields carry `LabelNode::Anonymous` — identical to
+    // `<KindId as Schema>::LABEL_NODE`, since a typed-id field has no
+    // nominal sub-shape.
+    const LABEL_NODE: LabelNode = LabelNode::Enum {
+        type_label: Some(Cow::Borrowed("ReplyContract")),
+        variants: Cow::Borrowed(&[
+            VariantLabel::Unit {
+                name: Cow::Borrowed("None"),
+            },
+            VariantLabel::Tuple {
+                name: Cow::Borrowed("One"),
+                fields: Cow::Borrowed(&[LabelNode::Anonymous]),
+            },
+            VariantLabel::Tuple {
+                name: Cow::Borrowed("Stream"),
+                fields: Cow::Borrowed(&[LabelNode::Anonymous]),
+            },
+            VariantLabel::Unit {
+                name: Cow::Borrowed("Manual"),
+            },
+        ]),
+    };
+}
+
 /// One record in the `aether.kinds.inputs` section (ADR-0033). The
 /// enum tag discriminates handler vs fallback vs component-level doc
 /// so the reader can classify before decoding further. `id` on a
@@ -814,12 +899,13 @@ pub enum InputsRecord {
         id: KindId,
         name: Cow<'static, str>,
         doc: Option<Cow<'static, str>>,
-        /// ADR-0109: the handler's reply kind id, read off its return
-        /// type — `Some(<R as Kind>::ID)` for a `-> R` (synchronous) or
-        /// `-> Pending<R>` (deferred) handler, `None` for a `-> ()`
-        /// fire-and-forget handler. Lets a caller read `In -> Out` before
-        /// issuing the call.
-        reply: Option<KindId>,
+        /// ADR-0112: the handler's reply class — `None` / `One(R)` for a
+        /// single-class handler (the ADR-0109 return-type contract),
+        /// `Manual` for a manual-class handler that replies by hand,
+        /// `Stream(R)` reserved. Lets a caller read the real `In -> Out`
+        /// before issuing the call. Successor to ADR-0109's
+        /// `Option<KindId>` reply field.
+        reply: ReplyContract,
     },
     /// A `#[fallback]` method's presence and optional description.
     Fallback { doc: Option<Cow<'static, str>> },
@@ -854,7 +940,14 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// unknown versions abort the read rather than silently skip. v0x02
 /// (ADR-0090 / issue 1257) added the `InputsRecord::Config` variant;
 /// v0x03 (ADR-0109 / issue 1803) added the `reply` kind id to the
-/// `Handler` variant. A component built before either and a substrate
+/// `Handler` variant; v0x04 (ADR-0112 / issue 1850) widened that field
+/// from `Option<KindId>` to [`ReplyContract`] so a handler's reply
+/// *class* (single / manual / stream) is reported, not just a single
+/// reply kind. A component built before any of these and a substrate
 /// after would otherwise disagree on the record shape, so the reader
 /// rejects an older version byte loudly — a hard rebuild boundary.
-pub const INPUTS_SECTION_VERSION: u8 = 0x03;
+///
+/// Distinct from the `aether.kinds` section's own version (also `0x04`,
+/// `kind_manifest::KINDS_VERSION`): the two sections version
+/// independently and happen to share a number at this revision.
+pub const INPUTS_SECTION_VERSION: u8 = 0x04;

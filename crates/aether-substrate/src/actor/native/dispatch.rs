@@ -52,7 +52,7 @@ use crate::mail::{KindId, MailboxId};
 /// call borrows `&mut ctx`), so no borrow conflict.
 pub fn typed_then_fallback_or_warn<A>(
     actor: &mut Box<A>,
-    ctx: &mut NativeCtx<'_>,
+    ctx: &mut NativeCtx<'_, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) where
@@ -99,7 +99,7 @@ pub fn typed_then_fallback_or_warn<A>(
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
 pub fn dispatch_log_tail_if_matching(
-    ctx: &mut NativeCtx<'_>,
+    ctx: &mut NativeCtx<'_, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {
@@ -131,7 +131,7 @@ pub fn dispatch_log_tail_if_matching(
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
 pub fn dispatch_trace_tail_if_matching(
-    ctx: &mut NativeCtx<'_>,
+    ctx: &mut NativeCtx<'_, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {
@@ -167,7 +167,7 @@ pub fn dispatch_trace_tail_if_matching(
 /// only fields this arm reads.
 pub fn dispatch_cost_tail_if_matching(
     binding: &NativeBinding,
-    ctx: &mut NativeCtx<'_>,
+    ctx: &mut NativeCtx<'_, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {

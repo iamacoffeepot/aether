@@ -1512,6 +1512,10 @@ struct HandlerFn {
     /// return type. Drives the auto-emitted `ctx.reply` and the reply
     /// kind id on the inputs manifest record.
     reply: HandlerReply,
+    /// ADR-0112: the declared reply class (single / manual). Selects the
+    /// ctx view the macro passes (`as_single()` for single, the full
+    /// `Manual` ctx for manual) and the manifest `ReplyContract` tag.
+    class: HandlerClass,
 }
 
 struct FallbackFn {
@@ -1567,15 +1571,28 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
     }
 }
 
-/// Match `#[handler]`, `#[crate::handler]`, or `#[aether_data::handler]` —
-/// any path whose last segment is `handler`. Bare `is_ident("handler")`
-/// only matches the unqualified form, so qualified-path tests like
-/// `#[aether_data::handler]` would skip the macro silently.
+/// Match a handler attribute — bare `#[handler]` (any path whose last
+/// segment is `handler`, so `#[crate::handler]` / `#[aether_data::handler]`
+/// resolve too) or a class-marked `#[handler::single|manual|stream]`
+/// (ADR-0112), whose last segment is the class and whose preceding
+/// segment is `handler`. The class path never reaches attribute
+/// resolution — `#[actor]` parses and strips it.
 fn attr_is_handler(attr: &Attribute) -> bool {
-    attr.path()
-        .segments
-        .last()
-        .is_some_and(|s| s.ident == "handler")
+    let segments = &attr.path().segments;
+    let Some(last) = segments.last() else {
+        return false;
+    };
+    if last.ident == "handler" {
+        return true;
+    }
+    if matches!(
+        last.ident.to_string().as_str(),
+        "single" | "manual" | "stream"
+    ) {
+        let len = segments.len();
+        return len >= 2 && segments[len - 2].ident == "handler";
+    }
+    false
 }
 
 /// Same logic for `#[fallback]`.
@@ -1634,6 +1651,56 @@ fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
              or `#[handler(task)]`",
         )),
     }
+}
+
+/// The reply class of a handler (ADR-0112), read off the attribute path:
+/// `#[handler]` / `#[handler::single]` are [`Single`](HandlerClass::Single),
+/// `#[handler::manual]` is [`Manual`](HandlerClass::Manual), and
+/// `#[handler::stream]` is [`Stream`](HandlerClass::Stream) — reserved,
+/// rejected by [`parse_handler_class`]. Orthogonal to [`HandlerVariant`]
+/// (the `mail` / `task` trigger), which is read from the parens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HandlerClass {
+    Single,
+    Manual,
+    Stream,
+}
+
+/// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112).
+/// The last path segment is the class (`single` / `manual` / `stream`),
+/// or `handler` itself for the bare `#[handler]` (= single). `stream` is
+/// a hard error — the class is reserved and its emit surface isn't built.
+/// `attr_is_handler` is the gate, so the path is known to end in one of
+/// these segments.
+fn parse_handler_class(attr: &Attribute) -> syn::Result<HandlerClass> {
+    let last = attr
+        .path()
+        .segments
+        .last()
+        .expect("attr_is_handler guarantees a non-empty path");
+    let class = match last.ident.to_string().as_str() {
+        // Bare `#[handler]` / `#[handler(mail|task)]` and the explicit
+        // `#[handler::single]` are both the single class.
+        "handler" | "single" => HandlerClass::Single,
+        "manual" => HandlerClass::Manual,
+        "stream" => HandlerClass::Stream,
+        other => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                format!(
+                    "unknown #[handler::<class>] — accepts `single`, `manual`, or `stream` \
+                     (ADR-0112); got `{other}`"
+                ),
+            ));
+        }
+    };
+    if class == HandlerClass::Stream {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "#[handler::stream] is reserved and not yet implemented (ADR-0112)",
+        ));
+    }
+    Ok(class)
 }
 
 /// Extract `(O, C, is_borrow)` from a `#[handler(task)]` method's third
@@ -1859,12 +1926,16 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     let kind_ty = extract_handler_kind_type(&f.sig)?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     let reply = classify_handler_reply(&f.sig.output);
+                    // ADR-0112: read the reply class off the marker path
+                    // (rejects `#[handler::stream]`).
+                    let class = parse_handler_class(&f.attrs[idx])?;
                     f.attrs.remove(idx);
                     handlers.push(HandlerFn {
                         method: f,
                         kind_ty,
                         agent_doc,
                         reply,
+                        class,
                     });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -2098,7 +2169,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
@@ -2123,16 +2194,18 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             }
             fn erased_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
             }
-            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_>) {
-                <#self_ty as ::aether_actor::FfiActor>::wire(self, __aether_ctx);
+            // ADR-0112: the lifecycle hooks keep their `FfiCtx<'_>` (= Single)
+            // default signatures; downgrade the carried `Manual` ctx here.
+            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>) {
+                <#self_ty as ::aether_actor::FfiActor>::wire(self, __aether_ctx.as_single());
             }
-            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_>) {
-                <#self_ty as ::aether_actor::FfiActor>::unwire(self, __aether_ctx);
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>) {
+                <#self_ty as ::aether_actor::FfiActor>::unwire(self, __aether_ctx.as_single());
             }
             fn erased_on_dehydrate(
                 &mut self,
@@ -2142,10 +2215,10 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             }
             fn erased_on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_, ::aether_actor::Manual>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
-                <#self_ty as ::aether_actor::FfiActor>::on_rehydrate(self, __aether_ctx, __aether_prior);
+                <#self_ty as ::aether_actor::FfiActor>::on_rehydrate(self, __aether_ctx.as_single(), __aether_prior);
             }
         }
 
@@ -2239,6 +2312,11 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 }
                 if let Some(idx) = handler_attr_idx {
                     let variant = parse_handler_variant(&f.attrs[idx])?;
+                    // ADR-0112: read the reply class off the marker path
+                    // (rejects `#[handler::stream]` on both the mail and task
+                    // variants). A task handler always receives the
+                    // downgraded `Single` ctx, so it carries no class field.
+                    let class = parse_handler_class(&f.attrs[idx])?;
                     f.attrs.remove(idx);
                     match variant {
                         HandlerVariant::Mail => {
@@ -2249,6 +2327,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                                 kind_ty,
                                 is_slice,
                                 reply,
+                                class,
                             });
                         }
                         HandlerVariant::Task => {
@@ -2480,19 +2559,27 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
-        // ADR-0109: a `-> R` handler auto-replies its return value
-        // through `OutboundReply::reply` (UFCS so the trait need not be
-        // imported at the emission site). `-> ()` and `-> Pending<R>`
-        // discard the return value — the deferred `Pending` send is the
-        // follow-on (#1805).
-        let call = match &h.reply {
-            HandlerReply::Sync(_) => quote! {
-                let __aether_reply = self.#method_ident(__aether_ctx, __aether_decoded);
+        // ADR-0112: the dispatch ctx is the full `Manual` view. A single
+        // handler is called with the downgraded `as_single()` view and the
+        // macro auto-replies a `-> R` return through `OutboundReply::reply`
+        // on the `Manual` ctx (`-> ()` / `-> Pending<R>` discard it — the
+        // deferred `Pending` send is #1805). A manual handler is called with
+        // the `Manual` ctx directly and issues its own replies — no
+        // auto-reply, regardless of return type.
+        let call = match (h.class, &h.reply) {
+            (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
+                let __aether_reply = self.#method_ident(__aether_ctx.as_single(), __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
-            HandlerReply::None | HandlerReply::Deferred(_) => quote! {
+            (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
+                self.#method_ident(__aether_ctx.as_single(), __aether_decoded);
+            },
+            (HandlerClass::Manual, _) => quote! {
                 self.#method_ident(__aether_ctx, __aether_decoded);
             },
+            (HandlerClass::Stream, _) => {
+                unreachable!("parse_handler_class rejects #[handler::stream]")
+            }
         };
         if h.is_slice {
             // Slice handler — payload is `count * size_of::<K>()`
@@ -2545,16 +2632,20 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             // `&TaskDone -> R` calls the handler for the reply value then
             // `resolve_value`s it; `&TaskDone -> ()` releases the hold via
             // `release_no_reply` with no reply.
+            //
+            // ADR-0112: the dispatch ctx is the full `Manual` view; a task
+            // handler (and `TaskDone::resolve_value`) take the single-mode
+            // ctx, so downgrade with `as_single()`.
             let dispatch = match t.mode {
                 TaskReplyMode::ByValue => quote! {
-                    self.#method_ident(__aether_ctx, __aether_done);
+                    self.#method_ident(__aether_ctx.as_single(), __aether_done);
                 },
                 TaskReplyMode::BorrowReply => quote! {
-                    let __aether_reply = self.#method_ident(__aether_ctx, &__aether_done);
-                    __aether_done.resolve_value(__aether_ctx, &__aether_reply);
+                    let __aether_reply = self.#method_ident(__aether_ctx.as_single(), &__aether_done);
+                    __aether_done.resolve_value(__aether_ctx.as_single(), &__aether_reply);
                 },
                 TaskReplyMode::BorrowNoReply => quote! {
-                    self.#method_ident(__aether_ctx, &__aether_done);
+                    self.#method_ident(__aether_ctx.as_single(), &__aether_done);
                     __aether_done.release_no_reply();
                 },
             };
@@ -2601,13 +2692,15 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // override on every envelope.
     let fallback_dispatch_override = fallback.as_ref().map(|f| {
         let method_ident = &f.method.sig.ident;
+        // ADR-0112: the trait seam carries the `Manual` ctx; a `#[fallback]`
+        // keeps its `NativeCtx<'_>` (= Single) signature, so downgrade.
         quote! {
             fn __aether_dispatch_fallback(
                 &mut self,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
                 __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
-                self.#method_ident(__aether_ctx, __aether_env);
+                self.#method_ident(__aether_ctx.as_single(), __aether_env);
                 true
             }
         }
@@ -2624,16 +2717,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // so this is independent of rustdoc extraction.
     let capability_handler_entries = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
-        // ADR-0109 §5: native chassis caps don't yet surface a
+        // ADR-0109 §5 / ADR-0112: native chassis caps don't yet surface a
         // per-handler reply contract — that needs a native handler
-        // manifest (a follow-on). Leave `reply: None` until then; the
-        // wasm `describe_component` path carries the contract today.
+        // manifest (a follow-on). Report `ReplyContract::None` until then;
+        // the wasm `describe_component` path carries the real class today.
         quote! {
             ::aether_substrate::actor::native::HandlerCapability {
                 id: <#kind_ty as ::aether_data::Kind>::ID,
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
-                reply: ::core::option::Option::None,
+                reply: ::aether_data::ReplyContract::None,
             }
         }
     });
@@ -2728,9 +2821,11 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
 
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
+            // ADR-0112: the dispatch seam carries the most-permissive
+            // `Manual` ctx; the arms downgrade per handler class.
             fn __aether_dispatch_envelope(
                 &mut self,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
@@ -2765,6 +2860,9 @@ struct NativeActorHandlerFn {
     /// return type. A `-> R` native handler auto-replies `R` through
     /// `OutboundReply::reply`, the same path a manual `ctx.reply` takes.
     reply: HandlerReply,
+    /// ADR-0112: the declared reply class (single / manual). Selects the
+    /// ctx view the dispatch arm passes and the manifest reply tag.
+    class: HandlerClass,
 }
 
 /// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
@@ -3021,19 +3119,27 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
-        // ADR-0109: a `-> R` handler replies its return value through
-        // `OutboundReply::reply` (UFCS so the trait need not be in scope
-        // at the emission site) — the same discharge path a manual
-        // `ctx.reply` takes. `-> ()` and `-> Pending<R>` discard the
-        // return value (the deferred `Pending` send is #1805).
-        let call = match &h.reply {
-            HandlerReply::Sync(_) => quote! {
-                let __aether_reply = self.#method(__aether_ctx, __aether_decoded);
+        // ADR-0112: the dispatch ctx is the full `Manual` view. A single
+        // handler is called with the downgraded `as_single()` view and the
+        // macro auto-replies a `-> R` return through `OutboundReply::reply`
+        // on the `Manual` ctx (`-> ()` / `-> Pending<R>` discard it — the
+        // deferred `Pending` send is #1805). A manual handler is called with
+        // the `Manual` ctx directly and issues its own replies — no
+        // auto-reply, regardless of return type.
+        let call = match (h.class, &h.reply) {
+            (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
+                let __aether_reply = self.#method(__aether_ctx.as_single(), __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
-            HandlerReply::None | HandlerReply::Deferred(_) => quote! {
+            (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
+                self.#method(__aether_ctx.as_single(), __aether_decoded);
+            },
+            (HandlerClass::Manual, _) => quote! {
                 self.#method(__aether_ctx, __aether_decoded);
             },
+            (HandlerClass::Stream, _) => {
+                unreachable!("parse_handler_class rejects #[handler::stream]")
+            }
         };
         // `Mail::kind()` returns the raw `u64` the FFI carried; `Kind::ID`
         // is typed `KindId` post-issue 466, so we drop into `.0` for the
@@ -3052,8 +3158,10 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 
     let tail = if let Some(f) = fallback {
         let method = &f.method.sig.ident;
+        // ADR-0112: a `#[fallback]` keeps its `FfiCtx<'_>` (= Single)
+        // signature; the dispatch ctx is `Manual`, so downgrade.
         quote! {
-            self.#method(__aether_ctx, __aether_mail);
+            self.#method(__aether_ctx.as_single(), __aether_mail);
             ::aether_actor::DISPATCH_HANDLED
         }
     } else {
@@ -3101,17 +3209,21 @@ fn build_inputs_manifest_consts(
     for h in handlers {
         let k = &h.kind_ty;
         let doc_expr = option_str_token(h.agent_doc.as_ref());
-        // ADR-0109: the reply kind id rides the handler record as an
-        // `Option<u64>` — `Some(<R as Kind>::ID.0)` for a `-> R` or
-        // `-> Pending<R>` handler (the inner `R`), `None` for `-> ()`.
-        let reply_expr = if let Some(r) = h.reply.manifest_kind() {
-            quote! {
-                ::core::option::Option::Some(
-                    <#r as ::aether_actor::__macro_internals::Kind>::ID.0
-                )
+        // ADR-0112: the reply class rides the handler record as a
+        // `ReplyContract` `(tag, id)` pair — `(0, 0)` for a single `-> ()`,
+        // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(3, 0)` for a
+        // manual handler (no single static reply kind). `Stream` is
+        // unreachable — `parse_handler_class` rejects `#[handler::stream]`.
+        let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
+            (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
+            (HandlerClass::Single, Some(r)) => (
+                quote! { 1u8 },
+                quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 },
+            ),
+            (HandlerClass::Single, None) => (quote! { 0u8 }, quote! { 0u64 }),
+            (HandlerClass::Stream, _) => {
+                unreachable!("parse_handler_class rejects #[handler::stream]")
             }
-        } else {
-            quote! { ::core::option::Option::None }
         };
         // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
         // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so
@@ -3121,7 +3233,8 @@ fn build_inputs_manifest_consts(
                 <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                 <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                 #doc_expr,
-                #reply_expr,
+                #reply_tag_expr,
+                #reply_id_expr,
             ))
         });
         copy_blocks.push(quote! {
@@ -3131,20 +3244,22 @@ fn build_inputs_manifest_consts(
                         <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
-                        #reply_expr,
+                        #reply_tag_expr,
+                        #reply_id_expr,
                     );
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
                         <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
-                        #reply_expr,
+                        #reply_tag_expr,
+                        #reply_id_expr,
                     );
-                // Per-record section version byte, bumped to 0x03 by
-                // ADR-0109 (issue 1803) — the `Handler` variant gained
-                // the `reply` kind id. Keep in lockstep with
-                // `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x03;
+                // Per-record section version byte, bumped to 0x04 by
+                // ADR-0112 (issue 1850) — the `Handler` variant's reply
+                // field widened from `Option<KindId>` to `ReplyContract`.
+                // Keep in lockstep with `INPUTS_SECTION_VERSION`.
+                out[pos] = 0x04;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3167,11 +3282,9 @@ fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
-                // Per-record section version byte, bumped to 0x03 by
-                // ADR-0109 (issue 1803) — the `Handler` variant gained
-                // the `reply` kind id. Keep in lockstep with
-                // `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x03;
+                // Per-record section version byte, in lockstep with
+                // `INPUTS_SECTION_VERSION` (0x04, ADR-0112 / issue 1850).
+                out[pos] = 0x04;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3194,11 +3307,9 @@ fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit);
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
-                // Per-record section version byte, bumped to 0x03 by
-                // ADR-0109 (issue 1803) — the `Handler` variant gained
-                // the `reply` kind id. Keep in lockstep with
-                // `INPUTS_SECTION_VERSION`.
-                out[pos] = 0x03;
+                // Per-record section version byte, in lockstep with
+                // `INPUTS_SECTION_VERSION` (0x04, ADR-0112 / issue 1850).
+                out[pos] = 0x04;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {
@@ -3234,9 +3345,9 @@ fn build_inputs_manifest_consts(
                         <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
                     );
-                // Per-record section version byte (0x03), in lockstep
-                // with `INPUTS_SECTION_VERSION` (ADR-0109 / issue 1803).
-                out[pos] = 0x03;
+                // Per-record section version byte (0x04), in lockstep
+                // with `INPUTS_SECTION_VERSION` (ADR-0112 / issue 1850).
+                out[pos] = 0x04;
                 pos += 1;
                 let mut i = 0;
                 while i < REC_LEN {

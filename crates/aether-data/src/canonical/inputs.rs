@@ -9,25 +9,61 @@
 //! `postcard::take_from_bytes` symmetrically.
 
 use super::primitives::{
-    option_borrowed_str_len, option_varint_u64_len, str_len, varint_u64_len,
-    write_option_borrowed_str, write_option_varint_u64, write_str, write_varint_u64,
+    option_borrowed_str_len, str_len, varint_u64_len, write_option_borrowed_str, write_str,
+    write_varint_u64,
 };
+
+/// Byte length of a [`ReplyContract`](crate::ReplyContract)'s postcard
+/// encoding from its `(tag, id)` pair. The discriminant varint is one
+/// byte for these four variants; the `One` / `Stream` arms carry a
+/// trailing `varint(id)`, the `None` / `Manual` arms carry nothing.
+/// Variant order (`None` = 0, `One` = 1, `Stream` = 2, `Manual` = 3) is
+/// the discriminant, matching the enum's declared order.
+#[must_use]
+pub const fn reply_contract_len(reply_tag: u8, reply_id: u64) -> usize {
+    match reply_tag {
+        // One / Stream carry a trailing varint(id).
+        1 | 2 => 1 + varint_u64_len(reply_id),
+        // None / Manual (and any other) carry just the discriminant.
+        _ => 1,
+    }
+}
+
+/// Serialize a [`ReplyContract`](crate::ReplyContract) into `out` at
+/// `pos` from its `(tag, id)` pair, returning the new cursor. Exact
+/// `postcard(ReplyContract)` wire shape: `varint(tag)` then, for
+/// `One` / `Stream`, `varint(id)`.
+#[must_use]
+pub const fn write_reply_contract(
+    reply_tag: u8,
+    reply_id: u64,
+    out: &mut [u8],
+    mut pos: usize,
+) -> usize {
+    out[pos] = reply_tag;
+    pos += 1;
+    if reply_tag == 1 || reply_tag == 2 {
+        pos = write_varint_u64(reply_id, out, pos);
+    }
+    pos
+}
 
 /// Byte length of a `Handler` record's postcard encoding. One-byte
 /// enum-variant tag (`0x00`) + `varint(id)` + `postcard(name)` +
-/// `option_str(doc)` + `option_varint(reply)` — the ADR-0109 reply
-/// kind id (`None` for a `-> ()` handler).
+/// `option_str(doc)` + `reply_contract(reply_tag, reply_id)` — the
+/// ADR-0112 reply class.
 #[must_use]
 pub const fn inputs_handler_len(
     id: u64,
     name: &str,
     doc: Option<&str>,
-    reply: Option<u64>,
+    reply_tag: u8,
+    reply_id: u64,
 ) -> usize {
     1 + varint_u64_len(id)
         + str_len(name)
         + option_borrowed_str_len(doc)
-        + option_varint_u64_len(reply)
+        + reply_contract_len(reply_tag, reply_id)
 }
 
 /// Serialize an `InputsRecord::Handler` into a fixed-size array sized
@@ -38,7 +74,8 @@ pub const fn write_inputs_handler<const N: usize>(
     id: u64,
     name: &str,
     doc: Option<&str>,
-    reply: Option<u64>,
+    reply_tag: u8,
+    reply_id: u64,
 ) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = 0usize;
@@ -47,7 +84,7 @@ pub const fn write_inputs_handler<const N: usize>(
     pos = write_varint_u64(id, &mut out, pos);
     pos = write_str(name, &mut out, pos);
     pos = write_option_borrowed_str(doc, &mut out, pos);
-    pos = write_option_varint_u64(reply, &mut out, pos);
+    pos = write_reply_contract(reply_tag, reply_id, &mut out, pos);
     // Silence "assigned but never read" warning on the final write.
     let _ = pos;
     out

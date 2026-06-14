@@ -678,7 +678,10 @@ mod tests {
 
         let mut cap = ReplyProbe;
         {
-            let mut ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+            // ADR-0112: drive the macro dispatch seam, which carries the
+            // `Manual` ctx — build it via `new_dispatching`, not `new`.
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
             let handled = cap.__aether_dispatch_envelope(
                 &mut ctx,
                 ReplyRequest::ID,

@@ -22,7 +22,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
-use aether_actor::{Actor, HandlesKind, Singleton};
+use aether_actor::{Actor, HandlesKind, Manual, ReplyMode, Single, Singleton, Stream};
+use core::marker::PhantomData;
+use core::ptr;
 
 use crate::actor::native::mailbox::NativeActorMailbox;
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
@@ -54,7 +56,7 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 /// the stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
-pub struct NativeCtx<'a> {
+pub struct NativeCtx<'a, M: ReplyMode = Single> {
     binding: &'a Arc<NativeBinding>,
     source: Source,
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
@@ -81,6 +83,10 @@ pub struct NativeCtx<'a> {
     /// ctxs that dispatch nothing (init / close-hook / chassis-root /
     /// cap-test fixtures built through [`Self::new`]).
     inbound: Option<Envelope>,
+    /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
+    /// selects which reply surface this ctx exposes. Defaults to
+    /// [`Single`], so the common `NativeCtx<'_>` signature is unchanged.
+    _mode: PhantomData<M>,
 }
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
@@ -137,12 +143,18 @@ macro_rules! native_sender_methods {
     };
 }
 
-impl<'a> NativeCtx<'a> {
+impl<'a> NativeCtx<'a, Single> {
     /// Internal constructor — the chassis dispatcher trampoline (in
-    /// `chassis::builder`) builds these. Cap-side test fixtures in
-    /// `aether-capabilities` also reach for it directly so they can
-    /// drive a handler without spinning up a full chassis; that's why
-    /// it's `pub` rather than `pub(crate)`.
+    /// `chassis::builder`) builds these for `wire` / `unwire` / close
+    /// hooks. Cap-side test fixtures in `aether-capabilities` also reach
+    /// for it directly so they can drive a handler method without
+    /// spinning up a full chassis; that's why it's `pub` rather than
+    /// `pub(crate)`.
+    ///
+    /// ADR-0112: stays `<Single>` so those ~hundred fixtures that call
+    /// handler methods directly keep their single-mode ctx unchanged.
+    /// Build a `<Manual>` ctx for driving the macro dispatch trampoline
+    /// with [`Self::new_dispatching`].
     pub fn new(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
@@ -155,7 +167,61 @@ impl<'a> NativeCtx<'a> {
             in_flight_mail_id,
             in_flight_root,
             inbound: None,
+            _mode: PhantomData,
         }
+    }
+}
+
+impl<'a> NativeCtx<'a, Manual> {
+    /// ADR-0112: an inbound-less `<Manual>` ctx for driving the
+    /// macro-emitted `NativeDispatch::__aether_dispatch_envelope` (which
+    /// carries the most-permissive view) from a cross-crate trampoline
+    /// test. The `<Single>` [`Self::new`] backs fixtures that call handler
+    /// methods directly; this one backs fixtures that route through the
+    /// dispatch seam.
+    pub fn new_dispatching(
+        binding: &'a Arc<NativeBinding>,
+        sender: Source,
+        in_flight_mail_id: MailId,
+        in_flight_root: MailId,
+    ) -> Self {
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            inbound: None,
+            _mode: PhantomData,
+        }
+    }
+
+    /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
+    /// [`Single`] ctx, dropping the `OutboundReply` surface. The
+    /// `#[actor]` macro hands a single-class handler this view, so a
+    /// handler whose marker disagrees with its class fails to unify.
+    /// There is deliberately no `as_manual` — the runtime only ever
+    /// downgrades.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_single(&mut self) -> &mut NativeCtx<'a, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, Manual>` and
+        // `NativeCtx<'a, Single>` are layout-identical (the marker field is
+        // a ZST for every `M` — see `native_ctx_layout_identical_across_modes`).
+        // The reborrow swaps the marker without touching any real field and
+        // only removes capability, never adds it.
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Single>>() }
+    }
+
+    /// ADR-0112 forward-only coercion to the reserved [`Stream`] view.
+    /// `#[handler::stream]` is rejected by the macro today, so this has
+    /// no in-tree caller yet; it exists so the stream class has its
+    /// downgrade path the day the emit surface lands.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_stream(&mut self) -> &mut NativeCtx<'a, Stream> {
+        // SAFETY: same as `as_single` — `M` is `PhantomData`-only, so the
+        // marker swap is a layout-identity reborrow.
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Stream>>() }
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched
@@ -178,9 +244,12 @@ impl<'a> NativeCtx<'a> {
             in_flight_mail_id,
             in_flight_root,
             inbound: Some(inbound),
+            _mode: PhantomData,
         }
     }
+}
 
+impl<M: ReplyMode> NativeCtx<'_, M> {
     /// #1757 / ADR-0106: retain this handler's inbound mail as an
     /// [`InboundMail`] guard to defer its reply past the handler's return
     /// — the by-construction replacement for a hand-rolled
@@ -658,7 +727,7 @@ impl<'a> NativeCtx<'a> {
     }
 }
 
-impl NativeCtx<'_> {
+impl<M: ReplyMode> NativeCtx<'_, M> {
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
@@ -692,7 +761,7 @@ impl NativeCtx<'_> {
     }
 }
 
-impl NativeCtx<'_> {
+impl<M: ReplyMode> NativeCtx<'_, M> {
     /// Lineage-aware multicast: encode `payload` once, then push one copy
     /// to every `recipient`. The inbound `(mail_id, root)` from this ctx
     /// propagate as `parent_mail` + `inherited_root`, so each fanned-out
@@ -837,7 +906,7 @@ impl NativeCtx<'_> {
     }
 }
 
-impl Drop for NativeCtx<'_> {
+impl<M: ReplyMode> Drop for NativeCtx<'_, M> {
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): handler-end flush. One
     /// `NativeCtx` is built per dispatched envelope (and one for
     /// `unwire`), so its scope *is* the handler's lifetime — dropping it
@@ -964,7 +1033,7 @@ impl<'a> NativeInitCtx<'a> {
 // FFI-side wiring (issue 607 phase 4 / ADR-0079) will program against
 // the trait the same way native callers do.
 
-impl MailSender for NativeCtx<'_> {
+impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -1058,7 +1127,12 @@ impl MailSender for NativeCtx<'_> {
     }
 }
 
-impl OutboundReply for NativeCtx<'_> {
+// ADR-0112: the reply surface is per-mode. `Manual` carries it
+// permanently (a manual-class handler issues its own replies); `Single`
+// carries the identical body **transitionally** so the existing native
+// handler / fallback bodies that hand-call `ctx.reply` keep compiling —
+// that impl is dropped when `single` is locked (a separate follow-on).
+impl OutboundReply for NativeCtx<'_, Manual> {
     type ReplyHandle = Source;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher
@@ -1101,7 +1175,41 @@ impl OutboundReply for NativeCtx<'_> {
     }
 }
 
-impl LifecycleControl for NativeCtx<'_> {
+// TRANSITIONAL (ADR-0112): dropped when single is locked.
+impl OutboundReply for NativeCtx<'_, Single> {
+    type ReplyHandle = Source;
+
+    fn reply_target(&self) -> Option<Source> {
+        Some(self.source)
+    }
+
+    fn source_mailbox(&self) -> Option<MailboxId> {
+        match self.source.addr {
+            SourceAddr::Component(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn reply<K: Kind>(&mut self, payload: &K) {
+        self.binding.send_reply_for_handler(
+            self.source,
+            payload,
+            self.in_flight_root,
+            self.outbound_parent(),
+        );
+    }
+
+    fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
+        self.binding.send_reply_for_handler(
+            sender,
+            payload,
+            self.in_flight_root,
+            self.outbound_parent(),
+        );
+    }
+}
+
+impl<M: ReplyMode> LifecycleControl for NativeCtx<'_, M> {
     type MonitorHandle = MonitorHandle;
     type MonitorError = MonitorError;
 
@@ -1236,6 +1344,32 @@ mod tests {
     fn handles_get_returns_none_for_unpublished_type() {
         let handles = ExportedHandles::new();
         assert!(handles.get::<StubHandles>().is_none());
+    }
+
+    /// ADR-0112: the mode marker is layout-neutral — the `Single` and
+    /// `Manual` views have identical size + alignment. This is the
+    /// invariant the `as_single` / `as_stream` pointer reborrows rest on.
+    #[test]
+    fn native_ctx_layout_identical_across_modes() {
+        use std::mem::{align_of, size_of};
+        assert_eq!(
+            size_of::<NativeCtx<'static, Single>>(),
+            size_of::<NativeCtx<'static, Manual>>(),
+        );
+        assert_eq!(
+            align_of::<NativeCtx<'static, Single>>(),
+            align_of::<NativeCtx<'static, Manual>>(),
+        );
+    }
+
+    /// ADR-0112 step 3: `OutboundReply` is reachable from both the
+    /// permanent `Manual` ctx and the transitional `Single` ctx (the
+    /// latter keeps the existing hand-`ctx.reply` native bodies compiling).
+    #[test]
+    fn outbound_reply_present_on_single_and_manual() {
+        fn assert_impls<C: OutboundReply>() {}
+        assert_impls::<NativeCtx<'static, Single>>();
+        assert_impls::<NativeCtx<'static, Manual>>();
     }
 
     /// Compile-time signal that `NativeActor` is `Send + 'static` (no

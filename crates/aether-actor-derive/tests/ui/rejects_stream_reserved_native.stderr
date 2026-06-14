@@ -1,0 +1,5 @@
+error: #[handler::stream] is reserved and not yet implemented (ADR-0112)
+  --> tests/ui/rejects_stream_reserved_native.rs:35:5
+   |
+35 |     #[handler::stream]
+   |     ^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,13 @@
+error: #[handler::stream] is reserved and not yet implemented (ADR-0112)
+  --> tests/ui/rejects_stream_reserved_ffi.rs:34:5
+   |
+34 |     #[handler::stream]
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `FfiCtx` and `Stream`
+ --> tests/ui/rejects_stream_reserved_ffi.rs:5:20
+  |
+5 | use aether_actor::{FfiCtx, Stream, actor};
+  |                    ^^^^^^  ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
