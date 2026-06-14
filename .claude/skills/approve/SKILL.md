@@ -1,6 +1,6 @@
 ---
 name: approve
-description: Plan → Ready gate. Validates that an issue's scope artifacts are complete and any drafted ADR has merged, then sets AgentReady=Yes and advances Phase to Ready. Does NOT dispatch implementation — that's /implement's job. Idempotent on re-run. `--sweep` discovers and batch-approves every Plan-complete issue behind one confirmation.
+description: Plan → Ready gate. Validates that an issue's scope artifacts are complete and any drafted ADR has merged, then advances Phase to Ready. Does NOT dispatch implementation — that's /implement's job. Idempotent on re-run. `--sweep` discovers and batch-approves every Plan-complete issue behind one confirmation.
 ---
 
 # /approve — Plan → Ready gate
@@ -19,7 +19,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
    This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
 
-2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, `AgentReady` not blocked by a label. Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
+2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label. Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
 
 3. **Print the approve plan and wait for confirmation.** A batch board write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
 
@@ -39,7 +39,7 @@ The primary human review point of the release flow. The user invokes `/approve <
    Confirm approve? (no board write happens until your go-ahead)
    ```
 
-4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set in one aliased `gh api graphql` request — 2N `updateProjectV2ItemFieldValue` mutations (`Phase=Ready` + `AgentReady=Yes` per issue) — then reconcile each issue's label to `phase:ready`. The sweep never auto-confirms.
+4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set in one aliased `gh api graphql` request — N `updateProjectV2ItemFieldValue` mutations (`Phase=Ready` per issue) — then reconcile each issue's label to `phase:ready`. The sweep never auto-confirms.
 
 `--sweep` takes no issue argument — it discovers them. It does not combine with `--note` or `--skip-adr`, both single-issue concerns.
 
@@ -47,7 +47,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
 ```
 /approve <issue>                    standard (single issue)
-/approve <issue> [<issue> …]        batch — validate each, write all board fields in one aliased request
+/approve <issue> [<issue> …]        batch — validate each, flip all to Ready in one aliased request
 /approve --sweep                    discover every Plan-complete issue, validate each, confirm, approve all
 /approve <issue> --note "<text>"    posts the text as a comment on the issue
 /approve <issue> --skip-adr         bypass the ADR-merged check (emergency override)
@@ -70,13 +70,13 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | Implementation plan | body has `## Implementation plan` and is non-empty | "Missing or empty §Implementation plan." |
 | ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
 | Model label | exactly one `model:*` label present (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
-| AgentReady allowed | `AgentReady` field is settable (not blocked by labels like `blocked`, `wontfix`, `duplicate`) | "Issue carries label '<label>' which blocks approval." |
+| Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
 
 If **all** gates pass, proceed.
 
 ## Actions on pass
 
-1. Set every approved issue's `Phase` field to `Ready` and its `AgentReady` field to `Yes` in **one** `gh api graphql` request — two aliased `updateProjectV2ItemFieldValue` mutations per issue (2N for N issues), assembled per `/scope` §"Batch every multi-write run into one aliased request" (field/option IDs from `field_cache`, item IDs from `item_cache` with the targeted-lookup fallback). A single-issue `/approve` is the N=1 case — still the aliased form, just the two mutations. Then reconcile each approved issue's label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)). When a batch mixes passing and failing issues, write the board fields only for the ones that cleared every gate and list the rest in the refusal.
+1. Set every approved issue's `Phase` field to `Ready` in **one** `gh api graphql` request — one aliased `updateProjectV2ItemFieldValue` mutation per issue (N for N issues), assembled per `/scope` §"Batch every multi-write run into one aliased request" (field/option IDs from `field_cache`, item IDs from `item_cache` with the targeted-lookup fallback). A single-issue `/approve` is the N=1 case — a single Phase write. Then reconcile each approved issue's label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)) — the `phase:ready` label is the agent-eligibility signal `/implement` reads. When a batch mixes passing and failing issues, write the board field only for the ones that cleared every gate and list the rest in the refusal.
 2. No comment on a plain approve — the `phase:ready` label, the board fields, and the timeline's label event already record it. If `--note` was passed, post the note as prose markdown:
 
    ```markdown
@@ -88,16 +88,15 @@ If **all** gates pass, proceed.
    ```
    ✓ #N approved.
    Phase: Plan → Ready
-   AgentReady: No → Yes
    Next: /implement <N>   (or wait for the orchestrator)
    ```
 
 ## Idempotency
 
-If `/approve` is re-run on an issue that already has `Phase=Ready` and `AgentReady=Yes`:
+If `/approve` is re-run on an issue that already has `Phase=Ready`:
 
 - Re-validate the gates (catches drift if anyone hand-edited the body).
-- If gates still pass: no-op, print *"Already approved — Phase=Ready, AgentReady=Yes."* No new comment.
+- If gates still pass: no-op, print *"Already approved — Phase=Ready."* No new comment.
 - If gates now fail: refuse and list failures. Don't auto-bounce — let the user decide whether to fix the body or `/bounce` the issue.
 
 ## Side findings

@@ -9,7 +9,7 @@ Multiple Claude sessions run against this repository at once — ideating, scopi
 
 Authority also drifts. A session opened to ideate ends up merging to main; one opened to implement re-scopes an issue. Nothing scopes what a session is *for*, so the blast radius of any single session is the whole pipeline.
 
-The pieces a role model can build on already exist: a skill vocabulary (`wish`, `wish-deep`, `sketch`, `scope`, `scope-spinoff`, `approve`, `implement`, `bounce`, `sweep`), a release board whose built-in Status field carries the Phase vocabulary (Backlog → Define → Design → Plan → Ready → … → Done), and custom fields including Size, AgentReady, and BounceTo. What is missing is a binding from a session to a **role** that fixes which skills it runs, where it runs them, and what it is allowed to touch.
+The pieces a role model can build on already exist: a skill vocabulary (`wish`, `wish-deep`, `sketch`, `scope`, `scope-spinoff`, `approve`, `implement`, `bounce`, `sweep`), a release board whose built-in Status field carries the Phase vocabulary (Backlog → Define → Design → Plan → Ready → … → Done), with the rest of an issue's metadata on labels (`type:*`, `size:*`, `model:*`, `phase:*`). What is missing is a binding from a session to a **role** that fixes which skills it runs, where it runs them, and what it is allowed to touch.
 
 ## Decision
 
