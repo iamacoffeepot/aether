@@ -42,14 +42,23 @@ directives_dir="$roles_dir/directives"
 marker_file="$roles_dir/$session_id"
 worktree_dir="$project_dir/.claude/worktrees/$session_id"
 
-# (1) Ensure the per-session worktree exists. Idempotent: skip when the path is
-# already present, otherwise add it. Never fatal — a failure here must not stop
-# the session from starting.
+# (1) Ensure the per-session worktree exists, then lock it. The lock makes
+# `git worktree remove` refuse to reclaim this worktree while the session is
+# live — whether the removal comes from a /sweep run, an ad-hoc cleanup, or
+# another session's sweep — so a clean-but-undiverged session worktree is never
+# mistaken for abandoned cruft (ADR-0110 § "Session binding"). The lock is
+# released by the SessionEnd hook on a clean exit; a crash leaves it locked,
+# which /sweep resolves by probing for a live cwd before unlocking. Both the add
+# and the lock are idempotent and never fatal — a failure here must not stop the
+# session from starting, and re-locking an already-locked worktree is a harmless
+# no-op (the `|| true` absorbs the "already locked" status).
 if command -v git >/dev/null 2>&1 \
     && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
     if [[ ! -e "$worktree_dir" ]]; then
         git -C "$project_dir" worktree add "$worktree_dir" >/dev/null 2>&1 || true
     fi
+    git -C "$project_dir" worktree lock "$worktree_dir" \
+        --reason "active claude session $session_id" >/dev/null 2>&1 || true
 fi
 
 # Emit the SessionStart added-context JSON for the text in $1, built safely with
