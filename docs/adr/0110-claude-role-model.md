@@ -39,6 +39,8 @@ The hook cannot change the running session's cwd itself (a hook's cwd is fixed a
 
 ### Hook-enforced guardrails
 
+> **Revised by [ADR-0111](0111-soft-ask-boundaries.md):** the hard `exit 2` block described below is replaced by an ask-to-confirm gate (`permissionDecision: "ask"`). The boundaries and their scope still hold; only the enforcement action (deny → ask) changes.
+
 A `PreToolUse` hook reads the role marker and worktree path and blocks, with a reason:
 
 - **Worktree boundary (all roles)** — a change that dirties a tracked file in the **main** worktree. Reads of any file, and writes under `/tmp` or the session's own worktree (`.claude/worktrees/<session-id>`), are allowed; only a change that would leave the main checkout dirty is held back. The edit tools (Edit/Write/MultiEdit/NotebookEdit) declare their target up front, so an edit landing in the main worktree is blocked before it runs (`PreToolUse`); a Bash command's effect is open-ended, so a dirtied main checkout is caught and reverted after it runs (a `PostToolUse` `git status` tripwire). Agents a session spawns run outside this guardrail (no role marker of their own, so the hook fails open) and work in their own worktrees, so a session stays bound to its own worktree and reaches its agents by dispatch rather than by editing theirs.
