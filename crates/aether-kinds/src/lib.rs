@@ -2655,6 +2655,49 @@ mod control_plane {
         pub kinds: Vec<KindDescriptorWire>,
     }
 
+    /// One native actor's per-handler reply contract on the wire — the
+    /// mirror of `aether_data::name_inventory::HandlerEntry` (ADR-0109
+    /// §5) and the native analogue of the wasm [`HandlerCapability`].
+    /// `namespace` is the owning cap's mailbox; `id` / `name` are the
+    /// handler's input kind; `reply` is its declared reply kind id
+    /// (`None` for a `-> ()` fire-and-forget handler, `Some` for a
+    /// `-> R` synchronous or `-> Pending<R>` deferred reply). Carries no
+    /// `doc` — the native link-time inventory holds ids + names, so a
+    /// native cap's per-handler docs are out of scope here (the wasm
+    /// `HandlerCapability` carries them from the custom section instead).
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct HandlerEntryWire {
+        pub namespace: String,
+        pub id: aether_data::KindId,
+        pub name: String,
+        pub reply: Option<aether_data::KindId>,
+    }
+
+    /// `aether.inventory.handlers` — request the running substrate's
+    /// native handler manifest (ADR-0109 §5): every native chassis cap's
+    /// per-handler `{ namespace, input kind, reply kind }`, collected at
+    /// link time. Empty payload; the request *is* the signal. Mailed to
+    /// the `"aether.inventory"` mailbox; reply: [`HandlersResult`].
+    ///
+    /// The MCP harness uses this to surface a native cap's `In -> Out`
+    /// the way `describe_component` surfaces a wasm component's — the
+    /// reply contract for the caps the driver leans on most
+    /// (`aether.fs`, `aether.render`, `aether.audio`).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.inventory.handlers")]
+    pub struct ListHandlers {}
+
+    /// Reply to [`ListHandlers`] (ADR-0109 §5). One [`HandlerEntryWire`]
+    /// per `#[handler]` across every native actor linked into the
+    /// substrate, in link order. The harness folds these per `namespace`
+    /// so each native cap reads as a `describe_component`-style handler
+    /// list carrying its `In -> Out` reply contract.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.inventory.handlers_result")]
+    pub struct HandlersResult {
+        pub handlers: Vec<HandlerEntryWire>,
+    }
+
     // Mesh-viewer structured load replies (issue 964). The mesh-viewer
     // component's `aether.mesh.load` was fire-and-forget — failures
     // warn-logged and the prior cache stayed, with no wire signal a
@@ -3877,6 +3920,8 @@ mod tests {
         assert_eq!(ResolveResult::NAME, "aether.inventory.resolve_result");
         assert_eq!(ListKinds::NAME, "aether.inventory.kinds");
         assert_eq!(ListKindsResult::NAME, "aether.inventory.kinds_result");
+        assert_eq!(ListHandlers::NAME, "aether.inventory.handlers");
+        assert_eq!(HandlersResult::NAME, "aether.inventory.handlers_result");
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl

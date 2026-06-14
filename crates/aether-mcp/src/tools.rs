@@ -12,7 +12,7 @@
 //! inventory baked into `aether-kinds` and from a component-capability
 //! cache populated by `load_component` / `replace_component`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -54,16 +54,19 @@ use crate::args::ActorLogsResponse;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
     CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
-    DagDescriptorArg, DagStatusArgs, DescribeComponentArgs, DescribeHandlesArgs,
-    DescribeHandlesResponse, EngineInfo, HandleSummaryJson, LoadComponentArgs, MailIdJson,
-    MailNodeJson, MailSpec, MailStatus, NodeArg, ReplaceComponentArgs, ReplyEventJson,
+    DagDescriptorArg, DagStatusArgs, DescribeComponentArgs, DescribeHandlersArgs,
+    DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
+    HandleSummaryJson, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus,
+    NativeCapHandlers, NativeHandlerJson, NodeArg, ReplaceComponentArgs, ReplyEventJson,
     SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
     TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
 use aether_kinds::descriptors;
-use aether_kinds::{Manifest, ManifestResult, Resolve, ResolveResult};
+use aether_kinds::{
+    HandlersResult, ListHandlers, Manifest, ManifestResult, Resolve, ResolveResult,
+};
 use base64::engine::general_purpose::STANDARD;
 use std::time::Duration;
 use tokio::fs;
@@ -725,6 +728,60 @@ impl Mcp {
                 None,
             )),
         }
+    }
+
+    #[tool(
+        description = "Describe a substrate's NATIVE chassis caps' reply contracts (ADR-0109 §5): the native analogue of describe_component. Sends aether.inventory.handlers to the engine's aether.inventory mailbox and decodes aether.inventory.handlers_result — the link-time handler manifest the #[actor] macro populates. Returns the handlers folded per mailbox namespace; each handler carries its input kind (id + name) and its reply kind id+name, so you read a native cap's In -> Out (e.g. aether.fs.read -> aether.fs.read_result) before issuing the call. reply is null for a fire-and-forget handler. Reply kind names resolve best-effort from the static substrate vocabulary; a component-defined reply kind stays null. Use describe_component for a loaded wasm component, describe_kinds for the full schema of any kind."
+    )]
+    pub async fn describe_handlers(
+        &self,
+        Parameters(args): Parameters<DescribeHandlersArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let reply = self
+            .session
+            .call_one(engine_envelope(engine, INVENTORY_CAP, &ListHandlers {}))
+            .await
+            .map_err(internal)?;
+        let Some(HandlersResult { handlers }) = HandlersResult::decode_from_bytes(&reply.payload)
+        else {
+            return Err(internal_msg("undecodable HandlersResult"));
+        };
+        // Fold the flat per-handler manifest per owning namespace so each
+        // native cap reads as a describe_component-style handler list. A
+        // BTreeMap keeps the caps (and their handlers) in a stable order.
+        let mut folded: BTreeMap<String, Vec<NativeHandlerJson>> = BTreeMap::new();
+        for entry in handlers {
+            folded
+                .entry(entry.namespace)
+                .or_default()
+                .push(NativeHandlerJson {
+                    // Input kind id rendered as the ADR-0064 tagged string,
+                    // falling back to a hex literal on an unencodable id.
+                    input_id: tagged_id::encode(entry.id.0)
+                        .unwrap_or_else(|| format!("{:#x}", entry.id.0)),
+                    input_name: entry.name,
+                    // The reply kind id is the contract; resolve its name
+                    // best-effort from the static substrate vocabulary so
+                    // the In -> Out reads without a second lookup. A
+                    // component-defined reply kind stays `None`.
+                    reply_id: entry.reply.map(|id| {
+                        tagged_id::encode(id.0).unwrap_or_else(|| format!("{:#x}", id.0))
+                    }),
+                    reply_name: entry.reply.and_then(static_kind_name),
+                });
+        }
+        let caps = folded
+            .into_iter()
+            .map(|(namespace, handlers)| NativeCapHandlers {
+                namespace,
+                handlers,
+            })
+            .collect();
+        json(&DescribeHandlersResponse {
+            engine_id: args.engine_id,
+            caps,
+        })
     }
 
     #[tool(
