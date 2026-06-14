@@ -1,13 +1,13 @@
 ---
 name: release-init
-description: Bootstrap a new aether release. Copies the release template project (canonical schema — the phase vocabulary in the built-in Status field, no custom fields, plus the server-side added→Backlog / closed→Done workflows), populates .claude/release-state.json with the project ID + Phase field/option ID cache, optionally seeds the project with starter issues. Required before /scope works.
+description: Bootstrap a new aether release. Copies the release template project (canonical schema — the phase vocabulary in the built-in Status field's options, no custom fields, plus the server-side added→Backlog / closed→Done workflows), populates .claude/release-state.json with the project ID + Phase field/option ID cache, optionally seeds the project with starter issues. Required before /scope works.
 ---
 
 # /release-init — release bootstrap skill
 
 Bootstraps the GitHub Project + local config that the other release skills depend on. The per-release project is a **copy of the release template project** — the copy carries the field schema, views, and the two configured workflows (item added → Backlog, issue closed → Done), so phase placement on add and close runs on GitHub's side with no skill writes. Idempotent only when `--reuse` is passed; otherwise creates a fresh project each call.
 
-**Status-as-Phase.** The lifecycle vocabulary (Backlog … Done, Bounced, Stalled) lives in the built-in `Status` field's options, because GitHub's built-in workflows can only set `Status` — never a custom single-select. The built-in field can't be renamed or deleted, so the UI header reads "Status"; everything else (this skill, `release-state.json`, the other skills, chat) keeps calling it **Phase** — the `field_cache` key `"Phase"` simply points at the field named `Status`.
+**Status-as-Phase.** `field_cache.Phase` points at the phase-carrying single-select — `Status` on boards bootstrapped from the release template (so GitHub's built-in "item added → Backlog" / "item closed → Done" workflows drive phase placement server-side), or a custom `Phase` field on a board created before the template existed (project 2). The built-in `Status` field can't be renamed or deleted; on template-bootstrapped boards the UI header reads "Status" but the tooling vocabulary is always "Phase".
 
 ## Invocation
 
@@ -49,7 +49,7 @@ bash scripts/release-project-init.sh <version> --owner <owner>
 
 The script locates the template by title and copies it (`gh project copy`) into `aether <version>`. Capture the project number from the script's output. If the script reports the template is missing, run step 0 first.
 
-If `--reuse <num>` was passed, skip creation and use `<num>` directly. Verify the project exists and that Status carries the phase options by running the next step's `field-list`. If Status or its options are missing, abort with a message naming what's missing.
+If `--reuse <num>` was passed, skip creation and use `<num>` directly. Verify the project exists; run the next step's `field-list` to confirm a single-select field carries the full phase vocabulary. If no such field is found, abort and name what is missing.
 
 ### 2. Query the field cache
 
@@ -60,7 +60,19 @@ gh project view <project-number> --owner <owner> --format json
 
 Extract:
 - The project's GraphQL node ID (from `view`, `.id`).
-- For Status: the field ID and every option's ID. **The field named `Status` is cached under the key `"Phase"`** — the copy regenerates the field/option IDs, so never reuse IDs from the template or a prior release.
+- The phase field — resolve by option set, not by name. Find the `SINGLE_SELECT` field whose options superset-match the phase vocabulary:
+
+```bash
+PHASE_VOCAB='["Backlog","Define","Design","Plan","Ready","Executing","Refine","Done","Bounced","Stalled"]'
+gh project field-list <project-number> --owner <owner> --format json \
+  | jq --argjson vocab "$PHASE_VOCAB" '
+      [.fields[] | select(.type == "SINGLE_SELECT") | select(
+        [.options[].name] as $opts |
+        ($vocab | map(. as $v | $opts | contains([$v])) | all)
+      )] | first'
+```
+
+  Cache the matched field's `id` and every option's `id` under the key `"Phase"` — regardless of the field's `.name` (`Status` on a template-copied board, `Phase` on project 2). If no field matches, abort: the template's Status options were not replaced with the phase vocabulary. The copy regenerates field/option IDs, so never reuse IDs from the template or a prior release.
 
 ### 3. Write `.claude/release-state.json`
 
@@ -93,7 +105,7 @@ Schema (formatted, no trailing comma):
 }
 ```
 
-The `"Phase"` entry holds the field named `Status` on the board (see [Status-as-Phase](#release-init--release-bootstrap-skill) above) — the key name is the tooling vocabulary, not the UI name. `item_cache` starts empty; `/sketch` seeds it per filed issue and other skills append on lookup miss.
+The `"Phase"` entry holds the phase-carrying single-select (see [Status-as-Phase](#release-init--release-bootstrap-skill) above) — the key name is the tooling vocabulary, regardless of the field's UI name. `item_cache` starts empty; `/sketch` seeds it per filed issue and other skills append on lookup miss.
 
 Write atomically: temp file then rename. Set permissions to user-only (`chmod 600`) since this is operational state, not source.
 
@@ -120,7 +132,7 @@ No Phase write — the copied "item added" workflow sets Backlog server-side. Sp
   Imported: <N> issue(s)
 
 Next:
-  1. Open the project URL above; the board view groups by Status (the phase vocabulary).
+  1. Open the project URL above; the board view groups by the phase-carrying field (Status on template boards).
      Verify both workflows copied: item added → Backlog, item closed → Done.
   2. Add more issues: /sketch (files + board-adds in one step)
   3. Scope an issue: /scope <issue-number>
@@ -131,7 +143,7 @@ Next:
 - **`gh` lacks `project` scope**: abort with the refresh command.
 - **Template project missing**: the script exits with a pointer; run `/release-init --init-template`, do the two printed workflow toggles, then re-run.
 - **Bootstrap script fails partway**: leave whatever was created on the GH side, report the error, do not write `release-state.json`. The user can `gh project delete` and retry.
-- **`field-list` shows the Status field missing or its phase options not replaced**: abort and report what's missing by name.
+- **`field-list` shows no single-select field carrying the full phase vocabulary**: abort and report what is missing; on a template-bootstrapped board this means the Status options were not replaced at `--init-template` time.
 - **`.claude/release-state.json` already exists and `--force` not passed**: ask the user to confirm overwrite before proceeding.
 - **`--import` issue doesn't exist or is in a different repo**: skip with a warning comment; continue with the rest.
 

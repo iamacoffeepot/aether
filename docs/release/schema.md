@@ -4,7 +4,7 @@ Each aether release lives in its own GitHub Project (`aether 0.4`, `aether 0.5`,
 
 ## Phase (the board's one field — its grouping column)
 
-The lifecycle vocabulary lives in the built-in **Status** field, whose options `release-project-init.sh --init-template` replaces with the phase set (GitHub's built-in workflows can only set Status, so the vocabulary has to live there). Everything else — the skills, `release-state.json`, this doc — calls it **Phase**: `release-state.json`'s `field_cache` key `"Phase"` points at the field named `Status`. Group the board view by Status to get the phase columns.
+The lifecycle vocabulary lives in the **phase-carrying single-select** field. On boards bootstrapped from the release template this is the built-in `Status` field (whose options `release-project-init.sh --init-template` replaces with the phase set, so GitHub's built-in "item added → Backlog" / "item closed → Done" workflows drive phase placement server-side). On a board created before the template existed — project 2, `aether 0.4` — the vocabulary lives in a custom `Phase` field instead, with the built-in `Status` sitting unused. Everything else — the skills, `release-state.json`, this doc — calls it **Phase**: `release-state.json`'s `field_cache` key `"Phase"` resolves to whichever field carries the vocabulary, found at cache-build time by matching its option set. Group the board view by that field to get the phase columns.
 
 | Phase     | Meaning                                                    | Advances by  |
 |-----------|------------------------------------------------------------|--------------|
