@@ -66,7 +66,7 @@ if [[ -f "$marker_file" ]]; then
     directive_file="$directives_dir/$role.md"
     if [[ -n "$role" && -f "$directive_file" ]]; then
         directive=$(cat "$directive_file")
-        emit_context "$(printf 'This session is bound to the %s role (ADR-0110). Its directive follows.\n\n%s' "$role" "$directive")"
+        emit_context "$(printf 'This session is bound to the %s role (ADR-0110).\n\nFirst action: switch into the session worktree by calling the EnterWorktree tool with path "%s" (it already exists — the SessionStart hook created it), so your edits and commands land in the worktree, never the main checkout.\n\nIts directive follows.\n\n%s' "$role" "$worktree_dir" "$directive")"
         exit 0
     fi
     # Marker present but empty or naming an unknown role — fall through to the
@@ -89,6 +89,11 @@ Roles:
 
 Once the marker is written, the matching role directive is injected at the next
 session start.
+
+After writing the marker, switch into the session worktree by calling the
+EnterWorktree tool with path "$worktree_dir" (it already exists — this hook
+created it), so your edits and commands land in the worktree, not the main
+checkout.
 EOF
 )
 

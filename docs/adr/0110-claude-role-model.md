@@ -35,7 +35,7 @@ Weight reuses the existing Size field, extended with a fourth option, **XL**, me
 
 Each session is bound to its own worktree under `.claude/worktrees/<session-id>`, created at start and never swapped out. The role marker is a gitignored, session-keyed file (`.claude/roles/<session-id>`) in the main clone, written once the role is known and read by session id from each consumer's input — the binding hook, the guardrail hook, and the status line. A `SessionStart` hook creates the worktree, reads the marker, and injects that role's directive — the skill set, the loop, the gate. With no marker, the hook injects an instruction to ask the user the role and write the marker. The directive ends with the `loop` invocation over the role's skill sequence, pausing at the role's gate for the user's go/no-go. The role is durable and session-bound, so it survives a restart. A per-session status line renders the role as a colored label, read from the same marker, so the kind of session is legible at a glance.
 
-The hook cannot change the running session's cwd (fixed at launch), so the session stays rooted at the repo while operating inside its worktree path; the enforcement below keeps it there.
+The hook cannot change the running session's cwd itself (a hook's cwd is fixed at launch), so ahead of the directive it injects an instruction making the session's first action a call to the `EnterWorktree` tool with the session-worktree path — a model tool, unlike a hook, that does move the session's cwd into the worktree. Edits and commands then land in the worktree by default, and the `PreToolUse`/`PostToolUse` enforcement below is the backstop for anything that slips past rather than the primary mechanism.
 
 ### Hook-enforced guardrails
 
