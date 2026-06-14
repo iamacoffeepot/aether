@@ -1,6 +1,6 @@
 # ADR-0111: Soft, ask-to-confirm role and worktree boundaries
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-14
 
 ## Context
