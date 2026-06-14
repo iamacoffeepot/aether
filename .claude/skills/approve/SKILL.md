@@ -11,7 +11,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
 `/approve --sweep` is the batched discovery entry point: instead of taking issue numbers, it enumerates every Plan-complete issue, validates each against the same gates the single-issue path runs, and waits for one confirmation before flipping any to Ready. It mirrors `/implement --sweep` (the dispatch-side discovery mode) so a reviewer clears a whole scoped batch in one pass instead of typing each number.
 
-1. **Enumerate over REST, in one call.** `phase:plan` is set only by `/scope` when it lands an issue at Plan, so the label alone is the eligibility signal — no GraphQL board read:
+1. **Enumerate over REST, in one call.** `phase:plan` is set only by `/scope` when it lands an issue at Plan, so the label alone is the eligibility signal — one REST query, off the contended GraphQL pool:
 
    ```bash
    gh api 'repos/iamacoffeepot/aether/issues?labels=phase:plan&state=open' --jq '.[].number'
@@ -21,7 +21,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
 2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label. Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
 
-3. **Print the approve plan and wait for confirmation.** A batch board write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
+3. **Print the approve plan and wait for confirmation.** A batch label write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
 
    ```
    Sweep: 6 Plan issues, 2 dropped, 4 to approve.
@@ -36,10 +36,10 @@ The primary human review point of the release flow. The user invokes `/approve <
      #1719  Phase=Design, not Plan
      #1740  ADR PR #1738 not merged (approve singly with /approve 1740 --skip-adr to override)
 
-   Confirm approve? (no board write happens until your go-ahead)
+   Confirm approve? (no label write happens until your go-ahead)
    ```
 
-4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set in one aliased `gh api graphql` request — N `updateProjectV2ItemFieldValue` mutations (`Phase=Ready` per issue) — then reconcile each issue's label to `phase:ready`. The sweep never auto-confirms.
+4. **On confirmation, approve the batch.** Apply [Actions on pass](#actions-on-pass) over the passing set — reconcile each passing issue's label to `phase:ready` (a REST `PUT …/labels` per issue, see [Phase label reconcile](#phase-label-reconcile)). The sweep never auto-confirms.
 
 `--sweep` takes no issue argument — it discovers them. It does not combine with `--note` or `--skip-adr`, both single-issue concerns.
 
@@ -47,16 +47,11 @@ The primary human review point of the release flow. The user invokes `/approve <
 
 ```
 /approve <issue>                    standard (single issue)
-/approve <issue> [<issue> …]        batch — validate each, flip all to Ready in one aliased request
+/approve <issue> [<issue> …]        batch — validate each, swap all to phase:ready over REST
 /approve --sweep                    discover every Plan-complete issue, validate each, confirm, approve all
 /approve <issue> --note "<text>"    posts the text as a comment on the issue
 /approve <issue> --skip-adr         bypass the ADR-merged check (emergency override)
 ```
-
-## Preconditions
-
-1. `.claude/release-state.json` exists and is readable. If not, abort with *"Run `/release-init <version>` first."*
-2. Issue must be in the active project. If not, abort with *"Issue #N is not in project <project-number>. Add it first."*
 
 ## Gate checks
 
@@ -64,7 +59,7 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 
 | Gate | Check | Refusal message |
 |------|-------|-----------------|
-| Phase | `Phase == Plan` | "Issue is at <current>, not Plan. Use `/scope` or `/bounce` first." |
+| Phase | issue carries the `phase:plan` label | "Issue is at <current>, not Plan. Use `/scope` or `/bounce` first." |
 | Problem statement | body has `## Problem statement` and the section is non-empty | "Missing or empty §Problem statement." |
 | Design notes | body has `## Design notes` and is non-empty | "Missing or empty §Design notes." |
 | Implementation plan | body has `## Implementation plan` and is non-empty | "Missing or empty §Implementation plan." |
@@ -76,8 +71,8 @@ If **all** gates pass, proceed.
 
 ## Actions on pass
 
-1. Set every approved issue's `Phase` field to `Ready` in **one** `gh api graphql` request — one aliased `updateProjectV2ItemFieldValue` mutation per issue (N for N issues), assembled per `/scope` §"Batch every multi-write run into one aliased request" (field/option IDs from `field_cache`, item IDs from `item_cache` with the targeted-lookup fallback). A single-issue `/approve` is the N=1 case — a single Phase write. Then reconcile each approved issue's label to `phase:ready` (see [Phase label reconcile](#phase-label-reconcile)) — the `phase:ready` label is the agent-eligibility signal `/implement` reads. When a batch mixes passing and failing issues, write the board field only for the ones that cleared every gate and list the rest in the refusal.
-2. No comment on a plain approve — the `phase:ready` label, the board fields, and the timeline's label event already record it. If `--note` was passed, post the note as prose markdown:
+1. Reconcile each approved issue's label to `phase:ready` (a REST `PUT …/labels` per issue, see [Phase label reconcile](#phase-label-reconcile)) — the `phase:ready` label is the canonical phase state and the agent-eligibility signal `/implement` reads. A single-issue `/approve` is the N=1 case — one label swap. When a batch mixes passing and failing issues, swap the label only for the ones that cleared every gate and list the rest in the refusal.
+2. No comment on a plain approve — the `phase:ready` label and the timeline's label event already record it. If `--note` was passed, post the note as prose markdown:
 
    ```markdown
    **Approved** — <note text>
@@ -93,7 +88,7 @@ If **all** gates pass, proceed.
 
 ## Idempotency
 
-If `/approve` is re-run on an issue that already has `Phase=Ready`:
+If `/approve` is re-run on an issue that already carries `phase:ready`:
 
 - Re-validate the gates (catches drift if anyone hand-edited the body).
 - If gates still pass: no-op, print *"Already approved — Phase=Ready."* No new comment.
@@ -136,7 +131,7 @@ When `--skip-adr` is used, a comment is mandatory — the override rationale has
 
 ## Phase label reconcile
 
-The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the label work stays off the contended pool. **In the same step you set the `Phase` field, swap the label over REST:**
+The `phase:*` label is the canonical phase state — it is the only phase store the pipeline keeps, legible on the issue itself and discoverable over the REST issues endpoint. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the phase write stays off the contended pool.
 
 ```bash
 # Atomic swap to phase:ready. Runs under bash for array word-splitting.
@@ -150,14 +145,12 @@ gh api -X PUT "repos/$repo/issues/$n/labels" "${args[@]}"
 EOF
 ```
 
-The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus `phase:ready`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than the old remove-then-add pair, which had a window between its two calls. The only write this skill makes is `Phase=Ready` → `phase:ready`; run the swap once per approved issue. On idempotent re-run (already Ready) the swap re-asserts the same set — a harmless no-op that also self-heals a hand-stripped label.
+The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus `phase:ready`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than a remove-then-add pair, which has a window between its two calls. The only write this skill makes is `phase:ready`; run the swap once per approved issue. On idempotent re-run (already Ready) the swap re-asserts the same set — a harmless no-op that also self-heals a hand-stripped label.
 
 ## Failure modes
 
-- **Issue not in project**: instruct user to add it via `gh project item-add`.
-- **`release-state.json` stale (field IDs invalid)**: re-run `/release-init <version> --reuse <num>` to rebuild the cache. Same advice as `/scope`.
 - **GitHub API rate limit**: retry with backoff. If still failing, abort and tell the user the rate-limit reset time.
-- **Hand-edits during validation**: if the issue body changes between the gate read and the field update, re-read and re-validate before committing the Phase transition. Don't write a partial transition.
+- **Hand-edits during validation**: if the issue body changes between the gate read and the label swap, re-read and re-validate before committing the phase-label transition. Don't write a partial transition.
 
 ## What `/approve` does NOT do
 
