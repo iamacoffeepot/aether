@@ -5,11 +5,13 @@
 # throwaway scaffold, and assert its exit code and (where it matters) a stdout
 # substring. Run from anywhere; exits non-zero on any failed case.
 #
-# Coverage is the two role-model boundary hooks — check-role-boundary.sh (the
-# PreToolUse ask-gates) and check-worktree-clean.sh (the PostToolUse tripwire).
-# The other wired hooks (check-pr-body, check-pre-push, check-host-fn-additions,
-# check-no-divider-comments, bind-session-role) are not yet covered here; the
-# case table below is the place to add them.
+# Coverage is the role-model boundary hooks — check-role-boundary.sh (the
+# PreToolUse ask-gates), check-worktree-clean.sh (the PostToolUse tripwire), and
+# the session-worktree lock lifecycle (bind-session-role.sh locks on bind,
+# release-session-worktree.sh unlocks on session end). The remaining wired hooks
+# (check-pr-body, check-pre-push, check-host-fn-additions, check-no-divider-
+# comments) are not yet covered here; the case table below is the place to add
+# them.
 #
 # The stateful hooks read a session role marker and inspect git state, so the
 # scaffold is a real throwaway git repo with a role marker and a committed
@@ -93,6 +95,28 @@ printf 'dirtied\n' >> "$SCAFFOLD/src/lib.rs"
 expect "dirty main -> block (exit 2)" check-worktree-clean.sh '{"session_id":"SESS"}' 2
 git -C "$SCAFFOLD" checkout -q -- src/lib.rs
 expect "unbound session -> fail open" check-worktree-clean.sh '{"session_id":"NONE"}' 0
+
+echo "## bind-session-role.sh — locks the session worktree against removal"
+expect "bind: exits 0 for a fresh session" bind-session-role.sh '{"session_id":"BINDLOCK"}' 0
+# The worktree it created must now refuse a plain `git worktree remove` — the
+# lock is what stops a /sweep or ad-hoc cleanup yanking a live session's tree.
+if git -C "$SCAFFOLD" worktree remove "$SCAFFOLD/.claude/worktrees/BINDLOCK" >/dev/null 2>&1; then
+  fail=$((fail+1)); printf 'FAIL  %-48s removal not refused (worktree unlocked)\n' "bind: locked worktree refuses removal"
+else
+  pass=$((pass+1)); printf 'PASS  %-48s [removal refused]\n' "bind: locked worktree refuses removal"
+fi
+
+echo "## release-session-worktree.sh — unlocks on session end"
+git -C "$SCAFFOLD" worktree add -q "$SCAFFOLD/.claude/worktrees/RELSESS" >/dev/null 2>&1
+git -C "$SCAFFOLD" worktree lock "$SCAFFOLD/.claude/worktrees/RELSESS" --reason "active claude session RELSESS" >/dev/null 2>&1
+expect "release: exits 0" release-session-worktree.sh '{"session_id":"RELSESS"}' 0
+# After release the lock is gone, so a plain remove now succeeds.
+if git -C "$SCAFFOLD" worktree remove "$SCAFFOLD/.claude/worktrees/RELSESS" >/dev/null 2>&1; then
+  pass=$((pass+1)); printf 'PASS  %-48s [unlocked, removable]\n' "release: worktree unlocked"
+else
+  fail=$((fail+1)); printf 'FAIL  %-48s still locked after release\n' "release: worktree unlocked"
+fi
+expect "release: no session id -> exit 0" release-session-worktree.sh '{}' 0
 
 echo
 echo "$pass passed, $fail failed"
