@@ -21,7 +21,7 @@ description: Triage §Side findings into child GitHub issues. Reads the parent i
 ## Preconditions
 
 1. `.claude/release-state.json` exists.
-2. Parent issue is in the active project (no Phase restriction — even Done parents can spin off informational findings).
+2. Parent issue exists (no Phase restriction — even Done parents can spin off informational findings).
 3. Parent's body has a `## Side findings` section with at least one bullet.
 
 ## Interactive mode
@@ -44,7 +44,7 @@ Wait for the user's response. Parse "1,3,4" into a set of indices.
 
 For each selected finding:
 
-1. **File the child via `/sketch`'s mechanics** (read `.claude/skills/sketch/SKILL.md` — it is the single definition of issue filing). The finding text is the sketch input: `/sketch` owns title inference (type prefix from its inference table, crate scope from the finding's file pointer — e.g. `aether-substrate/dispatch.rs:142` → `substrate`; ask the user inline if the pointer is missing or ambiguous), label selection, board placement at `Phase=Backlog`, and the item-ID cache write.
+1. **File the child via `/sketch`'s mechanics** (read `.claude/skills/sketch/SKILL.md` — it is the single definition of issue filing). The finding text is the sketch input: `/sketch` owns title inference (type prefix from its inference table, crate scope from the finding's file pointer — e.g. `aether-substrate/dispatch.rs:142` → `substrate`; ask the user inline if the pointer is missing or ambiguous), label selection, and filing at Backlog (no `phase:*` label).
 
 2. **Append the spinoff context** to the body `/sketch` produces — the lead comment plus a `## Found during` section after `## Description`:
 
@@ -94,7 +94,7 @@ Would remove findings 1, 3 from #<parent> §Side findings.
 
 ## What `/scope-spinoff` does NOT do
 
-- Scope the child issues. They're filed at `Phase=Backlog` with a title + description; running `/scope <child>` is a separate operation.
+- Scope the child issues. They're filed at Backlog (no `phase:*` label) with a title + description; running `/scope <child>` is a separate operation.
 - Auto-link as dependencies. The §Found during line in the body (and the timeline cross-reference it creates on the parent) is the connection. GitHub's native `--add-dependency` feature could be added in v2 if the dependency graph view becomes load-bearing.
 - Modify §Problem statement, §Design notes, or §Implementation plan on the parent. Only §Side findings is touched.
 - Reorder remaining findings. Index reuse means re-run = different number for the same item; user is expected to re-read after a partial spin-off.
