@@ -21,13 +21,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_data::{Kind, Source};
+use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
-use aether_substrate::actor::native::TaskDone;
+use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::handle_store::HandleStore;
-use aether_substrate::mail::registry::OwnedDispatch;
+use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::{
     Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
@@ -375,6 +376,120 @@ mod heavy {
 
         drop(chassis);
     }
+
+    /// ADR-0109: a `-> Pending<R>` request handler plus a borrow-form
+    /// `&TaskDone -> R` completion settles with exactly one reply of `R`.
+    /// The macro arms no immediate reply on the request, and on completion
+    /// calls `resolve_value` with the handler's returned value, routing it
+    /// back to the original caller.
+    #[test]
+    fn macro_pending_request_borrow_completion_replies_once() {
+        let (registry, mailer) = fresh_substrate();
+        let obs = DeferredObs::new();
+
+        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+        let caller = registry.register_inbox(
+            "test.macro_native_actor.deferred_caller",
+            forward_to(reply_tx),
+        );
+
+        let chassis: PassiveChassis<TestChassis> =
+            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<DeferredReplyCap>(obs.clone())
+                .build_passive()
+                .expect("deferred-reply cap boots");
+
+        // The inbound names the caller as its reply target, so the deferred
+        // reply routes back there.
+        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 55);
+        push_envelope_replying_to(
+            &registry,
+            DeferredReplyCap::NAMESPACE,
+            &KickP { seed: 21 },
+            caller_reply_to,
+        );
+
+        let reply = reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the deferred reply lands on the caller");
+        assert_eq!(
+            reply.kind,
+            <EchoReply as Kind>::ID,
+            "the completion's `-> EchoReply` return routed back as the reply"
+        );
+        let echoed =
+            EchoReply::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
+        assert_eq!(
+            echoed.value, 21,
+            "resolve_value sent the value the completion handler returned"
+        );
+        assert_eq!(
+            reply.sender.correlation_id, 55,
+            "the caller's correlation is echoed onto the reply"
+        );
+        assert_eq!(
+            obs.echo_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the borrow-form completion handler fired once"
+        );
+
+        // Exactly one reply settles — the macro must not also drop the
+        // TaskDone (which would re-release) or double-send.
+        assert!(
+            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "exactly one reply settles for the deferred request"
+        );
+
+        drop(chassis);
+    }
+
+    /// ADR-0109: a borrow-form `&TaskDone -> ()` completion releases the
+    /// hold without sending any reply. The macro emits `release_no_reply`,
+    /// so the completion runs cleanly (no lost-reply `debug_assert`) and
+    /// nothing routes back to the caller.
+    #[test]
+    fn macro_borrow_task_no_reply_releases_without_replying() {
+        let (registry, mailer) = fresh_substrate();
+        let obs = DeferredObs::new();
+
+        let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
+        let caller = registry.register_inbox(
+            "test.macro_native_actor.deferred_silent_caller",
+            forward_to(reply_tx),
+        );
+
+        let chassis: PassiveChassis<TestChassis> =
+            Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<DeferredReplyCap>(obs.clone())
+                .build_passive()
+                .expect("deferred-reply cap boots");
+
+        let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 9);
+        push_envelope_replying_to(
+            &registry,
+            DeferredReplyCap::NAMESPACE,
+            &KickS { seed: 88 },
+            caller_reply_to,
+        );
+
+        assert!(
+            wait_for(1, &obs.silent_calls, Duration::from_secs(2)),
+            "the no-reply completion ran (release_no_reply, no lost-reply panic)"
+        );
+        assert_eq!(
+            obs.silent_value.load(AtomicOrdering::SeqCst),
+            88,
+            "the no-reply completion saw its own worker output"
+        );
+
+        // No reply was sent — release_no_reply discharges without replying.
+        assert!(
+            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a `&TaskDone -> ()` completion sends nothing back to the caller"
+        );
+
+        drop(chassis);
+    }
 }
 
 /// Type-level assertion that the macro emits the universal
@@ -551,7 +666,11 @@ impl NativeActor for TaskRouteCap {
     fn on_kick_a(&self, ctx: &mut NativeCtx<'_>, mail: KickA) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
-        ctx.dispatch_blocking(move || ResultA { value: seed });
+        // This cap's completions self-resolve (by-value `TaskDone`), so
+        // the request handler returns `()` and dispatches via
+        // `dispatch_blocking_with` rather than the `Pending<R>`-returning
+        // `dispatch_blocking` (ADR-0109).
+        ctx.dispatch_blocking_with((), move || ResultA { value: seed });
     }
 
     /// Dispatch a worker that produces a `ResultB`.
@@ -559,7 +678,7 @@ impl NativeActor for TaskRouteCap {
     fn on_kick_b(&self, ctx: &mut NativeCtx<'_>, mail: KickB) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
-        ctx.dispatch_blocking(move || ResultB { tag: seed });
+        ctx.dispatch_blocking_with((), move || ResultB { tag: seed });
     }
 
     /// `ResultA` completion handler. Records the value + a call so the
@@ -658,4 +777,201 @@ fn macro_emits_native_handler_reply_manifest() {
         Some(<Pong as Kind>::ID),
         "the `-> Pong` return type is captured as the reply contract (In -> Out)",
     );
+}
+
+// ADR-0109 deferred reply contract (#1805): a `-> Pending<R>` request
+// handler plus a borrow-form `#[handler(task)]` completion. `&TaskDone ->
+// R` has the macro send `R` via `resolve_value`; `&TaskDone -> ()` has it
+// release the hold via `release_no_reply` with no reply. The fixtures
+// below drive both through a real chassis and observe what routes back to
+// a registered caller inbox.
+
+/// Forward every dispatched envelope onto `tx` so a test can observe the
+/// reply (or its absence) on a registered caller mailbox.
+fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
+    Arc::new(move |dispatch: OwnedDispatch| {
+        // ADR-0094: terminal test consumer — discharge before the value is
+        // forwarded for the test to observe.
+        dispatch.discharge();
+        let _ = tx.send(dispatch);
+    })
+}
+
+/// Like [`push_envelope`] but stamps an explicit `reply_to` [`Source`] so
+/// the handler's deferred reply has somewhere to route — a registered
+/// caller inbox the test reads back.
+fn push_envelope_replying_to<K: Kind>(
+    registry: &Registry,
+    recipient: &str,
+    payload: &K,
+    reply_to: Source,
+) {
+    use aether_substrate::mail::registry::MailboxEntry;
+    let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry exists") else {
+        panic!("expected mailbox entry under {recipient}");
+    };
+    let bytes = payload.encode_into_bytes();
+    handler.enqueue(OwnedDispatch::disarmed(
+        <K as Kind>::ID,
+        K::NAME.to_owned(),
+        None,
+        reply_to,
+        MailRef::from(bytes),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
+        Nanos(0),
+        0,
+        MailboxId(0),
+    ));
+}
+
+/// Trigger for the reply path: makes the cap dispatch an `EchoReply`
+/// worker behind a `-> Pending<EchoReply>` request handler.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.kick_p")]
+struct KickP {
+    seed: u64,
+}
+
+/// Trigger for the no-reply path: makes the cap dispatch a `Silent`
+/// worker whose completion releases the hold without replying.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.kick_s")]
+struct KickS {
+    seed: u64,
+}
+
+/// The deferred reply kind — what the `&TaskDone -> EchoReply` completion
+/// returns and the macro sends via `resolve_value`. Postcard-shape so the
+/// reply (postcard-encoded by `Mailer::send_reply`) round-trips through
+/// `EchoReply::decode_from_bytes`.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.echo_reply")]
+struct EchoReply {
+    value: u64,
+}
+
+/// The no-reply path's worker output — a distinct output type from
+/// `EchoReply` so the two task handlers route by output type. Never
+/// replied; the completion records it and releases.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.silent")]
+struct Silent {
+    value: u64,
+}
+
+/// Where the deferred-reply cap records what its completion handlers
+/// observed, so a test can assert each fired with the right value.
+#[derive(Clone)]
+struct DeferredObs {
+    /// How many times the `&TaskDone -> EchoReply` completion fired.
+    echo_calls: Arc<AtomicU32>,
+    /// How many times the `&TaskDone -> ()` completion fired.
+    silent_calls: Arc<AtomicU32>,
+    /// The `value` the no-reply completion saw on its worker output.
+    silent_value: Arc<AtomicU64>,
+}
+
+impl DeferredObs {
+    fn new() -> Self {
+        Self {
+            echo_calls: Arc::new(AtomicU32::new(0)),
+            silent_calls: Arc::new(AtomicU32::new(0)),
+            silent_value: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+struct DeferredReplyCap {
+    obs: DeferredObs,
+}
+
+impl aether_actor::Singleton for DeferredReplyCap {}
+
+#[aether_data::actor]
+impl NativeActor for DeferredReplyCap {
+    type Config = DeferredObs;
+    const NAMESPACE: &'static str = "test.macro_native_actor.deferred";
+
+    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { obs: config })
+    }
+
+    /// Reply path: `-> Pending<EchoReply>` declares the deferred reply
+    /// kind on the request signature and arms an `EchoReply` worker; the
+    /// macro sends nothing now.
+    #[allow(clippy::unused_self)]
+    #[aether_data::handler]
+    fn on_kick_p(&self, ctx: &mut NativeCtx<'_>, mail: KickP) -> Pending<EchoReply> {
+        let seed = mail.seed;
+        ctx.dispatch_blocking(move || EchoReply { value: seed })
+    }
+
+    /// Borrow-form completion: returns the reply; the macro calls
+    /// `resolve_value` with it and releases the hold.
+    #[aether_data::handler(task)]
+    fn on_echo_done(&self, _ctx: &mut NativeCtx<'_>, done: &TaskDone<EchoReply>) -> EchoReply {
+        self.obs.echo_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        EchoReply {
+            value: done.output().value,
+        }
+    }
+
+    /// No-reply path: returns `()`, so it dispatches via
+    /// `dispatch_blocking_with` (no `Pending<R>` contract to declare).
+    #[allow(clippy::unused_self)]
+    #[aether_data::handler]
+    fn on_kick_s(&self, ctx: &mut NativeCtx<'_>, mail: KickS) {
+        let seed = mail.seed;
+        ctx.dispatch_blocking_with((), move || Silent { value: seed });
+    }
+
+    /// Borrow-form no-reply completion: returns `()`, so the macro calls
+    /// `release_no_reply` — the hold releases with no reply sent.
+    #[aether_data::handler(task)]
+    fn on_silent_done(&self, _ctx: &mut NativeCtx<'_>, done: &TaskDone<Silent>) {
+        self.obs
+            .silent_value
+            .store(done.output().value, AtomicOrdering::SeqCst);
+        self.obs.silent_calls.fetch_add(1, AtomicOrdering::SeqCst);
+    }
 }

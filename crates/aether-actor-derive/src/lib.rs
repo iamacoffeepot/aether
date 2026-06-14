@@ -1636,12 +1636,15 @@ fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
     }
 }
 
-/// Extract `(O, C)` from a `#[handler(task)]` method's third parameter,
-/// which must be `done: TaskDone<O>` (where `C` defaults to `()`) or
-/// `done: TaskDone<O, C>`. Unlike a mail handler's third parameter (a
-/// `Kind`), a task completion's parameter is the framework's
-/// `TaskDone<...>` — `O` / `C` are its generic arguments, not a kind.
-fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type)> {
+/// Extract `(O, C, is_borrow)` from a `#[handler(task)]` method's third
+/// parameter, which must be `done: TaskDone<O>` (where `C` defaults to
+/// `()`) or `done: TaskDone<O, C>`, optionally behind a shared `&`.
+/// Unlike a mail handler's third parameter (a `Kind`), a task
+/// completion's parameter is the framework's `TaskDone<...>` — `O` / `C`
+/// are its generic arguments, not a kind. `is_borrow` is `true` when the
+/// parameter is `&TaskDone<…>` (the ADR-0109 opt-in for a macro-driven
+/// reply) versus the by-value `TaskDone<…>` self-resolve form.
+fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -1664,10 +1667,18 @@ fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type)> {
             "#[handler(task)] third parameter must be `done: TaskDone<O>` or `TaskDone<O, C>`",
         ));
     };
-    let Type::Path(type_path) = &*pt.ty else {
+    // ADR-0109: `&TaskDone<…>` (the macro-driven reply opt-in) vs the
+    // by-value `TaskDone<…>` self-resolve form. Peel a leading shared
+    // reference and remember which shape it was.
+    let (is_borrow, inner_ty): (bool, &Type) = match &*pt.ty {
+        Type::Reference(r) => (true, &*r.elem),
+        other => (false, other),
+    };
+    let Type::Path(type_path) = inner_ty else {
         return Err(syn::Error::new_spanned(
             &pt.ty,
-            "#[handler(task)] third parameter must be a `TaskDone<O>` / `TaskDone<O, C>` path type",
+            "#[handler(task)] third parameter must be a `TaskDone<O>` / `TaskDone<O, C>` path type \
+             (optionally behind `&`)",
         ));
     };
     let last = type_path.path.segments.last().ok_or_else(|| {
@@ -1717,7 +1728,57 @@ fn extract_task_handler_types(sig: &Signature) -> syn::Result<(Type, Type)> {
             "#[handler(task)] `TaskDone` takes at most two type arguments: `TaskDone<O, C>`",
         ));
     }
-    Ok((output, context))
+    Ok((output, context, is_borrow))
+}
+
+/// How a `#[handler(task)]` completion discharges its reply (ADR-0109),
+/// classified from its third-parameter borrow-ness plus its return type.
+/// The `&TaskDone` borrow is the opt-in signal for a macro-driven reply.
+enum TaskReplyMode {
+    /// `TaskDone<O, C>` by value, `-> ()`: the handler owns the
+    /// completion and calls `done.resolve*` itself (the ADR-0093 path,
+    /// untouched).
+    ByValue,
+    /// `&TaskDone<O, C>` returning `-> R`: the handler borrows the
+    /// completion and returns the reply; the macro calls
+    /// `done.resolve_value(ctx, &r)` and releases the hold.
+    BorrowReply,
+    /// `&TaskDone<O, C>` returning `-> ()`: the handler borrows the
+    /// completion and replies nothing; the macro calls
+    /// `done.release_no_reply()` (the sanctioned no-reply discharge).
+    BorrowNoReply,
+}
+
+/// Classify a `#[handler(task)]` completion's reply discharge from its
+/// third-parameter borrow-ness (`is_borrow`) and return type (ADR-0109).
+/// A by-value `TaskDone` keeps the self-resolve path and must return
+/// `()`; `&TaskDone -> R` sends `R` via `resolve_value`, `&TaskDone -> ()`
+/// releases via `release_no_reply`. A task completion can't itself defer
+/// (`-> Pending<R>`).
+fn classify_task_reply_mode(sig: &Signature, is_borrow: bool) -> syn::Result<TaskReplyMode> {
+    let reply = classify_handler_reply(&sig.output);
+    if is_borrow {
+        match reply {
+            HandlerReply::Sync(_) => Ok(TaskReplyMode::BorrowReply),
+            HandlerReply::None => Ok(TaskReplyMode::BorrowNoReply),
+            HandlerReply::Deferred(_) => Err(syn::Error::new_spanned(
+                &sig.output,
+                "#[handler(task)] cannot return `Pending<R>` — a dispatch completion \
+                 is the terminal reply. Return `R` (the macro sends it via \
+                 `resolve_value`) or `()` (release without replying)",
+            )),
+        }
+    } else {
+        match reply {
+            HandlerReply::None => Ok(TaskReplyMode::ByValue),
+            HandlerReply::Sync(_) | HandlerReply::Deferred(_) => Err(syn::Error::new_spanned(
+                &sig.output,
+                "a by-value `TaskDone<…>` #[handler(task)] must return `()` and call \
+                 `done.resolve*` itself; to have the macro send the reply, borrow it: \
+                 `done: &TaskDone<…>` returning `-> R`",
+            )),
+        }
+    }
 }
 
 /// Wasm-actor expansion — `#[actor] impl FfiActor for X` (or
@@ -2191,11 +2252,14 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                             });
                         }
                         HandlerVariant::Task => {
-                            let (output_ty, context_ty) = extract_task_handler_types(&f.sig)?;
+                            let (output_ty, context_ty, is_borrow) =
+                                extract_task_handler_types(&f.sig)?;
+                            let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
                             task_handlers.push(NativeActorTaskHandlerFn {
                                 method: f,
                                 output_ty,
                                 context_ty,
+                                mode,
                             });
                         }
                     }
@@ -2476,11 +2540,29 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             let output_ty = &t.output_ty;
             let context_ty = &t.context_ty;
             let method_ident = &t.method.sig.ident;
+            // ADR-0109: how the completion discharges. By-value hands the
+            // owned `TaskDone` to the handler (it self-resolves);
+            // `&TaskDone -> R` calls the handler for the reply value then
+            // `resolve_value`s it; `&TaskDone -> ()` releases the hold via
+            // `release_no_reply` with no reply.
+            let dispatch = match t.mode {
+                TaskReplyMode::ByValue => quote! {
+                    self.#method_ident(__aether_ctx, __aether_done);
+                },
+                TaskReplyMode::BorrowReply => quote! {
+                    let __aether_reply = self.#method_ident(__aether_ctx, &__aether_done);
+                    __aether_done.resolve_value(__aether_ctx, &__aether_reply);
+                },
+                TaskReplyMode::BorrowNoReply => quote! {
+                    self.#method_ident(__aether_ctx, &__aether_done);
+                    __aether_done.release_no_reply();
+                },
+            };
             quote! {
                 if let ::core::option::Option::Some(__aether_done) =
                     __aether_ctx.try_take_task_done::<#output_ty, #context_ty>(__aether_dispatch_id)
                 {
-                    self.#method_ident(__aether_ctx, __aether_done);
+                    #dispatch
                     return ::core::option::Option::Some(());
                 }
             }
@@ -2694,6 +2776,10 @@ struct NativeActorTaskHandlerFn {
     method: syn::ImplItemFn,
     output_ty: Type,
     context_ty: Type,
+    /// ADR-0109: how the completion discharges its reply — self-resolve
+    /// (by-value), macro-driven `resolve_value` (`&TaskDone -> R`), or
+    /// `release_no_reply` (`&TaskDone -> ()`).
+    mode: TaskReplyMode,
 }
 
 /// Token-level type equality, used to reject duplicate `TaskDone<O>`
