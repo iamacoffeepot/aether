@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: Reclaim stale local state. `/sweep` (or `/sweep worktrees`) removes worktrees + branches whose PRs merged; `/sweep branches` prunes worktree-less local branches whose PRs merged; `/sweep memory` compresses + de-indexes the project's stale memory index; `/sweep adrs` flags ADRs whose recorded status has drifted from reality (Proposed-but-shipped, unacknowledged supersession); `/sweep all` runs every target. Each enumerates candidates, classifies by a staleness signal, prints a plan, and confirms before acting. Pair the git targets with `/implement` — after implemented PRs land, run `/sweep` to reclaim disk + branch space.
+description: Reclaim stale local state. `/sweep` (or `/sweep worktrees`) removes worktrees + branches whose PRs merged; `/sweep branches` prunes worktree-less local branches whose PRs merged; `/sweep memory` compresses + de-indexes the project's stale memory index; `/sweep adrs` flags ADRs whose recorded status has drifted from reality (Proposed-but-shipped, unacknowledged supersession); `/sweep fat` decomposes fat (`size:xl`-labelled) issues into skinny children and closes-and-replaces the parent — recursively until every leaf is skinny; `/sweep all` runs every target except `fat`. Each enumerates candidates, classifies by a staleness signal, prints a plan, and confirms before acting. Pair the git targets with `/implement` — after implemented PRs land, run `/sweep` to reclaim disk + branch space.
 ---
 
 # Sweep skill
@@ -17,7 +17,8 @@ Parse the invocation argument to pick the target. Bare `/sweep` defaults to `wor
 | `branches` | local branches **without** a worktree | PR merged / `[gone]` upstream / merged into main | PR-merged only |
 | `memory` | the project's `MEMORY.md` index | over-limit / over-long lines / superseded / orphaned / stale refs | nothing (compress + de-index only) |
 | `adrs` | the `docs/adr/NNNN-*.md` decision records | recorded status drifted from reality: Proposed-but-shipped / unacknowledged supersession / stale partial-phase | nothing (surface only) |
-| `all` | run `worktrees`, then `branches`, then `memory`, then `adrs` in sequence | — | per-target |
+| `fat` | open `size:xl`-labelled issues | `size:xl` label present | nothing (decompose + close-and-replace, all confirmed) |
+| `all` | run `worktrees`, then `branches`, then `memory`, then `adrs` in sequence (not `fat`) | — | per-target |
 
 The git targets auto-remove only the entries with a hard merge-oracle (a merged PR) after one confirm; everything fuzzier is surfaced and left for the user. The `memory` target has no oracle, so it **never deletes files** — it tightens index hooks and drops index lines for superseded notes (the topic files stay on disk as archive). The `adrs` target **never edits an ADR** — a decision record's status is the user's to change, and the "did it ship" signal is a heuristic, not an oracle; the target only surfaces drift with evidence.
 
@@ -105,8 +106,26 @@ Flags ADRs in `docs/adr/NNNN-*.md` whose recorded **Status** line has drifted fr
 
 5. **Report** — counts per signal (drifted-shipped, asymmetric-supersession, stale-phase), the ADRs flagged, and the intentional/pending set left untouched. No files changed unless the user asked for a named edit in beat 4.
 
+## Target: fat
+
+Decomposes issues labelled `size:xl` — the dreamer's explicit "needs breakdown" stamp (ADR-0110) — into skinny (S/M/L) child issues and closes-and-replaces the fat parent. The pass recurses: a child that itself comes out `size:xl` is re-drilled before the parent is closed. The target terminates when every leaf in the decomposition is skinny. Signal is the `size:xl` label; enumerate uses REST, not the board (the board's `Size` field was removed in the #1825 label-native rollout).
+
+1. **Enumerate candidates.** `gh api 'repos/iamacoffeepot/aether/issues?labels=size:xl&state=open' --jq '.[] | select(has("pull_request")|not) | {number: .number, title: .title}'` — REST-enumerated, off the contended GraphQL pool. Pull requests are excluded by the `select` (PRs appear in the issues endpoint with a `pull_request` key). An empty result is a clean no-op: print "nothing to decompose" and exit.
+
+2. **Classify + drill.** For each fat parent, read its title and body to understand the scope, then decompose it into a set of skinny child issues — each one focused enough to fit in a single PR. A child whose projected scope still reads `size:xl` is itself drilled in a nested pass before it is filed, so the recursion terminates only when every leaf is skinny. Decomposition is agent judgment, not a hard oracle: there is no mechanical rule that derives children from a parent, so the next beat always confirms before filing or closing anything.
+
+3. **Surface the plan.** For each fat parent, print: the parent issue number and title, the proposed child set (one line per child: draft title and projected size — S/M/L), and the close-and-replace action (the parent will be closed with a comment listing its children once all children are filed). Then ask the user to confirm the full plan before any filing or closing fires.
+
+4. **Act on confirmed candidates.**
+   - File each confirmed child via `/sketch`'s REST mechanics: `gh api 'repos/iamacoffeepot/aether/issues' --method POST --field title='…' --field body='…'`. Each child body opens with a line linking back to the fat parent (`Decomposed from #NNN.`) and carries a Phase=Backlog annotation so it enters the board at Backlog. Add the child to the release board at Phase=Backlog using the `item_cache` / `project_node_id` from `.claude/release-state.json`.
+   - After all children are filed, close-and-replace the fat parent: post a comment on the parent listing the filed child issues (`gh api 'repos/iamacoffeepot/aether/issues/NNN/comments' --method POST --field body='…'`), then close the parent (`gh api 'repos/iamacoffeepot/aether/issues/NNN' --method PATCH --field state=closed`). Archive the parent's project item so only skinny issues stay live on the board.
+   - Skip any parent the user declined at the confirm gate; note the reason in the report.
+
+5. **Report** — parents decomposed and closed, children filed (with issue numbers per parent), and any fat issue left un-decomposed with the reason (user declined, or decomposition produced no actionable children).
+
 - **Confirm before acting**, on every target. Auto-removal is limited to the hard-oracle cases (PR-merged worktrees / branches); memory never auto-deletes anything off disk.
 - **worktrees**: never sweep the primary worktree or a worktree whose branch has an open PR. `git worktree list --porcelain` blocks are `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` separated by blank lines; detached-HEAD entries lack a `branch` line. A locked worktree refuses removal — `git worktree unlock <path>` first, or surface the lock reason rather than forcing.
 - **branches**: never delete the current or default branch, a branch with an open PR, or a worktree-backed branch (handled by `worktrees`). A branch with unpushed commits and no merged PR is potential lost work — surface, never auto-remove.
 - **memory**: never delete topic files (de-index keeps them as archive). Don't touch `user`-type memories (identity facts, rarely stale) without an explicit ask. When compressing, preserve the searchable identifiers. Verify a named file/symbol still exists in the repo before calling an entry stale — a memory reflects what was true when written, not necessarily now.
+- **fat**: not part of `all` — it is a board operation the dreamer invokes explicitly (ADR-0110's weigh loop), not local-cruft reclaim. Decomposition is judgment, not an oracle, so the target always confirms before filing children or closing any parent; the close-and-replace only fires on the children the user approves. A `/sweep fat` run with no open `size:xl` issues is a clean no-op, not an error. The `size:xl` label is the sole signal — no board field lookup, no `release-state.json` Size read.
 - Remote tracking refs are pruned by GitHub when a PR merges with `--delete-branch`. If a stale `origin/<branch>` lingers, `git fetch --prune` clears it — optional final step for the git targets.
