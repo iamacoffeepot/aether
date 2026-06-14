@@ -1,11 +1,11 @@
 ---
 name: land
-description: Land a CI-green draft PR — un-draft, squash-merge, flip Phase to Done, sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches, and routing dirty content conflicts to the user rather than touching their contents.
+description: Land a CI-green draft PR — un-draft, squash-merge, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches, and routing dirty content conflicts to the user rather than touching their contents.
 ---
 
 # /land — PR landing skill
 
-The orchestrator's post-review action: take a draft PR that the user has approved, un-draft it, let native auto-merge squash it onto `main`, flip the closing issue's board `Phase` to `Done`, and sweep the merged worktree. This is the step ADR-0110 names as the `land` skill in the orchestrator role's loop — deliberately separate from `/implement`, which holds at draft and never merges.
+The orchestrator's post-review action: take a draft PR that the user has approved, un-draft it, let native auto-merge squash it onto `main`, delete the closing issue's `phase:*` label (Done is label-absence), and sweep the merged worktree. This is the step ADR-0110 names as the `land` skill in the orchestrator role's loop — deliberately separate from `/implement`, which holds at draft and never merges.
 
 Two entry shapes, one skill:
 
@@ -24,11 +24,9 @@ Two entry shapes, one skill:
 
 | Check | Refusal |
 |-------|---------|
-| `.claude/release-state.json` exists | "Run `/release-init <version>` first." |
 | PR exists and is a draft | "PR #N is not a draft — it may have already been un-drafted or merged." |
 | CI green (all required checks pass, none pending) | "PR #N is not CI-green. Wait for checks or use `/implement <issue>` to fix." |
-| PR has a closing issue linked on the board | "PR #N has no closing issue in the active project. Link it or update Phase manually." |
-| Closing issue is in the active project | "Closing issue #M is not in project <project-number>. Add it or update Phase manually." |
+| PR has a closing issue (the PR's closing-issue reference) | "PR #N has no closing issue. Link one (`Closes #M`) or delete the phase label manually." |
 
 Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`.
 
@@ -36,7 +34,7 @@ Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot
 
 `/land --sweep` is the batched orchestrator entry point: it discovers the shard's held green draft PRs, validates each against the same gates single mode runs, prints a land plan with per-PR conflict prediction, and waits for one confirmation before landing anything.
 
-1. **Enumerate held green draft PRs over REST.** `/implement` leaves every implemented PR as a draft held at `Phase=Refine`, so `phase:refine` on an open issue is the eligibility signal — no GraphQL board read:
+1. **Enumerate held green draft PRs over REST.** `/implement` leaves every implemented PR as a draft held at `phase:refine`, so `phase:refine` on an open issue is the eligibility signal, queried over REST and off the contended GraphQL pool:
 
    ```bash
    gh api 'repos/iamacoffeepot/aether/issues?labels=phase:refine&state=open' --jq '.[].number'
@@ -92,7 +90,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Then re-predict. If the rebase produces conflicts, the branch becomes `dirty` — surface and abort.
 
-4. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing):
+4. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). This is the **sole remaining GraphQL-only op in the whole pipeline** — every other operation, phase state included, runs on REST now that the project board is retired:
    ```bash
    gh api graphql -f query='
    mutation {
@@ -109,25 +107,15 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
      -f merge_method=squash \
      -f commit_title="<pr-title>"
    ```
-   Poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid writing `Phase=Done` to an un-landed issue.
+   Poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid marking an un-landed issue Done (deleting its phase label).
 
-6. **Flip Phase to Done and delete the phase label.** `Done` carries no `phase:*` label (per the phase-label-reconcile rules in `/scope` and `/implement`) — so the label delete is the label action, not a swap:
+6. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
    ```bash
    gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
      --jq '.[].name | select(startswith("phase:"))' \
      | while read -r l; do
          gh api -X DELETE "repos/iamacoffeepot/aether/issues/<m>/labels/$l"
        done
-   ```
-   Then write the board field via GraphQL (field and option IDs from `field_cache`, item ID from `item_cache` with the targeted-lookup fallback per `/scope` §Project board mechanics):
-   ```bash
-   gh api graphql -f query='
-   mutation {
-     updateProjectV2ItemFieldValue(input: {
-       projectId: "<project-node-id>", itemId: "<item-id>",
-       fieldId: "<phase-field-id>", value: { singleSelectOptionId: "<done-option-id>" }
-     }) { projectV2Item { id } }
-   }'
    ```
 
 7. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
@@ -189,7 +177,7 @@ In `--sweep` mode, a `dirty` PR halts the remaining sequence — a conflict requ
 
 ## Phase label reconcile
 
-`Done` carries no `phase:*` label. The landing sequence deletes the current `phase:*` label instead of swapping it, per the rule in `/scope` §Phase label reconcile:
+`Done` carries no `phase:*` label — it is label-absence, the canonical resting state for a closed issue. The landing sequence deletes the current `phase:*` label instead of swapping it, per the rule in `/scope` §Phase label reconcile:
 
 ```bash
 gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
@@ -199,15 +187,14 @@ gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
     done
 ```
 
-This is the same form `/scope` documents for the `Backlog` and `Done` phases. The Phase board field write (`Done` option) uses the GraphQL `updateProjectV2ItemFieldValue` mutation per §Field writes — REST has no ProjectV2 field write.
+This is the same form `/scope` documents for the `Backlog` and `Done` phases — a REST `DELETE …/labels` per phase label, off the contended pool.
 
 ## What /land does NOT do
 
 - Auto-resolve content conflicts. A `dirty` branch always surfaces to the user (or an optional delegated agent).
 - Un-draft a PR that is not CI-green. The gate check enforces green before un-draft.
 - Land PRs in parallel. Protected `main` enforces linear history; parallel landing races to discover the serialization. The sequence lands one at a time with recompute.
-- Write `Phase=Done` before verifying the merge completed (`merged` field confirmed `true`).
+- Delete the `phase:*` label before verifying the merge completed (`merged` field confirmed `true`).
 - Remove a worktree whose PR has not merged. The sweep tail runs only after a confirmed merge.
-- Edit the issue body. `/scope` owns the body; `/land` only touches the Phase field and label.
+- Edit the issue body. `/scope` owns the body; `/land` only touches the `phase:*` label.
 - Dispatch implementation. `/implement` handles that; `/land` acts on PRs that implement has already produced and the user has reviewed.
-- Operate without `.claude/release-state.json`. The board field writes need the cached IDs.

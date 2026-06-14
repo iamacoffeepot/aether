@@ -5,7 +5,7 @@ description: Explicit phase regression. Move an issue from its current Phase bac
 
 # /bounce — explicit phase regression
 
-The user invokes `/bounce` when reviewing scope artifacts (or watching execution) and concludes an upstream phase needs rework. The skill records the regression as a `Phase=Bounced` board state plus a `bounce-to:<phase>` label, with the reason posted as a comment. `/scope` then resumes from the target phase on next invocation.
+The user invokes `/bounce` when reviewing scope artifacts (or watching execution) and concludes an upstream phase needs rework. The skill records the regression as a `phase:bounced` label plus a `bounce-to:<phase>` label, with the reason posted as a comment. `/scope` then resumes from the target phase on next invocation.
 
 Self-bounces by other skills (`/scope` hitting a wall, `/implement` discovering a design flaw mid-execution) use the same mechanism — this skill is the explicit user-driven wrapper.
 
@@ -19,9 +19,7 @@ Self-bounces by other skills (`/scope` hitting a wall, `/implement` discovering 
 
 ## Preconditions
 
-1. `.claude/release-state.json` exists. If not, abort with the standard pointer.
-2. Issue must be in the active project.
-3. `--reason` is non-empty (no silent bounces — the corpus shows bounces without context are the hardest to triage later).
+1. `--reason` is non-empty (no silent bounces — the corpus shows bounces without context are the hardest to triage later).
 
 ## Validation
 
@@ -42,7 +40,7 @@ A bounce from `Ready` to `Plan` is valid (target=3 < current=4). A bounce from `
 
 ## Actions on pass
 
-1. Set the project item's `Phase` field to `Bounced` (one `updateProjectV2ItemFieldValue` mutation; item ID from `item_cache`, targeted-lookup fallback per `/scope` §Project board mechanics). Then, over REST, reconcile the issue label to `phase:bounced` and stamp `bounce-to:<target>` (replacing any prior `bounce-to:*`) — the resume phase lives on the label, not a board field (see [Phase label reconcile](#phase-label-reconcile)).
+1. Over REST, reconcile the issue label to `phase:bounced` and stamp `bounce-to:<target>` (replacing any prior `bounce-to:*`) — both the bounced state and the resume phase live on labels (see [Phase label reconcile](#phase-label-reconcile)).
 2. Post the reason as a comment — it is the surviving comment class (information addressed to a human with no structured home), written as prose markdown with a bold lead:
 
    ```markdown
@@ -94,11 +92,11 @@ Same skill mechanism, different invocation site. `/bounce` is the user-driven va
 
 `Phase=Stalled` is a different signal — env/tooling failure, not a phase regression. Examples: qodana CI service down, GitHub API rate-limited mid-batch, `gh` token expired. The issue's scoping is fine; the *environment* is the problem.
 
-v1 has no `/stall` skill — set Stalled manually in the UI or via `gh project item-edit`, with no `bounce-to:*` label (a stall is not a phase regression). When you do, also set the `phase:stalled` label on the issue — the REST swap from [Phase label reconcile](#phase-label-reconcile), with `new="phase:stalled"` — so the halt is visible in `gh issue list`. Future `/stall <issue> --reason "<env-issue>"` would post the reason the same way `/bounce` does — it's the same surviving comment class.
+v1 has no `/stall` skill — set the `phase:stalled` label manually, with no `bounce-to:*` label (a stall is not a phase regression). Use the REST swap from [Phase label reconcile](#phase-label-reconcile), with `new="phase:stalled"`, so the halt is visible on the issue. Future `/stall <issue> --reason "<env-issue>"` would post the reason the same way `/bounce` does — it's the same surviving comment class.
 
 ## Phase label reconcile
 
-The board `Phase` field is only visible on the project board — not on the issue itself or in `gh issue list`. This skill mirrors every Phase write as a `phase:*` label on the issue so the lifecycle is legible at a glance, and the label never disagrees with the board. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the label work stays off the contended pool. **In the same step you set the `Phase` field, swap the label over REST:**
+The `phase:*` label is the canonical phase state — the only phase store the pipeline keeps, legible on the issue itself and discoverable over the REST issues endpoint. The swap rides REST: `gh issue edit --add-label/--remove-label` is GraphQL-backed, while the `gh api …/labels` endpoints are REST, so the phase write stays off the contended pool.
 
 ```bash
 # Atomic swap to an active phase. Runs under bash for array word-splitting.
@@ -112,12 +110,11 @@ gh api -X PUT "repos/$repo/issues/$n/labels" "${args[@]}"
 EOF
 ```
 
-The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus the one new `phase:*`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than the old remove-then-add pair, which had a window between its two calls (lowercased: `Phase=Bounced` → `phase:bounced`). A failed PUT leaves the prior labels untouched and heals on the next run. This skill writes `Phase=Bounced` (`phase:bounced`) plus a `bounce-to:<target>` label; on the `/scope` resume contract that becomes `Phase=<target>` (`phase:<target>`) with the `bounce-to:*` label cleared. The three `bounce-to:plan|design|define` labels must exist in the repo (`gh label create` once) for the stamp to apply.
+The single `PUT …/labels` replaces the label set with the non-`phase:*` labels plus the one new `phase:*`, so the issue never carries two phase labels and never carries zero — a tighter guarantee than a remove-then-add pair, which has a window between its two calls. A failed PUT leaves the prior labels untouched and heals on the next run. This skill writes `phase:bounced` plus a `bounce-to:<target>` label; on the `/scope` resume contract that becomes `phase:<target>` with the `bounce-to:*` label cleared. The three `bounce-to:plan|design|define` labels must exist in the repo (`gh label create` once) for the stamp to apply.
 
 ## Failure modes
 
-- **`release-state.json` stale**: rebuild via `/release-init <version> --reuse <num>`.
-- **GitHub API failure mid-transition**: don't write a partial state. If the field-edit succeeds but the comment fails, retry the comment with backoff. If the field-edit fails, abort without retrying the comment.
+- **GitHub API failure mid-transition**: don't write a partial state. If the label swap succeeds but the comment fails, retry the comment with backoff. If the label swap fails, abort without retrying the comment.
 - **Rate limits**: retry with backoff.
 
 ## What `/bounce` does NOT do

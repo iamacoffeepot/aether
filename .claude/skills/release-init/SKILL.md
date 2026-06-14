@@ -1,162 +1,78 @@
 ---
 name: release-init
-description: Bootstrap a new aether release. Copies the release template project (canonical schema — the phase vocabulary in the built-in Status field's options, no custom fields, plus the server-side added→Backlog / closed→Done workflows), populates .claude/release-state.json with the project ID + Phase field/option ID cache, optionally seeds the project with starter issues. Required before /scope works.
+description: Bootstrap a new aether release — ensure the phase / bounce-to / size / model labels exist and write a minimal .claude/release-state.json ({release_version, owner}). Issue phase is carried by phase:* labels (no project board). Required before /scope works.
 ---
 
 # /release-init — release bootstrap skill
 
-Bootstraps the GitHub Project + local config that the other release skills depend on. The per-release project is a **copy of the release template project** — the copy carries the field schema, views, and the two configured workflows (item added → Backlog, issue closed → Done), so phase placement on add and close runs on GitHub's side with no skill writes. Idempotent only when `--reuse` is passed; otherwise creates a fresh project each call.
-
-**Status-as-Phase.** `field_cache.Phase` points at the phase-carrying single-select — `Status` on boards bootstrapped from the release template (so GitHub's built-in "item added → Backlog" / "item closed → Done" workflows drive phase placement server-side), or a custom `Phase` field on a board created before the template existed (project 2). The built-in `Status` field can't be renamed or deleted; on template-bootstrapped boards the UI header reads "Status" but the tooling vocabulary is always "Phase".
+Bootstraps the label vocabulary + local marker the other release skills depend on. Issue phase is carried entirely by `phase:*` labels — Backlog and Done are label-absence, each active phase has its own label, and `size:*` / `model:*` carry the routing metadata `/scope` stamps at Plan. There is no project board: every pipeline write rides REST, so the contended GraphQL pool stays free for the one op that needs it (the PR un-draft in `/land`).
 
 ## Invocation
 
 ```
-/release-init <version>                            copy the template into "aether <version>"
-/release-init <version> --reuse <project-number>   adopt an existing project (no creation)
-/release-init <version> --import #N,#M,#...        add listed issues to the project
-/release-init <version> --owner <owner>            override default owner (iamacoffeepot)
-/release-init --init-template                      one-time: create the release template project
+/release-init <version>                  ensure labels + write release-state.json for "aether <version>"
+/release-init <version> --owner <owner>  override default owner (iamacoffeepot)
 ```
-
-Combinable: `/release-init 0.4 --reuse 2 --import #297,#694`.
 
 ## Preconditions
 
-1. `gh auth status` must include `project` scope. If not, instruct the user to run `gh auth refresh -s project` and abort.
+1. `gh auth status` must include `repo` scope (the standard scope). If not, instruct the user to run `gh auth refresh` and abort.
 2. The bootstrap script must exist at `scripts/release-project-init.sh` (committed in repo). If missing, abort with a pointer.
 3. `.claude/release-state.json` should not already exist (the file is the active-release marker; only one at a time). If it exists, ask the user to confirm overwrite before proceeding.
 
 ## Steps
 
-### 0. (One-time) create the template
-
-If no project titled `aether release template` exists for the owner, `/release-init --init-template` runs:
-
-```bash
-bash scripts/release-project-init.sh --init-template --owner <owner>
-```
-
-The script creates the project and replaces the `Status` field's options with the phase vocabulary (one `updateProjectV2Field` mutation). The two workflow toggles ("Item added to project" → Backlog, "Item closed" → Done) are **UI-only** — the workflow API is read/delete-only — and the script prints the exact steps. Done once; every release copies them for free (GitHub excludes only auto-add workflows from copies, which this flow doesn't use — `/sketch` adds items itself).
-
-### 1. Create or adopt the project
-
-If `--reuse <num>` was not passed:
+### 1. Ensure the label vocabulary
 
 ```bash
 bash scripts/release-project-init.sh <version> --owner <owner>
 ```
 
-The script locates the template by title and copies it (`gh project copy`) into `aether <version>`. Capture the project number from the script's output. If the script reports the template is missing, run step 0 first.
+The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `size:*` weights (including `size:xl` = fat, ADR-0110), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
 
-If `--reuse <num>` was passed, skip creation and use `<num>` directly. Verify the project exists; run the next step's `field-list` to confirm a single-select field carries the full phase vocabulary. If no such field is found, abort and name what is missing.
+### 2. Write `.claude/release-state.json`
 
-### 2. Query the field cache
-
-```bash
-gh project field-list <project-number> --owner <owner> --format json
-gh project view <project-number> --owner <owner> --format json
-```
-
-Extract:
-- The project's GraphQL node ID (from `view`, `.id`).
-- The phase field — resolve by option set, not by name. Find the `SINGLE_SELECT` field whose options superset-match the phase vocabulary:
-
-```bash
-PHASE_VOCAB='["Backlog","Define","Design","Plan","Ready","Executing","Refine","Done","Bounced","Stalled"]'
-gh project field-list <project-number> --owner <owner> --format json \
-  | jq --argjson vocab "$PHASE_VOCAB" '
-      [.fields[] | select(.type == "SINGLE_SELECT") | select(
-        [.options[].name] as $opts |
-        ($vocab | map(. as $v | $opts | contains([$v])) | all)
-      )] | first'
-```
-
-  Cache the matched field's `id` and every option's `id` under the key `"Phase"` — regardless of the field's `.name` (`Status` on a template-copied board, `Phase` on project 2). If no field matches, abort: the template's Status options were not replaced with the phase vocabulary. The copy regenerates field/option IDs, so never reuse IDs from the template or a prior release.
-
-### 3. Write `.claude/release-state.json`
-
-Schema (formatted, no trailing comma):
+The marker is minimal — phase, size, and model all live on labels, so it carries only the release version and the owner:
 
 ```json
 {
-  "active_project": <number>,
-  "project_node_id": "PVT_...",
   "release_version": "<version>",
-  "owner": "<owner>",
-  "field_cache": {
-    "Phase": {
-      "id": "PVTSSF_...",
-      "options": {
-        "Backlog": "<id>",
-        "Define": "<id>",
-        "Design": "<id>",
-        "Plan": "<id>",
-        "Ready": "<id>",
-        "Executing": "<id>",
-        "Refine": "<id>",
-        "Done": "<id>",
-        "Bounced": "<id>",
-        "Stalled": "<id>"
-      }
-    }
-  },
-  "item_cache": {}
+  "owner": "<owner>"
 }
 ```
 
-The `"Phase"` entry holds the phase-carrying single-select (see [Status-as-Phase](#release-init--release-bootstrap-skill) above) — the key name is the tooling vocabulary, regardless of the field's UI name. `item_cache` starts empty; `/sketch` seeds it per filed issue and other skills append on lookup miss.
-
 Write atomically: temp file then rename. Set permissions to user-only (`chmod 600`) since this is operational state, not source.
 
-### 4. Ensure `.gitignore` covers it
+### 3. Ensure `.gitignore` covers it
 
 Append `.claude/release-state.json` to `.gitignore` if not already present. This file is per-machine operational state, not project source. Do not commit.
 
-### 5. Import issues if `--import` was given
-
-For each issue in the comma-separated list:
-
-```bash
-gh project item-add <project-number> --owner <owner> --url https://github.com/<owner>/aether/issues/<number>
-```
-
-No Phase write — the copied "item added" workflow sets Backlog server-side. Spot-check the first import landed in Backlog; if it didn't (the workflow toggle was skipped on the template), set the field explicitly and remind the user to fix the template's workflows. Issue metadata (type / size / model) rides labels, not board fields — `/sketch` stamps `type:*` at filing and `/scope` stamps `size:*` / `model:*` at Plan; this step doesn't touch them. Record each returned item ID in `item_cache`.
-
-### 6. Print summary
+### 4. Print summary
 
 ```
 ✓ aether <version> bootstrapped
-  Project: https://github.com/users/<owner>/projects/<number>
+  Labels ensured: phase:* / bounce-to:* / size:* / model:*
   Local state: .claude/release-state.json
-  Imported: <N> issue(s)
 
 Next:
-  1. Open the project URL above; the board view groups by the phase-carrying field (Status on template boards).
-     Verify both workflows copied: item added → Backlog, item closed → Done.
-  2. Add more issues: /sketch (files + board-adds in one step)
-  3. Scope an issue: /scope <issue-number>
+  1. File an issue: /sketch (a new issue is Backlog by carrying no phase:* label)
+  2. Scope an issue: /scope <issue-number>
 ```
 
 ## Failure modes
 
-- **`gh` lacks `project` scope**: abort with the refresh command.
-- **Template project missing**: the script exits with a pointer; run `/release-init --init-template`, do the two printed workflow toggles, then re-run.
-- **Bootstrap script fails partway**: leave whatever was created on the GH side, report the error, do not write `release-state.json`. The user can `gh project delete` and retry.
-- **`field-list` shows no single-select field carrying the full phase vocabulary**: abort and report what is missing; on a template-bootstrapped board this means the Status options were not replaced at `--init-template` time.
-- **`.claude/release-state.json` already exists and `--force` not passed**: ask the user to confirm overwrite before proceeding.
-- **`--import` issue doesn't exist or is in a different repo**: skip with a warning comment; continue with the rest.
+- **`gh` lacks `repo` scope**: abort with the `gh auth refresh` pointer.
+- **Bootstrap script fails partway**: report which label create failed; the script is idempotent, so a re-run resumes from where it stopped.
+- **`.claude/release-state.json` already exists**: ask the user to confirm overwrite before proceeding.
 
 ## What `/release-init` does NOT do
 
-- Configure the board view layout (group-by, sort, sub-grouping) or toggle workflows. Both are UI-only; both live on the template, configured once at `--init-template` time and carried into every copy.
-- Stamp `type:*` / `size:*` / `model:*` labels on imported issues — `/sketch` and `/scope` own those.
-- Migrate items from an older release project. If you want to move issues from `aether 0.3` to `aether 0.4`, use `gh project item-archive` on the old + `--import` on the new.
-- Rename the Status field. GitHub doesn't allow it; the tooling vocabulary "Phase" lives in `release-state.json`'s cache key and everything downstream of it.
-- Delete or close old release projects. The user does that manually when they're done with a release.
+- Create or configure a project board — phase is carried by `phase:*` labels, not a board.
+- Stamp `type:*` / `size:*` / `model:*` labels on any issue — `/sketch` and `/scope` own those; this skill only ensures the labels exist for them to stamp.
+- Import or migrate issues — a new issue enters the pipeline via `/sketch`.
+- Delete or close old releases. The user does that manually when they're done with a release.
 
 ## Notes on `release-state.json`
 
-- The file is the **active-release marker**. Only one exists at a time per repo. Switching releases means re-running `/release-init <newversion>` (after archiving the old).
-- The `field_cache` is invalidated if anyone hand-edits fields/options in the UI. If `/scope` or another skill ever fails with a "field ID not found" error, run `/release-init <version> --reuse <num>` to rebuild the cache against the same project. Rebuilding preserves `item_cache` (item IDs only die with the project itself).
+- The file is the **active-release marker**. Only one exists at a time per repo. Switching releases means re-running `/release-init <newversion>`.
 - The file is `chmod 600` because it carries operational state; not sensitive per se, but personal to the machine.

@@ -15,7 +15,7 @@ Each wish carries its design-space context — the alternatives it was picked fr
 
 ## What `/wish` does and doesn't do
 
-`/wish` proposes design through structured drilling. It writes a directory tree of wish files. It does **not** file issues, write production code, or update the project board. The user reads the tree, decides which leaves to file as issues for `/scope` to pick up.
+`/wish` proposes design through structured drilling. It writes a directory tree of wish files. It does **not** file issues or write production code. The user reads the tree, decides which leaves to file as issues for `/scope` to pick up.
 
 Distinct from `/scope` (formalizing one chosen wish/issue into Define→Design→Plan). `/wish` is the upstream that surfaces what's *worth* scoping.
 
