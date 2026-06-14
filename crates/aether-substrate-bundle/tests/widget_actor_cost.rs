@@ -300,3 +300,138 @@ fn widget_cost_vs_draw_weight() {
          widget is mostly boundary cost and the slope is what grows with widget complexity.",
     );
 }
+
+/// Boot a fresh bench, load `count` widgets under one profile, advance `ticks`
+/// frames timing only the advance, and return
+/// `(wall_per_frame_nanos, per_widget_tick_ewma_nanos)`. Component load is
+/// outside the timed region, so the wall-clock is steady-state per-frame cost.
+#[allow(clippy::cast_precision_loss)] // elapsed nanos → f64 for a per-frame average; exactness is not load-bearing.
+fn measure_cell(
+    wasm: &[u8],
+    count: usize,
+    redraw_each_tick: bool,
+    quad_count: u32,
+    ticks: u32,
+) -> (f64, u64) {
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let ids = load_widgets(&mut bench, wasm, count, redraw_each_tick, quad_count);
+    let start = Instant::now();
+    bench
+        .execute(vec![("advance", BenchOp::advance(ticks))])
+        .expect("advance");
+    let wall_per_frame = start.elapsed().as_nanos() as f64 / f64::from(ticks);
+    (wall_per_frame, widget_mean_nanos(&bench, &ids))
+}
+
+/// The widget count at which the naive per-frame cost — fit linearly against
+/// count over the measured `(count, wall_nanos)` points — would reach the
+/// 60fps frame budget. `None` for a flat/declining fit (no break-even) or too
+/// few points. Reuses [`linear_fit`].
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)] // measurement-aid arithmetic over small counts + nanos; exactness is not load-bearing.
+fn budget_break_even(points: &[(usize, f64)]) -> Option<u64> {
+    if points.len() < 2 {
+        return None;
+    }
+    let samples: Vec<(u32, u64)> = points
+        .iter()
+        .map(|&(c, w)| (u32::try_from(c).unwrap_or(u32::MAX), w as u64))
+        .collect();
+    let (intercept, slope) = linear_fit(&samples);
+    if slope <= 0.0 {
+        return None;
+    }
+    let break_even = (FRAME_BUDGET_NANOS as f64 - intercept) / slope;
+    (break_even.is_finite() && break_even > 0.0).then_some(break_even as u64)
+}
+
+/// Aggregate per-frame cost at scale: does widget-as-actor hold at MMO-HUD
+/// widget density without the (deferred, per issue 1793) host-cached replay
+/// tier?
+///
+/// The 1793 spike answered the *per-widget boundary* question — one
+/// actor-backed widget costs ~1.3µs/frame, count-independent — but read it from
+/// the per-handler EWMA, which excludes the two costs that scale with the widget
+/// count: the scheduler's per-frame fan-out to N actors and the render cap's
+/// accumulation of N draw batches. Its verdict named those as the real ceiling
+/// without measuring them; this measurement does.
+///
+/// The true aggregate is the wall-clock around `advance`, which in the test
+/// bench runs the whole in-process per-frame pipeline — scheduler fan-out, every
+/// widget's `Tick` handler, the render accumulation, and the commit-current
+/// record — minus only GPU present (the offscreen target has no swapchain). The
+/// existing two fixture profiles decompose it with no internals access:
+///
+/// - `cached` (widgets early-return, emit nothing) is the **tick floor**: the
+///   cost of merely waking and dispatching N actors each frame plus the record
+///   of a near-empty frame. Scheduler fan-out lives here.
+/// - `naive − cached` is the **draw path**: the marginal cost of N widgets each
+///   building, encoding, and sending a batch the render cap then accumulates.
+///
+/// `handler_sum` (N × the naive per-handler EWMA) is the pure handler-execution
+/// total; comparing it to `naive` shows how much of the frame is handler work
+/// versus scheduler + render overhead.
+#[allow(clippy::cast_precision_loss)] // nanos/counts → f64 for a measurement readout; exactness is not load-bearing.
+#[test]
+#[ignore = "on-demand --release measurement; run with --ignored --nocapture"]
+fn widget_actor_aggregate_scale() {
+    let Some(wasm_path) = require_runtime("ui_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read ui_widget wasm");
+
+    let ticks = env_or("AETHER_UI_SCALE_TICKS", 300);
+    // One quad per widget isolates per-widget dispatch + accumulation overhead
+    // from draw weight (characterized by `widget_cost_vs_draw_weight`) and stays
+    // far under the 4MiB overlay quad buffer even at thousands of widgets.
+    let quad_count = env_or("AETHER_UI_SCALE_QUADS", 1);
+    let counts = env_counts("AETHER_UI_SCALE_WIDGETS", &[1, 64, 256, 512, 1024], 1);
+
+    eprintln!();
+    eprintln!(
+        "widget-actor aggregate per-frame cost at scale (issue 1793 follow-on): {ticks} ticks, \
+         {quad_count} quad/widget, 60fps budget {:.0} micros/frame",
+        FRAME_BUDGET_NANOS as f64 / 1000.0,
+    );
+    eprintln!(
+        "{:>8}  {:>12}  {:>13}  {:>11}  {:>14}  {:>10}",
+        "widgets", "naive_micros", "cached_micros", "draw_micros", "handler_sum", "pct_budget",
+    );
+
+    let mut naive_points: Vec<(usize, f64)> = Vec::with_capacity(counts.len());
+    for &count in &counts {
+        let (naive_wall, per_widget) = measure_cell(&wasm, count, true, quad_count, ticks);
+        let (cached_wall, _) = measure_cell(&wasm, count, false, quad_count, ticks);
+        let draw = (naive_wall - cached_wall).max(0.0);
+        let handler_sum = per_widget as f64 * count as f64;
+        let pct = naive_wall / FRAME_BUDGET_NANOS as f64 * 100.0;
+        naive_points.push((count, naive_wall));
+        eprintln!(
+            "{count:>8}  {:>12.2}  {:>13.2}  {:>11.2}  {:>14.2}  {pct:>9.1}%",
+            naive_wall / 1000.0,
+            cached_wall / 1000.0,
+            draw / 1000.0,
+            handler_sum / 1000.0,
+        );
+    }
+
+    if let Some(break_even) = budget_break_even(&naive_points) {
+        eprintln!();
+        eprintln!(
+            "extrapolated break-even: ~{break_even} widgets fill the 16.67ms frame \
+             (naive, linear in count)",
+        );
+    }
+
+    eprintln!();
+    eprintln!(
+        "what to improve: `cached_micros` is the tick floor — scheduler fan-out + bare dispatch of N \
+         still-subscribed guests. `draw_micros` is the marginal draw-path cost the deferred host-cached \
+         replay tier would remove. If `cached_micros` dominates and climbs with count, the ceiling is \
+         the per-frame fan-out (improve scheduling, or let static widgets stop subscribing Tick), not \
+         the wasm boundary the 1793 per-widget number already cleared.",
+    );
+}
