@@ -1,13 +1,13 @@
 ---
 name: scope
-description: Walk a GitHub issue Define → Design → Plan and update the release Project board. Stops at Plan with AgentReady=No, awaiting user approval via /approve. Aggressive (agent makes design calls) and resumable (per-phase updates to the board).
+description: Walk a GitHub issue Define → Design → Plan and update the release Project board. Stops at Plan, awaiting user approval via /approve. Aggressive (agent makes design calls) and resumable (per-phase updates to the board).
 ---
 
 # /scope — release scoping skill
 
-Walk a single issue from Backlog through Define → Design → Plan, producing a problem statement, design rationale, and implementation plan as structured body sections. Updates the active release Project's `Phase` field as it advances. Stops at `Plan` with `AgentReady=No`, awaiting user review via `/approve`.
+Walk a single issue from Backlog through Define → Design → Plan, producing a problem statement, design rationale, and implementation plan as structured body sections. Updates the active release Project's `Phase` field as it advances. Stops at `Plan`, awaiting user review via `/approve`.
 
-This skill produces **scoping artifacts only**. It does not write production code (that's `/implement`), open implementation PRs, or set `AgentReady=Yes` (that's `/approve`).
+This skill produces **scoping artifacts only**. It does not write production code (that's `/implement`), open implementation PRs, or advance the issue to Ready (that's `/approve`).
 
 ## Invocation
 
@@ -23,11 +23,11 @@ This skill produces **scoping artifacts only**. It does not write production cod
 
 ## Sweep dispatch
 
-`/scope --sweep` is the batched discovery entry point: instead of one issue, it takes the Backlog set, dispatches one background scoper agent per issue, and waits for your confirmation before any agent spawns. It is the read-only twin of `/implement --sweep` — each agent runs a full single-issue `/scope` (Define → Design → Plan, writing that issue's body sections, board fields, and `size:*` / `model:*` labels) in its own context, then stops with a bounded summary. The parent assembles the batch, confirms, paces dispatch against the shared GraphQL pool, and rolls up the outcomes.
+`/scope --sweep` is the batched discovery entry point: instead of one issue, it takes the Backlog set, dispatches one background scoper agent per issue, and waits for your confirmation before any agent spawns. It is the read-only twin of `/implement --sweep` — each agent runs a full single-issue `/scope` (Define → Design → Plan, writing that issue's body sections, the Phase board field, and `size:*` / `model:*` labels) in its own context, then stops with a bounded summary. The parent assembles the batch, confirms, paces dispatch against the shared GraphQL pool, and rolls up the outcomes.
 
 Two things differ from `/implement --sweep`:
 
-- **The agent owns its issue's whole scope.** `/implement` keeps the serial tail (push, PR, CI loop, board writes) in the parent because that tail is flaky; scope has no such tail — no worktree, no push, no CI — so each scoper agent writes its issue's artifacts directly and there is nothing to hand back. Each agent still batches its own issue's field writes into one aliased request per §"Batch every multi-write run into one aliased request"; the cross-agent pacing is the concurrency cap below, not a shared batch.
+- **The agent owns its issue's whole scope.** `/implement` keeps the serial tail (push, PR, CI loop, board writes) in the parent because that tail is flaky; scope has no such tail — no worktree, no push, no CI — so each scoper agent writes its issue's artifacts directly and there is nothing to hand back. Each agent writes only its own issue's Phase transitions (the board's one field) plus its labels; the cross-agent pacing is the concurrency cap below, not a shared batch.
 - **Two models, not one.** The scoper agents run a design-capable model — `--model` (default `opus`), because scoping makes design calls. That is distinct from the per-issue `model:*` label each agent *stamps* at Plan to route the future `/implement`.
 
 1. **Enumerate the candidate set.** With no issue arguments, discover every Backlog issue. Backlog is the resting phase that carries no `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)), so an open non-PR issue with no `phase:*` label is at Backlog. Over REST (per [Project board mechanics](#project-board-mechanics) — not `gh issue list`, which is GraphQL-backed):
@@ -74,11 +74,7 @@ Reads `.claude/release-state.json` at the repo root:
   "release_version": "0.4",
   "owner": "iamacoffeepot",
   "field_cache": {
-    "Phase":      { "id": "PVTSSF_...", "options": { "Backlog": "...", "Define": "...", ... } },
-    "Type":       { "id": "...", "options": { ... } },
-    "Size":       { "id": "...", "options": { ... } },
-    "AgentReady": { "id": "...", "options": { ... } },
-    "BounceTo":   { "id": "...", "options": { ... } }
+    "Phase": { "id": "PVTSSF_...", "options": { "Backlog": "...", "Define": "...", ... } }
   },
   "item_cache": { "<issue-number>": "PVTI_..." }
 }
@@ -98,7 +94,7 @@ For each sub-phase: read inputs, write the corresponding body section, advance t
 - **Output**: replaces or adds `## Problem statement` section in the body. Two short paragraphs:
   1. *What's being solved.* The concrete problem in plain language.
   2. *Why now / success criteria.* Why this release; what "done" looks like observably.
-- **Bounce**: if the body is too vague to frame a problem (e.g. one-line title, no description, no linked context), self-bounce with `Phase=Bounced`, `BounceTo=Define`, and a comment asking the specific clarifying question. Don't guess.
+- **Bounce**: if the body is too vague to frame a problem (e.g. one-line title, no description, no linked context), self-bounce with `Phase=Bounced`, a `bounce-to:define` label, and a comment asking the specific clarifying question. Don't guess.
 - **Project board**: set `Phase=Design` on success.
 
 ### Design
@@ -146,12 +142,12 @@ For each sub-phase: read inputs, write the corresponding body section, advance t
   - More than 3 logically-separable changes, *or*
   - More than 2 crates with logically-separable work
   - In that case, file each sub-issue via `/sketch`'s mechanics (Phase=Backlog initially, link parent), update §Sub-issues, and scope each child in a follow-up `/scope` run.
-- **Size estimation** — set the `Size` custom field on the project item:
+- **Size estimation** — stamp the issue's `size:*` label by this rubric:
   - **S**: single file, single concept, <100 LOC change
   - **M**: single crate, multiple files, <500 LOC change
   - **L**: cross-crate, architectural, or >500 LOC change
 
-  In the same step you set the `Size` field, mirror it to a `size:s|m|l` label over REST (the same `gh api …/labels` endpoints the [Phase label reconcile](#phase-label-reconcile) uses — never `gh issue edit`, which rides GraphQL), so the dispatcher both reads *and* writes the estimate off the contended pool:
+  Write it as a `size:s|m|l` label over REST (the same `gh api …/labels` endpoints the [Phase label reconcile](#phase-label-reconcile) uses — never `gh issue edit`, which rides GraphQL), so the estimate the dispatcher reads lives entirely off the contended pool:
 
   ```bash
   gh api "repos/iamacoffeepot/aether/issues/<n>/labels" --jq '.[].name | select(startswith("size:"))' \
@@ -165,7 +161,7 @@ For each sub-phase: read inputs, write the corresponding body section, advance t
   - `model:fable` — never stamped by `/scope`; reserved for a human pinning the top tier explicitly.
 
   The gate encodes a size-asymmetry: a downward misjudgment costs more as size grows, so an M/L `model:sonnet` demands a plan that reads as executable verbatim — when in doubt at M or L, stamp `model:opus`. Note the choice and a one-clause reason in the Plan audit comment.
-- **Project board**: leave `Phase=Plan`; set `AgentReady=No` (default, but explicit). This is the resting state awaiting `/approve`.
+- **Project board**: leave `Phase=Plan`. This is the resting state awaiting `/approve`.
 
 ## Side findings
 
@@ -210,7 +206,7 @@ This section is the canonical GitHub API-budget reference for the whole pipeline
 
 ### Field writes (GraphQL)
 
-To set a single-select field on a project item:
+To set the Phase field (the board's one single-select) on a project item:
 
 ```bash
 gh api graphql -f query='
@@ -252,32 +248,30 @@ Every op with a REST endpoint rides REST (`gh api <path>`); only the three Proje
 
 **GraphQL-only — no REST equivalent:**
 
-- ProjectV2 field writes — `updateProjectV2ItemFieldValue` (Phase / Type / Size / AgentReady / BounceTo).
+- ProjectV2 field writes — `updateProjectV2ItemFieldValue` (Phase — the board's only field).
 - ProjectV2 item add — `addProjectV2ItemById`.
 - Un-draft a PR — `markPullRequestReadyForReview` (the REST `pulls` PATCH cannot clear `draft`).
 
 ### Batch every multi-write run into one aliased request
 
-When a run writes more than one ProjectV2 field — across several issues, or several fields of one issue — send them as one `gh api graphql` request with aliased mutations instead of one request per write. An `/approve` of N issues issues one request carrying 2N aliased `updateProjectV2ItemFieldValue` mutations (Phase + AgentReady per issue); a single-issue Plan run that sets Phase, Size, and AgentReady aliases all three.
+When a run writes the Phase field for more than one issue — an `/approve --sweep` or `/implement --sweep` flipping a batch — send them as one `gh api graphql` request with aliased mutations instead of one request per issue. An `/approve` of N issues issues one request carrying N aliased `updateProjectV2ItemFieldValue` mutations (Phase per issue); a single-issue run writes Phase once and needs no aliasing.
 
 Build the aliased body under `bash` — zsh does not word-split an unquoted variable, so a body assembled in a loop must run inside a `bash <<'EOF'` block:
 
 ```bash
 bash <<'EOF'
 PID=<project-node-id>; PHASE=<phase-field-id>; READY=<ready-option-id>
-AR=<agentready-field-id>; YES=<yes-option-id>
 items=(PVTI_aaa PVTI_bbb PVTI_ccc)        # item IDs from item_cache
 body=""; i=0
 for item in "${items[@]}"; do
   body+="p$i: updateProjectV2ItemFieldValue(input:{projectId:\"$PID\",itemId:\"$item\",fieldId:\"$PHASE\",value:{singleSelectOptionId:\"$READY\"}}){projectV2Item{id}} "
-  body+="r$i: updateProjectV2ItemFieldValue(input:{projectId:\"$PID\",itemId:\"$item\",fieldId:\"$AR\",value:{singleSelectOptionId:\"$YES\"}}){projectV2Item{id}} "
   i=$((i+1))
 done
 gh api graphql -f query="mutation { $body }"
 EOF
 ```
 
-One request, 2N mutations, against the GraphQL pool once instead of N times. The item add and its Phase write cannot alias into one request (the field write needs the item ID the add returns), so a fresh `/sketch` filing stays two GraphQL calls.
+One request, N mutations, against the GraphQL pool once instead of N times. The item add and its Phase write cannot alias into one request (the field write needs the item ID the add returns), so a fresh `/sketch` filing stays two GraphQL calls.
 
 ## Phase label reconcile
 
@@ -314,8 +308,8 @@ gh api "repos/iamacoffeepot/aether/issues/<n>/labels" --jq '.[].name | select(st
 - Open implementation PRs (use `/implement`).
 - Merge anything.
 - Auto-file side findings as child issues (use `/scope-spinoff`).
-- Set `AgentReady=Yes` (use `/approve`).
-- Set `Type` — that should come from the issue title's conventional-commit prefix (`feat:` → `feat`, `fix:` → `fix`, etc.). If unset, infer from title; if title has no prefix, leave unset and surface it in the run's output.
+- Advance the issue to Ready (use `/approve`).
+- Stamp `Type` — `/sketch` sets the `type:*` label at filing from the title's conventional-commit prefix; there is no board Type field for `/scope` to set.
 
 ## Failure modes to handle gracefully
 

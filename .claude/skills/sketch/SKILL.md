@@ -23,7 +23,7 @@ With no idea text, ask what the idea is — don't guess from conversation contex
 
 ## Title
 
-`{type}({crate}): subject` — lowercase subject, conventional-commit form. The repo's issue lint auto-applies `invalid-title` to anything else, and `/scope` derives the board `Type` field from the prefix, so the title is load-bearing.
+`{type}({crate}): subject` — lowercase subject, conventional-commit form. The repo's issue lint auto-applies `invalid-title` to anything else, and the `type:*` label is stamped from the prefix, so the title is load-bearing.
 
 Type inference from the idea text (same table `/scope-spinoff` uses). The authoritative type set is the `TYPES` array in `.github/workflows/issue-labels.yml` — check it when this table and the lint diverge.
 
@@ -97,7 +97,7 @@ Record the returned project item ID in `release-state.json` under `item_cache` s
 
 (Create the key if absent; item IDs are stable for the life of the project.)
 
-Don't set `Type` / `Size` / `AgentReady` — `/scope` owns those. No audit comment — the issue's own creation event is the record.
+The board carries only `Phase=Backlog`. (`type:*` rides the issue from filing; `/scope` stamps `size:*` / `model:*` at Plan — all labels, no board fields.) No audit comment — the issue's own creation event is the record.
 
 Once the release board carries the server-side "item added → Backlog" workflow (issue #1577's template path), step 2 disappears; detect this by the project's workflows rather than guessing — until then, write the field explicitly.
 

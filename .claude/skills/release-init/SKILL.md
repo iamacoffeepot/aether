@@ -1,6 +1,6 @@
 ---
 name: release-init
-description: Bootstrap a new aether release. Copies the release template project (canonical schema with the phase vocabulary in the built-in Status field plus Type/Size/AgentReady/BounceTo/ADR/AuthBudget custom fields, and the server-side added→Backlog / closed→Done workflows), populates .claude/release-state.json with the project ID + field/option ID cache, optionally seeds the project with starter issues. Required before /scope works.
+description: Bootstrap a new aether release. Copies the release template project (canonical schema — the phase vocabulary in the built-in Status field, no custom fields, plus the server-side added→Backlog / closed→Done workflows), populates .claude/release-state.json with the project ID + Phase field/option ID cache, optionally seeds the project with starter issues. Required before /scope works.
 ---
 
 # /release-init — release bootstrap skill
@@ -37,7 +37,7 @@ If no project titled `aether release template` exists for the owner, `/release-i
 bash scripts/release-project-init.sh --init-template --owner <owner>
 ```
 
-The script creates the project, replaces the `Status` field's options with the phase vocabulary (one `updateProjectV2Field` mutation), and creates the other custom fields. The two workflow toggles ("Item added to project" → Backlog, "Item closed" → Done) are **UI-only** — the workflow API is read/delete-only — and the script prints the exact steps. Done once; every release copies them for free (GitHub excludes only auto-add workflows from copies, which this flow doesn't use — `/sketch` adds items itself).
+The script creates the project and replaces the `Status` field's options with the phase vocabulary (one `updateProjectV2Field` mutation). The two workflow toggles ("Item added to project" → Backlog, "Item closed" → Done) are **UI-only** — the workflow API is read/delete-only — and the script prints the exact steps. Done once; every release copies them for free (GitHub excludes only auto-add workflows from copies, which this flow doesn't use — `/sketch` adds items itself).
 
 ### 1. Create or adopt the project
 
@@ -49,7 +49,7 @@ bash scripts/release-project-init.sh <version> --owner <owner>
 
 The script locates the template by title and copies it (`gh project copy`) into `aether <version>`. Capture the project number from the script's output. If the script reports the template is missing, run step 0 first.
 
-If `--reuse <num>` was passed, skip creation and use `<num>` directly. Verify the project exists and has the expected fields by running the next step's `field-list` and checking that Status (carrying the phase options), Type, Size, AgentReady, BounceTo, ADR, AuthBudget are present. If any are missing, abort with a message naming the missing fields.
+If `--reuse <num>` was passed, skip creation and use `<num>` directly. Verify the project exists and that Status carries the phase options by running the next step's `field-list`. If Status or its options are missing, abort with a message naming what's missing.
 
 ### 2. Query the field cache
 
@@ -60,8 +60,7 @@ gh project view <project-number> --owner <owner> --format json
 
 Extract:
 - The project's GraphQL node ID (from `view`, `.id`).
-- For each of Status, Type, Size, AgentReady, BounceTo: the field ID and, for single-select fields, every option's ID. **The field named `Status` is cached under the key `"Phase"`** — the copy regenerates all field/option IDs, so never reuse IDs from the template or a prior release.
-- For ADR and AuthBudget: just the field ID (text fields, no options).
+- For Status: the field ID and every option's ID. **The field named `Status` is cached under the key `"Phase"`** — the copy regenerates the field/option IDs, so never reuse IDs from the template or a prior release.
 
 ### 3. Write `.claude/release-state.json`
 
@@ -88,13 +87,7 @@ Schema (formatted, no trailing comma):
         "Bounced": "<id>",
         "Stalled": "<id>"
       }
-    },
-    "Type":       { "id": "...", "options": { "feat": "...", "fix": "...", ... } },
-    "Size":       { "id": "...", "options": { "S": "...", "M": "...", "L": "..." } },
-    "AgentReady": { "id": "...", "options": { "No": "...", "Yes": "..." } },
-    "BounceTo":   { "id": "...", "options": { "Plan": "...", "Design": "...", "Define": "..." } },
-    "ADR":        { "id": "...", "options": null },
-    "AuthBudget": { "id": "...", "options": null }
+    }
   },
   "item_cache": {}
 }
@@ -116,7 +109,7 @@ For each issue in the comma-separated list:
 gh project item-add <project-number> --owner <owner> --url https://github.com/<owner>/aether/issues/<number>
 ```
 
-No Phase write — the copied "item added" workflow sets Backlog server-side. Spot-check the first import landed in Backlog; if it didn't (the workflow toggle was skipped on the template), set the field explicitly and remind the user to fix the template's workflows. Don't set Type/Size/AgentReady — those are `/scope`'s responsibility per-issue. Record each returned item ID in `item_cache`.
+No Phase write — the copied "item added" workflow sets Backlog server-side. Spot-check the first import landed in Backlog; if it didn't (the workflow toggle was skipped on the template), set the field explicitly and remind the user to fix the template's workflows. Issue metadata (type / size / model) rides labels, not board fields — `/sketch` stamps `type:*` at filing and `/scope` stamps `size:*` / `model:*` at Plan; this step doesn't touch them. Record each returned item ID in `item_cache`.
 
 ### 6. Print summary
 
@@ -138,14 +131,14 @@ Next:
 - **`gh` lacks `project` scope**: abort with the refresh command.
 - **Template project missing**: the script exits with a pointer; run `/release-init --init-template`, do the two printed workflow toggles, then re-run.
 - **Bootstrap script fails partway**: leave whatever was created on the GH side, report the error, do not write `release-state.json`. The user can `gh project delete` and retry.
-- **`field-list` returns fewer fields than expected** (e.g. someone hand-deleted a field, or the Status options weren't replaced on the template): abort and report the missing fields/options by name.
+- **`field-list` shows the Status field missing or its phase options not replaced**: abort and report what's missing by name.
 - **`.claude/release-state.json` already exists and `--force` not passed**: ask the user to confirm overwrite before proceeding.
 - **`--import` issue doesn't exist or is in a different repo**: skip with a warning comment; continue with the rest.
 
 ## What `/release-init` does NOT do
 
 - Configure the board view layout (group-by, sort, sub-grouping) or toggle workflows. Both are UI-only; both live on the template, configured once at `--init-template` time and carried into every copy.
-- Add Type/Size/AgentReady values to imported issues — `/scope` handles that.
+- Stamp `type:*` / `size:*` / `model:*` labels on imported issues — `/sketch` and `/scope` own those.
 - Migrate items from an older release project. If you want to move issues from `aether 0.3` to `aether 0.4`, use `gh project item-archive` on the old + `--import` on the new.
 - Rename the Status field. GitHub doesn't allow it; the tooling vocabulary "Phase" lives in `release-state.json`'s cache key and everything downstream of it.
 - Delete or close old release projects. The user does that manually when they're done with a release.

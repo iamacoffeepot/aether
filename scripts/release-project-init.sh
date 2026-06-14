@@ -42,21 +42,6 @@ if [[ "$INIT_TEMPLATE" -eq 0 && -z "$VERSION" ]]; then
     exit 64
 fi
 
-create_select() {
-    local number="$1" name="$2" options="$3"
-    echo "  + ${name} (single-select)"
-    gh project field-create "$number" --owner "$OWNER" \
-        --name "$name" --data-type SINGLE_SELECT \
-        --single-select-options "$options" >/dev/null
-}
-
-create_text() {
-    local number="$1" name="$2"
-    echo "  + ${name} (text)"
-    gh project field-create "$number" --owner "$OWNER" \
-        --name "$name" --data-type TEXT >/dev/null
-}
-
 if [[ "$INIT_TEMPLATE" -eq 1 ]]; then
     echo "→ Creating template project: ${TEMPLATE_TITLE} (owner: ${OWNER})"
     PROJECT_JSON=$(gh project create --owner "$OWNER" --title "$TEMPLATE_TITLE" --format json)
@@ -76,22 +61,15 @@ if [[ "$INIT_TEMPLATE" -eq 1 ]]; then
               {name: "Define",    color: BLUE,   description: "problem statement in progress"},
               {name: "Design",    color: BLUE,   description: "design rationale in progress"},
               {name: "Plan",      color: BLUE,   description: "impl plan written, awaiting /approve"},
-              {name: "Ready",     color: GREEN,  description: "approved, AgentReady"},
+              {name: "Ready",     color: GREEN,  description: "approved, ready for an agent"},
               {name: "Executing", color: YELLOW, description: "PR in flight"},
               {name: "Refine",    color: ORANGE, description: "CI loop / draft PR resting state"},
               {name: "Done",      color: PURPLE, description: "merged and closed"},
-              {name: "Bounced",   color: RED,    description: "regressed; see BounceTo"},
+              {name: "Bounced",   color: RED,    description: "regressed; see the bounce-to:* label"},
               {name: "Stalled",   color: PINK,   description: "env/tooling halt"}
             ]
           }) { projectV2Field { ... on ProjectV2SingleSelectField { id } } }
         }' -f fieldId="$STATUS_FIELD_ID" >/dev/null
-
-    create_select "$PROJECT_NUMBER" "Type"       "feat,fix,chore,docs,refactor,ci,test"
-    create_select "$PROJECT_NUMBER" "Size"       "S,M,L"
-    create_select "$PROJECT_NUMBER" "AgentReady" "No,Yes"
-    create_select "$PROJECT_NUMBER" "BounceTo"   "Plan,Design,Define"
-    create_text   "$PROJECT_NUMBER" "ADR"
-    create_text   "$PROJECT_NUMBER" "AuthBudget"
 
     cat <<EOF
 

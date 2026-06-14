@@ -56,7 +56,7 @@ For each selected finding:
    Spun off from #<parent> §Side findings during `/scope-spinoff` on <date>.
    ```
 
-   For a spun-off finding the verbatim blockquote in `## Description` is the finding line as it appeared in the parent body; the expansion is any context the agent already has from reading the code. Don't set Type/Size/AgentReady — `/scope` handles those when the child gets scoped.
+   For a spun-off finding the verbatim blockquote in `## Description` is the finding line as it appeared in the parent body; the expansion is any context the agent already has from reading the code. Don't stamp `size:*` / `model:*` — `/scope` handles those when the child gets scoped (`type:*` rides the issue from filing).
 
 No comment is posted on the parent: the child's `Spun off from #<parent>` line creates a cross-reference event in the parent's timeline automatically, one per filing, which is the per-finding record.
 
