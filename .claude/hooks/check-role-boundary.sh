@@ -5,12 +5,14 @@
 # Two gates run before a tool executes, both reading the session-keyed role
 # marker the binding hook (#1818) writes at .claude/roles/<session-id>:
 #
-#   (a) Role gate (all tools) — the active role's deny table matches the
-#       invoked skill (its slash-command form) or the git/gh verb that stands
-#       in for it (merge / push / issue-creation must be prevented, not
-#       detected after the fact) against the Bash command, and asks to confirm.
-#         dreamer / scoper -> approve, implement, merge, code-push
-#         orchestrator     -> wish, sketch, issue-creation
+#   (a) Role gate (all tools) — the active role's deny table matches the git/gh
+#       effect verb that stands in for a denied action (merge / push /
+#       issue-creation — caught before they run) against the Bash command, and
+#       asks to confirm. Skill-form denials are not Bash commands and have no
+#       enforceable Bash stand-in, so they are not carried here (ADR-0111 makes
+#       an out-of-role skill advisory at most, and its effects hit this gate).
+#         dreamer / scoper -> merge, code-push
+#         orchestrator     -> issue-creation
 #         everything       -> nothing
 #   (b) Edit-path gate (Edit/Write/MultiEdit/NotebookEdit) — resolves the
 #       target file_path to absolute and asks to confirm a write that would
@@ -58,18 +60,13 @@ role=$(tr -d '[:space:]' < "$marker_file")
 pos='(^|[;&|])[[:space:]]*'
 
 # Deny table (data). action_regex maps an action to the command-position
-# pattern that stands in for it; a skill appears as its slash-command form,
-# while merge / push / issue-creation appear as the git/gh verb (they must be
-# blocked before they run). issue-creation requires POST so a plain
-# `gh api .../issues` read is not mistaken for a create.
+# pattern that stands in for it: merge / push / issue-creation appear as their
+# git/gh verb (they must be caught before they run). issue-creation requires
+# POST so a plain `gh api .../issues` read is not mistaken for a create.
 action_regex() {
     case "$1" in
-        approve) printf '%s' "${pos}/approve" ;;
-        implement) printf '%s' "${pos}/implement" ;;
         merge) printf '%s' "${pos}(gh[[:space:]]+pr[[:space:]]+merge|git[[:space:]]+merge[[:space:]]|gh[[:space:]]+api[[:space:]][^|;&]*merge)" ;;
         push) printf '%s' "${pos}git[[:space:]]+push" ;;
-        wish) printf '%s' "${pos}/wish" ;;
-        sketch) printf '%s' "${pos}/sketch" ;;
         # issue-creation only: `issues` must be the final path segment (preceded
         # by `/` or space, followed by space), so POST to .../issues/<n>/comments
         # or .../issues/<n>/labels (commenting, labelling) is not mistaken for it.
@@ -78,20 +75,16 @@ action_regex() {
 }
 action_label() {
     case "$1" in
-        approve) printf 'run /approve' ;;
-        implement) printf 'run /implement' ;;
         merge) printf 'merge a pull request (gh pr merge / git merge / gh api .../merge)' ;;
         push) printf 'push code (git push)' ;;
-        wish) printf 'run /wish' ;;
-        sketch) printf 'run /sketch' ;;
         issue_create) printf 'create issues (gh issue create / gh api POST .../issues)' ;;
     esac
 }
 # role -> denied actions. everything (and any unknown role) denies nothing.
 role_actions() {
     case "$1" in
-        dreamer | scoper) printf 'approve implement merge push' ;;
-        orchestrator) printf 'wish sketch issue_create' ;;
+        dreamer | scoper) printf 'merge push' ;;
+        orchestrator) printf 'issue_create' ;;
         *) printf '' ;;
     esac
 }
