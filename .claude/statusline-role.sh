@@ -12,11 +12,10 @@
 #   orchestrator  — green  (166,227,161)
 #   everything    — mauve  (203,166,247)
 #
-# The badge is a rounded pill: a pastel left half-circle, the role name in dark
-# text on the pastel fill, a pastel right half-circle. The end-caps are the
-# powerline glyphs U+E0B6 / U+E0B4 — they need a Nerd Font to render. Set
-# AETHER_STATUSLINE_BADGE=block to drop the caps for a rectangular fill that
-# renders in any font.
+# The badge is a rectangular fill: the role name in dark text on the pastel
+# fill, no end-caps, so it renders in any font. Set
+# AETHER_STATUSLINE_BADGE=rounded for a pill with powerline half-circle end-caps
+# (U+E0B6 / U+E0B4) instead — those glyphs need a Nerd Font.
 #
 # Stays bash 3.2 compatible (the macOS system bash): printf octal escapes only,
 # no \u unicode escapes (unsupported there), so the cap glyphs are spelled as
@@ -90,9 +89,11 @@ fg="\033[38;2;${pastel}m"
 bg="\033[48;2;${pastel}m"
 ink_fg="\033[38;2;${ink}m"
 
-# \356\202\266 = U+E0B6 (left half-circle), \356\202\264 = U+E0B4 (right).
-if [[ "${AETHER_STATUSLINE_BADGE:-rounded}" == "block" ]]; then
-    printf "${bg}${ink_fg} %s ${RESET}\n" "$role"
-else
+# Default: a rectangular fill, no end-caps — renders in any font.
+# AETHER_STATUSLINE_BADGE=rounded adds powerline half-circle caps (a Nerd Font
+# only): \356\202\266 = U+E0B6 (left), \356\202\264 = U+E0B4 (right).
+if [[ "${AETHER_STATUSLINE_BADGE:-block}" == "rounded" ]]; then
     printf "${fg}\356\202\266${bg}${ink_fg} %s ${RESET}${fg}\356\202\264${RESET}\n" "$role"
+else
+    printf "${bg}${ink_fg} %s ${RESET}\n" "$role"
 fi
