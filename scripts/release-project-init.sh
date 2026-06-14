@@ -16,10 +16,11 @@
 #       workflows are excluded by GitHub, and unused — /sketch adds
 #       items itself).
 #
-# The phase vocabulary lives in the Status field's options; tooling
-# (release-state.json, the pipeline skills) keeps calling it "Phase" —
-# only the UI header reads "Status" (the built-in field cannot be
-# renamed or deleted).
+# On template-copied boards the phase vocabulary lives in the Status field's
+# options (so GitHub's built-in workflows can drive Backlog/Done). On boards
+# predating the template (project 2) the vocabulary lives in a custom Phase
+# field. The /release-init skill resolves the field by its option set at cache
+# time; tooling calls it "Phase" regardless of the field's UI name.
 
 set -euo pipefail
 
@@ -114,5 +115,6 @@ Verify (one minute, in the UI):
 
 Programmatic next:
   gh project field-list ${PROJECT_NUMBER} --owner ${OWNER} --format json  # field/option IDs
-  (cache the field named "Status" under the key "Phase" in release-state.json)
+  (run /release-init ${VERSION} --reuse ${PROJECT_NUMBER} to build release-state.json;
+   it resolves the Phase field by its option set, not by name)
 EOF
