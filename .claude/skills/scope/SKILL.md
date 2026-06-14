@@ -160,7 +160,7 @@ For each sub-phase: read inputs, write the corresponding body section, advance t
   - `model:opus` — the implementation itself requires non-obvious judgment: cross-crate L work, design-adjacent changes, plans with open exploration.
   - `model:fable` — never stamped by `/scope`; reserved for a human pinning the top tier explicitly.
 
-  The gate encodes a size-asymmetry: a downward misjudgment costs more as size grows, so an M/L `model:sonnet` demands a plan that reads as executable verbatim — when in doubt at M or L, stamp `model:opus`. Note the choice and a one-clause reason in the Plan audit comment.
+  The gate encodes a size-asymmetry: a downward misjudgment costs more as size grows, so an M/L `model:sonnet` demands a plan that reads as executable verbatim — when in doubt at M or L, stamp `model:opus`. Note the choice and a one-clause reason inline in the `## Implementation plan` section.
 - **Project board**: leave `Phase=Plan`. This is the resting state awaiting `/approve`.
 
 ## Side findings
@@ -178,7 +178,7 @@ These are *not auto-filed* as child issues. The user reviews them at `/approve` 
 
 ## Comments
 
-No progress comments — phase transitions are already legible from the `phase:*` labels (the issue timeline records every label change), the board fields, and the body sections themselves. A comment exists only when it is addressed to a human and carries content with no structured home. For this skill that is the **self-bounce question/blocker**, written as prose markdown with a bold lead, no `[skill]` prefix:
+No progress comments — phase transitions are already legible from the `phase:*` labels (the issue timeline records every label change), the board fields, and the body sections themselves. A comment exists only when it is addressed to a human and carries content with no structured home. For this skill that is the **self-bounce question/blocker**, written as prose markdown with a bold lead, no `[skill]` prefix. (The model-routing rationale is recorded inline in `## Implementation plan` — it has a structured home in the body, so it never goes in a comment.)
 
 ```markdown
 **Bounced to Define** — the body doesn't say which chassis this applies to.
