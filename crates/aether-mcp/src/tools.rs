@@ -304,9 +304,30 @@ impl Mcp {
                     Err(e) => format!("error: {e}"),
                 }
             } else {
+                // Capture the engine id and the handler's declared reply kind
+                // (ADR-0109 / issue 1803) before `deliver_one` consumes the
+                // spec, so `decode_reply_events` can search the per-engine kind
+                // cache for component-defined reply kinds (issue 1804).
+                let engine = Uuid::parse_str(&spec.engine_id).ok().map(EngineId);
+                let declared_reply = engine.and_then(|e| {
+                    let mbx = mailbox_id_from_path(&spec.recipient_name);
+                    let cache = self
+                        .components
+                        .lock()
+                        .expect("component cache mutex is never poisoned");
+                    cache.get(&(e, mbx)).and_then(|caps| {
+                        caps.handlers
+                            .iter()
+                            .find(|h| h.name == spec.kind_name)
+                            .and_then(|h| h.reply)
+                    })
+                });
                 match self.deliver_one(spec).await {
                     Ok((events, hit_timeout)) => {
-                        replies = decode_reply_events(&events);
+                        let engine_kinds = engine
+                            .map(|e| self.snapshot_engine_kinds(e))
+                            .unwrap_or_default();
+                        replies = decode_reply_events(&events, &engine_kinds, declared_reply);
                         timed_out = hit_timeout;
                         if hit_timeout { "timeout" } else { "delivered" }.to_owned()
                     }
@@ -411,7 +432,8 @@ impl Mcp {
                 replies: None,
             });
         }
-        let replies = decode_reply_events(strip_ack(&events));
+        let engine_kinds = self.snapshot_engine_kinds(engine);
+        let replies = decode_reply_events(strip_ack(&events), &engine_kinds, None);
         let root = decode_traced_ack(&events)?;
 
         // Round 2: reconstruct the tree by a guided walk over the
@@ -1339,6 +1361,23 @@ impl Mcp {
         }
     }
 
+    /// Snapshot the per-engine kind descriptor map for reply decoding
+    /// (issue 1804). Returns a clone of `engine`'s `name → descriptor`
+    /// map, or an empty map when the cache hasn't been seeded for that
+    /// engine yet. The engine cache is prefilled from the static substrate
+    /// vocabulary on the first `build_mail_envelope` call (`prefill_engine`),
+    /// so an empty snapshot only arises on paths that never encoded a kind
+    /// for this engine (e.g. a broken `engine_id` before `deliver_one` errored).
+    fn snapshot_engine_kinds(&self, engine: EngineId) -> HashMap<String, KindDescriptor> {
+        self.kinds
+            .descriptors
+            .lock()
+            .expect("kinds-cache mutex is never poisoned")
+            .get(&engine)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Batch-resolve `ids` that the engine's static map missed via
     /// `aether.inventory.resolve` and fold the answers (positive *and*
     /// negative) into the per-engine dynamic cache. A no-op when `ids` is
@@ -1629,20 +1668,56 @@ fn static_kind_name(id: KindId) -> Option<String> {
 
 /// Transcode the correlated reply envelopes a `call_collecting` returned
 /// into the MCP wire shape (issue 1242). Per envelope: the tagged kind
-/// id, the best-effort static kind name, and the best-effort
-/// `decode_schema` of the payload against the matching descriptor
-/// (`None` on an unknown kind or a decode miss). On a clean decode the
-/// raw bytes are omitted (issue 1246) — `params` already carries them;
-/// on a decode miss they are surfaced as base64 in `payload_bytes`.
+/// id, the best-effort kind name, and the best-effort `decode_schema` of
+/// the payload against the matching descriptor (`None` on an unknown kind
+/// or a decode miss). Decode priority (issue 1804): per-engine kind cache
+/// (`engine_kinds`, includes component-defined kinds populated from
+/// `ListKinds`) keyed by `declared_reply` (the handler's
+/// `HandlerCapability.reply` from ADR-0109) when it matches the envelope
+/// kind, then a general engine-cache scan for traced batches where the
+/// per-reply handler isn't known, then the static substrate vocabulary,
+/// then base64. On a clean decode the raw bytes are omitted (issue 1246).
 /// Order is preserved — arrival order.
-fn decode_reply_events(envelopes: &[MailEnvelope]) -> Vec<ReplyEventJson> {
-    let descriptors = descriptors::all();
+fn decode_reply_events(
+    envelopes: &[MailEnvelope],
+    engine_kinds: &HashMap<String, KindDescriptor>,
+    declared_reply: Option<KindId>,
+) -> Vec<ReplyEventJson> {
+    let static_descriptors = descriptors::all();
     envelopes
         .iter()
         .map(|env| {
-            let (params, payload_bytes) = descriptors
-                .iter()
-                .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
+            // Resolve the schema for this reply envelope. Tier 1: engine
+            // cache targeted by the declared reply kind — this is the path
+            // that decodes component-defined reply kinds to `params` rather
+            // than base64. Tier 2: general engine-cache scan — covers
+            // send_mail_traced batches where `declared_reply` is None and
+            // any handler in the batch may have replied. Tier 3: static
+            // substrate vocabulary — the fallback for native chassis cap
+            // replies not yet in the engine cache. Tier 4: base64.
+            let descriptor: Option<KindDescriptor> = declared_reply
+                .filter(|&dr| dr == env.kind)
+                .and_then(|dr| {
+                    engine_kinds
+                        .values()
+                        .find(|d| kind_id_from_parts(&d.name, &d.schema) == dr.0)
+                        .cloned()
+                })
+                .or_else(|| {
+                    engine_kinds
+                        .values()
+                        .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
+                        .cloned()
+                })
+                .or_else(|| {
+                    static_descriptors
+                        .iter()
+                        .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
+                        .cloned()
+                });
+            let kind_name = descriptor.as_ref().map(|d| d.name.clone());
+            let (params, payload_bytes) = descriptor
+                .as_ref()
                 .and_then(|d| aether_codec::decode_schema(&env.payload, &d.schema).ok())
                 .map_or_else(
                     // Decode miss: base64 the raw payload as the fallback
@@ -1658,7 +1733,7 @@ fn decode_reply_events(envelopes: &[MailEnvelope]) -> Vec<ReplyEventJson> {
                 // literal on an unencodable (non-kind-domain) id.
                 kind_id: tagged_id::encode(env.kind.0)
                     .unwrap_or_else(|| format!("{:#x}", env.kind.0)),
-                kind_name: static_kind_name(env.kind),
+                kind_name,
                 params,
                 payload_bytes,
             }
@@ -2881,7 +2956,8 @@ mod tests {
             payload,
         };
 
-        let decoded = decode_reply_events(&[reply]);
+        // Empty engine-kinds map → falls through to the static vocabulary.
+        let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
         assert_eq!(decoded.len(), 1, "one reply in, one out");
         let only = &decoded[0];
         assert_eq!(
@@ -2918,7 +2994,8 @@ mod tests {
             correlation_id: None,
             payload: vec![1, 2, 3],
         };
-        let decoded = decode_reply_events(&[reply]);
+        // No engine-kinds entry, no declared reply → falls through to base64.
+        let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
         assert_eq!(decoded.len(), 1);
         let only = &decoded[0];
         assert_eq!(only.kind_name, None, "an unknown kind has no name");
@@ -2952,7 +3029,8 @@ mod tests {
             payload,
         };
 
-        let decoded = decode_reply_events(&[reply]);
+        // Empty engine-kinds map → falls through to the static vocabulary.
+        let decoded = decode_reply_events(&[reply], &HashMap::new(), None);
         let json = serde_json::to_value(&decoded[0]).expect("reply serializes");
         let obj = json.as_object().expect("reply is a JSON object");
         assert!(
@@ -2960,6 +3038,93 @@ mod tests {
             "a clean decode omits the payload_bytes key entirely: {json}",
         );
         assert!(obj.contains_key("params"), "params is still present");
+    }
+
+    /// Issue 1804: `decode_reply_events` decodes a reply whose kind is
+    /// component-defined (not in `descriptors::all()`) when the engine
+    /// kind cache carries the schema and the handler's declared reply kind
+    /// matches the envelope (ADR-0109). This is the core gap the issue
+    /// closes: a `send_mail` reply for a component-defined kind should
+    /// surface `params`, not base64.
+    #[test]
+    fn decode_reply_events_decodes_component_defined_reply_via_engine_cache() {
+        use aether_data::{KindDescriptor, SchemaType};
+
+        // A component-defined reply kind — not in `descriptors::all()`.
+        let reply_kind = KindDescriptor {
+            name: "test.component.reply".to_owned(),
+            schema: SchemaType::String,
+        };
+        let reply_kind_id = KindId(kind_id_from_parts(&reply_kind.name, &reply_kind.schema));
+
+        // Encode a value against the component-defined schema, as the
+        // substrate handler would produce.
+        let value = serde_json::Value::String("hello from component".to_owned());
+        let payload =
+            aether_codec::encode_schema(&value, &reply_kind.schema).expect("encode reply value");
+
+        let envelope = MailEnvelope {
+            to: MailboxAddress::local(mailbox_id_from_name("aether.test.component")),
+            from: None,
+            kind: reply_kind_id,
+            correlation_id: Some(1),
+            payload,
+        };
+
+        // Pre-condition: the static vocabulary doesn't carry this kind, so
+        // without the engine cache the decode would fall through to base64.
+        assert!(
+            !descriptors::all().iter().any(|d| d.name == reply_kind.name),
+            "test invariant: the component kind must not be in the static vocabulary",
+        );
+
+        // Build an engine-kinds map as `load_component` / `ListKinds` would
+        // populate it, and supply the handler's declared reply kind.
+        let mut engine_kinds = HashMap::new();
+        engine_kinds.insert(reply_kind.name.clone(), reply_kind);
+
+        let decoded = decode_reply_events(&[envelope], &engine_kinds, Some(reply_kind_id));
+        assert_eq!(decoded.len(), 1);
+        let only = &decoded[0];
+        assert_eq!(
+            only.params.as_ref(),
+            Some(&value),
+            "component-defined reply kind decodes to params via engine cache",
+        );
+        assert!(
+            only.payload_bytes.is_none(),
+            "a clean decode omits the raw bytes",
+        );
+        assert_eq!(
+            only.kind_name.as_deref(),
+            Some("test.component.reply"),
+            "the component-defined kind name is surfaced from the engine cache",
+        );
+    }
+
+    /// Issue 1804: the base64 fallback is unchanged when neither the engine
+    /// kind cache nor the static vocabulary carries the reply kind, even
+    /// when `declared_reply` is `Some`. Covers fire-and-forget / unknown-
+    /// sender replies that never had a registered schema.
+    #[test]
+    fn decode_reply_events_base64_fallback_when_kind_absent_from_all_caches() {
+        let absent_kind_id = KindId(0xC0FF_EE00_C0FF_EE00);
+        let envelope = MailEnvelope {
+            to: MailboxAddress::local(MailboxId(2)),
+            from: None,
+            kind: absent_kind_id,
+            correlation_id: None,
+            payload: vec![0xAB, 0xCD],
+        };
+        // Declared reply matches the envelope but the engine cache is empty.
+        let decoded = decode_reply_events(&[envelope], &HashMap::new(), Some(absent_kind_id));
+        assert_eq!(decoded.len(), 1);
+        let only = &decoded[0];
+        assert_eq!(only.params, None, "absent kind doesn't decode to params");
+        assert!(
+            only.payload_bytes.is_some(),
+            "absent kind surfaces as base64 fallback",
+        );
     }
 
     /// ADR-0091 issue 1232 (end-to-end): a kind registered in the
