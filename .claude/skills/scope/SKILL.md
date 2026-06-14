@@ -16,7 +16,52 @@ This skill produces **scoping artifacts only**. It does not write production cod
 /scope <issue-number> --phase define rewrite Define section, redo downstream
 /scope <issue-number> --phase design rewrite Design section, redo Plan
 /scope <issue-number> --phase plan   rewrite Plan section only
+/scope --sweep                       discover every Backlog issue, one scoper agent each, confirm, run
+/scope --sweep <issue> [<issue> …]   sweep an explicit set instead of discovering
+/scope --sweep --model <m>           route the scoper agents to model <m> (default opus)
 ```
+
+## Sweep dispatch
+
+`/scope --sweep` is the batched discovery entry point: instead of one issue, it takes the Backlog set, dispatches one background scoper agent per issue, and waits for your confirmation before any agent spawns. It is the read-only twin of `/implement --sweep` — each agent runs a full single-issue `/scope` (Define → Design → Plan, writing that issue's body sections, board fields, and `size:*` / `model:*` labels) in its own context, then stops with a bounded summary. The parent assembles the batch, confirms, paces dispatch against the shared GraphQL pool, and rolls up the outcomes.
+
+Two things differ from `/implement --sweep`:
+
+- **The agent owns its issue's whole scope.** `/implement` keeps the serial tail (push, PR, CI loop, board writes) in the parent because that tail is flaky; scope has no such tail — no worktree, no push, no CI — so each scoper agent writes its issue's artifacts directly and there is nothing to hand back. Each agent still batches its own issue's field writes into one aliased request per §"Batch every multi-write run into one aliased request"; the cross-agent pacing is the concurrency cap below, not a shared batch.
+- **Two models, not one.** The scoper agents run a design-capable model — `--model` (default `opus`), because scoping makes design calls. That is distinct from the per-issue `model:*` label each agent *stamps* at Plan to route the future `/implement`.
+
+1. **Enumerate the candidate set.** With no issue arguments, discover every Backlog issue. Backlog is the resting phase that carries no `phase:*` label (see [Phase label reconcile](#phase-label-reconcile)), so an open non-PR issue with no `phase:*` label is at Backlog. Over REST (per [Project board mechanics](#project-board-mechanics) — not `gh issue list`, which is GraphQL-backed):
+
+   ```bash
+   gh api 'repos/iamacoffeepot/aether/issues?state=open&per_page=100' \
+     --jq '.[] | select(has("pull_request") | not)
+                | select([.labels[].name] | any(startswith("phase:")) | not) | .number'
+   ```
+
+   With explicit arguments (`/scope --sweep 1815 1816 …`), take that set verbatim instead of discovering.
+
+2. **Gate-check each candidate.** Each must be at `Phase=Backlog` and carry a body framable into a problem statement (the bar Define applies). Drop a candidate already past Backlog (it carries a `phase:*` label) or with a one-line, context-free body, and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason.
+
+3. **Print the scope plan and wait for confirmation.** Print the issues to be scoped, the routed scoper model, and the dropped-with-reason list, then stop and wait:
+
+   ```
+   Sweep: 9 Backlog issues, 2 dropped, 7 to scope (scoper model: opus).
+
+   Scope (Backlog → Plan):
+     #1815  add xl size option for fat issues
+     #1816  /sweep fat recursive issue decomposition
+     …
+
+   Dropped:
+     #1799  one-line title, no framable body — /sketch it further first
+     #1803  phase:design, already past Backlog
+
+   Confirm scope? (the agents spawn only on your go-ahead)
+   ```
+
+4. **On confirmation, dispatch.** Spawn one background agent per candidate, capped at a small concurrency (default ~3) so N concurrent board writers don't burst the shared per-user GraphQL pool: fill the cap, and as each agent finishes the next candidate starts. Each agent runs the full single-issue `/scope` procedure on its issue and stops; the parent collects each outcome — landed at Plan, or self-bounced — and prints the roll-up.
+
+The sweep never auto-confirms. A scoper agent that hits a tied design decision or an unframable body self-bounces its own issue (the single-issue Bounce mechanics), and the parent surfaces that bounce in the roll-up rather than guessing. `--sweep` takes no `--phase` (that is a single-issue resume control).
 
 ## Configuration
 
