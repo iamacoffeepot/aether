@@ -282,7 +282,7 @@ When a driller claims `producible: true`, an adversarial skeptic agent gates the
 
 ### Synthesis
 
-After the frontier drains, a final agent reads every node's bounded summary and writes `index.md` with the cross-branch coherence the fan-out spends — which branches drilled deep vs stayed stubs and why, the skeptic-demoted nodes, and the navigation surface over the tree.
+After the frontier drains, a final agent reads every node's bounded summary and writes `index.md` with the cross-branch coherence the fan-out spends — which branches drilled deep vs stayed stubs and why, the skeptic-demoted nodes, and the navigation surface over the tree. It also assigns each terminal leaf a **skinny/fat weight** using the `/scope` Size rubric (S = single-file/concept, M = single-crate/multiple files, L = cross-crate/architectural, XL = multi-PR arc) and writes a `## Weighted sketches` section into `index.md` — one bullet per leaf with its slug-path, weight, and a one-line filing recommendation. The workflow returns the weighted list as a `sketches` array so the skill's step-8 report can surface it directly.
 
 ### Knobs — `--beam` (shape), `--budget` (size), no `--depth`
 
@@ -412,10 +412,17 @@ Deep mode (`--deep`) reports from the workflow's returned stats instead:
   Frontier left undrilled (budget-bounded stubs): <undrilled>
   Index: wishes/<date>-<theme>/index.md
 
+Weighted sketches (<leafCount> leaves):
+  - [<slug-chain>] (<weight: S|M|L|XL>) <wish> — <recommendation>
+  ... (one line per leaf from sketches array)
+
 The tree is on disk and resumable across sessions.
 Drill a subtree deeper in a later pass: /wish --under <wish-path>
-File leaf plans you want to commit to as Backlog-Phase issues.
+Skinny leaves (S/M/L): file with /sketch then /scope.
+Fat leaves (XL): decompose via /wish --under <path>, or file fat for sweep fat.
 ```
+
+Render the "Weighted sketches" block from the `sketches` array the workflow returns. If `sketches` is empty or absent, omit the block.
 
 ## Path-cost dimensions (canonical set)
 
