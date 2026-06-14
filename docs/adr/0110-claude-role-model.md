@@ -41,7 +41,7 @@ The hook cannot change the running session's cwd (fixed at launch), so the sessi
 
 A `PreToolUse` hook reads the role marker and worktree path and blocks, with a reason:
 
-- **Worktree boundary (all roles)** — any file or git operation outside the session's worktree.
+- **Worktree boundary (all roles)** — a change that dirties a tracked file in the **main** worktree. Reads of any file, and writes under `/tmp` or the session's own worktree (`.claude/worktrees/<session-id>`), are allowed; only a change that would leave the main checkout dirty is held back. The edit tools (Edit/Write/MultiEdit/NotebookEdit) declare their target up front, so an edit landing in the main worktree is blocked before it runs (`PreToolUse`); a Bash command's effect is open-ended, so a dirtied main checkout is caught and reverted after it runs (a `PostToolUse` `git status` tripwire). Agents a session spawns run outside this guardrail (no role marker of their own, so the hook fails open) and work in their own worktrees, so a session stays bound to its own worktree and reaches its agents by dispatch rather than by editing theirs.
 - **Role boundary** — dreamer and scoper are blocked from `approve`, `implement`, merge, and code push; orchestrator is blocked from `wish`, `sketch`, and issue creation (a design gap bounces back rather than being scoped in place); everything carries no role boundary.
 
 Enforcement is the payoff. Advisory boundaries are the drifting status quo; a hard block is what removes the shared-clone collisions and bounds each session's blast radius.
