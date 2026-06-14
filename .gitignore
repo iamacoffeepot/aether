@@ -38,6 +38,13 @@ spikes/*/target/
 !.claude/skills/secretary/
 !.claude/skills/sweep/
 !.claude/skills/land/
+# Per-session role markers (ADR-0110 § "Session binding") — session-keyed,
+# per-clone state like `.claude/worktrees/`. The `*` glob ignores the marker
+# files (`.claude/roles/<session-id>`) while the negation keeps the committed
+# role-directive files under `directives/` tracked (same shape as the
+# `.claude/skills/*` + negation above).
+.claude/roles/*
+!.claude/roles/directives/
 # Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run
 # markdown, not part of the source tree. Read locally, file the wishes you
 # like as issues, discard the file.
