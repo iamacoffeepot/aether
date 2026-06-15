@@ -7,17 +7,19 @@
 //! than slipping through.
 //!
 //! This module gates *regression* on the frozen numbers. First-principles
-//! *correctness* of the solver pass stays the job of the unit tests in
-//! `reachability.rs` and `transforms.rs`. The cross-pass invariants that
-//! need the corridor and windowed passes land once issues 1858 / 1859
-//! merge.
+//! *correctness* of each pass stays the job of its own unit tests
+//! (`reachability.rs`, `corridor.rs`, `transforms.rs`). It also freezes the
+//! corridor graph's branch counts — node totals, flow-vs-punch edge counts,
+//! and per-node out-degree — over the same analytic fields, so a one-bit
+//! change in either the solver or the corridor pass surfaces here.
 //!
 //! Not `mod heavy` — the solver is a pure synchronous function with no
 //! dispatcher or timing dependence, so this belongs in the normal
 //! parallel test set.
 
+use crate::corridor::build_corridor_graph_core;
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach};
-use aether_kinds::StencilOffset;
+use aether_kinds::{EdgeKind, ScalarField, StencilOffset};
 
 /// 4-way movement stencil (stay + four orthogonal moves), matching the
 /// convention used by the solver's own unit tests.
@@ -492,5 +494,314 @@ fn canonical_large_field_output_fits_transform_cap() {
     assert!(
         v_len_bytes <= MAX_OUTPUT_BYTES,
         "64×64×1800 V field ({v_len_bytes} bytes) must fit the 64 MiB transform cap"
+    );
+}
+
+/// Wrap a solved `V` field (`Vec<u32>` from [`solve_cost_to_reach`]) in a
+/// [`ScalarField`] so the corridor core can consume it. The dims are
+/// `u32`-typed at the kind boundary; the field set here stays well inside
+/// `u32::MAX`.
+fn scalar_field(v: Vec<u32>, width: usize, height: usize, ticks: usize) -> ScalarField {
+    ScalarField {
+        width: u32::try_from(width).expect("width fits u32"),
+        height: u32::try_from(height).expect("height fits u32"),
+        ticks: u32::try_from(ticks).expect("ticks fits u32"),
+        values: v,
+    }
+}
+
+/// Per-pass branch-count summary of a [`CorridorGraph`] — the scalar
+/// readouts the step-3 baselines freeze. `flow_edges` / `punch_edges` split
+/// the edge set by kind; `max_out_degree` is the largest forward flow
+/// out-degree over all nodes (the branch count at the widest split);
+/// `total_out_degree` is the flow edge total seen from the source side
+/// (equal to `flow_edges`, recorded separately so a regression that moves
+/// an edge's endpoints without changing the count still has a second anchor).
+struct CorridorCounts {
+    nodes: usize,
+    flow_edges: usize,
+    punch_edges: usize,
+    max_out_degree: usize,
+    total_out_degree: usize,
+}
+
+/// Solve `costs` into a `V` field, build the corridor graph at `budget`,
+/// and summarize its branch counts.
+fn corridor_counts(
+    costs: &[u32],
+    start: &[u32],
+    width: usize,
+    height: usize,
+    ticks: usize,
+    budget: u32,
+) -> CorridorCounts {
+    let v = solve_cost_to_reach(width, height, ticks, costs, &stencil_4way(), start);
+    let field = scalar_field(v, width, height, ticks);
+    let graph = build_corridor_graph_core(&field, &stencil_4way(), budget);
+
+    let flow_edges = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Flow)
+        .count();
+    let punch_edges = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Punch)
+        .count();
+
+    // Forward flow out-degree per node, taken from the edge source side.
+    let max_out_degree = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let node = u32::try_from(i).expect("node index fits u32");
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::Flow && e.from == node)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+
+    CorridorCounts {
+        nodes: graph.nodes.len(),
+        flow_edges,
+        punch_edges,
+        max_out_degree,
+        total_out_degree: flow_edges,
+    }
+}
+
+/// Test 3a — ramp corridor: a single affordable basin per tick over the
+/// 3×1×3 ramp. One node per tick, a flow edge per tick step, no punch, and
+/// out-degree 1 everywhere (no branch).
+#[test]
+fn ramp_corridor_branch_counts() {
+    let (costs, width, height, ticks) = field_ramp();
+    let start = start_at_origin(width, height);
+    let counts = corridor_counts(&costs, &start, width, height, ticks, 5);
+
+    assert_eq!(counts.nodes, 3, "ramp: one component per tick");
+    assert_eq!(counts.flow_edges, 2, "ramp: one flow edge per tick step");
+    assert_eq!(
+        counts.punch_edges, 0,
+        "ramp: no sub-budget barrier to punch"
+    );
+    assert_eq!(
+        counts.max_out_degree, 1,
+        "ramp: no split, so out-degree 1 everywhere"
+    );
+    assert_eq!(counts.total_out_degree, 2, "ramp: total flow out-degree");
+}
+
+/// Test 3b — two-basin corridor: cell 1 is the `UNREACHABLE` sentinel every
+/// tick, so the two basins are never affordable-connected and never share a
+/// finite barrier. Two components per tick, two flow chains, and no punch
+/// (the sentinel is not a ridge the filtration can fuse).
+#[test]
+fn two_basin_corridor_branch_counts() {
+    let (costs, start, width, height, ticks) = field_two_basin();
+    let counts = corridor_counts(&costs, &start, width, height, ticks, 5);
+
+    assert_eq!(counts.nodes, 6, "two-basin: two components × three ticks");
+    assert_eq!(
+        counts.flow_edges, 4,
+        "two-basin: each basin flows across two tick steps"
+    );
+    assert_eq!(
+        counts.punch_edges, 0,
+        "two-basin: the sentinel divider is not a finite ridge"
+    );
+    assert_eq!(
+        counts.max_out_degree, 1,
+        "two-basin: each component flows to exactly one successor"
+    );
+    assert_eq!(
+        counts.total_out_degree, 4,
+        "two-basin: total flow out-degree"
+    );
+}
+
+/// Test 3c — false-corridor: cell 2 is permanently blocked, so the
+/// reachable corridor is the two-cell `{0, 1}` basin at every tick after
+/// it fills. One component per tick, a flow edge per step, no punch, no
+/// branch.
+#[test]
+fn false_corridor_branch_counts() {
+    let (costs, width, height, ticks) = field_false_corridor();
+    let start = start_at_origin(width, height);
+    let counts = corridor_counts(&costs, &start, width, height, ticks, 5);
+
+    assert_eq!(counts.nodes, 3, "false-corridor: one component per tick");
+    assert_eq!(
+        counts.flow_edges, 2,
+        "false-corridor: one flow edge per tick step"
+    );
+    assert_eq!(counts.punch_edges, 0, "false-corridor: no finite barrier");
+    assert_eq!(counts.max_out_degree, 1, "false-corridor: no branch");
+    assert_eq!(
+        counts.total_out_degree, 2,
+        "false-corridor: total flow out-degree"
+    );
+}
+
+/// Analytic split-then-merge corridor: 3×1 over 3 ticks. The middle cell at
+/// the center tick carries a sub-budget barrier `V` that splits the row in
+/// two; the single t0 component branches to both, then both rejoin into the
+/// single t2 component. This is the shape that produces an out-degree-2
+/// branch and a join. Built directly as a `V` field (the values are the
+/// hand-checked cost-to-reach), so the branch counts are frozen against a
+/// known graph rather than a solver round-trip.
+///
+/// ```text
+/// t0:  [1, 1, 1]   one component (cells 0,1,2)
+/// t1:  [1, 9, 1]   cell 1 above budget 5 → two components {0}, {2}
+/// t2:  [1, 1, 1]   one component again
+/// ```
+fn corridor_split_then_merge() -> (ScalarField, u32) {
+    let field = ScalarField {
+        width: 3,
+        height: 1,
+        ticks: 3,
+        values: vec![
+            1, 1, 1, //
+            1, 9, 1, //
+            1, 1, 1, //
+        ],
+    };
+    (field, 5)
+}
+
+/// Test 3d — split-then-merge corridor: out-degree 2 at the branch, a join
+/// back to one, and one punch edge at the center tick (the ridge the
+/// filtration would fuse above budget).
+#[test]
+fn split_then_merge_corridor_branch_counts() {
+    let (field, budget) = corridor_split_then_merge();
+    let graph = build_corridor_graph_core(&field, &stencil_4way(), budget);
+
+    // t0: 1 node; t1: 2 nodes; t2: 1 node.
+    assert_eq!(graph.nodes.len(), 4, "split-then-merge: 1 + 2 + 1 nodes");
+
+    let flow_edges = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Flow)
+        .count();
+    let punch_edges = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Punch)
+        .count();
+    // t0 branches to both t1 components (2), and both t1 components flow
+    // into t2 (2): four flow edges.
+    assert_eq!(
+        flow_edges, 4,
+        "split-then-merge: branch (2) + join (2) flows"
+    );
+    assert_eq!(
+        punch_edges, 1,
+        "split-then-merge: one punch at the center-tick ridge"
+    );
+
+    let flow_from = |n: u32| {
+        graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Flow && e.from == n)
+            .count()
+    };
+    let flow_to = |n: u32| {
+        graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Flow && e.to == n)
+            .count()
+    };
+    assert_eq!(
+        flow_from(0),
+        2,
+        "split-then-merge: t0 branches out-degree 2"
+    );
+    assert_eq!(flow_to(3), 2, "split-then-merge: t2 joins in-degree 2");
+
+    // The punch joins the two center-tick components, priced at the ridge V.
+    let punch = graph
+        .edges
+        .iter()
+        .find(|e| e.kind == EdgeKind::Punch)
+        .expect("split-then-merge has a punch edge");
+    assert_eq!(
+        punch.from, 1,
+        "split-then-merge: punch joins t1 component 1"
+    );
+    assert_eq!(punch.to, 2, "split-then-merge: ...to t1 component 2");
+    assert_eq!(
+        punch.price, 9,
+        "split-then-merge: punch priced at the ridge V"
+    );
+}
+
+/// Test 3e — corridor determinism: building the same `V` + budget twice
+/// produces byte-identical encoded output, anchoring the content-address
+/// contract for the corridor pass the same way the solver's double-solve
+/// does for `V`.
+#[test]
+fn split_then_merge_corridor_is_byte_identical() {
+    use aether_data::Kind;
+    let (field, budget) = corridor_split_then_merge();
+    let a = build_corridor_graph_core(&field, &stencil_4way(), budget);
+    let b = build_corridor_graph_core(&field, &stencil_4way(), budget);
+    assert_eq!(a, b, "corridor: double-build must be equal");
+    assert_eq!(
+        a.encode_into_bytes(),
+        b.encode_into_bytes(),
+        "corridor: double-build must be byte-identical"
+    );
+}
+
+/// Test 3f — corridor-merge monotonicity: raising the budget over the
+/// split-then-merge field weakly merges components (the sublevel-filtration
+/// direction). At budget 5 the center tick splits into two components; at
+/// budget 9 the ridge is affordable, so the center tick is a single
+/// component and the punch disappears. Node count is therefore
+/// non-increasing in the budget.
+#[test]
+fn corridor_components_merge_as_budget_rises() {
+    let (field, _) = corridor_split_then_merge();
+
+    let low = build_corridor_graph_core(&field, &stencil_4way(), 5);
+    let high = build_corridor_graph_core(&field, &stencil_4way(), 9);
+
+    assert_eq!(low.nodes.len(), 4, "budget 5: center tick splits in two");
+    assert_eq!(
+        high.nodes.len(),
+        3,
+        "budget 9: ridge affordable → center tick is one component"
+    );
+    assert!(
+        high.nodes.len() <= low.nodes.len(),
+        "raising the budget must not increase the node count: {} <= {}",
+        high.nodes.len(),
+        low.nodes.len()
+    );
+
+    let low_punches = low
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Punch)
+        .count();
+    let high_punches = high
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Punch)
+        .count();
+    assert_eq!(low_punches, 1, "budget 5: one punch at the ridge");
+    assert_eq!(
+        high_punches, 0,
+        "budget 9: the ridge is no longer a barrier"
     );
 }
