@@ -38,11 +38,14 @@ use aether_actor::{
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Render, ScalarField, Vertex};
+use aether_data::Kind;
+use aether_kinds::{
+    CorridorGraph, DrawTriangle, EdgeKind, MeshLoadResult, ReadResult, Render, ScalarField, Vertex,
+};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
-use crate::LoadMesh;
+use crate::{CorridorLoadResult, LoadCorridor, LoadMesh, Scrub};
 use core::str;
 
 const OUTLINE_WIDTH: f32 = 0.012;
@@ -79,20 +82,108 @@ const FIELD_CELL: Vec3 = Vec3::splat(1.0);
 /// maps to the world origin (a half-cell shell extends just outside it).
 const FIELD_ORIGIN: Vec3 = Vec3::ZERO;
 
+/// Half-extent of a corridor node dot at unit `cell_count`, in world
+/// units. The dot scales up with `sqrt(cell_count)` so area tracks the
+/// component's size (issue 1869 render).
+const CORRIDOR_NODE_RADIUS: f32 = 0.18;
+
+/// Half-width of a corridor flow-edge quad at unit `overlap_width`, in
+/// world units. The quad widens with `sqrt(overlap_width)` so the rendered
+/// thickness tracks the branch's pinch width.
+const CORRIDOR_FLOW_HALF_WIDTH: f32 = 0.025;
+
+/// World z-lift for a corridor flow edge so it sits just behind the node
+/// dots (smaller world-z draws under larger; the camera's `LessEqual`
+/// depth convention).
+const CORRIDOR_EDGE_LIFT: f32 = -0.01;
+
+/// Color of a corridor `Punch` edge — a contrasting slate-grey so an
+/// intra-tick barrier merge reads distinctly from the lineage-colored
+/// flow edges.
+const CORRIDOR_PUNCH_RGB: (f32, f32, f32) = (0.30, 0.30, 0.35);
+
+/// Per-tick lane spacing on the component axis (world-y) and the
+/// world-z step per tick layer for the abstract corridor-graph layout.
+const CORRIDOR_LANE_STEP: f32 = 0.6;
+const CORRIDOR_TICK_STEP: f32 = 1.0;
+
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
-    /// Reply target of the most recent `aether.mesh.load` request,
-    /// parked across the async `aether.fs.read` round-trip (issue 964).
-    /// `on_load` runs in the requester's reply context; the actual
-    /// parse + cache replace happens later in `on_read_result`, whose
-    /// reply context points at `FsCapability`, not the original
-    /// requester. Stashing the handle here lets the `MeshLoadResult`
-    /// route back to whoever sent the `LoadMesh` (the
-    /// parked-sender pattern; the handle stays valid for the instance
-    /// lifetime per the SDK `ReplyHandle` contract). `None` when the load
-    /// was fire-and-forget (no reply target) or when no load is in
-    /// flight.
+    /// Reply target of the most recent `aether.mesh.load` /
+    /// `aether.corridor.load` request, parked across the async
+    /// `aether.fs.read` round-trip (issue 964). `on_load` /
+    /// `on_load_corridor` runs in the requester's reply context; the
+    /// actual parse + cache replace happens later in `on_read_result`,
+    /// whose reply context points at `FsCapability`, not the original
+    /// requester. Stashing the handle here lets the load-result reply
+    /// route back to whoever sent the request (the parked-sender
+    /// pattern; the handle stays valid for the instance lifetime per the
+    /// SDK `ReplyHandle` contract). `None` when the load was
+    /// fire-and-forget (no reply target) or when no load is in flight.
     pending_reply: Option<ReplyHandle>,
+    /// Which reply kind to send when the parked read settles — the load
+    /// path that issued it. Set alongside `pending_reply` in `on_load` /
+    /// `on_load_corridor` so `on_read_result` answers with the right
+    /// result kind. The `.field` / `.dsl` / `.obj` arms still dispatch
+    /// on the path extension inside the mesh outcome; this distinguishes
+    /// the corridor ingest, whose bytes are a `CorridorGraph` rather than
+    /// a mesh.
+    pending_load: PendingLoad,
+    /// The scrubbable corridor datum (issue 1869), built once from a
+    /// `CorridorGraph` on `aether.corridor.load`. `None` until the first
+    /// successful corridor load; a decode failure leaves the prior datum
+    /// intact (whole-graph atomic replace, mirroring the mesh path).
+    corridor: Option<CorridorView>,
+    /// The current scrub tick cursor (issue 1869), set by
+    /// `aether.corridor.scrub` and clamped to `[0, ticks)`. The `Render`
+    /// stage re-emits this tick's node slice. Defaults to `0`.
+    current_tick: u32,
+}
+
+/// Which load path parked the in-flight `aether.fs.read`, so
+/// `on_read_result` knows which result kind to reply with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingLoad {
+    /// No load in flight, or the last load was a mesh load (the default).
+    Mesh,
+    /// An `aether.corridor.load` is awaiting its read reply.
+    Corridor,
+}
+
+/// A loaded corridor graph plus its derived scrub index (issue 1869).
+/// The graph is retained so the render pass can read node summaries
+/// (`tick`, `component`, `cell_count`) and edge endpoints; the index
+/// carries the O(1) per-tick addressing and the lineage that holds a
+/// region's color constant across the scrub.
+struct CorridorView {
+    graph: CorridorGraph,
+    index: ScrubIndex,
+}
+
+/// The tick-indexable scrub datum derived once from a `CorridorGraph`
+/// (issue 1869). Everything here is recoverable from the flat
+/// `Vec<CorridorNode>` + `Vec<CorridorEdge>`, so it lives viewer-side
+/// rather than on the wire kind — building it once is O(N + E) and
+/// amortizes across every scrub.
+struct ScrubIndex {
+    /// Number of distinct tick layers (`max node.tick + 1`, or `0` for an
+    /// empty graph). The scrub cursor clamps to `[0, ticks)`.
+    ticks: u32,
+    /// Per-tick node buckets: `nodes_by_tick[t]` is the node indices (into
+    /// `CorridorGraph::nodes`) whose `tick == t`. Addressing tick `t` is an
+    /// O(1) slice lookup.
+    nodes_by_tick: Vec<Vec<usize>>,
+    /// Per-node out-degree over `Flow` edges — the branch count the issue
+    /// asks for. Indexed by node index.
+    flow_out_degree: Vec<u32>,
+    /// Per-node lineage id, assigned in one forward pass over the flow-edge
+    /// DAG: a component reached by exactly one flow edge from a
+    /// non-splitting predecessor inherits that predecessor's lineage; a
+    /// split (predecessor out-degree > 1) starts a fresh lineage on each
+    /// branch; a merge keeps the lowest incoming lineage. The lineage id is
+    /// what lets the viewer hold a region's color constant across the
+    /// scrub. Indexed by node index.
+    lineage: Vec<u32>,
 }
 
 /// Mesh viewer component.
@@ -116,6 +207,9 @@ impl FfiActor for MeshViewer {
         Ok(MeshViewer {
             triangles: Vec::new(),
             pending_reply: None,
+            pending_load: PendingLoad::Mesh,
+            corridor: None,
+            current_tick: 0,
         })
     }
 
@@ -148,6 +242,12 @@ impl FfiActor for MeshViewer {
         if !self.triangles.is_empty() {
             ctx.actor::<RenderCapability>().send_many(&self.triangles);
         }
+        if let Some(corridor) = &self.corridor {
+            let tris = corridor.render_tick(self.current_tick);
+            if !tris.is_empty() {
+                ctx.actor::<RenderCapability>().send_many(&tris);
+            }
+        }
     }
 
     /// Triggers an asynchronous mesh load. Reply arrives as
@@ -173,6 +273,7 @@ impl FfiActor for MeshViewer {
         // loads are serialized through one read round-trip, and a
         // fresh load supersedes an unanswered prior one.
         self.pending_reply = ctx.reply_target();
+        self.pending_load = PendingLoad::Mesh;
         tracing::info!(
             target: "aether_mesh_viewer",
             namespace = %msg.namespace,
@@ -180,6 +281,64 @@ impl FfiActor for MeshViewer {
             "load requested; issuing read",
         );
         ctx.actor::<FsCapability>().read(&msg.namespace, &msg.path);
+    }
+
+    /// Triggers an asynchronous corridor-graph load (issue 1869). The
+    /// reply arrives as `aether.fs.read_result`; the bytes are decoded as
+    /// an `aether_kinds::CorridorGraph` and a `ScrubIndex` is built over
+    /// them. The `aether.corridor.load_result` reply to the originator
+    /// fires once the read settles and the decode + index build outcome
+    /// is known — see `on_read_result`.
+    ///
+    /// # Agent
+    /// `namespace` is the short prefix with no `://` — `"save"`,
+    /// `"assets"`, `"config"`. `path` points at a postcard-encoded
+    /// `CorridorGraph` (write it via `aether.fs.write`). Send-and-await
+    /// the `aether.corridor.load_result` reply to learn whether the load
+    /// succeeded. After a successful load, `aether.corridor.scrub` to
+    /// re-address a tick.
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler]
+    fn on_load_corridor(&mut self, ctx: &mut FfiCtx<'_>, msg: LoadCorridor) {
+        self.pending_reply = ctx.reply_target();
+        self.pending_load = PendingLoad::Corridor;
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            namespace = %msg.namespace,
+            path = %msg.path,
+            "corridor load requested; issuing read",
+        );
+        ctx.actor::<FsCapability>().read(&msg.namespace, &msg.path);
+    }
+
+    /// Sets the scrub tick cursor (issue 1869), clamped to the loaded
+    /// graph's `[0, ticks)` span. Fire-and-forget. The next `Render`
+    /// stage re-emits this tick's node slice, so the scrub is observable
+    /// as a re-addressed frame. A `Scrub` with no corridor loaded clamps
+    /// to `0` and renders nothing.
+    ///
+    /// # Agent
+    /// Send `aether.corridor.scrub { tick }` after a corridor load to
+    /// time-travel to that tick. Out-of-range ticks clamp to the last
+    /// valid tick.
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler]
+    fn on_scrub(&mut self, _ctx: &mut FfiCtx<'_>, msg: Scrub) {
+        let ticks = self.corridor.as_ref().map_or(0, |c| c.index.ticks);
+        // Clamp into `[0, ticks)`; an empty graph (ticks == 0) holds the
+        // cursor at 0. `saturating_sub` keeps `ticks == 0` from underflowing.
+        self.current_tick = if ticks == 0 {
+            0
+        } else {
+            msg.tick.min(ticks - 1)
+        };
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            requested = msg.tick,
+            current = self.current_tick,
+            ticks,
+            "scrub cursor set",
+        );
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the echoed
@@ -198,13 +357,17 @@ impl FfiActor for MeshViewer {
     /// Substrate-driven; do not send manually.
     #[handler::manual]
     fn on_read_result(&mut self, ctx: &mut FfiCtx<'_, Manual>, r: ReadResult) {
+        let pending = self.pending_load;
         let (namespace, path, outcome) = match r {
             ReadResult::Ok {
                 namespace,
                 path,
                 bytes,
             } => {
-                let outcome = self.load_bytes(&path, &bytes);
+                let outcome = match pending {
+                    PendingLoad::Mesh => self.load_bytes(&path, &bytes),
+                    PendingLoad::Corridor => self.load_corridor_bytes(&bytes),
+                };
                 (namespace, path, outcome)
             }
             ReadResult::Err {
@@ -217,13 +380,16 @@ impl FfiActor for MeshViewer {
                     namespace = %namespace,
                     path = %path,
                     error = ?error,
-                    "read failed; keeping prior mesh",
+                    "read failed; keeping prior datum",
                 );
                 let outcome = LoadOutcome::failed(format!("read failed: {error:?}"));
                 (namespace, path, outcome)
             }
         };
-        self.reply_load_result(ctx, namespace, path, outcome);
+        // Reset to the default load path so a stray later read can't
+        // mis-route as a corridor result.
+        self.pending_load = PendingLoad::Mesh;
+        self.reply_load_result(ctx, pending, namespace, path, outcome);
     }
 }
 
@@ -298,21 +464,36 @@ impl MeshViewer {
     fn reply_load_result(
         &mut self,
         ctx: &mut FfiCtx<'_, Manual>,
+        pending: PendingLoad,
         namespace: String,
         path: String,
         outcome: LoadOutcome,
     ) {
-        if let Some(sender) = self.pending_reply.take() {
-            ctx.reply_to(
+        let Some(sender) = self.pending_reply.take() else {
+            return;
+        };
+        let ok = outcome.error.is_none();
+        match pending {
+            PendingLoad::Mesh => ctx.reply_to(
                 sender,
                 &MeshLoadResult {
-                    ok: outcome.error.is_none(),
+                    ok,
                     namespace,
                     path,
                     error: outcome.error,
                     warnings: outcome.warnings,
                 },
-            );
+            ),
+            PendingLoad::Corridor => ctx.reply_to(
+                sender,
+                &CorridorLoadResult {
+                    ok,
+                    namespace,
+                    path,
+                    error: outcome.error,
+                    warnings: outcome.warnings,
+                },
+            ),
         }
     }
 
@@ -448,6 +629,276 @@ impl MeshViewer {
         self.triangles = out;
         LoadOutcome::ok()
     }
+
+    /// Decode a postcard `CorridorGraph` (issue 1858) from corridor-load
+    /// bytes, build a `ScrubIndex` over it, and replace the cached
+    /// corridor datum (issue 1869). The scrub cursor clamps to the new
+    /// graph's tick span. A decode failure leaves the prior datum intact,
+    /// mirroring the `.dsl` / `.obj` / `.field` arms.
+    fn load_corridor_bytes(&mut self, bytes: &[u8]) -> LoadOutcome {
+        let Some(graph) = CorridorGraph::decode_from_bytes(bytes) else {
+            tracing::warn!(
+                target: "aether_mesh_viewer",
+                "CorridorGraph decode failed; keeping prior corridor",
+            );
+            return LoadOutcome::failed("CorridorGraph decode failed".to_string());
+        };
+        let index = build_scrub_index(&graph);
+        // Re-clamp the cursor into the new tick span (a smaller graph may
+        // leave the old cursor out of range).
+        self.current_tick = if index.ticks == 0 {
+            0
+        } else {
+            self.current_tick.min(index.ticks - 1)
+        };
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            nodes = graph.nodes.len(),
+            edges = graph.edges.len(),
+            ticks = index.ticks,
+            "corridor load complete; scrub datum built",
+        );
+        self.corridor = Some(CorridorView { graph, index });
+        LoadOutcome::ok()
+    }
+}
+
+/// Build the tick-indexable scrub datum (issue 1869) from a flat
+/// `CorridorGraph`. One pass buckets nodes by `tick`, one edge pass
+/// builds flow out-degree and forward flow adjacency, and one
+/// topologically-ordered forward pass assigns lineage ids. Iterative
+/// throughout (no recursion — the load-bearing-code rule): the lineage
+/// pass walks nodes in `(tick, component)` order, which is a valid
+/// topological order for a time-layered DAG whose flow edges always point
+/// from tick `t` to `t + 1`.
+fn build_scrub_index(graph: &CorridorGraph) -> ScrubIndex {
+    let node_count = graph.nodes.len();
+
+    // Tick span: max node tick + 1. An empty graph has 0 ticks.
+    let ticks = graph
+        .nodes
+        .iter()
+        .map(|n| n.tick)
+        .max()
+        .map_or(0, |t| t + 1);
+
+    // Per-tick buckets. Pre-size to `ticks`, then push node indices in
+    // node order so each bucket stays in `(tick, component)` order (the
+    // graph's documented node ordering).
+    let mut nodes_by_tick: Vec<Vec<usize>> = (0..ticks as usize).map(|_| Vec::new()).collect();
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        nodes_by_tick[node.tick as usize].push(idx);
+    }
+
+    // Flow out-degree and forward flow adjacency in one edge pass. Punch
+    // edges are intra-tick barrier merges and don't carry lineage, so they
+    // are skipped here.
+    let mut flow_out_degree = vec![0u32; node_count];
+    let mut flow_adjacency: Vec<Vec<usize>> = (0..node_count).map(|_| Vec::new()).collect();
+    for (edge_idx, edge) in graph.edges.iter().enumerate() {
+        if edge.kind != EdgeKind::Flow {
+            continue;
+        }
+        let from = edge.from as usize;
+        if from < node_count {
+            flow_out_degree[from] = flow_out_degree[from].saturating_add(1);
+            flow_adjacency[from].push(edge_idx);
+        }
+    }
+
+    // Lineage pass. Walk nodes in node order (a valid topological order
+    // for the time-layered DAG) and propagate lineage forward along flow
+    // edges. A node keeps the lowest lineage proposed to it by any
+    // predecessor; a split (predecessor out-degree > 1) proposes a fresh
+    // lineage on each branch so divergent regions read as new corridors;
+    // a persist (out-degree == 1) hands the predecessor's lineage straight
+    // through; a merge reconciles to the lowest incoming lineage. A node
+    // never reached by a flow edge seeds a fresh lineage of its own.
+    let mut lineage = vec![u32::MAX; node_count];
+    let mut next_lineage: u32 = 0;
+    for from in 0..node_count {
+        // Seed a lineage for any node not yet assigned by a predecessor —
+        // a tick-0 component or an isolated component.
+        if lineage[from] == u32::MAX {
+            lineage[from] = next_lineage;
+            next_lineage += 1;
+        }
+        let from_lineage = lineage[from];
+        let splits = flow_out_degree[from] > 1;
+        for &edge_idx in &flow_adjacency[from] {
+            let to = graph.edges[edge_idx].to as usize;
+            if to >= node_count {
+                continue;
+            }
+            // A split branch starts its own lineage; a single forward edge
+            // carries the predecessor's lineage forward.
+            let proposed = if splits {
+                let fresh = next_lineage;
+                next_lineage += 1;
+                fresh
+            } else {
+                from_lineage
+            };
+            // Merge: keep the lowest lineage proposed to the successor.
+            lineage[to] = if lineage[to] == u32::MAX {
+                proposed
+            } else {
+                lineage[to].min(proposed)
+            };
+        }
+    }
+
+    ScrubIndex {
+        ticks,
+        nodes_by_tick,
+        flow_out_degree,
+        lineage,
+    }
+}
+
+impl ScrubIndex {
+    /// Node indices at tick `t` (the per-tick component slice). Empty for
+    /// an out-of-range tick. O(1).
+    fn nodes_at(&self, tick: u32) -> &[usize] {
+        self.nodes_by_tick
+            .get(tick as usize)
+            .map_or(&[][..], Vec::as_slice)
+    }
+}
+
+impl CorridorView {
+    /// Lay the current tick's component slice out abstractly and emit it as
+    /// `DrawTriangle`s (issue 1869 render). Nodes are square dots scaled by
+    /// `sqrt(cell_count)` and lineage-colored (so a persisting region holds
+    /// its color across the scrub); flow edges out of this tick's nodes are
+    /// thin quads weighted by `sqrt(overlap_width)`; punch edges within the
+    /// tick are contrasting slate quads. The layout is an abstract graph
+    /// view — nodes positioned by `(tick → world-z, component lane →
+    /// world-y)` — not a spatial field overlay, since the skeleton carries
+    /// no cell sets.
+    fn render_tick(&self, tick: u32) -> Vec<DrawTriangle> {
+        let mut out = Vec::new();
+        for &node_idx in self.index.nodes_at(tick) {
+            let node = &self.graph.nodes[node_idx];
+            let center = node_position(node.tick, node.component);
+            // A splitting node (out-degree > 1) draws a touch larger so a
+            // branch point reads as a graph event rather than a recolor.
+            let split_emphasis = if self.index.flow_out_degree[node_idx] > 1 {
+                1.3
+            } else {
+                1.0
+            };
+            let radius = CORRIDOR_NODE_RADIUS * scale_factor(node.cell_count) * split_emphasis;
+            let rgb = lineage_color(self.index.lineage[node_idx]);
+            push_quad(&mut out, center, radius, radius, 0.0, rgb);
+            // Flow edges leaving this node — draw forward to the successor
+            // at the next tick, weighted by overlap width.
+            for edge in self
+                .graph
+                .edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::Flow && e.from as usize == node_idx)
+            {
+                let to = &self.graph.nodes[edge.to as usize];
+                let end = node_position(to.tick, to.component);
+                let half = CORRIDOR_FLOW_HALF_WIDTH * scale_factor(edge.overlap_width.max(1));
+                push_edge_quad(&mut out, center, end, half, rgb);
+            }
+            // Punch edges touching this node — intra-tick barrier merges,
+            // contrasting color. Drawn once from the lower endpoint to
+            // avoid a double draw of the same edge.
+            for edge in self
+                .graph
+                .edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::Punch && e.from as usize == node_idx)
+            {
+                let other = &self.graph.nodes[edge.to as usize];
+                let end = node_position(other.tick, other.component);
+                push_edge_quad(
+                    &mut out,
+                    center,
+                    end,
+                    CORRIDOR_FLOW_HALF_WIDTH,
+                    CORRIDOR_PUNCH_RGB,
+                );
+            }
+        }
+        out
+    }
+}
+
+/// World position of the component `component` at tick `tick` in the
+/// abstract layout: tick steps along world-z, component lane along
+/// world-y, world-x fixed. The casts are exact for the small tick /
+/// component counts a corridor graph carries.
+#[allow(clippy::cast_precision_loss)]
+fn node_position(tick: u32, component: u32) -> Vec3 {
+    Vec3::new(
+        0.0,
+        component as f32 * CORRIDOR_LANE_STEP,
+        tick as f32 * CORRIDOR_TICK_STEP,
+    )
+}
+
+/// Monotone, bounded scale from a count: `sqrt(count)` so a node dot's
+/// area (or an edge's width) tracks the count without unbounded growth.
+/// The cast is exact for the modest cell / overlap counts in practice.
+#[allow(clippy::cast_precision_loss)]
+fn scale_factor(count: u32) -> f32 {
+    (count.max(1) as f32).sqrt()
+}
+
+/// Stable lineage → RGB via the existing palette, so a region holds one
+/// color across the scrub (the anti-flicker payoff). Skips palette slot 7
+/// (slate), reserved for the punch-edge contrast color.
+fn lineage_color(lineage: u32) -> (f32, f32, f32) {
+    PALETTE[(lineage as usize) % (PALETTE.len() - 1)]
+}
+
+/// Push an axis-aligned quad (two triangles) centered at `center` in the
+/// x/y plane, lifted on world-z by `lift`.
+fn push_quad(
+    out: &mut Vec<DrawTriangle>,
+    center: Vec3,
+    hx: f32,
+    hy: f32,
+    lift: f32,
+    rgb: (f32, f32, f32),
+) {
+    let c = Vec3::new(center.x, center.y, center.z + lift);
+    let v00 = Vec3::new(c.x - hx, c.y - hy, c.z);
+    let v10 = Vec3::new(c.x + hx, c.y - hy, c.z);
+    let v11 = Vec3::new(c.x + hx, c.y + hy, c.z);
+    let v01 = Vec3::new(c.x - hx, c.y + hy, c.z);
+    out.push(to_draw_triangle_rgb([v00, v10, v11], rgb));
+    out.push(to_draw_triangle_rgb([v00, v11, v01], rgb));
+}
+
+/// Push a thin quad (two triangles) along the segment `a → b`, `half`
+/// world units to each side of the segment in the x/y plane. A zero-length
+/// segment is skipped.
+fn push_edge_quad(out: &mut Vec<DrawTriangle>, a: Vec3, b: Vec3, half: f32, rgb: (f32, f32, f32)) {
+    let a = Vec3::new(a.x, a.y, a.z + CORRIDOR_EDGE_LIFT);
+    let b = Vec3::new(b.x, b.y, b.z + CORRIDOR_EDGE_LIFT);
+    let dir = b - a;
+    let len = dir.length();
+    if len < 1e-6 {
+        return;
+    }
+    // Perpendicular in the x/y plane (z held), normalized.
+    let perp = Vec3::new(-dir.y, dir.x, 0.0);
+    let perp_len = perp.length();
+    if perp_len < 1e-6 {
+        return;
+    }
+    let off = perp * (half / perp_len);
+    let v0 = a - off;
+    let v1 = b - off;
+    let v2 = b + off;
+    let v3 = a + off;
+    out.push(to_draw_triangle_rgb([v0, v1, v2], rgb));
+    out.push(to_draw_triangle_rgb([v0, v2, v3], rgb));
 }
 
 fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[Vec3; 3]> {
@@ -696,6 +1147,9 @@ mod tests {
         MeshViewer {
             triangles: Vec::new(),
             pending_reply: None,
+            pending_load: PendingLoad::Mesh,
+            corridor: None,
+            current_tick: 0,
         }
     }
 
@@ -778,6 +1232,222 @@ mod tests {
             viewer.triangles.len(),
             prior,
             "length mismatch leaves the prior cache intact",
+        );
+    }
+
+    use aether_kinds::{CorridorEdge, CorridorNode};
+
+    fn node(tick: u32, component: u32, cell_count: u32) -> CorridorNode {
+        CorridorNode {
+            tick,
+            component,
+            cell_count,
+            min_cost: 0,
+        }
+    }
+
+    fn flow_edge(from: u32, to: u32, overlap_width: u32) -> CorridorEdge {
+        CorridorEdge {
+            from,
+            to,
+            kind: EdgeKind::Flow,
+            price: 0,
+            overlap_width,
+        }
+    }
+
+    fn punch_edge(from: u32, to: u32, price: u32) -> CorridorEdge {
+        CorridorEdge {
+            from,
+            to,
+            kind: EdgeKind::Punch,
+            price,
+            overlap_width: 0,
+        }
+    }
+
+    /// A persist chain: one component per tick, linked by single flow edges.
+    /// Lineage is constant across all three ticks (the anti-flicker
+    /// property) and out-degree is 1 on every non-terminal node.
+    #[test]
+    fn persist_chain_holds_one_lineage() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 5), node(1, 0, 5), node(2, 0, 5)],
+            edges: vec![flow_edge(0, 1, 4), flow_edge(1, 2, 4)],
+        };
+        let index = build_scrub_index(&graph);
+        assert_eq!(index.ticks, 3);
+        assert_eq!(
+            index.lineage[0], index.lineage[1],
+            "a persisting region keeps its lineage across a tick step",
+        );
+        assert_eq!(
+            index.lineage[1], index.lineage[2],
+            "lineage stays constant down the whole persist chain",
+        );
+        assert_eq!(index.flow_out_degree[0], 1);
+        assert_eq!(index.flow_out_degree[1], 1);
+        assert_eq!(
+            index.flow_out_degree[2], 0,
+            "the terminal node has no outgoing flow edges",
+        );
+    }
+
+    /// A split: one component at tick 0 branches into two at tick 1.
+    /// Out-degree is the branch count (2); each branch gets a fresh lineage
+    /// distinct from the parent and from each other.
+    #[test]
+    fn split_branches_into_fresh_lineages() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 8), node(1, 0, 4), node(1, 1, 4)],
+            edges: vec![flow_edge(0, 1, 3), flow_edge(0, 2, 3)],
+        };
+        let index = build_scrub_index(&graph);
+        assert_eq!(
+            index.flow_out_degree[0], 2,
+            "out-degree equals the flow-edge branch count",
+        );
+        assert_ne!(
+            index.lineage[1], index.lineage[2],
+            "the two split branches get distinct lineages",
+        );
+        assert_ne!(
+            index.lineage[1], index.lineage[0],
+            "a split branch starts a fresh lineage, not the parent's",
+        );
+        assert_ne!(index.lineage[2], index.lineage[0]);
+    }
+
+    /// A merge: two components at tick 0 flow into one at tick 1. The
+    /// successor reconciles to the lowest incoming lineage, so the join is
+    /// recorded as a single carried lineage rather than two colors.
+    #[test]
+    fn merge_reconciles_to_lowest_lineage() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 4), node(0, 1, 4), node(1, 0, 8)],
+            edges: vec![flow_edge(0, 2, 3), flow_edge(1, 2, 3)],
+        };
+        let index = build_scrub_index(&graph);
+        let lo = index.lineage[0].min(index.lineage[1]);
+        assert_eq!(
+            index.lineage[2], lo,
+            "a merge keeps the lowest incoming lineage",
+        );
+    }
+
+    /// `nodes_at(t)` returns exactly the tick's component node indices, in
+    /// `(tick, component)` order, and an empty slice for an out-of-range tick.
+    #[test]
+    fn nodes_at_returns_the_tick_slice() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 1), node(1, 0, 1), node(1, 1, 1), node(2, 0, 1)],
+            edges: vec![],
+        };
+        let index = build_scrub_index(&graph);
+        assert_eq!(index.nodes_at(0), &[0]);
+        assert_eq!(index.nodes_at(1), &[1, 2], "tick 1 has two components");
+        assert_eq!(index.nodes_at(2), &[3]);
+        assert!(
+            index.nodes_at(99).is_empty(),
+            "out-of-range tick is an empty slice",
+        );
+    }
+
+    /// An empty graph yields a zero-tick index with empty derived tables —
+    /// no panic, and a scrub clamps to tick 0.
+    #[test]
+    fn empty_graph_builds_zero_tick_index() {
+        let graph = CorridorGraph {
+            nodes: vec![],
+            edges: vec![],
+        };
+        let index = build_scrub_index(&graph);
+        assert_eq!(index.ticks, 0);
+        assert!(index.nodes_by_tick.is_empty());
+        assert!(index.nodes_at(0).is_empty());
+    }
+
+    /// Punch edges don't contribute to flow out-degree or lineage: an
+    /// intra-tick punch between two tick-0 components leaves each on its
+    /// own lineage and out-degree 0.
+    #[test]
+    fn punch_edges_do_not_carry_lineage() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 4), node(0, 1, 4)],
+            edges: vec![punch_edge(0, 1, 7)],
+        };
+        let index = build_scrub_index(&graph);
+        assert_eq!(index.flow_out_degree[0], 0, "a punch is not a flow branch");
+        assert_ne!(
+            index.lineage[0], index.lineage[1],
+            "a punch does not merge lineages",
+        );
+    }
+
+    /// A good corridor load decodes the postcard bytes, builds the index,
+    /// caches it, and reports `ok`. The scrub cursor clamps into the graph's
+    /// tick span.
+    #[test]
+    fn corridor_load_builds_and_clamps_cursor() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 5), node(1, 0, 5)],
+            edges: vec![flow_edge(0, 1, 4)],
+        };
+        let bytes = graph.encode_into_bytes();
+        let mut viewer = empty_viewer();
+        viewer.current_tick = 9; // out of range for a 2-tick graph
+        let outcome = viewer.load_corridor_bytes(&bytes);
+        assert!(outcome.error.is_none(), "good corridor load succeeds");
+        assert!(viewer.corridor.is_some(), "the datum is cached");
+        assert_eq!(
+            viewer.current_tick, 1,
+            "the cursor clamps into the new graph's tick span",
+        );
+    }
+
+    /// A malformed corridor buffer keeps the prior datum and reports a
+    /// failure (whole-graph atomic replace, mirroring the mesh path).
+    #[test]
+    fn malformed_corridor_keeps_prior_datum() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 5), node(1, 0, 5)],
+            edges: vec![flow_edge(0, 1, 4)],
+        };
+        let mut viewer = empty_viewer();
+        viewer.load_corridor_bytes(&graph.encode_into_bytes());
+        assert!(
+            viewer.corridor.is_some(),
+            "prior good load populated the datum"
+        );
+
+        let outcome = viewer.load_corridor_bytes(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert!(
+            outcome.error.is_some(),
+            "malformed corridor reports a failure"
+        );
+        assert!(
+            viewer.corridor.is_some(),
+            "malformed corridor leaves the prior datum intact",
+        );
+    }
+
+    /// The render pass emits triangles for a non-empty tick slice and an
+    /// empty list for an out-of-range tick.
+    #[test]
+    fn render_tick_emits_for_a_populated_tick() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0, 0, 5), node(1, 0, 5)],
+            edges: vec![flow_edge(0, 1, 4)],
+        };
+        let index = build_scrub_index(&graph);
+        let view = CorridorView { graph, index };
+        assert!(
+            !view.render_tick(0).is_empty(),
+            "tick 0 has a node and an outgoing flow edge to draw",
+        );
+        assert!(
+            view.render_tick(99).is_empty(),
+            "an out-of-range tick draws nothing",
         );
     }
 }

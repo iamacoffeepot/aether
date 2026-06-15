@@ -20,13 +20,16 @@
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult, ScalarField};
-use aether_mesh_viewer::LoadMesh;
+use aether_kinds::{
+    CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, LoadComponent, LoadResult, MeshLoadResult,
+    ScalarField,
+};
+use aether_mesh_viewer::{CorridorLoadResult, LoadCorridor, LoadMesh, Scrub};
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
 };
-use aether_substrate_bundle::visual::{decode_png, differs_from_background};
+use aether_substrate_bundle::visual::{decode_png, differs_from_background, mean_absolute_error};
 
 // Force linkage of `aether-mesh-viewer`'s `inventory::submit!`
 // `KindDescriptor` entries into this test binary. Cargo treats
@@ -405,4 +408,115 @@ fn bad_dsl_load_replies_err() {
     assert!(reply.error.is_some(), "bad load carries a failure reason");
     assert_eq!(reply.namespace, "save", "reply echoes request namespace");
     assert_eq!(reply.path, path, "reply echoes request path");
+}
+
+/// A small corridor-graph fixture (issue 1869) whose two ticks have
+/// visibly different component layouts: tick 0 is a single component that
+/// splits into two distinct lineages at tick 1. Scrubbing between the two
+/// ticks re-addresses the datum, so the rendered slices — and the captured
+/// frames — differ.
+fn split_corridor_bytes() -> Vec<u8> {
+    let node = |tick, component, cell_count| CorridorNode {
+        tick,
+        component,
+        cell_count,
+        min_cost: 0,
+    };
+    let flow = |from, to, overlap_width| CorridorEdge {
+        from,
+        to,
+        kind: EdgeKind::Flow,
+        price: 0,
+        overlap_width,
+    };
+    let graph = CorridorGraph {
+        // tick 0: one big component; tick 1: two branches.
+        nodes: vec![node(0, 0, 16), node(1, 0, 8), node(1, 1, 8)],
+        edges: vec![flow(0, 1, 5), flow(0, 2, 5)],
+    };
+    postcard::to_allocvec(&graph).expect("encode CorridorGraph fixture")
+}
+
+/// Issue 1869 acceptance: load a fixture `CorridorGraph`, scrub to two
+/// distinct ticks, capture each, and assert the frames differ — the scrub
+/// re-addresses the per-tick datum — while `aether.draw_triangle` is
+/// observed throughout. Proves the scrubbable corridor datum end-to-end:
+/// ingest, the per-tick node buckets, the scrub cursor, and the per-tick
+/// render emit.
+#[test]
+fn corridor_scrub_re_addresses_the_datum() {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+        return;
+    };
+    let sandbox = init_save_sandbox("mesh-viewer");
+    let path = write_fixture("corridor.graph", &split_corridor_bytes());
+
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+    load_viewer(&mut bench, &wasm_path);
+
+    // Load the corridor graph and await the structured result.
+    let loaded = bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            (
+                "load_corridor",
+                BenchOp::send_and_await(
+                    component_address(),
+                    &LoadCorridor {
+                        namespace: "save".to_owned(),
+                        path: path.clone(),
+                    },
+                ),
+            ),
+        ])
+        .expect("prime + corridor load");
+    let reply = loaded
+        .reply::<CorridorLoadResult>("load_corridor")
+        .expect("decode CorridorLoadResult");
+    assert!(reply.ok, "corridor load should succeed: {:?}", reply.error);
+    assert_eq!(reply.path, path, "reply echoes request path");
+
+    // Scrub to tick 0, advance to emit several render frames, capture.
+    let frame0 = bench
+        .execute(vec![
+            (
+                "scrub0",
+                BenchOp::send_mail(component_address(), &Scrub { tick: 0 }),
+            ),
+            ("post0", BenchOp::advance(5)),
+            ("snap0", BenchOp::capture()),
+        ])
+        .expect("scrub 0 + capture");
+    let png0 = frame0.captured("snap0").expect("snap0 ran");
+    let img0 = decode_png(png0).expect("decode tick-0 capture");
+
+    // Scrub to tick 1 (the split), advance, capture again.
+    let frame1 = bench
+        .execute(vec![
+            (
+                "scrub1",
+                BenchOp::send_mail(component_address(), &Scrub { tick: 1 }),
+            ),
+            ("post1", BenchOp::advance(5)),
+            ("snap1", BenchOp::capture()),
+        ])
+        .expect("scrub 1 + capture");
+    let png1 = frame1.captured("snap1").expect("snap1 ran");
+    let img1 = decode_png(png1).expect("decode tick-1 capture");
+
+    assert_draw_triangle_observed(&bench);
+    // Each frame carries geometry (diverges from the clear color)...
+    differs_from_background(&img0, 5).expect("tick-0 frame has corridor geometry");
+    differs_from_background(&img1, 5).expect("tick-1 frame has corridor geometry");
+    // ...and the two scrubbed frames differ from each other — the scrub
+    // re-addressed the datum rather than re-emitting the same slice.
+    let mae = mean_absolute_error(&img0, &img1).expect("same-size frames compare");
+    assert!(
+        mae > 0.0,
+        "scrubbing to a different tick must change the rendered frame (mae = {mae})",
+    );
 }
