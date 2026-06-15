@@ -22,7 +22,7 @@ pub mod mailbox;
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, Schema};
+use aether_data::{Kind, MailboxId, Schema};
 
 use crate::mail::mailbox::KindId;
 
@@ -73,7 +73,8 @@ impl ReplyHandle {
 /// Inbound mail, as received by the `#[actor]`-synthesized
 /// `__aether_dispatch` (driven by the guest's `receive` FFI export).
 /// Wraps the raw
-/// `(kind, ptr, count, sender)` FFI parameters with typed decode helpers.
+/// `(kind, ptr, count, sender, recipient)` FFI parameters with typed
+/// decode helpers.
 ///
 /// The lifetime `'a` ties the returned references back to the receive
 /// call; holding a decoded `&K` past the return of `receive` is a
@@ -97,6 +98,14 @@ pub struct Mail<'a> {
     byte_len: u32,
     count: u32,
     sender: u32,
+    // ADR-0114 decision #1: the mailbox the substrate routed this mail
+    // to, carried as the raw `u64` the substrate stamped on its
+    // `OwnedDispatch.recipient` and widened by the receive ABI. For a
+    // normally-addressed actor this equals the actor's own mailbox id;
+    // an inline-child membrane (ADR-0114) reads it to demux mail to the
+    // co-located child the producer addressed. Surfaced via
+    // [`Mail::recipient`].
+    recipient: u64,
     _borrow: PhantomData<&'a [u8]>,
 }
 
@@ -105,13 +114,21 @@ impl<'a> Mail<'a> {
     /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
     #[doc(hidden)]
     #[must_use]
-    pub unsafe fn __from_raw(kind: u64, ptr: u32, byte_len: u32, count: u32, sender: u32) -> Self {
+    pub unsafe fn __from_raw(
+        kind: u64,
+        ptr: u32,
+        byte_len: u32,
+        count: u32,
+        sender: u32,
+        recipient: u64,
+    ) -> Self {
         Mail {
             kind,
             ptr: ptr as usize,
             byte_len,
             count,
             sender,
+            recipient,
             _borrow: PhantomData,
         }
     }
@@ -128,6 +145,7 @@ impl<'a> Mail<'a> {
         byte_len: u32,
         count: u32,
         sender: u32,
+        recipient: u64,
     ) -> Self {
         Mail {
             kind,
@@ -135,6 +153,7 @@ impl<'a> Mail<'a> {
             byte_len,
             count,
             sender,
+            recipient,
             _borrow: PhantomData,
         }
     }
@@ -178,6 +197,18 @@ impl<'a> Mail<'a> {
         } else {
             Some(ReplyHandle { raw: self.sender })
         }
+    }
+
+    /// Mailbox this mail was routed to (ADR-0114 decision #1). The
+    /// substrate stamps it on the dispatch envelope and threads it
+    /// through the receive ABI, so a guest can tell apart mail addressed
+    /// to different lineage addresses that land in the same instance.
+    /// For a normally-addressed actor this equals the actor's own
+    /// mailbox id; an inline-child membrane reads it to demux inbound
+    /// mail to the co-located child the producer addressed.
+    #[must_use]
+    pub fn recipient(&self) -> MailboxId {
+        MailboxId(self.recipient)
     }
 
     /// Decode as a single owned `K`. Returns `None` if the kind does
@@ -461,8 +492,8 @@ mod tests {
     // is derived from a local stack value or buffer whose lifetime
     // straddles the resulting `Mail`/`PriorState`, satisfying the
     // ABI's `(ptr, byte_len)` validity contract for the duration of
-    // the test body. The `count` / `sender` / `version` scalars are
-    // plain values with no aliasing implications. The `0,0,0` no-deref
+    // the test body. The `count` / `sender` / `recipient` / `version`
+    // scalars are plain values with no aliasing implications. The `0,0,0` no-deref
     // variants rely on the `bytes()` / `decode*` accessors honouring
     // the `len == 0` early-return rather than forming a slice over the
     // null pointer.
@@ -473,7 +504,7 @@ mod tests {
         let ptr_raw = (&raw const value).addr();
         let byte_len = size_of::<FakePod>() as u32;
         // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
         let kind: KindId<FakePod> = KindId::__new(7);
         let out = mail
             .decode(kind)
@@ -487,7 +518,7 @@ mod tests {
         let ptr_raw = (&raw const value).addr();
         let byte_len = size_of::<FakePod>() as u32;
         // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
         let wrong: KindId<FakePod> = KindId::__new(8);
         assert!(mail.decode(wrong).is_none());
     }
@@ -498,7 +529,7 @@ mod tests {
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
         let kind: KindId<FakePod> = KindId::__new(7);
         // `decode` requires count == 1; use `decode_slice` for batches.
         assert!(mail.decode(kind).is_none());
@@ -510,7 +541,7 @@ mod tests {
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
-        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
         let kind: KindId<FakePod> = KindId::__new(7);
         let out = mail
             .decode_slice(kind)
@@ -522,18 +553,37 @@ mod tests {
     fn mail_sender_none_for_sentinel_handle() {
         // SAFETY: no pointer is dereferenced (`bytes()` and friends
         // are not called); we only inspect the sentinel `sender`.
-        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, NO_REPLY_HANDLE, 0) };
         assert!(mail.reply_handle().is_none());
     }
 
     #[test]
     fn mail_sender_some_for_real_handle() {
         // SAFETY: no pointer is dereferenced; we only inspect `sender`.
-        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42) };
+        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) };
         let s = mail
             .reply_handle()
             .expect("non-sentinel handle yields Some");
         assert_eq!(s.raw(), 42);
+    }
+
+    #[test]
+    fn mail_recipient_roundtrips_from_raw_address() {
+        // ADR-0114 decision #1: the receive ABI threads the routed
+        // mailbox through as the trailing `recipient` frame slot; the
+        // accessor wraps it back into a `MailboxId`. Independent of the
+        // reply-handle `sender` slot — distinct values must not bleed.
+        // SAFETY: no pointer is dereferenced; only the scalar slots are
+        // inspected.
+        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0x1234_5678_9ABC_DEF0) };
+        assert_eq!(mail.recipient(), MailboxId(0x1234_5678_9ABC_DEF0));
+        // `__from_raw` (the wasm32 path) carries the same recipient
+        // unchanged — only the address widens, never the recipient.
+        // SAFETY: no pointer is dereferenced; only the scalar slots are
+        // inspected.
+        let raw_mail = unsafe { Mail::__from_raw(0, 0, 0, 0, NO_REPLY_HANDLE, 0xDEAD_BEEF) };
+        assert_eq!(raw_mail.recipient(), MailboxId(0xDEAD_BEEF));
+        assert!(raw_mail.reply_handle().is_none());
     }
 
     #[test]
@@ -562,7 +612,7 @@ mod tests {
     #[test]
     fn mail_is_typed_matches_kind_id() {
         // SAFETY: no pointer is dereferenced (`is::<K>` reads `kind`).
-        let mail = unsafe { Mail::__from_ptr(FakeKind::ID.0, 0, 0, 0, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr(FakeKind::ID.0, 0, 0, 0, NO_REPLY_HANDLE, 0) };
         assert!(mail.is::<FakeKind>());
         assert!(!mail.is::<FakePod>());
     }
@@ -574,7 +624,7 @@ mod tests {
         let byte_len = size_of::<FakePod>() as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
         let out = mail
             .decode_typed::<FakePod>()
             .expect("test setup: matching kind id decodes typed");
@@ -589,7 +639,7 @@ mod tests {
         // Kind id deliberately mismatched (FakeKind instead of FakePod).
         // SAFETY: see module-level test fixture justification above.
         let mail =
-            unsafe { Mail::__from_ptr(FakeKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr(FakeKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0) };
         assert!(mail.decode_typed::<FakePod>().is_none());
     }
 
@@ -600,7 +650,7 @@ mod tests {
         let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
         assert!(mail.decode_typed::<FakePod>().is_none());
     }
 
@@ -611,7 +661,7 @@ mod tests {
         let byte_len = (size_of::<FakePod>() * 2) as u32;
         // SAFETY: see module-level test fixture justification above.
         let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE, 0) };
         let out = mail
             .decode_slice_typed::<FakePod>()
             .expect("test setup: matching kind id decodes typed slice");
@@ -635,6 +685,7 @@ mod tests {
                 bytes.len() as u32,
                 1,
                 NO_REPLY_HANDLE,
+                0,
             )
         };
         let out = mail.decode_kind::<FakePostcard>().expect("decode");
@@ -667,8 +718,9 @@ mod tests {
         let ptr_raw = (&raw const value).addr();
         let byte_len = size_of::<FakeCastKind>() as u32;
         // SAFETY: see module-level test fixture justification above.
-        let mail =
-            unsafe { Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+        let mail = unsafe {
+            Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE, 0)
+        };
         let out = mail.decode_kind::<FakeCastKind>().expect("decode");
         assert_eq!(out, value);
     }
@@ -690,6 +742,7 @@ mod tests {
                 bytes.len() as u32,
                 1,
                 NO_REPLY_HANDLE,
+                0,
             )
         };
         assert!(mail.decode_kind::<FakePostcard>().is_none());
@@ -712,6 +765,7 @@ mod tests {
                 bytes.len() as u32,
                 2,
                 NO_REPLY_HANDLE,
+                0,
             )
         };
         assert!(mail.decode_kind::<FakePostcard>().is_none());
@@ -738,6 +792,7 @@ mod tests {
                 2,
                 1,
                 NO_REPLY_HANDLE,
+                0,
             )
         };
         assert!(mail.decode_kind::<FakePostcard>().is_none());
@@ -754,8 +809,16 @@ mod tests {
         // SAFETY: `buf` outlives `mail`; the `(addr, 0)` pair points
         // into the live `buf` allocation, satisfying the validity
         // contract trivially for the zero-byte read.
-        let mail =
-            unsafe { Mail::__from_ptr(FakeKind::ID.0, buf.as_ptr().addr(), 0, 1, NO_REPLY_HANDLE) };
+        let mail = unsafe {
+            Mail::__from_ptr(
+                FakeKind::ID.0,
+                buf.as_ptr().addr(),
+                0,
+                1,
+                NO_REPLY_HANDLE,
+                0,
+            )
+        };
         assert!(mail.decode_kind::<FakeKind>().is_none());
     }
 
@@ -773,8 +836,16 @@ mod tests {
         // The pointer is still valid for `size_of::<FakePod>()` bytes
         // (the `value` allocation), so even if decode did read it
         // would touch only valid memory.
-        let mail =
-            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, bogus_byte_len, 1, NO_REPLY_HANDLE) };
+        let mail = unsafe {
+            Mail::__from_ptr(
+                FakePod::ID.0,
+                ptr_raw,
+                bogus_byte_len,
+                1,
+                NO_REPLY_HANDLE,
+                0,
+            )
+        };
         assert!(mail.decode_typed::<FakePod>().is_none());
     }
 

@@ -544,8 +544,8 @@ pub mod guest_alloc {
 /// - A `static` [`crate::Slot<T>`] that backs the actor instance.
 /// - `extern "C" fn init(mailbox_id: u64) -> u32` — builds an
 ///   [`FfiInitCtx`], calls `T::init`, stashes the result in the slot.
-/// - `extern "C" fn receive(kind, ptr, byte_len, count, sender) -> u32`
-///   — builds [`FfiCtx`] and [`crate::Mail`], calls the
+/// - `extern "C" fn receive(kind, ptr, byte_len, count, sender, recipient)
+///   -> u32` — builds [`FfiCtx`] and [`crate::Mail`], calls the
 ///   `#[actor]`-synthesized `__aether_dispatch` on the stashed
 ///   instance.
 /// - `#[link_section = "aether.kinds.inputs"]` static that pins the
@@ -767,8 +767,10 @@ macro_rules! __export_internal {
 
         /// # Safety
         /// Called by the substrate with `(kind, ptr, byte_len, count,
-        /// sender)` matching the FFI contract. Exported under the
-        /// `_p32` suffix per ADR-0024 Phase 1.
+        /// sender, recipient)` matching the FFI contract. Exported under
+        /// the `_p32` suffix per ADR-0024 Phase 1; the trailing
+        /// `recipient: u64` (ADR-0114 decision #1) widens like the other
+        /// frame slots on the wasm path.
         #[cfg(target_arch = "wasm32")]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
@@ -777,6 +779,7 @@ macro_rules! __export_internal {
             byte_len: u32,
             count: u32,
             sender: u32,
+            recipient: u64,
         ) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
@@ -791,7 +794,8 @@ macro_rules! __export_internal {
             // ADR-0112: dispatch receives the full `Manual` ctx; the
             // synthesized `__aether_dispatch` downgrades per handler class.
             let mut ctx = $crate::FfiCtx::__new(mailbox_id);
-            let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
+            let mail =
+                unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender, recipient) };
             instance.__aether_dispatch(&mut ctx, mail)
         }
 
@@ -1077,7 +1081,8 @@ macro_rules! __export_multi_internal {
         /// # Safety
         /// FFI receive contract (ADR-0024); routes through the boxed
         /// `ErasedFfiActor`. Self-mailbox id derived from the live
-        /// instance's namespace.
+        /// instance's namespace. The trailing `recipient: u64` (ADR-0114
+        /// decision #1) carries the routed mailbox through to `Mail`.
         #[cfg(target_arch = "wasm32")]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
@@ -1086,6 +1091,7 @@ macro_rules! __export_multi_internal {
             byte_len: u32,
             count: u32,
             sender: u32,
+            recipient: u64,
         ) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
@@ -1097,7 +1103,8 @@ macro_rules! __export_multi_internal {
             // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
             let mut ctx = $crate::FfiCtx::__new(mailbox_id);
-            let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
+            let mail =
+                unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender, recipient) };
             instance.erased_dispatch(&mut ctx, mail)
         }
 
