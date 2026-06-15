@@ -27,8 +27,8 @@ use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
     HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
-    http::HttpConfig, trace::TraceDispatchCapability,
+    LifecycleConfig, TcpCapability, TextCapability, TrajectoryRecorderCapability, UiCapability,
+    fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_kinds::{Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
@@ -292,6 +292,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<HandleCapability>(())
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<DagCapability>(())
+        .with_actor::<TrajectoryRecorderCapability>(())
         .with_actor::<InputCapability>(boot.input_config)
         .with_actor::<ComponentHostCapability>(boot.component_host_config)
         .with_actor::<FsCapability>(boot.namespace_roots)

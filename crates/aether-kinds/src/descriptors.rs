@@ -55,9 +55,10 @@ mod tests {
         Fetch, FetchResult, Key, LifecycleUnsubscribeAll, List, ListResult, LoadComponent,
         LoadResult, LyriaGenerate, LyriaGenerateResult, Mat4Apply, MessagesSend,
         MessagesSendResult, MouseButton, MouseMove, NanobananaGenerate, NanobananaGenerateResult,
-        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, ReplaceComponent,
-        ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput, SubscribeInputResult,
-        Terminate, TerminateResult, Tick, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
+        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, RecordResult,
+        ReplaceComponent, ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput,
+        SubscribeInputResult, Terminate, TerminateResult, Tick, TrajectoryEnd, TrajectoryLog,
+        TrajectorySample, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -441,5 +442,122 @@ mod tests {
         for f in vec_fields.iter() {
             assert_eq!(f.ty, SchemaType::Scalar(Primitive::F32));
         }
+    }
+
+    /// Regression guard: all four trajectory kinds register in the
+    /// inventory-driven descriptor list so they appear in `describe_kinds`
+    /// without a manual second touch (ADR-0028, issue #243).
+    #[test]
+    fn trajectory_kinds_are_in_descriptor_list() {
+        let descs = all();
+        let names: Vec<&str> = descs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&TrajectorySample::NAME),
+            "TrajectorySample missing from descriptor list"
+        );
+        assert!(
+            names.contains(&TrajectoryEnd::NAME),
+            "TrajectoryEnd missing from descriptor list"
+        );
+        assert!(
+            names.contains(&TrajectoryLog::NAME),
+            "TrajectoryLog missing from descriptor list"
+        );
+        assert!(
+            names.contains(&RecordResult::NAME),
+            "RecordResult missing from descriptor list"
+        );
+    }
+
+    /// Trajectory kinds resolve to distinct ids: no two share the same
+    /// `Kind::ID`. A collision would mean two kinds dispatched to the
+    /// same handler, silently losing one.
+    #[test]
+    fn trajectory_kind_ids_are_distinct() {
+        let ids = [
+            TrajectorySample::ID,
+            TrajectoryEnd::ID,
+            TrajectoryLog::ID,
+            RecordResult::ID,
+        ];
+        // O(n²) pairwise check — n = 4, tolerable.
+        for (i, a) in ids.iter().enumerate() {
+            for b in ids.iter().skip(i + 1) {
+                assert_ne!(a.0, b.0, "duplicate trajectory kind ids: {a:?} == {b:?}");
+            }
+        }
+    }
+
+    /// `TrajectoryLog` is a postcard-shaped `Struct` (it carries a
+    /// `Vec<TrajectorySampleEntry>` field, so `repr_c` must be false).
+    #[test]
+    fn trajectory_log_is_postcard_struct() {
+        let descs = all();
+        let d = descs
+            .iter()
+            .find(|d| d.name == TrajectoryLog::NAME)
+            .expect("TrajectoryLog in descriptor list");
+        let SchemaType::Struct { repr_c, .. } = &d.schema else {
+            panic!("expected Struct for TrajectoryLog, got {:?}", d.schema);
+        };
+        assert!(
+            !*repr_c,
+            "TrajectoryLog contains Vec — must be postcard, not cast"
+        );
+    }
+
+    /// `RecordResult` is an `Enum` schema (two variants: `Ok` and `Err`).
+    #[test]
+    fn record_result_is_enum_schema() {
+        let descs = all();
+        let d = descs
+            .iter()
+            .find(|d| d.name == RecordResult::NAME)
+            .expect("RecordResult in descriptor list");
+        assert!(
+            matches!(d.schema, SchemaType::Enum { .. }),
+            "RecordResult should be Enum, got {:?}",
+            d.schema
+        );
+    }
+
+    /// Postcard round-trip for `TrajectoryLog`: encode via `Kind::encode_into_bytes`,
+    /// decode via postcard, assert equality of all fields and samples in order.
+    #[test]
+    fn trajectory_log_postcard_roundtrip() {
+        use crate::{TrajectoryEndReason, TrajectorySampleEntry};
+
+        let original = TrajectoryLog {
+            seed: 0xDEAD_BEEF_u64,
+            samples: alloc::vec![
+                TrajectorySampleEntry {
+                    tick: 1,
+                    x: 10,
+                    y: 20,
+                    value: 100,
+                },
+                TrajectorySampleEntry {
+                    tick: 2,
+                    x: 11,
+                    y: 21,
+                    value: 200,
+                },
+            ],
+            end_reason: TrajectoryEndReason::Completed,
+        };
+
+        let bytes = original.encode_into_bytes();
+        let decoded: TrajectoryLog =
+            postcard::from_bytes(&bytes).expect("TrajectoryLog round-trips via postcard");
+
+        assert_eq!(decoded.seed, original.seed);
+        assert_eq!(decoded.samples.len(), 2);
+        assert_eq!(decoded.samples[0].tick, 1);
+        assert_eq!(decoded.samples[0].x, 10);
+        assert_eq!(decoded.samples[0].y, 20);
+        assert_eq!(decoded.samples[0].value, 100);
+        assert_eq!(decoded.samples[1].tick, 2);
+        assert_eq!(decoded.samples[1].value, 200);
+        assert_eq!(decoded.end_reason, TrajectoryEndReason::Completed);
     }
 }

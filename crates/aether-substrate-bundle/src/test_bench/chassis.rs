@@ -14,7 +14,7 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
     InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, TextCapability,
-    UiCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
+    TrajectoryRecorderCapability, UiCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
@@ -306,6 +306,7 @@ impl TestBenchChassis {
             .with_workers(pool_workers)
             .with_actor::<HandleCapability>(())
             .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<TrajectoryRecorderCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<TcpCapability>(())

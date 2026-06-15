@@ -74,8 +74,12 @@ pub mod render;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
+// `aether.trajectory` position-stream recorder cap (issue 1862). A
+// native-only cap that accumulates per-tick samples into a typed,
+// seed-keyed `TrajectoryLog` handle (ADR-0049) replayable offline.
 #[cfg(test)]
 pub(crate) mod test_chassis;
+pub mod trajectory;
 // `aether.text` cap (ADR-0105). CPU-only — composes the render texture
 // surface by mail — but feature-gated the two-layer way so a wasm
 // component can address it by type without pulling `fontdue` into the
@@ -168,6 +172,7 @@ pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]
 pub use text::TextCapability;
+pub use trajectory::TrajectoryRecorderCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(not(target_arch = "wasm32"))]
 pub use trampoline::WasmTrampolineConfig;
