@@ -102,6 +102,12 @@ pub mod trampoline;
 // runs transforms, so gate the whole module rather than carry it dead.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transforms;
+// Pure minimum-cost reachability solver core (ADR-0047/0048/0049, issue
+// 1857). Gated to non-wasm like `transforms`: its only callers are the
+// native `#[transform]`s above (and the follow-on field passes that reuse
+// `solve_cost_to_reach`), so on a wasm-header-only build it would be dead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod reachability;
 pub mod window;
 
 #[cfg(feature = "audio")]
