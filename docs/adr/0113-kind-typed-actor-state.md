@@ -1,7 +1,8 @@
 # ADR-0113: Kind-typed actor state for hot-reload
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-14
+- **Accepted:** 2026-06-15 (implemented by #1884)
 
 ## Context
 
