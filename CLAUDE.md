@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Status
 
-Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. A thin native **substrate** owns I/O, GPU, and audio and hosts a WASM runtime; engine **actors** — wasm components and native chassis capabilities — run on it and communicate only by **mail**. "Aether" / "the engine" is the whole system; the substrate is the native base layer. Load-bearing design is recorded as ADRs in `docs/adr/NNNN-title.md` (use `docs/adr/TEMPLATE.md` to start one) — read the cited ADR before changing a subsystem.
+Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. A thin native **substrate** owns I/O, GPU, and audio and hosts a WASM runtime; engine **actors** — wasm components and native chassis capabilities — run on it and communicate only by **mail**. "Aether" / "the engine" is the whole system; the substrate is the native base layer. Load-bearing design is recorded as ADRs in `docs/adr/NNNN-title.md` (use `docs/adr/TEMPLATE.md` to start one) — read the cited ADR before changing a subsystem. The contributor and agent reference for using and extending aether is the **`docs/guide/`** mdbook (`docs/guide/SUMMARY.md` is the entry point; CI builds and deploys it to GitHub Pages).
 
 ## Architecture & crates
 
@@ -78,13 +78,17 @@ Tools (`mcp__aether-hub__*`):
 
 When verifying substrate behavior end-to-end, reach for the MCP harness before writing a new test binary.
 
-## Test bench (ADR-0067)
+## Test harnesses (ADR-0067)
 
-For Rust integration tests / CI gating without a live MCP session, **`aether_substrate_bundle::test_bench`** drives the same in-process substrate from a Rust thread. `TestBench::start()` (or `TestBench::builder().size(w, h).build()`) boots a full chassis (scheduler, mail queue, wgpu offscreen render target) with a loopback channel so substrate replies route back without a hub. Drive it with a sequence of `Step`s — `Step::advance(ticks)`, `capture()`, `capture_with_mails(pre, after)`, `send_mail::<K>(recipient, &mail)`, `send_and_await::<K>(recipient, &mail)` — and inspect the returned report (`captured(label)`, `reply::<R>(label)`, `count_observed(kind)`). `send_mail` encodes params the same path as the MCP tool, so any substrate kind is sendable.
+For Rust integration tests / CI gating without a live MCP session, two in-repo harnesses cover non-overlapping test surfaces.
 
-Scenarios need a wgpu adapter; CI installs `mesa-vulkan-drivers` on Linux runners and pre-builds component wasm before `cargo test`. Driverless dev boxes skip cleanly. Reach for the test bench for repeatable `cargo test` verification; the MCP harness for exploratory / live observation.
+**TestBench** (`aether_substrate_bundle::test_bench`) drives the substrate in-process over a loopback channel — no hub, no wire. `TestBench::start()` (or `TestBench::builder().size(w, h).build()`) boots a full chassis (scheduler, mail queue, wgpu offscreen render target). Drive it with a sequence of `Step`s — `Step::advance(ticks)`, `capture()`, `capture_with_mails(pre, after)`, `send_mail::<K>(recipient, &mail)`, `send_and_await::<K>(recipient, &mail)` — and inspect the returned report (`captured(label)`, `reply::<R>(label)`, `count_observed(kind)`). `send_mail` encodes params the same path as the MCP tool, so any substrate kind is sendable. Scenarios need a wgpu adapter; CI installs `mesa-vulkan-drivers` on Linux runners and pre-builds component wasm before `cargo test`. Driverless dev boxes skip cleanly.
 
-Wasm components are discovered structurally (issue 439): a `cargo metadata` package with `crate-type = cdylib` AND a dependency on **`aether-actor`**. Both signals are structural — no filename convention.
+**FleetBench** (`crates/aether-substrate-bundle/tests/fleetbench/`) drives the real hub → RPC → forked-headless-substrate stack over raw `WireFrame::Call` frames — the same wire protocol `aether-mcp` speaks, with the async/JSON front stripped. `FleetBench::start()` boots a hub-shaped passive chassis and connects a raw-frame `TcpStream` client; `spawn_headless()` forks a real `aether-substrate-headless` process through the engines cap; `load(engine, stem)` loads a component wasm and returns its lineage address; `send(engine, recipient, &mail)` issues a `Call` and returns the reply envelopes. FleetBench is headless — no GPU, no pixel readback.
+
+**Decision rule.** Engine-internal correctness and anything visual → TestBench. The RPC/hub boundary, `Call` recipient-name resolution, and fleet lifecycle (fork+exec, component load over the wire, engine eviction) → FleetBench. Hard line: FleetBench is headless, so rendered-output assertions must be TestBench; externally-addressable-over-the-wire assertions must be FleetBench.
+
+Wasm components are discovered structurally (issue 439): a `cargo metadata` package with `crate-type = cdylib` AND a dependency on **`aether-actor`**. Both signals are structural — no filename convention. Reach for TestBench or FleetBench for repeatable `cargo test` verification; the MCP harness for exploratory / live observation.
 
 ## Runtime & subsystems
 
