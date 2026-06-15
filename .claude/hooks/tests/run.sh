@@ -88,6 +88,14 @@ expect_no "unbound session -> fail open"                check-role-boundary.sh \
   '{"session_id":"NONE","tool_name":"Bash","tool_input":{"command":"git push"}}' "$ASK"
 expect_no "harmless read command -> allow"              check-role-boundary.sh \
   '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git status"}}' "$ASK"
+expect_no "merge gate: ff-only origin/main -> silent allow" check-role-boundary.sh \
+  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge --ff-only origin/main"}}' "$ASK"
+expect_no "merge gate: ff-only @{u} -> silent allow"    check-role-boundary.sh \
+  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge --ff-only @{u}"}}' "$ASK"
+expect    "merge gate: non-ff origin/main -> ask"       check-role-boundary.sh \
+  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge origin/main"}}' 0 "$ASK"
+expect    "merge gate: local branch merge -> ask"       check-role-boundary.sh \
+  '{"session_id":"SESS","tool_name":"Bash","tool_input":{"command":"git merge feature"}}' 0 "$ASK"
 
 echo "## check-worktree-clean.sh — PostToolUse tripwire"
 expect "clean main -> allow"          check-worktree-clean.sh '{"session_id":"SESS"}' 0

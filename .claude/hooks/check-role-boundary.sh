@@ -11,7 +11,7 @@
 #       asks to confirm. Skill-form denials are not Bash commands and have no
 #       enforceable Bash stand-in, so they are not carried here (ADR-0111 makes
 #       an out-of-role skill advisory at most, and its effects hit this gate).
-#         dreamer / scoper -> merge, code-push
+#         dreamer / scoper -> merge (except --ff-only upstream sync), code-push
 #         orchestrator     -> issue-creation
 #         everything       -> nothing
 #   (b) Edit-path gate (Edit/Write/MultiEdit/NotebookEdit) — resolves the
@@ -65,6 +65,10 @@ pos='(^|[;&|])[[:space:]]*'
 # POST so a plain `gh api .../issues` read is not mistaken for a create.
 action_regex() {
     case "$1" in
+        # merge: broad pattern catches `gh pr merge`, `git merge`, and `gh api
+        # .../merge` (PR-merge REST endpoint). A `git merge --ff-only` from an
+        # upstream/remote-tracking ref is a sync pull, not a landing; the
+        # role-gate loop exempts it via is_upstream_sync (see below).
         merge) printf '%s' "${pos}(gh[[:space:]]+pr[[:space:]]+merge|git[[:space:]]+merge[[:space:]]|gh[[:space:]]+api[[:space:]][^|;&]*merge)" ;;
         push) printf '%s' "${pos}git[[:space:]]+push" ;;
         # issue-creation only: `issues` must be the final path segment (preceded
@@ -97,6 +101,21 @@ role_remedy() {
     esac
 }
 
+# Returns success (0) when $1 is a fast-forward-only merge from an upstream or
+# remote-tracking ref — the routine way a long-lived session pulls current main
+# into its own worktree branch. Recognized form: a command-position `git merge`
+# that carries `--ff-only` AND names an upstream/remote-tracking source
+# (`origin/…`, `@{u}` / `@{upstream}`, or `FETCH_HEAD`). Two cheap grep guards:
+# order-independent, tolerant of intervening flags. Any merge form the helper
+# does not recognize falls through to the normal ask — errs toward prompting.
+is_upstream_sync() {
+    local cmd="$1"
+    printf '%s' "$cmd" | grep -qE "${pos}git[[:space:]]+merge[[:space:]]" || return 1
+    printf '%s' "$cmd" | grep -qF -- '--ff-only' || return 1
+    printf '%s' "$cmd" | grep -qE '(^|[[:space:]])(origin/[^[:space:]]+|@\{u\}|@\{upstream\}|FETCH_HEAD)([[:space:]]|$)' || return 1
+    return 0
+}
+
 # Surface a boundary crossing as a PreToolUse ask-to-confirm decision (ADR-0111):
 # print the hook JSON carrying the reason on stdout and exit 0, so the tool runs
 # only if the operator confirms. Supersedes the old `exit 2` hard deny.
@@ -110,6 +129,13 @@ emit_ask() {
 if [[ -n "$command" ]]; then
     for action in $(role_actions "$role"); do
         if printf '%s' "$command" | grep -qE "$(action_regex "$action")"; then
+            # A fast-forward-only merge from an upstream ref pulls code in, not
+            # out — it is the opposite of the denied "land code into main" action.
+            # Let it through silently so a long-lived session can sync its branch
+            # from origin/main without a prompt.
+            if [[ "$action" == merge ]] && is_upstream_sync "$command"; then
+                continue
+            fi
             reason=$(
                 printf '[role boundary] the %s role does not normally %s.\n\n' "$role" "$(action_label "$action")"
                 printf 'ADR-0110 binds this session to the %s role. Confirm only if you mean to\n' "$role"
