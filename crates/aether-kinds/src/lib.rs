@@ -2514,6 +2514,54 @@ mod control_plane {
         },
     }
 
+    /// Destination address for `aether.fs.copy`: a logical namespace
+    /// path the substrate resolves through the write adapter registry.
+    /// Only writable namespaces (`save`, `config`) accept a copy; a
+    /// read-only namespace (`assets`) replies `Forbidden` and an unknown
+    /// namespace replies `UnknownNamespace`. `path` is relative to the
+    /// namespace root — `..` and leading `/` are rejected at the adapter
+    /// boundary as `Forbidden`, the same rule that governs `aether.fs.write`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct NamespaceAddr {
+        pub namespace: String,
+        pub path: String,
+    }
+
+    /// `aether.fs.copy` — copy a file from a raw host filesystem path
+    /// (`from`) into a writable namespace address (`to`). `from` is an
+    /// absolute host path the substrate reads directly — it is not
+    /// namespace-scoped and carries the same trust level as `config_path`
+    /// / `binary_path` used elsewhere on the substrate. `to` is a
+    /// namespace-address struct; the write sandbox applies on the `to`
+    /// side: a read-only or unknown namespace replies with `Forbidden` /
+    /// `UnknownNamespace`. Reply: `CopyResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.fs.copy")]
+    pub struct Copy {
+        pub from: String,
+        pub to: NamespaceAddr,
+    }
+
+    /// Reply to `Copy`. Both arms echo `from` + `to` for correlation;
+    /// no bytes are echoed so the reply stays small regardless of file
+    /// size. `Err` carries an `FsError` — `NotFound` if `from` is absent
+    /// on the host, `Forbidden` for a read-only destination namespace or
+    /// a `to.path` that contains `..` / a leading `/`, `UnknownNamespace`
+    /// if `to.namespace` was not registered.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.fs.copy_result")]
+    pub enum CopyResult {
+        Ok {
+            from: String,
+            to: NamespaceAddr,
+        },
+        Err {
+            from: String,
+            to: NamespaceAddr,
+            error: FsError,
+        },
+    }
+
     /// `aether.fs.delete` — request the substrate remove a file.
     /// Missing files surface as `NotFound` (not silent success) so
     /// callers that care about the distinction can tell; callers
@@ -4239,6 +4287,8 @@ mod tests {
         assert_eq!(DeleteResult::NAME, "aether.fs.delete_result");
         assert_eq!(List::NAME, "aether.fs.list");
         assert_eq!(ListResult::NAME, "aether.fs.list_result");
+        assert_eq!(Copy::NAME, "aether.fs.copy");
+        assert_eq!(CopyResult::NAME, "aether.fs.copy_result");
         assert_eq!(Manifest::NAME, "aether.inventory.manifest");
         assert_eq!(ManifestResult::NAME, "aether.inventory.manifest_result");
         assert_eq!(Resolve::NAME, "aether.inventory.resolve");

@@ -47,6 +47,7 @@ Each request kind pairs with a reply kind that names the same operation:
 | `aether.fs.write` | `namespace`, `path`, `bytes` | `aether.fs.write_result` | — (ack) |
 | `aether.fs.delete` | `namespace`, `path` | `aether.fs.delete_result` | — (ack) |
 | `aether.fs.list` | `namespace`, `prefix` | `aether.fs.list_result` | `entries` |
+| `aether.fs.copy` | `from`, `to` | `aether.fs.copy_result` | — (ack) |
 
 Each reply is an `Ok` / `Err` enum. Every arm — including the bare `write` /
 `delete` acks — echoes the request's `namespace` + `path` (or `prefix`); the

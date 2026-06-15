@@ -21,7 +21,7 @@ use std::sync::Arc;
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
 use aether_actor::FfiActorMailbox;
-use aether_kinds::{Delete, FsError, List, Read, Write};
+use aether_kinds::{Copy, CopyResult, Delete, FsError, List, NamespaceAddr, Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 use std::fs;
@@ -355,6 +355,13 @@ pub trait FsMailboxExt {
     /// Mail `aether.fs.list { namespace, prefix }` to the cap. The
     /// reply enumerates entries under the prefix.
     fn list(&self, namespace: &str, prefix: &str);
+
+    /// Mail `aether.fs.copy { from, to }` to the cap. `from` is a raw
+    /// host filesystem path; `to` is a namespace-address destination. The
+    /// bytes flow host → namespace inside the substrate — they never ride
+    /// the wire. The reply echoes `from` + `to` without bytes, so a
+    /// large-file copy produces a small ack.
+    fn copy(&self, from: &str, to_namespace: &str, to_path: &str);
 }
 
 impl FsMailboxExt for FfiActorMailbox<FsCapability> {
@@ -382,6 +389,16 @@ impl FsMailboxExt for FfiActorMailbox<FsCapability> {
         self.send(&List {
             namespace: namespace.into(),
             prefix: prefix.into(),
+        });
+    }
+    //noinspection DuplicatedCode
+    fn copy(&self, from: &str, to_namespace: &str, to_path: &str) {
+        self.send(&Copy {
+            from: from.into(),
+            to: NamespaceAddr {
+                namespace: to_namespace.into(),
+                path: to_path.into(),
+            },
         });
     }
 }
@@ -414,6 +431,16 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
             prefix: prefix.into(),
         });
     }
+    //noinspection DuplicatedCode
+    fn copy(&self, from: &str, to_namespace: &str, to_path: &str) {
+        self.send(&Copy {
+            from: from.into(),
+            to: NamespaceAddr {
+                namespace: to_namespace.into(),
+                path: to_path.into(),
+            },
+        });
+    }
 }
 
 // The derive emits the Layer + Overlay + `from_env` shims at this scope
@@ -423,12 +450,13 @@ impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
 
 #[aether_actor::bridge(singleton)]
 mod native {
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use super::{
-        AdapterRegistry, Delete, FsError, List, NamespaceRoots, NamespaceRootsLayer, Read, Write,
-        build_registry,
+        AdapterRegistry, Copy, CopyResult, Delete, FsError, List, NamespaceRoots,
+        NamespaceRootsLayer, Read, Write, build_registry, fs_error_from_std,
     };
     use aether_actor::actor;
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
@@ -605,6 +633,48 @@ mod native {
             }
         }
 
+        /// Copy a file from a raw host path into a writable namespace.
+        /// `mail.from` is read via `std::fs::read` directly — not through
+        /// the `FileAdapter` trait — because `from` is an absolute host path
+        /// with no namespace root (the same trust model as `config_path` /
+        /// `binary_path`). The write sandbox applies entirely on the `to`
+        /// side: an unknown namespace → `UnknownNamespace`; a read-only
+        /// namespace or a `to.path` with `..` / leading `/` → `Forbidden`.
+        ///
+        /// # Agent
+        /// Reply: `CopyResult`. Echoes `from` + `to` (no bytes).
+        #[handler]
+        fn on_copy(&self, _ctx: &mut NativeCtx<'_>, mail: Copy) -> CopyResult {
+            let Some(adapter) = self.registry.get(&mail.to.namespace) else {
+                return CopyResult::Err {
+                    from: mail.from,
+                    to: mail.to,
+                    error: FsError::UnknownNamespace,
+                };
+            };
+            let bytes = match fs::read(&mail.from) {
+                Ok(b) => b,
+                Err(e) => {
+                    return CopyResult::Err {
+                        from: mail.from,
+                        to: mail.to,
+                        error: fs_error_from_std(e),
+                    };
+                }
+            };
+            match adapter.write(&mail.to.path, &bytes) {
+                Ok(()) => CopyResult::Ok {
+                    from: mail.from,
+                    to: mail.to,
+                },
+                Err(error) => CopyResult::Err {
+                    from: mail.from,
+                    to: mail.to,
+                    error,
+                },
+            }
+        }
+
         /// Delete a path under a namespace.
         ///
         /// # Agent
@@ -673,13 +743,13 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::super::{
-            AdapterRegistry, Delete, FileAdapter, FsError, List, LocalFileAdapter, NamespaceRoots,
-            Read, Write,
+            AdapterRegistry, Copy, Delete, FileAdapter, FsError, List, LocalFileAdapter,
+            NamespaceAddr, NamespaceRoots, Read, Write,
         };
         use super::{Arc, FsCapability, Path, PathBuf};
         use aether_actor::Actor;
         use aether_data::MailboxId;
-        use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
+        use aether_kinds::{CopyResult, DeleteResult, ListResult, ReadResult, WriteResult};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
@@ -1276,5 +1346,193 @@ mod native {
         //     `Mailer::send_reply` → component delivery.
         // Reach for the in-bundle integration suite if a future change
         // wants the full WAT roundtrip back as targeted coverage.
+
+        fn build_two_namespace_registry(root: &Path, save_writable: bool) -> Arc<AdapterRegistry> {
+            let save_adapter: Arc<dyn FileAdapter> = Arc::new(
+                LocalFileAdapter::new(root.join("save"), save_writable)
+                    .expect("test setup: save LocalFileAdapter constructs"),
+            );
+            let assets_adapter: Arc<dyn FileAdapter> = Arc::new(
+                LocalFileAdapter::new(root.join("assets"), false)
+                    .expect("test setup: assets LocalFileAdapter constructs"),
+            );
+            let mut r = AdapterRegistry::new();
+            r.register("save", save_adapter);
+            r.register("assets", assets_adapter);
+            Arc::new(r)
+        }
+
+        fn ensure_ns_dirs(root: &Path) {
+            fs::create_dir_all(root.join("save")).expect("test setup: save dir creates");
+            fs::create_dir_all(root.join("assets")).expect("test setup: assets dir creates");
+        }
+
+        #[test]
+        fn cap_copy_host_to_save_roundtrip() {
+            let root = scratch_root("cap-copy-ok");
+            ensure_ns_dirs(&root);
+            let src = root.join("source.bin");
+            fs::write(&src, b"\x0a\x14\x1e").expect("test setup: write source file");
+            let reg = build_save_only_registry(&root.join("save"), true);
+            let reg_clone = Arc::clone(&reg);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_copy(
+                &mut ctx,
+                Copy {
+                    from: src.to_string_lossy().into_owned(),
+                    to: NamespaceAddr {
+                        namespace: "save".to_string(),
+                        path: "copied.bin".to_string(),
+                    },
+                },
+            );
+            match result {
+                CopyResult::Ok { from, to } => {
+                    assert_eq!(from, src.to_string_lossy().as_ref());
+                    assert_eq!(to.namespace, "save");
+                    assert_eq!(to.path, "copied.bin");
+                }
+                CopyResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            assert_eq!(
+                reg_clone
+                    .get("save")
+                    .expect("test setup: save adapter is registered")
+                    .read("copied.bin")
+                    .expect("test setup: adapter reads copied bytes"),
+                vec![0x0a_u8, 0x14, 0x1e]
+            );
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_copy_into_read_only_namespace_replies_forbidden() {
+            let root = scratch_root("cap-copy-ro");
+            ensure_ns_dirs(&root);
+            let src = root.join("source.bin");
+            fs::write(&src, b"x").expect("test setup: write source file");
+            let reg = build_two_namespace_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_copy(
+                &mut ctx,
+                Copy {
+                    from: src.to_string_lossy().into_owned(),
+                    to: NamespaceAddr {
+                        namespace: "assets".to_string(),
+                        path: "data.bin".to_string(),
+                    },
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    CopyResult::Err {
+                        error: FsError::Forbidden,
+                        ..
+                    }
+                ),
+                "expected Forbidden, got {result:?}",
+            );
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_copy_unknown_destination_namespace_replies_unknown_namespace() {
+            let root = scratch_root("cap-copy-unknown-ns");
+            ensure_ns_dirs(&root);
+            let src = root.join("source.bin");
+            fs::write(&src, b"y").expect("test setup: write source file");
+            let reg = build_save_only_registry(&root.join("save"), true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_copy(
+                &mut ctx,
+                Copy {
+                    from: src.to_string_lossy().into_owned(),
+                    to: NamespaceAddr {
+                        namespace: "nope".to_string(),
+                        path: "data.bin".to_string(),
+                    },
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    CopyResult::Err {
+                        error: FsError::UnknownNamespace,
+                        ..
+                    }
+                ),
+                "expected UnknownNamespace, got {result:?}",
+            );
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_copy_missing_host_from_replies_not_found() {
+            let root = scratch_root("cap-copy-missing-src");
+            ensure_ns_dirs(&root);
+            let reg = build_save_only_registry(&root.join("save"), true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_copy(
+                &mut ctx,
+                Copy {
+                    from: root
+                        .join("does_not_exist.bin")
+                        .to_string_lossy()
+                        .into_owned(),
+                    to: NamespaceAddr {
+                        namespace: "save".to_string(),
+                        path: "dst.bin".to_string(),
+                    },
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    CopyResult::Err {
+                        error: FsError::NotFound,
+                        ..
+                    }
+                ),
+                "expected NotFound, got {result:?}",
+            );
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_copy_to_path_traversal_replies_forbidden() {
+            let root = scratch_root("cap-copy-traversal");
+            ensure_ns_dirs(&root);
+            let src = root.join("source.bin");
+            fs::write(&src, b"z").expect("test setup: write source file");
+            let reg = build_save_only_registry(&root.join("save"), true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            let result = fix.cap.on_copy(
+                &mut ctx,
+                Copy {
+                    from: src.to_string_lossy().into_owned(),
+                    to: NamespaceAddr {
+                        namespace: "save".to_string(),
+                        path: "../escape".to_string(),
+                    },
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    CopyResult::Err {
+                        error: FsError::Forbidden,
+                        ..
+                    }
+                ),
+                "expected Forbidden for traversal path, got {result:?}",
+            );
+            cleanup(&root);
+        }
     }
 }
