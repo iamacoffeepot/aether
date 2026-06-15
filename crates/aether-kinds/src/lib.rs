@@ -16,9 +16,11 @@ extern crate alloc;
 pub mod dag;
 pub mod descriptors;
 pub mod keycode;
+pub mod text_metrics;
 pub mod trace;
 
 pub use dag::*;
+pub use text_metrics::{CachedFontMetrics, scale_units};
 
 use aether_math::{Mat4, Vec4};
 use alloc::string::String;
@@ -1895,6 +1897,86 @@ mod control_plane {
         /// `World` mode — the `anchor` positions there.
         pub origin: [f32; 2],
         pub space: QuadSpace,
+    }
+
+    /// One glyph's horizontal advance, in font units (em-square
+    /// subdivisions), keyed by the Unicode scalar value (`char as u32`)
+    /// it maps to through the font's cmap. Scale to pixels with
+    /// `advance_units * size_pixels / units_per_em`. Not a kind on its
+    /// own — only addressable inside `FontMetrics.advances`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct GlyphAdvance {
+        /// Unicode scalar value (`char as u32`) this advance applies to.
+        pub codepoint: u32,
+        /// Horizontal advance in font units.
+        pub advance_units: f32,
+    }
+
+    /// Size-independent metrics for one loaded font (ADR-0105). Every
+    /// measure is in font units — the em square's `units_per_em`
+    /// subdivisions — so a consumer caches this table once and scales any
+    /// measure to a draw size locally with
+    /// `value * size_pixels / units_per_em`, the exact linear scaling the
+    /// `aether.text` cap applies as it lays a string out. The
+    /// per-codepoint `advances` fold the cmap in; a codepoint the font
+    /// has no glyph for advances by `default_advance` (the `.notdef`
+    /// glyph's advance), matching the draw path. Carried in
+    /// `FontMetricsResult::Ok`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct FontMetrics {
+        /// Em-square subdivisions — the denominator that turns a
+        /// font-unit measure into a fraction of `size_pixels`.
+        pub units_per_em: f32,
+        /// Highest point glyphs reach above the baseline, in font units.
+        pub ascent: f32,
+        /// Lowest point glyphs reach below the baseline, in font units
+        /// (typically negative).
+        pub descent: f32,
+        /// Recommended gap between one line's descent and the next line's
+        /// ascent, in font units.
+        pub line_gap: f32,
+        /// Advance for a codepoint the font has no glyph for — the
+        /// `.notdef` glyph's advance, in font units.
+        pub default_advance: f32,
+        /// Per-codepoint horizontal advances in font units, sorted by
+        /// `codepoint`, the cmap folded in.
+        pub advances: Vec<GlyphAdvance>,
+    }
+
+    /// Names the font a `FontMetricsRequest` measures: by the
+    /// session-scoped `font_id` a prior `LoadFont` (or metrics grab)
+    /// assigned, or by the `aether.fs` `namespace` / `path` of its TTF —
+    /// the latter loads the font on a miss the same way `LoadFont` does.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum FontRef {
+        /// A session-scoped `font_id` from a prior load or grab.
+        Id(u32),
+        /// A TTF addressed the same way `aether.fs.read` addresses a file
+        /// (e.g. `"assets"` / `"fonts/RobotoMono.ttf"`).
+        Path { namespace: String, path: String },
+    }
+
+    /// `aether.text.font_metrics` — grab a font's complete,
+    /// size-independent `FontMetrics` table so a consumer measures text
+    /// locally and synchronously (fit-to-content sizing, caret placement,
+    /// hit-testing) without a per-measurement mail round trip. `font`
+    /// references the font by id or by path; an unresident path loads on
+    /// the miss, reusing the `aether.fs` fetch + parse path. The cap
+    /// replies `FontMetricsResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.text.font_metrics")]
+    pub struct FontMetricsRequest {
+        pub font: FontRef,
+    }
+
+    /// Reply to `FontMetricsRequest`. `Ok` carries the resolved
+    /// `FontMetrics` table; `Err` carries a human-readable reason — an
+    /// unknown `font_id`, a bad path, or a file fontdue could not parse.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.text.font_metrics_result")]
+    pub enum FontMetricsResult {
+        Ok { metrics: FontMetrics },
+        Err { error: String },
     }
 
     // ADR-0107 `aether.ui` widget kinds. Immediate-mode: the component
@@ -4108,6 +4190,8 @@ mod tests {
         assert_eq!(LoadFont::NAME, "aether.text.load_font");
         assert_eq!(LoadFontResult::NAME, "aether.text.load_font_result");
         assert_eq!(DrawText::NAME, "aether.text.draw");
+        assert_eq!(FontMetricsRequest::NAME, "aether.text.font_metrics");
+        assert_eq!(FontMetricsResult::NAME, "aether.text.font_metrics_result");
         assert_eq!(UiPanel::NAME, "aether.ui.panel");
         assert_eq!(UiBar::NAME, "aether.ui.bar");
         assert_eq!(UiLabel::NAME, "aether.ui.label");
@@ -4721,6 +4805,72 @@ mod tests {
             assert_eq!(back.color, [1.0, 0.5, 0.25, 1.0]);
             assert_eq!(back.origin, [24.0, 48.0]);
             assert_eq!(back.space, QuadSpace::Screen);
+        }
+
+        #[test]
+        fn font_metrics_request_roundtrip_both_refs() {
+            for font in [
+                FontRef::Id(7),
+                FontRef::Path {
+                    namespace: "assets".to_string(),
+                    path: "fonts/RobotoMono.ttf".to_string(),
+                },
+            ] {
+                let r = FontMetricsRequest { font: font.clone() };
+                let bytes = postcard::to_allocvec(&r)
+                    .expect("test setup: postcard encodes FontMetricsRequest");
+                let back: FontMetricsRequest = postcard::from_bytes(&bytes)
+                    .expect("test setup: postcard decodes FontMetricsRequest");
+                assert_eq!(back.font, font);
+            }
+        }
+
+        #[test]
+        fn font_metrics_result_roundtrip_both_arms() {
+            let ok = FontMetricsResult::Ok {
+                metrics: FontMetrics {
+                    units_per_em: 1000.0,
+                    ascent: 800.0,
+                    descent: -200.0,
+                    line_gap: 0.0,
+                    default_advance: 600.0,
+                    advances: vec![
+                        GlyphAdvance {
+                            codepoint: u32::from('A'),
+                            advance_units: 600.0,
+                        },
+                        GlyphAdvance {
+                            codepoint: u32::from('i'),
+                            advance_units: 600.0,
+                        },
+                    ],
+                },
+            };
+            let bytes = postcard::to_allocvec(&ok)
+                .expect("test setup: postcard encodes FontMetricsResult::Ok");
+            let back: FontMetricsResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes FontMetricsResult::Ok");
+            match back {
+                FontMetricsResult::Ok { metrics } => {
+                    assert_eq!(metrics.units_per_em, 1000.0);
+                    assert_eq!(metrics.descent, -200.0);
+                    assert_eq!(metrics.advances.len(), 2);
+                    assert_eq!(metrics.advances[0].codepoint, u32::from('A'));
+                }
+                FontMetricsResult::Err { .. } => panic!("expected Ok"),
+            }
+
+            let err = FontMetricsResult::Err {
+                error: "unknown font_id".to_string(),
+            };
+            let bytes = postcard::to_allocvec(&err)
+                .expect("test setup: postcard encodes FontMetricsResult::Err");
+            let back: FontMetricsResult = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes FontMetricsResult::Err");
+            match back {
+                FontMetricsResult::Err { error } => assert_eq!(error, "unknown font_id"),
+                FontMetricsResult::Ok { .. } => panic!("expected Err"),
+            }
         }
     }
 

@@ -321,6 +321,7 @@ dependencies = [
  "confique",
  "crossbeam-channel",
  "ctrlc",
+ "fontdue",
  "plotters",
  "png",
  "pollster",

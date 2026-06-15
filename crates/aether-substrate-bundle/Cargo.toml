@@ -172,6 +172,12 @@ aether-camera = { path = "../aether-camera", default-features = false }
 # `SettlementRegistry::subscribe_settlement` needs crossbeam-channel in
 # direct scope. Test-only.
 crossbeam-channel = "0.5"
+# iamacoffeepot/aether#1854: the `aether.text.font_metrics` e2e grab
+# (`font_metrics_grab_measures_like_the_draw_path`) computes the draw
+# path's advance sum directly with fontdue as the ground truth the
+# guest-side cached measurement must reproduce bit-for-bit. Same crate
+# the text cap parses fonts with; test-only here.
+fontdue = "0.9"
 
 [lints]
 workspace = true
