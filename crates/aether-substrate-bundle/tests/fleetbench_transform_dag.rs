@@ -20,7 +20,30 @@
 
 mod fleetbench;
 
+// Force-link `aether-labyrinth` into this test binary so its certifier
+// `#[transform]`s reach the link-time inventory the guard test below reads
+// (issue 1908) — `extern crate as _` in the bundle lib does not propagate
+// the whole crate into a downstream binary that links the lib rlib.
+extern crate aether_labyrinth as _;
+
 mod tests {
+    /// The headless chassis builds its DAG `TransformRegistry` from the
+    /// link-time `aether_data::transforms()` inventory, so the reachability
+    /// certifier transforms must be linked into this binary — they reach it
+    /// only via the bundle's `aether-labyrinth` dependency edge (issue
+    /// 1908). Not heavy (a pure local-inventory read, no fork), so it runs
+    /// in the fast set and guards the edge: drop the dep and the certifier
+    /// transforms silently vanish from the registry with no compile error.
+    #[test]
+    fn certifier_transforms_registered_in_bundle_inventory() {
+        use aether_data::transforms;
+        assert!(
+            transforms().any(|t| t.name.ends_with("::solve")),
+            "the aether-labyrinth `solve` transform must be in the bundle's \
+             link-time inventory; a dropped dependency edge silently de-registers it",
+        );
+    }
+
     mod heavy {
         use std::thread;
         use std::time::{Duration, Instant};

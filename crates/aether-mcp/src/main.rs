@@ -13,6 +13,16 @@
 use std::env;
 use tokio::net::TcpListener;
 use tokio::task;
+
+// Link `aether-labyrinth` for its `#[transform]` link-time inventory
+// contribution alone (issue 1908) — `describe_transforms` reads the local
+// `aether_data::transforms()` inventory, and this binary references no
+// labyrinth symbol otherwise. Without this the `inventory` crate drops a
+// fully-unreferenced dependency's submissions and the reachability
+// certifier transforms silently vanish from the inventory. `as _` is the
+// side-effect-linkage form, so the crate is never named or otherwise used.
+extern crate aether_labyrinth as _;
+
 mod args;
 mod reverse;
 mod rpc;

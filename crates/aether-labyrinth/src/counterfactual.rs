@@ -219,21 +219,10 @@ mod tests {
     use super::{
         Crossing, SeedState, classify_crossing, detect_crossings, solve_counterfactual_core,
     };
-    use aether_kinds::{
-        ScalarField, StencilOffset, TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry,
-    };
+    use crate::test_support::stencil_4way;
+    use aether_kinds::{ScalarField, TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry};
 
     const UNREACHABLE: u32 = u32::MAX;
-
-    fn stencil_4way() -> Vec<StencilOffset> {
-        vec![
-            StencilOffset { dx: 0, dy: 0 },
-            StencilOffset { dx: 1, dy: 0 },
-            StencilOffset { dx: -1, dy: 0 },
-            StencilOffset { dx: 0, dy: 1 },
-            StencilOffset { dx: 0, dy: -1 },
-        ]
-    }
 
     fn sample(tick: u32, x: u32, y: u32, value: u32) -> TrajectorySampleEntry {
         TrajectorySampleEntry { tick, x, y, value }

@@ -183,60 +183,29 @@ fn pick_tie(rng: &mut Xorshift64, candidates: &[usize]) -> usize {
     }
 }
 
-/// The per-agent receding-horizon planner (issue 1863). The agent sits at
-/// flat cell `current` on real tick `now`; it solves the **exact**
-/// [`solve_cost_to_reach`] core over its perceived window — the field as
-/// it truly was `delay` ticks earlier for each window layer — and returns
-/// the first cell of the optimal path to the cheapest perceived goal.
-/// Committing that one step and re-planning next tick is #1859's `S = 1`
-/// receding horizon, per agent. Returns `current` (stay put) when no goal
-/// is visible inside the window.
-///
-/// Binding the planner to the same core the exact solver uses is the load-
-/// bearing move: at `delay = 0` and `window >= ticks` the perceived field
-/// is the true field over the full remaining horizon, so the plan *is* the
-/// exact single-source solve and the greedy traces an optimal path —
-/// reaching the cheapest goal with exactly its certified cost.
+/// The shared tail of the windowed step planners (`plan_next_cell`,
+/// `plan_step_realized`): seed the solver at `current`, solve the
+/// cost-to-reach field over the already-built `perceived` window, find the
+/// cheapest perceived goal arrival across layers `1..layers` (PRNG tie-break
+/// over equal-cost arrivals), then backtrack the optimal predecessor chain to
+/// layer 1 and return that next cell. Returns `current` (stay put) when no
+/// goal is visible inside the window or the chain is unreconstructable. The
+/// two callers differ only in how they build `perceived` before this tail.
 #[allow(clippy::too_many_arguments)]
-fn plan_next_cell(
+fn step_along_optimal_chain(
     width: usize,
     height: usize,
-    ticks: usize,
-    costs: &[u32],
+    layers: usize,
+    plane: usize,
+    perceived: &[u32],
     stencil: &[StencilOffset],
     goal: &[usize],
     current: usize,
-    now: usize,
-    window: usize,
-    delay: usize,
     rng: &mut Xorshift64,
 ) -> usize {
-    let plane = width.saturating_mul(height);
-    if plane == 0 || now + 1 >= ticks {
-        return current;
-    }
-    // The window spans real ticks [now ..= horizon_end]; layer k is real
-    // tick now + k, perceived as the true field at tick max(0, real - d).
-    let horizon_end = (now + window).min(ticks - 1);
-    let layers = horizon_end - now + 1;
-    if layers < 2 {
-        return current;
-    }
-
-    let mut perceived = vec![UNREACHABLE; plane * layers];
-    for k in 0..layers {
-        let real_tick = now + k;
-        let src_tick = real_tick.saturating_sub(delay);
-        let src_base = src_tick * plane;
-        let dst_base = k * plane;
-        for idx in 0..plane {
-            perceived[dst_base + idx] = costs.get(src_base + idx).copied().unwrap_or(UNREACHABLE);
-        }
-    }
-
     let mut seed = vec![UNREACHABLE; plane];
     seed[current] = 0;
-    let v = solve_cost_to_reach(width, height, layers, &perceived, stencil, &seed);
+    let v = solve_cost_to_reach(width, height, layers, perceived, stencil, &seed);
 
     // Cheapest perceived goal arrival over layers 1..layers (layer 0 is
     // the seed). Among equal-cost arrivals, the PRNG breaks the tie.
@@ -302,6 +271,62 @@ fn plan_next_cell(
         layer -= 1;
     }
     cur
+}
+
+/// The per-agent receding-horizon planner (issue 1863). The agent sits at
+/// flat cell `current` on real tick `now`; it solves the **exact**
+/// [`solve_cost_to_reach`] core over its perceived window — the field as
+/// it truly was `delay` ticks earlier for each window layer — and returns
+/// the first cell of the optimal path to the cheapest perceived goal.
+/// Committing that one step and re-planning next tick is #1859's `S = 1`
+/// receding horizon, per agent. Returns `current` (stay put) when no goal
+/// is visible inside the window.
+///
+/// Binding the planner to the same core the exact solver uses is the load-
+/// bearing move: at `delay = 0` and `window >= ticks` the perceived field
+/// is the true field over the full remaining horizon, so the plan *is* the
+/// exact single-source solve and the greedy traces an optimal path —
+/// reaching the cheapest goal with exactly its certified cost.
+#[allow(clippy::too_many_arguments)]
+fn plan_next_cell(
+    width: usize,
+    height: usize,
+    ticks: usize,
+    costs: &[u32],
+    stencil: &[StencilOffset],
+    goal: &[usize],
+    current: usize,
+    now: usize,
+    window: usize,
+    delay: usize,
+    rng: &mut Xorshift64,
+) -> usize {
+    let plane = width.saturating_mul(height);
+    if plane == 0 || now + 1 >= ticks {
+        return current;
+    }
+    // The window spans real ticks [now ..= horizon_end]; layer k is real
+    // tick now + k, perceived as the true field at tick max(0, real - d).
+    let horizon_end = (now + window).min(ticks - 1);
+    let layers = horizon_end - now + 1;
+    if layers < 2 {
+        return current;
+    }
+
+    let mut perceived = vec![UNREACHABLE; plane * layers];
+    for k in 0..layers {
+        let real_tick = now + k;
+        let src_tick = real_tick.saturating_sub(delay);
+        let src_base = src_tick * plane;
+        let dst_base = k * plane;
+        for idx in 0..plane {
+            perceived[dst_base + idx] = costs.get(src_base + idx).copied().unwrap_or(UNREACHABLE);
+        }
+    }
+
+    step_along_optimal_chain(
+        width, height, layers, plane, &perceived, stencil, goal, current, rng,
+    )
 }
 
 /// Simulate one reaction-delayed agent from `start` under reaction lag
@@ -587,67 +612,9 @@ fn plan_step_realized(
         perceived[dst..dst + plane].copy_from_slice(&realized[..plane]);
     }
 
-    let mut seed = vec![UNREACHABLE; plane];
-    seed[current] = 0;
-    let v = solve_cost_to_reach(width, height, layers, &perceived, stencil, &seed);
-
-    let mut best_cost = UNREACHABLE;
-    let mut best_targets: Vec<(usize, usize)> = Vec::new();
-    for k in 1..layers {
-        let layer_base = k * plane;
-        for &g in goal {
-            if g >= plane {
-                continue;
-            }
-            let cost = v[layer_base + g];
-            if cost == UNREACHABLE {
-                continue;
-            }
-            if cost < best_cost {
-                best_cost = cost;
-                best_targets.clear();
-                best_targets.push((g, k));
-            } else if cost == best_cost {
-                best_targets.push((g, k));
-            }
-        }
-    }
-    if best_targets.is_empty() {
-        return current;
-    }
-    let pick = if best_targets.len() == 1 {
-        0
-    } else {
-        rng.next_bounded(best_targets.len())
-    };
-    let (mut cur, mut layer) = best_targets[pick];
-
-    while layer > 1 {
-        let x = cur % width;
-        let y = cur / width;
-        let target = v[layer * plane + cur];
-        let landed = perceived[layer * plane + cur];
-        let mut preds: Vec<usize> = Vec::new();
-        for offset in stencil {
-            let Some(px) = predecessor_coord(x, offset.dx, width) else {
-                continue;
-            };
-            let Some(py) = predecessor_coord(y, offset.dy, height) else {
-                continue;
-            };
-            let p = py * width + px;
-            let pv = v[(layer - 1) * plane + p];
-            if pv != UNREACHABLE && landed.saturating_add(pv) == target {
-                preds.push(p);
-            }
-        }
-        if preds.is_empty() {
-            return current;
-        }
-        cur = pick_tie(rng, &preds);
-        layer -= 1;
-    }
-    cur
+    step_along_optimal_chain(
+        width, height, layers, plane, &perceived, stencil, goal, current, rng,
+    )
 }
 
 /// Whether the realized field has **closed around** the agent at `current`:

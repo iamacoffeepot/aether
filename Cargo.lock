@@ -202,6 +202,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-labyrinth"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "postcard",
+]
+
+[[package]]
 name = "aether-math"
 version = "0.3.0-alpha"
 dependencies = [
@@ -218,6 +229,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
+ "aether-labyrinth",
  "aether-rpc",
  "aether-substrate",
  "anyhow",
@@ -313,6 +325,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
+ "aether-labyrinth",
  "aether-math",
  "aether-substrate",
  "aether-test-fixtures",

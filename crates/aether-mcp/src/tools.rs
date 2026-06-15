@@ -2123,6 +2123,23 @@ mod tests {
         assert!(validate_recipient_scope(&name).is_err());
     }
 
+    #[test]
+    fn certifier_transforms_linked_into_mcp_inventory() {
+        // `describe_transforms` reads the LOCAL `aether_data::transforms()`
+        // inventory baked into the mcp binary at link time — not the
+        // engine's. The reachability certifier transforms reach it only
+        // because aether-mcp declares a dependency edge on aether-labyrinth
+        // that no mcp source references (issue 1908). The `inventory` crate
+        // drops a fully-unreferenced dependency's submissions, so this
+        // guards the edge: drop the dep and describe_transforms silently
+        // stops listing the reachability transforms — no compile error.
+        assert!(
+            aether_data::transforms().any(|t| t.name.ends_with("::solve")),
+            "the aether-labyrinth `solve` transform must be in the mcp link-time \
+             inventory; a dropped dependency edge silently de-registers it",
+        );
+    }
+
     /// Boot a hub-shaped passive chassis: a forwarding
     /// `RpcServerCapability` + the engines cap + `TraceObserver` (so
     /// the `RpcServer`'s local Calls settle and close). Returns the

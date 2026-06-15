@@ -575,8 +575,21 @@ mod tests {
     use crate::corridor::build_corridor_graph_core;
     use crate::reachability::test_fields::stencil_offsets;
     use aether_kinds::{
-        EdgeKind, ScalarField, TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry,
+        CorridorGraph, EdgeKind, ScalarField, TrafficDensity, TrajectoryEndReason, TrajectoryLog,
+        TrajectorySampleEntry,
     };
+
+    /// Sum the per-edge traffic accumulated on the graph's `Punch` edges —
+    /// the total punch crossings attributed across a run.
+    fn punch_traffic(graph: &CorridorGraph, density: &TrafficDensity) -> u32 {
+        graph
+            .edges
+            .iter()
+            .zip(&density.edge_traffic)
+            .filter(|(e, _)| matches!(e.kind, EdgeKind::Punch))
+            .map(|(_, &t)| t)
+            .sum()
+    }
 
     /// Build a `TrajectoryLog` from `(tick, x, y)` samples (value unused by
     /// the snap, so a constant placeholder).
@@ -765,14 +778,7 @@ mod tests {
         // affordable forward-flow detour connects the two basins).
         assert_eq!(density.punch_crossing_cheaper, 1);
         assert_eq!(density.punch_detour_cheaper, 0);
-        let punch_traffic: u32 = graph
-            .edges
-            .iter()
-            .zip(&density.edge_traffic)
-            .filter(|(e, _)| matches!(e.kind, EdgeKind::Punch))
-            .map(|(_, &t)| t)
-            .sum();
-        assert_eq!(punch_traffic, 1);
+        assert_eq!(punch_traffic(&graph, &density), 1);
     }
 
     #[test]
@@ -811,14 +817,11 @@ mod tests {
         // The crossing produced punch traffic, and it is verdicted
         // detour_cheaper (the cheap tick-2 reconvergence beats the price-9
         // barrier), never crossing_cheaper.
-        let punch_traffic: u32 = graph
-            .edges
-            .iter()
-            .zip(&density.edge_traffic)
-            .filter(|(e, _)| matches!(e.kind, EdgeKind::Punch))
-            .map(|(_, &t)| t)
-            .sum();
-        assert_eq!(punch_traffic, 1, "the ridge crossing is one punch unit");
+        assert_eq!(
+            punch_traffic(&graph, &density),
+            1,
+            "the ridge crossing is one punch unit"
+        );
         assert_eq!(density.punch_crossing_cheaper, 0);
         assert_eq!(density.punch_detour_cheaper, 1);
     }
