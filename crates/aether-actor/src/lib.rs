@@ -61,6 +61,7 @@ pub mod ffi;
 pub mod local;
 pub mod log;
 pub mod mail;
+pub mod text;
 pub mod trace_ring;
 
 pub use actor::ctx::{
@@ -81,6 +82,9 @@ pub use local::Local;
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
+// ADR-0105 guest-side text measurement over a cached `font_metrics`
+// grab (issue 1854).
+pub use text::CachedFontMetrics;
 
 // FFI surface promoted to the crate root so consumers see
 // `aether_actor::FfiCtx<'_>` / `aether_actor::FfiActor` / etc. without

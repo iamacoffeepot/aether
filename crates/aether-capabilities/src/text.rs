@@ -36,7 +36,7 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings of
 // the mod (always-on, outside the cfg gate).
-use aether_kinds::{CreateTextureResult, DrawText, LoadFont, ReadResult};
+use aether_kinds::{CreateTextureResult, DrawText, FontMetricsRequest, LoadFont, ReadResult};
 
 // ADR-0105 shelf-packed RGBA8 glyph atlas (`text/atlas.rs`). Native-only —
 // it is pure CPU but only the native cap consumes it, so it rides the same
@@ -54,8 +54,8 @@ mod native {
     use aether_actor::{OutboundReply, actor};
     use aether_data::Source;
     use aether_kinds::{
-        CreateTexture, DrawTexturedQuads, LoadFontResult, QuadSpace, Read, TexturedQuad,
-        UpdateTexture,
+        CreateTexture, DrawTexturedQuads, FontMetrics, FontMetricsResult, FontRef, GlyphAdvance,
+        LoadFontResult, QuadSpace, Read, TexturedQuad, UpdateTexture,
     };
     use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
@@ -65,22 +65,37 @@ mod native {
     use crate::render::RenderCapability;
 
     use super::atlas::{ATLAS_SIZE, Atlas, AtlasEntry, GlyphKey, GlyphSlot};
-    use super::{CreateTextureResult, DrawText, LoadFont, ReadResult};
+    use super::{CreateTextureResult, DrawText, FontMetricsRequest, LoadFont, ReadResult};
 
-    /// A `load_font` request parked while its `aether.fs.read` is in
-    /// flight, keyed in [`TextCapability::pending_fonts`] by the echoed
+    /// Which reply shape a parked font request is owed once its font is
+    /// resident. `load_font` and the `font_metrics` grab share the
+    /// `aether.fs` fetch + parse path; this rides along so the completion
+    /// arm replies in the caller's shape.
+    #[derive(Clone, Copy)]
+    enum PendingReply {
+        /// Reply `LoadFontResult` — the original `load_font` caller.
+        LoadFont,
+        /// Reply `FontMetricsResult` — a `font_metrics` grab that missed
+        /// the resident registry and triggered a load.
+        FontMetrics,
+    }
+
+    /// A font request parked while its `aether.fs.read` is in flight,
+    /// keyed in [`TextCapability::pending_fonts`] by the echoed
     /// `(namespace, path)`. Carries the original requester so the deferred
-    /// `LoadFontResult` lands on the `load_font` caller.
+    /// reply lands on the caller, plus the shape that reply takes.
     struct PendingFont {
         source: Source,
+        reply: PendingReply,
     }
 
     /// Context carried through the font-parse task so the completion arm
-    /// can shape the `LoadFontResult` reply.
+    /// can shape the reply the parked request is owed.
     struct FontParseContext {
         namespace: String,
         path: String,
         name: String,
+        reply: PendingReply,
     }
 
     /// A successfully parsed font plus the byte length the reply reports as
@@ -100,6 +115,11 @@ mod native {
         /// Session-scoped font registry. Index is the `font_id` a
         /// `LoadFontResult::Ok` handed back and `DrawText.font_id` names.
         fonts: HashMap<u32, Arc<fontdue::Font>>,
+        /// Reverse index from `(namespace, path)` to the `font_id` that
+        /// file is resident under. Dedups the registry: a repeat load or
+        /// a `font_metrics` grab of the same file reuses one resident
+        /// font and a stable id rather than parsing a second copy.
+        font_ids: HashMap<(String, String), u32>,
         /// Next `font_id` to assign — monotonic, session-scoped.
         next_font_id: u32,
         /// `load_font` requests awaiting their `aether.fs.read` reply,
@@ -120,6 +140,7 @@ mod native {
         fn new() -> Self {
             Self {
                 fonts: HashMap::new(),
+                font_ids: HashMap::new(),
                 next_font_id: 0,
                 pending_fonts: HashMap::new(),
                 atlas: Atlas::new(),
@@ -137,6 +158,47 @@ mod native {
                 self.pending_fonts.remove(&key);
             }
             pending
+        }
+
+        /// Register a parsed font under a session-scoped `font_id`,
+        /// deduped by `(namespace, path)`: a path already resident
+        /// returns its existing id (and drops the freshly-parsed `font`),
+        /// so repeat loads and metric grabs of one file share a single
+        /// resident font and a stable id.
+        fn register_font(&mut self, namespace: &str, path: &str, font: Arc<fontdue::Font>) -> u32 {
+            let key = (namespace.to_owned(), path.to_owned());
+            if let Some(&existing) = self.font_ids.get(&key) {
+                return existing;
+            }
+            let font_id = self.next_font_id;
+            self.next_font_id = self.next_font_id.saturating_add(1);
+            self.fonts.insert(font_id, font);
+            self.font_ids.insert(key, font_id);
+            font_id
+        }
+
+        /// Park a font request keyed `(namespace, path)` and forward its
+        /// `aether.fs.read`. The `ReadResult` routes back to
+        /// `on_read_result`, which parses the bytes and replies in the
+        /// shape `reply` selects.
+        fn forward_font_read(
+            &mut self,
+            ctx: &mut NativeCtx<'_, Manual>,
+            namespace: String,
+            path: String,
+            reply: PendingReply,
+        ) {
+            let source = ctx.reply_target();
+            self.pending_fonts
+                .entry((namespace.clone(), path.clone()))
+                .or_default()
+                .push_back(PendingFont { source, reply });
+
+            // Forward the read to the single fs resolver (ADR-0041); the
+            // `ReadResult` routes back to `on_read_result`, which parses
+            // it.
+            let read = Read { namespace, path };
+            ctx.actor::<FsCapability>().send(&read);
         }
 
         /// Send `create_texture` for the zeroed atlas, unless a creation is
@@ -211,20 +273,47 @@ mod native {
         /// file). The `font_id` is session-scoped — thread it into `draw`.
         #[handler::manual]
         fn on_load_font(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
-            let source = ctx.reply_target();
-            let key = (mail.namespace.clone(), mail.path.clone());
-            self.pending_fonts
-                .entry(key)
-                .or_default()
-                .push_back(PendingFont { source });
+            self.forward_font_read(ctx, mail.namespace, mail.path, PendingReply::LoadFont);
+        }
 
-            // Forward the read to the single fs resolver (ADR-0041); the
-            // `ReadResult` routes back to `on_read_result`, which parses it.
-            let read = Read {
-                namespace: mail.namespace,
-                path: mail.path,
-            };
-            ctx.actor::<FsCapability>().send(&read);
+        /// Grab a font's size-independent metric table.
+        ///
+        /// # Agent
+        /// Reply: `FontMetricsResult`. `font` references the font by a
+        /// session-scoped `font_id` or by `aether.fs` `namespace` /
+        /// `path`. A resident font (by id, or a path already loaded)
+        /// replies `Ok` synchronously this turn. An unresident path loads
+        /// on the miss — forwarding an `aether.fs.read`, parsing off the
+        /// hot path, and replying `Ok` once registered (the font is then
+        /// addressable by the assigned id too) or `Err` on a bad path /
+        /// unparseable file. An unknown `font_id` replies `Err`.
+        #[handler::manual]
+        fn on_font_metrics(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: FontMetricsRequest) {
+            match mail.font {
+                FontRef::Id(font_id) => {
+                    let reply = self.fonts.get(&font_id).map_or_else(
+                        || FontMetricsResult::Err {
+                            error: format!("unknown font_id {font_id}"),
+                        },
+                        |font| FontMetricsResult::Ok {
+                            metrics: build_font_metrics(font),
+                        },
+                    );
+                    ctx.reply(&reply);
+                }
+                FontRef::Path { namespace, path } => {
+                    if let Some(&font_id) = self.font_ids.get(&(namespace.clone(), path.clone())) {
+                        // Already resident — measure from the cached font
+                        // now, no fs round trip.
+                        let metrics = build_font_metrics(&self.fonts[&font_id]);
+                        ctx.reply(&FontMetricsResult::Ok { metrics });
+                    } else {
+                        // Load on the miss; `on_font_parsed` replies once
+                        // the font is parsed and registered.
+                        self.forward_font_read(ctx, namespace, path, PendingReply::FontMetrics);
+                    }
+                }
+            }
         }
 
         /// Correlate a forwarded `aether.fs.read` reply. `Ok` dispatches the
@@ -248,6 +337,7 @@ mod native {
                         namespace,
                         path,
                         name,
+                        reply: pending.reply,
                     };
                     let hold = ctx.acquire_settlement_hold();
                     ctx.dispatch_blocking_resumed_with::<FontParseOutput, _, _>(
@@ -272,58 +362,96 @@ mod native {
                     error,
                 } => {
                     if let Some(pending) = self.take_pending(&namespace, &path) {
-                        ctx.reply_to(
-                            pending.source,
-                            &LoadFontResult::Err {
-                                namespace,
-                                path,
-                                error: format!("file read failed: {error:?}"),
-                            },
-                        );
+                        let reason = format!("file read failed: {error:?}");
+                        match pending.reply {
+                            PendingReply::LoadFont => ctx.reply_to(
+                                pending.source,
+                                &LoadFontResult::Err {
+                                    namespace,
+                                    path,
+                                    error: reason,
+                                },
+                            ),
+                            PendingReply::FontMetrics => ctx.reply_to(
+                                pending.source,
+                                &FontMetricsResult::Err { error: reason },
+                            ),
+                        }
                     }
                 }
             }
         }
 
-        /// Font-parse completion (ADR-0093 §3). On success assign the next
-        /// `font_id`, register the parsed font, and reply `Ok`; on a parse
-        /// failure reply `Err`. Either way `resolve_with` re-replies through
-        /// the captured `load_font` caller and drops the hold.
+        /// Font-parse completion (ADR-0093 §3). On success register the
+        /// parsed font (deduped by path) and reply in the shape the parked
+        /// request is owed — `LoadFontResult::Ok` for a `load_font`,
+        /// `FontMetricsResult::Ok` for a `font_metrics` grab; on a parse
+        /// failure reply the matching `Err`. Either way `resolve_value`
+        /// re-replies through the captured caller and drops the hold.
         #[handler(task)]
         fn on_font_parsed(
             &mut self,
             ctx: &mut NativeCtx<'_>,
             done: TaskDone<FontParseOutput, FontParseContext>,
         ) {
-            let outcome: LoadFontResult = match done.output() {
-                Ok(parsed) => {
-                    let font_id = self.next_font_id;
-                    self.next_font_id = self.next_font_id.saturating_add(1);
-                    self.fonts.insert(font_id, Arc::clone(&parsed.font));
-                    let cx = done.context();
+            // Pull everything off `done` before consuming it: the context
+            // (which reply shape, plus path for the dedup key) and the
+            // parse outcome (the font + byte length, or the error text).
+            let (namespace, path, name, reply) = {
+                let cx = done.context();
+                (
+                    cx.namespace.clone(),
+                    cx.path.clone(),
+                    cx.name.clone(),
+                    cx.reply,
+                )
+            };
+            let parsed = match done.output() {
+                Ok(parsed) => Ok((Arc::clone(&parsed.font), parsed.resident_bytes)),
+                Err(error) => Err(error.clone()),
+            };
+
+            match parsed {
+                Ok((font, resident_bytes)) => {
+                    let font_id = self.register_font(&namespace, &path, Arc::clone(&font));
                     tracing::info!(
                         target: "aether_substrate::text",
                         font_id,
-                        name = %cx.name,
-                        resident_bytes = parsed.resident_bytes,
+                        name = %name,
+                        resident_bytes,
                         "font loaded",
                     );
-                    LoadFontResult::Ok {
-                        font_id,
-                        name: cx.name.clone(),
-                        resident_bytes: parsed.resident_bytes,
+                    match reply {
+                        PendingReply::LoadFont => done.resolve_value(
+                            ctx,
+                            &LoadFontResult::Ok {
+                                font_id,
+                                name,
+                                resident_bytes,
+                            },
+                        ),
+                        PendingReply::FontMetrics => done.resolve_value(
+                            ctx,
+                            &FontMetricsResult::Ok {
+                                metrics: build_font_metrics(&font),
+                            },
+                        ),
                     }
                 }
-                Err(error) => {
-                    let cx = done.context();
-                    LoadFontResult::Err {
-                        namespace: cx.namespace.clone(),
-                        path: cx.path.clone(),
-                        error: error.clone(),
+                Err(error) => match reply {
+                    PendingReply::LoadFont => done.resolve_value(
+                        ctx,
+                        &LoadFontResult::Err {
+                            namespace,
+                            path,
+                            error,
+                        },
+                    ),
+                    PendingReply::FontMetrics => {
+                        done.resolve_value(ctx, &FontMetricsResult::Err { error });
                     }
-                }
-            };
-            done.resolve_with(ctx, move |_out, _cx| outcome);
+                },
+            }
         }
 
         /// Store the atlas `texture_id` once `create_texture` replies. The
@@ -542,6 +670,44 @@ mod native {
             .file_stem()
             .and_then(|s| s.to_str())
             .map_or_else(|| path.to_owned(), ToOwned::to_owned)
+    }
+
+    /// Walk a parsed font into its size-independent [`FontMetrics`] table
+    /// — `units_per_em`, the horizontal line metrics, and every cmap
+    /// glyph's advance, all in font units.
+    ///
+    /// Evaluating fontdue at `px = units_per_em` makes its scale factor
+    /// exactly `1.0`, so each `metrics(..).advance_width` is the raw
+    /// font-unit advance with no rounding — the value a consumer scales
+    /// back up with `aether_kinds::scale_units` to reproduce this cap's
+    /// draw-path advance (`metrics(ch, size).advance_width`) bit-for-bit.
+    fn build_font_metrics(font: &fontdue::Font) -> FontMetrics {
+        let units_per_em = font.units_per_em();
+        let (ascent, descent, line_gap) = font
+            .horizontal_line_metrics(units_per_em)
+            .map_or((0.0, 0.0, 0.0), |line| {
+                (line.ascent, line.descent, line.line_gap)
+            });
+        // Glyph 0 is `.notdef` — the advance the draw path uses for a
+        // codepoint the font has no glyph for.
+        let default_advance = font.metrics_indexed(0, units_per_em).advance_width;
+        let mut advances: Vec<GlyphAdvance> = font
+            .chars()
+            .keys()
+            .map(|&ch| GlyphAdvance {
+                codepoint: u32::from(ch),
+                advance_units: font.metrics(ch, units_per_em).advance_width,
+            })
+            .collect();
+        advances.sort_unstable_by_key(|glyph| glyph.codepoint);
+        FontMetrics {
+            units_per_em,
+            ascent,
+            descent,
+            line_gap,
+            default_advance,
+            advances,
+        }
     }
 
     #[cfg(test)]
@@ -947,10 +1113,152 @@ mod native {
         /// A tiny real font for the draw-path tests — the workspace's
         /// vendored OFL Roboto Mono, the same asset the e2e scenario uses.
         fn test_font() -> fontdue::Font {
-            const TTF: &[u8] =
-                include_bytes!("../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf");
-            fontdue::Font::from_bytes(TTF, fontdue::FontSettings::default())
+            fontdue::Font::from_bytes(test_font_bytes(), fontdue::FontSettings::default())
                 .expect("test setup: vendored Roboto Mono parses")
+        }
+
+        /// The raw bytes of [`test_font`], for the read-result tests that
+        /// feed the parse path a real TTF.
+        fn test_font_bytes() -> &'static [u8] {
+            include_bytes!("../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
+        }
+
+        /// `build_font_metrics`'s table scales back to fontdue's draw-path
+        /// advance exactly — per glyph and as a run's advance sum — via
+        /// the same `scale_units` the guest uses. This is the invariant
+        /// the grab rests on: a cached size-independent table reproduces
+        /// the cap's layout without re-querying.
+        #[test]
+        fn font_metrics_table_matches_fontdue_draw_advances() {
+            let font = test_font();
+            let metrics = build_font_metrics(&font);
+            let by_codepoint: HashMap<u32, f32> = metrics
+                .advances
+                .iter()
+                .map(|glyph| (glyph.codepoint, glyph.advance_units))
+                .collect();
+            let advance_units = |ch: char| {
+                by_codepoint
+                    .get(&u32::from(ch))
+                    .copied()
+                    .unwrap_or(metrics.default_advance)
+            };
+
+            let size = 37.0;
+            for ch in "Hello, Aether! 0123".chars() {
+                let local =
+                    aether_kinds::scale_units(advance_units(ch), size, metrics.units_per_em);
+                let drawn = font.metrics(ch, size).advance_width;
+                assert_eq!(local, drawn, "advance mismatch for {ch:?}");
+            }
+
+            // The advance SUM — a run's extent — matches the draw path's
+            // pen walk (`pen_x += advance_width`).
+            let mut local_pen = 0.0f32;
+            let mut draw_pen = 0.0f32;
+            for ch in "Aether".chars() {
+                local_pen +=
+                    aether_kinds::scale_units(advance_units(ch), size, metrics.units_per_em);
+                draw_pen += font.metrics(ch, size).advance_width;
+            }
+            assert_eq!(local_pen, draw_pen);
+        }
+
+        /// `register_font` dedups by `(namespace, path)`: a repeat path
+        /// reuses the resident id and keeps one resident font, while a
+        /// different path gets a fresh id.
+        #[test]
+        fn register_font_dedups_repeat_path_to_one_id() {
+            let mut cap = TextCapability::new();
+            let first = cap.register_font("assets", "font.ttf", Arc::new(test_font()));
+            let again = cap.register_font("assets", "font.ttf", Arc::new(test_font()));
+            assert_eq!(first, again, "a repeat path must reuse the resident id");
+            assert_eq!(cap.fonts.len(), 1, "only one resident font for the path");
+
+            let other = cap.register_font("assets", "other.ttf", Arc::new(test_font()));
+            assert_ne!(other, first, "a different path gets a fresh id");
+            assert_eq!(cap.fonts.len(), 2);
+        }
+
+        /// A `font_metrics` grab by a resident `font_id` replies `Ok`
+        /// synchronously; an unknown id replies `Err`.
+        #[test]
+        fn font_metrics_by_id_replies_ok_or_err() {
+            let mut cap = TextCapability::new();
+            cap.fonts.insert(0, Arc::new(test_font()));
+            let (binding, rx) = ctx_binding();
+
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_font_metrics(
+                &mut ctx,
+                FontMetricsRequest {
+                    font: FontRef::Id(0),
+                },
+            );
+            match decode_session_reply::<FontMetricsResult>(&rx) {
+                FontMetricsResult::Ok { metrics } => {
+                    assert!(metrics.units_per_em > 0.0);
+                    assert!(!metrics.advances.is_empty(), "a real font has glyphs");
+                }
+                FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
+            }
+
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_font_metrics(
+                &mut ctx,
+                FontMetricsRequest {
+                    font: FontRef::Id(99),
+                },
+            );
+            match decode_session_reply::<FontMetricsResult>(&rx) {
+                FontMetricsResult::Err { error } => assert!(error.contains("99")),
+                FontMetricsResult::Ok { .. } => panic!("expected Err for an unknown font_id"),
+            }
+        }
+
+        /// A `font_metrics` grab by a path with no resident font loads on
+        /// the miss: it parks the request, forwards an `aether.fs.read`,
+        /// and — once the bytes come back and parse — registers the font
+        /// (indexed by path) and replies `FontMetricsResult::Ok`.
+        #[test]
+        fn font_metrics_by_path_loads_on_miss() {
+            let mut cap = TextCapability::new();
+            let (binding, rx) = ctx_binding();
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_font_metrics(
+                &mut ctx,
+                FontMetricsRequest {
+                    font: FontRef::Path {
+                        namespace: "assets".to_owned(),
+                        path: "font.ttf".to_owned(),
+                    },
+                },
+            );
+            assert_eq!(cap.pending_fonts.len(), 1, "a miss must park the request");
+            assert_next_send_kind::<Read>(&binding, &rx);
+
+            let mut read_ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            cap.on_read_result(
+                &mut read_ctx,
+                ReadResult::Ok {
+                    namespace: "assets".to_owned(),
+                    path: "font.ttf".to_owned(),
+                    bytes: test_font_bytes().to_vec(),
+                },
+            );
+            drive_task_completion(&mut cap, &binding, &rx);
+            match decode_session_reply::<FontMetricsResult>(&rx) {
+                FontMetricsResult::Ok { metrics } => {
+                    assert!(!metrics.advances.is_empty());
+                }
+                FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
+            }
+            assert_eq!(cap.fonts.len(), 1, "load-on-miss registers the font");
+            assert_eq!(cap.font_ids.len(), 1, "and indexes it by path");
         }
     }
 }

@@ -29,14 +29,15 @@
 
 use std::path::Path;
 
+use aether_actor::CachedFontMetrics;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     Camera, CaptureFrame, CaptureFrameResult, CreateTexture, CreateTextureResult, Delete,
     DeleteResult, DrawSolidQuads, DrawText, DrawTexturedQuads, DropComponent, DropResult,
-    FrameCheck, FrameCheckResult, FrameReduction, FsError, List, ListResult, LoadComponent,
-    LoadFont, LoadFontResult, LoadResult, MailEnvelope, Ping, QuadScale, QuadSpace, Read,
-    ReadResult, ReplaceComponent, ReplaceResult, SolidQuad, TexturedQuad, UiBar, UiPanel, Write,
-    WriteResult,
+    FontMetricsRequest, FontMetricsResult, FontRef, FrameCheck, FrameCheckResult, FrameReduction,
+    FsError, List, ListResult, LoadComponent, LoadFont, LoadFontResult, LoadResult, MailEnvelope,
+    Ping, QuadScale, QuadSpace, Read, ReadResult, ReplaceComponent, ReplaceResult, SolidQuad,
+    TexturedQuad, UiBar, UiPanel, Write, WriteResult,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{
@@ -1829,6 +1830,75 @@ fn text_draws_a_screen_space_string() {
         silhouette.min_x < frame_width / 2 && silhouette.max_y < frame_height,
         "text silhouette {silhouette:?} should bound the upper-left of the \
          {frame_width}x{frame_height} frame",
+    );
+}
+
+/// ADR-0105 font-metrics grab end to end (issue 1854): grab a real
+/// font's size-independent metric table over the mail path — by path, so
+/// the cap loads it on the miss — cache it guest-side, and assert the
+/// local measurement of a run reproduces the cap's draw-path advance sum
+/// bit-for-bit. That equality is the synchronous-local-layout invariant:
+/// a consumer measures text without a per-measurement mail round trip and
+/// still matches what the cap would draw.
+///
+/// CPU-only (no capture), but the bench still boots a full chassis, so it
+/// skips on driverless runners like the other scenarios.
+#[test]
+fn font_metrics_grab_measures_like_the_draw_path() {
+    const TTF: &[u8] = include_bytes!("../assets/fonts/RobotoMono.ttf");
+    if !require_wgpu_only() {
+        return;
+    }
+    let sandbox = init_save_sandbox("test-bench-font-metrics");
+    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
+
+    let mut bench = TestBench::builder()
+        .size(64, 32)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    // Grab by path with no prior load — exercises load-on-miss.
+    let grabbed = bench
+        .execute(vec![(
+            "grab",
+            BenchOp::send_and_await(
+                "aether.text",
+                &FontMetricsRequest {
+                    font: FontRef::Path {
+                        namespace: "assets".to_owned(),
+                        path: "font.ttf".to_owned(),
+                    },
+                },
+            ),
+        )])
+        .expect("font_metrics grab sequence");
+    let metrics = match grabbed
+        .reply::<FontMetricsResult>("grab")
+        .expect("decode FontMetricsResult")
+    {
+        FontMetricsResult::Ok { metrics } => metrics,
+        FontMetricsResult::Err { error } => panic!("font_metrics failed: {error}"),
+    };
+
+    // Cache the table guest-side and measure a run locally.
+    let cache = CachedFontMetrics::new(&metrics);
+    let text = "Hello aether";
+    let size = 29.0;
+    let local = cache.measure(text, size);
+
+    // Ground truth: fontdue's draw-path pen walk over the same string.
+    let font = fontdue::Font::from_bytes(TTF, fontdue::FontSettings::default())
+        .expect("vendored Roboto Mono parses");
+    let mut draw_pen = 0.0f32;
+    for ch in text.chars() {
+        draw_pen += font.metrics(ch, size).advance_width;
+    }
+
+    assert!(local > 0.0, "a non-empty run has positive extent");
+    assert_eq!(
+        local, draw_pen,
+        "local measure must equal the draw-path advance sum exactly",
     );
 }
 
