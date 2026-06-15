@@ -60,6 +60,7 @@ use core::fmt;
 
 pub mod bridge;
 pub mod ctx;
+pub mod inline;
 pub mod mailbox;
 pub mod raw;
 
@@ -791,12 +792,19 @@ macro_rules! __export_internal {
                 <$component as $crate::Actor>::NAMESPACE,
             )
             .0;
-            // ADR-0112: dispatch receives the full `Manual` ctx; the
-            // synthesized `__aether_dispatch` downgrades per handler class.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             let mail =
                 unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender, recipient) };
-            instance.__aether_dispatch(&mut ctx, mail)
+            // ADR-0114: the receive membrane demuxes on the routed
+            // recipient — own id dispatches the parent's handlers, an
+            // inline-child alias dispatches the co-located child. For a
+            // normally-addressed actor the recipient equals `mailbox_id`,
+            // so the closure runs verbatim. ADR-0112: dispatch receives
+            // the full `Manual` ctx; `__aether_dispatch` downgrades per
+            // handler class.
+            $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, move |__aether_mail| {
+                let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+                instance.__aether_dispatch(&mut ctx, __aether_mail)
+            })
         }
 
         /// ADR-0095: the generic guest allocator the substrate delivers every
@@ -1100,12 +1108,17 @@ macro_rules! __export_multi_internal {
                 instance.erased_namespace(),
             )
             .0;
-            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
-            // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
             let mail =
                 unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender, recipient) };
-            instance.erased_dispatch(&mut ctx, mail)
+            // ADR-0114: same receive membrane as the single-actor arm —
+            // own id dispatches the entry/boxed type, an inline-child
+            // alias dispatches the co-located child. ADR-0112: the boxed
+            // `ErasedFfiActor` seam carries the `Manual` view; the
+            // synthesized impl downgrades to `Single` per hook.
+            $crate::ffi::inline::membrane_dispatch(mailbox_id, mail, move |__aether_mail| {
+                let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+                instance.erased_dispatch(&mut ctx, __aether_mail)
+            })
         }
 
         /// ADR-0095 guest allocator — identical to the single-actor arm.
