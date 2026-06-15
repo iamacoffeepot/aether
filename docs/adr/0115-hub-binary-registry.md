@@ -25,7 +25,7 @@ The hub gains a **content-addressed binary store**. A binary is uploaded once an
 **Surface.**
 
 - `upload_binary(staged_path, name?)` → `{ hash, name? }`. The argument is **always a path to the binary already present on the fleet host — never inline bytes**; the hub ingests the file from that path and stores it content-addressed, and identical uploads dedup to one entry. An optional name is a mutable pointer to the resulting hash.
-- `spawn_substrate` (and `load_component`) accept a **selector** in place of a path: `default | name | name@version | hash`, plus an **attribute query** over the binary's self-reported manifest (e.g. `chassis=headless, caps=[audio]`, `target=…`) that resolves to a hash. Exact selectors win first (`hash` > `name@version` > `name`), then an attribute query, then `default`.
+- `spawn_substrate` (and `load_component`) take a **selector** and no longer accept a host path: `default | name | name@version | hash`, plus an **attribute query** over the binary's self-reported manifest (e.g. `chassis=headless, caps=[audio]`, `target=…`) that resolves to a hash. Exact selectors win first (`hash` > `name@version` > `name`), then an attribute query, then `default`.
 - `list_binaries` enumerates the store with each entry's manifest and accepts the same attribute filters, so a consumer reads what the available binaries *are* rather than guessing names — the menu that keeps a selector from just moving "which path?" to "which name?".
 
 **Identity.**
@@ -67,7 +67,7 @@ The hub gains a **content-addressed binary store**. A binary is uploaded once an
 
 - The hub becomes stateful with a persistent, disk-budgeted binary store and the eviction policy that implies. Binaries are large, so the budget and pin-protection must be real rather than nominal.
 - First use of a freshly-built binary pays a one-time upload before it is selectable.
-- Two new tools (`upload_binary`, `list_binaries`) plus a selector argument on `spawn_substrate` / `load_component`; the raw path form is retained only as an upload input.
+- Two new tools (`upload_binary`, `list_binaries`) plus a selector on `spawn_substrate` / `load_component`; the raw path form is removed from those two entirely and survives only as the input to `upload_binary`.
 - Upload runs the binary once (`--describe`) to capture its manifest, so a binary must be runnable on the hub's host until the embedded-section form lands.
 
 **Neutral / follow-on.**
@@ -80,7 +80,7 @@ The hub gains a **content-addressed binary store**. A binary is uploaded once an
 
 - **Path-reference registry** (the hub indexes host paths and the caller selects by name): still couples to the local build layout — a resolved path must exist, can go stale, and gives no reproducible pin. Uploading into the store cuts the host-path cord entirely.
 - **Reuse the per-engine ADR-0049 handle store directly:** it lives below an engine, but binaries are forked by the hub before any engine exists, so the store must be hub-level. The machinery is reused; the instance is not.
-- **Keep a raw host-path escape hatch on `spawn_substrate` alongside the selector:** rejected as part of the default surface — paths are the friction being removed, and the only path a caller touches is the one-time upload input. A true one-off raw-path spawn can be reconsidered if a concrete need appears.
+- **Keep a raw host-path escape hatch on `spawn_substrate` alongside the selector:** rejected outright — not deferred, not reconsiderable. A path that exists is a path agents reach for by default, and spawning is common enough that the escape hatch would quietly become the norm and re-create the coupling the registry removes. The registry is the sole way to spawn; the only path anywhere is the one-time upload input.
 - **Inline the binary bytes in the upload call** (base64 in JSON): rejected outright — a binary is far too large to ride through a tool call, and inlining it would blow the very context budget the registry is meant to keep tidy. `upload_binary` is always a staged path; the bytes are read host-side and never put on the wire.
 - **Uploader-supplied metadata** (the build step labels the binary at upload): rejected in favour of self-description — a binary cannot misreport what is linked into it the way an external label can drift out of sync.
 - **A statically embedded manifest section instead of `--describe`:** the cross-target-robust form (it reads without running the binary), deferred because emitting and parsing a native section per target is more than the same-host first cut needs.
