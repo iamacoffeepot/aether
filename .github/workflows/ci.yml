@@ -176,7 +176,7 @@ jobs:
       # cross-builds in its own cargo invocation: consolidated component
       # crates (e.g. `aether-camera`) gate their `aether_actor::export!()`
       # FFI emission behind a default `runtime` feature, and trunk-type
-      # consumers (sokoban) opt out via `default-features = false`. A
+      # consumers opt out via `default-features = false`. A
       # multi-package build would feature-unify, re-enabling `runtime` for
       # the trunk consumer → wasm-lld duplicate-symbol on `init` /
       # `receive_p32`; xtask keeps each build's feature resolve isolated.

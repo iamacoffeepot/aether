@@ -659,7 +659,6 @@ mod tests {
             "multi_actor",
             "aether_camera",
             "aether_mesh_viewer",
-            "aether_demo_sokoban",
         ] {
             assert!(
                 stems.contains(expected),

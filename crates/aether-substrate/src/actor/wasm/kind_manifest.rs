@@ -22,11 +22,9 @@
 //
 // Pre-v0x03 labels lacked `kind_id` and were paired by declaration
 // order. That was fragile once any second emitter wrote to only one
-// of the two sections (issue tracked in the
-// "demo.sokoban.load_level.id" empty-field-name regression); v0x03
-// rejects old-format bytes loudly so a rebuild-required boundary is
-// explicit rather than "single-field cast kinds have empty fields
-// and encode-from-JSON silently fails."
+// of the two sections; v0x03 rejects old-format bytes loudly so a
+// rebuild-required boundary is explicit rather than "single-field
+// cast kinds have empty fields and encode-from-JSON silently fails."
 //
 // The parser walks each section sequentially; postcard stops decoding
 // exactly at the record's end, so the next byte is the next record's
@@ -829,37 +827,6 @@ mod tests {
         assert_eq!(descs.len(), 1);
         assert_eq!(descs[0].name, "present");
         let _ = &mut orphan;
-    }
-
-    #[test]
-    fn sokoban_load_level_single_field_has_name() {
-        // Regression: `#[actor]` retention historically wrote kinds
-        // records into `aether.kinds` without parallel labels records
-        // into `aether.kinds.labels`, desyncing the old by-index
-        // pairing. `demo.sokoban.load_level`'s single `id` field came
-        // back with an empty name, blocking hub encode-from-params
-        // for that kind. With by-id pairing + parallel labels
-        // retention the field name survives all emitter
-        // configurations. Skipped when the wasm isn't built.
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../target/wasm32-unknown-unknown/release/aether_demo_sokoban.wasm"
-        );
-        let Ok(bytes) = fs::read(path) else {
-            eprintln!("skipping: sokoban wasm not built at {path}");
-            return;
-        };
-        let descs = read_from_bytes(&bytes).expect("decode");
-        let load_level = descs
-            .iter()
-            .find(|d| d.name == "demo.sokoban.load_level")
-            .expect("load_level descriptor present");
-        let SchemaType::Struct { fields, repr_c } = &load_level.schema else {
-            panic!("expected Struct, got {:?}", load_level.schema);
-        };
-        assert!(*repr_c);
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, "id");
     }
 
     #[test]
