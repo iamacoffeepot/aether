@@ -23,6 +23,7 @@ pub mod point;
 pub mod polygon;
 pub mod serialize;
 pub mod simplify;
+pub mod surface_net;
 pub mod tessellate;
 
 #[cfg(test)]
@@ -35,3 +36,4 @@ pub use parse::{ParseError, parse};
 pub use point::Point3;
 pub use polygon::{Polygon, mesh_polygons, tessellate_polygon};
 pub use serialize::serialize;
+pub use surface_net::surface_net;

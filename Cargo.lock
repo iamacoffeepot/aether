@@ -260,6 +260,7 @@ dependencies = [
  "aether-mesh",
  "aether-substrate-bundle",
  "inventory",
+ "postcard",
  "serde",
  "tracing",
 ]
