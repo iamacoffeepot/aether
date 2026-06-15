@@ -370,8 +370,17 @@ mod native {
                 // `root`. Without this, the trampoline's wrapped Mail
                 // defaults to `MailId::NONE` and the guest's outbound looks
                 // like a fresh root.
+                // ADR-0114 §2: deliver the *routed* recipient as the guest
+                // `Mail`'s recipient, not the trampoline's own id. For a
+                // normally-addressed actor `env.recipient` equals
+                // `self.mailbox`, so this is a no-op; for an inline-child
+                // alias it carries the child's address, which
+                // `Component::deliver` threads to the guest's `receive`
+                // frame + the `ComponentCtx` dispatch identity so the
+                // membrane demuxes to the child and the child's sends stamp
+                // its address as origin.
                 let mail = Mail::new(
-                    self.mailbox,
+                    env.recipient,
                     env.kind,
                     env.payload.bytes().to_vec(),
                     env.count,

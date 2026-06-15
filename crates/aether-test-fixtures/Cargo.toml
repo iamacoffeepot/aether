@@ -126,5 +126,15 @@ crate-type = ["cdylib"]
 name = "http_handler"
 crate-type = ["cdylib"]
 
+# ADR-0114 inline-child fixture (#1916): the entry `InlineParent` spawns a
+# co-located `InlineChild` in `wire` via `ctx.spawn_inline_child`. Both
+# answer `InlineProbe` with a `who`-tagged `InlineEcho` so the FleetBench
+# scenario can address the child by its first-class lineage name over the
+# wire and assert the membrane demuxed to the child (not the parent).
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/inline_child.wasm
+[[example]]
+name = "inline_child"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

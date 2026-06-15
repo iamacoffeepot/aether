@@ -154,6 +154,19 @@ pub struct ComponentCtx {
     in_flight_mail_id: Cell<MailId>,
     /// ADR-0080 §5 in-flight inbound `root`. See `in_flight_mail_id`.
     in_flight_root: Cell<MailId>,
+    /// ADR-0114 decision #4: the mailbox the in-flight inbound was routed
+    /// to — the dispatch's self-identity. Set by [`Component::deliver`]
+    /// from `mail.recipient` before the guest's `receive_p32` shim runs
+    /// (the recipient the capabilities trampoline now forwards as the
+    /// guest `Mail`'s recipient, ADR-0114 §2). Outbound origin stamping
+    /// (`send` / `reply`) reads it via [`Self::dispatch_identity`] so an
+    /// inline child's sends carry the child's address instead of the fixed
+    /// `self.sender`. For a normally-addressed actor it equals `self.sender`
+    /// (the component's own id), so the stamp is unchanged — the
+    /// no-op regression guard. [`MailboxId::NONE`] outside an in-flight
+    /// dispatch (and on substrate-internal call sites that bypass
+    /// `deliver`, e.g. test fixtures), where it falls back to `self.sender`.
+    in_flight_recipient: Cell<MailboxId>,
     /// Issue iamacoffeepot/aether#1465: lineage-`MailId` counter for
     /// [`ComponentCtx::reply`]. A reply echoes the inbound correlation
     /// on its `reply_to` (so it correlates home), but its own trace
@@ -236,6 +249,7 @@ impl ComponentCtx {
             correlation_counter: Cell::new(1),
             in_flight_mail_id: Cell::new(MailId::NONE),
             in_flight_root: Cell::new(MailId::NONE),
+            in_flight_recipient: Cell::new(MailboxId::NONE),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawn: None,
         }
@@ -277,6 +291,21 @@ impl ComponentCtx {
         id
     }
 
+    /// ADR-0114 decision #4: the self-identity outbound mail is stamped
+    /// with — the in-flight dispatch's routed recipient. For an inline
+    /// child (ADR-0114) this is the child's alias, so its sends stamp the
+    /// child's address as origin and its replies route back to the child;
+    /// for a normally-addressed actor it equals `self.sender`, so the
+    /// stamp is unchanged. Falls back to `self.sender` when no recipient
+    /// is in flight (substrate-internal call sites that bypass
+    /// [`Component::deliver`], e.g. test fixtures).
+    fn dispatch_identity(&self) -> MailboxId {
+        match self.in_flight_recipient.get() {
+            id if id == MailboxId::NONE => self.sender,
+            id => id,
+        }
+    }
+
     /// Return the correlation id used by the most recent
     /// `ComponentCtx::send` call. The `prev_correlation_p32` host fn
     /// surfaces this to the guest so a handler can match an inbound
@@ -302,13 +331,18 @@ impl ComponentCtx {
         // (auto-routed by `Mailer::send_reply`) carries it back so a
         // handler can match the reply to this send.
         let correlation = self.mint_correlation();
-        let reply_to = Source::with_correlation(SourceAddr::Component(self.sender), correlation);
+        // ADR-0114 decision #4: stamp origin from the dispatch identity
+        // (the routed recipient) so an inline child's sends carry the
+        // child's address; a normally-addressed actor stamps `self.sender`
+        // unchanged.
+        let identity = self.dispatch_identity();
+        let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
 
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
         // outbound's MailId from the same correlation that drives
         // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
         // which uses one counter for both.
-        let mail_id = MailId::new(self.sender, correlation);
+        let mail_id = MailId::new(identity, correlation);
         self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false);
     }
 
@@ -327,8 +361,9 @@ impl ComponentCtx {
         count: u32,
     ) {
         let correlation = self.mint_correlation();
-        let reply_to = Source::with_correlation(SourceAddr::Component(self.sender), correlation);
-        let mail_id = MailId::new(self.sender, correlation);
+        let identity = self.dispatch_identity();
+        let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
+        let mail_id = MailId::new(identity, correlation);
         self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true);
     }
 
@@ -361,7 +396,10 @@ impl ComponentCtx {
         correlation: u64,
     ) {
         let reply_to = Source::with_correlation(SourceAddr::None, correlation);
-        let mail_id = MailId::new(self.sender, self.next_reply_lineage());
+        // ADR-0114 decision #4: a child's reply stamps the child's
+        // identity (the routed recipient) on its lineage `MailId`, like
+        // its sends; a normally-addressed actor stamps `self.sender`.
+        let mail_id = MailId::new(self.dispatch_identity(), self.next_reply_lineage());
         self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false);
     }
 
@@ -410,8 +448,13 @@ impl ComponentCtx {
             (parent_mail, inherited_root)
         };
         let root = inherited_root.unwrap_or(mail_id);
+        // ADR-0114 decision #4: the recorded source + the `origin` name
+        // stamped below read the dispatch identity (the routed recipient),
+        // so an inline child's mail is attributed to the child's address;
+        // a normally-addressed actor reads `self.sender` unchanged.
+        let identity = self.dispatch_identity();
         self.queue
-            .record_sent(mail_id, root, parent_mail, self.sender, recipient, kind);
+            .record_sent(mail_id, root, parent_mail, identity, recipient, kind);
 
         // Closure-bound (actor-enqueue) and Sink-bound (synchronous
         // handler) recipients dispatch inline here, bypassing the
@@ -436,7 +479,7 @@ impl ComponentCtx {
                 // and move payload + kind_name into it. The bytes
                 // flow straight into the downstream cap's mpsc
                 // envelope without a `to_vec()` clone.
-                let origin = self.registry.mailbox_name(self.sender);
+                let origin = self.registry.mailbox_name(identity);
                 // ADR-0094: the second of two production mint sites
                 // (ComponentCtx's inline send bypasses `route_mail`). Armed
                 // here; the recipient actor's dispatcher discharges it.
@@ -463,7 +506,7 @@ impl ComponentCtx {
             }
             Some(MailboxEntry::Inline(handler)) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
-                let origin = self.registry.mailbox_name(self.sender);
+                let origin = self.registry.mailbox_name(identity);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,
                     kind_name: &kind_name,
@@ -516,11 +559,24 @@ impl ComponentCtx {
         self.in_flight_root.set(root);
     }
 
+    /// ADR-0114 decision #4: publish the in-flight dispatch's routed
+    /// recipient (the dispatch identity) so [`Self::dispatch_identity`]
+    /// stamps a guest-triggered `send` / `reply` with it. Called by
+    /// [`Component::deliver`] alongside [`Self::set_in_flight`], from
+    /// `mail.recipient` (the recipient the capabilities trampoline now
+    /// forwards as the guest `Mail`'s recipient). For a normally-addressed
+    /// actor this equals `self.sender`, so the stamp is unchanged.
+    pub(crate) fn set_in_flight_recipient(&self, recipient: MailboxId) {
+        self.in_flight_recipient.set(recipient);
+    }
+
     /// Clear the in-flight context after the guest's `receive_p32`
-    /// shim returns. Symmetric with [`Self::set_in_flight`].
+    /// shim returns. Symmetric with [`Self::set_in_flight`] /
+    /// [`Self::set_in_flight_recipient`].
     pub(crate) fn clear_in_flight(&self) {
         self.in_flight_mail_id.set(MailId::NONE);
         self.in_flight_root.set(MailId::NONE);
+        self.in_flight_recipient.set(MailboxId::NONE);
     }
 }
 
@@ -1057,11 +1113,17 @@ impl Component {
         // call site that bypasses `deliver` (today: only test
         // fixtures) doesn't accidentally pick up stale lineage.
         self.store.data().set_in_flight(mail.mail_id, mail.root);
+        // ADR-0114 decision #4: publish the routed recipient as the
+        // dispatch identity so a guest-triggered `send` / `reply` stamps
+        // its origin with the address the mail was sent to (the inline
+        // child's alias, or the actor's own id for normal mail). Cleared
+        // alongside the lineage cells after the call.
+        self.store.data().set_in_flight_recipient(mail.recipient);
         // ADR-0114 decision #1: thread the routed recipient through to
         // the guest as the trailing `receive_p32` frame slot so a guest
-        // handler (and a future inline-child membrane) can read which
-        // address the mail was sent to. For a normally-addressed actor
-        // this equals the actor's own mailbox id.
+        // handler (and the inline-child membrane) can read which address
+        // the mail was sent to. For a normally-addressed actor this equals
+        // the actor's own mailbox id.
         let result = self.receive.call(
             &mut self.store,
             (
@@ -2427,5 +2489,164 @@ mod tests {
         );
         assert_eq!(root, mail_id, "detached send is its own root");
         assert_eq!(mail_id.sender, sender);
+    }
+
+    /// ADR-0114 step 1: the inline-child alias id the `spawn_inline_child`
+    /// host fn folds — `with_tag(Mailbox, fold_lineage(parent_carry,
+    /// instanced(aether.embedded, subname)))` — equals the parse → fold of
+    /// the rendered lineage name (`mailbox_id_from_path`), so a wire `Call`
+    /// addressing the child by name resolves to the same id the guest
+    /// keys its membrane on (the post-#1920 convention). The parent carry
+    /// mirrors a depth-2 loaded component (`aether.component/aether.embedded:NAME`).
+    #[test]
+    fn inline_alias_folded_id_matches_post_1920_convention() {
+        let parent_carry = aether_data::fold_lineage(
+            aether_data::ActorId::singleton("aether.component").0,
+            aether_data::ActorId::instanced("aether.embedded", "testparent"),
+        );
+        let folded = MailboxId(aether_data::with_tag(
+            Tag::Mailbox,
+            aether_data::fold_lineage(
+                parent_carry,
+                aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, "widget"),
+            ),
+        ));
+        let from_path = aether_data::mailbox_id_from_path(
+            "aether.component/aether.embedded:testparent/aether.embedded:widget",
+        );
+        assert_eq!(
+            folded, from_path,
+            "the host-fn alias fold matches the rendered-name parse → fold",
+        );
+    }
+
+    /// ADR-0114 step 1: an alias `MailboxEntry` cloned from the parent's
+    /// `Inbox` routes mail addressed to the alias into the parent slot's
+    /// inbox, and the rendered alias name resolves (the engine's `Call`
+    /// recipient-name path) to the alias id. Mirrors the `spawn_inline_child`
+    /// host fn's registration against a depth-2 parent registered with its
+    /// lineage-folded id.
+    #[test]
+    fn inline_alias_routes_into_parent_slot_inbox() {
+        let registry = Arc::new(Registry::new());
+        let captured: LineageCapture = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        let parent_name = "aether.component/aether.embedded:testparent".to_owned();
+        let parent_id = aether_data::mailbox_id_from_path(&parent_name);
+        registry
+            .try_register_inbox_with_id(
+                parent_id,
+                parent_name.clone(),
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    dispatch.discharge();
+                    captured_for_handler.lock().unwrap().push((
+                        dispatch.mail_id,
+                        dispatch.root,
+                        dispatch.parent_mail,
+                    ));
+                }),
+            )
+            .expect("parent registers under its lineage id");
+
+        // Mirror the host fn: fold the alias id and register an alias route
+        // to the parent's slot by cloning the parent's Inbox handler.
+        let alias_name = format!("{parent_name}/aether.embedded:widget");
+        let alias_id = aether_data::mailbox_id_from_path(&alias_name);
+        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(parent_id) else {
+            panic!("parent is registered as a live Inbox");
+        };
+        registry
+            .try_register_inbox_with_id(alias_id, alias_name.clone(), handler)
+            .expect("alias registers under the folded id");
+
+        // Name resolution (the wire `Call` path) resolves the alias.
+        assert_eq!(
+            registry.lookup(&alias_name),
+            Some(alias_id),
+            "the rendered alias name resolves to the folded alias id",
+        );
+
+        // Mail addressed to the alias lands in the parent slot's inbox.
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+        mailer.push(Mail::new(
+            alias_id,
+            aether_data::KindId(0xABCD),
+            vec![1, 2, 3],
+            1,
+        ));
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "alias mail dispatched into the parent slot's inbox",
+        );
+    }
+
+    /// ADR-0114 step 2: a guest `send` during a dispatch whose routed
+    /// recipient equals the component's own mailbox stamps the component
+    /// as origin — the no-op regression that guards a normally-addressed
+    /// actor.
+    #[test]
+    fn send_stamps_self_when_recipient_is_own_mailbox() {
+        let registry = Arc::new(Registry::new());
+        let (captured, sink_id) =
+            register_lineage_capture_sink(&registry, "inline_self_origin_sink");
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
+        let ctx = ComponentCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            HubOutbound::disconnected(),
+        );
+
+        // Recipient == own mailbox (a normally-addressed actor).
+        ctx.set_in_flight_recipient(sender);
+        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1);
+
+        let captured = captured.lock().unwrap();
+        let (mail_id, _root, _parent) = captured[0];
+        assert_eq!(
+            mail_id.sender, sender,
+            "origin stamps the component's own id when recipient == self",
+        );
+    }
+
+    /// ADR-0114 step 2: a guest `send` during a dispatch routed to an
+    /// inline-child alias stamps the alias as origin — the recipient
+    /// becomes the dispatch identity, so the child's sends carry the
+    /// child's address.
+    #[test]
+    fn send_stamps_alias_when_recipient_is_inline_child() {
+        let registry = Arc::new(Registry::new());
+        let (captured, sink_id) =
+            register_lineage_capture_sink(&registry, "inline_alias_origin_sink");
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
+        let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
+        let ctx = ComponentCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            HubOutbound::disconnected(),
+        );
+
+        // Recipient == an inline-child alias distinct from the component's
+        // own id.
+        ctx.set_in_flight_recipient(alias);
+        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1);
+
+        let captured = captured.lock().unwrap();
+        let (mail_id, _root, _parent) = captured[0];
+        assert_eq!(
+            mail_id.sender, alias,
+            "origin stamps the alias (dispatch identity) when recipient is a child",
+        );
+        assert_ne!(
+            mail_id.sender, sender,
+            "the child's send must not stamp the parent component",
+        );
     }
 }

@@ -97,6 +97,22 @@ unsafe extern "C" {
         config_ptr: u32,
         config_len: u32,
     ) -> u64;
+    /// ADR-0114: register an inline child's alias route and return its
+    /// `MailboxId`. Unlike [`spawn_sibling`] (which stages a detached
+    /// spawn), this folds the alias id `with_tag(Mailbox,
+    /// fold_lineage(parent_carry, instanced(aether.embedded, subname)))`
+    /// and synchronously registers an alias `MailboxEntry` routing to the
+    /// parent trampoline's own dispatcher slot — the child is co-located
+    /// in the parent's wasm instance, so there is no new trampoline and no
+    /// config (the guest runs `init` in-process). `is_counter` is `1` for
+    /// `Subname::Counter` (the host appends a monotonic discriminator) or
+    /// `0` for a caller-supplied name; `subname_ptr/len` is the bare
+    /// `Named` segment (empty for `Counter`), copied out of guest memory
+    /// before the call returns. The returned id is the ADR-0099 §3 lineage
+    /// fold of the trampoline's carry with the child's node; `0` on a
+    /// host-side error (no memory, OOB, bad UTF-8, no binding/spawner).
+    #[link_name = "spawn_inline_child_p32"]
+    pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
 }
 
 /// Host-side stub for the FFI `aether::send_mail` import. Always
@@ -220,4 +236,20 @@ pub unsafe fn spawn_sibling(
     _config_len: u32,
 ) -> u64 {
     panic!("aether-actor: spawn_sibling called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::spawn_inline_child` import
+/// (ADR-0114). Always panics — callers outside the FFI guest are
+/// misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
+    panic!("aether-actor: spawn_inline_child called outside the FFI guest");
 }

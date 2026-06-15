@@ -238,6 +238,50 @@ pub struct UiWidgetConfig {
     pub quad_count: u32,
 }
 
+/// ADR-0114 inline-child fixture driver. A unit query sent to either the
+/// parent's own address or its inline child's first-class lineage
+/// address; the recipient replies an [`InlineEcho`] tagged with `who`
+/// handled it, so the `FleetBench` scenario proves the membrane demuxed
+/// the mail to the child (not the parent) and a control to the parent's
+/// own address is unaffected. Postcard-shaped unit struct.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+)]
+#[kind(name = "aether.test_fixtures.inline_probe")]
+pub struct InlineProbe;
+
+/// Reply to [`InlineProbe`] — `who` names the actor that handled the
+/// query so the test can assert the demux landed on the child vs the
+/// parent. Postcard-shaped.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.test_fixtures.inline_echo")]
+pub struct InlineEcho {
+    pub who: u32,
+}
+
+/// [`InlineEcho::who`] marker for the parent component (the membrane's
+/// own-id path).
+pub const INLINE_WHO_PARENT: u32 = 1;
+
+/// [`InlineEcho::who`] marker for the inline child (the membrane's
+/// child-alias path).
+pub const INLINE_WHO_CHILD: u32 = 2;
+
 #[cfg(test)]
 mod tests {
     use aether_data::{Kind, Ref};

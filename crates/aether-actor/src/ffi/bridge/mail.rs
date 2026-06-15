@@ -184,4 +184,32 @@ impl MailBridge {
             )
         }
     }
+
+    /// ADR-0114: register an inline child's alias route and return its
+    /// `MailboxId`. The inline analogue of [`Self::spawn_sibling`]: the
+    /// host folds the alias id onto the parent's lineage carry and
+    /// registers a route to the parent trampoline's own slot, so the
+    /// co-located child is addressable like any actor with no new
+    /// trampoline. `is_counter` selects `Subname::Counter` (the host
+    /// appends a monotonic discriminator) vs a caller-supplied name;
+    /// `subname` is the bare `Named` segment (empty for `Counter`). No
+    /// config crosses here — the guest runs the child's `init` in-process
+    /// (see [`crate::FfiCtx::spawn_inline_child`]). The returned id is the
+    /// ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
+    /// error.
+    #[must_use]
+    pub fn spawn_inline_child(&self, is_counter: bool, subname: &str) -> u64 {
+        let subname_bytes = subname.as_bytes();
+        // SAFETY: forwards to `raw::spawn_inline_child`, whose ABI is
+        // documented at the import site in `ffi/raw.rs`. The `(ptr, len)`
+        // pair is derived from a reference valid for `len` bytes for the
+        // call's duration; the host copies before returning.
+        unsafe {
+            raw::spawn_inline_child(
+                u32::from(is_counter),
+                subname_bytes.as_ptr().addr() as u32,
+                subname_bytes.len() as u32,
+            )
+        }
+    }
 }

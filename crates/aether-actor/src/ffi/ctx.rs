@@ -29,11 +29,13 @@ use crate::actor::ctx::resolver::Resolver;
 use crate::actor::{
     Actor, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
-use crate::ffi::FfiActor;
 use crate::ffi::bridge::{MAIL_BRIDGE, PERSIST_BRIDGE};
+use crate::ffi::inline::INLINE_CHILDREN;
 use crate::ffi::mailbox::FfiActorMailbox;
+use crate::ffi::{BootError, ErasedFfiActor, FfiActor};
 use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
+use alloc::boxed::Box;
 use alloc::string::String;
 
 /// Init-only capability handle for FFI guests. Resolved during
@@ -106,15 +108,27 @@ impl Resolver for FfiInitCtx<'_> {
     }
 }
 
-/// Why a synchronous [`FfiCtx::spawn_child`] call failed before the host
-/// staged the request (ADR-0097). Spawn-time failures — a retired or
-/// in-use subname, or the sibling's `init` returning `Err` — surface
-/// asynchronously on the trampoline, not through this `Result`.
+/// Why a synchronous spawn verb failed.
+///
+/// For the detached [`FfiCtx::spawn_child`] (ADR-0097), only subname
+/// validation can fail here — a spawn-time failure (a retired / in-use
+/// subname, or the sibling's `init` returning `Err`) surfaces
+/// asynchronously on the trampoline, not through this `Result`. For the
+/// inline [`FfiCtx::spawn_inline_child`] (ADR-0114) the child's `init`
+/// runs in-process, synchronously, so its failure is reported here as
+/// [`SpawnError::InitFailed`].
 #[derive(Debug, Clone)]
 pub enum SpawnError {
     /// A [`Subname::Named`] discriminator failed
     /// [`validate_namespace_segment`].
     SubnameInvalid(NamespaceError),
+    /// ADR-0114: an inline child's synchronous `init` returned `Err`. The
+    /// wrapped [`BootError`] carries the actor's own failure message.
+    /// Unlike the detached `spawn_child` — whose `init` runs later on the
+    /// trampoline and logs asynchronously — an inline child's `init` runs
+    /// in-guest during [`FfiCtx::spawn_inline_child`], so the boot failure
+    /// comes back through this `Result`.
+    InitFailed(BootError),
 }
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
@@ -273,22 +287,92 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         // before any lineage carry exists.
         #[allow(clippy::disallowed_methods)]
         let tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
-        let (is_counter, full_subname) = match subname {
-            // `Counter`: the host assigns a bare monotonic counter as the
-            // discriminator. No prefix is passed — the host ignores it for
-            // Counter and produces just `n.to_string()`.
-            Subname::Counter => (true, String::new()),
-            // `Named`: validate the caller-supplied segment (no `:`,
-            // no control/whitespace, not empty) then pass it bare as the
-            // flat discriminator — convention: no `.` in a discriminator.
-            Subname::Named(name) => {
-                validate_namespace_segment(name).map_err(SpawnError::SubnameInvalid)?;
-                (false, String::from(name))
-            }
-        };
+        let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
         let id = MAIL_BRIDGE.spawn_sibling(tag, is_counter, &full_subname, &config_bytes);
         Ok(MailboxId(id))
+    }
+
+    /// ADR-0114: spawn an **inline child** — a co-located child actor that
+    /// shares this component's WASM instance, slot, and run-token, while
+    /// being addressed and mailed like any actor. The signature mirrors
+    /// [`Self::spawn_child`] (a `Subname`-discriminated `Instanced` type);
+    /// the only difference is co-residency.
+    ///
+    /// The host folds the child's alias [`MailboxId`]
+    /// (`{parent}/aether.embedded:<subname>`) and registers a route to
+    /// this trampoline's own slot; the SDK then runs `A::init`
+    /// **synchronously** (unlike the detached `spawn_child`, whose `init`
+    /// runs later on a fresh trampoline) and inserts the boxed child into
+    /// the ctx-side [`INLINE_CHILDREN`] registry keyed by the alias. Mail
+    /// addressed to the alias lands in this slot and the `export!`
+    /// membrane demuxes it to the child; the child's own sends stamp the
+    /// child's address as origin and its replies route back.
+    ///
+    /// A [`Subname::Named`] that fails validation returns
+    /// [`SpawnError::SubnameInvalid`]; a synchronous `init` `Err` returns
+    /// [`SpawnError::InitFailed`].
+    pub fn spawn_inline_child<A>(
+        &self,
+        subname: Subname<'_>,
+        config: &A::Config,
+    ) -> Result<MailboxId, SpawnError>
+    where
+        // `ErasedFfiActor` is the boxing seam every `#[actor]` type emits
+        // (ADR-0096) — the registry stores the child as `dyn
+        // ErasedFfiActor`, so the bound is the mechanical realisation of
+        // "reuse the existing erasure" (no new child-dispatch trait).
+        A: Instanced + FfiActor + ErasedFfiActor,
+    {
+        let (is_counter, full_subname) = resolve_subname(subname)?;
+        let alias = MailboxId(MAIL_BRIDGE.spawn_inline_child(is_counter, &full_subname));
+        // Re-decode an owned `A::Config` for the in-guest `init` from the
+        // same bytes the detached path would have shipped — symmetric with
+        // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
+        // it sidesteps a `Clone` bound the detached verb also lacks.
+        let bytes = config.encode_into_bytes();
+        let Some(owned) = <A::Config as Kind>::decode_from_bytes(&bytes) else {
+            return Err(SpawnError::InitFailed(BootError::new(
+                "spawn_inline_child: Config round-trip failed",
+            )));
+        };
+        install_inline_child::<A>(alias, owned)
+    }
+}
+
+/// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
+/// spawn host fns take, shared by [`FfiCtx::spawn_child`] and
+/// [`FfiCtx::spawn_inline_child`]. `Counter` passes an empty discriminator
+/// the host ignores (it assigns a bare monotonic counter and produces just
+/// `n.to_string()`); `Named` validates the caller-supplied segment (no `:`,
+/// no control/whitespace, not empty) then passes it bare as the flat
+/// discriminator — convention: no `.` in a discriminator.
+fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
+    match subname {
+        Subname::Counter => Ok((true, String::new())),
+        Subname::Named(name) => {
+            validate_namespace_segment(name).map_err(SpawnError::SubnameInvalid)?;
+            Ok((false, String::from(name)))
+        }
+    }
+}
+
+/// Build an inline child's actor value and register it under its alias
+/// (ADR-0114). Split out of [`FfiCtx::spawn_inline_child`] so the in-guest
+/// `init` + registry insert is exercisable on the host build (where the
+/// `spawn_inline_child` host fn is a panicking stub): the unit test calls
+/// this with a synthetic alias and an owned config.
+fn install_inline_child<A>(alias: MailboxId, config: A::Config) -> Result<MailboxId, SpawnError>
+where
+    A: FfiActor + ErasedFfiActor,
+{
+    let mut ctx = FfiInitCtx::__new(alias.0);
+    match A::init(config, &mut ctx) {
+        Ok(child) => {
+            INLINE_CHILDREN.insert(alias, Box::new(child));
+            Ok(alias)
+        }
+        Err(err) => Err(SpawnError::InitFailed(err)),
     }
 }
 
@@ -511,9 +595,87 @@ impl Persistence for FfiDropCtx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FfiCtx, Manual, Single};
-    use crate::actor::ctx::OutboundReply;
+    use super::{FfiCtx, Manual, Single, SpawnError, install_inline_child};
+    use crate::Actor;
+    use crate::actor::ctx::{OutboundReply, Resolver};
+    use crate::actor::{Instanced, Subname};
+    use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx};
+    use crate::mail::{Mail, PriorState};
+    use aether_data::MailboxId;
     use core::mem::{align_of, size_of};
+
+    /// Test inline child whose `init` always fails — drives the
+    /// [`SpawnError::InitFailed`] path. The `ErasedFfiActor` dispatch
+    /// hooks are unreachable: a failed `init` never registers or
+    /// dispatches the child.
+    struct FailingChild;
+
+    impl Actor for FailingChild {
+        const NAMESPACE: &'static str = "test.inline.failing_child";
+    }
+
+    impl Instanced for FailingChild {}
+
+    impl FfiActor for FailingChild {
+        type Config = ();
+        type State = ();
+
+        fn init<C>(_config: (), _ctx: &mut C) -> Result<Self, BootError>
+        where
+            C: Resolver,
+        {
+            Err(BootError::new("inline child init deliberately fails"))
+        }
+    }
+
+    impl ErasedFfiActor for FailingChild {
+        fn erased_namespace(&self) -> &'static str {
+            Self::NAMESPACE
+        }
+        fn erased_dispatch(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+            unreachable!("a failed-init child is never dispatched")
+        }
+        fn erased_wire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {
+            unreachable!()
+        }
+        fn erased_unwire(&mut self, _ctx: &mut FfiCtx<'_, Manual>) {
+            unreachable!()
+        }
+        fn erased_on_dehydrate(&mut self, _ctx: &mut FfiDropCtx<'_>) {
+            unreachable!()
+        }
+        fn erased_on_rehydrate(&mut self, _ctx: &mut FfiCtx<'_, Manual>, _prior: PriorState<'_>) {
+            unreachable!()
+        }
+    }
+
+    /// Step 3: a synchronous `init` `Err` surfaces as
+    /// [`SpawnError::InitFailed`] (the inline child runs `init` in-process,
+    /// unlike the detached `spawn_child` whose init failure logs async).
+    /// Exercises [`install_inline_child`] directly so the host build runs
+    /// it without the panicking `spawn_inline_child` host-fn stub.
+    #[test]
+    fn install_inline_child_reports_init_failure() {
+        let result = install_inline_child::<FailingChild>(MailboxId(0x5555), ());
+        assert!(
+            matches!(result, Err(SpawnError::InitFailed(_))),
+            "a failing init must return SpawnError::InitFailed, got {result:?}",
+        );
+    }
+
+    /// Step 3: subname validation parity with `spawn_child` — a
+    /// separator-bearing `Named` subname is rejected up front with
+    /// [`SpawnError::SubnameInvalid`], before any host round-trip (so the
+    /// host build's panicking host-fn stub is never reached).
+    #[test]
+    fn spawn_inline_child_rejects_invalid_subname() {
+        let ctx = FfiCtx::__new(0);
+        let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
+        assert!(
+            matches!(result, Err(SpawnError::SubnameInvalid(_))),
+            "a separator-bearing subname must return SubnameInvalid, got {result:?}",
+        );
+    }
 
     /// ADR-0112: the mode marker is layout-neutral — the `Single` and
     /// `Manual` views have identical size + alignment. This is the
