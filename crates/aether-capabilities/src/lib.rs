@@ -113,6 +113,14 @@ pub mod transforms;
 // `solve_cost_to_reach`), so on a wasm-header-only build it would be dead.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod reachability;
+// Pure corridor-graph core (ADR-0047/0048/0049, issue 1858): the
+// connectivity skeleton of a solved cost-to-reach field under a budget.
+// Gated to non-wasm like `reachability` — its caller is the native
+// `build_corridor_graph` transform (and the follow-on passes that reuse
+// the per-tick component labeler), so on a wasm-header-only build it would
+// be dead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod corridor;
 pub mod window;
 
 #[cfg(feature = "audio")]
