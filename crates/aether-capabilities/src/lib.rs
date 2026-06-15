@@ -74,12 +74,10 @@ pub mod render;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
-// `aether.trajectory` position-stream recorder cap (issue 1862). A
-// native-only cap that accumulates per-tick samples into a typed,
-// seed-keyed `TrajectoryLog` handle (ADR-0049) replayable offline.
+// Shared `TestChassis` / `fresh_substrate` / reply-decode fixtures for the
+// cap unit tests in this crate (issues 785 / 786).
 #[cfg(test)]
 pub(crate) mod test_chassis;
-pub mod trajectory;
 // `aether.text` cap (ADR-0105). CPU-only — composes the render texture
 // surface by mail — but feature-gated the two-layer way so a wasm
 // component can address it by type without pulling `fontdue` into the
@@ -104,42 +102,11 @@ pub mod trampoline;
 // `#[transform]` inventory entry is itself `cfg(not(wasm32))`-gated, so
 // on a wasm-header-only build the fn would be dead. No wasm consumer
 // runs transforms, so gate the whole module rather than carry it dead.
-pub mod escapability;
+// Holds only the generic `mat4_apply`; the space-time reachability
+// certifier transforms + their solver / corridor / counterfactual /
+// traffic / escapability cores moved to `aether-labyrinth` (issue 1908).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transforms;
-// Pure minimum-cost reachability solver core (ADR-0047/0048/0049, issue
-// 1857). Gated to non-wasm like `transforms`: its only callers are the
-// native `#[transform]`s above (and the follow-on field passes that reuse
-// `solve_cost_to_reach`), so on a wasm-header-only build it would be dead.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod reachability;
-// Pure corridor-graph core (ADR-0047/0048/0049, issue 1858): the
-// connectivity skeleton of a solved cost-to-reach field under a budget.
-// Gated to non-wasm like `reachability` — its caller is the native
-// `build_corridor_graph` transform (and the follow-on passes that reuse
-// the per-tick component labeler), so on a wasm-header-only build it would
-// be dead.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod corridor;
-// Pure counterfactual reachability-from-state core (ADR-0047/0048/0049,
-// issue 1864): classifies each budget-crossing in a recorded path as
-// avoidable / unavoidable via a windowed re-solve seeded from the path's
-// actual state. Gated to non-wasm like `reachability` / `corridor` — its
-// caller is the native `solve_counterfactual` transform, so on a
-// wasm-header-only build it would be dead.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod counterfactual;
-// Pure trajectory-density aggregation core (ADR-0047/0048/0049, issue
-// 1865): snaps a set of paths onto the corridor graph and accumulates
-// per-edge traffic. Gated to non-wasm like `corridor` — its caller is the
-// native `aggregate_traffic` transform, so on a wasm-header-only build it
-// would be dead.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod traffic;
-// Baseline-replay validation harness for the reachability solver (issue
-// 1860). Test-only; no production code.
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod reachability_baselines;
 pub mod window;
 
 #[cfg(feature = "audio")]
@@ -206,7 +173,6 @@ pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]
 pub use text::TextCapability;
-pub use trajectory::TrajectoryRecorderCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(not(target_arch = "wasm32"))]
 pub use trampoline::WasmTrampolineConfig;

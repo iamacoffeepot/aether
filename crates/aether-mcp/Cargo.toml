@@ -39,6 +39,12 @@ aether-rpc = { path = "../aether-rpc" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# The space-time reachability subsystem (issue 1908), default features =
+# the pure certifier `#[transform]`s only (no `native`, so no
+# `aether-substrate` / wasmtime / wgpu enters the coordinator's production
+# graph). The dependency edge is what links those transforms into the
+# link-time inventory `describe_transforms` reads.
+aether-labyrinth = { path = "../aether-labyrinth" }
 
 anyhow = { workspace = true }
 axum = "0.8"

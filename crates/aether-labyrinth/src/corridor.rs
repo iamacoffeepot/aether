@@ -607,19 +607,10 @@ pub fn corridor_resolution_depth_core(graph: &CorridorGraph) -> ResolutionDepth 
 #[cfg(test)]
 mod tests {
     use super::build_corridor_graph_core;
-    use aether_kinds::{EdgeKind, ScalarField, StencilOffset};
+    use crate::test_support::{flow_in, flow_out, stencil_4way};
+    use aether_kinds::{EdgeKind, ScalarField};
 
     const UNREACHABLE: u32 = u32::MAX;
-
-    fn stencil_4way() -> Vec<StencilOffset> {
-        vec![
-            StencilOffset { dx: 0, dy: 0 },
-            StencilOffset { dx: 1, dy: 0 },
-            StencilOffset { dx: -1, dy: 0 },
-            StencilOffset { dx: 0, dy: 1 },
-            StencilOffset { dx: 0, dy: -1 },
-        ]
-    }
 
     /// One uniform-cost affordable basin per tick → exactly one node per
     /// tick and a flow edge per tick step.
@@ -772,24 +763,14 @@ mod tests {
         assert_eq!(graph.nodes[2].tick, 1);
         assert_eq!(graph.nodes[3].tick, 2);
 
-        let flow_from = |n: u32| {
-            graph
-                .edges
-                .iter()
-                .filter(|e| e.kind == EdgeKind::Flow && e.from == n)
-                .count()
-        };
-        let flow_to = |n: u32| {
-            graph
-                .edges
-                .iter()
-                .filter(|e| e.kind == EdgeKind::Flow && e.to == n)
-                .count()
-        };
         // The t0 component branches to both t1 components (out-degree 2).
-        assert_eq!(flow_from(0), 2, "branch: out-degree equals branch count");
+        assert_eq!(
+            flow_out(&graph.edges, 0),
+            2,
+            "branch: out-degree equals branch count"
+        );
         // The two t1 components both flow into the single t2 component.
-        assert_eq!(flow_to(3), 2, "join: both branches re-merge");
+        assert_eq!(flow_in(&graph.edges, 3), 2, "join: both branches re-merge");
     }
 
     /// Determinism: the same `V` + budget produces byte-identical output.

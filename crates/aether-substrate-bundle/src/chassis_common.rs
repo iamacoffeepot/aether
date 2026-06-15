@@ -27,10 +27,13 @@ use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
     DagCapability, FsCapability, GeminiCapability, GeminiConfig, HandleCapability, HttpCapability,
     HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, TcpCapability, TextCapability, TrajectoryRecorderCapability, UiCapability,
-    fs::NamespaceRoots, http::HttpConfig, trace::TraceDispatchCapability,
+    LifecycleConfig, TcpCapability, TextCapability, UiCapability, fs::NamespaceRoots,
+    http::HttpConfig, trace::TraceDispatchCapability,
 };
 use aether_kinds::{Present, Render, Shutdown, Tick};
+// The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
+// 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
+use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{KnobKind, KnobRecord, KnownKeys, dump_config, known_keys};

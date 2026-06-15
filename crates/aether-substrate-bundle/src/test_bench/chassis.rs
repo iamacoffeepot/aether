@@ -14,12 +14,15 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability, InputCapability,
     InputConfig, RenderCapability, RenderConfig, RenderHandles, TcpCapability, TextCapability,
-    TrajectoryRecorderCapability, UiCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
+    UiCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_kinds::Tick;
+// The `aether.trajectory` recorder cap moved to `aether-labyrinth` (issue
+// 1908); the mailbox NAMESPACE (and so its hash-derived id) is unchanged.
+use aether_labyrinth::TrajectoryRecorderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{

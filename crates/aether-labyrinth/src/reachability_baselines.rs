@@ -19,19 +19,8 @@
 
 use crate::corridor::build_corridor_graph_core;
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach};
-use aether_kinds::{EdgeKind, ScalarField, StencilOffset};
-
-/// 4-way movement stencil (stay + four orthogonal moves), matching the
-/// convention used by the solver's own unit tests.
-fn stencil_4way() -> Vec<StencilOffset> {
-    vec![
-        StencilOffset { dx: 0, dy: 0 },
-        StencilOffset { dx: 1, dy: 0 },
-        StencilOffset { dx: -1, dy: 0 },
-        StencilOffset { dx: 0, dy: 1 },
-        StencilOffset { dx: 0, dy: -1 },
-    ]
-}
+use crate::test_support::{flow_in, flow_out, stencil_4way};
+use aether_kinds::{EdgeKind, ScalarField};
 
 /// Hand-rolled splitmix64 PRNG (Sebastiano Vigna, 2015). Dependency-
 /// free and integer-exact across platforms, so a given seed always
@@ -707,26 +696,16 @@ fn split_then_merge_corridor_branch_counts() {
         "split-then-merge: one punch at the center-tick ridge"
     );
 
-    let flow_from = |n: u32| {
-        graph
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Flow && e.from == n)
-            .count()
-    };
-    let flow_to = |n: u32| {
-        graph
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Flow && e.to == n)
-            .count()
-    };
     assert_eq!(
-        flow_from(0),
+        flow_out(&graph.edges, 0),
         2,
         "split-then-merge: t0 branches out-degree 2"
     );
-    assert_eq!(flow_to(3), 2, "split-then-merge: t2 joins in-degree 2");
+    assert_eq!(
+        flow_in(&graph.edges, 3),
+        2,
+        "split-then-merge: t2 joins in-degree 2"
+    );
 
     // The punch joins the two center-tick components, priced at the ridge V.
     let punch = graph

@@ -1,0 +1,55 @@
+[package]
+name = "aether-labyrinth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The space-time reachability subsystem (issue 1908), extracted out of
+# `aether-capabilities` so it reads as one coherent unit: the reachability
+# solver core, the corridor-graph + resolution-depth analysis, the
+# counterfactual / traffic / escapability passes, the certifier
+# `#[transform]`s wrapping them, and the `aether.trajectory` recorder cap.
+#
+# The transforms are pure (`aether-data` + `aether-kinds` only), so the
+# default crate is transforms-only and links anywhere that reads the
+# link-time inventory (`aether-mcp`'s `describe_transforms`) without
+# pulling the native runtime. `TrajectoryRecorderCapability` implements
+# `NativeActor` (it needs `aether-substrate`), so it rides behind the
+# `native` feature — the chassis bins enable it; the transform-only
+# consumer skips it. This mirrors how `aether-capabilities` gates its own
+# native caps.
+
+[features]
+# Default-off `native`: the bare crate carries only the pure transforms +
+# their cores, so a consumer that just wants the `#[transform]` inventory
+# (e.g. `aether-mcp`) links them without the substrate stack.
+default = []
+# Pulls the substrate runtime the `aether.trajectory` recorder cap's
+# `NativeActor` impl references. Always on for chassis bins.
+native = ["dep:aether-substrate"]
+
+[dependencies]
+# Always-on: the data layer (the `#[transform]` macro + the `Kind` trait)
+# and the shared kind vocabulary the transforms operate over. `derive`
+# turns on `aether_data::transform` so the dependency edge is explicit
+# rather than relying on workspace feature unification.
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+# The `#[bridge]` / `#[actor]` attribute macros the recorder cap declares
+# with. Target-agnostic; the native impl arm it emits is itself
+# `aether-substrate`-gated, so the bare crate carries only the markers.
+aether-actor = { path = "../aether-actor" }
+
+# Native-only: the substrate runtime the recorder cap's `NativeActor`
+# impl reaches for (`NativeCtx`, `HandleStore`, `BootError`). Gated behind
+# `native` so the transform-only consumer never pulls it.
+aether-substrate = { path = "../aether-substrate", optional = true }
+
+[dev-dependencies]
+# The recorder cap's tests round-trip `TrajectoryLog` / `RecordResult`
+# bytes and enqueue raw dispatches; postcard is the wire codec. Test-only,
+# so it stays out of the production graph.
+postcard = { workspace = true, features = ["alloc"] }
+
+[lints]
+workspace = true
