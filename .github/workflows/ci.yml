@@ -260,9 +260,7 @@ jobs:
           # unnecessary.
           #
           # The fail-threshold lives in qodana.yaml (`failThreshold`),
-          # the single source of truth both this job and
-          # scripts/qodana-local.sh inherit — so the local pre-flight
-          # gate and CI can never disagree. It stays explicit there
+          # the single source of truth this job reads. It stays explicit there
           # (not the action's default, which could shift across version
           # bumps — iamacoffeepot/aether#941), so no --fail-threshold
           # CLI override here, which would shadow the yaml value.

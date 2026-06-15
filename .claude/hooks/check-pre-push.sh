@@ -5,9 +5,9 @@
 # pusher (CLI, IDE, Claude). What this Claude-side hook adds: earlier
 # failure — the check fires before `git push` starts uploading, so a stale
 # tree fails in milliseconds instead of after a slow push + pre-push
-# pre-flight cycle. (Qodana is no longer a separate nudge: it runs inside
-# `scripts/preflight.sh --qodana`, which the implement-agent push path
-# passes; see CLAUDE.md § "Qodana pre-flight".)
+# pre-flight cycle. (Qodana is not a pre-flight step: it is a required CI
+# gate that `/land` resolves from the `qodana-report` artifact; see
+# CLAUDE.md § "Qodana".)
 #
 # Reads the Bash tool-call JSON from stdin (Claude Code PreToolUse hook
 # protocol). Exits 0 to allow, 2 to block (stdout body returns to Claude).
@@ -75,15 +75,9 @@ fi
     echo
     echo "    scripts/preflight.sh"
     echo
-    echo "On the implement-agent push path (about to open a CI-checked PR),"
-    echo "pass --qodana so the pre-flight also runs the same qodana scan CI"
-    echo "gates on:"
-    echo
-    echo "    scripts/preflight.sh --qodana"
-    echo
     echo "Once preflight.sh exits 0 the stamp updates and the push proceeds."
-    echo "To bypass deliberately (e.g. emergency docs push, or a known"
-    echo "Qodana-for-Rust EAP tooling flake), re-run the push with --no-verify."
+    echo "To bypass deliberately (e.g. an emergency docs push), re-run the"
+    echo "push with --no-verify."
 } >&2
 
 exit 2
