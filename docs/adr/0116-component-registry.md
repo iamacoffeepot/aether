@@ -22,7 +22,7 @@ Extend the ADR-0115 content-addressed store to hold component wasm, and give `lo
 
 **Upload.** Same rule as ADR-0115: upload takes a **staged path, never inline bytes** — a `.wasm` is read host-side and stored content-addressed, identical uploads dedup, and an optional name is a mutable pointer to the resulting hash.
 
-**Selection.** `load_component` and boot-manifest component entries accept a selector — `name | name@version | hash`, plus an **attribute query** over the component's self-reported manifest, resolving to a hash. The query axes follow what a component *is*:
+**Selection.** `load_component` and boot-manifest component entries take a selector — `name | name@version | hash`, plus an **attribute query** over the component's self-reported manifest, resolving to a hash. **The host wasm path is retired from `load_component` entirely, not kept as an escape hatch** — an available path is one an agent reaches for by default, and on a procedure this common that quietly becomes the norm and re-creates the exact coupling the registry removes. A component is loaded only from the registry; the sole path anywhere is the upload input. The query axes follow what a component *is*:
 
 - by **namespace** / **exported actor** — `module@actor` selects a specific actor from a multi-actor module, mirroring the ADR-0096 export selector.
 - by **handled kind** — "a component that handles `Tick`," "one that sends to `aether.render`," read from the `aether.kinds` inputs section.
@@ -60,6 +60,6 @@ Extend the ADR-0115 content-addressed store to hold component wasm, and give `lo
 
 ## Alternatives considered
 
-- **Keep `load_component` path-only:** the same coupling and reproducibility gap as the substrate binary path; rejected for the reasons ADR-0115 already gives.
+- **Keep `load_component` accepting a host path** (whether path-only, or a path alongside the selector as an escape hatch): rejected — the same coupling and reproducibility gap as the substrate binary path, and a path that exists is one agents default to, re-creating the friction on one of the most common procedures there is. The registry is the only way to load a component; the path survives solely as the upload input.
 - **A separate component-only store, distinct from the binary store:** rejected — ADR-0115's store is artifact-generic precisely so one store with type-tagged manifests serves both. Two stores duplicate addressing, the disk budget, and eviction.
 - **Require a `--describe` step for components:** unnecessary — a component already embeds its manifest in the `aether.kinds` section and export table, so the registry reads it directly rather than running the component to ask.
