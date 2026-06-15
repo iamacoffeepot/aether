@@ -4180,6 +4180,110 @@ mod control_plane {
     pub struct CrossingClassification {
         pub crossings: Vec<CrossingVerdict>,
     }
+
+    /// A self-realizing field simulation (issue 1867): an agent whose own
+    /// motion through a field *spawns* the contributions it must then avoid.
+    /// Per run, a closed feedback loop — realize the field, plan against it,
+    /// step, snapshot a contribution onto the recent position, advance —
+    /// produces a path-dependent realized field that is distinct per seed,
+    /// deterministic given (seed + policy + field). Studied as a
+    /// distribution over many seeded runs (see [`ClosureDistribution`]), not
+    /// a single solve. The whole simulation is a pure function of its inputs
+    /// (seed + field in), so it content-addresses as a `#[transform]` with no
+    /// executor change (ADR-0048 §4/§130).
+    ///
+    /// `problem` carries the shared reachability bundle (the base space-time
+    /// cost field, the one-tick [`MovementStencil`], and the start seed) —
+    /// embedding [`ReachabilityProblem`] keeps the per-tick planner
+    /// *literally* #1857's `solve_cost_to_reach` over the realized field, so
+    /// the path-dependence is structural rather than a bespoke trap
+    /// heuristic. `problem.start` doubles as the **start region**: the cells
+    /// with a finite seed value are the spawn cells, and each run inherits
+    /// its sampled cell's seed as its initial accumulated cost. `goal` is the
+    /// goal region as flat row-major cell indices (`y * width + x`); a run
+    /// **finishes** the moment it lands on a goal cell with accumulated cost
+    /// `< budget` before the final tick.
+    ///
+    /// The **contribution model** is #1866's snapshot-placement-plus-lead.
+    /// Every `placement_period` ticks the run snapshots its current cell and
+    /// enqueues a contribution that takes effect `lead_ticks` (`L`) later. An
+    /// *active* contribution committed at trigger tick `t_c` (with
+    /// `t - t_c >= L`) adds `contribution_cost` to every base-field cell
+    /// within radius `cover(age) = covered_extent_initial +
+    /// covered_growth_per_tick * (t - t_c)` of its snapshot center
+    /// (saturating at the `u32::MAX` sentinel). At most `max_concurrent`
+    /// contributions are held active at once (oldest expires). The realized
+    /// field at tick `t` is the base field plus the sum of every active
+    /// contribution at its current age — the load-bearing path-dependent
+    /// quantity, since which cells are covered is a function of where the run
+    /// stepped at every earlier placement tick.
+    ///
+    /// `window` is the planning-window depth `W` (how far forward the planner
+    /// sees each tick); `runs` is the number of seeded runs in the
+    /// distribution; `seed` keys the deterministic PRNG that samples each
+    /// run's start cell and breaks equal-cost stencil ties. Where the per-
+    /// contribution escapability bound (#1866) certifies a single snapshot in
+    /// O(1) but leaves `N > max_concurrent` *uncertified*, this simulator is
+    /// the empirical complement: it realizes the aggregate trail along the
+    /// real path and detects the multi-window closure the single-instant
+    /// `cover(L)` measure cannot see.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
+    )]
+    #[kind(name = "aether.reach.realization_problem")]
+    pub struct RealizationProblem {
+        pub problem: ReachabilityProblem,
+        pub goal: Vec<u32>,
+        pub budget: u32,
+        pub placement_period: u32,
+        pub lead_ticks: u32,
+        pub covered_extent_initial: f32,
+        pub covered_growth_per_tick: f32,
+        pub contribution_cost: u32,
+        pub max_concurrent: u32,
+        pub window: u32,
+        pub runs: u32,
+        pub seed: u64,
+    }
+
+    /// One run's outcome in a [`ClosureDistribution`] (issue 1867). Not a
+    /// kind on its own — only addressable inside
+    /// `ClosureDistribution.samples`. `run` is the run index. `finished` is
+    /// `true` iff the agent reached a goal cell under budget before the final
+    /// tick. `closure_tick` is the first tick at which the realized field
+    /// **closed around the agent** — no stencil neighbor of the current cell
+    /// is both un-blocked and keeps accumulated cost `< budget`, the
+    /// window-independent signal that the run's own trail has covered every
+    /// feasible next cell. `closure_tick` is `u32::MAX` when the run never
+    /// closed (it exhausted ticks without the field closing), separating
+    /// self-accumulated closure — the headline failure — from plain
+    /// budget/time exhaustion. Integer-exact, so a run replays byte-stable.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RunOutcome {
+        pub run: u32,
+        pub finished: bool,
+        pub closure_tick: u32,
+    }
+
+    /// The output of the self-realizing field simulation (issue 1867): the
+    /// distribution of closure outcomes over a seeded set of runs. `runs` is
+    /// the shared run count; `closed` is how many runs the realized field
+    /// closed around (the headline failure rate is `closed / runs`);
+    /// `samples` carries one [`RunOutcome`] per run, in run-index order. The
+    /// distribution of `closure_tick` over the samples shows *when* the
+    /// multi-window closure happens. Counts-only and integer-exact — every
+    /// run's realized field is recoverable by replaying its seed through the
+    /// companion `realize_single` transform, so the headline output stays
+    /// tiny and byte-stable for content-addressing replay.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.closure_distribution")]
+    pub struct ClosureDistribution {
+        pub runs: u32,
+        pub closed: u32,
+        pub samples: Vec<RunOutcome>,
+    }
 }
 
 mod trajectory {
@@ -4521,6 +4625,11 @@ mod tests {
             CrossingClassification::NAME,
             "aether.reach.crossing_classification"
         );
+        assert_eq!(RealizationProblem::NAME, "aether.reach.realization_problem");
+        assert_eq!(
+            ClosureDistribution::NAME,
+            "aether.reach.closure_distribution"
+        );
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
@@ -4849,6 +4958,70 @@ mod tests {
             let back: CrossingClassification = postcard::from_bytes(&bytes)
                 .expect("test setup: postcard decodes CrossingClassification");
             assert_eq!(back, cls);
+        }
+
+        #[test]
+        fn realization_kinds_resolve_distinctly_from_reach_kinds() {
+            use aether_data::Kind;
+            // The two realization kinds carry ids distinct from each other
+            // and from the #1857 / #1863 reachability kinds they build on — a
+            // shared id would collide in the transform Ref-slot resolver.
+            let ids = [
+                RealizationProblem::ID,
+                ClosureDistribution::ID,
+                ScalarField::ID,
+                ReachabilityProblem::ID,
+                PopulationSweepProblem::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "realization kind ids must be distinct");
+                }
+            }
+        }
+
+        #[test]
+        fn realization_problem_schema_embeds_reachability_problem() {
+            let SchemaType::Struct { fields, .. } = &<RealizationProblem as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 12);
+            assert_eq!(fields[0].name, "problem");
+            assert!(matches!(fields[0].ty, SchemaType::Struct { .. }));
+            assert_eq!(fields[1].name, "goal");
+            assert!(matches!(fields[1].ty, SchemaType::Vec(_)));
+            assert_eq!(fields[2].name, "budget");
+            assert_eq!(fields[2].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[5].name, "covered_extent_initial");
+            assert_eq!(fields[5].ty, SchemaType::Scalar(Primitive::F32));
+            assert_eq!(fields[6].name, "covered_growth_per_tick");
+            assert_eq!(fields[6].ty, SchemaType::Scalar(Primitive::F32));
+            assert_eq!(fields[11].name, "seed");
+            assert_eq!(fields[11].ty, SchemaType::Scalar(Primitive::U64));
+        }
+
+        #[test]
+        fn closure_distribution_schema_is_struct_of_samples() {
+            let SchemaType::Struct { fields, .. } = &<ClosureDistribution as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 3);
+            assert_eq!(fields[0].name, "runs");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[1].name, "closed");
+            assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[2].name, "samples");
+            let SchemaType::Vec(element) = &fields[2].ty else {
+                panic!("expected Vec");
+            };
+            let SchemaType::Struct { fields: sample, .. } = &**element else {
+                panic!("expected nested RunOutcome struct");
+            };
+            assert_eq!(sample.len(), 3);
+            assert_eq!(sample[0].name, "run");
+            assert_eq!(sample[1].name, "finished");
+            assert_eq!(sample[1].ty, SchemaType::Bool);
+            assert_eq!(sample[2].name, "closure_tick");
         }
     }
 
