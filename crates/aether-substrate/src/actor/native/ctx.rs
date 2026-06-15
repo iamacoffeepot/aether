@@ -1127,11 +1127,10 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
     }
 }
 
-// ADR-0112: the reply surface is per-mode. `Manual` carries it
-// permanently (a manual-class handler issues its own replies); `Single`
-// carries the identical body **transitionally** so the existing native
-// handler / fallback bodies that hand-call `ctx.reply` keep compiling —
-// that impl is dropped when `single` is locked (a separate follow-on).
+// ADR-0112: the reply surface is per-mode. `Manual` carries it (a
+// manual-class handler issues its own replies); `Single` deliberately
+// does not, so a `-> ()` single handler is provably silent and a stray
+// single-ctx `ctx.reply` is a compile error rather than a manifest lie.
 impl OutboundReply for NativeCtx<'_, Manual> {
     type ReplyHandle = Source;
 
@@ -1157,40 +1156,6 @@ impl OutboundReply for NativeCtx<'_, Manual> {
         // ADR-0080 §5/§6 (#1695): a synchronous reply joins the handler's
         // causal chain — inherit this ctx's `root` + `parent` so the
         // reply's `Sent` lands in the caller's chain.
-        self.binding.send_reply_for_handler(
-            self.source,
-            payload,
-            self.in_flight_root,
-            self.outbound_parent(),
-        );
-    }
-
-    fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
-        self.binding.send_reply_for_handler(
-            sender,
-            payload,
-            self.in_flight_root,
-            self.outbound_parent(),
-        );
-    }
-}
-
-// TRANSITIONAL (ADR-0112): dropped when single is locked.
-impl OutboundReply for NativeCtx<'_, Single> {
-    type ReplyHandle = Source;
-
-    fn reply_target(&self) -> Option<Source> {
-        Some(self.source)
-    }
-
-    fn source_mailbox(&self) -> Option<MailboxId> {
-        match self.source.addr {
-            SourceAddr::Component(id) => Some(id),
-            _ => None,
-        }
-    }
-
-    fn reply<K: Kind>(&mut self, payload: &K) {
         self.binding.send_reply_for_handler(
             self.source,
             payload,
@@ -1362,13 +1327,13 @@ mod tests {
         );
     }
 
-    /// ADR-0112 step 3: `OutboundReply` is reachable from both the
-    /// permanent `Manual` ctx and the transitional `Single` ctx (the
-    /// latter keeps the existing hand-`ctx.reply` native bodies compiling).
+    /// ADR-0112: `OutboundReply` is reachable from the `Manual` ctx
+    /// only. The single-locked ctx carries no reply surface, so a `-> ()`
+    /// single handler is provably silent (a stray single-ctx `ctx.reply`
+    /// is a compile error, not a manifest lie).
     #[test]
-    fn outbound_reply_present_on_single_and_manual() {
+    fn outbound_reply_present_on_manual() {
         fn assert_impls<C: OutboundReply>() {}
-        assert_impls::<NativeCtx<'static, Single>>();
         assert_impls::<NativeCtx<'static, Manual>>();
     }
 
@@ -1486,7 +1451,7 @@ mod tests {
     /// called; the compile is the assertion. If a reply bound regains a
     /// `serde::Serialize` half, this stops compiling.
     #[allow(dead_code)]
-    fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_>, sender: Source) {
+    fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_, Manual>, sender: Source) {
         OutboundReply::reply(ctx, &CastOnly { code: 2 });
         OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });
         ctx.reply_to_target(sender, &CastOnly { code: 4 }, MailId::NONE, None);

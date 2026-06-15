@@ -366,11 +366,10 @@ impl<M: ReplyMode> MailSender for FfiCtx<'_, M> {
     }
 }
 
-// ADR-0112: the reply surface is per-mode. `Manual` carries it
-// permanently (a manual-class handler issues its own replies); `Single`
-// carries the identical body **transitionally** so the ~350 existing
-// `#[handler]` bodies that hand-call `ctx.reply` keep compiling — that
-// impl is dropped when `single` is locked (a separate follow-on issue).
+// ADR-0112: the reply surface is per-mode. `Manual` carries it (a
+// manual-class handler issues its own replies); `Single` deliberately
+// does not, so a `-> ()` single handler is provably silent and a stray
+// single-ctx `ctx.reply` is a compile error rather than a manifest lie.
 impl OutboundReply for FfiCtx<'_, Manual> {
     type ReplyHandle = ReplyHandle;
 
@@ -382,33 +381,6 @@ impl OutboundReply for FfiCtx<'_, Manual> {
         None
     }
 
-    //noinspection DuplicatedCode
-    fn reply<K: Kind>(&mut self, payload: &K) {
-        if let Some(raw) = self.sender {
-            let bytes = payload.encode_into_bytes();
-            MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
-        }
-    }
-
-    fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
-    }
-}
-
-// TRANSITIONAL (ADR-0112): dropped when single is locked.
-impl OutboundReply for FfiCtx<'_, Single> {
-    type ReplyHandle = ReplyHandle;
-
-    fn reply_target(&self) -> Option<ReplyHandle> {
-        self.sender.map(ReplyHandle::__from_raw)
-    }
-
-    fn source_mailbox(&self) -> Option<MailboxId> {
-        None
-    }
-
-    //noinspection DuplicatedCode
     fn reply<K: Kind>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
@@ -559,13 +531,13 @@ mod tests {
         );
     }
 
-    /// ADR-0112 step 3: `OutboundReply` is reachable from both the
-    /// permanent `Manual` ctx and the transitional `Single` ctx (the
-    /// latter keeps the existing hand-`ctx.reply` handlers compiling).
+    /// ADR-0112: `OutboundReply` is reachable from the `Manual` ctx
+    /// only. The single-locked ctx carries no reply surface, so a `-> ()`
+    /// single handler is provably silent (a stray single-ctx `ctx.reply`
+    /// is a compile error, not a manifest lie).
     #[test]
-    fn outbound_reply_present_on_single_and_manual() {
+    fn outbound_reply_present_on_manual() {
         fn assert_impls<C: OutboundReply>() {}
-        assert_impls::<FfiCtx<'static, Single>>();
         assert_impls::<FfiCtx<'static, Manual>>();
     }
 }

@@ -25,7 +25,9 @@
 //!
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, OutboundReply, Resolver, actor};
+use aether_actor::{
+    BootError, FfiActor, FfiCtx, MailSender, Manual, OutboundReply, Resolver, actor,
+};
 use aether_camera::{CameraTopdownSet, TopdownParams};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -210,14 +212,14 @@ impl FfiActor for Sokoban {
         }
     }
 
-    #[handler]
-    fn on_reset(&mut self, ctx: &mut FfiCtx<'_>, _rst: SokobanReset) {
+    #[handler::manual]
+    fn on_reset(&mut self, ctx: &mut FfiCtx<'_, Manual>, _rst: SokobanReset) {
         self.load_level(self.state.level_id);
         self.reply_state(ctx);
     }
 
-    #[handler]
-    fn on_load_level(&mut self, ctx: &mut FfiCtx<'_>, load: SokobanLoadLevel) {
+    #[handler::manual]
+    fn on_load_level(&mut self, ctx: &mut FfiCtx<'_, Manual>, load: SokobanLoadLevel) {
         self.load_level(load.id);
         self.reply_state(ctx);
     }
@@ -384,7 +386,7 @@ impl Sokoban {
         ctx.actor::<RenderCapability>().send(&body);
     }
 
-    fn reply_state(&self, ctx: &mut FfiCtx<'_>) {
+    fn reply_state(&self, ctx: &mut FfiCtx<'_, Manual>) {
         ctx.reply(&self.state);
     }
 

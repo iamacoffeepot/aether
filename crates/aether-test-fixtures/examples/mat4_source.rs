@@ -20,7 +20,7 @@
 // even though this source is stateless.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_kinds::Mat4Apply;
 use aether_math::{Mat4, Vec4};
 use aether_test_fixtures::Mat4SourceTrigger;
@@ -48,8 +48,8 @@ impl FfiActor for MatSource {
     /// dispatches `aether.test_fixtures.mat4_source_trigger` and the
     /// reply (`aether.math.mat4_apply`) is the transform input.
     #[handler]
-    fn on_trigger(&mut self, ctx: &mut FfiCtx<'_>, _trigger: Mat4SourceTrigger) {
-        ctx.reply(&Mat4Apply {
+    fn on_trigger(&mut self, _ctx: &mut FfiCtx<'_>, _trigger: Mat4SourceTrigger) -> Mat4Apply {
+        Mat4Apply {
             matrix: Mat4::from_cols_array([
                 2.0, 0.0, 0.0, 0.0, //
                 0.0, 3.0, 0.0, 0.0, //
@@ -57,7 +57,7 @@ impl FfiActor for MatSource {
                 5.0, 6.0, 7.0, 1.0, //
             ]),
             vector: Vec4::new(1.0, 1.0, 1.0, 1.0),
-        });
+        }
     }
 }
 

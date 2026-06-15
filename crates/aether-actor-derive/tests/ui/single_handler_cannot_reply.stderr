@@ -1,0 +1,11 @@
+error[E0599]: no method named `reply` found for mutable reference `&mut FfiCtx<'_>` in the current scope
+  --> tests/ui/single_handler_cannot_reply.rs:55:13
+   |
+55 |         ctx.reply(&Ack { seq: ping.seq });
+   |             ^^^^^
+   |
+help: there is a method `reply_kind` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/aether-actor/src/ffi/ctx.rs
+   |
+   |     pub fn reply_kind<K: Kind>(&self, sender: ReplyHandle, kind: KindId<K>, payload: &K) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

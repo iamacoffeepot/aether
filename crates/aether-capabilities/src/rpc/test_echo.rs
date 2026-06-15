@@ -56,7 +56,7 @@ pub struct TestEchoReply {
 #[aether_actor::bridge(singleton)]
 mod test_echo_actor {
     use super::{TestEchoReply, TestEchoRequest};
-    use aether_actor::{actor, actor::ctx::OutboundReply};
+    use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
@@ -76,8 +76,8 @@ mod test_echo_actor {
         // doesn't touch component state.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) {
-            ctx.reply(&TestEchoReply { value: mail.value });
+        fn on_echo(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) -> TestEchoReply {
+            TestEchoReply { value: mail.value }
         }
     }
 }

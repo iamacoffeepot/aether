@@ -147,7 +147,7 @@ pub struct TestCallConfig {
 #[aether_actor::bridge(singleton)]
 mod test_source {
     use super::{TestReadResult, TestSourceRequest};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
@@ -164,15 +164,18 @@ mod test_source {
 
         #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
         #[handler]
-        fn on_source(&mut self, ctx: &mut NativeCtx<'_>, mail: TestSourceRequest) {
-            let reply = if mail.fail {
+        fn on_source(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: TestSourceRequest,
+        ) -> TestReadResult {
+            if mail.fail {
                 TestReadResult::Err {
                     message: format!("source {} failed", mail.value),
                 }
             } else {
                 TestReadResult::Ok { value: mail.value }
-            };
-            ctx.reply(&reply);
+            }
         }
     }
 }
@@ -282,7 +285,7 @@ mod test_bundle_observer {
 #[aether_actor::bridge(singleton)]
 mod test_call {
     use super::{TestCallConfig, TestCallReply, TestCallRequest};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::{Manual, OutboundReply, actor};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::runtime::trace::SettlementHold;
@@ -317,8 +320,8 @@ mod test_call {
         }
 
         #[allow(clippy::needless_pass_by_value)]
-        #[handler]
-        fn on_call(&mut self, ctx: &mut NativeCtx<'_>, mail: TestCallRequest) {
+        #[handler::manual]
+        fn on_call(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: TestCallRequest) {
             let _ = &mail.input;
             if self.config.never {
                 // Acquire a hold on the call's chain root and never
@@ -522,7 +525,7 @@ fn big_output(x: TestNumber) -> TestBytes {
 #[aether_actor::bridge(singleton)]
 mod test_number_source {
     use super::{TestNumber, TestNumberRequest};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
@@ -541,11 +544,11 @@ mod test_number_source {
 
         #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
         #[handler]
-        fn on_request(&mut self, ctx: &mut NativeCtx<'_>, mail: TestNumberRequest) {
-            ctx.reply(&TestNumber {
+        fn on_request(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestNumberRequest) -> TestNumber {
+            TestNumber {
                 value: mail.value,
                 tag: 0,
-            });
+            }
         }
     }
 }

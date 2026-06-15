@@ -12,7 +12,7 @@
 // fine but must keep the signature.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
@@ -44,8 +44,8 @@ impl FfiActor for Echoer {
     }
 
     #[handler]
-    fn on_request(&mut self, ctx: &mut FfiCtx<'_>, req: Request) {
-        ctx.reply(&Response { seq: req.seq });
+    fn on_request(&mut self, _ctx: &mut FfiCtx<'_>, req: Request) -> Response {
+        Response { seq: req.seq }
     }
 }
 

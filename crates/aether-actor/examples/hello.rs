@@ -21,7 +21,7 @@
 // fine but must keep the signature.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
@@ -102,8 +102,8 @@ impl FfiActor for Hello {
     /// The seq echo lets you pair requests and replies when multiple
     /// are in flight.
     #[handler]
-    fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, ping: Ping) {
-        ctx.reply(&Pong { seq: ping.seq });
+    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, ping: Ping) -> Pong {
+        Pong { seq: ping.seq }
     }
 }
 

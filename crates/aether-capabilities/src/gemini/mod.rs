@@ -425,7 +425,7 @@ mod native {
     use crate::contentgen::staging::{gen_root, stage_gen_output};
     use crate::contentgen::task_queue::TaskQueue;
     use crate::fs::{FileAdapter, LocalFileAdapter};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::{Manual, OutboundReply, actor};
     use aether_kinds::{GeminiError, GroundingMetadata, Usage};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
@@ -613,8 +613,12 @@ mod native {
         /// per-model `aspect_ratio` / `image_size` / reference-count
         /// rules synchronously (the matching `…NotSupportedByModel` /
         /// `UnknownModel` error on a miss) before any dispatch.
-        #[handler]
-        fn on_nanobanana_generate(&mut self, ctx: &mut NativeCtx<'_>, mail: NanobananaGenerate) {
+        #[handler::manual]
+        fn on_nanobanana_generate(
+            &mut self,
+            ctx: &mut NativeCtx<'_, Manual>,
+            mail: NanobananaGenerate,
+        ) {
             let request_id = mail.request_id;
             // Opt-in / default-off; cross-model, so never validated.
             let include_sig = mail.include_thought_signature.unwrap_or(false);
@@ -686,8 +690,8 @@ mod native {
         /// `save://gen/<uuid>.wav` path per clip. Rejects an unknown
         /// model and a both-set `seed` + `sample_count` synchronously
         /// before any dispatch.
-        #[handler]
-        fn on_lyria_generate(&mut self, ctx: &mut NativeCtx<'_>, mail: LyriaGenerate) {
+        #[handler::manual]
+        fn on_lyria_generate(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LyriaGenerate) {
             let request_id = mail.request_id;
             if !lyria::is_supported(&mail.model) {
                 OutboundReply::reply(
@@ -842,7 +846,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -893,7 +897,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -937,7 +941,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -986,7 +990,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -1034,7 +1038,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -1262,7 +1266,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,

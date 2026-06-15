@@ -32,7 +32,9 @@
 //! 4. Every `aether.lifecycle.render` stage re-emits the cached
 //!    triangles to `"aether.render"`.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyHandle, Resolver, actor};
+use aether_actor::{
+    BootError, FfiActor, FfiCtx, Manual, OutboundReply, ReplyHandle, Resolver, actor,
+};
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
@@ -177,8 +179,8 @@ impl FfiActor for MeshViewer {
     ///
     /// # Agent
     /// Substrate-driven; do not send manually.
-    #[handler]
-    fn on_read_result(&mut self, ctx: &mut FfiCtx<'_>, r: ReadResult) {
+    #[handler::manual]
+    fn on_read_result(&mut self, ctx: &mut FfiCtx<'_, Manual>, r: ReadResult) {
         let (namespace, path, outcome) = match r {
             ReadResult::Ok {
                 namespace,
@@ -270,7 +272,7 @@ impl MeshViewer {
     /// so a stale target can't leak into a later load's reply.
     fn reply_load_result(
         &mut self,
-        ctx: &mut FfiCtx<'_>,
+        ctx: &mut FfiCtx<'_, Manual>,
         namespace: String,
         path: String,
         outcome: LoadOutcome,

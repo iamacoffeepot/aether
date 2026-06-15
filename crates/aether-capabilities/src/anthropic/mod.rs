@@ -259,7 +259,7 @@ mod native {
     };
     use crate::contentgen::adapter::{AdapterUsage, AnthropicResponse};
     use crate::contentgen::task_queue::TaskQueue;
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::{Manual, OutboundReply, actor};
     use aether_kinds::{AnthropicError, Message, Role, Usage};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
@@ -353,7 +353,7 @@ mod native {
         /// path always passes through.
         fn gate_model(
             &self,
-            ctx: &mut NativeCtx<'_>,
+            ctx: &mut NativeCtx<'_, Manual>,
             path: SendPath,
             request_id: u64,
             model: &str,
@@ -374,7 +374,7 @@ mod native {
         /// Reply an `Err` synchronously (model validation failure)
         /// before any dispatch.
         fn reply_err(
-            ctx: &mut NativeCtx<'_>,
+            ctx: &mut NativeCtx<'_, Manual>,
             path: SendPath,
             request_id: u64,
             error: AnthropicError,
@@ -458,8 +458,8 @@ mod native {
         /// supported table synchronously (`UnknownModel` on a miss),
         /// then dispatches the blocking HTTPS call on an ephemeral
         /// thread; the reply lands when the call returns.
-        #[handler]
-        fn on_messages_send(&mut self, ctx: &mut NativeCtx<'_>, mail: MessagesSend) {
+        #[handler::manual]
+        fn on_messages_send(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: MessagesSend) {
             let request_id = mail.request_id;
             if !self.gate_model(ctx, SendPath::Messages, request_id, &mail.model) {
                 return;
@@ -489,8 +489,8 @@ mod native {
         /// flag, so setting either replies `Err { ParamNotSupported }`
         /// synchronously (no dispatch) rather than silently dropping it —
         /// route sampling knobs through `aether.anthropic.messages.send`.
-        #[handler]
-        fn on_cli_send(&mut self, ctx: &mut NativeCtx<'_>, mail: CliSend) {
+        #[handler::manual]
+        fn on_cli_send(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: CliSend) {
             // The `claude` CLI has no flag for either knob; reject when
             // set instead of silently dropping (the outcome to avoid —
             // `feedback_explicit_nulls_over_absent_fields`).
@@ -645,7 +645,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -691,7 +691,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -741,7 +741,7 @@ mod native {
                 4,
             );
             let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), cap_mailbox));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -852,7 +852,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
@@ -895,7 +895,7 @@ mod native {
                 Arc::clone(&mailer),
                 cap_mailbox,
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 session_sender(),
                 aether_data::MailId::NONE,
