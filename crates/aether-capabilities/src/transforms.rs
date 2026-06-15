@@ -8,9 +8,13 @@
 //! like the DAG executor's `double` / `seed` fixtures.
 
 use aether_data::transform;
-use aether_kinds::{BudgetQuery, Mat4Apply, ReachabilityMargin, ReachabilityProblem, ScalarField};
+use aether_kinds::{
+    BudgetQuery, CorridorGraph, Mat4Apply, MovementStencil, ReachabilityMargin,
+    ReachabilityProblem, ScalarField,
+};
 use aether_math::Vec4;
 
+use crate::corridor::build_corridor_graph_core;
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach};
 
 /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
@@ -100,6 +104,33 @@ fn reachability_margin(field: ScalarField, query: BudgetQuery) -> ReachabilityMa
         min_cost,
         margin,
     }
+}
+
+/// Build the time-sliced corridor graph of a solved cost-to-reach field
+/// `V` under a budget (ADR-0047/0048/0049, issue 1858). A multi-input
+/// transform: `V` (the `solve` output), the movement stencil shared with
+/// the solver, and the budget query whose `budget` is the affordability
+/// threshold `B`. The output is the connectivity skeleton of `V` — per
+/// tick the connected components of `{cell : V <= B}`, the inter-tick flow
+/// edges, and the intra-tick punch edges priced at the sublevel-filtration
+/// threshold of `V` that fuses them — a flat DAG orders of magnitude
+/// smaller than `V`.
+///
+/// The body delegates to the pure [`build_corridor_graph_core`] (the
+/// reusable internal API the path-snap / validation passes call directly);
+/// the transform fn only unbundles the operands, so it clears the
+/// `#[transform]` purity deny-list.
+// The `#[transform]` ABI hands the body owned kinds decoded from wire
+// bytes; the core borrows them, so the owned `field` / `stencil` params
+// are intentionally passed by reference rather than consumed.
+#[allow(clippy::needless_pass_by_value)]
+#[transform]
+fn build_corridor_graph(
+    field: ScalarField,
+    stencil: MovementStencil,
+    query: BudgetQuery,
+) -> CorridorGraph {
+    build_corridor_graph_core(&field, &stencil.offsets, query.budget)
 }
 
 #[cfg(test)]
@@ -356,5 +387,71 @@ mod reachability_transform_tests {
 
         let back = ScalarField::decode_from_bytes(&bytes).expect("canonical field round-trips");
         assert_eq!(field, back);
+    }
+}
+
+#[cfg(test)]
+mod corridor_transform_tests {
+    use super::build_corridor_graph;
+    use aether_data::{Kind, transforms};
+    use aether_kinds::{
+        BudgetQuery, CorridorGraph, EdgeKind, MovementStencil, ScalarField, StencilOffset,
+    };
+
+    fn stencil_4way() -> MovementStencil {
+        MovementStencil {
+            offsets: vec![
+                StencilOffset { dx: 0, dy: 0 },
+                StencilOffset { dx: 1, dy: 0 },
+                StencilOffset { dx: -1, dy: 0 },
+                StencilOffset { dx: 0, dy: 1 },
+                StencilOffset { dx: 0, dy: -1 },
+            ],
+        }
+    }
+
+    /// 5×1 field with a sub-budget ridge at cell 2, driven through the
+    /// transform: two components and a punch priced at the ridge `V`.
+    fn ridge_field() -> ScalarField {
+        ScalarField {
+            width: 5,
+            height: 1,
+            ticks: 1,
+            values: vec![1, 1, 7, 1, 1],
+        }
+    }
+
+    #[test]
+    fn transform_produces_components_and_a_punch() {
+        let graph = build_corridor_graph(ridge_field(), stencil_4way(), BudgetQuery { budget: 5 });
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].kind, EdgeKind::Punch);
+        assert_eq!(graph.edges[0].price, 7);
+    }
+
+    #[test]
+    fn registered_in_link_time_inventory() {
+        // A three-input transform: `(ScalarField, MovementStencil,
+        // BudgetQuery)` in slot order, `CorridorGraph` out — the same
+        // inventory contract `solve` / `reachability_margin` satisfy.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::build_corridor_graph"))
+            .expect("build_corridor_graph not registered in link-time inventory");
+        assert_eq!(
+            entry.input_kind_ids,
+            [ScalarField::ID, MovementStencil::ID, BudgetQuery::ID]
+        );
+        assert_eq!(entry.output_kind_id, CorridorGraph::ID);
+    }
+
+    #[test]
+    fn build_is_deterministic_and_content_addressable() {
+        // Same input bytes -> identical output bytes: the content-addressing
+        // contract the DAG executor keys transform results on.
+        let a = build_corridor_graph(ridge_field(), stencil_4way(), BudgetQuery { budget: 5 });
+        let b = build_corridor_graph(ridge_field(), stencil_4way(), BudgetQuery { budget: 5 });
+        assert_eq!(a, b);
+        assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
     }
 }

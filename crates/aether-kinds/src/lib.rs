@@ -3844,6 +3844,94 @@ mod control_plane {
         pub min_cost: u32,
         pub margin: i64,
     }
+
+    // ADR-0047/0048/0049 corridor-graph vocabulary (issue 1858). The
+    // time-sliced connectivity skeleton of a solved cost-to-reach field
+    // `V` (a [`ScalarField`]) under a budget `B`: per tick, the connected
+    // components of the affordable set `{cell : V(cell, tick) <= B}` (the
+    // nodes), the intra-tick "punch" edges a sub-budget barrier separates
+    // (priced at the sublevel-filtration threshold of `V` at which raising
+    // `B` would merge them), and the inter-tick "flow" edges between
+    // components an affordable one-tick stencil step links. A flat,
+    // postcard-friendly DAG built by the `build_corridor_graph` transform
+    // in `aether-capabilities`: nodes carry summaries, not cell sets, so
+    // the graph stays orders of magnitude smaller than `V`, and components
+    // are re-derivable from `V` + `B` + the [`MovementStencil`] (all
+    // content-addressed) rather than stored as per-tick label images.
+    // `Vec`-bearing like [`crate::DrawTexturedQuads`].
+
+    /// One node in a [`CorridorGraph`] — a single connected component of
+    /// the affordable set `{cell : V(cell, tick) <= budget}` at one tick.
+    /// A summary, not a cell set. `tick` is the time layer (the row-major
+    /// `(tick, y, x)` slice convention is [`ScalarField`]'s); `component`
+    /// is the component's per-tick id, assigned in row-major
+    /// first-encounter order over the tick's affordable cells, so two
+    /// builds of the same `V` + budget label identically; `cell_count` is
+    /// the number of affordable cells the component covers; `min_cost` is
+    /// the minimum cost-to-reach (`V`) over those cells. A node is
+    /// referenced from a [`CorridorEdge`] by its index into
+    /// [`CorridorGraph::nodes`], which is ordered by `(tick, component)`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CorridorNode {
+        pub tick: u32,
+        pub component: u32,
+        pub cell_count: u32,
+        pub min_cost: u32,
+    }
+
+    /// Whether a [`CorridorEdge`] joins two components already connected
+    /// under the budget (`Flow`) or a pair a sub-budget barrier currently
+    /// separates (`Punch`). `Flow` edges are inter-tick (a component at
+    /// tick `t` to one at `t + 1`); `Punch` edges are intra-tick (two
+    /// components at the same tick that the sublevel filtration of `V`
+    /// would merge above the budget). Kept as two distinct kinds, plus the
+    /// edge's `price`, so "connected now" never collapses into "connected
+    /// at higher budget."
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EdgeKind {
+        Flow,
+        Punch,
+    }
+
+    /// One directed edge in a [`CorridorGraph`]. `from` and `to` index
+    /// into [`CorridorGraph::nodes`]; the graph is a time-layered DAG, so
+    /// a `Flow` edge always points forward in time (`from` at tick `t`,
+    /// `to` at tick `t + 1`) and a `Punch` edge joins two components at the
+    /// same tick. `price` is the punch's merge threshold — the budget at
+    /// which the sublevel filtration of `V` fuses the two components (the
+    /// minimum `V` along the separating barrier) — and is `0` for a `Flow`
+    /// edge. `overlap_width` is the count of distinct affordable landing
+    /// cells the stencil step bridges for a `Flow` edge (how wide the
+    /// pinch/branch is) and is `0` for a `Punch` edge. Both `price` and
+    /// `overlap_width` are public: a consumer recovers "what merges at
+    /// `B'`" by thresholding punch prices, and reads `overlap_width` to
+    /// render branch width.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CorridorEdge {
+        pub from: u32,
+        pub to: u32,
+        pub kind: EdgeKind,
+        pub price: u32,
+        pub overlap_width: u32,
+    }
+
+    /// The time-sliced corridor graph (issue 1858): the connectivity
+    /// skeleton of a solved cost-to-reach field `V` under a fixed budget.
+    /// `nodes` are the per-tick connected components of the affordable set,
+    /// ordered by `(tick, component)`; `edges` are the inter-tick `Flow`
+    /// links and the intra-tick `Punch` merges, emitted sorted by endpoints
+    /// then kind so the output is byte-stable and content-addressable. A
+    /// skeleton, not a field: it carries no cell-to-component label image,
+    /// so its size scales with the number of components and edges rather
+    /// than `width * height * ticks`.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.corridor.graph")]
+    pub struct CorridorGraph {
+        pub nodes: Vec<CorridorNode>,
+        pub edges: Vec<CorridorEdge>,
+    }
 }
 
 mod trajectory {
@@ -4172,6 +4260,7 @@ mod tests {
         assert_eq!(ReachabilityProblem::NAME, "aether.reach.problem");
         assert_eq!(BudgetQuery::NAME, "aether.reach.budget_query");
         assert_eq!(ReachabilityMargin::NAME, "aether.reach.margin");
+        assert_eq!(CorridorGraph::NAME, "aether.corridor.graph");
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
@@ -4297,6 +4386,48 @@ mod tests {
             assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U32));
             assert_eq!(fields[2].name, "margin");
             assert_eq!(fields[2].ty, SchemaType::Scalar(Primitive::I64));
+        }
+
+        #[test]
+        fn corridor_graph_schema_is_struct_of_two_vecs() {
+            // The corridor graph is a flat DAG: a `Vec<CorridorNode>` and a
+            // `Vec<CorridorEdge>`, both recursing into their element
+            // structs. A `Struct` schema (not a cast) is what the DAG
+            // validator and the hub codec read for the transform output.
+            let SchemaType::Struct { fields, .. } = &<CorridorGraph as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "nodes");
+            let SchemaType::Vec(node) = &fields[0].ty else {
+                panic!("expected Vec of nodes");
+            };
+            assert!(matches!(**node, SchemaType::Struct { .. }));
+            assert_eq!(fields[1].name, "edges");
+            let SchemaType::Vec(edge) = &fields[1].ty else {
+                panic!("expected Vec of edges");
+            };
+            assert!(matches!(**edge, SchemaType::Struct { .. }));
+        }
+
+        #[test]
+        fn corridor_graph_id_distinct_from_reach_kinds() {
+            use aether_data::Kind;
+            // The corridor output shares no id with the reachability kinds
+            // it composes with in a DAG — a collision would alias the
+            // transform's `Ref<CorridorGraph>` output slot.
+            let ids = [
+                CorridorGraph::ID,
+                ScalarField::ID,
+                MovementStencil::ID,
+                BudgetQuery::ID,
+                ReachabilityMargin::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "corridor / reach kind ids must be distinct");
+                }
+            }
         }
     }
 
