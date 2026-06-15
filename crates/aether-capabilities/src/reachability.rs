@@ -454,12 +454,12 @@ pub fn solve_population_sweep(problem: PopulationSweepProblem) -> SurvivalCurve 
 /// population, corridor, and population-transform test modules reuse one
 /// definition instead of redeclaring it.
 #[cfg(test)]
-pub(crate) mod test_fields {
-    pub(crate) use super::UNREACHABLE;
+pub mod test_fields {
+    pub use super::UNREACHABLE;
     use aether_kinds::{MovementStencil, StencilOffset};
 
     /// Stay + the four orthogonal one-cell moves, as raw offsets.
-    pub(crate) fn stencil_offsets() -> Vec<StencilOffset> {
+    pub fn stencil_offsets() -> Vec<StencilOffset> {
         vec![
             StencilOffset { dx: 0, dy: 0 },
             StencilOffset { dx: 1, dy: 0 },
@@ -471,7 +471,7 @@ pub(crate) mod test_fields {
 
     /// The same 4-way move set wrapped in a [`MovementStencil`] — the form
     /// the `ReachabilityProblem` / transform tests bundle.
-    pub(crate) fn stencil_4way() -> MovementStencil {
+    pub fn stencil_4way() -> MovementStencil {
         MovementStencil {
             offsets: stencil_offsets(),
         }
@@ -574,9 +574,7 @@ mod tests {
 mod population_tests {
     use super::test_fields::stencil_offsets as stencil_4way;
     use super::{UNREACHABLE, solve_cost_to_reach, solve_population_sweep};
-    use aether_kinds::{
-        MovementStencil, PopulationSweepProblem, ReachabilityProblem, ScalarField,
-    };
+    use aether_kinds::{MovementStencil, PopulationSweepProblem, ReachabilityProblem, ScalarField};
 
     /// Build a sweep problem from a single start cell (the rest of the
     /// start region is the sentinel, so the population is sampled entirely
