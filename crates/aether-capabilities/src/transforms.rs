@@ -11,11 +11,12 @@ use aether_data::transform;
 use aether_kinds::{
     BudgetQuery, ClosureDistribution, CorridorGraph, CrossingClassification, CrossingQueryParams,
     Mat4Apply, MovementStencil, PopulationSweepProblem, ReachabilityMargin, ReachabilityProblem,
-    RealizationProblem, ScalarField, SurvivalCurve, TrafficDensity, TrajectoryLog, TrajectorySet,
+    RealizationProblem, ResolutionDepth, ScalarField, SurvivalCurve, TrafficDensity, TrajectoryLog,
+    TrajectorySet,
 };
 use aether_math::Vec4;
 
-use crate::corridor::build_corridor_graph_core;
+use crate::corridor::{build_corridor_graph_core, corridor_resolution_depth_core};
 use crate::counterfactual::solve_counterfactual_core;
 use crate::reachability::{
     UNREACHABLE, realize_single, simulate_realization, solve_cost_to_reach, solve_population_sweep,
@@ -136,6 +137,26 @@ fn build_corridor_graph(
     query: BudgetQuery,
 ) -> CorridorGraph {
     build_corridor_graph_core(&field, &stencil.offsets, query.budget)
+}
+
+/// Compute the fork resolution depth of a corridor graph (issue 1859): how
+/// far ahead a bounded-horizon traversal must look before committing to an
+/// affordable one-tick step. A unary `CorridorGraph -> ResolutionDepth`
+/// node — two passes over #1858's landed graph (backward liveness over the
+/// `Flow` edges, then longest dead-end path per fork), no windowed re-solve
+/// and no new field.
+///
+/// The body delegates to the pure [`corridor_resolution_depth_core`]; the
+/// transform fn only borrows the decoded graph, so it clears the
+/// `#[transform]` purity deny-list (no host fn, no `Ctx`, no `std::time` /
+/// `std::env`).
+// The `#[transform]` ABI hands the body the owned graph decoded from wire
+// bytes; the core borrows it, so the owned `graph` param is intentionally
+// passed by reference rather than consumed.
+#[allow(clippy::needless_pass_by_value)]
+#[transform]
+fn corridor_resolution_depth(graph: CorridorGraph) -> ResolutionDepth {
+    corridor_resolution_depth_core(&graph)
 }
 
 /// Sweep a seeded Monte-Carlo population of reaction-delayed agents over a
@@ -555,6 +576,80 @@ mod corridor_transform_tests {
         // contract the DAG executor keys transform results on.
         let a = build_corridor_graph(ridge_field(), stencil_4way(), BudgetQuery { budget: 5 });
         let b = build_corridor_graph(ridge_field(), stencil_4way(), BudgetQuery { budget: 5 });
+        assert_eq!(a, b);
+        assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
+    }
+}
+
+#[cfg(test)]
+mod resolution_depth_transform_tests {
+    use super::corridor_resolution_depth;
+    use aether_data::{Kind, transforms};
+    use aether_kinds::{CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ResolutionDepth};
+
+    fn node(tick: u32) -> CorridorNode {
+        CorridorNode {
+            tick,
+            component: 0,
+            cell_count: 1,
+            min_cost: 1,
+        }
+    }
+
+    fn flow(from: u32, to: u32) -> CorridorEdge {
+        CorridorEdge {
+            from,
+            to,
+            kind: EdgeKind::Flow,
+            price: 0,
+            overlap_width: 0,
+        }
+    }
+
+    /// A wall-trap graph driven through the transform: a depth-2 dead-end
+    /// branch beside a through spine yields `max_resolution_depth = 2`.
+    fn wall_trap_graph() -> CorridorGraph {
+        // Spine 0(t0) 1(t1) 2(t2) 3(t3) reaching the final tick 3; dead-end
+        // branch off node 0 into node 4(t1) -> node 5(t2) that terminates
+        // before the final tick and never rejoins. Fork node 0, depth 2.
+        CorridorGraph {
+            nodes: vec![node(0), node(1), node(2), node(3), node(1), node(2)],
+            edges: vec![flow(0, 1), flow(1, 2), flow(2, 3), flow(0, 4), flow(4, 5)],
+        }
+    }
+
+    #[test]
+    fn transform_reports_the_fork_depth() {
+        let depths = corridor_resolution_depth(wall_trap_graph());
+        assert_eq!(depths.max_resolution_depth, 2);
+        assert_eq!(depths.forks.len(), 1);
+        assert_eq!(depths.forks[0].node_index, 0);
+        assert_eq!(depths.forks[0].depth, 2);
+    }
+
+    #[test]
+    fn registered_in_link_time_inventory() {
+        // A unary transform: `CorridorGraph` in, `ResolutionDepth` out — the
+        // same inventory contract `mat4_apply` / `build_corridor_graph`
+        // satisfy.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::corridor_resolution_depth"))
+            .expect("corridor_resolution_depth not registered in link-time inventory");
+        assert_eq!(entry.input_kind_ids, [CorridorGraph::ID]);
+        assert_eq!(entry.output_kind_id, ResolutionDepth::ID);
+    }
+
+    #[test]
+    fn resolution_depth_id_distinct_from_corridor_graph() {
+        assert_ne!(ResolutionDepth::ID, CorridorGraph::ID);
+    }
+
+    #[test]
+    fn is_deterministic_and_content_addressable() {
+        // Same graph bytes -> identical output bytes: the content-addressing
+        // contract the DAG executor keys transform results on.
+        let a = corridor_resolution_depth(wall_trap_graph());
+        let b = corridor_resolution_depth(wall_trap_graph());
         assert_eq!(a, b);
         assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
     }
