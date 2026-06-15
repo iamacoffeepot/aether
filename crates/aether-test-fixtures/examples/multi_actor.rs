@@ -41,8 +41,9 @@ impl FfiActor for RootManager {
     }
 
     /// ADR-0097: on `Ping`, spawn a `Panel` sibling from the same
-    /// resident module. `Subname::Counter` lets the host name it
-    /// `ui.panel.<n>`; the returned `MailboxId` is fire-and-forget here.
+    /// resident module. `Subname::Counter` gives it a bare counter
+    /// discriminator (`0`, `1`, …); the returned `MailboxId` is
+    /// fire-and-forget here.
     #[handler]
     fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, _ping: Ping) {
         let _ = ctx.spawn_child::<Panel>(Subname::Counter, &());

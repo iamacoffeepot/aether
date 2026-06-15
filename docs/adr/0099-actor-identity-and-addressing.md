@@ -82,8 +82,8 @@ atom     := ident ( "." ident )*
 ```
 
 - **`/`** separates nodes — one segment per ActorId in the lineage, root → leaf.
-- **`:`** carries an instanced node's discriminator; the segment around it names that node's ActorId, `hash(NAMESPACE:subname)`.
-- **`.`** is cosmetic, within a single namespace ident — `aether.component` is one segment.
+- **`:`** carries an instanced node's discriminator; the segment around it names that node's ActorId, `hash(NAMESPACE:subname)`. A discriminator is a flat segment — no `.` inside it; an instanced node is `hash(namespace:subname)` where the subname carries no internal `.`.
+- **`.`** is cosmetic, within a single namespace atom — `aether.embedded` is one atom. It does not appear inside a discriminator.
 
 The loaded camera renders as `aether.component/aether.embedded:camera`: root host, child embedding-host class, instance. Because the string is a rendering, a MailboxId is never computed by hashing it — a written path is resolved by parsing it into segments, mapping each segment to its ActorId, and chain-folding (§3). Type addressing never touches the string at all: `ctx.actor::<R>()` resolves R to its id by R's resolution mode (§5), not by the rendered path. The parse is the cold path, paid only by string-addressed callers — MCP, the CLI, `actor_logs`.
 

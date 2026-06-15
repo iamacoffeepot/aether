@@ -156,8 +156,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let (subname_prefix, config) = copied;
 
-            // `Counter`: append a discriminator from the live Spawner so
-            // the name is globally unique and known synchronously.
+            // `Counter`: the discriminator is the bare counter value — a
+            // flat segment with no prefix, per the convention that `.`
+            // appears only inside namespace atoms (ADR-0099 §4).
             let full_subname = if is_counter == 0 {
                 subname_prefix
             } else {
@@ -171,7 +172,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     tracing::warn!(target: "aether_substrate::component", "spawn_sibling: no spawner on the binding (counter subname unresolvable)");
                     return 0;
                 };
-                format!("{subname_prefix}.{n}")
+                n.to_string()
             };
 
             // ADR-0099 §3: a spawned sibling nests under this trampoline,
