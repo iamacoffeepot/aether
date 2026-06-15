@@ -50,10 +50,11 @@ use aether_kinds::MailEnvelope as TracedEnvelope;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    Cancel, CancelResult, ComponentCapabilities, DagDescriptor, EngineDescriptor, HandleDescribe,
-    HandleDescribeResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
-    LogTailResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult, Status,
-    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
+    Cancel, CancelResult, ComponentCapabilities, DagDescriptor, DeadEngineDescriptor,
+    EngineDescriptor, HandleDescribe, HandleDescribeResult, ListEngines, ListEnginesResult,
+    LoadComponent, LoadResult, LogTail, LogTailResult, ReplaceComponent, ReplaceResult,
+    SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit, SubmitResult, TerminateEngine,
+    TerminateEngineResult,
 };
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -204,6 +205,19 @@ impl FleetBench {
         let payload = single_reply(&replies, "ListEngines");
         match ListEnginesResult::decode_from_bytes(&payload) {
             Some(result) => result.engines,
+            None => panic!("undecodable ListEnginesResult"),
+        }
+    }
+
+    /// The engines cap's recently-died ring — the last few engines that
+    /// left the supervised table, each with why it left (issue 1906).
+    /// Same `ListEngines` round-trip as [`list_engines`](Self::list_engines),
+    /// reading the reply's `recently_died` sidecar instead of the live set.
+    pub fn recently_died(&mut self) -> Vec<DeadEngineDescriptor> {
+        let replies = self.call(None, "aether.engine", &ListEngines {});
+        let payload = single_reply(&replies, "ListEngines");
+        match ListEnginesResult::decode_from_bytes(&payload) {
+            Some(result) => result.recently_died,
             None => panic!("undecodable ListEnginesResult"),
         }
     }

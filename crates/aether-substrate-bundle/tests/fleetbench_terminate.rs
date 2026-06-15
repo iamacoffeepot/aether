@@ -12,6 +12,7 @@ mod fleetbench;
 mod tests {
     mod heavy {
         use crate::fleetbench::FleetBench;
+        use aether_kinds::DeathReason;
 
         /// Spawn two headless substrates and assert both appear in
         /// `ListEngines` with fresh heartbeats — the standalone
@@ -68,6 +69,37 @@ mod tests {
             assert!(
                 after.iter().all(|e| e.engine_id != engine_id),
                 "terminated engine {engine_id} should be gone from the fleet: {after:?}",
+            );
+        }
+
+        /// Spawn one headless substrate, `terminate` it, then assert it
+        /// surfaces in the `recently_died` ring with reason `Terminated` —
+        /// the issue-1906 row: a removed engine carries *why* it left, so
+        /// a deliberate shutdown is distinguishable from a crash. Drives
+        /// the deliberate-terminate recording path (`on_terminate` records
+        /// `Terminated` at the removal site) end-to-end against a real
+        /// engine, which the engines-cap unit tests can't seed without
+        /// forking a substrate.
+        #[test]
+        fn fleetbench_terminate_records_death_reason() {
+            let mut bench = FleetBench::start();
+            let engine = bench.spawn_headless();
+            let engine_id = engine.0.to_string();
+
+            bench.terminate(engine);
+
+            let dead = bench.recently_died();
+            let record = dead
+                .iter()
+                .find(|d| d.engine_id == engine_id)
+                .unwrap_or_else(|| {
+                    panic!("terminated engine {engine_id} should appear in recently_died: {dead:?}")
+                });
+            assert_eq!(
+                record.reason,
+                DeathReason::Terminated,
+                "a deliberate terminate is recorded as Terminated, got {:?}",
+                record.reason,
             );
         }
     }

@@ -60,8 +60,8 @@ mod server_native {
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
-        CallSettled, EngineDescriptor, ForwardEnvelope, ListEnginesResult, SpawnEngineResult,
-        TerminateEngineResult,
+        CallSettled, DeadEngineDescriptor, DeathReason, EngineDescriptor, ForwardEnvelope,
+        ListEnginesResult, SpawnEngineResult, TerminateEngineResult,
     };
     use aether_substrate::Mail;
     use aether_substrate::Subname;
@@ -70,6 +70,7 @@ mod server_native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{Source, SourceAddr};
     use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::convert::Infallible;
     use std::env;
     use std::io;
@@ -161,6 +162,23 @@ mod server_native {
         Ok(s.trim().parse().unwrap_or(DEFAULT_HEARTBEAT_MISS_LIMIT))
     }
 
+    /// How many recently-died engines [`EngineServer`] retains for
+    /// `list_engines`' `recently_died` sidecar (issue 1906). A small
+    /// bound: the surface is "what just left and why", not an audit log —
+    /// the oldest record is dropped once the ring is full.
+    const RECENTLY_DIED_CAP: usize = 16;
+
+    /// One recently-departed engine in [`EngineServer`]'s recently-died
+    /// ring (issue 1906). Cap-internal — holds the wire fields plus the
+    /// `Instant` the cap removed the engine, so `on_list` can compute the
+    /// `died_age_millis` it reports in a [`DeadEngineDescriptor`].
+    struct DeadRecord {
+        engine_id: String,
+        rpc_port: u16,
+        reason: DeathReason,
+        died_at: Instant,
+    }
+
     /// One supervised engine in [`EngineServer`]'s table.
     struct EngineEntry {
         /// Mailbox of the `aether.engine.proxy:<id>` actor — the
@@ -194,6 +212,13 @@ mod server_native {
         /// (issue 1339), resolved once from [`EngineConfig`] at init.
         /// `None` disables the heartbeat fleet-wide.
         heartbeat: Option<HeartbeatParams>,
+        /// Bounded ring of the last [`RECENTLY_DIED_CAP`] engines that
+        /// left the table and why (issue 1906). `on_terminate` /
+        /// `on_engine_died` push a [`DeadRecord`] at the removal site;
+        /// `on_list` renders it into the reply's `recently_died` sidecar
+        /// so an observer can tell a clean terminate from a crash or a
+        /// heartbeat eviction.
+        recently_died: VecDeque<DeadRecord>,
     }
 
     #[actor]
@@ -207,14 +232,30 @@ mod server_native {
                 next_engine_seq: 1,
                 mailer: ctx.mailer(),
                 heartbeat: config.heartbeat_params(),
+                recently_died: VecDeque::new(),
             })
+        }
+
+        /// Push a [`DeadRecord`] onto the recently-died ring, evicting the
+        /// oldest entry once the ring is full (issue 1906).
+        fn record_death(&mut self, engine_id: String, rpc_port: u16, reason: DeathReason) {
+            if self.recently_died.len() >= RECENTLY_DIED_CAP {
+                self.recently_died.pop_front();
+            }
+            self.recently_died.push_back(DeadRecord {
+                engine_id,
+                rpc_port,
+                reason,
+                died_at: Instant::now(),
+            });
         }
 
         /// Enumerate every engine the cap currently supervises.
         ///
         /// # Agent
         /// Send `ListEngines` (fieldless). Reply: `ListEnginesResult
-        /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }] }`.
+        /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }],
+        /// recently_died: [{ engine_id, rpc_port, reason, died_age_millis }] }`.
         #[handler]
         fn on_list(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ListEngines) -> ListEnginesResult {
             let now = Instant::now();
@@ -230,7 +271,23 @@ mod server_native {
                     .unwrap_or(u64::MAX),
                 })
                 .collect();
-            ListEnginesResult { engines }
+            let recently_died = self
+                .recently_died
+                .iter()
+                .map(|record| DeadEngineDescriptor {
+                    engine_id: record.engine_id.clone(),
+                    rpc_port: record.rpc_port,
+                    reason: record.reason.clone(),
+                    died_age_millis: u64::try_from(
+                        now.saturating_duration_since(record.died_at).as_millis(),
+                    )
+                    .unwrap_or(u64::MAX),
+                })
+                .collect();
+            ListEnginesResult {
+                engines,
+                recently_died,
+            }
         }
 
         /// Fork+exec a substrate binary and connect a proxy to it.
@@ -359,16 +416,25 @@ mod server_native {
                 };
             };
 
+            // Record the deliberate shutdown in the recently-died ring so
+            // `list_engines` can show it left cleanly (issue 1906). The
+            // proxy deliberately does not `report_died` for a terminate —
+            // the cap initiated it — so there is no second signal to
+            // reconcile and this is the one record for this death.
+            let proxy_mailbox = entry.proxy_mailbox;
+            self.record_death(
+                mail.engine_id.clone(),
+                entry.rpc_port,
+                DeathReason::Terminated,
+            );
+
             // Forward to the proxy: it SIGKILLs its substrate and
             // self-shuts-down. Fire-and-forget — the proxy doesn't
             // reply, and the table entry is already gone, so the
             // returned MailId has nothing to subscribe against.
             let payload = mail.encode_into_bytes();
-            let _ = ctx.send_envelope_traced(
-                entry.proxy_mailbox,
-                <TerminateEngine as Kind>::ID,
-                &payload,
-            );
+            let _ =
+                ctx.send_envelope_traced(proxy_mailbox, <TerminateEngine as Kind>::ID, &payload);
             TerminateEngineResult::Ok
         }
 
@@ -464,12 +530,18 @@ mod server_native {
                 );
                 return;
             };
-            if self.engines.remove(&EngineId(uuid)).is_some() {
+            if let Some(entry) = self.engines.remove(&EngineId(uuid)) {
                 tracing::info!(
                     target: "aether_substrate::engine_server",
                     engine_id = %mail.engine_id,
+                    reason = ?mail.reason,
                     "engine evicted: proxy reported death",
                 );
+                // Record inside the `is_some` guard so a duplicate `died`
+                // (e.g. one a concurrent terminate already dropped) adds no
+                // second record — one record per death (issue 1339/1906).
+                let rpc_port = entry.rpc_port;
+                self.record_death(mail.engine_id, rpc_port, mail.reason);
             }
         }
 
@@ -625,8 +697,8 @@ mod tests {
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
-        EngineAlive, EngineDied, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
-        TerminateEngineResult,
+        DeathReason, EngineAlive, EngineDied, ListEngines, SpawnEngine, SpawnEngineResult,
+        TerminateEngine, TerminateEngineResult,
     };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::handle_store::HandleStore;
@@ -681,12 +753,13 @@ mod tests {
     /// Push a fire-and-forget kind at the cap, then drive a `ListEngines`
     /// so the assertion runs only after the cap has processed the
     /// earlier mail (single-threaded actor, in-order mailbox). Returns
-    /// the engine list the cap reports afterward.
+    /// the full `ListEnginesResult` the cap reports afterward — both the
+    /// live `engines` and the `recently_died` ring.
     fn push_then_list<K: Kind>(
         mailer: &Arc<Mailer>,
         cells: &ReplyCells,
         fire: &K,
-    ) -> Vec<aether_kinds::EngineDescriptor> {
+    ) -> aether_kinds::ListEnginesResult {
         let server = mailbox_id_from_name(<EngineServer as Actor>::NAMESPACE);
         mailer.push(Mail::new(server, K::ID, fire.encode_into_bytes(), 1));
         drive(mailer, &ListEngines {}, || {
@@ -696,7 +769,6 @@ mod tests {
                 .expect("test setup: list cell mutex poisoned")
                 .take()
         })
-        .engines
     }
 
     /// Contention-sensitive driver tests: each boots a `PassiveChassis`
@@ -798,7 +870,11 @@ mod tests {
         /// `on_engine_died` for an engine the cap never supervised — the
         /// terminate-race / double-report case — is an idempotent no-op,
         /// not a panic, and inserts nothing. Covers both a malformed and a
-        /// well-formed-but-unknown `engine_id` (issue 1339).
+        /// well-formed-but-unknown `engine_id` (issue 1339). The
+        /// `is_some()` guard also keeps the death off the recently-died
+        /// ring: a `died` for an engine we never knew records no phantom
+        /// death, which is what keeps the ring one-record-per-real-death
+        /// under the idempotent duplicate-`died` contract (issue 1906).
         #[test]
         fn engine_died_for_unknown_is_noop() {
             let (_chassis, mailer, cells) = boot();
@@ -808,11 +884,18 @@ mod tests {
                 &cells,
                 &EngineDied {
                     engine_id: "not-a-uuid".to_owned(),
+                    reason: DeathReason::Crashed {
+                        detail: "peer closed".to_owned(),
+                    },
                 },
             );
             assert!(
-                after_malformed.is_empty(),
+                after_malformed.engines.is_empty(),
                 "a malformed died must not panic or insert",
+            );
+            assert!(
+                after_malformed.recently_died.is_empty(),
+                "a malformed died records no phantom death",
             );
 
             let after_unknown = push_then_list(
@@ -820,11 +903,18 @@ mod tests {
                 &cells,
                 &EngineDied {
                     engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                    reason: DeathReason::Evicted {
+                        detail: "heartbeat miss limit 3 of 3".to_owned(),
+                    },
                 },
             );
             assert!(
-                after_unknown.is_empty(),
+                after_unknown.engines.is_empty(),
                 "a died for an unknown engine is a no-op",
+            );
+            assert!(
+                after_unknown.recently_died.is_empty(),
+                "a died for an unknown engine records no phantom death",
             );
         }
 
@@ -842,7 +932,7 @@ mod tests {
                 },
             );
             assert!(
-                after.is_empty(),
+                after.engines.is_empty(),
                 "an alive for an unknown engine must not insert it",
             );
         }

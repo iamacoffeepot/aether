@@ -111,6 +111,39 @@ pub struct EngineInfo {
     pub last_heartbeat_age_millis: u64,
 }
 
+/// One recently-departed engine, as reported in `list_engines`'
+/// `recently_died` sidecar (issue 1906).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DeadEngineInfo {
+    /// Engine UUID it carried while live.
+    pub engine_id: String,
+    /// The localhost RPC port the hub had assigned its substrate.
+    pub rpc_port: u16,
+    /// Why it left the supervised list: `"terminated"` (a deliberate
+    /// `terminate_substrate`), `"crashed"` (the substrate closed its RPC
+    /// connection on its own), or `"evicted"` (it missed the liveness
+    /// heartbeat past the hub's miss limit).
+    pub reason: String,
+    /// Specifics for the reason — the connection-close detail for
+    /// `"crashed"`, the `heartbeat miss limit N of M` count for
+    /// `"evicted"`, empty for a clean `"terminated"`.
+    pub detail: String,
+    /// Milliseconds since the hub removed it from the supervised list.
+    pub died_age_millis: u64,
+}
+
+/// `list_engines` output: the live fleet plus the recently-died sidecar
+/// (issue 1906). An object rather than a bare array so an observer can
+/// tell a clean shutdown from a failure without grepping host logs.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListEnginesResponse {
+    /// Every engine the hub currently supervises.
+    pub engines: Vec<EngineInfo>,
+    /// The last few engines that left the fleet, each with why it left
+    /// and how long ago.
+    pub recently_died: Vec<DeadEngineInfo>,
+}
+
 /// Per-item outcome from a `send_mail` batch.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MailStatus {
