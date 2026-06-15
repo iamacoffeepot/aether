@@ -1882,6 +1882,15 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // emitted `export!` shim can decode 0 config bytes via
     // `impl Kind for ()` and the user's `init` body stays 1-param.
     let mut config_type: Option<syn::ImplItemType> = None;
+    // ADR-0113 (issue 1855): optional `type State = …` declaration plus
+    // the `dehydrate` / `rehydrate` accessor pair. When `type State` is
+    // declared the macro generates the `on_dehydrate` / `on_rehydrate`
+    // hooks from these (snapshot via `dehydrate`, restore via
+    // `rehydrate`); when omitted it synthesizes `type State = ();` so a
+    // no-persistence actor is unchanged.
+    let mut state_type: Option<syn::ImplItemType> = None;
+    let mut dehydrate_accessor: Option<syn::ImplItemFn> = None;
+    let mut rehydrate_accessor: Option<syn::ImplItemFn> = None;
 
     for impl_item in item.items {
         match impl_item {
@@ -1893,6 +1902,9 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             }
             ImplItem::Type(it) if it.ident == "Config" => {
                 config_type = Some(it);
+            }
+            ImplItem::Type(it) if it.ident == "State" => {
+                state_type = Some(it);
             }
             ImplItem::Const(c) => {
                 consts.push(c);
@@ -1963,6 +1975,18 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                         &f,
                         "#[actor] synthesizes `fn receive`; remove this definition",
                     ));
+                } else if name == "dehydrate" {
+                    // ADR-0113: the save-side accessor — `fn dehydrate(&self)
+                    // -> Self::State`. Routed out of `helpers` so the macro
+                    // can validate the `type State` XOR and lift it into the
+                    // inherent impl where the generated `on_dehydrate` calls
+                    // `self.dehydrate()`.
+                    dehydrate_accessor = Some(f);
+                } else if name == "rehydrate" {
+                    // ADR-0113: the restore-side accessor — `fn rehydrate(&mut
+                    // self, state: Self::State)`. The generated `on_rehydrate`
+                    // calls `self.rehydrate(..)` with the decoded state.
+                    rehydrate_accessor = Some(f);
                 } else {
                     helpers.push(f);
                 }
@@ -2015,6 +2039,68 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             ));
         }
     }
+
+    // ADR-0113 (issue 1855): declarative persistence. `type State` plus
+    // the `dehydrate` / `rehydrate` accessor pair generate the
+    // `on_dehydrate` / `on_rehydrate` hooks, so they are mutually
+    // exclusive with hand-written hooks and require each other. Validate
+    // the XOR at the offending span before synthesizing / generating.
+    let manual_state_hook = lifecycle_methods.iter().find(|m| {
+        matches!(
+            m.sig.ident.to_string().as_str(),
+            "on_dehydrate" | "on_rehydrate"
+        )
+    });
+    if let Some(state) = state_type.as_ref() {
+        // (a) `type State` + a hand-written hook is contradictory — the
+        // macro already generates the hook from the accessors.
+        if let Some(hook) = manual_state_hook {
+            return Err(syn::Error::new_spanned(
+                hook,
+                "#[actor] generates `on_dehydrate` / `on_rehydrate` from `type State` plus the \
+                 `dehydrate` / `rehydrate` accessors (ADR-0113); remove the hand-written hook, \
+                 or drop `type State` and the accessors to write the hooks by hand",
+            ));
+        }
+        // (c) `type State` needs both accessors — a half-pair would leave
+        // one generated hook with no method to call.
+        if dehydrate_accessor.is_none() {
+            return Err(syn::Error::new_spanned(
+                state,
+                "`type State` requires a `fn dehydrate(&self) -> Self::State` accessor \
+                 (ADR-0113) — the macro snapshots state through it in the generated \
+                 `on_dehydrate`",
+            ));
+        }
+        if rehydrate_accessor.is_none() {
+            return Err(syn::Error::new_spanned(
+                state,
+                "`type State` requires a `fn rehydrate(&mut self, state: Self::State)` accessor \
+                 (ADR-0113) — the macro restores state through it in the generated \
+                 `on_rehydrate`",
+            ));
+        }
+    } else if let Some(accessor) = dehydrate_accessor.as_ref().or(rehydrate_accessor.as_ref()) {
+        // (b) an accessor without `type State` has no kind to (de)serialize.
+        return Err(syn::Error::new_spanned(
+            accessor,
+            "`dehydrate` / `rehydrate` are the ADR-0113 persistence accessors and require a \
+             `type State = …` declaration; add it, or rename the method if it is an unrelated \
+             helper",
+        ));
+    }
+
+    // Mirror `synthesized_config_type`: synthesize `type State = ();`
+    // when the author omitted it (gated on `state_type.is_some()` at
+    // macro time, NOT on `State != ()` at runtime), so a no-persistence
+    // actor keeps the default no-op hooks and pays nothing.
+    let synthesized_state_type: Option<syn::ImplItemType> = if state_type.is_some() {
+        None
+    } else {
+        Some(syn::parse_quote!(
+            type State = ();
+        ))
+    };
 
     // ADR-0090 (issue 1256): the trait now takes `init(config: Self::Config,
     // ctx: &mut C)`. If the user declared `type Config = …`, leave their
@@ -2152,6 +2238,65 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         (None, None) => unreachable!("synthesized_config_type is Some when user omitted"),
     };
 
+    // ADR-0113: emit the `type State = …` line in the trait impl — the
+    // user's declaration (passed through) or the synthesized `= ()`.
+    let state_type_tokens = match (state_type.as_ref(), synthesized_state_type.as_ref()) {
+        (Some(user), _) => quote! { #user },
+        (None, Some(synth)) => quote! { #synth },
+        (None, None) => unreachable!("synthesized_state_type is Some when user omitted"),
+    };
+
+    // ADR-0113: when the author declared `type State`, generate the
+    // `on_dehydrate` / `on_rehydrate` hooks from the lifted accessors.
+    // `Self::State` resolves directly inside `impl FfiActor for Self`.
+    // `on_dehydrate` snapshots through `self.dehydrate()` and frames the
+    // value with `save_state_kind`; `on_rehydrate` decodes via
+    // `PriorState::as_kind` and either restores through `self.rehydrate`
+    // or boots fresh, warning only when bytes were present but did not
+    // decode (a reshaped state kind — `K::ID` changed). When `type State`
+    // was omitted these are empty and the actor keeps the default no-op
+    // hooks (or its own hand-written ones, carried in `lifecycle_methods`).
+    let generated_state_hooks = if state_type.is_some() {
+        quote! {
+            fn on_dehydrate(&mut self, __aether_ctx: &mut ::aether_actor::FfiDropCtx<'_>) {
+                let __aether_state = self.dehydrate();
+                ::aether_actor::Persistence::save_state_kind::<
+                    <Self as ::aether_actor::FfiActor>::State,
+                >(__aether_ctx, 0, &__aether_state);
+            }
+
+            fn on_rehydrate(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
+                __aether_prior: ::aether_actor::PriorState<'_>,
+            ) {
+                match __aether_prior.as_kind::<<Self as ::aether_actor::FfiActor>::State>() {
+                    ::core::option::Option::Some(__aether_state) => {
+                        self.rehydrate(__aether_state);
+                    }
+                    ::core::option::Option::None => {
+                        if !__aether_prior.bytes().is_empty() {
+                            ::aether_actor::__macro_internals::tracing::warn!(
+                                "discarded prior state on rehydrate: bytes were present but did \
+                                 not decode as the declared `type State` (a reshaped state kind); \
+                                 booting fresh",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // ADR-0113: the lifted accessors ride as inherent methods on Self
+    // (like handlers / helpers) so the generated trait-impl hooks can
+    // call `self.dehydrate()` / `self.rehydrate(..)`. Both are `None`
+    // when the actor declares no `type State`.
+    let dehydrate_accessor_tokens = dehydrate_accessor.as_ref();
+    let rehydrate_accessor_tokens = rehydrate_accessor.as_ref();
+
     Ok(quote! {
         #actor_impl
 
@@ -2159,10 +2304,13 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 
         impl #impl_generics #trait_path for #self_ty #where_clause {
             #config_type_tokens
+            #state_type_tokens
 
             #wrapped_init
 
             #(#lifecycle_methods)*
+
+            #generated_state_hooks
         }
 
         impl #impl_generics #self_ty #where_clause {
@@ -2180,6 +2328,8 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             #(#handler_methods_tokens)*
             #fallback_method_tokens
             #(#helper_methods_tokens)*
+            #dehydrate_accessor_tokens
+            #rehydrate_accessor_tokens
         }
 
         // ADR-0096: object-safe erasure so a multi-actor module's
