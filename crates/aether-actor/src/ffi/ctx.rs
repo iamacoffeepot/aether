@@ -274,17 +274,16 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
         #[allow(clippy::disallowed_methods)]
         let tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
         let (is_counter, full_subname) = match subname {
-            // `Counter`: pass the type-namespace prefix; the host appends
-            // its monotonic discriminator so the name is globally unique.
-            Subname::Counter => (true, String::from(<A as Actor>::NAMESPACE)),
-            // `Named`: form the full prefixed subname here; validate the
-            // caller-supplied segment before it crosses the FFI.
+            // `Counter`: the host assigns a bare monotonic counter as the
+            // discriminator. No prefix is passed — the host ignores it for
+            // Counter and produces just `n.to_string()`.
+            Subname::Counter => (true, String::new()),
+            // `Named`: validate the caller-supplied segment (no `:`,
+            // no control/whitespace, not empty) then pass it bare as the
+            // flat discriminator — convention: no `.` in a discriminator.
             Subname::Named(name) => {
                 validate_namespace_segment(name).map_err(SpawnError::SubnameInvalid)?;
-                (
-                    false,
-                    alloc::format!("{}.{}", <A as Actor>::NAMESPACE, name),
-                )
+                (false, String::from(name))
             }
         };
         let config_bytes = config.encode_into_bytes();

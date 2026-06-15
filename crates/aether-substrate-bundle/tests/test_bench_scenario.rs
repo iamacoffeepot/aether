@@ -321,12 +321,12 @@ fn multi_actor_unknown_export_errors() {
 /// ADR-0097: a loaded `RootManager` spawns a `Panel` sibling at runtime
 /// via `ctx.spawn_child::<Panel>`. Pinging `RootManager` triggers the
 /// spawn; the spawned `Panel` registers at
-/// `aether.embedded:ui.panel.0` (Counter discriminator), and
-/// pinging *it* makes it broadcast a `TickObserved` to the bench
-/// observer — proving the spawned sibling is addressable and dispatches.
-/// The fire-and-settle send blocks until the whole tree (including the
-/// spawned trampoline's init) drains, so the panel is registered before
-/// the second send routes.
+/// `aether.embedded:0` (Counter discriminator — a flat segment, no type
+/// prefix), and pinging *it* makes it broadcast a `TickObserved` to the
+/// bench observer — proving the spawned sibling is addressable and
+/// dispatches. The fire-and-settle send blocks until the whole tree
+/// (including the spawned trampoline's init) drains, so the panel is
+/// registered before the second send routes.
 #[test]
 fn multi_actor_sibling_spawn() {
     let Some(wasm_path) = require_runtime("multi_actor") else {
@@ -363,11 +363,12 @@ fn multi_actor_sibling_spawn() {
     // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
     // Panel registers at the `/`-rendered lineage path — the RootManager's
     // name with the sibling's trampoline segment appended — and its id is
-    // the lineage fold of that path, not `hash("…trampoline:ui.panel.0")`.
-    let panel_name = format!("{root_name}/aether.embedded:ui.panel.0");
+    // the lineage fold of that path, not `hash("…trampoline:0")`.
+    // The Counter discriminator is a flat segment ("0") — no type prefix.
+    let panel_name = format!("{root_name}/aether.embedded:0");
     bench
         .execute(vec![
-            // RootManager spawns a Panel sibling (Counter → ui.panel.0).
+            // RootManager spawns a Panel sibling (Counter → 0).
             (
                 "spawn",
                 BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 }),
@@ -383,7 +384,7 @@ fn multi_actor_sibling_spawn() {
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         1,
-        "the spawned Panel (ui.panel.0) should have dispatched its ping and broadcast once; \
+        "the spawned Panel (0) should have dispatched its ping and broadcast once; \
          observed kinds: {:?}",
         bench.observed_kinds(),
     );

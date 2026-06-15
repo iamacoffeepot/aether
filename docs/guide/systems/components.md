@@ -128,11 +128,11 @@ fn on_open_panel(&mut self, ctx: &mut FfiCtx<'_>, _: OpenPanel) {
 }
 ```
 
-`Subname::Counter` has the host number the instance — `ui.panel.0`, `.1`, … — for
-when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")` gives
-it a stable name you address by. Either way the new instance lives at
+`Subname::Counter` has the host number the instance with a bare counter — `0`, `1`,
+… — for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`
+gives it a stable name you address by. Either way the new instance lives at
 `aether.component/aether.embedded:<name>` like any loaded component, and its replies route
-back to the spawner. Spawn stays within the module the instance runs from; a
+back to the spawner. The name after `:` is always a flat segment (no `.`). Spawn stays within the module the instance runs from; a
 different binary comes in through `load_component`, which carries its own code and
 kind vocabulary. This is what lets a wasm crate be a *library* of actors: a UI root
 spawns its panels, a zone manager spawns a per-entity actor for each thing in range —
