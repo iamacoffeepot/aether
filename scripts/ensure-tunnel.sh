@@ -64,6 +64,7 @@ tunnel_is_up() {
 # already bound we never launch a second one.
 if tunnel_is_up; then
     echo "[ensure-tunnel] tunnel already up on :${TUNNEL_PORT} — nothing to do."
+    echo "run \`/mcp\` to (re)connect the harness tools if they're missing."
     exit 0
 fi
 
@@ -120,6 +121,7 @@ deadline=$((SECONDS + STARTUP_TIMEOUT_SECS))
 while (( SECONDS < deadline )); do
     if tunnel_is_up; then
         echo "[ensure-tunnel] tunnel is up on :${TUNNEL_PORT}."
+        echo "run \`/mcp\` to (re)connect the harness tools if they're missing."
         exit 0
     fi
     sleep 1
