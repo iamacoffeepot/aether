@@ -27,8 +27,8 @@ crate-type = ["cdylib", "rlib"]
 # siblings `receive_p32` / `on_drop` / etc.) into the rlib output
 # unconditionally — wasm-lld then forces these symbols into any
 # cdylib that transitively links this rlib, colliding with that
-# cdylib's own `export!()`. Trunk-type consumers (sokoban) opt out
-# via `default-features = false` so their wasm builds see only the
+# cdylib's own `export!()`. Trunk-type consumers (e.g. aether-substrate-bundle)
+# opt out via `default-features = false` so their wasm builds see only the
 # kind types and no FFI exports. The feature is on by default so a
 # bare `cargo build -p aether-camera --target wasm32-unknown-unknown`
 # still produces the full component artifact.

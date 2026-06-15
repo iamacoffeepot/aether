@@ -876,10 +876,9 @@ fn route_mail(
                 "mail to unknown mailbox — dropped",
             );
             // ADR-0080 §2: balance the `Sent` so settlement chains
-            // drain (issue 838). Sokoban's `on_tick` sends to an
-            // unloaded `"camera"` mailbox every tick; without this
-            // every Tick chain has an orphaned `Sent` and never
-            // settles.
+            // drain (issue 838). Without this, a component that sends
+            // to an unloaded mailbox every tick would leave every Tick
+            // chain with an orphaned `Sent` that never settles.
             trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
     }
