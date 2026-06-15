@@ -2260,6 +2260,233 @@ fn text_draws_world_space_label() {
     );
 }
 
+/// ADR-0114 §5: an inline child carries its `type State` across a
+/// `replace_component` swap. Loads `inline_child_stateful` (the entry
+/// `InlineStatefulParent` spawns a stateful `InlineStatefulChild` in
+/// `wire`), bumps the **child's** counter to 2 through the child's
+/// first-class lineage address, replaces the wasm at the same mailbox id
+/// with the same binary, then re-queries the child's alias. The old
+/// instance's `on_dehydrate` packs the child's state into the composite
+/// migration bundle; the new instance's `on_rehydrate` reconstructs the
+/// child by type and restores its count — so the post-replace query reads
+/// 2, not the fresh-`init` 0. Reload is engine-internal correctness
+/// (dehydrate → composite → rehydrate reconstruct), which is `TestBench`'s
+/// lane; #1916's `FleetBench` already proved the over-the-wire child
+/// addressing, so this doesn't re-prove it.
+#[test]
+fn replace_preserves_inline_child_state_via_reconstruct() {
+    use aether_actor::Actor;
+
+    const FIXTURE_NAME: &str = "inline_child_stateful";
+
+    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+        return;
+    };
+    let parent_addr = format!(
+        "aether.component/{}:{FIXTURE_NAME}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+    // The child's first-class lineage address: the parent's rendered name
+    // plus the inline-child node (ADR-0114). The parent spawns it under
+    // the `Named("widget")` subname in `wire`.
+    let child_addr = format!("{parent_addr}/aether.embedded:widget");
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    // Load the entry export (InlineStatefulParent), capturing its mailbox
+    // id for the replace.
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let mailbox_id = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("inline_child_stateful load failed: {error}"),
+    };
+
+    // Bump the *child's* counter to 2 (mail demuxed to the child's alias),
+    // then read it back. `send_mail` is fire-and-settle, so the bumps land
+    // before the query.
+    let pre = bench
+        .execute(vec![
+            (
+                "bump_a",
+                BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump),
+            ),
+            (
+                "bump_b",
+                BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump),
+            ),
+            (
+                "query",
+                BenchOp::send_and_await(child_addr.as_str(), &CountQuery),
+            ),
+        ])
+        .expect("bump + query sequence");
+    assert_eq!(
+        pre.reply::<CountReport>("query")
+            .expect("decode pre-replace CountReport"),
+        CountReport { count: 2 },
+        "two bumps should leave the inline child's counter at 2 before the replace",
+    );
+
+    // Replace the wasm at the parent's mailbox id with the same binary.
+    // The old instance's `on_dehydrate` composites the child's state; the
+    // new instance's `on_rehydrate` reconstructs the child and restores it.
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
+    let swapped = bench
+        .execute(vec![(
+            "swap",
+            BenchOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    match swapped
+        .reply::<ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+    {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
+
+    // Query the reconstructed child's alias: the count must still be 2.
+    // A 0 here means the child vanished across the reload (its state lost,
+    // or it booted fresh) — the regression ADR-0114 §5 closes.
+    let post = bench
+        .execute(vec![(
+            "query",
+            BenchOp::send_and_await(child_addr.as_str(), &CountQuery),
+        )])
+        .expect("post-replace query sequence");
+    let post_count = post
+        .reply::<CountReport>("query")
+        .expect("decode post-replace CountReport");
+    assert_eq!(
+        post_count,
+        CountReport { count: 2 },
+        "the inline child's state must survive replace_component via the composite bundle + \
+         rehydrate reconstruct; got {post_count:?} (0 means the child was not reconstructed)",
+    );
+}
+
+/// ADR-0114 §5 no-regression: a childless component still hot-reloads
+/// unchanged. The `stateful_replace` fixture spawns no inline children, so
+/// its composite is byte-identical to its own `on_dehydrate` blob and the
+/// reload behaves exactly as before the inline-child compose landed. This
+/// guards the byte-identity invariant from the integration side; the
+/// `aether-actor` unit `zero_children_compose_is_byte_identical_to_raw_parent`
+/// guards it at the bundle layer.
+#[test]
+fn childless_component_hot_reloads_unchanged() {
+    use aether_actor::Actor;
+
+    const FIXTURE_NAME: &str = "stateful_replace";
+
+    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+        return;
+    };
+    let addr = format!(
+        "aether.component/{}:{FIXTURE_NAME}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let mailbox_id = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
+    };
+
+    let pre = bench
+        .execute(vec![
+            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+        ])
+        .expect("bump + query sequence");
+    assert_eq!(
+        pre.reply::<CountReport>("query")
+            .expect("decode pre-replace CountReport"),
+        CountReport { count: 2 },
+        "two bumps leave the childless counter at 2 before the replace",
+    );
+
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
+    let swapped = bench
+        .execute(vec![(
+            "swap",
+            BenchOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    match swapped
+        .reply::<ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+    {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
+
+    let post = bench
+        .execute(vec![(
+            "query",
+            BenchOp::send_and_await(addr.as_str(), &CountQuery),
+        )])
+        .expect("post-replace query sequence");
+    assert_eq!(
+        post.reply::<CountReport>("query")
+            .expect("decode post-replace CountReport"),
+        CountReport { count: 2 },
+        "a childless component's state survives the reload unchanged (byte-identical composite)",
+    );
+}
+
 // Pre-#775 the bench emitted `aether.observation.frame_stats` every
 // 120 frames and a test verified one broadcast arrived after
 // `advance(120)`. Issue 775 retired the broadcast cap, the frame_stats

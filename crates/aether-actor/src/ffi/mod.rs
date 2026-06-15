@@ -61,6 +61,8 @@ use core::fmt;
 pub mod bridge;
 pub mod ctx;
 pub mod inline;
+pub mod inline_bundle;
+pub mod inline_compose;
 pub mod mailbox;
 pub mod raw;
 
@@ -857,8 +859,19 @@ macro_rules! __export_internal {
                 <$component as $crate::Actor>::NAMESPACE,
             )
             .0;
-            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
-            <$component as $crate::FfiActor>::on_dehydrate(instance, &mut ctx);
+            // ADR-0114 §5: run the parent's `on_dehydrate` and every
+            // resident inline child's into a single composite, then call
+            // the host `save_state` once. With no inline children the
+            // composite is byte-identical to the parent's own blob, so a
+            // childless component dehydrates exactly as before; a parent
+            // that saves nothing and has no children skips the host save.
+            if let Some((version, bytes)) = $crate::ffi::inline_compose::compose_dehydrate(
+                mailbox_id,
+                |ctx| <$component as $crate::FfiActor>::on_dehydrate(instance, ctx),
+            ) {
+                let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
+                ctx.save_state(version, &bytes);
+            }
             0
         }
 
@@ -879,12 +892,66 @@ macro_rules! __export_internal {
                 <$component as $crate::Actor>::NAMESPACE,
             )
             .0;
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
-            let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
-            <$component as $crate::FfiActor>::on_rehydrate(instance, ctx.as_single(), prior);
+            // ADR-0114 §5: decompose the migration bundle, restore the
+            // parent, then reconstruct each inline child by type. For a
+            // childless component the bundle decomposes to the raw parent
+            // blob, so the parent sees the identical `PriorState` it would
+            // have before. A single-actor module's reconstructable type set
+            // is just `$component` (an inline child of any other type is
+            // not in the `export!` set; its tag is logged + skipped).
+            let prior_bytes: &[u8] = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: substrate wrote `len` bytes at `ptr` (the rehydrate
+                // ABI); the slice is bounded by this call.
+                unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
+            };
+            $crate::ffi::inline_compose::reconstruct_inline_children(
+                version,
+                prior_bytes,
+                |parent_version, parent_bytes| {
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+                    // SAFETY: `parent_bytes` lives for this closure call;
+                    // `PriorState::__from_ptr` bounds the slice to it.
+                    let parent_prior = unsafe {
+                        $crate::PriorState::__from_ptr(
+                            parent_version,
+                            parent_bytes.as_ptr() as usize,
+                            parent_bytes.len(),
+                        )
+                    };
+                    <$component as $crate::FfiActor>::on_rehydrate(
+                        instance,
+                        ctx.as_single(),
+                        parent_prior,
+                    );
+                },
+                |child| $crate::__export_internal!(@reconstruct_child child ; $component),
+            );
             0
         }
     };
+
+    // Reconstruct one inline child by matching its persisted type tag
+    // against the module's exported type set (ADR-0114 §5). For each
+    // candidate type whose `hash(NAMESPACE)` matches, re-`init` it and
+    // restore its state via `inline_compose::reconstruct_one_child`. An
+    // unmatched tag returns `false` so the caller logs + skips it.
+    (@reconstruct_child $child:ident ; $($candidate:ty),+) => {{
+        let mut __aether_reconstructed = false;
+        $(
+            if $child.type_tag
+                == $crate::__macro_internals::mailbox_id_from_name(
+                    <$candidate as $crate::Actor>::NAMESPACE,
+                )
+                .0
+            {
+                __aether_reconstructed =
+                    $crate::ffi::inline_compose::reconstruct_one_child::<$candidate>($child);
+            }
+        )+
+        __aether_reconstructed
+    }};
 }
 
 /// ADR-0096: FFI shims for a multi-actor module — `export!(A, B, …)`.
@@ -1162,8 +1229,17 @@ macro_rules! __export_multi_internal {
                 instance.erased_namespace(),
             )
             .0;
-            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
-            instance.erased_on_dehydrate(&mut ctx);
+            // ADR-0114 §5: compose the parent + every inline child into one
+            // composite, then `save_state` once (the boxed instance's
+            // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
+            // byte-identical to the boxed parent's own blob.
+            if let Some((version, bytes)) = $crate::ffi::inline_compose::compose_dehydrate(
+                mailbox_id,
+                |ctx| instance.erased_on_dehydrate(ctx),
+            ) {
+                let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new(mailbox_id);
+                ctx.save_state(version, &bytes);
+            }
             0
         }
 
@@ -1184,11 +1260,36 @@ macro_rules! __export_multi_internal {
                 instance.erased_namespace(),
             )
             .0;
-            // ADR-0112: the boxed `ErasedFfiActor` seam carries the `Manual`
-            // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::FfiCtx::__new(mailbox_id);
-            let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
-            instance.erased_on_rehydrate(&mut ctx, prior);
+            // ADR-0114 §5: decompose, restore the boxed parent, then
+            // reconstruct each inline child by matching its type tag against
+            // every exported type. Childless ⇒ the boxed parent sees the
+            // identical `PriorState`.
+            let prior_bytes: &[u8] = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: substrate wrote `len` bytes at `ptr` (the rehydrate
+                // ABI); the slice is bounded by this call.
+                unsafe { ::core::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }
+            };
+            $crate::ffi::inline_compose::reconstruct_inline_children(
+                version,
+                prior_bytes,
+                |parent_version, parent_bytes| {
+                    // ADR-0112: the boxed `ErasedFfiActor` seam carries the
+                    // `Manual` view; the synthesized impl downgrades per hook.
+                    let mut ctx = $crate::FfiCtx::__new(mailbox_id);
+                    // SAFETY: `parent_bytes` lives for this closure call.
+                    let parent_prior = unsafe {
+                        $crate::PriorState::__from_ptr(
+                            parent_version,
+                            parent_bytes.as_ptr() as usize,
+                            parent_bytes.len(),
+                        )
+                    };
+                    instance.erased_on_rehydrate(&mut ctx, parent_prior);
+                },
+                |child| $crate::__export_internal!(@reconstruct_child child ; $($component),+),
+            );
             0
         }
     };

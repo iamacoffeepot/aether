@@ -37,6 +37,7 @@ use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Init-only capability handle for FFI guests. Resolved during
 /// `FfiActor::init`; not available at runtime (the type split fences
@@ -336,7 +337,13 @@ impl<M: ReplyMode> FfiCtx<'_, M> {
                 "spawn_inline_child: Config round-trip failed",
             )));
         };
-        install_inline_child::<A>(alias, owned)
+        // The actor-type tag the rehydrate reconstruct matches against the
+        // module's exported types (ADR-0114 §5) — the same `hash(NAMESPACE)`
+        // tag `init_typed_p32` selects on. This is the id definition for the
+        // child type, so the disallowed-method allow mirrors `spawn_child`.
+        #[allow(clippy::disallowed_methods)]
+        let type_tag = mailbox_id_from_name(<A as Actor>::NAMESPACE).0;
+        install_inline_child::<A>(alias, type_tag, full_subname, is_counter, owned)
     }
 }
 
@@ -362,14 +369,30 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// `init` + registry insert is exercisable on the host build (where the
 /// `spawn_inline_child` host fn is a panicking stub): the unit test calls
 /// this with a synthetic alias and an owned config.
-fn install_inline_child<A>(alias: MailboxId, config: A::Config) -> Result<MailboxId, SpawnError>
+///
+/// ADR-0114 §5: `type_tag` / `full_subname` / `is_counter` are recorded in
+/// the slot so a `replace_component` swap can reconstruct the child by
+/// type and re-fold its metadata.
+fn install_inline_child<A>(
+    alias: MailboxId,
+    type_tag: u64,
+    full_subname: String,
+    is_counter: bool,
+    config: A::Config,
+) -> Result<MailboxId, SpawnError>
 where
     A: FfiActor + ErasedFfiActor,
 {
     let mut ctx = FfiInitCtx::__new(alias.0);
     match A::init(config, &mut ctx) {
         Ok(child) => {
-            INLINE_CHILDREN.insert(alias, Box::new(child));
+            INLINE_CHILDREN.insert_child(
+                alias,
+                type_tag,
+                full_subname,
+                is_counter,
+                Box::new(child),
+            );
             Ok(alias)
         }
         Err(err) => Err(SpawnError::InitFailed(err)),
@@ -477,6 +500,27 @@ impl OutboundReply for FfiCtx<'_, Manual> {
     }
 }
 
+/// A `save_state` deposit captured in memory instead of forwarded to the
+/// host `save_state` import (ADR-0114 §5). The dehydrate compose hands the
+/// parent and each inline child a [`FfiDropCtx`] bound to one of these so
+/// it can collect every saved blob and pack them into a single composite,
+/// then call the real host `save_state` once.
+#[derive(Default)]
+pub struct CapturedState {
+    /// The most recent `(version, bytes)` the hook saved. `None` until the
+    /// hook calls `save_state`; the last call wins (mirroring the host's
+    /// single-`Option<StateBundle>` overwrite contract).
+    saved: Option<(u32, Vec<u8>)>,
+}
+
+impl CapturedState {
+    /// Take the captured `(version, bytes)`, leaving the slot empty.
+    #[must_use]
+    pub fn take(&mut self) -> Option<(u32, Vec<u8>)> {
+        self.saved.take()
+    }
+}
+
 /// Narrowed capability handle for the `on_dehydrate` save hook.
 /// Outbound mail still works through [`MailSender`]; the reply / resolve
 /// surfaces are intentionally absent.
@@ -485,28 +529,55 @@ pub struct FfiDropCtx<'a> {
     /// `send` resolves the receiver through `R::resolve(self.mailbox)`
     /// like every other ctx (ADR-0099 §5).
     mailbox: u64,
+    /// ADR-0114 §5: when `Some`, `save_state` records into this buffer
+    /// instead of the host import, so the dehydrate compose can collect
+    /// the parent's and each child's bundle and pack one composite. `None`
+    /// is the ordinary path — `save_state` forwards to the host.
+    capture: Option<&'a mut CapturedState>,
     _borrow: PhantomData<&'a ()>,
 }
 
-impl FfiDropCtx<'_> {
+impl<'a> FfiDropCtx<'a> {
     /// Not part of the public API; called only by [`crate::export!`].
+    /// Forwards `save_state` to the host import.
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64) -> Self {
         Self {
             mailbox,
+            capture: None,
+            _borrow: PhantomData,
+        }
+    }
+
+    /// Not part of the public API; called only by the dehydrate compose
+    /// (`crate::ffi::inline_compose`). `save_state` records into `capture`
+    /// rather than the host import, so the composite can be assembled
+    /// before a single real host `save_state`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
+        Self {
+            mailbox,
+            capture: Some(capture),
             _borrow: PhantomData,
         }
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
+    /// When this ctx was built capturing (ADR-0114 §5), the deposit is
+    /// recorded in the capture buffer; otherwise it forwards to the host.
     ///
     /// # Panics
     /// Panics if the host `save_state` import returns non-zero — fail-fast
     /// per ADR-0063: the persistence bridge is part of the substrate
     /// contract and a failure here means the runtime is in an
-    /// unrecoverable state.
+    /// unrecoverable state. (The capturing path cannot fail.)
     pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
+        if let Some(capture) = self.capture.as_mut() {
+            capture.saved = Some((version, bytes.to_vec()));
+            return;
+        }
         let status = PERSIST_BRIDGE.save_state(version, bytes);
         assert_eq!(
             status, 0,
@@ -585,11 +656,11 @@ impl MailSender for FfiDropCtx<'_> {
 
 impl Persistence for FfiDropCtx<'_> {
     fn save_state(&mut self, version: u32, bytes: &[u8]) {
-        let status = PERSIST_BRIDGE.save_state(version, bytes);
-        assert_eq!(
-            status, 0,
-            "aether-actor: save_state failed (status {status})"
-        );
+        // Route through the inherent `save_state` so the ADR-0114 §5
+        // capture path applies — the generated `on_dehydrate` hooks reach
+        // the bundle through `Persistence::save_state_kind`, which calls
+        // this trait method, so a capturing ctx must intercept here too.
+        FfiDropCtx::save_state(self, version, bytes);
     }
 }
 
@@ -602,6 +673,7 @@ mod tests {
     use crate::ffi::{BootError, ErasedFfiActor, FfiActor, FfiDropCtx};
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
+    use alloc::string::String;
     use core::mem::{align_of, size_of};
 
     /// Test inline child whose `init` always fails — drives the
@@ -656,7 +728,13 @@ mod tests {
     /// it without the panicking `spawn_inline_child` host-fn stub.
     #[test]
     fn install_inline_child_reports_init_failure() {
-        let result = install_inline_child::<FailingChild>(MailboxId(0x5555), ());
+        let result = install_inline_child::<FailingChild>(
+            MailboxId(0x5555),
+            0,
+            String::from("child"),
+            false,
+            (),
+        );
         assert!(
             matches!(result, Err(SpawnError::InitFailed(_))),
             "a failing init must return SpawnError::InitFailed, got {result:?}",
