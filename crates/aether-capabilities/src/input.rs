@@ -158,7 +158,6 @@ mod native {
         SubscribeInputSelf, UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
     };
     use aether_actor::actor;
-    use aether_actor::actor::ctx::OutboundReply;
     use aether_data::{Kind, KindId};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -214,8 +213,12 @@ mod native {
         /// `SubscribeInput { kind, mailbox }`. Component mailboxes only —
         /// sinks and dropped mailboxes are rejected.
         #[handler]
-        fn on_subscribe(&mut self, ctx: &mut NativeCtx<'_>, payload: SubscribeInput) {
-            let result = match validate_subscriber_mailbox(&self.registry, payload.mailbox) {
+        fn on_subscribe(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            payload: SubscribeInput,
+        ) -> SubscribeInputResult {
+            match validate_subscriber_mailbox(&self.registry, payload.mailbox) {
                 Ok(()) => {
                     self.subscribers
                         .entry(payload.kind)
@@ -224,8 +227,7 @@ mod native {
                     SubscribeInputResult::Ok
                 }
                 Err(error) => SubscribeInputResult::Err { error },
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Subscribe the *sending* actor to an input stream (ADR-0021,
@@ -243,8 +245,12 @@ mod native {
         /// # Agent
         /// `SubscribeInputSelf { kind }`.
         #[handler]
-        fn on_subscribe_self(&mut self, ctx: &mut NativeCtx<'_>, payload: SubscribeInputSelf) {
-            let result = match ctx.source_mailbox() {
+        fn on_subscribe_self(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            payload: SubscribeInputSelf,
+        ) -> SubscribeInputResult {
+            match ctx.source_mailbox() {
                 Some(mailbox) => {
                     self.subscribers
                         .entry(payload.kind)
@@ -258,8 +264,7 @@ mod native {
                             with an explicit mailbox"
                         .to_string(),
                 },
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Unsubscribe a mailbox from an input stream (ADR-0021).
@@ -268,8 +273,12 @@ mod native {
         /// `UnsubscribeInput { kind, mailbox }`. Idempotent on
         /// "not currently subscribed"; rejects unknown / sink mailboxes.
         #[handler]
-        fn on_unsubscribe(&mut self, ctx: &mut NativeCtx<'_>, payload: UnsubscribeInput) {
-            let result = match validate_subscriber_mailbox(&self.registry, payload.mailbox) {
+        fn on_unsubscribe(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            payload: UnsubscribeInput,
+        ) -> SubscribeInputResult {
+            match validate_subscriber_mailbox(&self.registry, payload.mailbox) {
                 Ok(()) => {
                     if let Some(set) = self.subscribers.get_mut(&payload.kind) {
                         set.remove(&payload.mailbox);
@@ -277,8 +286,7 @@ mod native {
                     SubscribeInputResult::Ok
                 }
                 Err(error) => SubscribeInputResult::Err { error },
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Unsubscribe the *sending* actor from an input stream
@@ -290,8 +298,12 @@ mod native {
         /// # Agent
         /// `UnsubscribeInputSelf { kind }`.
         #[handler]
-        fn on_unsubscribe_self(&mut self, ctx: &mut NativeCtx<'_>, payload: UnsubscribeInputSelf) {
-            let result = match ctx.source_mailbox() {
+        fn on_unsubscribe_self(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            payload: UnsubscribeInputSelf,
+        ) -> SubscribeInputResult {
+            match ctx.source_mailbox() {
                 Some(mailbox) => {
                     if let Some(set) = self.subscribers.get_mut(&payload.kind) {
                         set.remove(&mailbox);
@@ -304,8 +316,7 @@ mod native {
                             with an explicit mailbox"
                         .to_string(),
                 },
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Remove `mailbox` from every input stream's subscriber set.

@@ -57,6 +57,7 @@ mod native {
         CreateTexture, DrawTexturedQuads, LoadFontResult, QuadSpace, Read, TexturedQuad,
         UpdateTexture,
     };
+    use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
     use aether_substrate::chassis::error::BootError;
 
@@ -208,8 +209,8 @@ mod native {
         /// replies `Ok { font_id, name, resident_bytes }` once registered
         /// or `Err` with the failure reason (bad path, or an unparseable
         /// file). The `font_id` is session-scoped — thread it into `draw`.
-        #[handler]
-        fn on_load_font(&mut self, ctx: &mut NativeCtx<'_>, mail: LoadFont) {
+        #[handler::manual]
+        fn on_load_font(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
             let source = ctx.reply_target();
             let key = (mail.namespace.clone(), mail.path.clone());
             self.pending_fonts
@@ -230,8 +231,8 @@ mod native {
         /// font parse off the hot path, pinning its deferred reply to the
         /// original `load_font` caller; `Err` relays the fs error to that
         /// caller as `LoadFontResult::Err`.
-        #[handler]
-        fn on_read_result(&mut self, ctx: &mut NativeCtx<'_>, mail: ReadResult) {
+        #[handler::manual]
+        fn on_read_result(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
             match mail {
                 ReadResult::Ok {
                     namespace,
@@ -597,7 +598,8 @@ mod native {
         fn load_font_parks_request_and_forwards_read() {
             let mut cap = TextCapability::new();
             let (binding, rx) = ctx_binding();
-            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_load_font(
                 &mut ctx,
                 LoadFont {
@@ -613,7 +615,8 @@ mod native {
         fn read_err_replies_load_font_err_and_clears_pending() {
             let mut cap = TextCapability::new();
             let (binding, rx) = ctx_binding();
-            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_load_font(
                 &mut ctx,
                 LoadFont {
@@ -625,7 +628,7 @@ mod native {
             assert_next_send_kind::<Read>(&binding, &rx);
 
             let mut read_ctx =
-                NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Err {
@@ -645,7 +648,8 @@ mod native {
         fn malformed_font_bytes_reply_err() {
             let mut cap = TextCapability::new();
             let (binding, rx) = ctx_binding();
-            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx =
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_load_font(
                 &mut ctx,
                 LoadFont {
@@ -656,7 +660,7 @@ mod native {
             assert_next_send_kind::<Read>(&binding, &rx);
 
             let mut read_ctx =
-                NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+                NativeCtx::new_dispatching(&binding, session_sender(), MailId::NONE, MailId::NONE);
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Ok {
