@@ -1148,7 +1148,7 @@ mod test_handlers {
     #[aether_actor::bridge(singleton)]
     mod echo_handler {
         use super::{HttpHeader, HttpServerRequest, HttpServerResponse};
-        use aether_actor::{actor, actor::ctx::OutboundReply};
+        use aether_actor::actor;
         use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
         use aether_substrate::chassis::error::BootError;
 
@@ -1165,7 +1165,11 @@ mod test_handlers {
 
             #[allow(clippy::unused_self)]
             #[handler]
-            fn on_request(&mut self, ctx: &mut NativeCtx<'_>, request: HttpServerRequest) {
+            fn on_request(
+                &mut self,
+                _ctx: &mut NativeCtx<'_>,
+                request: HttpServerRequest,
+            ) -> HttpServerResponse {
                 let headers = vec![
                     HttpHeader {
                         name: "x-aether-method".to_string(),
@@ -1184,11 +1188,11 @@ mod test_handlers {
                         value: "text/plain".to_string(),
                     },
                 ];
-                ctx.reply(&HttpServerResponse {
+                HttpServerResponse {
                     status: 200,
                     headers,
                     body: request.body,
-                });
+                }
             }
         }
     }

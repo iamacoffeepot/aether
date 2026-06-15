@@ -329,8 +329,8 @@ mod cap_native {
         BindListenerResult, Close, ListListenersResult, ListenerInfo, TcpListenerActor,
         TcpListenerConfig, UnbindListenerResult,
     };
-    use aether_actor::actor;
     use aether_actor::actor::ctx::OutboundReply;
+    use aether_actor::{Manual, actor};
     use aether_substrate::actor::monitor::MonitorHandle;
     use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -404,25 +404,23 @@ mod cap_native {
         /// Reply: `BindListenerResult`. `Ok` on successful bind +
         /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
         #[handler]
-        fn on_bind(&mut self, ctx: &mut NativeCtx<'_>, mail: BindListener) {
+        fn on_bind(&mut self, ctx: &mut NativeCtx<'_>, mail: BindListener) -> BindListenerResult {
             let listener = match TcpListener::bind(&mail.addr) {
                 Ok(l) => l,
                 Err(e) => {
-                    ctx.reply(&BindListenerResult::Err {
+                    return BindListenerResult::Err {
                         addr: mail.addr,
                         reason: format!("bind failed: {e}"),
-                    });
-                    return;
+                    };
                 }
             };
             let local_port = match listener.local_addr() {
                 Ok(addr) => addr.port(),
                 Err(e) => {
-                    ctx.reply(&BindListenerResult::Err {
+                    return BindListenerResult::Err {
                         addr: mail.addr,
                         reason: format!("local_addr failed: {e}"),
-                    });
-                    return;
+                    };
                 }
             };
             let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
@@ -440,11 +438,10 @@ mod cap_native {
             {
                 Ok(id) => id,
                 Err(e) => {
-                    ctx.reply(&BindListenerResult::Err {
+                    return BindListenerResult::Err {
                         addr: mail.addr,
                         reason: format!("spawn failed: {e:?}"),
-                    });
-                    return;
+                    };
                 }
             };
 
@@ -458,11 +455,10 @@ mod cap_native {
                     // unlikely (listener was just inserted Live). Reply
                     // Err and let the listener live; chassis shutdown
                     // will reap it.
-                    ctx.reply(&BindListenerResult::Err {
+                    return BindListenerResult::Err {
                         addr: mail.addr,
                         reason: format!("monitor failed: {e:?}"),
-                    });
-                    return;
+                    };
                 }
             };
 
@@ -476,11 +472,11 @@ mod cap_native {
                 },
             );
 
-            ctx.reply(&BindListenerResult::Ok {
+            BindListenerResult::Ok {
                 listener_name: subname_str,
                 listener_id,
                 local_port,
-            });
+            }
         }
 
         /// Mail `Close` to the named listener and park the
@@ -491,8 +487,8 @@ mod cap_native {
         /// Reply: `UnbindListenerResult`. Asynchronous — the response
         /// fires after the listener's accept thread joins and its
         /// `MonitorNotice` arrives at this cap.
-        #[handler]
-        fn on_unbind(&mut self, ctx: &mut NativeCtx<'_>, mail: UnbindListener) {
+        #[handler::manual]
+        fn on_unbind(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: UnbindListener) {
             // Resolve listener_id from the cap-local supervisor map by
             // name. The cap is the source of truth for "what listeners
             // exist"; no registry walk needed.
@@ -533,7 +529,11 @@ mod cap_native {
         /// # Agent
         /// Reply: `ListListenersResult`.
         #[handler]
-        fn on_list(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListListeners) {
+        fn on_list(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            _mail: ListListeners,
+        ) -> ListListenersResult {
             let listeners: Vec<ListenerInfo> = self
                 .listeners
                 .values()
@@ -543,7 +543,7 @@ mod cap_native {
                     port: entry.port,
                 })
                 .collect();
-            ctx.reply(&ListListenersResult { listeners });
+            ListListenersResult { listeners }
         }
 
         /// Listener tombstoned — remove from the supervisor map and
@@ -554,8 +554,8 @@ mod cap_native {
         /// `on_bind`) fires this notice; if the close came from an
         /// unbind request, `pending_unbinds` has an entry with the
         /// originator to reply to.
-        #[handler]
-        fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+        #[handler::manual]
+        fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_, Manual>, notice: MonitorNotice) {
             // Drop the supervisor entry. The held MonitorHandle drops
             // here; deregister is idempotent with the close path's
             // forward-index drain.

@@ -310,7 +310,7 @@ mod native {
         DisabledHttpAdapter, Fetch, FetchRequest, FetchResponse, HttpAdapter, HttpConfig,
         HttpError, HttpHeader, HttpMethod,
     };
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_kinds::FetchResult;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -550,7 +550,7 @@ mod native {
         /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
         /// long-running fetches block other HTTP mail until they finish.
         #[handler]
-        fn on_fetch(&self, ctx: &mut NativeCtx<'_>, mail: Fetch) {
+        fn on_fetch(&self, _ctx: &mut NativeCtx<'_>, mail: Fetch) -> FetchResult {
             let timeout = mail.timeout_ms.map_or(self.default_timeout, |ms| {
                 Duration::from_millis(u64::from(ms))
             });
@@ -564,7 +564,7 @@ mod native {
                 timeout,
             };
 
-            let reply = match self.adapter.fetch(adapter_req) {
+            match self.adapter.fetch(adapter_req) {
                 Ok(r) => FetchResult::Ok {
                     url,
                     status: r.status,
@@ -572,8 +572,7 @@ mod native {
                     body: r.body,
                 },
                 Err(error) => FetchResult::Err { url, error },
-            };
-            ctx.reply(&reply);
+            }
         }
     }
 
@@ -590,7 +589,7 @@ mod native {
             build_http_adapter,
         };
         use aether_actor::Actor;
-        use aether_data::{Kind, MailboxId};
+        use aether_data::MailboxId;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
         use aether_substrate::chassis::builder::Builder;
@@ -599,8 +598,6 @@ mod native {
 
         use crate::test_chassis::{TestChassis, fresh_substrate};
         use aether_substrate::mail::registry;
-        use serde::de::DeserializeOwned;
-        use std::sync::mpsc::Receiver;
 
         // ADR-0090: the confique migration is byte-identical to the prior
         // hand-rolled reader. These exercise the resolution logic without
@@ -691,27 +688,11 @@ mod native {
 
         use aether_data::{SessionToken, SourceAddr, Uuid};
 
-        use aether_substrate::mail::outbound::EgressEvent;
-
         fn session_sender() -> Source {
             Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
         }
 
         use crate::test_chassis::test_mailer_and_rx;
-
-        fn decode_reply<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>) -> K {
-            let event = rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("test: egress event arrives within 1s deadline");
-            let EgressEvent::ToSession {
-                kind_name, payload, ..
-            } = event
-            else {
-                panic!("expected ToSession egress, got {event:?}");
-            };
-            assert_eq!(kind_name, K::NAME);
-            postcard::from_bytes(&payload).expect("test: reply payload decodes via postcard")
-        }
 
         /// Boot the cap against a default disabled `HttpConfig` and confirm
         /// the mailbox is registered.
@@ -756,7 +737,7 @@ mod native {
 
         #[test]
         fn disabled_adapter_replies_disabled() {
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _) = test_mailer_and_rx();
             let cap = HttpCapability::from_adapter(
                 Arc::new(DisabledHttpAdapter),
                 HttpConfig::default().default_timeout,
@@ -768,7 +749,7 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            cap.on_fetch(
+            match cap.on_fetch(
                 &mut ctx,
                 Fetch {
                     url: "https://api.example.com/".to_string(),
@@ -777,8 +758,7 @@ mod native {
                     body: vec![],
                     timeout_ms: None,
                 },
-            );
-            match decode_reply::<FetchResult>(&rx) {
+            ) {
                 FetchResult::Err {
                     url,
                     error: HttpError::Disabled,
@@ -862,7 +842,7 @@ mod native {
 
         #[test]
         fn cap_fetch_ok_replies_with_response() {
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _) = test_mailer_and_rx();
             let stub = StubAdapter::with(Ok(FetchResponse {
                 status: 200,
                 headers: vec![HttpHeader {
@@ -882,7 +862,7 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            cap.on_fetch(
+            match cap.on_fetch(
                 &mut ctx,
                 Fetch {
                     url: "https://api.example.com/v1".to_string(),
@@ -891,8 +871,7 @@ mod native {
                     body: vec![],
                     timeout_ms: Some(5000),
                 },
-            );
-            match decode_reply::<FetchResult>(&rx) {
+            ) {
                 FetchResult::Ok {
                     url,
                     status,
@@ -910,7 +889,7 @@ mod native {
 
         #[test]
         fn cap_fetch_err_echoes_url_and_error() {
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _) = test_mailer_and_rx();
             let cap = HttpCapability::from_adapter(
                 StubAdapter::with(Err(HttpError::Timeout)) as Arc<dyn HttpAdapter>,
                 HttpConfig::default().default_timeout,
@@ -922,7 +901,7 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            cap.on_fetch(
+            match cap.on_fetch(
                 &mut ctx,
                 Fetch {
                     url: "https://slow.example.com/".to_string(),
@@ -931,8 +910,7 @@ mod native {
                     body: vec![],
                     timeout_ms: None,
                 },
-            );
-            match decode_reply::<FetchResult>(&rx) {
+            ) {
                 FetchResult::Err { url, error } => {
                     assert_eq!(url, "https://slow.example.com/");
                     assert_eq!(error, HttpError::Timeout);
@@ -961,7 +939,7 @@ mod native {
                 aether_data::MailId::NONE,
                 aether_data::MailId::NONE,
             );
-            cap.on_fetch(
+            let _ = cap.on_fetch(
                 &mut ctx,
                 Fetch {
                     url: "https://api.example.com/".to_string(),
@@ -996,10 +974,5 @@ mod native {
             });
             assert!(matches!(resp, Err(HttpError::Disabled)));
         }
-
-        /// Silence `Kind` unused-import (handy for the test mod's
-        /// `decode_reply` bound).
-        #[allow(dead_code)]
-        fn _silence_kind<K: Kind>() {}
     }
 }
