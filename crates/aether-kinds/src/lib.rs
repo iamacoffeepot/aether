@@ -3717,6 +3717,132 @@ mod control_plane {
             error: GeminiError,
         },
     }
+
+    // ADR-0047/0048/0049 space-time reachability vocabulary (issue
+    // 1857). The shared kind contract a minimum-cost reachability solver
+    // over a time-varying scalar cost field reads and writes; the solver
+    // itself is a pair of native `#[transform]`s in `aether-capabilities`.
+    // A family of follow-on field passes (corridor extraction, windowed
+    // re-solve, agent populations) all consume `ScalarField`, so the
+    // representation lands here once. Postcard-shaped, `Vec`-bearing like
+    // `CreateTexture`.
+
+    /// A dense scalar field over a 2D grid and an integer tick axis — the
+    /// shared currency of the reachability solver (issue 1857). `values`
+    /// is row-major over `(tick, y, x)`: the scalar at cell `(x, y)` on
+    /// tick `t` is `values[t * height * width + y * width + x]`, so a
+    /// well-formed field has `values.len() == width * height * ticks`.
+    /// `u32::MAX` is the reserved sentinel — in a cost field it marks a
+    /// blocked / impassable cell, and in the solved cost-to-reach field it
+    /// marks a cell no stencil-feasible path reaches. Costs are
+    /// non-negative, so a `u32` field with the reserved sentinel folds
+    /// "blocked" in with no second mask and keeps the recurrence's `min`
+    /// well-defined. This is both the cost-field input (inside
+    /// [`ReachabilityProblem`]) and the solved cost-to-reach output of the
+    /// `solve` transform.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.scalar_field")]
+    pub struct ScalarField {
+        pub width: u32,
+        pub height: u32,
+        pub ticks: u32,
+        pub values: Vec<u32>,
+    }
+
+    /// One signed cell offset in a [`MovementStencil`] — a single-tick
+    /// step `(dx, dy)` measured in grid cells. The zero offset `(0, 0)` is
+    /// the "stay put" move. Not a kind on its own — only addressable
+    /// inside `MovementStencil.offsets`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct StencilOffset {
+        pub dx: i32,
+        pub dy: i32,
+    }
+
+    /// The one-tick movement stencil — the set of cells reachable from any
+    /// cell in a single tick (issue 1857). A standalone kind so the
+    /// corridor-graph and windowed-replan passes share one stencil
+    /// representation. Each [`StencilOffset`] is a step applied to a
+    /// cell's position; include the zero `(0, 0)` offset for the "stay
+    /// put" move. The solver reads it as the predecessor set: cell `c` on
+    /// tick `t` is reachable from `c - offset` on tick `t - 1` for each
+    /// offset, so a non-symmetric stencil is interpreted in the forward
+    /// (reachable-from) direction.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.movement_stencil")]
+    pub struct MovementStencil {
+        pub offsets: Vec<StencilOffset>,
+    }
+
+    /// The bundled input to the `solve` transform (issue 1857): a cost
+    /// field, the movement stencil, and the start seed. Bundling the
+    /// operands into one kind keeps `solve` a unary `Kind -> Kind` node,
+    /// the same shape [`crate::Mat4Apply`] gives `mat4_apply`. `start` is
+    /// a cost-valued seed slice of length `cost.width * cost.height` — the
+    /// per-cell initial accumulated cost at `t = 0`, with `u32::MAX`
+    /// marking a cell that is not a start. A plain start sets its cells to
+    /// `0`; the seed-slice form (rather than a bare 0-cost cell set) is
+    /// what lets a windowed re-solve carry its frontier and a
+    /// counterfactual query seed from an actual `(cell, accumulated-cost)`
+    /// state.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.problem")]
+    pub struct ReachabilityProblem {
+        pub cost: ScalarField,
+        pub stencil: MovementStencil,
+        pub start: Vec<u32>,
+    }
+
+    /// A budget threshold to query a solved cost-to-reach field against
+    /// (issue 1857). Paired with the `V` field by the `reachability_margin`
+    /// transform, which compares `budget` to the minimum cost-to-reach
+    /// over the field's final tick.
+    #[derive(
+        aether_data::Kind,
+        aether_data::Schema,
+        Serialize,
+        Deserialize,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+    )]
+    #[kind(name = "aether.reach.budget_query")]
+    pub struct BudgetQuery {
+        pub budget: u32,
+    }
+
+    /// The result of a `reachability_margin` query (issue 1857).
+    /// `min_cost` is the minimum cost-to-reach over the field's final-tick
+    /// cells (`u32::MAX` if no final-tick cell is reachable). `reachable`
+    /// is `min_cost < budget`. `margin` is `budget - min_cost` as a signed
+    /// value — positive slack when reachable under budget, negative when
+    /// the cheapest reachable cell still exceeds the budget (or when no
+    /// cell is reachable at all).
+    #[derive(
+        aether_data::Kind,
+        aether_data::Schema,
+        Serialize,
+        Deserialize,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+    )]
+    #[kind(name = "aether.reach.margin")]
+    pub struct ReachabilityMargin {
+        pub reachable: bool,
+        pub min_cost: u32,
+        pub margin: i64,
+    }
 }
 
 #[cfg(test)]
@@ -3922,6 +4048,11 @@ mod tests {
         assert_eq!(ListKindsResult::NAME, "aether.inventory.kinds_result");
         assert_eq!(ListHandlers::NAME, "aether.inventory.handlers");
         assert_eq!(HandlersResult::NAME, "aether.inventory.handlers_result");
+        assert_eq!(ScalarField::NAME, "aether.reach.scalar_field");
+        assert_eq!(MovementStencil::NAME, "aether.reach.movement_stencil");
+        assert_eq!(ReachabilityProblem::NAME, "aether.reach.problem");
+        assert_eq!(BudgetQuery::NAME, "aether.reach.budget_query");
+        assert_eq!(ReachabilityMargin::NAME, "aether.reach.margin");
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
@@ -3984,6 +4115,69 @@ mod tests {
             assert_eq!(nested_fields[0].name, "x");
             assert_eq!(nested_fields[2].name, "z");
             assert_eq!(nested_fields[5].name, "b");
+        }
+
+        #[test]
+        fn reachability_kinds_resolve_distinctly() {
+            use aether_data::Kind;
+            // The five reachability kinds carry distinct ids — a shared id
+            // would collide in the transform Ref-slot resolver (the same
+            // contract `mat4_apply`'s input/output split rests on).
+            let ids = [
+                ScalarField::ID,
+                MovementStencil::ID,
+                ReachabilityProblem::ID,
+                BudgetQuery::ID,
+                ReachabilityMargin::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "reachability kind ids must be distinct");
+                }
+            }
+        }
+
+        #[test]
+        fn scalar_field_schema_is_struct() {
+            let SchemaType::Struct { fields, .. } = &<ScalarField as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 4);
+            assert_eq!(fields[0].name, "width");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[3].name, "values");
+            let SchemaType::Vec(element) = &fields[3].ty else {
+                panic!("expected Vec");
+            };
+            assert_eq!(**element, SchemaType::Scalar(Primitive::U32));
+        }
+
+        #[test]
+        fn reachability_problem_schema_nests_field_and_stencil() {
+            let SchemaType::Struct { fields, .. } = &<ReachabilityProblem as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 3);
+            assert_eq!(fields[0].name, "cost");
+            assert!(matches!(fields[0].ty, SchemaType::Struct { .. }));
+            assert_eq!(fields[1].name, "stencil");
+            assert!(matches!(fields[1].ty, SchemaType::Struct { .. }));
+            assert_eq!(fields[2].name, "start");
+            assert!(matches!(fields[2].ty, SchemaType::Vec(_)));
+        }
+
+        #[test]
+        fn margin_schema_is_struct() {
+            let SchemaType::Struct { fields, .. } = &<ReachabilityMargin as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 3);
+            assert_eq!(fields[0].name, "reachable");
+            assert_eq!(fields[0].ty, SchemaType::Bool);
+            assert_eq!(fields[1].name, "min_cost");
+            assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[2].name, "margin");
+            assert_eq!(fields[2].ty, SchemaType::Scalar(Primitive::I64));
         }
     }
 
