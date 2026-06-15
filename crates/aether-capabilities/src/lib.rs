@@ -129,6 +129,13 @@ pub(crate) mod corridor;
 // wasm-header-only build it would be dead.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod counterfactual;
+// Pure trajectory-density aggregation core (ADR-0047/0048/0049, issue
+// 1865): snaps a set of paths onto the corridor graph and accumulates
+// per-edge traffic. Gated to non-wasm like `corridor` — its caller is the
+// native `aggregate_traffic` transform, so on a wasm-header-only build it
+// would be dead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod traffic;
 pub mod window;
 
 #[cfg(feature = "audio")]
