@@ -29,7 +29,7 @@ mod native {
     use super::{DispatchTraced, DispatchTracedAck};
     use std::sync::Arc;
 
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::helpers::resolve_bundle;
@@ -92,7 +92,11 @@ mod native {
         /// `correlation_id`, so the RPC server's `on_any` fallback wraps
         /// each into a `ReplyEvent` on the wire.
         #[handler]
-        fn on_dispatch_traced(&mut self, ctx: &mut NativeCtx<'_>, batch: DispatchTraced) {
+        fn on_dispatch_traced(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            batch: DispatchTraced,
+        ) -> DispatchTracedAck {
             let root = ctx.in_flight_mail_id();
             let forward_reply_to = ctx.reply_target();
             let DispatchTraced { mails } = batch;
@@ -104,8 +108,7 @@ mod native {
             let resolved = match resolve_bundle(&self.registry, &mails, "dispatch_traced batch") {
                 Ok(v) => v,
                 Err(error) => {
-                    ctx.reply(&DispatchTracedAck::Err { error });
-                    return;
+                    return DispatchTracedAck::Err { error };
                 }
             };
             for mail in resolved {
@@ -116,7 +119,7 @@ mod native {
                     forward_reply_to,
                 );
             }
-            ctx.reply(&DispatchTracedAck::Ok { root });
+            DispatchTracedAck::Ok { root }
         }
     }
 
@@ -130,21 +133,17 @@ mod native {
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+        use aether_substrate::mail::outbound::HubOutbound;
         use aether_substrate::mail::registry::MailDispatch;
         use aether_substrate::mail::{Source, SourceAddr};
-        use std::sync::mpsc::Receiver;
-        use std::time::Duration;
 
         /// Shared scaffolding for the `on_dispatch_traced` tests:
         /// fresh registry + mailer + outbound + transport + cap wired
-        /// together with the `mailer.outbound -> rx` egress recorder.
-        /// The cap doesn't go through `init` (which reads ctx state);
-        /// construct it directly with the registry handle the resolve
-        /// path needs.
+        /// together. The cap doesn't go through `init` (which reads ctx
+        /// state); construct it directly with the registry handle the
+        /// resolve path needs.
         struct DispatchTracedFixture {
             registry: Arc<Registry>,
-            rx: Receiver<EgressEvent>,
             transport: Arc<NativeBinding>,
             cap: TraceDispatchCapability,
         }
@@ -152,7 +151,7 @@ mod native {
         fn dispatch_traced_fixture() -> DispatchTracedFixture {
             let registry = Arc::new(Registry::new());
             let store = Arc::new(HandleStore::new(1024 * 1024));
-            let (outbound, rx) = HubOutbound::attached_loopback();
+            let (outbound, _rx) = HubOutbound::attached_loopback();
             let mailer = Arc::new(
                 Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
             );
@@ -163,7 +162,6 @@ mod native {
             let cap = TraceDispatchCapability::with_registry(Arc::clone(&registry));
             DispatchTracedFixture {
                 registry,
-                rx,
                 transport,
                 cap,
             }
@@ -175,23 +173,6 @@ mod native {
         fn chassis_root_ctx(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_> {
             let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
             NativeCtx::new(transport, sender, inbound, inbound)
-        }
-
-        /// Drain `rx` until it goes quiet, decoding every
-        /// `DispatchTracedAck` `ToSession` egress it sees. Exactly one
-        /// ack is the success shape; the test asserts on `len()`.
-        fn drain_ack_replies(rx: &Receiver<EgressEvent>) -> Vec<DispatchTracedAck> {
-            let mut acks = Vec::new();
-            while let Ok(event) = rx.recv_timeout(Duration::from_millis(250)) {
-                if let EgressEvent::ToSession {
-                    kind_name, payload, ..
-                } = event
-                    && kind_name == <DispatchTracedAck as aether_data::Kind>::NAME
-                {
-                    acks.push(postcard::from_bytes(&payload).expect("ack payload decodes"));
-                }
-            }
-            acks
         }
 
         /// Issue 749: `on_dispatch_traced` resolves each envelope's
@@ -233,7 +214,7 @@ mod native {
 
             let inbound = MailId::new(MailboxId(0xC0DE), 7);
             let mut ctx = chassis_root_ctx(&fix.transport, inbound);
-            fix.cap.on_dispatch_traced(
+            let ack = fix.cap.on_dispatch_traced(
                 &mut ctx,
                 DispatchTraced {
                     mails: vec![
@@ -280,11 +261,9 @@ mod native {
                 "envelope B missing or chain not inherited; captured: {snapshot:?}"
             );
 
-            let acks = drain_ack_replies(&fix.rx);
-            assert_eq!(acks.len(), 1, "expected exactly one ack reply");
-            match &acks[0] {
+            match ack {
                 DispatchTracedAck::Ok { root } => assert_eq!(
-                    *root, inbound,
+                    root, inbound,
                     "Ok ack must echo the in-flight inbound mail id as the chassis root"
                 ),
                 DispatchTracedAck::Err { error } => {
@@ -302,7 +281,7 @@ mod native {
             let mut fix = dispatch_traced_fixture();
             let inbound = MailId::new(MailboxId(0xC0DE), 99);
             let mut ctx = chassis_root_ctx(&fix.transport, inbound);
-            fix.cap.on_dispatch_traced(
+            let ack = fix.cap.on_dispatch_traced(
                 &mut ctx,
                 DispatchTraced {
                     mails: vec![MailEnvelope {
@@ -314,12 +293,9 @@ mod native {
                 },
             );
 
-            let acks = drain_ack_replies(&fix.rx);
-            assert_eq!(acks.len(), 1);
             assert!(
-                matches!(&acks[0], DispatchTracedAck::Err { error } if error.contains("unknown recipient")),
-                "expected Err with 'unknown recipient' message, got: {:?}",
-                acks[0]
+                matches!(&ack, DispatchTracedAck::Err { error } if error.contains("unknown recipient")),
+                "expected Err with 'unknown recipient' message, got: {ack:?}"
             );
         }
     }

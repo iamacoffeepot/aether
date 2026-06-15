@@ -503,8 +503,8 @@ mod native {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use aether_actor::actor;
     use aether_actor::actor::ctx::OutboundReply;
+    use aether_actor::{Manual, ReplyMode, actor};
     use aether_data::{Kind, KindId, MailboxId as DataMailboxId, mailbox_id_from_name};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -685,12 +685,16 @@ mod native {
         /// `LifecycleSubscribe { stage, mailbox }`. Stage must be a kind
         /// id registered as a state or terminal in the lifecycle graph.
         #[handler]
-        fn on_subscribe(&mut self, ctx: &mut NativeCtx<'_>, payload: LifecycleSubscribe) {
+        fn on_subscribe(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            payload: LifecycleSubscribe,
+        ) -> LifecycleSubscribeResult {
             let stage_kind = KindId(payload.stage);
             let mailbox = DataMailboxId(payload.mailbox);
             let known =
                 self.graph.state(stage_kind).is_some() || self.graph.is_terminal(stage_kind);
-            let result = if known {
+            if known {
                 self.subscribers
                     .entry(stage_kind)
                     .or_default()
@@ -703,8 +707,7 @@ mod native {
                         "stage {stage_kind:?} is not declared by this chassis's lifecycle graph"
                     ),
                 }
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Subscribe the *sending* actor to a lifecycle stage broadcast
@@ -722,9 +725,13 @@ mod native {
         /// `LifecycleSubscribeSelf { stage }`. Stage must be a kind id
         /// registered as a state or terminal in the lifecycle graph.
         #[handler]
-        fn on_subscribe_self(&mut self, ctx: &mut NativeCtx<'_>, payload: LifecycleSubscribeSelf) {
+        fn on_subscribe_self(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            payload: LifecycleSubscribeSelf,
+        ) -> LifecycleSubscribeResult {
             let stage_kind = KindId(payload.stage);
-            let result = match ctx.source_mailbox() {
+            match ctx.source_mailbox() {
                 None => LifecycleSubscribeResult::Err {
                     stage: payload.stage,
                     error: "aether.lifecycle.subscribe_self requires a local component sender; \
@@ -751,8 +758,7 @@ mod native {
                         }
                     }
                 }
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Unsubscribe a mailbox from a lifecycle stage broadcast.
@@ -761,12 +767,16 @@ mod native {
         /// # Agent
         /// `LifecycleUnsubscribe { stage, mailbox }`.
         #[handler]
-        fn on_unsubscribe(&mut self, ctx: &mut NativeCtx<'_>, payload: LifecycleUnsubscribe) {
+        fn on_unsubscribe(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            payload: LifecycleUnsubscribe,
+        ) -> LifecycleSubscribeResult {
             let stage_kind = KindId(payload.stage);
             let mailbox = DataMailboxId(payload.mailbox);
             let known =
                 self.graph.state(stage_kind).is_some() || self.graph.is_terminal(stage_kind);
-            let result = if known {
+            if known {
                 if let Some(set) = self.subscribers.get_mut(&stage_kind) {
                     set.remove(&mailbox);
                 }
@@ -778,8 +788,7 @@ mod native {
                         "stage {stage_kind:?} is not declared by this chassis's lifecycle graph"
                     ),
                 }
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Unsubscribe the *sending* actor from a lifecycle stage
@@ -796,9 +805,9 @@ mod native {
             &mut self,
             ctx: &mut NativeCtx<'_>,
             payload: LifecycleUnsubscribeSelf,
-        ) {
+        ) -> LifecycleSubscribeResult {
             let stage_kind = KindId(payload.stage);
-            let result = match ctx.source_mailbox() {
+            match ctx.source_mailbox() {
                 None => LifecycleSubscribeResult::Err {
                     stage: payload.stage,
                     error: "aether.lifecycle.unsubscribe_self requires a local component sender; \
@@ -824,8 +833,7 @@ mod native {
                         }
                     }
                 }
-            };
-            ctx.reply(&result);
+            }
         }
 
         /// Remove `mailbox` from every lifecycle stage's subscriber set.
@@ -876,8 +884,8 @@ mod native {
         /// `LifecycleAdvance {}`. Sent by the chassis main loop each
         /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
         /// root settles.
-        #[handler]
-        fn on_advance(&mut self, ctx: &mut NativeCtx<'_>, _payload: LifecycleAdvance) {
+        #[handler::manual]
+        fn on_advance(&mut self, ctx: &mut NativeCtx<'_, Manual>, _payload: LifecycleAdvance) {
             if self.terminal_reached {
                 // Already done — reply immediately with zeros so the
                 // chassis main loop unblocks and can break on `next == 0`.
@@ -1012,8 +1020,8 @@ mod native {
         /// `Settled { root }`. Synthesised by the settlement registry
         /// when the in-flight count for `root` reaches zero; not a public
         /// API for user code.
-        #[handler]
-        fn on_settled(&mut self, ctx: &mut NativeCtx<'_>, payload: Settled) {
+        #[handler::manual]
+        fn on_settled(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: Settled) {
             let Some(pending) = self.pending.as_ref() else {
                 return;
             };
@@ -1108,7 +1116,7 @@ mod native {
         /// [`Self::on_settled`]'s state mutation + reply but logs at
         /// `error`: reaching here means the settlement pipeline stalled
         /// past `advance_timeout`. No-op when nothing is pending.
-        fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_>) {
+        fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_, Manual>) {
             let Some(pending) = self.pending.take() else {
                 return;
             };
@@ -1162,8 +1170,8 @@ mod native {
     /// state's), not a compile-site `K`; the path preserves the inbound
     /// `(parent, root)` lineage so settlement counts each child against
     /// the root (ADR-0080 §6).
-    fn broadcast_to_subscribers(
-        ctx: &mut NativeCtx<'_>,
+    fn broadcast_to_subscribers<M: ReplyMode>(
+        ctx: &mut NativeCtx<'_, M>,
         subscribers: &BTreeMap<KindId, BTreeSet<DataMailboxId>>,
         stage: KindId,
     ) {

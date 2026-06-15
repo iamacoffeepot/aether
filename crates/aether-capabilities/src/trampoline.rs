@@ -77,7 +77,6 @@ mod native {
     use std::sync::Arc;
 
     use aether_actor::actor;
-    use aether_actor::actor::ctx::OutboundReply;
     use aether_kinds::{
         ComponentCapabilities, DropComponent, DropResult, ReplaceComponent, ReplaceResult,
     };
@@ -295,7 +294,11 @@ mod native {
         /// [`Self::forward_to_wasm`], which warn-drops because
         /// `self.component` is `None`.
         #[handler]
-        fn on_drop_component(&mut self, ctx: &mut NativeCtx<'_>, _payload: DropComponent) {
+        fn on_drop_component(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            _payload: DropComponent,
+        ) -> DropResult {
             if let Some(mut component) = self.component.take() {
                 // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
                 // single pre-shutdown hook — the legacy `on_drop`
@@ -315,7 +318,7 @@ mod native {
             // inside `with_stamped`, so both indexes clear together.
             self.mailer.cost_table().drop_mailbox(self.mailbox);
             CostCells::try_with_mut(|cells| cells.seed(Vec::new()));
-            ctx.reply(&DropResult::Ok);
+            DropResult::Ok
         }
 
         /// Replace the wasm component with a fresh module. ADR-0022 +
@@ -326,9 +329,12 @@ mod native {
         /// module instantiates against the same binding, and
         /// `on_rehydrate` runs on the fresh side.
         #[handler]
-        fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
-            let result = self.handle_replace(payload);
-            ctx.reply(&result);
+        fn on_replace_component(
+            &mut self,
+            _ctx: &mut NativeCtx<'_>,
+            payload: ReplaceComponent,
+        ) -> ReplaceResult {
+            self.handle_replace(payload)
         }
 
         /// Forward un-handled mail to the wasm guest.
