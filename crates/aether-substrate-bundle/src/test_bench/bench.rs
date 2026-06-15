@@ -33,10 +33,10 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use aether_capabilities::trace_walk::TreeWalk;
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty};
-use aether_kinds::Tick;
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
+use aether_kinds::{LogTail, LogTailResult, Tick};
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or postcard per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
@@ -412,6 +412,36 @@ impl TestBench {
             .lock()
             .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
             .clone()
+    }
+
+    /// Tail `mailbox_name`'s per-actor log ring (ADR-0081). Mirrors
+    /// `FleetBench::log_tail` over the existing `send_bytes_and_await`,
+    /// so in-process scenario tests can assert guest-emitted
+    /// `tracing::warn!` / `tracing::info!` entries without an RPC session.
+    ///
+    /// `since: None` reads from the oldest retained entry; `Some(n)` returns
+    /// only entries with `sequence > n`. `max: 0` resolves to the
+    /// substrate-default cap (currently 100). The framework dispatch loop
+    /// answers [`LogTail`] for every native actor and wasm trampoline, so
+    /// `mailbox_name` is any live mailbox path (e.g.
+    /// `"aether.component/aether.embedded:test_fixture_probe"`).
+    ///
+    /// # Panics
+    /// Panics on a decode failure — implies a kind shape mismatch,
+    /// matching the fail-fast disposition of [`Self::count_observed`] /
+    /// [`Self::observed_kinds`].
+    pub fn log_tail(&mut self, mailbox_name: &str, since: Option<u64>) -> LogTailResult {
+        let request = LogTail {
+            max: 0,
+            min_level: None,
+            since,
+        };
+        let payload = self
+            .send_bytes_and_await(mailbox_name, LogTail::ID, request.encode_into_bytes())
+            .unwrap_or_else(|e| panic!("log_tail send to {mailbox_name:?} failed: {e}"));
+        LogTailResult::decode_from_bytes(&payload).unwrap_or_else(|| {
+            panic!("log_tail reply from {mailbox_name:?} did not decode as LogTailResult")
+        })
     }
 
     /// Borrow the substrate's queryable [`CapabilityRegistry`]
