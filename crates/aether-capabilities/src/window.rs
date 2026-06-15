@@ -15,7 +15,7 @@ use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle};
 
 #[aether_actor::bridge(singleton)]
 mod native {
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -58,19 +58,27 @@ mod native {
         // capability is stateless, so the reply routes purely off `ctx`.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_set_mode(&self, ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) {
-            ctx.reply(&SetWindowModeResult::Err {
+        fn on_set_mode(
+            &self,
+            _ctx: &mut NativeCtx<'_>,
+            _mail: SetWindowMode,
+        ) -> SetWindowModeResult {
+            SetWindowModeResult::Err {
                 error: "unsupported on this chassis — no window peripheral".to_owned(),
-            });
+            }
         }
 
         /// Reply `Err` for the same reason as `on_set_mode`.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_set_title(&self, ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) {
-            ctx.reply(&SetWindowTitleResult::Err {
+        fn on_set_title(
+            &self,
+            _ctx: &mut NativeCtx<'_>,
+            _mail: SetWindowTitle,
+        ) -> SetWindowTitleResult {
+            SetWindowTitleResult::Err {
                 error: "unsupported on this chassis — no window peripheral".to_owned(),
-            });
+            }
         }
 
         /// Reply `Err` for the same reason as `on_set_mode`
@@ -78,10 +86,10 @@ mod native {
         /// peripheral can't foreground one.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_focus(&self, ctx: &mut NativeCtx<'_>, _mail: FocusWindow) {
-            ctx.reply(&FocusWindowResult::Err {
+        fn on_focus(&self, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
+            FocusWindowResult::Err {
                 error: "unsupported on this chassis — no window peripheral".to_owned(),
-            });
+            }
         }
     }
 
@@ -92,12 +100,14 @@ mod native {
     )]
     mod tests {
         use super::*;
-        use aether_data::{MailId, Source, SourceAddr};
+        use aether_data::{Kind, MailId, Source, SourceAddr};
         use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle, WindowMode};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::{HubOutbound, InboxHandler, MailboxId, OwnedDispatch, Registry};
+        use aether_substrate::{
+            HubOutbound, InboxHandler, MailboxId, NativeDispatch, OwnedDispatch, Registry,
+        };
         use std::sync::Arc;
         use std::sync::mpsc;
         use std::time::Duration;
@@ -128,8 +138,9 @@ mod native {
         /// `focus` reply from the headless window cap joins the caller's
         /// causal chain — the reply's `Sent` holds the root open until its
         /// `Finished` fires, instead of detaching through the lineage-less
-        /// unchained path. Each handler routes through the typed
-        /// `ctx.reply()`, so they all share the proof.
+        /// unchained path. Each handler is a single-class `-> R` handler;
+        /// the macro-emitted dispatch issues the reply so they all share the
+        /// proof via the dispatch trampoline (ADR-0112).
         #[test]
         fn err_reply_joins_caller_chain() {
             let (mailer, caller_mailbox, reply_rx) = settlement_substrate();
@@ -138,12 +149,13 @@ mod native {
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let cap = HeadlessWindowCapability;
+            let mut cap = HeadlessWindowCapability;
 
-            // Run each handler under its own root and assert the reply
-            // holds, then settles, that root.
+            // Run each handler under its own root through the dispatch
+            // trampoline (ADR-0112: `NativeCtx::new_dispatching` + `__aether_dispatch_envelope`)
+            // and assert the reply holds, then settles, that root.
             let mut next_correlation = 0_u64;
-            let mut drive = |handler: &dyn Fn(&HeadlessWindowCapability, &mut NativeCtx<'_>)| {
+            let mut drive = |kind_id: aether_data::KindId, payload: &[u8]| {
                 next_correlation += 1;
                 let root = MailId::new(MailboxId(0x1710), next_correlation);
                 let caller_source = Source::with_correlation(
@@ -152,14 +164,14 @@ mod native {
                 );
 
                 {
-                    let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
-                    handler(&cap, &mut ctx);
+                    let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
+                    cap.__aether_dispatch_envelope(&mut ctx, kind_id, payload);
                 }
 
                 assert_eq!(
                     counter.live_roots(),
                     1,
-                    "the in-handler reply holds the caller chain open",
+                    "the macro-emitted reply holds the caller chain open",
                 );
                 let dispatch = reply_rx
                     .recv_timeout(Duration::from_secs(2))
@@ -173,27 +185,23 @@ mod native {
                 );
             };
 
-            drive(&|cap, ctx| {
-                cap.on_set_mode(
-                    ctx,
-                    SetWindowMode {
-                        mode: WindowMode::Windowed,
-                        width: None,
-                        height: None,
-                    },
-                );
-            });
-            drive(&|cap, ctx| {
-                cap.on_set_title(
-                    ctx,
-                    SetWindowTitle {
-                        title: "test".to_owned(),
-                    },
-                );
-            });
-            drive(&|cap, ctx| {
-                cap.on_focus(ctx, FocusWindow {});
-            });
+            drive(
+                SetWindowMode::ID,
+                &SetWindowMode {
+                    mode: WindowMode::Windowed,
+                    width: None,
+                    height: None,
+                }
+                .encode_into_bytes(),
+            );
+            drive(
+                SetWindowTitle::ID,
+                &SetWindowTitle {
+                    title: "test".to_owned(),
+                }
+                .encode_into_bytes(),
+            );
+            drive(FocusWindow::ID, &FocusWindow {}.encode_into_bytes());
         }
     }
 }

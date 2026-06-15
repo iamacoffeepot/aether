@@ -62,12 +62,13 @@ mod native {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_data::Kind;
     use aether_kinds::{
         CaptureFrameResult, CreateTextureResult, DRAW_TRIANGLE_BYTES, QuadScale, QuadSpace,
         SimilarityCheck, SolidQuad, TexturedQuad,
     };
+    use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::capture::{CaptureQueue, PendingCapture, ReferenceCapture};
     use aether_substrate::chassis::error::BootError;
@@ -453,8 +454,8 @@ mod native {
         /// for an atomic "set X, capture, restore X" call. Reply is
         /// `aether.render.capture_frame_result` carrying the PNG on
         /// success or a free-form reason on failure.
-        #[handler]
-        fn on_capture_frame(&self, ctx: &mut NativeCtx<'_>, mail: CaptureFrame) {
+        #[handler::manual]
+        fn on_capture_frame(&self, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
             if let Some(obs) = &self.config.observed_kinds {
                 obs.lock()
                     .expect("mutex poisoned; fail-fast per ADR-0063")
@@ -599,7 +600,11 @@ mod native {
         /// the reply `aether.render.create_texture_result` carries the
         /// `texture_id` to thread into `draw_textured_quads`.
         #[handler]
-        fn on_create_texture(&self, ctx: &mut NativeCtx<'_>, mail: CreateTexture) {
+        fn on_create_texture(
+            &self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: CreateTexture,
+        ) -> CreateTextureResult {
             if let Some(obs) = &self.config.observed_kinds {
                 obs.lock()
                     .expect("mutex poisoned; fail-fast per ADR-0063")
@@ -607,22 +612,20 @@ mod native {
             }
             let expected = expected_pixel_bytes(mail.width, mail.height);
             let Some(expected) = expected else {
-                ctx.reply(&CreateTextureResult::Err {
+                return CreateTextureResult::Err {
                     error: format!(
                         "texture dimensions {}x{} overflow or are zero",
                         mail.width, mail.height
                     ),
-                });
-                return;
+                };
             };
             if mail.pixels.len() != expected {
-                ctx.reply(&CreateTextureResult::Err {
+                return CreateTextureResult::Err {
                     error: format!(
                         "pixels length {} does not match width*height*4 = {expected}",
                         mail.pixels.len()
                     ),
-                });
-                return;
+                };
             }
             let mut registry = self
                 .handles
@@ -642,7 +645,7 @@ mod native {
                 },
             );
             drop(registry);
-            ctx.reply(&CreateTextureResult::Ok { texture_id });
+            CreateTextureResult::Ok { texture_id }
         }
 
         /// `UpdateTexture` handler (ADR-0105). Overwrites a sub-rectangle
@@ -1646,6 +1649,7 @@ mod native_headless {
 
     use aether_actor::actor;
     use aether_kinds::{CaptureFrameResult, CreateTextureResult};
+    use aether_substrate::Manual;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -1709,8 +1713,8 @@ mod native_headless {
         /// fails fast on headless instead of hanging on a reply that
         /// never comes. Mirrors ADR-0035 §Consequences fail-fast shape
         /// for `set_window_mode`.
-        #[handler]
-        fn on_capture_frame(&self, ctx: &mut NativeCtx<'_>, _mail: CaptureFrame) {
+        #[handler::manual]
+        fn on_capture_frame(&self, ctx: &mut NativeCtx<'_, Manual>, _mail: CaptureFrame) {
             self.outbound.send_reply(
                 ctx.reply_target(),
                 &CaptureFrameResult::Err {
@@ -1723,8 +1727,8 @@ mod native_headless {
         /// texture against a headless chassis fails fast instead of
         /// waiting on a reply that never comes — same fail-fast shape as
         /// `on_capture_frame` (ADR-0105).
-        #[handler]
-        fn on_create_texture(&self, ctx: &mut NativeCtx<'_>, _mail: CreateTexture) {
+        #[handler::manual]
+        fn on_create_texture(&self, ctx: &mut NativeCtx<'_, Manual>, _mail: CreateTexture) {
             self.outbound.send_reply(
                 ctx.reply_target(),
                 &CreateTextureResult::Err {
@@ -1778,7 +1782,7 @@ mod native_headless {
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let mut ctx = NativeCtx::new(
+            let mut ctx = NativeCtx::new_dispatching(
                 &transport,
                 Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
                 aether_data::MailId::NONE,
