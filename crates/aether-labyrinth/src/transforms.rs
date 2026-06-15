@@ -12,11 +12,12 @@
 //! unrelated to reachability and stays in `aether-capabilities`.
 
 use aether_data::transform;
-use aether_kinds::{
+use aether_kinds::TrajectoryLog;
+
+use crate::{
     BudgetQuery, ClosureDistribution, CorridorGraph, CrossingClassification, CrossingQueryParams,
     MovementStencil, PopulationSweepProblem, ReachabilityMargin, ReachabilityProblem,
-    RealizationProblem, ResolutionDepth, ScalarField, SurvivalCurve, TrafficDensity, TrajectoryLog,
-    TrajectorySet,
+    RealizationProblem, ResolutionDepth, ScalarField, SurvivalCurve, TrafficDensity, TrajectorySet,
 };
 
 use crate::corridor::{build_corridor_graph_core, corridor_resolution_depth_core};
@@ -302,11 +303,11 @@ fn canonical_uniform_problem() -> ReachabilityProblem {
 mod reachability_transform_tests {
     use super::{canonical_uniform_problem, reachability_margin, solve};
     use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
-    use aether_data::{Kind, transforms};
-    use aether_kinds::{
+    use crate::{
         BudgetQuery, MovementStencil, ReachabilityMargin, ReachabilityProblem, ScalarField,
         StencilOffset,
     };
+    use aether_data::{Kind, transforms};
 
     /// 3×1 uniform-cost field, start at cell 0 — the same hand-checked
     /// field the solver-core tests pin, here driven through the transform.
@@ -469,8 +470,8 @@ mod reachability_transform_tests {
 mod corridor_transform_tests {
     use super::build_corridor_graph;
     use crate::reachability::test_fields::stencil_4way;
+    use crate::{BudgetQuery, CorridorGraph, EdgeKind, MovementStencil, ScalarField};
     use aether_data::{Kind, transforms};
-    use aether_kinds::{BudgetQuery, CorridorGraph, EdgeKind, MovementStencil, ScalarField};
 
     /// 5×1 field with a sub-budget ridge at cell 2, driven through the
     /// transform: two components and a punch priced at the ridge `V`.
@@ -521,8 +522,8 @@ mod corridor_transform_tests {
 #[cfg(test)]
 mod resolution_depth_transform_tests {
     use super::corridor_resolution_depth;
+    use crate::{CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ResolutionDepth};
     use aether_data::{Kind, transforms};
-    use aether_kinds::{CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ResolutionDepth};
 
     fn node(tick: u32) -> CorridorNode {
         CorridorNode {
@@ -596,8 +597,8 @@ mod resolution_depth_transform_tests {
 mod population_transform_tests {
     use super::{canonical_uniform_problem, solve_population};
     use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
+    use crate::{PopulationSweepProblem, ReachabilityProblem, ScalarField, SurvivalCurve};
     use aether_data::{Kind, transforms};
-    use aether_kinds::{PopulationSweepProblem, ReachabilityProblem, ScalarField, SurvivalCurve};
 
     /// A small reachable sweep: a 3×1 uniform-cost field, the population
     /// spawned at cell 0, goal at cell 2.
@@ -706,10 +707,9 @@ mod counterfactual_transform_tests {
     use super::solve_counterfactual;
     use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
     use aether_data::{Kind, transforms};
-    use aether_kinds::{
-        CrossingClassification, CrossingQueryParams, ReachabilityProblem, ScalarField,
-        TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry,
-    };
+    use aether_kinds::{TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry};
+
+    use crate::{CrossingClassification, CrossingQueryParams, ReachabilityProblem, ScalarField};
 
     /// A 3×1 uniform-cost-1 field over `ticks` layers, wrapped in a
     /// `ReachabilityProblem` (whose `start` seed is unused — the path
@@ -918,8 +918,8 @@ mod realization_transform_tests {
     use super::{realize_single_run, simulate_realization_sweep};
     use crate::escapability::{EscapeParams, evaluate};
     use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
+    use crate::{ClosureDistribution, ReachabilityProblem, RealizationProblem, ScalarField};
     use aether_data::{Kind, transforms};
-    use aether_kinds::{ClosureDistribution, ReachabilityProblem, RealizationProblem, ScalarField};
 
     /// A 3×1 corridor whose forward cell is base-blocked: the agent steps
     /// 0 → 1, and its own immediate over-budget contribution on cell 0 closes
@@ -1180,9 +1180,10 @@ mod traffic_transform_tests {
     use super::{aggregate_traffic, build_corridor_graph};
     use crate::reachability::test_fields::stencil_4way;
     use aether_data::{Kind, transforms};
-    use aether_kinds::{
-        BudgetQuery, CorridorGraph, MovementStencil, ScalarField, TrafficDensity,
-        TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry, TrajectorySet,
+    use aether_kinds::{TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry};
+
+    use crate::{
+        BudgetQuery, CorridorGraph, MovementStencil, ScalarField, TrafficDensity, TrajectorySet,
     };
 
     /// A 3×1 uniform-cost field held across 3 ticks — one persisting

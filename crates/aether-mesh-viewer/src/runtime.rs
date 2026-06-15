@@ -40,9 +40,9 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_data::Kind;
 use aether_kinds::{
-    CorridorGraph, DrawTriangle, EdgeKind, MeshLoadResult, ReadResult, Render, ScalarField,
-    TrajectorySampleEntry, TrajectorySet, Vertex,
+    DrawTriangle, MeshLoadResult, ReadResult, Render, TrajectorySampleEntry, Vertex,
 };
+use aether_labyrinth::{CorridorGraph, EdgeKind, ScalarField, TrajectorySet};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -327,7 +327,7 @@ impl FfiActor for MeshViewer {
 
     /// Triggers an asynchronous corridor-graph load (issue 1869). The
     /// reply arrives as `aether.fs.read_result`; the bytes are decoded as
-    /// an `aether_kinds::CorridorGraph` and a `ScrubIndex` is built over
+    /// an `aether_labyrinth::CorridorGraph` and a `ScrubIndex` is built over
     /// them. The `aether.corridor.load_result` reply to the originator
     /// fires once the read settles and the decode + index build outcome
     /// is known — see `on_read_result`.
@@ -1534,7 +1534,8 @@ mod tests {
         );
     }
 
-    use aether_kinds::{CorridorEdge, CorridorNode, TrajectoryEndReason};
+    use aether_kinds::TrajectoryEndReason;
+    use aether_labyrinth::{CorridorEdge, CorridorNode};
     use aether_math::Aabb;
 
     /// Build a `TrajectorySampleEntry` at cell `(x, y, tick)` (value is

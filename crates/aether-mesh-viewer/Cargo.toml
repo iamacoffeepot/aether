@@ -39,6 +39,11 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render"] }
 aether-kinds = { path = "../aether-kinds" }
+# Issue 1914: the corridor / scalar-field / edge kinds the viewer decodes
+# (`CorridorGraph`, `ScalarField`, `EdgeKind`, `TrajectorySet`) now live in
+# `aether-labyrinth`. Default (transforms-only, no `native`) features —
+# the viewer reads the kind types, not the recorder cap.
+aether-labyrinth = { path = "../aether-labyrinth" }
 aether-mesh = { path = "../aether-mesh" }
 aether-math = { path = "../aether-math" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }

@@ -22,10 +22,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
 
-use aether_kinds::{
-    CorridorEdge, CorridorGraph, EdgeKind, ScalarField, StencilOffset, TrafficDensity,
-    TrajectoryLog,
-};
+use aether_kinds::TrajectoryLog;
+
+use crate::{CorridorEdge, CorridorGraph, EdgeKind, ScalarField, StencilOffset, TrafficDensity};
 
 use crate::corridor::{TickComponents, label_tick_components};
 
@@ -574,10 +573,9 @@ mod tests {
     use super::aggregate_traffic_core;
     use crate::corridor::build_corridor_graph_core;
     use crate::reachability::test_fields::stencil_offsets;
-    use aether_kinds::{
-        CorridorGraph, EdgeKind, ScalarField, TrafficDensity, TrajectoryEndReason, TrajectoryLog,
-        TrajectorySampleEntry,
-    };
+    use aether_kinds::{TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry};
+
+    use crate::{CorridorGraph, EdgeKind, ScalarField, TrafficDensity};
 
     /// Sum the per-edge traffic accumulated on the graph's `Punch` edges —
     /// the total punch crossings attributed across a run.
