@@ -4091,6 +4091,95 @@ mod control_plane {
         pub population: u32,
         pub samples: Vec<SurvivalSample>,
     }
+
+    // ADR-0047/0048/0049 counterfactual reachability query (issue 1864).
+    // Given a recorded path through a time-varying cost field (a
+    // `TrajectoryLog`, issue 1862) and a tick where its accumulator
+    // crossed a budget `B`, the `solve_counterfactual` transform re-runs
+    // the reachability solver from the path's actual `(position,
+    // accumulated-cost)` state `W` ticks before the crossing, seeing only
+    // the field visible in that window, and classifies the crossing as
+    // avoidable (a within-budget continuation existed) or unavoidable. The
+    // query params are a cast-shaped scalar bundle (modeled on
+    // [`WindowSize`]); the classification is `Vec`-bearing (modeled on
+    // [`CorridorGraph`]).
+
+    /// The lookahead depth and budget for a [`solve_counterfactual`] query
+    /// (issue 1864). `window` is `W` — how many ticks before each
+    /// budget-crossing the re-solve seeds from the path's actual state, so
+    /// the decision tick is `crossing_tick − window`, clamped to the path's
+    /// first recorded tick. `budget` is `B`, the threshold a path's
+    /// accumulator crosses: a crossing is the first sample whose `value`
+    /// reaches `B` (the `prev.value < B` → `cur.value >= B` transition; a
+    /// first sample already `>= B` is a crossing at the path start). The
+    /// `value` carried in each `TrajectorySampleEntry` is the path's
+    /// accumulated field cost, denominated in the same `u32` currency as
+    /// the cost-to-reach field `V` and `budget`, which is what makes the
+    /// seed cost comparable to the budget.
+    ///
+    /// [`solve_counterfactual`]: https://docs.rs/aether-capabilities
+    #[repr(C)]
+    #[derive(
+        Copy,
+        Clone,
+        Debug,
+        PartialEq,
+        Eq,
+        Serialize,
+        Deserialize,
+        bytemuck::Pod,
+        bytemuck::Zeroable,
+        aether_data::Kind,
+        aether_data::Schema,
+    )]
+    #[kind(name = "aether.reach.crossing_query")]
+    pub struct CrossingQueryParams {
+        pub window: u32,
+        pub budget: u32,
+    }
+
+    /// One budget-crossing's verdict in a [`CrossingClassification`] (issue
+    /// 1864). `crossing_tick` is the tick at which the path's accumulator
+    /// first reached the budget; `decision_tick` is `crossing_tick −
+    /// window` clamped to the path's first recorded tick (the tick whose
+    /// state seeds the windowed re-solve). `seed_x` / `seed_y` /
+    /// `seed_cost` are the path's actual `(x, y, value)` state at the
+    /// decision tick (the latest sample at or before it), echoed in full so
+    /// a machine consumer correlates each verdict to its seed without
+    /// re-deriving it. `avoidable` is true exactly when the windowed
+    /// re-solve reaches some cell at `crossing_tick` under the budget;
+    /// `best_continuation_cost` is the minimum cost-to-reach over the
+    /// window's final-tick cells (`u32::MAX` if none is reachable), and
+    /// `margin` is `budget − best_continuation_cost` as a signed value
+    /// (positive slack when avoidable, negative when even the cheapest
+    /// continuation exceeds the budget). Not a kind on its own — only
+    /// addressable inside `CrossingClassification.crossings`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CrossingVerdict {
+        pub crossing_tick: u32,
+        pub decision_tick: u32,
+        pub seed_x: u32,
+        pub seed_y: u32,
+        pub seed_cost: u32,
+        pub avoidable: bool,
+        pub best_continuation_cost: u32,
+        pub margin: i64,
+    }
+
+    /// The per-crossing classification produced by the
+    /// `solve_counterfactual` transform (issue 1864): one
+    /// [`CrossingVerdict`] for every budget-crossing detected in the
+    /// recorded path, in tick order. A path with no crossing yields an
+    /// empty `crossings`. A skeleton keyed to the path's crossings rather
+    /// than a field, so its size scales with the number of crossings, not
+    /// `width * height * ticks`. `Vec`-bearing like [`CorridorGraph`].
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.crossing_classification")]
+    pub struct CrossingClassification {
+        pub crossings: Vec<CrossingVerdict>,
+    }
 }
 
 mod trajectory {
@@ -4427,6 +4516,11 @@ mod tests {
             "aether.reach.population_problem"
         );
         assert_eq!(SurvivalCurve::NAME, "aether.reach.survival_curve");
+        assert_eq!(CrossingQueryParams::NAME, "aether.reach.crossing_query");
+        assert_eq!(
+            CrossingClassification::NAME,
+            "aether.reach.crossing_classification"
+        );
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
@@ -4616,6 +4710,75 @@ mod tests {
         }
 
         #[test]
+        fn crossing_query_params_is_repr_c_struct_of_two_u32() {
+            // A cast-shaped scalar bundle (modeled on `WindowSize`): two
+            // `u32` fields in a `repr(C)` struct so the cheap cast path
+            // carries it on the wire.
+            const { assert!(<CrossingQueryParams as CastEligible>::ELIGIBLE) };
+            let SchemaType::Struct { repr_c, fields } = &<CrossingQueryParams as Schema>::SCHEMA
+            else {
+                panic!("expected Struct");
+            };
+            assert!(*repr_c);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "window");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[1].name, "budget");
+            assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U32));
+        }
+
+        #[test]
+        fn crossing_classification_schema_is_struct_of_one_vec() {
+            // A flat Vec-bearing struct (modeled on `CorridorGraph`): one
+            // `Vec<CrossingVerdict>`, recursing into the verdict struct. A
+            // `Struct` schema (not a cast) is what the DAG validator and the
+            // hub codec read for the transform output.
+            let SchemaType::Struct { fields, .. } = &<CrossingClassification as Schema>::SCHEMA
+            else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "crossings");
+            let SchemaType::Vec(verdict) = &fields[0].ty else {
+                panic!("expected Vec of verdicts");
+            };
+            let SchemaType::Struct {
+                fields: verdict_fields,
+                ..
+            } = &**verdict
+            else {
+                panic!("expected nested verdict Struct");
+            };
+            assert_eq!(verdict_fields.len(), 8);
+            assert_eq!(verdict_fields[0].name, "crossing_tick");
+            assert_eq!(verdict_fields[1].name, "decision_tick");
+            assert_eq!(verdict_fields[5].name, "avoidable");
+            assert_eq!(verdict_fields[5].ty, SchemaType::Bool);
+            assert_eq!(verdict_fields[7].name, "margin");
+            assert_eq!(verdict_fields[7].ty, SchemaType::Scalar(Primitive::I64));
+        }
+
+        #[test]
+        fn crossing_kinds_resolve_distinctly_from_reach_kinds() {
+            use aether_data::Kind;
+            // The two new crossing-query kinds share no id with the
+            // reachability / trajectory kinds they compose with in a DAG — a
+            // collision would alias the transform's Ref slots.
+            let ids = [
+                CrossingQueryParams::ID,
+                CrossingClassification::ID,
+                ReachabilityProblem::ID,
+                ScalarField::ID,
+                TrajectoryLog::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "crossing / reach / trajectory ids must be distinct");
+                }
+            }
+        }
+
+        #[test]
         fn population_problem_schema_embeds_reachability_problem() {
             let SchemaType::Struct { fields, .. } = &<PopulationSweepProblem as Schema>::SCHEMA
             else {
@@ -4652,6 +4815,40 @@ mod tests {
             assert_eq!(sample.len(), 2);
             assert_eq!(sample[0].name, "delay");
             assert_eq!(sample[1].name, "finished");
+        }
+
+        #[test]
+        fn crossing_classification_postcard_round_trips() {
+            use alloc::vec;
+            let cls = CrossingClassification {
+                crossings: vec![
+                    CrossingVerdict {
+                        crossing_tick: 12,
+                        decision_tick: 4,
+                        seed_x: 3,
+                        seed_y: 7,
+                        seed_cost: 18,
+                        avoidable: true,
+                        best_continuation_cost: 22,
+                        margin: 3,
+                    },
+                    CrossingVerdict {
+                        crossing_tick: 30,
+                        decision_tick: 30,
+                        seed_x: 0,
+                        seed_y: 0,
+                        seed_cost: 99,
+                        avoidable: false,
+                        best_continuation_cost: u32::MAX,
+                        margin: -1,
+                    },
+                ],
+            };
+            let bytes = postcard::to_allocvec(&cls)
+                .expect("test setup: postcard encodes CrossingClassification");
+            let back: CrossingClassification = postcard::from_bytes(&bytes)
+                .expect("test setup: postcard decodes CrossingClassification");
+            assert_eq!(back, cls);
         }
     }
 

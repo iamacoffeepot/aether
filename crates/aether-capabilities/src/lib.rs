@@ -121,6 +121,14 @@ pub(crate) mod reachability;
 // be dead.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod corridor;
+// Pure counterfactual reachability-from-state core (ADR-0047/0048/0049,
+// issue 1864): classifies each budget-crossing in a recorded path as
+// avoidable / unavoidable via a windowed re-solve seeded from the path's
+// actual state. Gated to non-wasm like `reachability` / `corridor` — its
+// caller is the native `solve_counterfactual` transform, so on a
+// wasm-header-only build it would be dead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod counterfactual;
 pub mod window;
 
 #[cfg(feature = "audio")]

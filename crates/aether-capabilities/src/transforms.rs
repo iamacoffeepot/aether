@@ -9,12 +9,14 @@
 
 use aether_data::transform;
 use aether_kinds::{
-    BudgetQuery, CorridorGraph, Mat4Apply, MovementStencil, PopulationSweepProblem,
-    ReachabilityMargin, ReachabilityProblem, ScalarField, SurvivalCurve,
+    BudgetQuery, CorridorGraph, CrossingClassification, CrossingQueryParams, Mat4Apply,
+    MovementStencil, PopulationSweepProblem, ReachabilityMargin, ReachabilityProblem, ScalarField,
+    SurvivalCurve, TrajectoryLog,
 };
 use aether_math::Vec4;
 
 use crate::corridor::build_corridor_graph_core;
+use crate::counterfactual::solve_counterfactual_core;
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach, solve_population_sweep};
 
 /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
@@ -152,6 +154,42 @@ fn build_corridor_graph(
 #[transform]
 fn solve_population(input: PopulationSweepProblem) -> SurvivalCurve {
     solve_population_sweep(input)
+}
+
+/// Classify every budget-crossing in a recorded path against a windowed
+/// cost field — the counterfactual reachability-from-state query
+/// (ADR-0047/0048/0049, issue 1864). A three-input transform: the
+/// `ReachabilityProblem` (its cost field + movement stencil; its `start`
+/// seed is unused — the path supplies the seed), the recorded
+/// `TrajectoryLog` (issue 1862), and the `(window, budget)` params. The
+/// output is one `CrossingVerdict` per budget-crossing, each carrying
+/// whether the crossing was avoidable — whether, `window` ticks earlier
+/// and seeing only the field visible in that window, a within-budget
+/// continuation existed from the path's actual state.
+///
+/// The body delegates to the pure [`solve_counterfactual_core`] (the
+/// reusable internal API), which reuses [`solve_cost_to_reach`] for each
+/// per-crossing windowed re-solve; the transform fn only unbundles the
+/// operands and threads the params, so it clears the `#[transform]` purity
+/// deny-list. Iterative throughout (a per-crossing loop, a per-window
+/// dense solve).
+// The `#[transform]` ABI hands the body owned kinds decoded from wire
+// bytes; the core borrows them, so the owned `problem` / `path` params are
+// intentionally passed by reference rather than consumed.
+#[allow(clippy::needless_pass_by_value)]
+#[transform]
+fn solve_counterfactual(
+    problem: ReachabilityProblem,
+    path: TrajectoryLog,
+    params: CrossingQueryParams,
+) -> CrossingClassification {
+    solve_counterfactual_core(
+        &problem.cost,
+        &problem.stencil.offsets,
+        &path,
+        params.window,
+        params.budget,
+    )
 }
 
 #[cfg(test)]
@@ -574,5 +612,217 @@ mod population_transform_tests {
 
         let replay = solve_population(sweep());
         assert_eq!(curve.encode_into_bytes(), replay.encode_into_bytes());
+    }
+}
+
+#[cfg(test)]
+mod counterfactual_transform_tests {
+    use super::solve_counterfactual;
+    use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
+    use aether_data::{Kind, transforms};
+    use aether_kinds::{
+        CrossingClassification, CrossingQueryParams, ReachabilityProblem, ScalarField,
+        TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry,
+    };
+
+    /// A 3×1 uniform-cost-1 field over `ticks` layers, wrapped in a
+    /// `ReachabilityProblem` (whose `start` seed is unused — the path
+    /// supplies the seed).
+    fn uniform_problem(ticks: u32) -> ReachabilityProblem {
+        ReachabilityProblem {
+            cost: ScalarField {
+                width: 3,
+                height: 1,
+                ticks,
+                values: vec![1u32; 3 * ticks as usize],
+            },
+            stencil: stencil_4way(),
+            // Unused by the counterfactual query; left as a non-seed.
+            start: vec![UNREACHABLE, UNREACHABLE, UNREACHABLE],
+        }
+    }
+
+    fn entry(tick: u32, x: u32, y: u32, value: u32) -> TrajectorySampleEntry {
+        TrajectorySampleEntry { tick, x, y, value }
+    }
+
+    fn log(samples: Vec<TrajectorySampleEntry>) -> TrajectoryLog {
+        TrajectoryLog {
+            seed: 7,
+            samples,
+            end_reason: TrajectoryEndReason::Completed,
+        }
+    }
+
+    /// A path over the uniform field that crosses budget 5 at tick 4.
+    fn crossing_path() -> TrajectoryLog {
+        log(vec![
+            entry(0, 0, 0, 0),
+            entry(1, 1, 0, 2),
+            entry(2, 2, 0, 4),
+            entry(3, 2, 0, 6),
+            entry(4, 2, 0, 8),
+        ])
+    }
+
+    #[test]
+    fn registered_in_link_time_inventory() {
+        // A three-input transform: `(ReachabilityProblem, TrajectoryLog,
+        // CrossingQueryParams)` in slot order, `CrossingClassification`
+        // out — the same inventory contract the other reach transforms
+        // satisfy.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::solve_counterfactual"))
+            .expect("solve_counterfactual not registered in link-time inventory");
+        assert_eq!(
+            entry.input_kind_ids,
+            [
+                ReachabilityProblem::ID,
+                TrajectoryLog::ID,
+                CrossingQueryParams::ID
+            ]
+        );
+        assert_eq!(entry.output_kind_id, CrossingClassification::ID);
+    }
+
+    #[test]
+    fn avoidable_crossing_under_a_large_window() {
+        // The path crosses budget 5 at tick 3 (value 6). Window 4 →
+        // decision tick saturates to 0, seed cost 0 at cell 0. Vloc(·, 3)
+        // over 4 uniform-cost-1 layers from cost 0 reaches 3 → under budget
+        // 5, so the crossing is avoidable (a within-budget continuation
+        // existed from the path's state 4 ticks back).
+        let out = solve_counterfactual(
+            uniform_problem(5),
+            crossing_path(),
+            CrossingQueryParams {
+                window: 4,
+                budget: 5,
+            },
+        );
+        assert_eq!(out.crossings.len(), 1);
+        let v = out.crossings[0];
+        assert_eq!(v.crossing_tick, 3);
+        assert_eq!(v.decision_tick, 0);
+        assert_eq!(v.seed_cost, 0);
+        assert!(v.avoidable, "best continuation 3 < budget 5");
+        assert_eq!(v.best_continuation_cost, 3);
+        assert_eq!(v.margin, 2);
+    }
+
+    #[test]
+    fn unavoidable_crossing_under_a_small_window() {
+        // Crossing at tick 3. Window 1 → decision tick 2, seed cost 4 at
+        // cell 2. Vloc(·, 3) over 2 uniform-cost-1 layers from cost 4
+        // reaches 5 → not under budget 5, so the crossing is unavoidable.
+        // Same field + path as the avoidable case: the shorter window seeds
+        // from a costlier, later state, flipping the verdict.
+        let out = solve_counterfactual(
+            uniform_problem(5),
+            crossing_path(),
+            CrossingQueryParams {
+                window: 1,
+                budget: 5,
+            },
+        );
+        assert_eq!(out.crossings.len(), 1);
+        let v = out.crossings[0];
+        assert_eq!(v.crossing_tick, 3);
+        assert_eq!(v.decision_tick, 2);
+        assert_eq!(v.seed_cost, 4);
+        assert!(!v.avoidable, "best continuation 5 is not < budget 5");
+        assert_eq!(v.best_continuation_cost, 5);
+        assert_eq!(v.margin, 0);
+    }
+
+    #[test]
+    fn no_crossing_yields_empty_classification() {
+        // A path that never reaches the budget produces no verdicts.
+        let path = log(vec![
+            entry(0, 0, 0, 0),
+            entry(1, 1, 0, 1),
+            entry(2, 2, 0, 2),
+        ]);
+        let out = solve_counterfactual(
+            uniform_problem(3),
+            path,
+            CrossingQueryParams {
+                window: 1,
+                budget: 5,
+            },
+        );
+        assert!(out.crossings.is_empty());
+    }
+
+    #[test]
+    fn is_deterministic_and_content_addressable() {
+        // Same input bytes -> identical output bytes: the content-addressing
+        // contract the DAG executor keys transform results on, so a query
+        // replays byte-for-byte.
+        let a = solve_counterfactual(
+            uniform_problem(5),
+            crossing_path(),
+            CrossingQueryParams {
+                window: 4,
+                budget: 5,
+            },
+        );
+        let b = solve_counterfactual(
+            uniform_problem(5),
+            crossing_path(),
+            CrossingQueryParams {
+                window: 4,
+                budget: 5,
+            },
+        );
+        assert_eq!(a, b);
+        assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
+    }
+
+    #[test]
+    fn classification_over_canonical_field_encodes_under_output_cap() {
+        // A path with many crossings over the canonical 64×64×1800 field:
+        // the `CrossingClassification` is a skeleton (one verdict per
+        // crossing), so it stays orders of magnitude under the 64MB
+        // transform output cap (ADR-0048 §6) regardless of the field size.
+        const CAP: usize = 64 * 1024 * 1024;
+        let width = 64u32;
+        let height = 64u32;
+        let ticks = 1800u32;
+        let plane = (width * height) as usize;
+        let problem = ReachabilityProblem {
+            cost: ScalarField {
+                width,
+                height,
+                ticks,
+                values: vec![1u32; plane * ticks as usize],
+            },
+            stencil: stencil_4way(),
+            start: vec![UNREACHABLE; plane],
+        };
+        // A sawtooth accumulator that crosses budget 5 repeatedly across the
+        // full horizon — exercises the per-crossing loop at scale.
+        let samples: Vec<_> = (0..ticks)
+            .map(|t| entry(t, t % width, (t / width) % height, (t % 8) + 1))
+            .collect();
+        let path = log(samples);
+        let out = solve_counterfactual(
+            problem,
+            path,
+            CrossingQueryParams {
+                window: 4,
+                budget: 5,
+            },
+        );
+        assert!(!out.crossings.is_empty(), "sawtooth crosses the budget");
+        let bytes = out.encode_into_bytes();
+        assert!(
+            bytes.len() < CAP,
+            "encoded classification is {} bytes, over the {CAP}-byte cap",
+            bytes.len()
+        );
+        let back =
+            CrossingClassification::decode_from_bytes(&bytes).expect("classification round-trips");
+        assert_eq!(out, back);
     }
 }
