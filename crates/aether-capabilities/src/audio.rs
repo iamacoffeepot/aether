@@ -99,7 +99,7 @@ mod native {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use crossbeam_queue::ArrayQueue;
 
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::{Manual, OutboundReply, actor};
     use aether_data::{MailboxId, Source, SourceAddr};
     use aether_kinds::{
         LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult, Read, ReadResult,
@@ -2262,7 +2262,7 @@ mod native {
         /// handler can route three fetch paths.
         fn start_track_decode(
             &mut self,
-            ctx: &mut NativeCtx<'_>,
+            ctx: &mut NativeCtx<'_, Manual>,
             pending: &PendingTrack,
             namespace: String,
             path: String,
@@ -2311,7 +2311,7 @@ mod native {
         /// [`BankAssembly`] is parked until the sample reads complete.
         fn on_sfz_loaded(
             &mut self,
-            ctx: &mut NativeCtx<'_>,
+            ctx: &mut NativeCtx<'_, Manual>,
             pending: &PendingInstrument,
             namespace: String,
             path: String,
@@ -2397,7 +2397,7 @@ mod native {
         /// (its assembly already failed) is dropped.
         fn on_sample_loaded(
             &mut self,
-            ctx: &mut NativeCtx<'_>,
+            ctx: &mut NativeCtx<'_, Manual>,
             assembly_id: u64,
             fs_path: &str,
             bytes: Vec<u8>,
@@ -2469,7 +2469,12 @@ mod native {
         /// original requester and discard the partial assembly (ADR-0103
         /// §2). Sibling sample reads still in flight prune from the pending
         /// table; their replies will find no assembly and drop.
-        fn fail_assembly(&mut self, ctx: &mut NativeCtx<'_>, assembly_id: u64, error: String) {
+        fn fail_assembly(
+            &mut self,
+            ctx: &mut NativeCtx<'_, Manual>,
+            assembly_id: u64,
+            error: String,
+        ) {
             let Some(assembly) = self.assemblies.remove(&assembly_id) else {
                 return;
             };
@@ -2738,27 +2743,26 @@ mod native {
         /// Reply: `SetMasterGainResult`. `Ok { applied_gain }` clamps to
         /// `0.0..=1.0`; `Err` on chassis without audio.
         #[handler]
-        fn on_set_master_gain(&self, ctx: &mut NativeCtx<'_>, mail: SetMasterGain) {
+        fn on_set_master_gain(
+            &self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: SetMasterGain,
+        ) -> SetMasterGainResult {
             let applied = mail.gain.clamp(0.0, 1.0);
-            match self.sender.as_ref() {
-                Some(s) => {
-                    let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
-                    ctx.reply(&SetMasterGainResult::Ok {
-                        applied_gain: applied,
-                    });
-                    tracing::info!(
-                        target: "aether_substrate::audio",
-                        requested = mail.gain,
-                        applied,
-                        "master gain set",
-                    );
-                }
-                None => {
-                    ctx.reply(&SetMasterGainResult::Err {
-                        error: "audio pipeline not initialised on this desktop substrate"
-                            .to_owned(),
-                    });
-                }
+            let Some(s) = self.sender.as_ref() else {
+                return SetMasterGainResult::Err {
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                };
+            };
+            let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
+            tracing::info!(
+                target: "aether_substrate::audio",
+                requested = mail.gain,
+                applied,
+                "master gain set",
+            );
+            SetMasterGainResult::Ok {
+                applied_gain: applied,
             }
         }
 
@@ -2774,40 +2778,36 @@ mod native {
         /// count. Nop chassis (headless / hub / disabled / no device) reply
         /// `Err` fail-fast.
         #[handler]
-        fn on_schedule(&self, ctx: &mut NativeCtx<'_>, mail: Schedule) {
+        fn on_schedule(&self, ctx: &mut NativeCtx<'_>, mail: Schedule) -> ScheduleResult {
             let Some(s) = self.sender.as_ref() else {
-                ctx.reply(&ScheduleResult::Err {
+                return ScheduleResult::Err {
                     error: "audio pipeline not initialised on this desktop substrate".to_owned(),
-                });
-                return;
+                };
             };
             if mail.events.is_empty() {
-                ctx.reply(&ScheduleResult::Err {
+                return ScheduleResult::Err {
                     error: "schedule batch carries no events".to_owned(),
-                });
-                return;
+                };
             }
             if mail.events.len() > SCHEDULE_MAX_EVENTS {
-                ctx.reply(&ScheduleResult::Err {
+                return ScheduleResult::Err {
                     error: format!(
                         "schedule batch of {} events exceeds the {SCHEDULE_MAX_EVENTS}-event cap",
                         mail.events.len(),
                     ),
-                });
-                return;
+                };
             }
             if let Some(over) = mail
                 .events
                 .iter()
                 .find(|e| e.at_millis > SCHEDULE_MAX_MILLIS)
             {
-                ctx.reply(&ScheduleResult::Err {
+                return ScheduleResult::Err {
                     error: format!(
                         "scheduled event at {} millis exceeds the {SCHEDULE_MAX_MILLIS}-millis horizon",
                         over.at_millis,
                     ),
-                });
-                return;
+                };
             }
             // Length is validated at or below SCHEDULE_MAX_EVENTS, which
             // fits u32, so the accepted count never truncates.
@@ -2818,12 +2818,11 @@ mod native {
                 events: mail.events,
             };
             if s.push(ev).is_err() {
-                ctx.reply(&ScheduleResult::Err {
+                return ScheduleResult::Err {
                     error: "audio event queue full — schedule dropped".to_owned(),
-                });
-                return;
+                };
             }
-            ctx.reply(&ScheduleResult::Ok { accepted });
+            ScheduleResult::Ok { accepted }
         }
 
         /// Fetch, decode, and play an audio asset in the track lane.
@@ -2835,8 +2834,8 @@ mod native {
         /// `Err` with the failure reason (bad path, malformed/unsupported
         /// file, or a chassis without audio). Re-playing the same
         /// `(sender, lane, namespace, path)` key restarts the track.
-        #[handler]
-        fn on_play_track(&mut self, ctx: &mut NativeCtx<'_>, mail: PlayTrack) {
+        #[handler::manual]
+        fn on_play_track(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: PlayTrack) {
             // Nop chassis (headless / hub / disabled / no device): fail
             // fast with a loud Err (ADR-0103 §7).
             if self.sender.is_none() || self.sample_rate.is_none() {
@@ -2884,8 +2883,8 @@ mod native {
         /// accumulate); `Err` relays the fs error to whichever original
         /// requester is waiting. The deferred reply lands on that caller —
         /// not the fs mailbox the read reply came from.
-        #[handler]
-        fn on_read_result(&mut self, ctx: &mut NativeCtx<'_>, mail: ReadResult) {
+        #[handler::manual]
+        fn on_read_result(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
             match mail {
                 ReadResult::Ok {
                     namespace,
@@ -2937,7 +2936,7 @@ mod native {
         /// PCM into the track lane and reply `Ok`; on a decode failure
         /// reply `Err`. Either way `resolve_with` re-replies through the
         /// captured `play_track` caller and drops the hold.
-        #[handler(task)]
+        #[handler::manual(task)]
         fn on_track_decoded(
             &mut self,
             ctx: &mut NativeCtx<'_>,
@@ -3022,8 +3021,8 @@ mod native {
         /// `Err` carries the failure reason (bad path, malformed `.sfz` /
         /// sample, or a chassis without audio). Loaded ids are
         /// session-scoped.
-        #[handler]
-        fn on_load_instrument(&mut self, ctx: &mut NativeCtx<'_>, mail: LoadInstrument) {
+        #[handler::manual]
+        fn on_load_instrument(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadInstrument) {
             // Nop chassis (headless / hub / disabled / no device): fail
             // fast with a loud Err (ADR-0103 §7).
             if self.sender.is_none() || self.sample_rate.is_none() {
@@ -3057,7 +3056,7 @@ mod native {
         /// and reply `Ok` with the id / name / resident bytes; on a decode
         /// failure reply `Err`. Either way `resolve_with` re-replies through
         /// the captured `load_instrument` caller and drops the hold.
-        #[handler(task)]
+        #[handler::manual(task)]
         fn on_instrument_assembled(
             &mut self,
             ctx: &mut NativeCtx<'_>,
@@ -4217,7 +4216,7 @@ mod native {
             ));
 
             let root = MailId::new(MailboxId(0xC0), 1);
-            let mut ctx = NativeCtx::new(&transport, session_sender(), root, root);
+            let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4234,7 +4233,7 @@ mod native {
             // Synthesize the fs reply with a real WAV asset (at half the
             // device rate, so decode also resamples).
             let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
-            let mut read_ctx = NativeCtx::new(&transport, session_sender(), root, root);
+            let mut read_ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Ok {
@@ -4277,7 +4276,12 @@ mod native {
                 MailboxId(0),
             ));
 
-            let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_dispatching(
+                &transport,
+                session_sender(),
+                MailId::NONE,
+                MailId::NONE,
+            );
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4289,8 +4293,12 @@ mod native {
                 },
             );
             let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
-            let mut read_ctx =
-                NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
+            let mut read_ctx = NativeCtx::new_dispatching(
+                &transport,
+                session_sender(),
+                MailId::NONE,
+                MailId::NONE,
+            );
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Ok {
@@ -4323,7 +4331,12 @@ mod native {
                 MailboxId(0),
             ));
 
-            let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_dispatching(
+                &transport,
+                session_sender(),
+                MailId::NONE,
+                MailId::NONE,
+            );
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4365,7 +4378,12 @@ mod native {
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_dispatching(
+                &transport,
+                session_sender(),
+                MailId::NONE,
+                MailId::NONE,
+            );
             cap.on_play_track(
                 &mut ctx,
                 PlayTrack {
@@ -4386,7 +4404,7 @@ mod native {
             );
             // stop_track on a nop chassis is a silent no-op (no panic).
             cap.on_stop_track(
-                &mut ctx,
+                ctx.as_single(),
                 StopTrack {
                     namespace: "assets".to_owned(),
                     path: "track.wav".to_owned(),
@@ -4403,13 +4421,13 @@ mod native {
         #[test]
         fn schedule_happy_path_replies_ok_and_queues_one_event() {
             let (cap, queue) = live_cap();
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _rx) = test_mailer_and_rx();
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
             let mut ctx = load_ctx(&transport);
-            cap.on_schedule(
+            let result = cap.on_schedule(
                 &mut ctx,
                 Schedule {
                     events: vec![
@@ -4431,7 +4449,7 @@ mod native {
                     ],
                 },
             );
-            match decode_session_reply::<ScheduleResult>(&rx) {
+            match result {
                 ScheduleResult::Ok { accepted } => assert_eq!(accepted, 2),
                 ScheduleResult::Err { error } => panic!("expected Ok, got Err({error})"),
             }
@@ -4447,14 +4465,14 @@ mod native {
         #[test]
         fn schedule_empty_batch_replies_err() {
             let (cap, queue) = live_cap();
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _rx) = test_mailer_and_rx();
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
             let mut ctx = load_ctx(&transport);
-            cap.on_schedule(&mut ctx, Schedule { events: vec![] });
-            match decode_session_reply::<ScheduleResult>(&rx) {
+            let result = cap.on_schedule(&mut ctx, Schedule { events: vec![] });
+            match result {
                 ScheduleResult::Err { .. } => {}
                 ScheduleResult::Ok { .. } => panic!("empty batch must reject"),
             }
@@ -4467,7 +4485,7 @@ mod native {
         #[test]
         fn schedule_over_event_cap_rejects_atomically() {
             let (cap, queue) = live_cap();
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _rx) = test_mailer_and_rx();
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0),
@@ -4483,8 +4501,8 @@ mod native {
                     },
                 })
                 .collect();
-            cap.on_schedule(&mut ctx, Schedule { events });
-            match decode_session_reply::<ScheduleResult>(&rx) {
+            let result = cap.on_schedule(&mut ctx, Schedule { events });
+            match result {
                 ScheduleResult::Err { error } => assert!(error.contains("cap"), "reason: {error}"),
                 ScheduleResult::Ok { .. } => panic!("over-cap batch must reject"),
             }
@@ -4497,13 +4515,13 @@ mod native {
         #[test]
         fn schedule_over_horizon_rejects_atomically() {
             let (cap, queue) = live_cap();
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _rx) = test_mailer_and_rx();
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
             let mut ctx = load_ctx(&transport);
-            cap.on_schedule(
+            let result = cap.on_schedule(
                 &mut ctx,
                 Schedule {
                     events: vec![
@@ -4526,7 +4544,7 @@ mod native {
                     ],
                 },
             );
-            match decode_session_reply::<ScheduleResult>(&rx) {
+            match result {
                 ScheduleResult::Err { error } => {
                     assert!(error.contains("horizon"), "reason: {error}");
                 }
@@ -4543,13 +4561,13 @@ mod native {
         #[test]
         fn schedule_on_nop_chassis_replies_err() {
             let cap = AudioCapability::nop();
-            let (mailer, rx) = test_mailer_and_rx();
+            let (mailer, _rx) = test_mailer_and_rx();
             let transport = Arc::new(NativeBinding::new_for_test(
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
             let mut ctx = load_ctx(&transport);
-            cap.on_schedule(
+            let result = cap.on_schedule(
                 &mut ctx,
                 Schedule {
                     events: vec![ScheduledEvent {
@@ -4562,7 +4580,7 @@ mod native {
                     }],
                 },
             );
-            match decode_session_reply::<ScheduleResult>(&rx) {
+            match result {
                 ScheduleResult::Err { .. } => {}
                 ScheduleResult::Ok { .. } => panic!("nop chassis must reply Err"),
             }
@@ -5009,6 +5027,14 @@ mod native {
             NativeCtx::new(transport, session_sender(), MailId::NONE, MailId::NONE)
         }
 
+        /// ADR-0112: a `Manual` ctx for directly calling `#[handler::manual]`
+        /// methods (`on_load_instrument`, `on_read_result`). Mirrors `load_ctx`
+        /// but uses `new_dispatching` so the method's `OutboundReply` surface
+        /// is available.
+        fn manual_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_, Manual> {
+            NativeCtx::new_dispatching(transport, session_sender(), MailId::NONE, MailId::NONE)
+        }
+
         #[test]
         fn load_instrument_happy_path_replies_ok_and_registers() {
             let (mut cap, queue) = live_cap();
@@ -5018,7 +5044,7 @@ mod native {
                 MailboxId(0),
             ));
 
-            let mut ctx = load_ctx(&transport);
+            let mut ctx = manual_ctx(&transport);
             cap.on_load_instrument(
                 &mut ctx,
                 LoadInstrument {
@@ -5035,7 +5061,7 @@ sample=c4.wav lokey=60 hikey=71 pitch_keycenter=60
 <region>
 sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 ";
-            let mut read_ctx = load_ctx(&transport);
+            let mut read_ctx = manual_ctx(&transport);
             cap.on_read_result(
                 &mut read_ctx,
                 ReadResult::Ok {
@@ -5106,7 +5132,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let mut ctx = load_ctx(&transport);
+            let mut ctx = manual_ctx(&transport);
             cap.on_load_instrument(
                 &mut ctx,
                 LoadInstrument {
@@ -5153,7 +5179,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let mut ctx = load_ctx(&transport);
+            let mut ctx = manual_ctx(&transport);
             cap.on_load_instrument(
                 &mut ctx,
                 LoadInstrument {
@@ -5188,7 +5214,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
                 Arc::clone(&mailer),
                 MailboxId(0),
             ));
-            let mut ctx = load_ctx(&transport);
+            let mut ctx = manual_ctx(&transport);
             cap.on_load_instrument(
                 &mut ctx,
                 LoadInstrument {
@@ -5227,7 +5253,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 1);
 
             {
-                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_play_track(
                     &mut ctx,
                     PlayTrack {
@@ -5242,7 +5268,8 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 
             let wav = super::super::decode::wav_int16_mono(&ramp(512), 24_000);
             {
-                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut read_ctx =
+                    NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_read_result(
                     &mut read_ctx,
                     ReadResult::Ok {
@@ -5293,7 +5320,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 2);
 
             {
-                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_play_track(
                     &mut ctx,
                     PlayTrack {
@@ -5307,7 +5334,8 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             }
 
             {
-                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut read_ctx =
+                    NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_read_result(
                     &mut read_ctx,
                     ReadResult::Ok {
@@ -5357,7 +5385,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 3);
 
             {
-                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_load_instrument(
                     &mut ctx,
                     LoadInstrument {
@@ -5375,7 +5403,8 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 ";
             let wav = super::super::decode::wav_int16_mono(&ramp(256), 24_000);
             {
-                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut read_ctx =
+                    NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_read_result(
                     &mut read_ctx,
                     ReadResult::Ok {
@@ -5442,7 +5471,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
             let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 4);
 
             {
-                let mut ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_load_instrument(
                     &mut ctx,
                     LoadInstrument {
@@ -5454,7 +5483,8 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 
             {
                 // A <control> block with no regions fails to parse.
-                let mut read_ctx = NativeCtx::new(&transport, caller_source, root, root);
+                let mut read_ctx =
+                    NativeCtx::new_dispatching(&transport, caller_source, root, root);
                 cap.on_read_result(
                     &mut read_ctx,
                     ReadResult::Ok {
