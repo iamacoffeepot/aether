@@ -57,7 +57,7 @@ mod server_native {
         EngineAlive, EngineDied, ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine,
     };
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
         CallSettled, EngineDescriptor, ForwardEnvelope, ListEnginesResult, SpawnEngineResult,
@@ -216,7 +216,7 @@ mod server_native {
         /// Send `ListEngines` (fieldless). Reply: `ListEnginesResult
         /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }] }`.
         #[handler]
-        fn on_list(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListEngines) {
+        fn on_list(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ListEngines) -> ListEnginesResult {
             let now = Instant::now();
             let engines = self
                 .engines
@@ -230,7 +230,7 @@ mod server_native {
                     .unwrap_or(u64::MAX),
                 })
                 .collect();
-            ctx.reply(&ListEnginesResult { engines });
+            ListEnginesResult { engines }
         }
 
         /// Fork+exec a substrate binary and connect a proxy to it.
@@ -244,14 +244,13 @@ mod server_native {
         /// or `Err { error }` if the fork fails or the substrate never
         /// comes up.
         #[handler]
-        fn on_spawn(&mut self, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) {
+        fn on_spawn(&mut self, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) -> SpawnEngineResult {
             let rpc_port = match free_local_port() {
                 Ok(port) => port,
                 Err(e) => {
-                    ctx.reply(&SpawnEngineResult::Err {
+                    return SpawnEngineResult::Err {
                         error: format!("could not allocate an RPC port: {e}"),
-                    });
-                    return;
+                    };
                 }
             };
 
@@ -281,10 +280,9 @@ mod server_native {
             let child = match command.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    ctx.reply(&SpawnEngineResult::Err {
+                    return SpawnEngineResult::Err {
                         error: format!("failed to spawn {}: {e}", mail.binary_path),
-                    });
-                    return;
+                    };
                 }
             };
 
@@ -319,16 +317,14 @@ mod server_native {
                             last_alive: Instant::now(),
                         },
                     );
-                    ctx.reply(&SpawnEngineResult::Ok {
+                    SpawnEngineResult::Ok {
                         engine_id: engine_id.0.to_string(),
                         rpc_port,
-                    });
+                    }
                 }
-                Err(e) => {
-                    ctx.reply(&SpawnEngineResult::Err {
-                        error: format!("proxy failed to connect to the spawned substrate: {e:?}"),
-                    });
-                }
+                Err(e) => SpawnEngineResult::Err {
+                    error: format!("proxy failed to connect to the spawned substrate: {e:?}"),
+                },
             }
         }
 
@@ -343,22 +339,24 @@ mod server_native {
         /// for an `engine_id` that doesn't parse or names no
         /// supervised engine.
         #[handler]
-        fn on_terminate(&mut self, ctx: &mut NativeCtx<'_>, mail: TerminateEngine) {
+        fn on_terminate(
+            &mut self,
+            ctx: &mut NativeCtx<'_>,
+            mail: TerminateEngine,
+        ) -> TerminateEngineResult {
             let engine_id = match Uuid::parse_str(&mail.engine_id) {
                 Ok(uuid) => EngineId(uuid),
                 Err(e) => {
-                    ctx.reply(&TerminateEngineResult::Err {
+                    return TerminateEngineResult::Err {
                         error: format!("engine_id {:?} is not a valid UUID: {e}", mail.engine_id),
-                    });
-                    return;
+                    };
                 }
             };
 
             let Some(entry) = self.engines.remove(&engine_id) else {
-                ctx.reply(&TerminateEngineResult::Err {
+                return TerminateEngineResult::Err {
                     error: format!("no supervised engine {}", mail.engine_id),
-                });
-                return;
+                };
             };
 
             // Forward to the proxy: it SIGKILLs its substrate and
@@ -371,7 +369,7 @@ mod server_native {
                 <TerminateEngine as Kind>::ID,
                 &payload,
             );
-            ctx.reply(&TerminateEngineResult::Ok);
+            TerminateEngineResult::Ok
         }
 
         /// Relay one mail to a specific engine's substrate.
