@@ -136,5 +136,16 @@ crate-type = ["cdylib"]
 name = "inline_child"
 crate-type = ["cdylib"]
 
+# ADR-0114 §5 inline-child-reload fixture (#1930): a multi-actor module
+# `export!(InlineStatefulParent, InlineStatefulChild)` whose entry spawns
+# a stateful inline child in `wire`. The child declares `type State` and
+# answers `Bump` / `CountQuery`, so a TestBench scenario can mutate its
+# state, `replace_component` the same wasm, and assert the prior count
+# survived the dehydrate → composite bundle → rehydrate reconstruct.
+# Wasm artifact: target/wasm32-unknown-unknown/{profile}/examples/inline_child_stateful.wasm
+[[example]]
+name = "inline_child_stateful"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

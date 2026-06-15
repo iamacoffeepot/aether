@@ -18,6 +18,7 @@
 //! [`crate::Slot`].
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
@@ -29,9 +30,45 @@ use crate::mail::Mail;
 
 /// One inline child's slot. `actor` is `None` while the child is taken
 /// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
+///
+/// ADR-0114 §5: the slot also records the metadata a `replace_component`
+/// swap needs to reconstruct the child in the fresh instance — the
+/// actor-type tag (`mailbox_id_from_name(NAMESPACE)`, the same tag
+/// `init_typed_p32` matches a reconstruct on) plus the resolved
+/// `full_subname` / `is_counter` the alias id was folded from, so the
+/// rehydrate path re-folds the identical alias and re-`init`s the child
+/// by type.
 struct InlineSlot {
     id: MailboxId,
+    /// `mailbox_id_from_name(A::NAMESPACE)` — the actor-type tag the
+    /// rehydrate reconstruct matches against the module's exported types.
+    type_tag: u64,
+    /// The resolved discriminator the alias id was folded from (a counter
+    /// child's monotonic value is already resolved here, not the
+    /// unresolved `Counter` marker), so re-folding on rehydrate is
+    /// deterministic.
+    full_subname: String,
+    /// Whether the host should treat `full_subname` as a counter prefix on
+    /// re-fold; always `false` after resolution, but carried so the
+    /// rehydrate call mirrors the original `spawn_inline_child` shape.
+    is_counter: bool,
     actor: Option<Box<dyn ErasedFfiActor>>,
+}
+
+/// A cloneable snapshot of one resident inline child's reconstruct
+/// metadata (no actor box), produced by [`InlineRegistry::child_metas`]
+/// for the dehydrate walk. The compose path reads each child's state
+/// through [`InlineRegistry::with_child_mut`] keyed by `id`.
+#[derive(Clone)]
+pub struct InlineChildMeta {
+    /// The child's alias [`MailboxId`] (the registry key).
+    pub id: MailboxId,
+    /// The actor-type tag — `mailbox_id_from_name(NAMESPACE)`.
+    pub type_tag: u64,
+    /// The resolved subname the alias id was folded from.
+    pub full_subname: String,
+    /// Whether the original spawn used a counter discriminator.
+    pub is_counter: bool,
 }
 
 /// The process-global inline-child registry (ADR-0114 decision #3), keyed
@@ -57,28 +94,45 @@ impl InlineRegistry {
         }
     }
 
-    /// Install (or replace) the child registered under `id`.
-    pub fn insert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
+    /// Register a freshly-spawned (or reconstructed) inline child under
+    /// `id`, recording the reconstruct metadata alongside the actor box.
+    /// Replaces the actor + metadata if `id` is already present (a
+    /// re-spawn / rehydrate re-register of the same alias).
+    pub fn insert_child(
+        &self,
+        id: MailboxId,
+        type_tag: u64,
+        full_subname: String,
+        is_counter: bool,
+        actor: Box<dyn ErasedFfiActor>,
+    ) {
         // SAFETY: single-threaded guest + serialized delivery — no other
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
         let slots = unsafe { &mut *self.inner.get() };
         if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+            slot.type_tag = type_tag;
+            slot.full_subname = full_subname;
+            slot.is_counter = is_counter;
             slot.actor = Some(actor);
         } else {
             slots.push(InlineSlot {
                 id,
+                type_tag,
+                full_subname,
+                is_counter,
                 actor: Some(actor),
             });
         }
     }
 
-    /// Take the child out for dispatch, leaving its slot empty. Returns
+    /// Take the child out for dispatch, leaving its slot (and its
+    /// reconstruct metadata) intact but the actor box empty. Returns
     /// `None` if `id` names no resident inline child (already taken out,
     /// or never registered). The borrow drops before the returned box is
     /// dispatched, so a child may re-enter the registry mid-dispatch.
     pub fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedFfiActor>> {
-        // SAFETY: see [`Self::insert`].
+        // SAFETY: see [`Self::insert_child`].
         let slots = unsafe { &mut *self.inner.get() };
         slots
             .iter_mut()
@@ -86,9 +140,53 @@ impl InlineRegistry {
             .and_then(|s| s.actor.take())
     }
 
-    /// Put a child back after dispatch. Pairs with [`Self::take`].
+    /// Put a child back after dispatch, into its existing slot (metadata
+    /// preserved). Pairs with [`Self::take`]; the slot is guaranteed to
+    /// exist because `take` left it in place with an empty actor box.
     pub fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedFfiActor>) {
-        self.insert(id, actor);
+        // SAFETY: see [`Self::insert_child`].
+        let slots = unsafe { &mut *self.inner.get() };
+        if let Some(slot) = slots.iter_mut().find(|s| s.id == id) {
+            slot.actor = Some(actor);
+        }
+    }
+
+    /// Snapshot the reconstruct metadata of every resident inline child
+    /// (ADR-0114 §5 dehydrate walk). The actor boxes stay in the
+    /// registry; the compose path reads each child's state through
+    /// [`Self::with_child_mut`] keyed by the returned `id`.
+    #[must_use]
+    pub fn child_metas(&self) -> Vec<InlineChildMeta> {
+        // SAFETY: see [`Self::insert_child`].
+        let slots = unsafe { &*self.inner.get() };
+        slots
+            .iter()
+            .map(|slot| InlineChildMeta {
+                id: slot.id,
+                type_tag: slot.type_tag,
+                full_subname: slot.full_subname.clone(),
+                is_counter: slot.is_counter,
+            })
+            .collect()
+    }
+
+    /// Run `f` against the child registered under `id` with a unique
+    /// mutable borrow held only for the call, returning its result (or
+    /// `None` if `id` names no resident child). Used by the dehydrate
+    /// compose to drive each child's `erased_on_dehydrate` in place. The
+    /// borrow drops before this returns, so it never spans a dispatch.
+    pub fn with_child_mut<R>(
+        &self,
+        id: MailboxId,
+        f: impl FnOnce(&mut dyn ErasedFfiActor) -> R,
+    ) -> Option<R> {
+        // SAFETY: see [`Self::insert_child`].
+        let slots = unsafe { &mut *self.inner.get() };
+        slots
+            .iter_mut()
+            .find(|s| s.id == id)
+            .and_then(|s| s.actor.as_deref_mut())
+            .map(f)
     }
 }
 
@@ -147,6 +245,7 @@ mod tests {
     use crate::mail::{Mail, PriorState};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
+    use alloc::string::String;
     use core::sync::atomic::{AtomicU32, Ordering};
 
     /// Distinct return codes so an assertion can tell which dispatch path
@@ -205,7 +304,13 @@ mod tests {
         let id = MailboxId(0x1111);
 
         assert!(registry.take(id).is_none(), "empty registry has no child");
-        registry.insert(id, Box::new(RecordingChild));
+        registry.insert_child(
+            id,
+            0,
+            String::from("widget"),
+            false,
+            Box::new(RecordingChild),
+        );
         let taken = registry
             .take(id)
             .expect("insert then take returns the child");
@@ -218,6 +323,33 @@ mod tests {
             registry.take(id).is_some(),
             "reinsert refills the slot for the next dispatch",
         );
+    }
+
+    /// Step 1 coverage: a spawned child's slot carries its actor-type tag
+    /// and resolved subname, surfaced through `child_metas` for the
+    /// dehydrate walk.
+    #[test]
+    fn child_metas_carry_type_tag_and_subname() {
+        let registry = InlineRegistry::new();
+        let id = MailboxId(0x7777);
+        let tag = 0xABCD_u64;
+        registry.insert_child(
+            id,
+            tag,
+            String::from("widget"),
+            false,
+            Box::new(RecordingChild),
+        );
+
+        let metas = registry.child_metas();
+        let meta = match metas.as_slice() {
+            [one] => one,
+            other => panic!("expected exactly one child meta, got {}", other.len()),
+        };
+        assert_eq!(meta.id, id, "the meta carries the alias id");
+        assert_eq!(meta.type_tag, tag, "the meta carries the actor-type tag");
+        assert_eq!(meta.full_subname, "widget", "the meta carries the subname");
+        assert!(!meta.is_counter, "a Named subname is not a counter");
     }
 
     /// Step 4 coverage: recipient == own id dispatches the parent, never
@@ -237,7 +369,13 @@ mod tests {
         let own = 0x3000_u64;
         let child = 0x3001_u64;
         let before = CHILD_DISPATCHES.load(Ordering::Relaxed);
-        INLINE_CHILDREN.insert(MailboxId(child), Box::new(RecordingChild));
+        INLINE_CHILDREN.insert_child(
+            MailboxId(child),
+            0,
+            String::from("widget"),
+            false,
+            Box::new(RecordingChild),
+        );
 
         let rc = membrane_dispatch(own, mail_to(child), |_mail| {
             panic!("own dispatch must not run for a child recipient")
