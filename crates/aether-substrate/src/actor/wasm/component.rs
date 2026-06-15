@@ -541,11 +541,14 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
 /// Contract with the guest: it exports a
-/// `receive(kind, ptr, byte_len, count, sender) -> u32` entrypoint
-/// and a `memory` named `memory`. ADR-0013 widened the receive ABI
-/// with a `sender: u32` parameter — a per-instance handle the guest
-/// can pass back to `reply_mail`, or `NO_REPLY_HANDLE` for
-/// component-originated mail. The `byte_len: u32` parameter (added
+/// `receive(kind, ptr, byte_len, count, sender, recipient) -> u32`
+/// entrypoint and a `memory` named `memory`. ADR-0013 widened the
+/// receive ABI with a `sender: u32` parameter — a per-instance handle
+/// the guest can pass back to `reply_mail`, or `NO_REPLY_HANDLE` for
+/// component-originated mail. ADR-0114 decision #1 added the trailing
+/// `recipient: u64` — the mailbox id the substrate routed this mail to
+/// (the actor's own id for a normal actor; an inline-child alias for
+/// the membrane). The `byte_len: u32` parameter (added
 /// to support postcard-shaped receivers per ADR-0033's "any declared
 /// kind" intent) is the total payload size the substrate wrote at
 /// `ptr`, sourced from `mail.payload.len()`. Cast decoders sanity-
@@ -565,7 +568,7 @@ type ReallocFunc = TypedFunc<(u32, u32, u32, u32), u32>;
 pub struct Component {
     store: Store<ComponentCtx>,
     memory: Memory,
-    receive: TypedFunc<(u64, u32, u32, u32, u32), u32>,
+    receive: TypedFunc<(u64, u32, u32, u32, u32, u64), u32>,
     /// Issue 584 Phase 2b: post-init mail-allowed hook. Stored (rather
     /// than called inside [`Self::instantiate`]) so the trampoline
     /// can fire it AFTER its mailbox is registered — issue 640
@@ -762,8 +765,8 @@ impl Component {
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
-        let receive =
-            instance.get_typed_func::<(u64, u32, u32, u32, u32), u32>(&mut store, "receive_p32")?;
+        let receive = instance
+            .get_typed_func::<(u64, u32, u32, u32, u32, u64), u32>(&mut store, "receive_p32")?;
 
         // Optional `init(mailbox_id) -> u32` export: called once before
         // the first `receive`, handed the component's own mailbox id so
@@ -1054,9 +1057,21 @@ impl Component {
         // call site that bypasses `deliver` (today: only test
         // fixtures) doesn't accidentally pick up stale lineage.
         self.store.data().set_in_flight(mail.mail_id, mail.root);
+        // ADR-0114 decision #1: thread the routed recipient through to
+        // the guest as the trailing `receive_p32` frame slot so a guest
+        // handler (and a future inline-child membrane) can read which
+        // address the mail was sent to. For a normally-addressed actor
+        // this equals the actor's own mailbox id.
         let result = self.receive.call(
             &mut self.store,
-            (mail.kind.0, mail_ptr, byte_len, mail.count, handle),
+            (
+                mail.kind.0,
+                mail_ptr,
+                byte_len,
+                mail.count,
+                handle,
+                mail.recipient.0,
+            ),
         );
         self.store.data().clear_in_flight();
         result
@@ -1342,7 +1357,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "on_dehydrate") (result i32)
                 i32.const 200
@@ -1354,7 +1369,7 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0))
     "#;
 
@@ -1399,7 +1414,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 16
                 local.get 1
                 i32.store
@@ -1425,7 +1440,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
                 ;; *(u32*)200 = low32(mailbox_id)
@@ -1475,7 +1490,7 @@ mod tests {
     const WAT_INIT_CONFIG_NO_ALLOC: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "init_with_config_p32") (param i64 i32 i32) (result i32)
                 i32.const 204
@@ -1495,7 +1510,7 @@ mod tests {
     const WAT_WIRE_UNWIRE: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "wire") (param i64) (result i32)
                 i32.const 100
@@ -1522,7 +1537,7 @@ mod tests {
     const WAT_WIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "wire") (param i64) (result i32)
                 unreachable))
@@ -1534,7 +1549,7 @@ mod tests {
     const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "unwire") (param i64) (result i32)
                 unreachable))
@@ -1548,7 +1563,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "on_dehydrate") (result i32)
                 (drop (call $save_state
@@ -1566,7 +1581,7 @@ mod tests {
             (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "on_dehydrate") (result i32)
                 (drop (call $save_state
@@ -1587,7 +1602,7 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 ;; *(u32*)396 = version
@@ -1613,9 +1628,30 @@ mod tests {
         (module
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 i32.const 500
                 local.get 4
+                i32.store
+                i32.const 0))
+    "#
+        )
+    }
+
+    /// ADR-0114 decision #1: `receive` stores the low 32 bits of the
+    /// `recipient` param (the 6th, an `i64`) at offset 500 so the test
+    /// can observe the routed mailbox the substrate threaded through.
+    /// Exports `realloc_p32` so even an empty mail has a (non-null)
+    /// region to be placed in.
+    fn wat_stores_recipient() -> String {
+        format!(
+            r#"
+        (module
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
+                i32.const 500
+                local.get 5
+                i32.wrap_i64
                 i32.store
                 i32.const 0))
     "#
@@ -1636,7 +1672,7 @@ mod tests {
                 (func $reply_mail (param i32 i64 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64) (result i32)
                 (drop (call $reply_mail
                     (local.get 4) ;; sender handle from receive param
                     (i64.const {kind_id}) ;; hashed kind id of "test.pong"
@@ -1989,6 +2025,33 @@ mod tests {
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
         assert_eq!(component.read_u32(500), NO_REPLY_HANDLE);
+    }
+
+    /// ADR-0114 decision #1 end-to-end through the dispatch unit path:
+    /// `Component::deliver` reads the routed `mail.recipient` and threads
+    /// it as the trailing `receive_p32` frame slot, so the guest reads
+    /// the address its mail was sent to. The production trampoline routes
+    /// a normally-addressed actor's mail with `recipient == self.mailbox`
+    /// (the actor's own id), so the guest sees its own mailbox id; this
+    /// unit fixture sends a distinct recipient to prove the value the
+    /// substrate routes is exactly what the guest receives.
+    #[test]
+    fn deliver_threads_recipient_to_guest() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+
+        let mut component = instantiate(&wat_stores_recipient());
+        // A recipient whose low 32 bits are observable through the WAT
+        // fixture's `i32.wrap_i64` store. The high bits (tag nibble +
+        // hash) are dropped by the wrap — the low word is enough to
+        // prove the routed id, not the reply handle, reached the guest.
+        let recipient = M(0x9999_0000_1234_5678);
+        let mail = SubstrateMail::new(recipient, aether_data::KindId(0), vec![], 1);
+        component.deliver(&mail).expect("deliver");
+        assert_eq!(
+            component.read_u32(500),
+            0x1234_5678,
+            "guest must receive the routed recipient's low word as the 6th receive param",
+        );
     }
 
     #[test]

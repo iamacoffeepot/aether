@@ -349,6 +349,14 @@ pub struct OwnedDispatch {
     ///
     /// [`TraceEvent::Received`]: aether_kinds::trace::TraceEvent
     pub enqueue_depth: u32,
+    /// The mailbox this dispatch was routed to (ADR-0114 decision #1).
+    /// For a normally-addressed actor this is the actor's own mailbox
+    /// id; once inline-child aliases exist (ADR-0114) it is the alias
+    /// the producer addressed, which the guest membrane demuxes on.
+    /// Set from the `recipient` parameter the two production mint sites
+    /// already pass; survives release builds (where the debug-only
+    /// `ObligationGuard` that previously held it is compiled out).
+    pub recipient: MailboxId,
     /// ADR-0094 debug-only settlement-obligation guard. Present only
     /// under `#[cfg(debug_assertions)]`; release builds carry no field
     /// (byte-identical to the pre-ADR-0094 layout). Disarmed via
@@ -383,8 +391,6 @@ impl OwnedDispatch {
     ) -> Self {
         #[cfg(debug_assertions)]
         let obligation = ObligationGuard::armed(mail_id, kind_name.clone(), recipient);
-        #[cfg(not(debug_assertions))]
-        let _ = recipient;
         Self {
             kind,
             kind_name,
@@ -397,6 +403,7 @@ impl OwnedDispatch {
             parent_mail,
             t_enqueue,
             enqueue_depth,
+            recipient,
             #[cfg(debug_assertions)]
             obligation,
         }
@@ -405,9 +412,9 @@ impl OwnedDispatch {
     /// Construct an `OwnedDispatch` whose ADR-0094 obligation is
     /// **disarmed** — dropping it without discharge/transfer does not
     /// panic. For test/helper mints, the `noop` handler, and seeds that
-    /// carry no real settlement lineage. `recipient` is recorded only so
-    /// the (never-firing) guard names a mailbox if it is later armed by
-    /// other means; pass `MailboxId(0)` when none is meaningful.
+    /// carry no real settlement lineage. `recipient` is stored on the
+    /// dispatch (and names the never-firing guard's mailbox in debug);
+    /// pass `MailboxId(0)` when none is meaningful.
     ///
     /// `pub` (not `pub(crate)`) because integration tests and sibling
     /// crates' (`aether-capabilities`) tests mint dispatches directly to
@@ -432,8 +439,6 @@ impl OwnedDispatch {
     ) -> Self {
         #[cfg(debug_assertions)]
         let obligation = ObligationGuard::disarmed(mail_id, kind_name.clone(), recipient);
-        #[cfg(not(debug_assertions))]
-        let _ = recipient;
         Self {
             kind,
             kind_name,
@@ -446,6 +451,7 @@ impl OwnedDispatch {
             parent_mail,
             t_enqueue,
             enqueue_depth,
+            recipient,
             #[cfg(debug_assertions)]
             obligation,
         }
@@ -491,6 +497,7 @@ impl Clone for OwnedDispatch {
             parent_mail: self.parent_mail,
             t_enqueue: self.t_enqueue,
             enqueue_depth: self.enqueue_depth,
+            recipient: self.recipient,
             // ADR-0094: a clone is for inspection, never a second live
             // obligation — `ObligationGuard::clone` is disarmed.
             #[cfg(debug_assertions)]
@@ -515,6 +522,7 @@ impl fmt::Debug for OwnedDispatch {
             .field("parent_mail", &self.parent_mail)
             .field("t_enqueue", &self.t_enqueue)
             .field("enqueue_depth", &self.enqueue_depth)
+            .field("recipient", &self.recipient)
             // ADR-0094: the debug-only `obligation` guard is deliberately
             // omitted so `Debug` output is identical across debug/release.
             .finish_non_exhaustive()
@@ -1682,6 +1690,36 @@ mod tests {
         );
         env.discharge();
         drop(env);
+    }
+
+    /// ADR-0114 decision #1: the routed recipient promoted to a real
+    /// `OwnedDispatch` field survives in every build (not just the
+    /// debug-only `ObligationGuard`). Both mint sites stamp it from
+    /// their `recipient` parameter; a clone (for inspection) carries it
+    /// through too.
+    #[test]
+    fn dispatch_carries_routed_recipient() {
+        let recipient = MailboxId(0xABCD);
+        let env = OwnedDispatch::disarmed(
+            KindId(7),
+            "aether.fs.read".to_owned(),
+            None,
+            Source::NONE,
+            MailRef::from(Vec::new()),
+            1,
+            MailId::new(MailboxId(3), 3),
+            MailId::new(MailboxId(3), 3),
+            None,
+            Nanos(0),
+            0,
+            recipient,
+        );
+        assert_eq!(env.recipient, recipient);
+        // The hand-rolled `Clone` must propagate the new field — a clone
+        // is for inspection, but still carries the recipient.
+        let cloned = env.clone();
+        drop(env);
+        assert_eq!(cloned.recipient, recipient);
     }
 
     /// ADR-0094: an armed dispatch that is `mark_transferred()` before
