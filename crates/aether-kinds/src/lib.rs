@@ -4084,6 +4084,50 @@ mod control_plane {
         pub punch_detour_cheaper: u32,
     }
 
+    /// One fork in a [`CorridorGraph`] (issue 1859): a live node with a
+    /// `Flow` edge into a dead-end branch, paired with the lookahead depth
+    /// that branch demands. `node_index` indexes into
+    /// [`CorridorGraph::nodes`]; `depth` is the longest `Flow`-path within
+    /// the dead-end subtree hanging off the fork — how many ticks the
+    /// dead-end region stays affordable past the fork before it terminates,
+    /// i.e. how far a bounded-horizon traversal must see past the fork to
+    /// tell the dead-end apart from a branch that reaches the final tick.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ForkDepth {
+        pub node_index: u32,
+        pub depth: u32,
+    }
+
+    /// The fork resolution depth of a [`CorridorGraph`] (issue 1859): how
+    /// far ahead a bounded-horizon traversal must look before committing to
+    /// an affordable one-tick step, computed as two passes over the landed
+    /// corridor graph — no windowed re-solve and no new field.
+    ///
+    /// A node is **live** if a `Flow`-edge path reaches a final-tick node;
+    /// a node in the graph (reachable-affordable) with no such continuation
+    /// is **dead-end**. A **fork** is a live node with a `Flow` edge into a
+    /// dead-end node: locally the step is affordable, yet the branch it
+    /// enters never reaches the end. Each fork's `depth` is the longest
+    /// `Flow`-path within the dead-end subtree hanging off it — the ticks
+    /// the dead-end stays affordable before terminating, which is exactly
+    /// the lookahead a traversal needs to distinguish it from a through
+    /// branch. `max_resolution_depth` is the `max` over `forks` (`0` when
+    /// the graph has no fork), so a bounded-lookahead traversal with window
+    /// `W >= max_resolution_depth` stops committing to dead-ends.
+    ///
+    /// `forks` is the per-fork list `(node_index, depth)` for inspection,
+    /// emitted in ascending `node_index` order so the output is byte-stable
+    /// and content-addressable. A skeleton-sized reduction (`Vec`-bearing
+    /// like [`CorridorGraph`]), orders of magnitude smaller than the field.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.corridor.resolution_depth")]
+    pub struct ResolutionDepth {
+        pub max_resolution_depth: u32,
+        pub forks: Vec<ForkDepth>,
+    }
+
     /// A seeded Monte-Carlo population sweep over a time-varying scalar
     /// cost field (issue 1863): a population of reaction-delayed agents
     /// re-planning toward the cheapest goal under a fixed per-tick lag.
@@ -4686,6 +4730,7 @@ mod tests {
         assert_eq!(CorridorGraph::NAME, "aether.corridor.graph");
         assert_eq!(TrajectorySet::NAME, "aether.corridor.trajectory_set");
         assert_eq!(TrafficDensity::NAME, "aether.corridor.traffic_density");
+        assert_eq!(ResolutionDepth::NAME, "aether.corridor.resolution_depth");
         assert_eq!(
             PopulationSweepProblem::NAME,
             "aether.reach.population_problem"
@@ -4848,6 +4893,56 @@ mod tests {
                 panic!("expected Vec of edges");
             };
             assert!(matches!(**edge, SchemaType::Struct { .. }));
+        }
+
+        #[test]
+        fn resolution_depth_schema_is_max_plus_vec_of_forks() {
+            // The resolution-depth result is a flat reduction: a scalar
+            // `max_resolution_depth` and a `Vec<ForkDepth>`, the fork struct
+            // recursing into two `u32` fields. A `Struct` schema (not a
+            // cast) is what the DAG validator and the hub codec read for the
+            // transform output.
+            let SchemaType::Struct { fields, .. } = &<ResolutionDepth as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "max_resolution_depth");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[1].name, "forks");
+            let SchemaType::Vec(fork) = &fields[1].ty else {
+                panic!("expected Vec of forks");
+            };
+            let SchemaType::Struct {
+                fields: fork_fields,
+                ..
+            } = &**fork
+            else {
+                panic!("expected nested fork Struct");
+            };
+            assert_eq!(fork_fields.len(), 2);
+            assert_eq!(fork_fields[0].name, "node_index");
+            assert_eq!(fork_fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fork_fields[1].name, "depth");
+            assert_eq!(fork_fields[1].ty, SchemaType::Scalar(Primitive::U32));
+        }
+
+        #[test]
+        fn resolution_depth_id_distinct_from_corridor_kinds() {
+            use aether_data::Kind;
+            // The resolution-depth output shares no id with the corridor /
+            // reach kinds it composes with in a DAG — a collision would
+            // alias the transform's `Ref<ResolutionDepth>` output slot.
+            let ids = [
+                ResolutionDepth::ID,
+                CorridorGraph::ID,
+                TrafficDensity::ID,
+                ScalarField::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "resolution-depth id must be distinct");
+                }
+            }
         }
 
         #[test]

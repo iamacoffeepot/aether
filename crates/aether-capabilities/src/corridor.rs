@@ -27,7 +27,8 @@
 use std::collections::BTreeMap;
 
 use aether_kinds::{
-    CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ScalarField, StencilOffset,
+    CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ForkDepth, ResolutionDepth, ScalarField,
+    StencilOffset,
 };
 
 use crate::reachability::UNREACHABLE;
@@ -433,6 +434,176 @@ pub fn build_corridor_graph_core(
     CorridorGraph { nodes, edges }
 }
 
+/// The final time layer of a [`CorridorGraph`] — the maximum `tick` over
+/// its nodes — or `None` when the graph has no node. A node at this tick
+/// is a terminus a live path must reach.
+fn final_tick(graph: &CorridorGraph) -> Option<u32> {
+    graph.nodes.iter().map(|n| n.tick).max()
+}
+
+/// Mark the **live** nodes of a [`CorridorGraph`]: a node is live when a
+/// chain of `Flow` edges reaches a final-tick node. `Flow` edges point
+/// forward in time (`from` at tick `t`, `to` at tick `t + 1`), so liveness
+/// propagates *backward*: seed the final-tick nodes, then walk each `Flow`
+/// edge from `to` to `from`, marking `from` live whenever `to` is live.
+///
+/// A node in the graph (reachable-affordable) that is not live is a
+/// **dead-end**: it has no affordable one-tick continuation that reaches
+/// the final tick. The result is indexed parallel to `graph.nodes`.
+///
+/// The graph is a time-layered DAG with ticks strictly decreasing along the
+/// backward walk, so the worklist drains in bounded iterations with no
+/// recursion (per the load-bearing-code rule). The per-node `live` flag
+/// guards re-enqueue, so each node is processed once.
+pub fn live_nodes(graph: &CorridorGraph) -> Vec<bool> {
+    let node_count = graph.nodes.len();
+    let mut live = vec![false; node_count];
+    let Some(last) = final_tick(graph) else {
+        return live;
+    };
+
+    // Predecessor adjacency over `Flow` edges only: for each node, the
+    // `from` endpoints of the flow edges that land on it. Liveness flows
+    // from a node to its flow predecessors.
+    let mut flow_predecessors: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    for edge in &graph.edges {
+        if edge.kind != EdgeKind::Flow {
+            continue;
+        }
+        let from = edge.from as usize;
+        let to = edge.to as usize;
+        if from < node_count && to < node_count {
+            flow_predecessors[to].push(from);
+        }
+    }
+
+    let mut worklist: Vec<usize> = Vec::new();
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        if node.tick == last {
+            live[idx] = true;
+            worklist.push(idx);
+        }
+    }
+
+    while let Some(node) = worklist.pop() {
+        for &pred in &flow_predecessors[node] {
+            if !live[pred] {
+                live[pred] = true;
+                worklist.push(pred);
+            }
+        }
+    }
+
+    live
+}
+
+/// Compute the per-fork resolution depth of a [`CorridorGraph`] given its
+/// [`live_nodes`] mask. A **fork** is a live node with a `Flow` edge into a
+/// dead-end node; its resolution depth is the longest `Flow`-path within
+/// the dead-end subtree hanging off it — how many ticks the dead-end region
+/// stays affordable past the fork before it terminates. That depth is
+/// exactly how far past the fork a bounded-horizon traversal must see to
+/// tell the dead-end apart from a through branch.
+///
+/// Longest dead-end path is a topological DP over the DAG. Because `Flow`
+/// edges always advance the tick by one, longest-path-in-ticks from a
+/// dead-end node `n` is `1 + max` over its dead-end flow successors (`0`
+/// when `n` has none), so processing nodes in descending tick order fills
+/// the table in one pass with no recursion. A fork's depth is `1 + max`
+/// over the longest dead-end paths of the dead-end nodes its flow edges
+/// enter (the `+ 1` counts the fork's own step into the dead-end region).
+///
+/// Returns the forks in ascending `node_index` order so the output is
+/// byte-stable and content-addressable.
+pub fn fork_resolution_depths(graph: &CorridorGraph, live: &[bool]) -> Vec<ForkDepth> {
+    let node_count = graph.nodes.len();
+    if node_count == 0 {
+        return Vec::new();
+    }
+
+    // Dead-end flow successors of each dead-end node: a `Flow` edge whose
+    // `from` and `to` are both dead-end nodes stays within the dead-end
+    // subtree. (A flow edge out of a dead-end node can only reach another
+    // dead-end node — a flow successor of a dead-end is never live, since
+    // liveness would have propagated backward to the predecessor.)
+    let mut dead_successors: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    // Forward dead-end flow targets of every node (live or dead): the
+    // dead-end nodes a node's flow edges enter. A live node with a
+    // non-empty list is a fork.
+    let mut dead_flow_targets: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    for edge in &graph.edges {
+        if edge.kind != EdgeKind::Flow {
+            continue;
+        }
+        let from = edge.from as usize;
+        let to = edge.to as usize;
+        if from >= node_count || to >= node_count || live[to] {
+            continue;
+        }
+        // `to` is a dead-end node.
+        dead_flow_targets[from].push(to);
+        if !live[from] {
+            dead_successors[from].push(to);
+        }
+    }
+
+    // Longest `Flow`-path length (in ticks) within the dead-end subtree
+    // rooted at each dead-end node. Topological DP: process dead-end nodes
+    // in descending tick order so every flow successor (tick `+ 1`) is
+    // already resolved. Indices into a node list sorted by descending tick.
+    let mut order: Vec<usize> = (0..node_count).filter(|&i| !live[i]).collect();
+    order.sort_by(|&a, &b| graph.nodes[b].tick.cmp(&graph.nodes[a].tick));
+
+    let mut longest_dead_path = vec![0u32; node_count];
+    for &node in &order {
+        let mut best = 0u32;
+        for &succ in &dead_successors[node] {
+            best = best.max(longest_dead_path[succ].saturating_add(1));
+        }
+        longest_dead_path[node] = best;
+    }
+
+    let mut forks: Vec<ForkDepth> = Vec::new();
+    for (idx, &is_live) in live.iter().enumerate() {
+        if !is_live {
+            continue;
+        }
+        let mut depth = 0u32;
+        for &target in &dead_flow_targets[idx] {
+            // `+ 1` counts the fork's own step into the dead-end region;
+            // `longest_dead_path[target]` is the rest of the branch.
+            depth = depth.max(longest_dead_path[target].saturating_add(1));
+        }
+        if depth > 0 {
+            forks.push(ForkDepth {
+                node_index: u32::try_from(idx).expect("node index fits u32"),
+                depth,
+            });
+        }
+    }
+
+    // Ascending `node_index` keeps the output byte-stable; the source loop
+    // already visits nodes in ascending order, so this is a no-op guard
+    // against future reordering.
+    forks.sort_by_key(|f| f.node_index);
+    forks
+}
+
+/// The fork resolution depth of a [`CorridorGraph`]: the maximum lookahead
+/// a bounded-horizon traversal must use before committing to an affordable
+/// one-tick step. Two passes — [`live_nodes`] then [`fork_resolution_depths`]
+/// — over the landed graph; `max_resolution_depth` is the `max` fork depth
+/// (`0` when the graph has no fork).
+pub fn corridor_resolution_depth_core(graph: &CorridorGraph) -> ResolutionDepth {
+    let live = live_nodes(graph);
+    let forks = fork_resolution_depths(graph, &live);
+    let max_resolution_depth = forks.iter().map(|f| f.depth).max().unwrap_or(0);
+    ResolutionDepth {
+        max_resolution_depth,
+        forks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_corridor_graph_core;
@@ -670,5 +841,225 @@ mod tests {
         let back = aether_kinds::CorridorGraph::decode_from_bytes(&bytes)
             .expect("corridor graph round-trips");
         assert_eq!(graph, back);
+    }
+}
+
+#[cfg(test)]
+mod resolution_depth_tests {
+    use super::{corridor_resolution_depth_core, fork_resolution_depths, live_nodes};
+    use aether_kinds::{CorridorEdge, CorridorGraph, CorridorNode, EdgeKind};
+
+    /// A node at `tick` (the other summary fields don't affect liveness or
+    /// fork depth, which read only `tick` and the flow topology).
+    fn node(tick: u32) -> CorridorNode {
+        CorridorNode {
+            tick,
+            component: 0,
+            cell_count: 1,
+            min_cost: 1,
+        }
+    }
+
+    /// A `Flow` edge `from -> to` (forward one tick).
+    fn flow(from: u32, to: u32) -> CorridorEdge {
+        CorridorEdge {
+            from,
+            to,
+            kind: EdgeKind::Flow,
+            price: 0,
+            overlap_width: 0,
+        }
+    }
+
+    /// A `Punch` edge (intra-tick), which liveness and fork depth ignore.
+    fn punch(from: u32, to: u32) -> CorridorEdge {
+        CorridorEdge {
+            from,
+            to,
+            kind: EdgeKind::Punch,
+            price: 3,
+            overlap_width: 0,
+        }
+    }
+
+    /// A through corridor — one node per tick, a flow edge per step — is
+    /// fully live: every node reaches the final tick.
+    #[test]
+    fn through_corridor_is_fully_live() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0), node(1), node(2)],
+            edges: vec![flow(0, 1), flow(1, 2)],
+        };
+        assert_eq!(live_nodes(&graph), vec![true, true, true]);
+        assert!(fork_resolution_depths(&graph, &live_nodes(&graph)).is_empty());
+    }
+
+    /// A branch that terminates before the final tick is dead-end: it is in
+    /// the graph but has no flow continuation to the end.
+    #[test]
+    fn branch_terminating_early_is_dead_end() {
+        // tick 0: node 0 (start). tick 1: node 1 (through) + node 2
+        // (dead-end, no successor). tick 2: node 3 (terminus).
+        let graph = CorridorGraph {
+            nodes: vec![node(0), node(1), node(1), node(2)],
+            edges: vec![flow(0, 1), flow(0, 2), flow(1, 3)],
+        };
+        // node 2 dead-ends at tick 1; everything else reaches tick 2.
+        assert_eq!(live_nodes(&graph), vec![true, true, false, true]);
+    }
+
+    /// Every tick reachable to the end → all nodes live, no forks.
+    #[test]
+    fn all_affordable_corridor_has_no_forks() {
+        let graph = CorridorGraph {
+            nodes: vec![node(0), node(1), node(2), node(3)],
+            edges: vec![flow(0, 1), flow(1, 2), flow(2, 3)],
+        };
+        assert!(live_nodes(&graph).iter().all(|&l| l));
+        let depths = corridor_resolution_depth_core(&graph);
+        assert_eq!(depths.max_resolution_depth, 0);
+        assert!(depths.forks.is_empty());
+    }
+
+    /// The wall-trap graph: a depth-5 cheap-then-walled dead-end branch
+    /// beside a through branch. The fork at the split must look 5 ticks
+    /// ahead to tell the dead-end apart from the through branch.
+    #[test]
+    fn wall_trap_yields_max_depth_five() {
+        // Through spine: nodes 0..=7 at ticks 0..=7 (reaches the final
+        // tick 7). At tick 1, node 1 forks into a dead-end chain — nodes
+        // 8..=12 occupying ticks 2..=6 — that never rejoins the spine and
+        // terminates one tick *before* the final tick (so it is genuinely a
+        // dead-end, not a through branch). The dead-end persists five ticks
+        // past the fork, so the fork (node 1) demands depth 5.
+        //
+        // Spine: 0(t0) 1(t1) 2(t2) 3(t3) 4(t4) 5(t5) 6(t6) 7(t7)
+        // Dead :            8(t2) 9(t3) 10(t4) 11(t5) 12(t6)
+        let mut nodes = Vec::new();
+        for t in 0..=7 {
+            nodes.push(node(t));
+        }
+        for t in 2..=6 {
+            nodes.push(node(t)); // dead-end chain at ticks 2..=6
+        }
+        let edges = vec![
+            // spine
+            flow(0, 1),
+            flow(1, 2),
+            flow(2, 3),
+            flow(3, 4),
+            flow(4, 5),
+            flow(5, 6),
+            flow(6, 7),
+            // dead-end chain branching off node 1 (tick 1) into node 8 (tick 2)
+            flow(1, 8),
+            flow(8, 9),
+            flow(9, 10),
+            flow(10, 11),
+            flow(11, 12),
+        ];
+        let graph = CorridorGraph { nodes, edges };
+        let live = live_nodes(&graph);
+        // Spine (0..=7) live; dead-end chain (8..=12) dead-end.
+        assert_eq!(&live[0..8], &[true; 8]);
+        assert_eq!(&live[8..13], &[false; 5]);
+
+        let depths = corridor_resolution_depth_core(&graph);
+        // The only fork is node 1; its dead-end branch persists five ticks.
+        assert_eq!(depths.forks.len(), 1);
+        assert_eq!(depths.forks[0].node_index, 1);
+        assert_eq!(depths.forks[0].depth, 5);
+        assert_eq!(depths.max_resolution_depth, 5);
+    }
+
+    /// Nested dead-ends: a fork's depth is the longest path through its
+    /// dead-end subtree, not the shortest.
+    #[test]
+    fn nested_dead_ends_take_the_longest_path() {
+        // Spine: 0(t0) 1(t1) ... 6(t6) reaching the final tick 6.
+        // Off node 0 (tick 0) a dead-end branch enters node 7 (tick 1),
+        // which splits into a short stub node 8 (tick 2, terminates) and a
+        // longer chain node 9(t2) 10(t3) 11(t4) — both terminating before
+        // the final tick 6. The fork is node 0; its longest dead-end path is
+        // 0 -> 7 -> 9 -> 10 -> 11 = depth 4, not the depth-2 stub.
+        let nodes = vec![
+            node(0), // 0 spine t0
+            node(1), // 1 spine t1
+            node(2), // 2 spine t2
+            node(3), // 3 spine t3
+            node(4), // 4 spine t4
+            node(5), // 5 spine t5
+            node(6), // 6 spine t6 (final tick)
+            node(1), // 7 dead t1
+            node(2), // 8 dead t2 (stub)
+            node(2), // 9 dead t2
+            node(3), // 10 dead t3
+            node(4), // 11 dead t4
+        ];
+        let edges = vec![
+            // spine
+            flow(0, 1),
+            flow(1, 2),
+            flow(2, 3),
+            flow(3, 4),
+            flow(4, 5),
+            flow(5, 6),
+            // dead-end subtree off node 0
+            flow(0, 7),
+            flow(7, 8),
+            flow(7, 9),
+            flow(9, 10),
+            flow(10, 11),
+        ];
+        let graph = CorridorGraph { nodes, edges };
+        let live = live_nodes(&graph);
+        assert_eq!(&live[0..7], &[true; 7]);
+        assert_eq!(&live[7..12], &[false; 5]);
+
+        let depths = corridor_resolution_depth_core(&graph);
+        assert_eq!(depths.forks.len(), 1);
+        assert_eq!(depths.forks[0].node_index, 0);
+        // 0 -> 7 (+1) -> 9 (+1) -> 10 (+1) -> 11 (+1) = 4.
+        assert_eq!(depths.forks[0].depth, 4);
+        assert_eq!(depths.max_resolution_depth, 4);
+    }
+
+    /// Punch edges are ignored by liveness and fork detection: a node that
+    /// reaches the end only via a punch (not a flow chain) is still
+    /// dead-end, and a punch into a dead-end is not a fork.
+    #[test]
+    fn punch_edges_do_not_carry_liveness() {
+        // tick 0: node 0. tick 1: node 1 (through, flows to terminus) and
+        // node 2 (dead-end). A punch joins node 1 and node 2 at tick 1.
+        // tick 2: node 3 terminus, reached from node 1 by flow.
+        let graph = CorridorGraph {
+            nodes: vec![node(0), node(1), node(1), node(2)],
+            edges: vec![flow(0, 1), flow(0, 2), punch(1, 2), flow(1, 3)],
+        };
+        // The punch does not make node 2 live.
+        assert_eq!(live_nodes(&graph), vec![true, true, false, true]);
+        let depths = corridor_resolution_depth_core(&graph);
+        // node 0 forks into dead-end node 2: depth 1 (one tick of dead-end).
+        assert_eq!(
+            depths.forks,
+            vec![aether_kinds::ForkDepth {
+                node_index: 0,
+                depth: 1
+            }]
+        );
+        assert_eq!(depths.max_resolution_depth, 1);
+    }
+
+    /// An empty graph (no nodes) yields no forks and zero depth.
+    #[test]
+    fn empty_graph_has_zero_depth() {
+        let graph = CorridorGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+        assert!(live_nodes(&graph).is_empty());
+        let depths = corridor_resolution_depth_core(&graph);
+        assert_eq!(depths.max_resolution_depth, 0);
+        assert!(depths.forks.is_empty());
     }
 }
