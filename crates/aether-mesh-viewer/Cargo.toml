@@ -42,6 +42,13 @@ aether-kinds = { path = "../aether-kinds" }
 aether-mesh = { path = "../aether-mesh" }
 aether-math = { path = "../aether-math" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# Issue 1868: the `.field` arm decodes a Serde-derived `ScalarField`
+# (the reachability solver's kind, issue 1857) from `.field` file bytes
+# straight off `aether.fs.read`. Postcard is the wire shape the substrate
+# already uses for kind params, so the file bytes an agent writes via
+# `aether.fs.write` are postcard. `default-features = false` keeps it
+# `no_std` for the wasm guest build.
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
 # ADR-0060: tracing facade reaches the substrate's `aether.log` via
 # the SDK's `MailSubscriber` (installed by `export!`).
 tracing = { workspace = true, default-features = false }

@@ -36,7 +36,7 @@ use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, ReplyHandle, Reso
 use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Render, Vertex};
+use aether_kinds::{DrawTriangle, MeshLoadResult, ReadResult, Render, ScalarField, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -59,6 +59,23 @@ const PALETTE: &[(f32, f32, f32)] = &[
 ];
 
 const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
+
+/// Iso threshold for the `.field` arm (issue 1868). Fixed at `1`: cost-0
+/// cells classify as outside and every positive value — the `u32::MAX`
+/// unreachable sentinel included — as inside, with no special case, so a
+/// reachability field becomes a solid whose empty regions read as
+/// tunnels through it.
+const FIELD_ISO_THRESHOLD: u32 = 1;
+
+/// World cell size for the `.field` arm: one world unit per grid step on
+/// each axis, with time → world-z (the camera's depth convention). The
+/// camera frames the result through `view_proj`; the placement is the
+/// fixed unit convention, matching the DSL/OBJ paths' world units.
+const FIELD_CELL: Vec3 = Vec3::splat(1.0);
+
+/// World origin for the `.field` arm. The field's `(0, 0, tick 0)` corner
+/// maps to the world origin (a half-cell shell extends just outside it).
+const FIELD_ORIGIN: Vec3 = Vec3::ZERO;
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
@@ -241,6 +258,13 @@ impl MeshViewer {
     /// success and leaving it intact on any failure. Returns the
     /// structured outcome for the `MeshLoadResult` reply.
     fn load_bytes(&mut self, path: &str, bytes: &[u8]) -> LoadOutcome {
+        let lower = path.rsplit('.').next().map(str::to_ascii_lowercase);
+        // `.field` carries a binary `ScalarField` (issue 1868), not UTF-8
+        // text, so it dispatches on the raw bytes before the text decode
+        // the `.dsl` / `.obj` arms need.
+        if lower.as_deref() == Some("field") {
+            return self.try_replace_field(bytes);
+        }
         let Ok(text) = str::from_utf8(bytes) else {
             tracing::warn!(
                 target: "aether_mesh_viewer",
@@ -249,7 +273,6 @@ impl MeshViewer {
             );
             return LoadOutcome::failed("mesh file is not valid UTF-8".to_string());
         };
-        let lower = path.rsplit('.').next().map(str::to_ascii_lowercase);
         if lower.as_deref() == Some("dsl") {
             self.try_replace_dsl(text)
         } else if lower.as_deref() == Some("obj") {
@@ -258,9 +281,11 @@ impl MeshViewer {
             tracing::warn!(
                 target: "aether_mesh_viewer",
                 path = %path,
-                "unsupported file extension; expected .dsl or .obj",
+                "unsupported file extension; expected .dsl, .obj, or .field",
             );
-            LoadOutcome::failed("unsupported file extension; expected .dsl or .obj".to_string())
+            LoadOutcome::failed(
+                "unsupported file extension; expected .dsl, .obj, or .field".to_string(),
+            )
         }
     }
 
@@ -352,6 +377,75 @@ impl MeshViewer {
             }
         }
     }
+
+    /// Decode a binary `ScalarField` (issue 1857) from `.field` bytes,
+    /// iso-surface it, and replace the cached triangle list (issue 1868).
+    ///
+    /// The field's dense row-major `values[t * H * W + y * W + x]` layout
+    /// *is* the stacked space-time volume, so it meshes directly with
+    /// `(x, y, tick)` mapped to `(x, y, z)` and `depth = ticks` — time
+    /// becomes world-z, matching the camera's depth convention. The
+    /// iso threshold is fixed at `1`, so cost-0 cells are outside and
+    /// every positive value (the `u32::MAX` unreachable sentinel included)
+    /// is inside, with no special case. World placement is the fixed
+    /// unit-cell convention (`FIELD_CELL` / `FIELD_ORIGIN`); the camera
+    /// frames the result through `view_proj`. A decode or mesh failure
+    /// leaves the prior cache intact, mirroring the `.dsl` / `.obj` arms.
+    fn try_replace_field(&mut self, bytes: &[u8]) -> LoadOutcome {
+        let field: ScalarField = match postcard::from_bytes(bytes) {
+            Ok(field) => field,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_mesh_viewer",
+                    error = ?error,
+                    "ScalarField decode failed; keeping prior mesh",
+                );
+                return LoadOutcome::failed(format!("ScalarField decode failed: {error}"));
+            }
+        };
+        let expected = (field.width as usize)
+            .saturating_mul(field.height as usize)
+            .saturating_mul(field.ticks as usize);
+        if field.values.len() != expected {
+            tracing::warn!(
+                target: "aether_mesh_viewer",
+                width = field.width,
+                height = field.height,
+                ticks = field.ticks,
+                values = field.values.len(),
+                expected,
+                "ScalarField values length mismatch; keeping prior mesh",
+            );
+            return LoadOutcome::failed(format!(
+                "ScalarField values length {} != width * height * ticks = {}",
+                field.values.len(),
+                expected,
+            ));
+        }
+        let tris = aether_mesh::surface_net(
+            field.width as usize,
+            field.height as usize,
+            field.ticks as usize,
+            &field.values,
+            FIELD_ISO_THRESHOLD,
+            FIELD_CELL,
+            FIELD_ORIGIN,
+        );
+        let out: Vec<DrawTriangle> = tris
+            .iter()
+            .map(|t| to_draw_triangle_palette_vec3(t.vertices, t.color))
+            .collect();
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            width = field.width,
+            height = field.height,
+            ticks = field.ticks,
+            triangles = out.len(),
+            "field load complete; cache replaced",
+        );
+        self.triangles = out;
+        LoadOutcome::ok()
+    }
 }
 
 fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[Vec3; 3]> {
@@ -390,6 +484,15 @@ fn outline_loop(loop_: &[Vec3], n: Vec3, out: &mut Vec<[Vec3; 3]>) {
 fn to_draw_triangle_palette(tri: [Point3; 3], color: u32) -> DrawTriangle {
     let rgb = PALETTE[(color as usize) % PALETTE.len()];
     to_draw_triangle_rgb([tri[0].to_f32(), tri[1].to_f32(), tri[2].to_f32()], rgb)
+}
+
+/// Palette-color a world-space `Vec3` triangle (the surface-nets mesher's
+/// output, issue 1868). Mirrors [`to_draw_triangle_palette`] but takes
+/// `Vec3` vertices directly — the surface-nets pass already emits world
+/// coordinates, with no fixed-point `Point3` round-trip.
+fn to_draw_triangle_palette_vec3(tri: [Vec3; 3], color: u32) -> DrawTriangle {
+    let rgb = PALETTE[(color as usize) % PALETTE.len()];
+    to_draw_triangle_rgb(tri, rgb)
 }
 
 fn to_draw_triangle_rgb(tri: [Vec3; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
@@ -583,6 +686,97 @@ mod tests {
             v 1 0 0\n\
             f 1 2 99\n";
         assert!(parse_obj(obj).is_err());
+    }
+
+    /// A bare viewer with an empty cache and no parked reply — enough to
+    /// drive `load_bytes` directly (no scheduler / ctx needed).
+    fn empty_viewer() -> MeshViewer {
+        MeshViewer {
+            triangles: Vec::new(),
+            pending_reply: None,
+        }
+    }
+
+    /// A single-inside-sample `ScalarField` postcard-encoded the way an
+    /// agent writes it via `aether.fs.write`.
+    fn single_voxel_field_bytes() -> Vec<u8> {
+        let mut values = vec![0u32; 3 * 3 * 3];
+        values[13] = 1; // center sample (x, y, z) = (1, 1, 1): 1*9 + 1*3 + 1
+        let field = ScalarField {
+            width: 3,
+            height: 3,
+            ticks: 3,
+            values,
+        };
+        postcard::to_allocvec(&field).expect("test setup: encode ScalarField")
+    }
+
+    /// Issue 1868: a `.field` load decodes a postcard `ScalarField`,
+    /// meshes it, and replaces the cache with a non-empty triangle list,
+    /// reporting `ok: true`. The single-voxel field meshes to the
+    /// 12-triangle closed cube the mesher's own test asserts.
+    #[test]
+    fn field_load_replaces_cache_and_reports_ok() {
+        let mut viewer = empty_viewer();
+        let bytes = single_voxel_field_bytes();
+        let outcome = viewer.load_bytes("reach.field", &bytes);
+        assert!(
+            outcome.error.is_none(),
+            "good field should load: {:?}",
+            outcome.error,
+        );
+        assert_eq!(
+            viewer.triangles.len(),
+            12,
+            "single-voxel field meshes to a 12-triangle closed cube",
+        );
+    }
+
+    /// Issue 1868: a malformed `.field` buffer keeps the prior cache and
+    /// reports `ok: false`. A non-postcard byte run fails to decode; the
+    /// previously-loaded triangles survive.
+    #[test]
+    fn malformed_field_keeps_prior_cache() {
+        let mut viewer = empty_viewer();
+        // Seed a prior good mesh.
+        let good = single_voxel_field_bytes();
+        viewer.load_bytes("good.field", &good);
+        let prior = viewer.triangles.len();
+        assert_eq!(prior, 12, "prior good load populated the cache");
+
+        // A truncated / garbage buffer fails to decode.
+        let outcome = viewer.load_bytes("bad.field", &[0xff, 0xff, 0xff, 0x01]);
+        assert!(outcome.error.is_some(), "malformed field reports a failure");
+        assert_eq!(
+            viewer.triangles.len(),
+            prior,
+            "malformed field leaves the prior cache intact",
+        );
+    }
+
+    /// A `.field` whose declared dimensions disagree with `values.len()`
+    /// is rejected before meshing, keeping the prior cache.
+    #[test]
+    fn field_length_mismatch_keeps_prior_cache() {
+        let mut viewer = empty_viewer();
+        let good = single_voxel_field_bytes();
+        viewer.load_bytes("good.field", &good);
+        let prior = viewer.triangles.len();
+
+        let field = ScalarField {
+            width: 4,
+            height: 4,
+            ticks: 4,
+            values: vec![1u32; 10], // not 4*4*4
+        };
+        let bytes = postcard::to_allocvec(&field).expect("encode mismatched field");
+        let outcome = viewer.load_bytes("mismatch.field", &bytes);
+        assert!(outcome.error.is_some(), "length mismatch reports a failure");
+        assert_eq!(
+            viewer.triangles.len(),
+            prior,
+            "length mismatch leaves the prior cache intact",
+        );
     }
 }
 

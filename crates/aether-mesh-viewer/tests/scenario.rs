@@ -20,7 +20,7 @@
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
+use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult, ScalarField};
 use aether_mesh_viewer::LoadMesh;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -153,6 +153,59 @@ fn dsl_box_loads_and_renders() {
     let img = decode_png(png).expect("decode capture png");
     assert_draw_triangle_observed(&bench);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
+}
+
+/// Issue 1868 render-path smoke: a `.field` load decodes a postcard
+/// `ScalarField`, surface-nets it, and replays the triangles to
+/// `aether.render` every frame — `aether.draw_triangle` is observed.
+/// Asserts mesh structure (triangles flow), not pixels, per the GPU-test
+/// split (the test bench has no GPU-capture host for structural checks).
+#[test]
+fn field_loads_and_renders() {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+        return;
+    };
+    let sandbox = init_save_sandbox("mesh-viewer");
+    // A small filled box with an interior empty pocket — a non-trivial
+    // boundary surface (an outer shell plus a cavity).
+    let (w, h, t) = (4u32, 4u32, 4u32);
+    let (wz, hz, tz) = (w as usize, h as usize, t as usize);
+    let mut values = vec![1u32; wz * hz * tz];
+    values[2 * hz * wz + 2 * wz + 2] = 0; // carve an interior empty cell
+    let field = ScalarField {
+        width: w,
+        height: h,
+        ticks: t,
+        values,
+    };
+    let bytes = postcard::to_allocvec(&field).expect("encode ScalarField fixture");
+    let path = write_fixture("reach.field", &bytes);
+
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+    load_viewer(&mut bench, &wasm_path);
+
+    bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            (
+                "load_mesh",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path,
+                    },
+                ),
+            ),
+            ("post", BenchOp::advance(5)),
+        ])
+        .expect("prime + load + advance");
+
+    assert_draw_triangle_observed(&bench);
 }
 
 /// `.obj` parser smoke. The OBJ path doesn't go through `aether-mesh`'s
