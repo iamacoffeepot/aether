@@ -20,7 +20,7 @@ pub mod text_metrics;
 pub mod trace;
 
 pub use dag::*;
-pub use text_metrics::scale_units;
+pub use text_metrics::{CachedFontMetrics, scale_units};
 
 use aether_math::{Mat4, Vec4};
 use alloc::string::String;
