@@ -104,6 +104,7 @@ pub mod trampoline;
 // `#[transform]` inventory entry is itself `cfg(not(wasm32))`-gated, so
 // on a wasm-header-only build the fn would be dead. No wasm consumer
 // runs transforms, so gate the whole module rather than carry it dead.
+pub mod escapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transforms;
 // Pure minimum-cost reachability solver core (ADR-0047/0048/0049, issue
