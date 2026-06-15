@@ -4015,6 +4015,75 @@ mod control_plane {
         pub edges: Vec<CorridorEdge>,
     }
 
+    /// The set of paths to aggregate over a [`CorridorGraph`] (issue 1865).
+    /// Bundles a `Vec` of #1862's [`TrajectoryLog`](super::TrajectoryLog)
+    /// handles into one input kind so the `aggregate_traffic` transform
+    /// stays a fixed-arity `Kind`-slot node — embedding the top-level
+    /// `TrajectoryLog` Kind as a `Vec`-of-Kind field is valid because it
+    /// derives `Schema`, the same way [`crate::Mat4Apply`] embeds the
+    /// top-level Kind `Vec4`. Each log replays one moving point's tick-
+    /// ordered path; the aggregation snaps every sample to its corridor
+    /// component and accumulates per-edge traffic. `Vec`-bearing like
+    /// [`crate::DrawTexturedQuads`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.corridor.trajectory_set")]
+    pub struct TrajectorySet {
+        /// The paths to aggregate. Each is one #1862 trajectory session;
+        /// order is not significant to the aggregation (traffic is a sum).
+        pub logs: Vec<super::TrajectoryLog>,
+    }
+
+    /// The per-edge traffic density of a [`TrajectorySet`] snapped onto a
+    /// [`CorridorGraph`] (issue 1865): the discrepancy surface a set of
+    /// paths over a field's connectivity skeleton makes visible — which
+    /// edges carry the bulk of the traffic, which are reachable but
+    /// untraveled, and how through-boundary ("punch") traffic splits by
+    /// whether punching beat the affordable detour around it.
+    ///
+    /// A flat, postcard-friendly reduction keyed by the graph's node / edge
+    /// indices so a consumer joins it back to the graph by index:
+    /// `edge_traffic[i]` is the traffic over `CorridorGraph.edges[i]`, and
+    /// `node_traffic[i]` the visits to `CorridorGraph.nodes[i]`. The output
+    /// is orders of magnitude smaller than the field `V` (a skeleton-sized
+    /// reduction over `Vec<u32>`), well under the 64MB transform output cap.
+    ///
+    /// Traffic is integer-valued (counts, not a continuous density) so the
+    /// encoded bytes are exact for content-addressing replay; the fraction
+    /// `count / path_count` is a trivial derived read.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.corridor.traffic_density")]
+    pub struct TrafficDensity {
+        /// Number of paths aggregated (the [`TrajectorySet`] length).
+        pub path_count: u32,
+        /// Traffic per edge, parallel to [`CorridorGraph::edges`]:
+        /// `edge_traffic[i]` is the number of path crossings attributed to
+        /// `edges[i]`. A `Flow` edge's count is the number of affordable
+        /// tick steps mapped onto it; a `Punch` edge's count is the number
+        /// of through-boundary crossings attributed to it. An entry that
+        /// stays `0` is reachable but untraveled.
+        pub edge_traffic: Vec<u32>,
+        /// Visits per node, parallel to [`CorridorGraph::nodes`]:
+        /// `node_traffic[i]` is the number of path samples that snapped to
+        /// `nodes[i]` (one per path per tick the path occupies that
+        /// component).
+        pub node_traffic: Vec<u32>,
+        /// Indices into [`CorridorGraph::edges`] whose traffic is `0`:
+        /// reachable but untraveled edges. Derivable from `edge_traffic`
+        /// (its zero entries) but surfaced explicitly — it is a headline
+        /// discrepancy and explicit beats derived for a machine consumer.
+        pub untraveled_edges: Vec<u32>,
+        /// Total punch-edge traffic over edges where punching was cheaper
+        /// than the affordable detour (`price` < `detour_cost`, including
+        /// the no-detour case): crossing the barrier beat going around.
+        pub punch_crossing_cheaper: u32,
+        /// Total punch-edge traffic over edges where an affordable detour
+        /// over the flow skeleton was cheaper than or equal to the punch
+        /// `price`: going around beat crossing the barrier.
+        pub punch_detour_cheaper: u32,
+    }
+
     /// A seeded Monte-Carlo population sweep over a time-varying scalar
     /// cost field (issue 1863): a population of reaction-delayed agents
     /// re-planning toward the cheapest goal under a fixed per-tick lag.
@@ -4615,6 +4684,8 @@ mod tests {
         assert_eq!(BudgetQuery::NAME, "aether.reach.budget_query");
         assert_eq!(ReachabilityMargin::NAME, "aether.reach.margin");
         assert_eq!(CorridorGraph::NAME, "aether.corridor.graph");
+        assert_eq!(TrajectorySet::NAME, "aether.corridor.trajectory_set");
+        assert_eq!(TrafficDensity::NAME, "aether.corridor.traffic_density");
         assert_eq!(
             PopulationSweepProblem::NAME,
             "aether.reach.population_problem"
@@ -4981,6 +5052,67 @@ mod tests {
         }
 
         #[test]
+        fn trajectory_set_schema_is_vec_of_trajectory_logs() {
+            // The path-set bundle is a single `Vec<TrajectoryLog>` field;
+            // embedding the top-level `TrajectoryLog` Kind as a Vec element
+            // recurses into its struct (the same Kind-as-Schema-field shape
+            // `Mat4Apply` uses for `Vec4`).
+            let SchemaType::Struct { fields, .. } = &<TrajectorySet as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "logs");
+            let SchemaType::Vec(log) = &fields[0].ty else {
+                panic!("expected Vec of logs");
+            };
+            assert!(matches!(**log, SchemaType::Struct { .. }));
+        }
+
+        #[test]
+        fn traffic_density_schema_is_struct() {
+            // The density is a flat reduction: three `Vec<u32>` plus three
+            // scalar `u32`s — a `Struct` schema the hub codec and DAG
+            // validator read for the transform output.
+            let SchemaType::Struct { fields, .. } = &<TrafficDensity as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 6);
+            assert_eq!(fields[0].name, "path_count");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[1].name, "edge_traffic");
+            assert!(matches!(fields[1].ty, SchemaType::Vec(_)));
+            assert_eq!(fields[2].name, "node_traffic");
+            assert!(matches!(fields[2].ty, SchemaType::Vec(_)));
+            assert_eq!(fields[3].name, "untraveled_edges");
+            assert!(matches!(fields[3].ty, SchemaType::Vec(_)));
+            assert_eq!(fields[4].name, "punch_crossing_cheaper");
+            assert_eq!(fields[4].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[5].name, "punch_detour_cheaper");
+            assert_eq!(fields[5].ty, SchemaType::Scalar(Primitive::U32));
+        }
+
+        #[test]
+        fn traffic_kinds_resolve_distinctly_from_corridor_kinds() {
+            use aether_data::Kind;
+            // The aggregation's input bundle and output density carry ids
+            // distinct from each other and from the corridor / field / log
+            // kinds they compose with — a shared id would alias a transform
+            // Ref slot.
+            let ids = [
+                TrajectorySet::ID,
+                TrafficDensity::ID,
+                CorridorGraph::ID,
+                ScalarField::ID,
+                TrajectoryLog::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "traffic / corridor kind ids must be distinct");
+                }
+            }
+        }
+
+        #[test]
         fn realization_problem_schema_embeds_reachability_problem() {
             let SchemaType::Struct { fields, .. } = &<RealizationProblem as Schema>::SCHEMA else {
                 panic!("expected Struct");
@@ -5022,6 +5154,23 @@ mod tests {
             assert_eq!(sample[1].name, "finished");
             assert_eq!(sample[1].ty, SchemaType::Bool);
             assert_eq!(sample[2].name, "closure_tick");
+        }
+
+        #[test]
+        fn traffic_density_postcard_round_trips() {
+            use aether_data::Kind;
+            let density = TrafficDensity {
+                path_count: 3,
+                edge_traffic: alloc::vec![5, 0, 2],
+                node_traffic: alloc::vec![3, 3, 1, 0],
+                untraveled_edges: alloc::vec![1],
+                punch_crossing_cheaper: 4,
+                punch_detour_cheaper: 1,
+            };
+            let bytes = density.encode_into_bytes();
+            let back =
+                TrafficDensity::decode_from_bytes(&bytes).expect("traffic density round-trips");
+            assert_eq!(density, back);
         }
     }
 

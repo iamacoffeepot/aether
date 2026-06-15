@@ -11,7 +11,7 @@ use aether_data::transform;
 use aether_kinds::{
     BudgetQuery, ClosureDistribution, CorridorGraph, CrossingClassification, CrossingQueryParams,
     Mat4Apply, MovementStencil, PopulationSweepProblem, ReachabilityMargin, ReachabilityProblem,
-    RealizationProblem, ScalarField, SurvivalCurve, TrajectoryLog,
+    RealizationProblem, ScalarField, SurvivalCurve, TrafficDensity, TrajectoryLog, TrajectorySet,
 };
 use aether_math::Vec4;
 
@@ -20,6 +20,7 @@ use crate::counterfactual::solve_counterfactual_core;
 use crate::reachability::{
     UNREACHABLE, realize_single, simulate_realization, solve_cost_to_reach, solve_population_sweep,
 };
+use crate::traffic::aggregate_traffic_core;
 
 /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
 /// first-party transform). `Mat4Apply` bundles both operands so the
@@ -230,6 +231,36 @@ fn simulate_realization_sweep(input: RealizationProblem) -> ClosureDistribution 
 #[transform]
 fn realize_single_run(input: RealizationProblem) -> ScalarField {
     realize_single(input)
+}
+
+/// Aggregate a set of paths onto a corridor graph, producing the per-edge
+/// traffic density (ADR-0047/0048/0049, issue 1865). A five-input
+/// transform: the corridor graph (#1858), the field `V` it was built from
+/// (#1857) re-derived for the per-tick snap, the movement stencil and the
+/// budget query shared with the builder, and the trajectory set (#1862)
+/// to aggregate. The output is a flat reduction keyed by the graph's node
+/// / edge indices — per-edge traffic, per-node visits, the untraveled
+/// (reachable-but-zero-traffic) edges, and the punch-traffic split by
+/// whether crossing beat the affordable detour.
+///
+/// The body delegates to the pure [`aggregate_traffic_core`] (which reuses
+/// #1858's per-tick component labeler for snap id parity); the transform
+/// fn only unbundles the operands, so it clears the `#[transform]` purity
+/// deny-list.
+// The `#[transform]` ABI hands the body owned kinds decoded from wire
+// bytes; the core borrows them, so the owned `graph` / `field` / `stencil`
+// / `paths` params are intentionally passed by reference rather than
+// consumed.
+#[allow(clippy::needless_pass_by_value)]
+#[transform]
+fn aggregate_traffic(
+    graph: CorridorGraph,
+    field: ScalarField,
+    stencil: MovementStencil,
+    query: BudgetQuery,
+    paths: TrajectorySet,
+) -> TrafficDensity {
+    aggregate_traffic_core(&graph, &field, &stencil.offsets, query.budget, &paths.logs)
 }
 
 #[cfg(test)]
@@ -1126,5 +1157,164 @@ mod realization_transform_tests {
         let field_back =
             ScalarField::decode_from_bytes(&field_bytes).expect("realized field round-trips");
         assert_eq!(field, field_back);
+    }
+}
+
+#[cfg(test)]
+mod traffic_transform_tests {
+    use super::{aggregate_traffic, build_corridor_graph};
+    use crate::reachability::test_fields::stencil_4way;
+    use aether_data::{Kind, transforms};
+    use aether_kinds::{
+        BudgetQuery, CorridorGraph, MovementStencil, ScalarField, TrafficDensity,
+        TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry, TrajectorySet,
+    };
+
+    /// A 3×1 uniform-cost field held across 3 ticks — one persisting
+    /// component per tick, flow edges chaining them — and a single path
+    /// that rides it the whole way.
+    fn held_field() -> ScalarField {
+        ScalarField {
+            width: 3,
+            height: 1,
+            ticks: 3,
+            values: vec![1; 9],
+        }
+    }
+
+    fn riding_path_set() -> TrajectorySet {
+        TrajectorySet {
+            logs: vec![TrajectoryLog {
+                seed: 1,
+                samples: (0..3)
+                    .map(|t| TrajectorySampleEntry {
+                        tick: t,
+                        x: t,
+                        y: 0,
+                        value: 0,
+                    })
+                    .collect(),
+                end_reason: TrajectoryEndReason::Completed,
+            }],
+        }
+    }
+
+    #[test]
+    fn transform_produces_node_and_flow_traffic() {
+        let field = held_field();
+        let stencil = stencil_4way();
+        let query = BudgetQuery { budget: 5 };
+        let graph = build_corridor_graph(field.clone(), stencil.clone(), query);
+        let density = aggregate_traffic(graph, field, stencil, query, riding_path_set());
+        // One visit per tick to the single persisting component, and one
+        // flow unit per consecutive-tick step.
+        assert_eq!(density.path_count, 1);
+        assert_eq!(density.node_traffic.iter().sum::<u32>(), 3);
+        assert_eq!(density.edge_traffic.iter().sum::<u32>(), 2);
+    }
+
+    #[test]
+    fn registered_in_link_time_inventory() {
+        // A five-input transform: `(CorridorGraph, ScalarField,
+        // MovementStencil, BudgetQuery, TrajectorySet)` in slot order,
+        // `TrafficDensity` out — the same inventory contract the other
+        // first-party transforms satisfy.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::aggregate_traffic"))
+            .expect("aggregate_traffic not registered in link-time inventory");
+        assert_eq!(
+            entry.input_kind_ids,
+            [
+                CorridorGraph::ID,
+                ScalarField::ID,
+                MovementStencil::ID,
+                BudgetQuery::ID,
+                TrajectorySet::ID,
+            ]
+        );
+        assert_eq!(entry.output_kind_id, TrafficDensity::ID);
+    }
+
+    #[test]
+    fn traffic_kinds_resolve_distinctly() {
+        let ids = [
+            TrajectorySet::ID,
+            TrafficDensity::ID,
+            CorridorGraph::ID,
+            ScalarField::ID,
+            TrajectoryLog::ID,
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            for b in &ids[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_is_deterministic_and_content_addressable() {
+        // Same paths + graph + field -> identical output bytes: the
+        // content-addressing contract the DAG executor keys results on.
+        let field = held_field();
+        let stencil = stencil_4way();
+        let query = BudgetQuery { budget: 5 };
+        let graph = build_corridor_graph(field.clone(), stencil.clone(), query);
+        let a = aggregate_traffic(
+            graph.clone(),
+            field.clone(),
+            stencil.clone(),
+            query,
+            riding_path_set(),
+        );
+        let b = aggregate_traffic(graph, field, stencil, query, riding_path_set());
+        assert_eq!(a, b);
+        assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
+    }
+
+    #[test]
+    fn canonical_scale_density_encodes_under_output_cap_and_round_trips() {
+        // A canonical-scale corridor graph + path set: the density is a
+        // skeleton-sized handful of `Vec<u32>`, so it sits far under the
+        // 64MB transform output cap (ADR-0048 §6) and round-trips
+        // byte-stable through the kind codec.
+        const CAP: usize = 64 * 1024 * 1024;
+        let width = 64u32;
+        let height = 64u32;
+        let ticks = 64u32;
+        let plane = (width * height) as usize;
+        let field = ScalarField {
+            width,
+            height,
+            ticks,
+            values: vec![1u32; plane * ticks as usize],
+        };
+        let stencil = stencil_4way();
+        let query = BudgetQuery { budget: 1000 };
+        let graph = build_corridor_graph(field.clone(), stencil.clone(), query);
+        // A handful of paths riding the single open component diagonally.
+        let logs: Vec<TrajectoryLog> = (0..8)
+            .map(|seed| TrajectoryLog {
+                seed,
+                samples: (0..ticks)
+                    .map(|t| TrajectorySampleEntry {
+                        tick: t,
+                        x: t % width,
+                        y: t % height,
+                        value: 0,
+                    })
+                    .collect(),
+                end_reason: TrajectoryEndReason::Completed,
+            })
+            .collect();
+        let density = aggregate_traffic(graph, field, stencil, query, TrajectorySet { logs });
+
+        let bytes = density.encode_into_bytes();
+        assert!(
+            bytes.len() < CAP,
+            "encoded density is {} bytes, over the {CAP}-byte cap",
+            bytes.len()
+        );
+        let back = TrafficDensity::decode_from_bytes(&bytes).expect("density round-trips");
+        assert_eq!(density, back);
     }
 }
