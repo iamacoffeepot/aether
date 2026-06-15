@@ -1,5 +1,5 @@
 //! `aether.handle` cap. Owns the substrate's `HandleStore` and routes
-//! ADR-0045 publish/release/pin/unpin requests via `ctx.reply(&result)`.
+//! ADR-0045 publish/release/pin/unpin requests via ADR-0112 `-> R` handlers.
 //! Decode failure on a malformed payload goes through the macro miss
 //! path (warn-log, no reply, so the sender's correlated reply handler
 //! never fires) — substrate-level invariant violation, not
@@ -24,7 +24,7 @@ mod native {
     use std::sync::Arc;
 
     use super::{HandleDescribe, HandlePin, HandlePublish, HandleRelease, HandleUnpin};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_kinds::{
         HandleDescribeResult, HandleError, HandlePinResult, HandlePublishResult,
         HandleReleaseResult, HandleSummary, HandleUnpinResult,
@@ -63,7 +63,7 @@ mod native {
         /// # Agent
         /// Reply: `HandlePublishResult`.
         #[handler]
-        fn on_publish(&self, ctx: &mut NativeCtx<'_>, mail: HandlePublish) {
+        fn on_publish(&self, _ctx: &mut NativeCtx<'_>, mail: HandlePublish) -> HandlePublishResult {
             let id = self.store.next_ephemeral();
             match self.store.put(id, mail.kind_id, mail.bytes) {
                 Ok(()) => {
@@ -72,17 +72,15 @@ mod native {
                     // on zero the entry stays in the store (subject
                     // to LRU eviction under pressure).
                     self.store.inc_ref(id);
-                    ctx.reply(&HandlePublishResult::Ok {
+                    HandlePublishResult::Ok {
                         kind_id: mail.kind_id,
                         id,
-                    });
+                    }
                 }
-                Err(e) => {
-                    ctx.reply(&HandlePublishResult::Err {
-                        kind_id: mail.kind_id,
-                        error: put_error_to_handle_error(e),
-                    });
-                }
+                Err(e) => HandlePublishResult::Err {
+                    kind_id: mail.kind_id,
+                    error: put_error_to_handle_error(e),
+                },
             }
         }
 
@@ -92,14 +90,14 @@ mod native {
         /// # Agent
         /// Reply: `HandleReleaseResult`.
         #[handler]
-        fn on_release(&self, ctx: &mut NativeCtx<'_>, mail: HandleRelease) {
+        fn on_release(&self, _ctx: &mut NativeCtx<'_>, mail: HandleRelease) -> HandleReleaseResult {
             if self.store.dec_ref(mail.id) {
-                ctx.reply(&HandleReleaseResult::Ok { id: mail.id });
+                HandleReleaseResult::Ok { id: mail.id }
             } else {
-                ctx.reply(&HandleReleaseResult::Err {
+                HandleReleaseResult::Err {
                     id: mail.id,
                     error: HandleError::UnknownHandle,
-                });
+                }
             }
         }
 
@@ -108,14 +106,14 @@ mod native {
         /// # Agent
         /// Reply: `HandlePinResult`.
         #[handler]
-        fn on_pin(&self, ctx: &mut NativeCtx<'_>, mail: HandlePin) {
+        fn on_pin(&self, _ctx: &mut NativeCtx<'_>, mail: HandlePin) -> HandlePinResult {
             if self.store.pin(mail.id) {
-                ctx.reply(&HandlePinResult::Ok { id: mail.id });
+                HandlePinResult::Ok { id: mail.id }
             } else {
-                ctx.reply(&HandlePinResult::Err {
+                HandlePinResult::Err {
                     id: mail.id,
                     error: HandleError::UnknownHandle,
-                });
+                }
             }
         }
 
@@ -124,14 +122,14 @@ mod native {
         /// # Agent
         /// Reply: `HandleUnpinResult`.
         #[handler]
-        fn on_unpin(&self, ctx: &mut NativeCtx<'_>, mail: HandleUnpin) {
+        fn on_unpin(&self, _ctx: &mut NativeCtx<'_>, mail: HandleUnpin) -> HandleUnpinResult {
             if self.store.unpin(mail.id) {
-                ctx.reply(&HandleUnpinResult::Ok { id: mail.id });
+                HandleUnpinResult::Ok { id: mail.id }
             } else {
-                ctx.reply(&HandleUnpinResult::Err {
+                HandleUnpinResult::Err {
                     id: mail.id,
                     error: HandleError::UnknownHandle,
-                });
+                }
             }
         }
 
@@ -142,10 +140,14 @@ mod native {
         /// # Agent
         /// Reply: `HandleDescribeResult`.
         #[handler]
-        fn on_describe(&self, ctx: &mut NativeCtx<'_>, mail: HandleDescribe) {
+        fn on_describe(
+            &self,
+            _ctx: &mut NativeCtx<'_>,
+            mail: HandleDescribe,
+        ) -> HandleDescribeResult {
             let max = clamp_describe_max(mail.max);
             let snap = self.store.inspect(max);
-            ctx.reply(&snapshot_to_result(&snap));
+            snapshot_to_result(&snap)
         }
     }
 
@@ -260,7 +262,7 @@ mod native {
             /// `HandlePublish` mail at the registered mailbox, the dispatcher
             /// thread runs the macro-emitted `NativeDispatch::__aether_dispatch_envelope`
             /// which calls `on_publish`, the reply lands on the hub-outbound
-            /// channel via `ctx.reply(&HandlePublishResult::Ok)` →
+            /// channel via the ADR-0112 `-> R` reply path →
             /// `Mailer::send_reply` → `outbound.send_reply`.
             #[test]
             fn capability_routes_publish_through_dispatcher_thread() {

@@ -42,9 +42,9 @@ mod native {
     use std::time::Duration;
 
     use super::{Cancel, DagReapTick, DagTransformDone, Settled, Status, Submit};
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_data::{Kind, KindId, MailId, MailboxId};
-    use aether_kinds::{StatusResult, SubmitResult};
+    use aether_kinds::{CancelResult, StatusResult, SubmitResult};
     use aether_substrate::Mail;
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -131,8 +131,8 @@ mod native {
         /// # Agent
         /// Reply: `SubmitResult`.
         #[handler]
-        fn on_submit(&mut self, ctx: &mut NativeCtx<'_>, mail: Submit) {
-            let reply = match self.executor.submit(ctx, mail.descriptor) {
+        fn on_submit(&mut self, ctx: &mut NativeCtx<'_>, mail: Submit) -> SubmitResult {
+            match self.executor.submit(ctx, mail.descriptor) {
                 SubmitOutcome::Ok {
                     dag_id,
                     output_handles,
@@ -141,8 +141,7 @@ mod native {
                     output_handles,
                 },
                 SubmitOutcome::Err { error } => SubmitResult::Err { error },
-            };
-            ctx.reply(&reply);
+            }
         }
 
         /// Cancel an in-flight DAG by its `DagId` (ADR-0047 §5).
@@ -150,9 +149,8 @@ mod native {
         /// # Agent
         /// Reply: `CancelResult`.
         #[handler]
-        fn on_cancel(&mut self, ctx: &mut NativeCtx<'_>, mail: Cancel) {
-            let reply = self.executor.cancel(mail.dag_id);
-            ctx.reply(&reply);
+        fn on_cancel(&mut self, _ctx: &mut NativeCtx<'_>, mail: Cancel) -> CancelResult {
+            self.executor.cancel(mail.dag_id)
         }
 
         /// Query a DAG's execution status (ADR-0047 §1/§6). An unknown
@@ -163,15 +161,13 @@ mod native {
         /// # Agent
         /// Reply: `StatusResult`.
         #[handler]
-        fn on_status(&mut self, ctx: &mut NativeCtx<'_>, mail: Status) {
-            let reply = self
-                .executor
+        fn on_status(&mut self, _ctx: &mut NativeCtx<'_>, mail: Status) -> StatusResult {
+            self.executor
                 .status(mail.dag_id)
                 .unwrap_or_else(|| StatusResult::Failed {
                     node_id: aether_kinds::NodeId(0),
                     error: format!("unknown dag {}", mail.dag_id),
-                });
-            ctx.reply(&reply);
+                })
         }
 
         /// Settlement notice for a `Call` dispatch (ADR-0047 §4 step 4).

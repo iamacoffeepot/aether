@@ -4,7 +4,7 @@
 //! (the MCP harness) reads the running substrate's **own, per-build**
 //! state instead of a drift-prone compiled-in copy.
 //!
-//! Four request kinds, each replying synchronously via `ctx.reply`:
+//! Four request kinds, each replying synchronously (ADR-0112 `-> R`):
 //!
 //! - [`Manifest`] → [`ManifestResult`]: the compile-time manifest —
 //!   every link-time [`NameEntry`](aether_data::name_inventory::NameEntry)
@@ -61,7 +61,7 @@ mod native {
         Resolve, ResolveResult,
     };
 
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_data::KindId;
     use aether_data::canonical::kind_id_from_parts;
     use aether_data::name_inventory::{
@@ -152,7 +152,7 @@ mod native {
         // signature, not a state read here.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_manifest(&mut self, ctx: &mut NativeCtx<'_>, _mail: Manifest) {
+        fn on_manifest(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Manifest) -> ManifestResult {
             let names = name_entries()
                 .map(|entry| NameEntryWire {
                     domain: entry.domain.to_vec(),
@@ -170,7 +170,7 @@ mod native {
                     cardinality: cardinality_wire(&entry.cardinality),
                 })
                 .collect();
-            ctx.reply(&ManifestResult { names, templates });
+            ManifestResult { names, templates }
         }
 
         /// Reply with the substrate's live kind vocabulary: every
@@ -191,7 +191,7 @@ mod native {
         /// no `Schema` impl of its own; decode it with
         /// `postcard::from_bytes::<SchemaType>(&desc.schema_postcard)`.
         #[handler]
-        fn on_list_kinds(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListKinds) {
+        fn on_list_kinds(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
             let kinds = self
                 .registry
                 .list_kind_descriptors()
@@ -211,7 +211,7 @@ mod native {
                     }
                 })
                 .collect();
-            ctx.reply(&ListKindsResult { kinds });
+            ListKindsResult { kinds }
         }
 
         /// Resolve each requested tagged-id string to its origin name via
@@ -230,7 +230,7 @@ mod native {
         // signature, not a state read.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_resolve(&mut self, ctx: &mut NativeCtx<'_>, mail: Resolve) {
+        fn on_resolve(&mut self, _ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
             let resolved = mail
                 .ids
                 .into_iter()
@@ -242,7 +242,7 @@ mod native {
                     ResolvedName { id, name }
                 })
                 .collect();
-            ctx.reply(&ResolveResult { resolved });
+            ResolveResult { resolved }
         }
 
         /// Reply with the native handler manifest (ADR-0109 §5): every
@@ -266,7 +266,7 @@ mod native {
         // not a state read.
         #[allow(clippy::unused_self)]
         #[handler]
-        fn on_handlers(&mut self, ctx: &mut NativeCtx<'_>, _mail: ListHandlers) {
+        fn on_handlers(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
             let handlers = handler_entries()
                 .map(|entry| HandlerEntryWire {
                     namespace: entry.namespace.into(),
@@ -275,7 +275,7 @@ mod native {
                     reply: entry.reply,
                 })
                 .collect();
-            ctx.reply(&HandlersResult { handlers });
+            HandlersResult { handlers }
         }
     }
 
@@ -288,20 +288,16 @@ mod native {
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::handle_store::HandleStore;
         use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+        use aether_substrate::mail::outbound::HubOutbound;
         use aether_substrate::mail::registry::Registry;
         use aether_substrate::mail::{Source, SourceAddr};
         use aether_substrate::runtime::thread_name::register;
         use std::sync::Arc;
-        use std::sync::mpsc::Receiver;
 
-        use crate::test_chassis::decode_reply;
-
-        /// Cap + loopback mailer + transport wired so `ctx.reply`
-        /// egresses as a `ToSession` event the test can decode. Mirrors
-        /// the `trace.rs` `DispatchTracedFixture` shape.
+        /// Cap + fully-wired test mailer + `NativeBinding` transport.
+        /// Handlers are called directly and return their result; no egress
+        /// channel decode needed (ADR-0112 `-> R` migration).
         struct Fixture {
-            rx: Receiver<EgressEvent>,
             transport: Arc<NativeBinding>,
             cap: InventoryCapability,
         }
@@ -309,7 +305,7 @@ mod native {
         fn fixture() -> Fixture {
             let registry = Arc::new(Registry::new());
             let store = Arc::new(HandleStore::new(1024 * 1024));
-            let (outbound, rx) = HubOutbound::attached_loopback();
+            let (outbound, _rx) = HubOutbound::attached_loopback();
             let mailer = Arc::new(
                 Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
             );
@@ -318,7 +314,6 @@ mod native {
                 MailboxId(0x1117),
             ));
             Fixture {
-                rx,
                 transport,
                 cap: InventoryCapability {
                     registry: Arc::clone(&registry),
@@ -354,10 +349,9 @@ mod native {
 
             let mut fix = fixture();
             let mut ctx = session_ctx(&fix.transport);
-            fix.cap.on_manifest(&mut ctx, Manifest {});
+            let result = fix.cap.on_manifest(&mut ctx, Manifest {});
             drop(ctx);
 
-            let result = decode_reply::<ManifestResult>(&fix.rx);
             assert!(
                 result.names.iter().any(|n| n.name == "aether.fs"),
                 "manifest should carry the aether.fs chassis mailbox NameEntry; names: {:?}",
@@ -396,10 +390,9 @@ mod native {
 
             let mut fix = fixture();
             let mut ctx = session_ctx(&fix.transport);
-            fix.cap.on_manifest(&mut ctx, Manifest {});
+            let result = fix.cap.on_manifest(&mut ctx, Manifest {});
             drop(ctx);
 
-            let result = decode_reply::<ManifestResult>(&fix.rx);
             let trampoline = result
                 .templates
                 .iter()
@@ -448,10 +441,9 @@ mod native {
                 .expect("register fresh kind");
 
             let mut ctx = session_ctx(&fix.transport);
-            fix.cap.on_list_kinds(&mut ctx, ListKinds {});
+            let result = fix.cap.on_list_kinds(&mut ctx, ListKinds {});
             drop(ctx);
 
-            let result = decode_reply::<ListKindsResult>(&fix.rx);
             let entry = result
                 .kinds
                 .iter()
@@ -499,7 +491,7 @@ mod native {
 
             let mut fix = fixture();
             let mut ctx = session_ctx(&fix.transport);
-            fix.cap.on_resolve(
+            let result = fix.cap.on_resolve(
                 &mut ctx,
                 Resolve {
                     ids: vec![
@@ -511,8 +503,6 @@ mod native {
                 },
             );
             drop(ctx);
-
-            let result = decode_reply::<ResolveResult>(&fix.rx);
             assert_eq!(result.resolved.len(), 4, "one entry per requested id");
 
             assert_eq!(result.resolved[0].id, registered_tag);
@@ -607,10 +597,9 @@ mod native {
 
             let mut fix = fixture();
             let mut ctx = session_ctx(&fix.transport);
-            fix.cap.on_handlers(&mut ctx, ListHandlers {});
+            let result = fix.cap.on_handlers(&mut ctx, ListHandlers {});
             drop(ctx);
 
-            let result = decode_reply::<HandlersResult>(&fix.rx);
             let entry = result
                 .handlers
                 .iter()
