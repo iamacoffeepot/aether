@@ -4014,6 +4014,83 @@ mod control_plane {
         pub nodes: Vec<CorridorNode>,
         pub edges: Vec<CorridorEdge>,
     }
+
+    /// A seeded Monte-Carlo population sweep over a time-varying scalar
+    /// cost field (issue 1863): a population of reaction-delayed agents
+    /// re-planning toward the cheapest goal under a fixed per-tick lag.
+    /// The whole sweep is a pure function of its inputs (seed + field in,
+    /// curve out), so it content-addresses as a `#[transform]` with no
+    /// executor change (ADR-0048 §4/§130).
+    ///
+    /// `problem` carries the shared reachability bundle (the space-time
+    /// cost field, the one-tick [`MovementStencil`], and the start seed)
+    /// — embedding [`ReachabilityProblem`] keeps the per-agent planner
+    /// *literally* #1857's [`ReachabilityProblem`]-shaped solve, so
+    /// the headline property holds structurally rather than by
+    /// coincidence. `problem.start` doubles as the **start region**: the
+    /// cells with a finite seed value are the population's spawn cells, and
+    /// each agent inherits that cell's seed as its initial accumulated
+    /// cost.
+    ///
+    /// `goal` is the goal region as flat row-major cell indices
+    /// (`y * width + x`); an agent **finishes** the moment it lands on a
+    /// goal cell with accumulated cost `< budget` before the final tick.
+    /// `population` is the number of agents sampled from the start region;
+    /// `window` is each agent's planning-window depth `W` (how far forward
+    /// it sees); `seed` keys the deterministic PRNG that samples the
+    /// population and breaks equal-cost ties; `delays` is the swept set of
+    /// reaction lags.
+    ///
+    /// The **lag convention**: at simulation tick `t`, an agent with delay
+    /// `d` perceives the field tick `τ` (for each `τ` in its window) as it
+    /// truly was at tick `max(0, τ - d)` — it reacts to field changes `d`
+    /// ticks late. At `d = 0` and `window >= ticks` the perceived field is
+    /// the true field over the full remaining horizon, so each agent's plan
+    /// *is* the exact single-source solve and the survival fraction
+    /// approaches the exact reachable-under-budget bound. `d` (how stale the
+    /// view is) is orthogonal to `window` (how far forward the agent sees).
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.population_problem")]
+    pub struct PopulationSweepProblem {
+        pub problem: ReachabilityProblem,
+        pub goal: Vec<u32>,
+        pub budget: u32,
+        pub population: u32,
+        pub window: u32,
+        pub seed: u64,
+        pub delays: Vec<u32>,
+    }
+
+    /// One point on a [`SurvivalCurve`] (issue 1863): for the swept
+    /// reaction delay `delay`, the number of agents (out of the curve's
+    /// shared `population`) that finished under budget. Not a kind on its
+    /// own — only addressable inside `SurvivalCurve.samples`. Integer
+    /// counts (rather than a pre-divided `f32` fraction) keep the output
+    /// byte-exact for content-addressing replay; the survival fraction
+    /// `finished / population` is a trivial derived read.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SurvivalSample {
+        pub delay: u32,
+        pub finished: u32,
+    }
+
+    /// The output of the population sweep (issue 1863): the
+    /// completion-rate-vs-reaction-delay curve. `population` is the shared
+    /// agent count every [`SurvivalSample`] divides; `samples` carries one
+    /// `(delay, finished)` point per swept delay, in the input `delays`
+    /// order. The fraction `finished / population` is the survival rate,
+    /// and the knee where it collapses is the field's effective reaction
+    /// demand.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+    )]
+    #[kind(name = "aether.reach.survival_curve")]
+    pub struct SurvivalCurve {
+        pub population: u32,
+        pub samples: Vec<SurvivalSample>,
+    }
 }
 
 mod trajectory {
@@ -4345,6 +4422,11 @@ mod tests {
         assert_eq!(BudgetQuery::NAME, "aether.reach.budget_query");
         assert_eq!(ReachabilityMargin::NAME, "aether.reach.margin");
         assert_eq!(CorridorGraph::NAME, "aether.corridor.graph");
+        assert_eq!(
+            PopulationSweepProblem::NAME,
+            "aether.reach.population_problem"
+        );
+        assert_eq!(SurvivalCurve::NAME, "aether.reach.survival_curve");
     }
 
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
@@ -4512,6 +4594,64 @@ mod tests {
                     assert_ne!(a, b, "corridor / reach kind ids must be distinct");
                 }
             }
+        }
+
+        #[test]
+        fn population_kinds_resolve_distinctly_from_reach_kinds() {
+            use aether_data::Kind;
+            // The two population kinds carry ids distinct from each other
+            // and from the #1857 reachability kinds they build on — a
+            // shared id would collide in the transform Ref-slot resolver.
+            let ids = [
+                PopulationSweepProblem::ID,
+                SurvivalCurve::ID,
+                ScalarField::ID,
+                ReachabilityProblem::ID,
+            ];
+            for (i, a) in ids.iter().enumerate() {
+                for b in &ids[i + 1..] {
+                    assert_ne!(a, b, "population kind ids must be distinct");
+                }
+            }
+        }
+
+        #[test]
+        fn population_problem_schema_embeds_reachability_problem() {
+            let SchemaType::Struct { fields, .. } = &<PopulationSweepProblem as Schema>::SCHEMA
+            else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 7);
+            assert_eq!(fields[0].name, "problem");
+            assert!(matches!(fields[0].ty, SchemaType::Struct { .. }));
+            assert_eq!(fields[1].name, "goal");
+            assert!(matches!(fields[1].ty, SchemaType::Vec(_)));
+            assert_eq!(fields[2].name, "budget");
+            assert_eq!(fields[2].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[5].name, "seed");
+            assert_eq!(fields[5].ty, SchemaType::Scalar(Primitive::U64));
+            assert_eq!(fields[6].name, "delays");
+            assert!(matches!(fields[6].ty, SchemaType::Vec(_)));
+        }
+
+        #[test]
+        fn survival_curve_schema_is_struct_of_samples() {
+            let SchemaType::Struct { fields, .. } = &<SurvivalCurve as Schema>::SCHEMA else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "population");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+            assert_eq!(fields[1].name, "samples");
+            let SchemaType::Vec(element) = &fields[1].ty else {
+                panic!("expected Vec");
+            };
+            let SchemaType::Struct { fields: sample, .. } = &**element else {
+                panic!("expected nested SurvivalSample struct");
+            };
+            assert_eq!(sample.len(), 2);
+            assert_eq!(sample[0].name, "delay");
+            assert_eq!(sample[1].name, "finished");
         }
     }
 
