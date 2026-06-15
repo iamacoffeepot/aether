@@ -9,15 +9,17 @@
 
 use aether_data::transform;
 use aether_kinds::{
-    BudgetQuery, CorridorGraph, CrossingClassification, CrossingQueryParams, Mat4Apply,
-    MovementStencil, PopulationSweepProblem, ReachabilityMargin, ReachabilityProblem, ScalarField,
-    SurvivalCurve, TrajectoryLog,
+    BudgetQuery, ClosureDistribution, CorridorGraph, CrossingClassification, CrossingQueryParams,
+    Mat4Apply, MovementStencil, PopulationSweepProblem, ReachabilityMargin, ReachabilityProblem,
+    RealizationProblem, ScalarField, SurvivalCurve, TrajectoryLog,
 };
 use aether_math::Vec4;
 
 use crate::corridor::build_corridor_graph_core;
 use crate::counterfactual::solve_counterfactual_core;
-use crate::reachability::{UNREACHABLE, solve_cost_to_reach, solve_population_sweep};
+use crate::reachability::{
+    UNREACHABLE, realize_single, simulate_realization, solve_cost_to_reach, solve_population_sweep,
+};
 
 /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
 /// first-party transform). `Mat4Apply` bundles both operands so the
@@ -190,6 +192,44 @@ fn solve_counterfactual(
         params.window,
         params.budget,
     )
+}
+
+/// Simulate a seeded distribution of self-realizing field runs and emit the
+/// closure-outcome distribution (issue 1867). `RealizationProblem` bundles
+/// the shared reachability operands (base field, stencil, start region), the
+/// goal region, the contribution model (`placement_period`, `lead_ticks`,
+/// `covered_extent_initial`, `covered_growth_per_tick`, `contribution_cost`,
+/// `max_concurrent`), the planning `window`, the run count, and the seed, so
+/// the transform stays a unary `Kind → Kind` node — the same shape
+/// `Mat4Apply` gives `mat4_apply`.
+///
+/// The body delegates to the pure [`simulate_realization`] core: per run a
+/// closed feedback loop where the agent's own motion spawns the snapshot
+/// contributions it then plans against via #1857's exact
+/// [`solve_cost_to_reach`], so the realized field is path-dependent and the
+/// closure is structural. This is the empirical complement to #1866's local
+/// escapability bound — it realizes the aggregate trail along the real path
+/// and detects the multi-window closure the single-instant `cover(L)` measure
+/// cannot rule out. The seed is an explicit input and the PRNG
+/// deterministic, so the sweep is a pure function of its inputs and
+/// content-addresses correctly: it clears the `#[transform]` purity deny-list
+/// (no host fn, no `Ctx`, no `std::time` / `std::env`; seeded PRNG only).
+#[transform]
+fn simulate_realization_sweep(input: RealizationProblem) -> ClosureDistribution {
+    simulate_realization(input)
+}
+
+/// Replay a single self-realizing run (the input's seed, run index `0`) and
+/// emit its realized field as a stacked `(tick, y, x)` [`ScalarField`] (issue
+/// 1867). The inspection path for the counts-only [`ClosureDistribution`]:
+/// leaning on the determinism contract (same seed → same realized field), any
+/// run's path-dependent realized field is recoverable by replaying that seed
+/// here, so the headline distribution stays tiny. The body delegates to the
+/// pure [`realize_single`] core and clears the same purity deny-list as
+/// `simulate_realization_sweep`.
+#[transform]
+fn realize_single_run(input: RealizationProblem) -> ScalarField {
+    realize_single(input)
 }
 
 #[cfg(test)]
@@ -824,5 +864,267 @@ mod counterfactual_transform_tests {
         let back =
             CrossingClassification::decode_from_bytes(&bytes).expect("classification round-trips");
         assert_eq!(out, back);
+    }
+}
+
+#[cfg(test)]
+mod realization_transform_tests {
+    use super::{realize_single_run, simulate_realization_sweep};
+    use crate::escapability::{EscapeParams, evaluate};
+    use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
+    use aether_data::{Kind, transforms};
+    use aether_kinds::{ClosureDistribution, ReachabilityProblem, RealizationProblem, ScalarField};
+
+    /// A 3×1 corridor whose forward cell is base-blocked: the agent steps
+    /// 0 → 1, and its own immediate over-budget contribution on cell 0 closes
+    /// the realized field around it (the hand-traced closure regime from the
+    /// core tests, driven through the transform).
+    fn closing_problem() -> RealizationProblem {
+        RealizationProblem {
+            problem: ReachabilityProblem {
+                cost: ScalarField {
+                    width: 3,
+                    height: 1,
+                    ticks: 4,
+                    values: vec![
+                        1,
+                        1,
+                        UNREACHABLE,
+                        1,
+                        1,
+                        UNREACHABLE,
+                        1,
+                        1,
+                        UNREACHABLE,
+                        1,
+                        1,
+                        UNREACHABLE,
+                    ],
+                },
+                stencil: stencil_4way(),
+                start: vec![0, UNREACHABLE, UNREACHABLE],
+            },
+            goal: vec![2],
+            budget: 10,
+            placement_period: 1,
+            lead_ticks: 0,
+            covered_extent_initial: 0.0,
+            covered_growth_per_tick: 0.0,
+            contribution_cost: 100,
+            max_concurrent: 4,
+            window: 8,
+            runs: 4,
+            seed: 0xABCD_4321,
+        }
+    }
+
+    #[test]
+    fn simulate_realization_registered_in_link_time_inventory() {
+        // Same contract as `solve` / `solve_population`: registered, one
+        // `RealizationProblem` input slot, `ClosureDistribution` output.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::simulate_realization_sweep"))
+            .expect("simulate_realization_sweep not registered in link-time inventory");
+        assert_eq!(entry.input_kind_ids, [RealizationProblem::ID]);
+        assert_eq!(entry.output_kind_id, ClosureDistribution::ID);
+    }
+
+    #[test]
+    fn realize_single_registered_in_link_time_inventory() {
+        // The companion readout: one `RealizationProblem` input slot, a
+        // `ScalarField` (the replayed run's realized field) output.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::realize_single_run"))
+            .expect("realize_single_run not registered in link-time inventory");
+        assert_eq!(entry.input_kind_ids, [RealizationProblem::ID]);
+        assert_eq!(entry.output_kind_id, ScalarField::ID);
+    }
+
+    #[test]
+    fn realization_kinds_resolve_distinctly() {
+        assert_ne!(RealizationProblem::ID, ClosureDistribution::ID);
+        assert_ne!(RealizationProblem::ID, ScalarField::ID);
+        assert_ne!(ClosureDistribution::ID, ScalarField::ID);
+    }
+
+    #[test]
+    fn simulate_and_single_are_deterministic_and_content_addressable() {
+        // Same seed + field bytes -> byte-identical `ClosureDistribution` AND
+        // byte-identical `realize_single` `ScalarField`: the content-
+        // addressing contract and the proof that "same seed → same realized
+        // field."
+        let dist_a = simulate_realization_sweep(closing_problem());
+        let dist_b = simulate_realization_sweep(closing_problem());
+        assert_eq!(dist_a, dist_b);
+        assert_eq!(dist_a.encode_into_bytes(), dist_b.encode_into_bytes());
+
+        let field_a = realize_single_run(closing_problem());
+        let field_b = realize_single_run(closing_problem());
+        assert_eq!(field_a, field_b);
+        assert_eq!(field_a.encode_into_bytes(), field_b.encode_into_bytes());
+    }
+
+    #[test]
+    fn multi_window_closure_each_contribution_locally_certified() {
+        // The headline: a regime where **every spawned contribution passes
+        // #1866's local `escapable_within_lead`** (each is individually
+        // escapable within its lead) yet the concurrent count along the path
+        // exceeds #1866's conservative `max_concurrent` (so the local bound
+        // explicitly does *not* certify the configuration) — and the
+        // simulator empirically exhibits closure the O(1) local bound cannot
+        // rule out.
+        //
+        // The certified contribution shape #1866 evaluates: r0 = 0, g = 1,
+        // stencil speed s = 2 (the analytic per-tick displacement bound), lead
+        // L = 4 → cover(L) = 4, reach(L) = 8. The per-contribution verdict is
+        // `escapable` (4 < 8, g < s) with a *finite* conservative concurrency
+        // cap `max_concurrent` — ratio = 2, ratio² = 4, N_max = 3. So #1866
+        // certifies any configuration of at most 3 simultaneously-active
+        // contributions of this shape, and leaves a count above 3 uncertified.
+        let shape = EscapeParams {
+            covered_extent_initial: 0.0,
+            covered_growth_per_tick: 1.0,
+            stencil_speed: 2.0,
+            lead_ticks: 4,
+        };
+        let verdict = evaluate(&shape);
+        assert!(
+            verdict.escapable,
+            "each contribution must be locally certified escapable"
+        );
+        assert_eq!(verdict.max_concurrent, 3);
+
+        // A 1×1-wide pocket the agent walks into and seals with its own
+        // trail: a long thin corridor (1×9) where the agent paces back and
+        // forth dropping over-budget contributions every tick, and `lead`
+        // and `cover` are tuned to the certified shape above, yet the
+        // *aggregate* trail — many concurrent contributions of different
+        // ages stacked along the real path — closes the field around it.
+        let width = 1u32;
+        let height = 9u32;
+        let plane = (width * height) as usize;
+        let blocked_ends = {
+            // A static base field that is finite only in a short reachable
+            // stub, so the agent cannot run away from its own trail; the goal
+            // sits past a base-blocked cell it can never afford.
+            let mut layer = vec![1u32; plane];
+            // Block the far half so the agent is confined to a short segment.
+            for cell in layer.iter_mut().skip(3) {
+                *cell = UNREACHABLE;
+            }
+            let ticks = 8u32;
+            let mut values = Vec::with_capacity(plane * ticks as usize);
+            for _ in 0..ticks {
+                values.extend_from_slice(&layer);
+            }
+            (values, ticks)
+        };
+        let (values, ticks) = blocked_ends;
+        let p = RealizationProblem {
+            problem: ReachabilityProblem {
+                cost: ScalarField {
+                    width,
+                    height,
+                    ticks,
+                    values,
+                },
+                stencil: stencil_4way(),
+                start: {
+                    let mut s = vec![UNREACHABLE; plane];
+                    s[0] = 0;
+                    s
+                },
+            },
+            // Goal in the blocked far region: unreachable, so the run never
+            // finishes and the only terminal outcome is self-closure.
+            goal: vec![8],
+            budget: 10,
+            placement_period: 1, // dense placement → many concurrent contributions
+            lead_ticks: 4,       // the certified shape's lead
+            covered_extent_initial: 0.0,
+            covered_growth_per_tick: 1.0, // the certified shape's growth
+            contribution_cost: 100,       // each covered cell goes over budget
+            max_concurrent: 6,            // hold more concurrently than #1866's cap certifies
+            window: 8,
+            runs: 4,
+            seed: 0x0BAD_F00D,
+        };
+        // The path holds up to `max_concurrent = 6` simultaneously-active
+        // contributions — above #1866's conservative cap of 3 for this shape,
+        // the multi-window regime the O(1) local check leaves uncertified.
+        assert!(p.max_concurrent > verdict.max_concurrent);
+        let dist = simulate_realization_sweep(p);
+        assert!(
+            dist.closed > 0,
+            "expected the aggregate trail to close the realized field around the agent"
+        );
+    }
+
+    #[test]
+    fn closure_distribution_encodes_under_output_cap_and_replays() {
+        // A multi-run sweep over a multi-cell start region: the
+        // `ClosureDistribution` is counts plus one `(u32, bool, u32)`
+        // `RunOutcome` per run, so it sits far under the 64MB transform output
+        // cap (ADR-0048 §6), and two runs of the same input replay
+        // byte-identically.
+        const CAP: usize = 64 * 1024 * 1024;
+        let width = 8u32;
+        let height = 8u32;
+        let ticks = 12u32;
+        let plane = (width * height) as usize;
+        let sweep = || RealizationProblem {
+            problem: ReachabilityProblem {
+                cost: ScalarField {
+                    width,
+                    height,
+                    ticks,
+                    values: vec![1u32; plane * ticks as usize],
+                },
+                stencil: stencil_4way(),
+                start: {
+                    let mut s = vec![UNREACHABLE; plane];
+                    s[0] = 0;
+                    s[1] = 0;
+                    s[2] = 0;
+                    s
+                },
+            },
+            goal: vec![63],
+            budget: 1000,
+            placement_period: 2,
+            lead_ticks: 3,
+            covered_extent_initial: 0.0,
+            covered_growth_per_tick: 0.5,
+            contribution_cost: 50,
+            max_concurrent: 6,
+            window: 8,
+            runs: 64,
+            seed: 0x2468_ACE0,
+        };
+
+        let dist = simulate_realization_sweep(sweep());
+        assert_eq!(dist.runs, 64);
+        assert_eq!(dist.samples.len(), 64);
+
+        let bytes = dist.encode_into_bytes();
+        assert!(
+            bytes.len() < CAP,
+            "encoded closure distribution is {} bytes, over the {CAP}-byte cap",
+            bytes.len()
+        );
+        let back = ClosureDistribution::decode_from_bytes(&bytes)
+            .expect("closure distribution round-trips");
+        assert_eq!(dist, back);
+
+        let replay = simulate_realization_sweep(sweep());
+        assert_eq!(dist.encode_into_bytes(), replay.encode_into_bytes());
+
+        // The companion realized field also fits the cap and round-trips.
+        let field = realize_single_run(sweep());
+        let field_bytes = field.encode_into_bytes();
+        assert!(field_bytes.len() < CAP);
+        let field_back =
+            ScalarField::decode_from_bytes(&field_bytes).expect("realized field round-trips");
+        assert_eq!(field, field_back);
     }
 }
