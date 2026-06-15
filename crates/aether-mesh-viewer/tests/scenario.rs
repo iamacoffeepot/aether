@@ -22,7 +22,7 @@
 
 use aether_kinds::{
     CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, LoadComponent, LoadResult, MeshLoadResult,
-    ScalarField,
+    ScalarField, TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry, TrajectorySet,
 };
 use aether_mesh_viewer::{CorridorLoadResult, LoadCorridor, LoadMesh, Scrub};
 use aether_substrate_bundle::test_bench::{
@@ -209,6 +209,108 @@ fn field_loads_and_renders() {
         .expect("prime + load + advance");
 
     assert_draw_triangle_observed(&bench);
+}
+
+/// Issue 1870 render-path smoke: load a `.field` solid then a `.paths`
+/// overlay; both replay to `aether.render` every frame, and the observed
+/// `aether.draw_triangle` count rises after the overlay load (the path
+/// ribbons add geometry on top of the solid). Asserts geometry flow, not
+/// pixels, per the GPU-test split.
+#[test]
+fn field_then_paths_overlay_renders() {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
+        return;
+    };
+    let sandbox = init_save_sandbox("mesh-viewer");
+
+    // A small solid field so the overlay has a volume to thread.
+    let (w, h, t) = (4u32, 4u32, 4u32);
+    let field = ScalarField {
+        width: w,
+        height: h,
+        ticks: t,
+        values: vec![1u32; (w * h * t) as usize],
+    };
+    let field_bytes = postcard::to_allocvec(&field).expect("encode ScalarField fixture");
+    let field_path = write_fixture("reach.field", &field_bytes);
+
+    // Two paths threading the volume; they share the first grid step so
+    // the traffic ramp has something to colour.
+    let make_log = |seed: u64, cells: &[(u32, u32, u32)]| TrajectoryLog {
+        seed,
+        samples: cells
+            .iter()
+            .map(|&(tick, x, y)| TrajectorySampleEntry {
+                tick,
+                x,
+                y,
+                value: 0,
+            })
+            .collect(),
+        end_reason: TrajectoryEndReason::Completed,
+    };
+    let set = TrajectorySet {
+        logs: vec![
+            make_log(1, &[(0, 0, 0), (1, 1, 0), (2, 2, 0), (3, 3, 0)]),
+            make_log(2, &[(0, 0, 0), (1, 1, 0), (2, 2, 1), (3, 3, 1)]),
+        ],
+    };
+    let paths_bytes = postcard::to_allocvec(&set).expect("encode TrajectorySet fixture");
+    let paths_path = write_fixture("herd.paths", &paths_bytes);
+
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+    load_viewer(&mut bench, &wasm_path);
+
+    // Load the solid and advance; record the solid-only draw count.
+    bench
+        .execute(vec![
+            ("prime", BenchOp::advance(1)),
+            (
+                "load_field",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path: field_path,
+                    },
+                ),
+            ),
+            ("post_field", BenchOp::advance(5)),
+        ])
+        .expect("prime + load field + advance");
+    let solid_only = bench.count_observed("aether.draw_triangle");
+    assert!(
+        solid_only >= 1,
+        "the solid should flow before the overlay loads; got {solid_only}",
+    );
+
+    // Load the path overlay and advance again; the per-frame draw count
+    // now includes the ribbon geometry, so the total observed count rises.
+    bench
+        .execute(vec![
+            (
+                "load_paths",
+                BenchOp::send_mail(
+                    component_address(),
+                    &LoadMesh {
+                        namespace: "save".to_owned(),
+                        path: paths_path,
+                    },
+                ),
+            ),
+            ("post_paths", BenchOp::advance(5)),
+        ])
+        .expect("load paths + advance");
+    let with_overlay = bench.count_observed("aether.draw_triangle");
+    assert!(
+        with_overlay > solid_only,
+        "the overlay load should raise the observed draw-triangle count: \
+         solid-only {solid_only}, with overlay {with_overlay}",
+    );
 }
 
 /// `.obj` parser smoke. The OBJ path doesn't go through `aether-mesh`'s

@@ -40,12 +40,14 @@ use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
 use aether_data::Kind;
 use aether_kinds::{
-    CorridorGraph, DrawTriangle, EdgeKind, MeshLoadResult, ReadResult, Render, ScalarField, Vertex,
+    CorridorGraph, DrawTriangle, EdgeKind, MeshLoadResult, ReadResult, Render, ScalarField,
+    TrajectorySampleEntry, TrajectorySet, Vertex,
 };
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
 use crate::{CorridorLoadResult, LoadCorridor, LoadMesh, Scrub};
+use alloc::collections::BTreeMap;
 use core::str;
 
 const OUTLINE_WIDTH: f32 = 0.012;
@@ -107,8 +109,40 @@ const CORRIDOR_PUNCH_RGB: (f32, f32, f32) = (0.30, 0.30, 0.35);
 const CORRIDOR_LANE_STEP: f32 = 0.6;
 const CORRIDOR_TICK_STEP: f32 = 1.0;
 
+/// Half-width of a path overlay ribbon-tube cross-section (issue 1870),
+/// in world units. Each path segment becomes a `+`-cross of two
+/// perpendicular ribbons this wide, so the polyline reads as a thin tube
+/// through the field volume from any camera angle.
+const PATH_TUBE_HALF_WIDTH: f32 = 0.06;
+
+/// Shortest segment the overlay draws (issue 1870). A consecutive sample
+/// pair whose world-space separation is below this degenerates to nothing
+/// rather than emitting a zero-area ribbon (e.g. a "stay put" tick that
+/// holds the same cell, where the perpendicular basis is undefined).
+const PATH_SEGMENT_EPSILON: f32 = 1e-6;
+
+/// Reference span the field-rate ramp normalizes against (issue 1870).
+/// Reach-cost fields are small integers (per-tick accumulated cost); a
+/// fixed span keeps the cool→warm read stable across loads rather than
+/// re-colouring the whole solid when a per-field maximum shifts. Values
+/// past the span saturate at the warm end.
+const RATE_SPAN: f32 = 64.0;
+
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
+    /// The path overlay (issue 1870): ribbon-tube `DrawTriangle`s for a
+    /// decoded `TrajectorySet`, coloured per segment by how many paths
+    /// share that grid step (the traffic ramp). Built once on a `.paths`
+    /// load and re-emitted alongside `triangles` every `Render` stage.
+    /// Empty until the first successful `.paths` load; a decode failure
+    /// leaves the prior overlay intact (atomic replace, mirroring the
+    /// mesh path).
+    overlay: Vec<DrawTriangle>,
+    /// The most recently decoded `.field` `ScalarField` (issue 1870),
+    /// retained so the rate ramp shading the solid is available and so a
+    /// later overlay load shares the same volume. `None` until the first
+    /// successful `.field` load.
+    field: Option<ScalarField>,
     /// Reply target of the most recent `aether.mesh.load` /
     /// `aether.corridor.load` request, parked across the async
     /// `aether.fs.read` round-trip (issue 964). `on_load` /
@@ -206,6 +240,8 @@ impl FfiActor for MeshViewer {
     {
         Ok(MeshViewer {
             triangles: Vec::new(),
+            overlay: Vec::new(),
+            field: None,
             pending_reply: None,
             pending_load: PendingLoad::Mesh,
             corridor: None,
@@ -241,6 +277,12 @@ impl FfiActor for MeshViewer {
     fn on_render(&mut self, ctx: &mut FfiCtx<'_>, _render: Render) {
         if !self.triangles.is_empty() {
             ctx.actor::<RenderCapability>().send_many(&self.triangles);
+        }
+        // The path overlay (issue 1870) replays in the same pass as the
+        // rate-shaded solid, so traffic-shaded polylines sit inside the
+        // same volume the camera frames.
+        if !self.overlay.is_empty() {
+            ctx.actor::<RenderCapability>().send_many(&self.overlay);
         }
         if let Some(corridor) = &self.corridor {
             let tris = corridor.render_tick(self.current_tick);
@@ -433,6 +475,11 @@ impl MeshViewer {
         if lower.as_deref() == Some("field") {
             return self.try_replace_field(bytes);
         }
+        // `.paths` carries a binary `TrajectorySet` (issue 1870), also not
+        // UTF-8 text, so it dispatches on the raw bytes alongside `.field`.
+        if lower.as_deref() == Some("paths") {
+            return self.try_replace_paths(bytes);
+        }
         let Ok(text) = str::from_utf8(bytes) else {
             tracing::warn!(
                 target: "aether_mesh_viewer",
@@ -449,10 +496,10 @@ impl MeshViewer {
             tracing::warn!(
                 target: "aether_mesh_viewer",
                 path = %path,
-                "unsupported file extension; expected .dsl, .obj, or .field",
+                "unsupported file extension; expected .dsl, .obj, .field, or .paths",
             );
             LoadOutcome::failed(
-                "unsupported file extension; expected .dsl, .obj, or .field".to_string(),
+                "unsupported file extension; expected .dsl, .obj, .field, or .paths".to_string(),
             )
         }
     }
@@ -614,9 +661,19 @@ impl MeshViewer {
             FIELD_CELL,
             FIELD_ORIGIN,
         );
+        // Issue 1870: shade each iso-vertex by the field rate `V` at the
+        // cell it lands in, through `rate_ramp`, instead of the mesher's
+        // flat palette index. A surface-net vertex sits a half-cell
+        // outside the inside region (the boundary shell), so the cell it
+        // reads from is the one its world position rounds *into* — clamped
+        // to the field extent so a shell vertex just outside the grid
+        // samples the nearest in-range cell rather than reading nothing.
         let out: Vec<DrawTriangle> = tris
             .iter()
-            .map(|t| to_draw_triangle_palette_vec3(t.vertices, t.color))
+            .map(|t| {
+                let rgb = triangle_rate_rgb(&field, t.vertices);
+                to_draw_triangle_rgb(t.vertices, rgb)
+            })
             .collect();
         tracing::info!(
             target: "aether_mesh_viewer",
@@ -627,6 +684,60 @@ impl MeshViewer {
             "field load complete; cache replaced",
         );
         self.triangles = out;
+        self.field = Some(field);
+        LoadOutcome::ok()
+    }
+
+    /// Decode a binary `TrajectorySet` (issue 1865 bundle kind) from
+    /// `.paths` bytes, build the path overlay, and replace the cached
+    /// overlay triangles (issue 1870).
+    ///
+    /// Each `TrajectoryLog` replays one moving point's tick-ordered path;
+    /// a consecutive sample pair maps `(x, y, tick)` → world `(x, y,
+    /// tick)` (time → world-z, the same stacking the `.field` solid uses)
+    /// and becomes a `+`-cross ribbon tube. The tube is coloured by the
+    /// step's *traffic*: how many paths in the set traverse that same grid
+    /// step `(cell_t → cell_{t+1})`, mapped through `traffic_ramp` so a
+    /// shared step reads hotter than a lone one. Traffic is counted in one
+    /// pass over every log's consecutive sample pairs (keyed by the integer
+    /// cell endpoints, so order within the set doesn't matter), then the
+    /// ribbons are built in a second pass. A decode failure leaves the
+    /// prior overlay intact, mirroring the `.dsl` / `.obj` / `.field` arms;
+    /// an empty set clears the overlay to nothing.
+    fn try_replace_paths(&mut self, bytes: &[u8]) -> LoadOutcome {
+        let Some(set) = TrajectorySet::decode_from_bytes(bytes) else {
+            tracing::warn!(
+                target: "aether_mesh_viewer",
+                "TrajectorySet decode failed; keeping prior overlay",
+            );
+            return LoadOutcome::failed("TrajectorySet decode failed".to_string());
+        };
+        let traffic = count_step_traffic(&set);
+        let max_traffic = traffic.values().copied().max().unwrap_or(0);
+        let mut out = Vec::new();
+        for log in &set.logs {
+            for pair in log.samples.windows(2) {
+                let (from, to) = (&pair[0], &pair[1]);
+                let key = step_key(from, to);
+                let count = traffic.get(&key).copied().unwrap_or(0);
+                let rgb = traffic_ramp(count, max_traffic);
+                segment_tube(
+                    cell_to_world(from),
+                    cell_to_world(to),
+                    PATH_TUBE_HALF_WIDTH,
+                    rgb,
+                    &mut out,
+                );
+            }
+        }
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            paths = set.logs.len(),
+            steps = traffic.len(),
+            triangles = out.len(),
+            "paths load complete; overlay replaced",
+        );
+        self.overlay = out;
         LoadOutcome::ok()
     }
 
@@ -901,6 +1012,201 @@ fn push_edge_quad(out: &mut Vec<DrawTriangle>, a: Vec3, b: Vec3, half: f32, rgb:
     out.push(to_draw_triangle_rgb([v0, v2, v3], rgb));
 }
 
+/// Map a trajectory sample cell `(x, y, tick)` to its world position
+/// (issue 1870): `(x, y, tick)` → world `(x, y, tick)`, with time on the
+/// world-z axis. The same unit-cell / origin convention the `.field`
+/// solid stacks with (`FIELD_CELL` / `FIELD_ORIGIN`), so a path threads
+/// through the same volume the iso-surface fills.
+#[allow(clippy::cast_precision_loss)] // grid cell indices are small
+fn cell_to_world(s: &TrajectorySampleEntry) -> Vec3 {
+    FIELD_ORIGIN
+        + Vec3::new(
+            s.x as f32 * FIELD_CELL.x,
+            s.y as f32 * FIELD_CELL.y,
+            s.tick as f32 * FIELD_CELL.z,
+        )
+}
+
+/// A grid cell `(x, y, tick)` — one endpoint of a trajectory step.
+type Cell = (u32, u32, u32);
+
+/// The integer grid step a consecutive sample pair traverses: its two
+/// cell endpoints `(from, to)`. Two paths that traverse the same step
+/// share this key, so the traffic count over the set is exact in cell
+/// space with no world-space rounding.
+type StepKey = (Cell, Cell);
+
+/// Per-step traffic counts over a `TrajectorySet`, keyed by [`StepKey`].
+type TrafficMap = BTreeMap<StepKey, u32>;
+
+/// The integer grid step a consecutive sample pair traverses (issue
+/// 1870), keyed by its two cell endpoints. Two paths that traverse the
+/// same step share this key.
+fn step_key(from: &TrajectorySampleEntry, to: &TrajectorySampleEntry) -> StepKey {
+    ((from.x, from.y, from.tick), (to.x, to.y, to.tick))
+}
+
+/// Count, over every log's consecutive sample pairs, how many paths
+/// traverse each grid step (issue 1870). The map is keyed by [`step_key`]
+/// so a step shared by N paths reaches a count of N; the per-segment
+/// traffic ramp reads off it. Counted in one pass before any ribbon is
+/// built so the maximum (for ramp normalization) is known up front.
+fn count_step_traffic(set: &TrajectorySet) -> TrafficMap {
+    let mut traffic = BTreeMap::new();
+    for log in &set.logs {
+        for pair in log.samples.windows(2) {
+            *traffic.entry(step_key(&pair[0], &pair[1])).or_insert(0) += 1;
+        }
+    }
+    traffic
+}
+
+/// A camera-independent `+`-cross ribbon tube along the segment `a → b`
+/// (issue 1870), generalising [`outline_loop`]'s perpendicular-ribbon
+/// technique to a free 3D segment. The viewer never receives `view_proj`
+/// (the camera is owned elsewhere), so a camera-facing ribbon is not
+/// available; instead two ribbons are placed in perpendicular planes —
+/// the cross-section reads as a tube from any angle and degrades to a
+/// thin edge-on only at the rare angle that looks straight down one
+/// ribbon, which the other ribbon covers. The two in-plane perpendiculars
+/// come from `dir × world_axis` with a fallback axis when `dir` is
+/// parallel to the primary axis. A segment shorter than
+/// `PATH_SEGMENT_EPSILON` emits nothing (an undefined direction).
+fn segment_tube(
+    a: Vec3,
+    b: Vec3,
+    half_width: f32,
+    rgb: (f32, f32, f32),
+    out: &mut Vec<DrawTriangle>,
+) {
+    let dir = b - a;
+    let len = dir.length();
+    if len < PATH_SEGMENT_EPSILON {
+        return;
+    }
+    let dir = dir / len;
+    // A stable perpendicular: cross `dir` with a world axis it isn't
+    // (near-)parallel to. Y-up is the primary; fall back to X when `dir`
+    // runs along Y so the cross product never collapses.
+    let reference = if dir.cross(Vec3::Y).length() > 1e-3 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let u = dir.cross(reference).normalize();
+    let v = dir.cross(u).normalize();
+    push_ribbon(out, a, b, u * half_width, rgb);
+    push_ribbon(out, a, b, v * half_width, rgb);
+}
+
+/// Push one ribbon (two triangles) along `a → b`, `offset` to each side.
+/// The shared half of [`segment_tube`]'s `+`-cross.
+fn push_ribbon(out: &mut Vec<DrawTriangle>, a: Vec3, b: Vec3, offset: Vec3, rgb: (f32, f32, f32)) {
+    let v0 = a - offset;
+    let v1 = b - offset;
+    let v2 = b + offset;
+    let v3 = a + offset;
+    out.push(to_draw_triangle_rgb([v0, v1, v2], rgb));
+    out.push(to_draw_triangle_rgb([v0, v2, v3], rgb));
+}
+
+/// Colour ramp for the field rate `V` shading the solid (issue 1870):
+/// low rate → cool blue, high rate → warm red, the `u32::MAX` unreachable
+/// sentinel → a distinct desaturated grey so it reads apart from the
+/// in-range gradient. The in-range value is normalized against a fixed
+/// reference span so the ramp is stable across loads (a per-field max
+/// would re-colour the whole solid every load); values past the span
+/// saturate at the warm end. Monotone non-decreasing in `v` over the
+/// in-range domain.
+#[allow(clippy::cast_precision_loss)] // reach-cost values are small integers
+fn rate_ramp(v: u32) -> (f32, f32, f32) {
+    if v == u32::MAX {
+        return (0.45, 0.45, 0.5); // unreachable sentinel — distinct grey
+    }
+    let t = (v as f32 / RATE_SPAN).clamp(0.0, 1.0);
+    lerp_rgb((0.20, 0.45, 0.85), (0.90, 0.30, 0.20), t)
+}
+
+/// Colour ramp for path traffic density (issue 1870): a lone step (count
+/// `1`) reads cool, the busiest step reads hot, normalized against
+/// `max_count` so the hottest path in *this* set anchors the warm end.
+/// `max_count == 0` (the degenerate empty set) maps everything to the
+/// cool end. Monotone non-decreasing in `count`.
+#[allow(clippy::cast_precision_loss)] // path counts are small integers
+fn traffic_ramp(count: u32, max_count: u32) -> (f32, f32, f32) {
+    let t = if max_count <= 1 {
+        0.0
+    } else {
+        (count.saturating_sub(1) as f32 / (max_count - 1) as f32).clamp(0.0, 1.0)
+    };
+    lerp_rgb((0.35, 0.65, 0.95), (0.95, 0.75, 0.15), t)
+}
+
+/// Linearly interpolate between two RGB triples at `t ∈ [0, 1]`.
+fn lerp_rgb(lo: (f32, f32, f32), hi: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
+    (
+        (hi.0 - lo.0).mul_add(t, lo.0),
+        (hi.1 - lo.1).mul_add(t, lo.1),
+        (hi.2 - lo.2).mul_add(t, lo.2),
+    )
+}
+
+/// Rate-shade a surface-net iso-triangle (issue 1870): sample the field
+/// `V` at the cell each of the triangle's three world vertices rounds
+/// into and average their rate colours. A surface-net vertex sits a
+/// half-cell outside the inside region, so its world position is rounded
+/// to the nearest cell and clamped into the field extent (a shell vertex
+/// just outside the grid reads the nearest in-range cell). Averaging the
+/// three keeps a face that straddles a rate boundary from snapping to one
+/// side.
+fn triangle_rate_rgb(field: &ScalarField, verts: [Vec3; 3]) -> (f32, f32, f32) {
+    let mut acc = (0.0, 0.0, 0.0);
+    for v in verts {
+        let value = sample_field_at_world(field, v);
+        let rgb = rate_ramp(value);
+        acc.0 += rgb.0;
+        acc.1 += rgb.1;
+        acc.2 += rgb.2;
+    }
+    (acc.0 / 3.0, acc.1 / 3.0, acc.2 / 3.0)
+}
+
+/// Read the field `V` at the cell a world position rounds into (issue
+/// 1870). World `(x, y, z)` inverts the `.field` placement
+/// (`FIELD_ORIGIN` / `FIELD_CELL`) back to a `(cell_x, cell_y, tick)`
+/// index, rounded to the nearest cell and clamped into `[0, dim)` on each
+/// axis so a boundary-shell vertex just outside the grid still reads the
+/// nearest in-range cell. Returns the dense-grid value
+/// `values[tick * H * W + y * W + x]`.
+fn sample_field_at_world(field: &ScalarField, world: Vec3) -> u32 {
+    let local = world - FIELD_ORIGIN;
+    let cx = round_clamp(local.x / FIELD_CELL.x, field.width);
+    let cy = round_clamp(local.y / FIELD_CELL.y, field.height);
+    let ct = round_clamp(local.z / FIELD_CELL.z, field.ticks);
+    let idx = (ct * field.height as usize + cy) * field.width as usize + cx;
+    field.values.get(idx).copied().unwrap_or(u32::MAX)
+}
+
+/// Round a cell coordinate to the nearest integer index and clamp it into
+/// `[0, dim)`. `dim == 0` clamps to `0` (a degenerate field the caller's
+/// length check already rejects, guarded here so the index math can't
+/// underflow).
+fn round_clamp(value: f32, dim: u32) -> usize {
+    if dim == 0 {
+        return 0;
+    }
+    // Clamp into `[0.0, (dim - 1)]` in float space *before* the integer
+    // cast so the cast is provably non-negative and in range — the lint
+    // it would otherwise warn about (sign loss / truncation) can't occur.
+    #[allow(clippy::cast_precision_loss)] // dim is a small grid extent
+    let hi = (dim - 1) as f32;
+    let clamped = value.round().clamp(0.0, hi);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // clamped to [0, dim-1], so the cast is exact and non-negative
+    let index = clamped as usize;
+    index
+}
+
 fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[Vec3; 3]> {
     let mut tris = Vec::new();
     let n = polygon.plane_normal;
@@ -937,15 +1243,6 @@ fn outline_loop(loop_: &[Vec3], n: Vec3, out: &mut Vec<[Vec3; 3]>) {
 fn to_draw_triangle_palette(tri: [Point3; 3], color: u32) -> DrawTriangle {
     let rgb = PALETTE[(color as usize) % PALETTE.len()];
     to_draw_triangle_rgb([tri[0].to_f32(), tri[1].to_f32(), tri[2].to_f32()], rgb)
-}
-
-/// Palette-color a world-space `Vec3` triangle (the surface-nets mesher's
-/// output, issue 1868). Mirrors [`to_draw_triangle_palette`] but takes
-/// `Vec3` vertices directly — the surface-nets pass already emits world
-/// coordinates, with no fixed-point `Point3` round-trip.
-fn to_draw_triangle_palette_vec3(tri: [Vec3; 3], color: u32) -> DrawTriangle {
-    let rgb = PALETTE[(color as usize) % PALETTE.len()];
-    to_draw_triangle_rgb(tri, rgb)
 }
 
 fn to_draw_triangle_rgb(tri: [Vec3; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
@@ -1146,6 +1443,8 @@ mod tests {
     fn empty_viewer() -> MeshViewer {
         MeshViewer {
             triangles: Vec::new(),
+            overlay: Vec::new(),
+            field: None,
             pending_reply: None,
             pending_load: PendingLoad::Mesh,
             corridor: None,
@@ -1235,7 +1534,256 @@ mod tests {
         );
     }
 
-    use aether_kinds::{CorridorEdge, CorridorNode};
+    use aether_kinds::{CorridorEdge, CorridorNode, TrajectoryEndReason};
+    use aether_math::Aabb;
+
+    /// Build a `TrajectorySampleEntry` at cell `(x, y, tick)` (value is
+    /// not read by the overlay).
+    fn entry(tick: u32, x: u32, y: u32) -> TrajectorySampleEntry {
+        TrajectorySampleEntry {
+            tick,
+            x,
+            y,
+            value: 0,
+        }
+    }
+
+    /// Build a `TrajectoryLog` from a list of `(tick, x, y)` cells.
+    fn log_from(seed: u64, cells: &[(u32, u32, u32)]) -> aether_kinds::TrajectoryLog {
+        aether_kinds::TrajectoryLog {
+            seed,
+            samples: cells.iter().map(|&(t, x, y)| entry(t, x, y)).collect(),
+            end_reason: TrajectoryEndReason::Completed,
+        }
+    }
+
+    fn paths_bytes(logs: Vec<aether_kinds::TrajectoryLog>) -> Vec<u8> {
+        let set = TrajectorySet { logs };
+        postcard::to_allocvec(&set).expect("test setup: encode TrajectorySet")
+    }
+
+    /// Issue 1870: `segment_tube` emits a `+`-cross of two ribbons (4
+    /// triangles) for a non-degenerate segment, and the union's bounding
+    /// box spans both endpoints.
+    #[test]
+    fn segment_tube_emits_a_cross_spanning_its_endpoints() {
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 0.0, 3.0);
+        let mut out = Vec::new();
+        segment_tube(a, b, 0.1, (0.5, 0.5, 0.5), &mut out);
+        assert_eq!(
+            out.len(),
+            4,
+            "a `+`-cross of two ribbons is 2 triangles each",
+        );
+        let mut points = Vec::new();
+        for tri in &out {
+            for v in tri.verts {
+                points.push(Vec3::new(v.x, v.y, v.z));
+            }
+        }
+        let aabb = Aabb::from_points(&points);
+        assert!(
+            aabb.min.z <= a.z + 1e-4 && aabb.max.z >= b.z - 1e-4,
+            "the tube spans both endpoints on the segment axis: {aabb:?}",
+        );
+    }
+
+    /// Issue 1870: a zero-length (stay-put) segment emits no geometry —
+    /// its direction is undefined, so there is no ribbon to draw.
+    #[test]
+    fn degenerate_segment_emits_nothing() {
+        let p = Vec3::new(1.0, 2.0, 3.0);
+        let mut out = Vec::new();
+        segment_tube(p, p, 0.1, (0.5, 0.5, 0.5), &mut out);
+        assert!(out.is_empty(), "a zero-length segment draws nothing");
+    }
+
+    /// Issue 1870: the rate ramp is monotone non-decreasing over in-range
+    /// values (warming as the rate rises) and the `u32::MAX` sentinel maps
+    /// to a tone distinct from both ends of the gradient.
+    #[test]
+    fn rate_ramp_is_monotone_with_a_distinct_sentinel() {
+        let lo = rate_ramp(0);
+        let mid = rate_ramp(16);
+        let hi = rate_ramp(64);
+        assert!(
+            lo.0 <= mid.0 && mid.0 <= hi.0,
+            "red channel warms monotonically with rate",
+        );
+        assert!(
+            lo.2 >= mid.2 && mid.2 >= hi.2,
+            "blue channel cools monotonically with rate",
+        );
+        let sentinel = rate_ramp(u32::MAX);
+        assert_ne!(sentinel, lo, "the sentinel reads apart from the cool end");
+        assert_ne!(sentinel, hi, "the sentinel reads apart from the warm end");
+    }
+
+    /// Issue 1870: the traffic ramp warms monotonically as a step's share
+    /// count rises toward the set maximum.
+    #[test]
+    fn traffic_ramp_warms_with_shared_count() {
+        let lone = traffic_ramp(1, 4);
+        let some = traffic_ramp(2, 4);
+        let busiest = traffic_ramp(4, 4);
+        assert!(
+            lone.0 <= some.0 && some.0 <= busiest.0,
+            "a busier step reads hotter (red channel rises)",
+        );
+        assert!(
+            busiest.0 > lone.0,
+            "the busiest step is strictly hotter than a lone step",
+        );
+    }
+
+    /// Issue 1870: a `.paths` load decodes a `TrajectorySet`, builds the
+    /// overlay, and reports `ok`. Two paths sharing one step colour that
+    /// shared step's ribbon hotter than an unshared step's ribbon.
+    #[test]
+    fn shared_step_colours_hotter_than_an_unshared_step() {
+        // Path A: (0,0,t0) → (1,0,t1) → (2,0,t2). Path B shares the first
+        // step then diverges: (0,0,t0) → (1,0,t1) → (1,1,t2).
+        let a = log_from(1, &[(0, 0, 0), (1, 1, 0), (2, 2, 0)]);
+        let b = log_from(2, &[(0, 0, 0), (1, 1, 0), (2, 1, 1)]);
+        let bytes = paths_bytes(vec![a, b]);
+
+        let mut viewer = empty_viewer();
+        let outcome = viewer.load_bytes("herd.paths", &bytes);
+        assert!(
+            outcome.error.is_none(),
+            "good path set loads: {:?}",
+            outcome.error,
+        );
+        assert!(!viewer.overlay.is_empty(), "overlay is populated");
+
+        // Re-derive the colours the overlay used: the shared first step
+        // (count 2) vs an unshared later step (count 1) under the same set
+        // maximum, so the assertion tracks `try_replace_paths`'s ramp.
+        let set = TrajectorySet {
+            logs: vec![
+                log_from(1, &[(0, 0, 0), (1, 1, 0), (2, 2, 0)]),
+                log_from(2, &[(0, 0, 0), (1, 1, 0), (2, 1, 1)]),
+            ],
+        };
+        let traffic = count_step_traffic(&set);
+        let max = traffic
+            .values()
+            .copied()
+            .max()
+            .expect("test setup: the path set has at least one step");
+        assert_eq!(max, 2, "the shared step carries two paths");
+        let shared = traffic_ramp(2, max);
+        let unshared = traffic_ramp(1, max);
+        assert!(
+            shared.0 > unshared.0,
+            "the shared step's ribbon reads hotter than an unshared step's",
+        );
+    }
+
+    /// Issue 1870: a malformed `.paths` buffer keeps the prior overlay and
+    /// reports a failure.
+    #[test]
+    fn malformed_paths_keeps_prior_overlay() {
+        let mut viewer = empty_viewer();
+        let good = paths_bytes(vec![log_from(1, &[(0, 0, 0), (1, 1, 0)])]);
+        viewer.load_bytes("good.paths", &good);
+        let prior = viewer.overlay.len();
+        assert!(prior > 0, "prior good load populated the overlay");
+
+        let outcome = viewer.load_bytes("bad.paths", &[0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert!(
+            outcome.error.is_some(),
+            "malformed path set reports failure"
+        );
+        assert_eq!(
+            viewer.overlay.len(),
+            prior,
+            "malformed path set leaves the prior overlay intact",
+        );
+    }
+
+    /// Issue 1870: an empty `TrajectorySet` clears the overlay to no
+    /// triangles (a successful load of zero paths).
+    #[test]
+    fn empty_path_set_clears_the_overlay() {
+        let mut viewer = empty_viewer();
+        let good = paths_bytes(vec![log_from(1, &[(0, 0, 0), (1, 1, 0)])]);
+        viewer.load_bytes("good.paths", &good);
+        assert!(
+            !viewer.overlay.is_empty(),
+            "prior good load populated overlay"
+        );
+
+        let empty = paths_bytes(Vec::new());
+        let outcome = viewer.load_bytes("empty.paths", &empty);
+        assert!(outcome.error.is_none(), "an empty set loads cleanly");
+        assert!(
+            viewer.overlay.is_empty(),
+            "an empty path set clears the overlay to nothing",
+        );
+    }
+
+    /// Issue 1870: the `.field` arm rate-shades the iso-surface — a field
+    /// with a low-rate region and a high-rate region yields iso-vertices
+    /// coloured at opposite ends of the rate ramp — and retains the
+    /// decoded field on the viewer.
+    #[test]
+    fn field_rate_shades_low_and_high_regions() {
+        // A 4×2×2 field: the x<2 half is low-rate (1), the x>=2 half is
+        // high-rate (60), every cell inside. The boundary between the two
+        // halves produces iso-vertices that read cool on the low side and
+        // warm on the high side.
+        let (w, h, t) = (4u32, 2u32, 2u32);
+        let mut values = vec![1u32; (w * h * t) as usize];
+        for tick in 0..t {
+            for y in 0..h {
+                for x in 2..w {
+                    values[((tick * h + y) * w + x) as usize] = 60;
+                }
+            }
+        }
+        let field = ScalarField {
+            width: w,
+            height: h,
+            ticks: t,
+            values,
+        };
+        let bytes = postcard::to_allocvec(&field).expect("encode rate field");
+
+        let mut viewer = empty_viewer();
+        let outcome = viewer.load_bytes("rate.field", &bytes);
+        assert!(
+            outcome.error.is_none(),
+            "rate field loads: {:?}",
+            outcome.error,
+        );
+        assert!(viewer.field.is_some(), "the decoded field is retained");
+        assert!(!viewer.triangles.is_empty(), "the solid meshed");
+
+        // The reddest and bluest triangles in the solid should sit at
+        // opposite ends — the high-rate half warm, the low-rate half cool.
+        let reddest = viewer
+            .triangles
+            .iter()
+            .map(|t| t.verts[0].r)
+            .fold(f32::MIN, f32::max);
+        let bluest = viewer
+            .triangles
+            .iter()
+            .map(|t| t.verts[0].b)
+            .fold(f32::MIN, f32::max);
+        let cool = rate_ramp(1);
+        let warm = rate_ramp(60);
+        assert!(
+            reddest > cool.0 + 0.1,
+            "the high-rate region shades warm (redder than the cool end)",
+        );
+        assert!(
+            bluest > warm.2 + 0.1,
+            "the low-rate region shades cool (bluer than the warm end)",
+        );
+    }
 
     fn node(tick: u32, component: u32, cell_count: u32) -> CorridorNode {
         CorridorNode {
