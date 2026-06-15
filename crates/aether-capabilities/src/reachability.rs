@@ -708,6 +708,123 @@ fn forward_coord(coord: usize, delta: i32, bound: usize) -> Option<usize> {
     (next < bound).then_some(next)
 }
 
+/// The mutable state one self-realizing run carries across ticks: the agent's
+/// current cell, the cost accumulated so far, and the active snapshot
+/// contributions. Shared by both run drivers — [`simulate_run`] (the closure /
+/// finish verdict) and [`realize_single`] (the per-tick stacked field) — so the
+/// one closed-loop step lives in exactly one place ([`step_realized_run`]).
+struct RunState {
+    current: usize,
+    acc: u32,
+    contributions: Vec<Contribution>,
+}
+
+/// The outcome of one [`step_realized_run`] call.
+enum StepOutcome {
+    /// The realized field closed around the agent before it could step — no
+    /// stencil neighbor is both un-blocked and keeps `acc < budget`.
+    Closed,
+    /// The agent reached a goal cell with `acc < budget`.
+    Reached,
+    /// The agent stepped and the run continues.
+    Continued,
+}
+
+/// One tick of the closed self-realizing loop, mutating `state` in place: realize
+/// the field at `now`, check closure, spawn a snapshot contribution on the
+/// placement cadence, plan one step via [`plan_step_realized`], then step and
+/// accumulate the true realized cost (the `now + 1` realization at the landed
+/// cell). Returns the realized field *at `now`* (the field the agent planned
+/// against this tick, which the stacked-field driver records) and the
+/// [`StepOutcome`]. This is the single per-step body both run drivers share, so
+/// the closed loop is defined once. Iterative — the per-tick window solve and
+/// the contribution scan are bounded; no recursion.
+#[allow(clippy::too_many_arguments)]
+fn step_realized_run(
+    width: usize,
+    height: usize,
+    base: &[u32],
+    base_ticks: usize,
+    stencil: &[StencilOffset],
+    goal: &[usize],
+    budget: u32,
+    placement_period: usize,
+    model: &ContributionModel,
+    window: usize,
+    now: usize,
+    rng: &mut Xorshift64,
+    state: &mut RunState,
+) -> (Vec<u32>, StepOutcome) {
+    let is_goal = |cell: usize| goal.contains(&cell);
+    let realized = realize_field(
+        width,
+        height,
+        base,
+        base_ticks,
+        now,
+        &state.contributions,
+        model,
+    );
+
+    // Closure check before stepping: has the trail covered every feasible
+    // next cell from the agent's current position this tick?
+    if field_closed(
+        width,
+        height,
+        &realized,
+        stencil,
+        state.current,
+        state.acc,
+        budget,
+    ) {
+        return (realized, StepOutcome::Closed);
+    }
+
+    // Spawn a snapshot contribution on the current cell at the placement
+    // cadence (snapshot placement + lead, #1866's model), holding at most
+    // `max_concurrent` active — the oldest expires.
+    if placement_period > 0 && now.is_multiple_of(placement_period) {
+        state.contributions.push(Contribution {
+            center: state.current,
+            trigger_tick: now,
+        });
+        if model.max_concurrent > 0 && state.contributions.len() > model.max_concurrent {
+            state.contributions.remove(0);
+        }
+    }
+
+    let next = plan_step_realized(
+        width,
+        height,
+        &realized,
+        stencil,
+        goal,
+        state.current,
+        window,
+        rng,
+    );
+    // The realized cost actually paid is the next-tick realization at the
+    // landed cell (the contribution set the agent stepped into).
+    let landed_realized = realize_field(
+        width,
+        height,
+        base,
+        base_ticks,
+        now + 1,
+        &state.contributions,
+        model,
+    );
+    let true_cost = landed_realized.get(next).copied().unwrap_or(UNREACHABLE);
+    state.acc = state.acc.saturating_add(true_cost);
+    state.current = next;
+    let outcome = if state.acc < budget && is_goal(state.current) {
+        StepOutcome::Reached
+    } else {
+        StepOutcome::Continued
+    };
+    (realized, outcome)
+}
+
 /// Simulate one self-realizing run from `start` (issue 1867). Per tick the
 /// closed loop is: realize the field (base plus active contributions) →
 /// plan one step via [`plan_step_realized`] → step and accumulate the true
@@ -734,58 +851,38 @@ fn simulate_run(
     window: usize,
     rng: &mut Xorshift64,
 ) -> (bool, u32) {
-    let is_goal = |cell: usize| goal.contains(&cell);
-    let mut current = start;
-    let mut acc = start_cost;
-    let mut contributions: Vec<Contribution> = Vec::new();
+    let mut state = RunState {
+        current: start,
+        acc: start_cost,
+        contributions: Vec::new(),
+    };
 
-    if acc < budget && is_goal(current) {
+    if state.acc < budget && goal.contains(&state.current) {
         return (true, u32::MAX);
     }
 
     for now in 0..ticks.saturating_sub(1) {
-        let realized = realize_field(width, height, base, base_ticks, now, &contributions, model);
-
-        // Closure check before stepping: has the trail covered every feasible
-        // next cell from the agent's current position this tick?
-        if field_closed(width, height, &realized, stencil, current, acc, budget) {
-            // `now < ticks`, and `ticks` came from a `u32` field, so the
-            // cast is exact; saturate defensively.
-            return (false, u32::try_from(now).unwrap_or(u32::MAX));
-        }
-
-        // Spawn a snapshot contribution on the current cell at the placement
-        // cadence (snapshot placement + lead, #1866's model), holding at most
-        // `max_concurrent` active — the oldest expires.
-        if placement_period > 0 && now % placement_period == 0 {
-            contributions.push(Contribution {
-                center: current,
-                trigger_tick: now,
-            });
-            if model.max_concurrent > 0 && contributions.len() > model.max_concurrent {
-                contributions.remove(0);
-            }
-        }
-
-        let next = plan_step_realized(
-            width, height, &realized, stencil, goal, current, window, rng,
-        );
-        // The realized cost actually paid is the next-tick realization at the
-        // landed cell (the contribution set the agent stepped into).
-        let landed_realized = realize_field(
+        let (_realized, outcome) = step_realized_run(
             width,
             height,
             base,
             base_ticks,
-            now + 1,
-            &contributions,
+            stencil,
+            goal,
+            budget,
+            placement_period,
             model,
+            window,
+            now,
+            rng,
+            &mut state,
         );
-        let true_cost = landed_realized.get(next).copied().unwrap_or(UNREACHABLE);
-        acc = acc.saturating_add(true_cost);
-        current = next;
-        if acc < budget && is_goal(current) {
-            return (true, u32::MAX);
+        match outcome {
+            // `now < ticks`, and `ticks` came from a `u32` field, so the cast
+            // is exact; saturate defensively.
+            StepOutcome::Closed => return (false, u32::try_from(now).unwrap_or(u32::MAX)),
+            StepOutcome::Reached => return (true, u32::MAX),
+            StepOutcome::Continued => {}
         }
     }
     (false, u32::MAX)
@@ -920,71 +1017,59 @@ pub fn realize_single(input: RealizationProblem) -> ScalarField {
     } else {
         start_cells[run_rng.next_bounded(start_cells.len())]
     };
-    let mut current = start;
-    let mut acc = start_seed.get(start).copied().unwrap_or(0);
-    let mut contributions: Vec<Contribution> = Vec::new();
+    let mut state = RunState {
+        current: start,
+        acc: start_seed.get(start).copied().unwrap_or(0),
+        contributions: Vec::new(),
+    };
 
     let out_ticks = ticks.max(1);
     let mut values = vec![UNREACHABLE; plane.saturating_mul(out_ticks)];
 
-    let goal_hit = |cell: usize, a: u32| a < budget && goal.contains(&cell);
-    let mut done = goal_hit(current, acc) || start_cells.is_empty();
+    // Once the run stops stepping (goal reached, field closed, or no start
+    // region) the contributions freeze, but the stacked field keeps recording
+    // the still-aging realized field — so the loop continues to the horizon,
+    // calling the shared step body only while the run is still live.
+    let mut done = (state.acc < budget && goal.contains(&state.current)) || start_cells.is_empty();
 
     for now in 0..out_ticks {
-        let realized = realize_field(
-            width,
-            height,
-            &base,
-            base_ticks,
-            now,
-            &contributions,
-            &model,
-        );
+        let active = !done && now + 1 < out_ticks;
+        let realized = if active {
+            let (realized, outcome) = step_realized_run(
+                width,
+                height,
+                &base,
+                base_ticks,
+                &stencil,
+                &goal,
+                budget,
+                placement_period,
+                &model,
+                window,
+                now,
+                &mut run_rng,
+                &mut state,
+            );
+            if matches!(outcome, StepOutcome::Closed | StepOutcome::Reached) {
+                done = true;
+            }
+            realized
+        } else {
+            // Frozen / final tick: just record the realization at `now`; the
+            // contribution set no longer changes.
+            realize_field(
+                width,
+                height,
+                &base,
+                base_ticks,
+                now,
+                &state.contributions,
+                &model,
+            )
+        };
         let dst = now.saturating_mul(plane);
         if let Some(slot) = values.get_mut(dst..dst + plane) {
             slot.copy_from_slice(&realized[..plane]);
-        }
-
-        if done || now + 1 >= out_ticks {
-            continue;
-        }
-        if field_closed(width, height, &realized, &stencil, current, acc, budget) {
-            done = true;
-            continue;
-        }
-        if placement_period > 0 && now % placement_period == 0 {
-            contributions.push(Contribution {
-                center: current,
-                trigger_tick: now,
-            });
-            if model.max_concurrent > 0 && contributions.len() > model.max_concurrent {
-                contributions.remove(0);
-            }
-        }
-        let next = plan_step_realized(
-            width,
-            height,
-            &realized,
-            &stencil,
-            &goal,
-            current,
-            window,
-            &mut run_rng,
-        );
-        let landed_realized = realize_field(
-            width,
-            height,
-            &base,
-            base_ticks,
-            now + 1,
-            &contributions,
-            &model,
-        );
-        let true_cost = landed_realized.get(next).copied().unwrap_or(UNREACHABLE);
-        acc = acc.saturating_add(true_cost);
-        current = next;
-        if goal_hit(current, acc) {
-            done = true;
         }
     }
 
