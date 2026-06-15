@@ -11,7 +11,7 @@
 // owned for an all-`Copy` state, so silence the false positive.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Manual, OutboundReply, Resolver, actor};
 use aether_test_fixtures::{Bump, CountQuery, CountReport};
 
 /// Reshaped durable state — the added `generation` field changes the
@@ -68,8 +68,8 @@ impl FfiActor for Counter {
         self.count += 1;
     }
 
-    #[handler]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_>, _query: CountQuery) {
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }

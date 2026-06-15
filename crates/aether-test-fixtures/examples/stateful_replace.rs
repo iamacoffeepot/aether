@@ -21,8 +21,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    BootError, FfiActor, FfiCtx, FfiDropCtx, Instanced, Mail, OutboundReply, PriorState, Resolver,
-    actor,
+    BootError, FfiActor, FfiCtx, FfiDropCtx, Instanced, Mail, Manual, OutboundReply, PriorState,
+    Resolver, actor,
 };
 use aether_test_fixtures::{Bump, CountQuery, CountReport};
 
@@ -50,8 +50,8 @@ impl FfiActor for Counter {
     }
 
     /// Reply with the live counter so a test can read it across a swap.
-    #[handler]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_>, _query: CountQuery) {
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }

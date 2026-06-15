@@ -10,7 +10,7 @@
 //! config round-tripped intact. No tick / render behaviour — the
 //! sibling `probe` covers that.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Manual, OutboundReply, Resolver, actor};
 use aether_test_fixtures::{ConfigEcho, ConfigQuery, ProbeConfig};
 
 pub struct ProbeWithConfig {
@@ -36,8 +36,8 @@ impl FfiActor for ProbeWithConfig {
     /// Reply with a `ConfigEcho` describing the cached config. Lets
     /// the integration test observe what the typed `init` actually
     /// received without scraping logs or readback.
-    #[handler]
-    fn on_config_query(&mut self, ctx: &mut FfiCtx<'_>, _query: ConfigQuery) {
+    #[handler::manual]
+    fn on_config_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: ConfigQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&ConfigEcho {
                 seed: self.seed,

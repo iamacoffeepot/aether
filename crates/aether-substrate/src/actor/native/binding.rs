@@ -1061,7 +1061,7 @@ mod tests {
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 55);
 
         {
-            let mut ctx = NativeCtx::new(&binding, caller_source, request, root);
+            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, request, root);
             OutboundReply::reply(&mut ctx, &Tick);
             // ctx drops here; the reply already routed eagerly via the
             // Mailer (replies are not buffered), so the flush is a no-op.
@@ -1118,7 +1118,7 @@ mod tests {
         let root = MailId::new(MailboxId(0xC0), 1);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
         {
-            let mut ctx = NativeCtx::new(&binding, caller_source, root, root);
+            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, root, root);
             OutboundReply::reply(&mut ctx, &Tick);
             OutboundReply::reply(&mut ctx, &Tick);
         }
@@ -1338,7 +1338,7 @@ mod tests {
         let root = MailId::new(MailboxId(0xC0), 1);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
         {
-            let mut ctx = NativeCtx::new(&binding, caller_source, root, root);
+            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, root, root);
             OutboundReply::reply(&mut ctx, &Tick);
         }
 

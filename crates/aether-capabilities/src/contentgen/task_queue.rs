@@ -91,10 +91,11 @@ impl TaskQueue {
     /// [`NativeCtx::dispatch_blocking_resumed`] when a slot later frees,
     /// so the deferred dispatch keeps *this* chain held and replies to
     /// *this* caller (iamacoffeepot/aether#1031).
-    pub fn submit<O, F>(&mut self, ctx: &mut NativeCtx<'_>, work: F)
+    pub fn submit<O, F, M>(&mut self, ctx: &mut NativeCtx<'_, M>, work: F)
     where
         O: Kind + serde::Serialize + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
+        M: aether_actor::ReplyMode,
     {
         if self.in_flight < self.max {
             // `dispatch_blocking_with` (not the bare `dispatch_blocking`,

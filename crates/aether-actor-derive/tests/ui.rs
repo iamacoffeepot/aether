@@ -38,6 +38,11 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_stream_reserved_ffi.rs");
     t.compile_fail("tests/ui/rejects_stream_reserved_native.rs");
     t.compile_fail("tests/ui/rejects_manual_marker_mismatch_ffi.rs");
+    // ADR-0112 (single-locked): a single-class `#[handler]` body has no
+    // reply surface (`OutboundReply` is not impl'd for the `Single` ctx),
+    // so a hand-call to `ctx.reply` is a compile error — `-> ()` is
+    // provably silent.
+    t.compile_fail("tests/ui/single_handler_cannot_reply.rs");
     // ADR-0113: declarative `type State` + `dehydrate` / `rehydrate`
     // accessors generate the hot-swap hooks; the macro enforces the XOR
     // (no manual hook), the pairing (both accessors), and the dependency

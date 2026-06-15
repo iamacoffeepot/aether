@@ -17,7 +17,7 @@
 // contract is the point, so silence the false positive here.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, OutboundReply, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Manual, OutboundReply, Resolver, actor};
 use aether_test_fixtures::{Bump, CountQuery, CountReport};
 
 /// Durable state the `Counter` carries across `replace_component`. The
@@ -73,8 +73,8 @@ impl FfiActor for Counter {
     }
 
     /// Reply with the live counter so a test can read it across a swap.
-    #[handler]
-    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_>, _query: CountQuery) {
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut FfiCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }
