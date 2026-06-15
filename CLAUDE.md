@@ -140,27 +140,22 @@ One module can carry several actors: `export!(A, B, C)` (ADR-0096) exports each 
 
 ## Pre-push pre-flight
 
-`scripts/preflight.sh` runs the CI-equivalent local checks (fmt + clippy + doc + nextest + wasm32 component cross-build) over the workspace and, on success, stamps `.git/aether-preflight-passed` with the HEAD sha so a re-push of the same commit short-circuits. The pre-push git hook (`.githooks/pre-push`) invokes it automatically against the changed-file set. Enable once per clone: `scripts/setup-githooks.sh` (sets `core.hooksPath -> .githooks`).
-
-The qodana scan is **opt-in** via `scripts/preflight.sh --qodana` (or `PREFLIGHT_QODANA=1`) — it runs `scripts/qodana-local.sh` as the last step, needs colima/docker up, and adds ~3.3min, so the default fast loop skips it. The implement-agent push path passes `--qodana` to match the CI qodana gate before opening a PR (see § "Qodana pre-flight").
+`scripts/preflight.sh` runs the CI-equivalent local checks (fmt + clippy + doc + nextest + wasm32 component cross-build) over the workspace and, on success, stamps `.git/aether-preflight-passed` with the HEAD sha so a re-push of the same commit short-circuits. The pre-push git hook (`.githooks/pre-push`) invokes it automatically against the changed-file set. Enable once per clone: `scripts/setup-githooks.sh` (sets `core.hooksPath -> .githooks`). Qodana is not part of this local pre-flight — it is a required CI gate resolved at `/land` (see § "Qodana").
 
 Exception classes that skip the Rust pre-flight (only when *every* changed path matches the class):
 
 - **Docs-only**: `docs/**` or `*.md` at the root.
 - **CI / repo-config-only**: `.github/**`, `.claude/**`, `.githooks/**`, `scripts/**`, `qodana.{yaml,sarif.json}`, `.mcp.json`, `.gitignore`, `.gitattributes`, or `{rust-toolchain,rustfmt,clippy}.toml`.
 
-A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of `git push` / `gh pr create`. If HEAD has no matching stamp it blocks and prompts Claude to run `scripts/preflight.sh` (with `--qodana` on the implement-agent push path). Bypass either layer with `git push --no-verify`.
+A Claude-side hook (`.claude/hooks/check-pre-push.sh`) checks the stamp ahead of `git push` / `gh pr create`. If HEAD has no matching stamp it blocks and prompts Claude to run `scripts/preflight.sh`. Bypass either layer with `git push --no-verify`.
 
-## Qodana pre-flight (local)
+## Qodana
 
-Qodana gates merges via the `ci-pass` aggregator. Run the **same scan CI submits**, locally, with `scripts/qodana-local.sh` (issue 1099). The naive `qodana scan` times out because it bind-mounts the repo over colima's virtiofs and Qodana's `cargo metadata` pass does thousands of small reads there; the script sidesteps that the way CI does — it syncs the working tree (plus real git history) into a Docker named volume (the VM's native fs) and keeps a persistent cache volume for the bootstrapped toolchain + analysis caches. Same linter image / `qodana.recommended` profile / fail-threshold as the CI job, reading the same `qodana.yaml` — `failThreshold: 2` lives there as the single source both the CI job and the local run inherit (neither passes a `--fail-threshold` CLI override). The run mirrors CI's PR mode: it scans scoped against the merge-base with `origin/main` (`--diff-start`), so only the findings the branch newly introduces count toward `failThreshold` — the same scope CI's qodana-action auto-enables on a pull request. `--full` forces a whole-tree scan, and the run falls back to whole-tree automatically when there is no diff against `origin/main` (e.g. on `main`). `scripts/preflight.sh --qodana` runs it as a pre-flight step; concurrent runs serialize on a lockfile (the volumes are fixed shared names).
+Qodana is a required merge gate via the `ci-pass` aggregator (the `Qodana scan` check), run by CI in PR mode — scoped against the `origin/main` merge-base, so only findings the branch newly introduces count toward `failThreshold: 2`. There is **no local scan**: `qodana.yaml` (linter image, `qodana.recommended` profile, excludes, `failThreshold: 2`) is the single config source CI reads, and `NewCrateVersionAvailable` is excluded project-wide.
 
-- **Run it**: `colima start` first (the script won't auto-boot a cold VM), then `scripts/qodana-local.sh`. ~3.3min warm; SARIF + HTML report land in `./.qodana-local/` (gitignored). Exit code is Qodana's gate (non-zero = findings). `--full` forces a whole-tree scan instead of the default scoped diff; `--rebuild-cache` drops the cache volume.
-- **Fidelity**: the run scans the same scope as CI's PR-mode gate — scoped against the `origin/main` merge-base (`--diff-start`) — so it predicts the CI qodana verdict instead of over-reporting the pre-existing findings a whole-tree scan counts. It reads the same `qodana.yaml` (linter image, `qodana.recommended` profile, excludes, `failThreshold: 2`), the single source both gates inherit. `NewCrateVersionAvailable` is excluded project-wide in `qodana.yaml`, so there's no token-gated local/CI gap to close.
+When a PR's `Qodana scan` is red, `/implement` holds the draft (a sole Qodana red is not a push blocker) and `/land` resolves it before un-drafting: `scripts/qodana-report.sh <pr>` downloads the CI `qodana-report` artifact, parses the SARIF, and prints the findings on the PR's own changes (`--all` for the whole-tree set); Claude fixes them in the worktree. Suspected false positives are surfaced to the user — never silenced by editing a `qodana.yaml` exclude or committing a `--baseline` without explicit sign-off (fix what's fixable; baseline only verified FPs). Re-baselining `qodana.sarif.json`, when warranted, uses the same `qodana-report` artifact.
 
-The authoritative local qodana gate is `scripts/preflight.sh --qodana` (or `scripts/qodana-local.sh` directly) — the same scan CI runs, working from any checkout including a `.claude/worktrees/` worktree. RustRover's IDE inspector is **not** the qodana pre-flight: it analyzes the IDE's open project (the main checkout, not the worktree diff an implement agent validates) and rehosts only a subset of the checks. Reach for RustRover MCP for rename / symbol / refactor work; for the qodana gate use qodana-local.
-
-Re-baselining (`qodana.sarif.json`) is done by downloading the `qodana-report` workflow artifact from a CI run.
+RustRover's IDE inspector is **not** this gate: it analyzes the IDE's open project and rehosts only a subset of the checks. Reach for RustRover MCP for rename / symbol / refactor work; the `Qodana scan` CI check is the authoritative qodana verdict.
 
 ## Heavy (contention-sensitive) tests
 

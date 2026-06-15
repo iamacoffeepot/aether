@@ -25,7 +25,7 @@ Two entry shapes, one skill:
 | Check | Refusal |
 |-------|---------|
 | PR exists and is a draft | "PR #N is not a draft — it may have already been un-drafted or merged." |
-| CI green (all required checks pass, none pending) | "PR #N is not CI-green. Wait for checks or use `/implement <issue>` to fix." |
+| CI green — or green except `Qodana scan` as the sole failing required check, none pending (the [Qodana sweep](#qodana-sweep) resolves it before un-draft) | "PR #N has a non-Qodana required check red (or checks pending). Wait, or use `/implement <issue>` to fix a non-Qodana red." |
 | PR has a closing issue (the PR's closing-issue reference) | "PR #N has no closing issue. Link one (`Closes #M`) or delete the phase label manually." |
 
 Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`.
@@ -90,7 +90,9 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Then re-predict. If the rebase produces conflicts, the branch becomes `dirty` — surface and abort.
 
-4. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). This is the **sole remaining GraphQL-only op in the whole pipeline** — every other operation, phase state included, runs on REST now that the project board is retired:
+4. **Qodana sweep (only when `Qodana scan` is the sole red).** When gate-check found `Qodana scan` as the one failing required check, resolve it before un-drafting — run the [Qodana sweep](#qodana-sweep): fetch the findings from the `qodana-report` artifact, triage and fix them in the worktree, re-push, and wait for `CI pass` green. Only then proceed. Skip this step when the PR is already fully green; bail to the user (do not un-draft) when the sweep surfaces an artifact-missing / outside-the-diff / uncertain case.
+
+5. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). This is the **sole remaining GraphQL-only op in the whole pipeline** — every other operation, phase state included, runs on REST now that the project board is retired:
    ```bash
    gh api graphql -f query='
    mutation {
@@ -101,7 +103,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Verify `isDraft` is `false` in the response before proceeding.
 
-5. **Squash-merge.** With auto-merge enabled on this repo, un-drafting a green PR typically lets GitHub's native auto-merge land it. When that is not relied on (e.g. auto-merge disabled, or a race window), issue the REST squash merge directly:
+6. **Squash-merge.** With auto-merge enabled on this repo, un-drafting a green PR typically lets GitHub's native auto-merge land it. When that is not relied on (e.g. auto-merge disabled, or a race window), issue the REST squash merge directly:
    ```bash
    gh api -X PUT repos/iamacoffeepot/aether/pulls/<n>/merge \
      -f merge_method=squash \
@@ -109,7 +111,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid marking an un-landed issue Done (deleting its phase label).
 
-6. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
+7. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
    ```bash
    gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
      --jq '.[].name | select(startswith("phase:"))' \
@@ -118,20 +120,32 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
        done
    ```
 
-7. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
+8. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
    ```bash
    git worktree remove .claude/worktrees/issue-<m>
    git branch -D <branch>
    ```
    If the worktree has uncommitted files (rare — the implement agent should have committed everything), use `--force`. Skip this step when `--no-sweep` was passed.
 
-8. **Print summary.**
+9. **Print summary.**
    ```
    ✓ #<n> landed.
    Merged: <pr-url>
    Issue #<m>: Phase → Done
    Worktree: .claude/worktrees/issue-<m> swept
    ```
+
+## Qodana sweep
+
+Qodana is a required CI gate (`Qodana scan`, in `ci-pass`), not a local pre-flight step. `/implement` holds a draft whose only red is `Qodana scan` at `phase:refine`; `/land` resolves it here, before un-drafting. Invoked from [Landing sequence](#landing-sequence) step 4 when `Qodana scan` is the sole red.
+
+1. **Confirm Qodana-only.** From the REST check-runs set, the failing required checks minus `CI pass` must be exactly `{Qodana scan}`. Any other red is a real failure — refuse and route to `/implement`.
+2. **Fetch + parse the findings.** `scripts/qodana-report.sh <pr>` downloads the PR's `qodana-report` CI artifact, parses the SARIF, filters to findings on the PR's own changes, and prints the actionable list (`file:line  [severity] ruleId — message`), exiting non-zero when PR-diff findings exist. `--all` prints the whole-tree set.
+3. **Triage + fix in the worktree.** Resolve each finding. Surface a suspected **false positive** to the user rather than editing a `qodana.yaml` exclude or committing a `--baseline` — those weaken the gate and need explicit sign-off (fix what's fixable; baseline only verified FPs).
+4. **Local sanity** before re-push: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, and the affected `cargo nextest`.
+5. **Commit + push**, then `scripts/wave-status.sh --wait <pr>` until green, and continue the landing sequence from un-draft.
+
+**Bail out — surface to the user, do not fix —** when `qodana-report.sh` reports no artifact or the Qodana job crashed (EAP infra; the old `Stalled` case); when findings land outside the PR's own changes; or when the find set is too large / uncertain for a confident pass (a large clean set may go to a focused `Agent`; inline is the default). Never auto-suppress a finding to make the gate pass.
 
 ## Conflict prediction and routing
 
@@ -192,7 +206,8 @@ This is the same form `/scope` documents for the `Backlog` and `Done` phases —
 ## What /land does NOT do
 
 - Auto-resolve content conflicts. A `dirty` branch always surfaces to the user (or an optional delegated agent).
-- Un-draft a PR that is not CI-green. The gate check enforces green before un-draft.
+- Un-draft a PR with a non-Qodana required check red. The gate enforces green before un-draft, except a sole `Qodana scan` red, which the [Qodana sweep](#qodana-sweep) resolves first.
+- Auto-suppress Qodana findings — edit a `qodana.yaml` exclude or commit a `--baseline` — without surfacing to the user. The Qodana sweep fixes findings or surfaces them; it never silences them.
 - Land PRs in parallel. Protected `main` enforces linear history; parallel landing races to discover the serialization. The sequence lands one at a time with recompute.
 - Delete the `phase:*` label before verifying the merge completed (`merged` field confirmed `true`).
 - Remove a worktree whose PR has not merged. The sweep tail runs only after a confirmed merge.

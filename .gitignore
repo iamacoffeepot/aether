@@ -60,9 +60,6 @@ spikes/*/target/
 # (iamacoffeepot/aether#1084) — populated by scripts/perf-compare.sh,
 # persisted by the workflow's actions/cache, never committed.
 /.perf-cache/
-# Local Qodana scan output (scripts/qodana-local.sh) — SARIF + HTML
-# report copied out of the results volume; regenerated each run.
-/.qodana-local/
 
 # Environment files — may hold secrets (API keys, etc.); never commit.
 # Covers any directory and every variant: .env, .env.local, .env.production, etc.

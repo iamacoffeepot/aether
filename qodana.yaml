@@ -11,9 +11,9 @@ profile:
 
 # Quality gate: the scan fails when the finding count exceeds this.
 # Bumped 0 -> 2 so a small number of findings get swept at end-of-release
-# rather than blocking each push. Single source of truth — both the CI
-# Qodana job and scripts/qodana-local.sh inherit it (neither passes a
-# --fail-threshold CLI override, which would shadow this value).
+# rather than blocking each push. Single source of truth — the CI Qodana
+# job reads it (it passes no --fail-threshold CLI override, which would
+# shadow this value).
 failThreshold: 2
 
 # Paths Qodana shouldn't analyse.

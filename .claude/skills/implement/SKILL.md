@@ -15,7 +15,7 @@ Two entry shapes, one skill:
 Two ways to run it:
 
 - **In-session (default).** The whole skill runs in the main session — implement, push, drive CI green, hold the draft. Use this for a single issue or when you want tight control over each step.
-- **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh --qodana` (which stamps the commit; `--qodana` runs the same qodana scan CI gates on, needs colima up), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or phase-label writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`). **The parent owns the `phase:executing` flip at dispatch:** before or as it spawns the agents, the parent performs §Execute step 1 — the `phase:executing` label reconcile — for every issue in the batch. The dispatched agent never touches the phase label, so the flip cannot be deferred to it; leaving it for the parent's takeover would hold each issue at `phase:ready` for the whole time its agent is implementing, misreporting the in-flight fleet and inviting a double-dispatch. `Executing` here means *handed to an agent*: with batched per-agent queues every issue in a queue flips at dispatch, so a queued-but-not-yet-started issue reads `phase:executing` slightly early — accepted, because the parent cannot observe intra-agent queue progress and `phase:ready` would misreport the whole window.
+- **Hybrid background-agent.** To parallelize across independent issues, the orchestrator may dispatch one background Agent per issue that does *only* the bounded, parallelizable part: cut the worktree off `main`, implement the plan, run the full-workspace validation, and commit — then **STOP**. The main session ("parent") then takes each finished worktree and runs the serial, less-reliable part itself: `scripts/preflight.sh` (which stamps the commit), the push, the draft-PR open, and the CI-green Refine loop — reviewing the agent's diff as it takes over. Never hand the push, PR creation, CI loop, or phase-label writes to the dispatched Agent: handing off the *whole* skill (the retired `/delegate`) proved flaky, so the split keeps the unreliable parts in-session (see `feedback_delegate_implementation_stop_after_commit`). **The parent owns the `phase:executing` flip at dispatch:** before or as it spawns the agents, the parent performs §Execute step 1 — the `phase:executing` label reconcile — for every issue in the batch. The dispatched agent never touches the phase label, so the flip cannot be deferred to it; leaving it for the parent's takeover would hold each issue at `phase:ready` for the whole time its agent is implementing, misreporting the in-flight fleet and inviting a double-dispatch. `Executing` here means *handed to an agent*: with batched per-agent queues every issue in a queue flips at dispatch, so a queued-but-not-yet-started issue reads `phase:executing` slightly early — accepted, because the parent cannot observe intra-agent queue progress and `phase:ready` would misreport the whole window.
 
   **Batched dispatch.** Before spawning agents, the orchestrator reads each candidate issue's `size:*` and `model:*` labels over REST (`gh api repos/iamacoffeepot/aether/issues/<n> --jq '.labels[].name'` per issue, or one `gh api 'repos/iamacoffeepot/aether/issues?labels=size:m&state=open' --jq '.[].number'` sweep — not `gh issue view` / `gh issue list`, which are GraphQL-backed) — no GraphQL query needed, since `/scope` stamps the size and model routing onto labels at Plan time. It then packs the approved issues into per-agent queues by an **estimated context budget** rather than a fixed count: a queue accumulates issues until the next one would push it past the ~150k-token compaction threshold an agent hits, then a new queue opens.
 
@@ -138,7 +138,7 @@ Type comes from the issue's `type:*` label. Slug is the issue title sanitized: l
    - `cargo nextest run --workspace`
    - `cargo doc --workspace --no-deps`
    - wasm32 cross-build for component crates (`cargo metadata` → packages with `crate-type = cdylib` and `aether-actor` dep)
-   - `scripts/preflight.sh --qodana` if present (writes the stamp file expected by the pre-push hook). Pass `--qodana` on this push path so the pre-flight runs the same qodana scan CI gates on before the PR opens — it needs colima/docker up and adds ~3.3min; a non-clean qodana exit (findings over `failThreshold`, or the Qodana-for-Rust EAP tooling crash) classifies as a build-env failure → `Stalled` (handle as a `--no-verify` push only for a confirmed EAP flake, never to skip real findings)
+   - `scripts/preflight.sh` if present (writes the stamp file expected by the pre-push hook). Qodana is **not** run here — it is a required CI gate (`Qodana scan`, in `ci-pass`) resolved at `/land` from the `qodana-report` artifact, so a sole `Qodana scan` red holds the draft for `/land` rather than blocking the push (see the Refine loop's CI-green branch)
 
 4. Push the branch, then open the PR over REST (`gh pr create` is GraphQL-backed; `POST …/pulls` is REST and takes `draft: true` directly). Write the PR body to a file first so backticks / `$` in the template aren't shell-expanded, and pass it with `-F body=@<file>`:
    ```bash
@@ -165,9 +165,9 @@ After PR open, enter the loop. On each iteration:
 
    `wave-status.sh --wait <pr>` loops (polling every 20s) until `CI pass` — the required merge aggregator — is present and completed with zero pending check-runs, then exits 0 on `success` or 1 on failure/neutral. A subset-registered matrix (only `Detect changes` up, say) can't trip a false green. Exit 0 → goto step 2; exit 1 → the script has already printed the failed child check names — go to step 3.
 
-2. **CI green** → goto "Done condition" below.
+2. **CI green** → goto "Done condition" below. **Or green except a sole `Qodana scan` red** — the failing required checks minus `CI pass` are exactly `{Qodana scan}`: also goto "Done condition". A sole Qodana red is not fixed or Stalled here; it is held at `phase:refine` for `/land` to resolve from the `qodana-report` artifact. (Any other red alongside it is a real failure — go to step 3.)
 
-3. **CI failed** → pull logs (`gh run view <run-id> --log-failed`), classify, act:
+3. **CI failed** (a non-Qodana required check is red) → pull logs (`gh run view <run-id> --log-failed`), classify, act:
 
    ```
    Classification → Action
@@ -179,8 +179,8 @@ After PR open, enter the loop. On each iteration:
    Scenario runner regression      → real, fix or bounce-to-Design
    Pre-existing test breaks        → likely scope expansion needed
                                      bounce-to-Plan with the test name
-   Build env failure (qodana down,
-   gh api rate limit, network)     → Stalled, abort loop, set
+   Build env failure (gh api rate
+   limit, network)                 → Stalled, abort loop, set
                                      Phase=Stalled, exit
    ```
 
@@ -204,9 +204,9 @@ Format/clippy/build are never flakes — always real, always immediate fix.
 
 ## Done condition
 
-CI green:
+CI green — or green except a sole `Qodana scan` red held for `/land`:
 
-1. Phase label: leave the issue at `phase:refine`. The resting state is "draft PR open + green" — no comment; the green checks on the PR are the record.
+1. Phase label: leave the issue at `phase:refine`. The resting state is "draft PR open + green (or Qodana-only red)" — no comment; the PR's checks are the record. A held `Qodana scan` red is normal here: `/land` runs the Qodana sweep before it un-drafts.
 2. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not delete the `phase:*` label (Done is a `/land`-time action). Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
 3. Print to user:
 
