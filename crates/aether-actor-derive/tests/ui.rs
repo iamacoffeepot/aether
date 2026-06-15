@@ -38,4 +38,12 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_stream_reserved_ffi.rs");
     t.compile_fail("tests/ui/rejects_stream_reserved_native.rs");
     t.compile_fail("tests/ui/rejects_manual_marker_mismatch_ffi.rs");
+    // ADR-0113: declarative `type State` + `dehydrate` / `rehydrate`
+    // accessors generate the hot-swap hooks; the macro enforces the XOR
+    // (no manual hook), the pairing (both accessors), and the dependency
+    // (an accessor needs `type State`).
+    t.pass("tests/ui/accepts_state_actor.rs");
+    t.compile_fail("tests/ui/rejects_state_with_manual_hook.rs");
+    t.compile_fail("tests/ui/rejects_accessor_without_state.rs");
+    t.compile_fail("tests/ui/rejects_missing_rehydrate.rs");
 }

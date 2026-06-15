@@ -1239,6 +1239,220 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     );
 }
 
+/// ADR-0113: a single-actor component carries its declared `type State`
+/// across `replace_component` through the macro-generated `on_dehydrate`
+/// / `on_rehydrate` hooks — no hand-written hooks. Loads the
+/// `stateful_replace_typed` fixture, bumps the counter to 3, replaces the
+/// wasm at the same mailbox id with the same binary, then re-queries. The
+/// generated `on_dehydrate` frames the `CounterState` via
+/// `save_state_kind`; the generated `on_rehydrate` recovers it via
+/// `as_kind`, so the count survives the swap.
+#[test]
+fn replace_preserves_state_via_typed_state_kind() {
+    use aether_actor::Actor;
+
+    const FIXTURE_NAME: &str = "stateful_replace_typed";
+
+    let Some(wasm_path) = require_runtime(FIXTURE_NAME) else {
+        return;
+    };
+    let addr = format!(
+        "aether.component/{}:{FIXTURE_NAME}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let mailbox_id = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
+    };
+
+    // Bump the counter to 3, then read it back.
+    let pre = bench
+        .execute(vec![
+            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+        ])
+        .expect("bump + query sequence");
+    assert_eq!(
+        pre.reply::<CountReport>("query")
+            .expect("decode pre-replace CountReport"),
+        CountReport { count: 3 },
+        "three bumps should leave the counter at 3 before the replace",
+    );
+
+    // Replace with the same binary; the generated hooks carry the count.
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
+    let swapped = bench
+        .execute(vec![(
+            "swap",
+            BenchOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    match swapped
+        .reply::<ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+    {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
+
+    let post = bench
+        .execute(vec![(
+            "query",
+            BenchOp::send_and_await(addr.as_str(), &CountQuery),
+        )])
+        .expect("post-replace query sequence");
+    let post_count = post
+        .reply::<CountReport>("query")
+        .expect("decode post-replace CountReport");
+    assert_eq!(
+        post_count,
+        CountReport { count: 3 },
+        "the counter must survive the replace via the macro-generated typed-state hooks; \
+         got {post_count:?} (0 means the generated hooks did not carry the state)",
+    );
+}
+
+/// ADR-0113: when a replacement is compiled against a reshaped `type
+/// State` kind (a different `Kind::ID`), the generated `on_rehydrate`
+/// sees `PriorState::as_kind` miss the decode and boots fresh. Loads the
+/// `stateful_replace_typed` fixture, bumps to 3, then replaces it with
+/// `stateful_replace_reshaped` (same `NAMESPACE`, a `CounterState` that
+/// gained a field). The recovered count is 0 — the fresh-`init` value —
+/// because the saved bundle's leading id no longer matches. The warn the
+/// generated hook emits on the decode-miss is covered host-side by
+/// `aether-actor`'s `state_framing_roundtrip` test (the bench does not
+/// route `aether.log` mail through its observed sinks).
+#[test]
+fn typed_state_decode_miss_boots_fresh() {
+    use aether_actor::Actor;
+
+    const TYPED_NAME: &str = "stateful_replace_typed";
+    const RESHAPED_NAME: &str = "stateful_replace_reshaped";
+
+    let Some(typed_path) = require_runtime(TYPED_NAME) else {
+        return;
+    };
+    let Some(reshaped_path) = require_runtime(RESHAPED_NAME) else {
+        return;
+    };
+    let addr = format!(
+        "aether.component/{}:{TYPED_NAME}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
+
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: typed_wasm,
+                    name: Some(TYPED_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                },
+            ),
+        )])
+        .expect("load sequence");
+    let mailbox_id = match loaded
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+    {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
+    };
+
+    let pre = bench
+        .execute(vec![
+            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+        ])
+        .expect("bump + query sequence");
+    assert_eq!(
+        pre.reply::<CountReport>("query")
+            .expect("decode pre-replace CountReport"),
+        CountReport { count: 3 },
+        "three bumps should leave the counter at 3 before the replace",
+    );
+
+    // Replace with the reshaped wasm: the saved bundle's leading id no
+    // longer matches the new `CounterState::ID`, so rehydrate misses.
+    let reshaped_wasm = fs::read(&reshaped_path).expect("read reshaped fixture wasm");
+    let swapped = bench
+        .execute(vec![(
+            "swap",
+            BenchOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm: reshaped_wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    match swapped
+        .reply::<ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+    {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
+
+    let post = bench
+        .execute(vec![(
+            "query",
+            BenchOp::send_and_await(addr.as_str(), &CountQuery),
+        )])
+        .expect("post-replace query sequence");
+    let post_count = post
+        .reply::<CountReport>("query")
+        .expect("decode post-replace CountReport");
+    assert_eq!(
+        post_count,
+        CountReport { count: 0 },
+        "a reshaped state kind must boot fresh on rehydrate (decode-miss); \
+         got {post_count:?} (3 would mean the stale bundle decoded against the new shape)",
+    );
+}
+
 /// fs scenarios need wgpu (the bench unconditionally builds a
 /// `Gpu` at boot) but not the fixture wasm. Skips on wgpu-less
 /// runners and panics under `AETHER_REQUIRE_RUNTIME` so a

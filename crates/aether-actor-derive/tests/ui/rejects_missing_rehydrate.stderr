@@ -1,0 +1,5 @@
+error: `type State` requires a `fn rehydrate(&mut self, state: Self::State)` accessor (ADR-0113) — the macro restores state through it in the generated `on_rehydrate`
+  --> tests/ui/rejects_missing_rehydrate.rs:37:5
+   |
+37 |     type State = CounterState;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -154,6 +154,27 @@ pub trait FfiActor: crate::Actor {
     /// would have to write `type Config = ();` themselves.
     type Config: aether_data::Kind;
 
+    /// ADR-0113 kind-typed persistent state: the durable shape the
+    /// actor carries across a `replace_component` swap. Declaring it
+    /// (beside a `dehydrate` / `rehydrate` accessor pair) lets the
+    /// `#[actor]` macro generate the [`Self::on_dehydrate`] /
+    /// [`Self::on_rehydrate`] hooks instead of the author hand-writing
+    /// them — the save side snapshots `State` and frames it via
+    /// `save_state_kind`, the restore side decodes it via
+    /// [`PriorState::as_kind`][crate::PriorState::as_kind] and boots
+    /// fresh (with a `tracing::warn!`) when a reshaped `State` kind no
+    /// longer decodes.
+    ///
+    /// Mirrors [`Self::Config`]: the `#[actor]` macro synthesizes
+    /// `type State = ();` when the author omits it, so a no-persistence
+    /// actor is unchanged and pays nothing (stable Rust has no
+    /// associated-type defaults — rust-lang/rust#29661 — so the
+    /// synthesis stands in). Distinct from `Self` because the durable
+    /// fields are a subset of the actor's state: the `Mailbox` tokens
+    /// and handle ids `init` rebuilds are intentionally excluded
+    /// (ADR-0113).
+    type State: aether_data::Kind;
+
     /// Runs once. Resolve kinds and mailboxes via `ctx` and return the
     /// initial actor state. ADR-0033: `#[actor]` prepends
     /// `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler

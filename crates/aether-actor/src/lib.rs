@@ -125,6 +125,11 @@ pub mod __macro_internals {
     // `Box<dyn ErasedFfiActor>`; re-export `Box` so the emitted code
     // doesn't depend on the guest crate's prelude exposing `alloc`.
     pub use alloc::boxed::Box;
+    // ADR-0113: the `#[actor]`-generated `on_rehydrate` warns through
+    // `::aether_actor::__macro_internals::tracing::warn!` on a non-empty
+    // decode-miss, so the macro roots the warn here rather than forcing
+    // `tracing` into every component's dependency list.
+    pub use tracing;
 }
 
 /// ADR-0033 attribute macros and `Kind` / `Schema` derives, behind

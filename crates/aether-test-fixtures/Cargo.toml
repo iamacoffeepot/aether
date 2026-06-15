@@ -70,6 +70,22 @@ crate-type = ["cdylib"]
 name = "stateful_replace"
 crate-type = ["cdylib"]
 
+# ADR-0113 declarative-state fixture: a single-actor `Counter` that
+# declares `type State = CounterState` plus the `dehydrate` / `rehydrate`
+# accessors, so `#[actor]` generates the hooks. The counter survives a
+# same-wasm `replace_component` swap with no hand-written hooks.
+[[example]]
+name = "stateful_replace_typed"
+crate-type = ["cdylib"]
+
+# ADR-0113 decode-miss companion: same `NAMESPACE` / `CounterState` kind
+# name but a reshaped state shape (added field → different `Kind::ID`).
+# Replacing the typed fixture with this one makes the generated
+# `on_rehydrate` miss the decode and boot fresh.
+[[example]]
+name = "stateful_replace_reshaped"
+crate-type = ["cdylib"]
+
 # Issue 1454: cube render fixture. Emits a twelve-triangle world-space
 # unit cube under a fixed `view_proj` so the TestBench cube scenario can
 # assert the camera + depth + readback pipeline.
