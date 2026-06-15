@@ -1,6 +1,6 @@
 # ADR-0108: Substrate HTTP server capability
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the aether.http server capability)
 - **Date:** 2026-06-12
 
 Mirrors **ADR-0043** (the substrate HTTP egress sink) on the inbound side: where ADR-0043 turns a component's outbound `Fetch` mail into an HTTP request, this turns an inbound HTTP request into mail to a handler component. It reuses ADR-0043's `HttpMethod` / `HttpHeader` shapes and its buffered-body decision, joins the socket-binding capability family of **ADR-0079** (the `aether.tcp` listener / session actors), drives its response close through the settlement machinery of **ADR-0080** and **ADR-0106**, follows the I/O-cap-as-mail-sink and config-layering template of **ADR-0041** and **ADR-0090**, and takes the `RpcServerCapability` (issue 750) as its literal code template.

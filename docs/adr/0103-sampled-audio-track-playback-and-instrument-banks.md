@@ -1,6 +1,6 @@
 # ADR-0103: Sampled Audio: Track Playback and Instrument Banks
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — sampled audio in the aether.audio capability)
 - **Date:** 2026-06-11
 
 ## Context

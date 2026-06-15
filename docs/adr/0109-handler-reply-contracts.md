@@ -1,6 +1,6 @@
 # ADR-0109: Handler reply contracts via return types
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — return-type reply contracts in aether-actor)
 - **Date:** 2026-06-13
 
 ## Context

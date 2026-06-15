@@ -1,6 +1,6 @@
 # ADR-0104: Scheduled note events for the audio capability
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the aether.audio.schedule handler)
 - **Date:** 2026-06-12
 
 ## Context
