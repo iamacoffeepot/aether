@@ -1040,12 +1040,54 @@ mod engine {
         pub last_heartbeat_age_millis: u64,
     }
 
+    /// Why an engine left the supervised-engine table, as carried in a
+    /// [`DeadEngineDescriptor`] (and in the [`EngineDied`] signal for the
+    /// two self-death paths). A tagged enum so an observer can branch on
+    /// the cause without parsing free text; the `detail` string on the
+    /// non-clean variants carries the specifics.
+    ///
+    /// - `Terminated` — a deliberate `aether.engine.terminate` shut the
+    ///   engine down. The clean-shutdown case; carries no detail.
+    /// - `Crashed { detail }` — the substrate closed its RPC connection
+    ///   (`Bye` / eof) on its own; `detail` is the close reason the proxy
+    ///   observed.
+    /// - `Evicted { detail }` — the liveness heartbeat crossed its miss
+    ///   limit and the proxy declared the engine dead; `detail` is the
+    ///   `heartbeat miss limit N of M` count.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum DeathReason {
+        Terminated,
+        Crashed { detail: String },
+        Evicted { detail: String },
+    }
+
+    /// One recently-departed engine, as reported in a
+    /// [`ListEnginesResult`]'s `recently_died` ring (the bounded last-N
+    /// deaths the engines cap retains). Distinct from [`EngineDescriptor`]:
+    /// a dead engine carries a [`DeathReason`] and an age-since-death
+    /// rather than a live heartbeat age. `engine_id` / `rpc_port` are the
+    /// same identifiers it carried while alive; `died_age_millis` is how
+    /// long ago the cap removed it from the supervised table.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct DeadEngineDescriptor {
+        pub engine_id: String,
+        pub rpc_port: u16,
+        pub reason: DeathReason,
+        pub died_age_millis: u64,
+    }
+
     /// `aether.engine.list_result` — reply to [`ListEngines`]: every
-    /// engine the cap supervises right now. Issue 763 P4.
+    /// engine the cap supervises right now, plus a bounded sidecar of the
+    /// engines that recently left and why. Issue 763 P4.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.list_result")]
     pub struct ListEnginesResult {
         pub engines: Vec<EngineDescriptor>,
+        /// The recently-died ring: the last few engines that left the
+        /// supervised table, each with why it left ([`DeathReason`]) and
+        /// how long ago. Lets an observer tell a clean `terminate` from a
+        /// crash or a heartbeat eviction without grepping host logs.
+        pub recently_died: Vec<DeadEngineDescriptor>,
     }
 
     /// `aether.engine.spawn` — ask the engines cap to fork+exec a
@@ -1181,6 +1223,12 @@ mod engine {
     #[kind(name = "aether.engine.died")]
     pub struct EngineDied {
         pub engine_id: String,
+        /// Why the proxy is reporting the death, so the cap can record it
+        /// into its recently-died ring: `Crashed` for a connection-close
+        /// (`Bye` / eof), `Evicted` for a heartbeat miss-limit crossing. A
+        /// deliberate terminate never sends `EngineDied` — the cap records
+        /// `Terminated` itself at the removal site.
+        pub reason: DeathReason,
     }
 
     /// `aether.engine.alive` — a per-engine proxy reporting a confirmed
@@ -4571,6 +4619,80 @@ mod tests {
         let back = SpawnEngine::decode_from_bytes(&bare.encode_into_bytes())
             .expect("test setup: bare SpawnEngine decodes");
         assert_eq!(back.boot_manifest, None);
+    }
+
+    #[test]
+    fn engine_died_carries_death_reason() {
+        // `EngineDied` gained a `reason` field — the proxy's self-death
+        // paths tag the cause (`Crashed` for a `Bye`, `Evicted` for a
+        // heartbeat miss). Both the id and the tagged reason must survive
+        // the postcard encode/decode the proxy → cap mail rides.
+        use alloc::string::ToString;
+
+        let died = EngineDied {
+            engine_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            reason: DeathReason::Crashed {
+                detail: "peer closed: eof".to_string(),
+            },
+        };
+        let back = EngineDied::decode_from_bytes(&died.encode_into_bytes())
+            .expect("test setup: EngineDied decodes");
+        assert_eq!(back.engine_id, died.engine_id);
+        assert_eq!(
+            back.reason,
+            DeathReason::Crashed {
+                detail: "peer closed: eof".to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn list_engines_result_roundtrips_recently_died() {
+        // `ListEnginesResult` gained the `recently_died` ring; each entry
+        // carries a tagged `DeathReason`. All three reasons (and the live
+        // engine list alongside) must round-trip the engines-cap reply.
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        let result = ListEnginesResult {
+            engines: vec![EngineDescriptor {
+                engine_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                rpc_port: 9001,
+                last_heartbeat_age_millis: 0,
+            }],
+            recently_died: vec![
+                DeadEngineDescriptor {
+                    engine_id: "22222222-2222-2222-2222-222222222222".to_string(),
+                    rpc_port: 9002,
+                    reason: DeathReason::Terminated,
+                    died_age_millis: 12,
+                },
+                DeadEngineDescriptor {
+                    engine_id: "33333333-3333-3333-3333-333333333333".to_string(),
+                    rpc_port: 9003,
+                    reason: DeathReason::Evicted {
+                        detail: "heartbeat miss limit 3 of 3".to_string(),
+                    },
+                    died_age_millis: 34,
+                },
+            ],
+        };
+        let back = ListEnginesResult::decode_from_bytes(&result.encode_into_bytes())
+            .expect("test setup: ListEnginesResult decodes");
+        assert_eq!(back.engines.len(), 1);
+        assert_eq!(back.recently_died.len(), 2);
+        assert_eq!(
+            back.recently_died[0].engine_id,
+            result.recently_died[0].engine_id
+        );
+        assert_eq!(back.recently_died[0].reason, DeathReason::Terminated);
+        assert_eq!(back.recently_died[0].died_age_millis, 12);
+        assert_eq!(
+            back.recently_died[1].reason,
+            DeathReason::Evicted {
+                detail: "heartbeat miss limit 3 of 3".to_string(),
+            },
+        );
     }
 
     #[test]

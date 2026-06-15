@@ -55,7 +55,7 @@ mod proxy_native {
     };
     use aether_actor::{Actor, actor};
     use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
-    use aether_kinds::{CallSettled, EngineAlive, EngineDied};
+    use aether_kinds::{CallSettled, DeathReason, EngineAlive, EngineDied};
     use aether_substrate::Mail;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -322,8 +322,11 @@ mod proxy_native {
                         // Tell the engines cap the engine is gone so it
                         // drops the registry entry — without this the
                         // proxy dies but `list_engines` keeps reporting
-                        // a corpse (issue 1339).
-                        self.report_died(ctx);
+                        // a corpse (issue 1339). The substrate closed the
+                        // connection on its own — a crash, not a
+                        // deliberate terminate; carry the `Bye` reason so
+                        // `list_engines` can show why.
+                        self.report_died(ctx, DeathReason::Crashed { detail: reason });
                         ctx.shutdown();
                         return;
                     }
@@ -402,7 +405,15 @@ mod proxy_native {
                     miss_limit = self.miss_limit,
                     "engine proxy: heartbeat miss limit crossed; evicting engine",
                 );
-                self.report_died(ctx);
+                self.report_died(
+                    ctx,
+                    DeathReason::Evicted {
+                        detail: format!(
+                            "heartbeat miss limit {} of {}",
+                            self.missed_heartbeats, self.miss_limit
+                        ),
+                    },
+                );
                 ctx.shutdown();
             }
         }
@@ -532,12 +543,17 @@ mod proxy_native {
         }
 
         /// Report this engine's death to the engines cap so it drops the
-        /// registry entry (issue 1339). Idempotent on the cap side — a
-        /// `died` for an already-evicted engine is a no-op. Sent as a
-        /// fresh root for the same reason as [`Self::report_alive`].
-        fn report_died(&self, ctx: &NativeCtx<'_>) {
+        /// registry entry and records the cause in its recently-died ring
+        /// (issue 1339, issue 1906). `reason` distinguishes a crash
+        /// (`Crashed`, connection-close) from a heartbeat eviction
+        /// (`Evicted`); a deliberate terminate never reaches here.
+        /// Idempotent on the cap side — a `died` for an already-evicted
+        /// engine is a no-op. Sent as a fresh root for the same reason as
+        /// [`Self::report_alive`].
+        fn report_died(&self, ctx: &NativeCtx<'_>, reason: DeathReason) {
             let died = EngineDied {
                 engine_id: self.engine_id.0.to_string(),
+                reason,
             };
             let _ = ctx.send_envelope_as_root(
                 engine_cap_mailbox(),
@@ -625,19 +641,20 @@ use crate::rpc::test_echo::TestEchoReply;
 // at file root so the `#[bridge]` macro's `HandlesKind` markers stay
 // addressable, the same constraint as the proxy's own handler kinds.
 #[cfg(test)]
-use aether_kinds::{EngineAlive, EngineDied};
+use aether_kinds::{DeathReason, EngineAlive, EngineDied};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 /// Shared capture cells for [`EngineCapSink`]. Lives at file root (not
 /// inside the bridge mod) like `EngineServer`'s `ReplyCells` — it's the
 /// sink actor's `Config`, so it must be addressable as `super::…` from
-/// the bridge mod.
+/// the bridge mod. `died` keeps the whole [`EngineDied`] (id + reason) so
+/// the death-path tests can assert the surfaced cause.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct EngineCapCells {
     pub alive: Arc<Mutex<Vec<String>>>,
-    pub died: Arc<Mutex<Vec<String>>>,
+    pub died: Arc<Mutex<Vec<EngineDied>>>,
 }
 
 /// Test-only stand-in for the engines cap, registered at the cap's own
@@ -681,7 +698,7 @@ mod engine_cap_sink {
                 .died
                 .lock()
                 .expect("test setup: died cell mutex poisoned")
-                .push(mail.engine_id);
+                .push(mail);
         }
     }
 }
@@ -732,8 +749,8 @@ mod tests {
     // fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{
-        EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig, HeartbeatParams,
-        ProxyReplySink,
+        DeathReason, EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig,
+        HeartbeatParams, ProxyReplySink,
     };
     use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
     use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
@@ -972,9 +989,9 @@ mod tests {
         (chassis, cells, engine_id.0.to_string())
     }
 
-    /// Block until `cell` holds at least one entry (returning the
-    /// first), or the deadline passes (panicking with `what`).
-    fn await_first(cell: &Arc<Mutex<Vec<String>>>, what: &str) -> String {
+    /// Block until `cell` holds at least one entry (returning a clone of
+    /// the first), or the deadline passes (panicking with `what`).
+    fn await_first<T: Clone>(cell: &Arc<Mutex<Vec<T>>>, what: &str) -> T {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             // Clone out under the guard, then drop it before the branch
@@ -1023,7 +1040,15 @@ mod tests {
                 }),
             );
             let died = await_first(&cells.died, "wedged engine not evicted");
-            assert_eq!(died, engine_id, "the wedged engine's id is reported dead");
+            assert_eq!(
+                died.engine_id, engine_id,
+                "the wedged engine's id is reported dead"
+            );
+            assert!(
+                matches!(died.reason, DeathReason::Evicted { .. }),
+                "a heartbeat-evicted engine is reported Evicted, got {:?}",
+                died.reason,
+            );
         }
 
         /// A healthy engine (pongs every heartbeat) is reported alive and
@@ -1066,7 +1091,15 @@ mod tests {
             let (port, _server) = fake_server(Behavior::Close);
             let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
             let died = await_first(&cells.died, "closed engine not reported dead");
-            assert_eq!(died, engine_id, "the closed engine's id is reported dead");
+            assert_eq!(
+                died.engine_id, engine_id,
+                "the closed engine's id is reported dead"
+            );
+            assert!(
+                matches!(died.reason, DeathReason::Crashed { .. }),
+                "a connection-close eviction is reported Crashed, got {:?}",
+                died.reason,
+            );
         }
     }
 }

@@ -31,10 +31,10 @@ use aether_data::{
 use aether_kinds::dag::{DagDescriptor, Edge, Node, NodeId};
 use aether_kinds::{
     Cancel, CancelResult, CaptureFrame, CaptureFrameResult, ComponentCapabilities, CostTail,
-    CostTailResult, FrameCheck, FrameReduction, ListEngines, ListEnginesResult, ListKinds,
-    ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope, ReplaceComponent,
-    ReplaceResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, Status, StatusResult, Submit,
-    SubmitResult, TerminateEngine, TerminateEngineResult,
+    CostTailResult, DeathReason, FrameCheck, FrameReduction, ListEngines, ListEnginesResult,
+    ListKinds, ListKindsResult, LoadComponent, LoadResult, MailEnvelope as KindMailEnvelope,
+    ReplaceComponent, ReplaceResult, SimilarityCheck, SpawnEngine, SpawnEngineResult, Status,
+    StatusResult, Submit, SubmitResult, TerminateEngine, TerminateEngineResult,
     trace::{
         DescribeTreeResult, DispatchTraced, DispatchTracedAck, MailNodeWire, TRACE_MAILBOX_NAME,
         TraceTail, TraceTailResult,
@@ -54,12 +54,12 @@ use crate::args::ActorLogsResponse;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow};
 use crate::args::{
     CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DagCancelArgs,
-    DagDescriptorArg, DagStatusArgs, DescribeComponentArgs, DescribeHandlersArgs,
+    DagDescriptorArg, DagStatusArgs, DeadEngineInfo, DescribeComponentArgs, DescribeHandlersArgs,
     DescribeHandlersResponse, DescribeHandlesArgs, DescribeHandlesResponse, EngineInfo,
-    HandleSummaryJson, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, MailStatus,
-    NativeCapHandlers, NativeHandlerJson, NodeArg, ReplaceComponentArgs, ReplyEventJson,
-    SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs, SubmitDagArgs,
-    TerminateSubstrateArgs, TracedMailSpec, TransformListing,
+    HandleSummaryJson, ListEnginesResponse, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
+    MailStatus, NativeCapHandlers, NativeHandlerJson, NodeArg, ReplaceComponentArgs,
+    ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse, SpawnSubstrateArgs,
+    SubmitDagArgs, TerminateSubstrateArgs, TracedMailSpec, TransformListing,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -188,7 +188,7 @@ impl Mcp {
 #[tool_router]
 impl Mcp {
     #[tool(
-        description = "List every engine the hub currently supervises. Each item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate."
+        description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), or \"evicted\" (a missed-heartbeat eviction) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure."
     )]
     pub async fn list_engines(&self) -> Result<String, McpError> {
         let reply = self
@@ -207,7 +207,24 @@ impl Mcp {
                 last_heartbeat_age_millis: e.last_heartbeat_age_millis,
             })
             .collect();
-        json(&engines)
+        let recently_died: Vec<DeadEngineInfo> = result
+            .recently_died
+            .into_iter()
+            .map(|d| {
+                let (reason, detail) = death_reason_parts(d.reason);
+                DeadEngineInfo {
+                    engine_id: d.engine_id,
+                    rpc_port: d.rpc_port,
+                    reason,
+                    detail,
+                    died_age_millis: d.died_age_millis,
+                }
+            })
+            .collect();
+        json(&ListEnginesResponse {
+            engines,
+            recently_died,
+        })
     }
 
     #[tool(
@@ -1979,6 +1996,18 @@ fn json<T: serde::Serialize>(value: &T) -> Result<String, McpError> {
     serde_json::to_string(value).map_err(|e| McpError::internal_error(e.to_string(), None))
 }
 
+/// Flatten a wire [`DeathReason`] into the `(reason, detail)` pair the
+/// `list_engines` tool renders: a short tag plus the variant's detail
+/// string (empty for the clean `Terminated` case). Flat over a tagged
+/// JSON enum so an LLM consumer reads the cause without a nested match.
+fn death_reason_parts(reason: DeathReason) -> (String, String) {
+    match reason {
+        DeathReason::Terminated => ("terminated".to_owned(), String::new()),
+        DeathReason::Crashed { detail } => ("crashed".to_owned(), detail),
+        DeathReason::Evicted { detail } => ("evicted".to_owned(), detail),
+    }
+}
+
 // `e` is owned because callers do `.map_err(internal)` — the closure-
 // converted form needs an `FnOnce(anyhow::Error) -> McpError`.
 #[allow(clippy::needless_pass_by_value)]
@@ -2219,15 +2248,19 @@ mod tests {
         (chassis, port)
     }
 
-    /// `list_engines` over the RPC round-trip yields an empty array on
-    /// a fresh hub — proves the whole `RpcSession` demux + the
-    /// `engine = None` Call path against the real `aether.engine` cap.
+    /// `list_engines` over the RPC round-trip yields an object with empty
+    /// `engines` / `recently_died` arrays on a fresh hub — proves the
+    /// whole `RpcSession` demux + the `engine = None` Call path against
+    /// the real `aether.engine` cap, and the issue-1906 output shape.
     #[tokio::test]
     async fn list_engines_on_empty_hub_is_empty() {
         let (_chassis, port) = boot_hub();
         let mcp = connect_mcp(port);
         let out = mcp.list_engines().await.expect("list_engines ok");
-        assert_eq!(out, "[]", "fresh hub supervises no engines");
+        assert_eq!(
+            out, "{\"engines\":[],\"recently_died\":[]}",
+            "fresh hub supervises no engines and has no recent deaths",
+        );
     }
 
     /// `spawn_substrate` with a binary path that doesn't exist surfaces
