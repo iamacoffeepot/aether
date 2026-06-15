@@ -764,6 +764,7 @@ pub use control_plane::*;
 pub use engine::*;
 pub use rpc::*;
 pub use tcp::*;
+pub use trajectory::*;
 
 mod tcp {
     use alloc::string::String;
@@ -3842,6 +3843,124 @@ mod control_plane {
         pub reachable: bool,
         pub min_cost: u32,
         pub margin: i64,
+    }
+}
+
+mod trajectory {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    /// One per-tick sample from a moving point's grid position and a
+    /// scalar accumulator value. Sent by a producer to the
+    /// `TrajectoryRecorderCapability` (`aether.trajectory`) every tick
+    /// to record the point's current state. `seed` keys the session:
+    /// all samples sharing a seed are accumulated into the same
+    /// `TrajectoryLog` handle, emitted when `TrajectoryEnd` arrives for
+    /// that seed. Fire-and-forget; the recorder has no per-sample reply.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.trajectory.sample")]
+    pub struct TrajectorySample {
+        /// Session discriminator. All samples with the same seed are
+        /// accumulated into a single `TrajectoryLog` handle.
+        pub seed: u64,
+        /// Tick counter at which this sample was captured. Preserved
+        /// verbatim in the log so offline transforms replay in tick
+        /// order.
+        pub tick: u32,
+        /// Grid column the point occupied at this tick.
+        pub x: u32,
+        /// Grid row the point occupied at this tick.
+        pub y: u32,
+        /// Scalar accumulator value at this tick (e.g. a score,
+        /// resource count, or distance travelled — domain-agnostic).
+        pub value: u32,
+    }
+
+    /// Reason a trajectory session ended. Domain-free and self-describing
+    /// so an LLM caller can interpret the terminal event without needing
+    /// additional context (ADR memory: design for machine consumers).
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum TrajectoryEndReason {
+        /// The session ran to its natural conclusion (e.g. the point
+        /// reached its target or exhausted a fixed step budget).
+        Completed,
+        /// The session was cut short by a soft limit (e.g. a time
+        /// budget was exceeded, or a step cap was reached before the
+        /// natural end condition).
+        Truncated,
+        /// The session was cancelled by the producer before it reached
+        /// a natural or soft-limit end condition.
+        Aborted,
+    }
+
+    /// Terminal marker for a trajectory session. Signals the
+    /// `TrajectoryRecorderCapability` to build the `TrajectoryLog`
+    /// handle for `seed` from all accumulated `TrajectorySample`s and
+    /// publish it to the handle store. Reply: `RecordResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.trajectory.end")]
+    pub struct TrajectoryEnd {
+        /// The same seed used in the `TrajectorySample` stream being
+        /// terminated. Selects which buffer the recorder flushes.
+        pub seed: u64,
+        /// Why the session ended. Carried verbatim into `TrajectoryLog`
+        /// so offline analysis can filter by outcome.
+        pub reason: TrajectoryEndReason,
+    }
+
+    /// One tick's worth of position + accumulator data, as stored in a
+    /// `TrajectoryLog`. Separates the on-wire sample shape
+    /// (`TrajectorySample`, which also carries `seed`) from the stored
+    /// shape (which doesn't need `seed` since all entries share the log's
+    /// single `seed` field).
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct TrajectorySampleEntry {
+        pub tick: u32,
+        pub x: u32,
+        pub y: u32,
+        pub value: u32,
+    }
+
+    /// A complete, tick-ordered record of one trajectory session, stored
+    /// in the handle store (ADR-0049) under `aether.trajectory.log`
+    /// (`TrajectoryLog::ID`). Published by `TrajectoryRecorderCapability`
+    /// at terminal time (on `TrajectoryEnd`) as a single immutable handle
+    /// keyed by `seed`. Offline analysis transforms decode this handle to
+    /// replay the session's path.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.trajectory.log")]
+    pub struct TrajectoryLog {
+        /// The session seed — matches the `seed` on every
+        /// `TrajectorySample` in this log.
+        pub seed: u64,
+        /// Tick-ordered list of recorded samples. The recorder appends
+        /// in the order `TrajectorySample` mails arrive; a well-behaved
+        /// producer sends them in ascending-tick order.
+        pub samples: Vec<TrajectorySampleEntry>,
+        /// Why the session ended, propagated from `TrajectoryEnd`.
+        pub end_reason: TrajectoryEndReason,
+    }
+
+    /// Reply to `TrajectoryEnd`. `Ok` carries the seed and the freshly
+    /// minted handle id + kind id of the published `TrajectoryLog` in
+    /// the handle store; `Err` is returned when `seed` has no in-flight
+    /// session (unknown or already terminated). Mirrors the shape of
+    /// `HandlePublishResult` so a caller can chain the handle id into a
+    /// DAG `Source` or store it for offline replay.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.trajectory.record_result")]
+    pub enum RecordResult {
+        Ok {
+            seed: u64,
+            handle_id: aether_data::HandleId,
+            kind_id: aether_data::KindId,
+        },
+        Err {
+            seed: u64,
+            error: String,
+        },
     }
 }
 
