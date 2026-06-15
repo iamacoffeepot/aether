@@ -16,7 +16,7 @@ Prior decisions and facts in play:
 
 - ADR-0049 gives a persistent, content-addressed handle store (typed `Ref<K>`, a disk budget, `describe_handles`). It is **per-engine** — `describe_handles` is scoped to an `engine_id` — so it cannot directly hold the binaries the hub forks *before* any engine exists.
 - The hub already fork+execs whatever path it is handed via `spawn_substrate`, so executing caller-supplied bytes is not a new trust boundary **on a single-user local host**. Widening that scope is a separate concern, addressed under follow-on below.
-- Large payloads already stage to disk rather than ride inline: DAG sources stage via a `payload_path`, and `load_component` forwards wasm bytes.
+- Large payloads already stage rather than ride inline through a tool call: DAG sources stage via a `payload_path`. A binary is large enough that inlining its bytes through the tool channel is never acceptable, so binary upload follows the staged-path model.
 
 ## Decision
 
@@ -24,7 +24,7 @@ The hub gains a **content-addressed binary store**. A binary is uploaded once an
 
 **Surface.**
 
-- `upload_binary(bytes-or-staged-path, name?)` → `{ hash, name? }`. The bytes are stored content-addressed, and identical uploads dedup to one entry. An optional name is a mutable pointer to the resulting hash.
+- `upload_binary(staged_path, name?)` → `{ hash, name? }`. The argument is **always a path to the binary already present on the fleet host — never inline bytes**; the hub ingests the file from that path and stores it content-addressed, and identical uploads dedup to one entry. An optional name is a mutable pointer to the resulting hash.
 - `spawn_substrate` (and `load_component`) accept a **selector** in place of a path: `default | name | name@version | hash`, plus an **attribute query** over the binary's self-reported manifest (e.g. `chassis=headless, caps=[audio]`, `target=…`) that resolves to a hash. Exact selectors win first (`hash` > `name@version` > `name`), then an attribute query, then `default`.
 - `list_binaries` enumerates the store with each entry's manifest and accepts the same attribute filters, so a consumer reads what the available binaries *are* rather than guessing names — the menu that keeps a selector from just moving "which path?" to "which name?".
 
@@ -49,6 +49,7 @@ The hub gains a **content-addressed binary store**. A binary is uploaded once an
 
 - The store is **hub-level** — binaries are forked by the hub, above any engine — and persists on the hub's disk across the `restart-hub` re-fork, so uploads survive a hub restart rather than needing re-upload.
 - It reuses the ADR-0049 content-addressing machinery (content hash, disk budget, describe-style reporting) as a **hub-scoped instance**, distinct from the existing per-engine handle store.
+- The registry lives in the existing `aether.engine` cap that already owns spawn and the fleet, not a new actor — selector resolution and realize-to-exec are part of forking a substrate, and the store has no consumer independent of spawn. The store is kept **artifact-generic** (a content-addressed blob plus a type-tagged manifest), so when component wasm joins as a second consumer (`load_component`) it extracts cleanly into a standalone shared store actor — a follow-up decision of its own.
 - Eviction: content-addressing dedups identical builds; named and explicitly-pinned hashes are eviction-protected; the remainder is reclaimed LRU under the disk budget. Pin-protection is load-bearing — a pinned test fixture must not be evicted out from under a test.
 
 **Scope for the first cut:** substrate binaries only. The same selector is designed to extend to component wasm later (name = component namespace, hash = content), but that is not built now.
@@ -80,6 +81,6 @@ The hub gains a **content-addressed binary store**. A binary is uploaded once an
 - **Path-reference registry** (the hub indexes host paths and the caller selects by name): still couples to the local build layout — a resolved path must exist, can go stale, and gives no reproducible pin. Uploading into the store cuts the host-path cord entirely.
 - **Reuse the per-engine ADR-0049 handle store directly:** it lives below an engine, but binaries are forked by the hub before any engine exists, so the store must be hub-level. The machinery is reused; the instance is not.
 - **Keep a raw host-path escape hatch on `spawn_substrate` alongside the selector:** rejected as part of the default surface — paths are the friction being removed, and the only path a caller touches is the one-time upload input. A true one-off raw-path spawn can be reconsidered if a concrete need appears.
-- **Inline the binary bytes in the upload call** (base64 in JSON): rejected for large executables; uploads stage to disk the way DAG sources and component loads already do.
+- **Inline the binary bytes in the upload call** (base64 in JSON): rejected outright — a binary is far too large to ride through a tool call, and inlining it would blow the very context budget the registry is meant to keep tidy. `upload_binary` is always a staged path; the bytes are read host-side and never put on the wire.
 - **Uploader-supplied metadata** (the build step labels the binary at upload): rejected in favour of self-description — a binary cannot misreport what is linked into it the way an external label can drift out of sync.
 - **A statically embedded manifest section instead of `--describe`:** the cross-target-robust form (it reads without running the binary), deferred because emitting and parsing a native section per target is more than the same-host first cut needs.
