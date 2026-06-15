@@ -29,7 +29,7 @@
 //! second linear pass over the interior axis-aligned grid edges emits a
 //! sign-wound quad (two [`Triangle`]s) per sign-change edge.
 //!
-//! [`ScalarField`]: https://docs.rs/aether-kinds
+//! [`ScalarField`]: https://docs.rs/aether-labyrinth
 
 use crate::mesh::Triangle;
 use aether_math::Vec3;

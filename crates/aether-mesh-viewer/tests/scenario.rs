@@ -21,8 +21,11 @@
 //! mutation.
 
 use aether_kinds::{
-    CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, LoadComponent, LoadResult, MeshLoadResult,
-    ScalarField, TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry, TrajectorySet,
+    LoadComponent, LoadResult, MeshLoadResult, TrajectoryEndReason, TrajectoryLog,
+    TrajectorySampleEntry,
+};
+use aether_labyrinth::{
+    CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ScalarField, TrajectorySet,
 };
 use aether_mesh_viewer::{CorridorLoadResult, LoadCorridor, LoadMesh, Scrub};
 use aether_substrate_bundle::test_bench::{

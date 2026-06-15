@@ -39,6 +39,12 @@ aether-kinds = { path = "../aether-kinds" }
 # with. Target-agnostic; the native impl arm it emits is itself
 # `aether-substrate`-gated, so the bare crate carries only the markers.
 aether-actor = { path = "../aether-actor" }
+# Issue 1914: the relocated `aether.reach.*` / `aether.corridor.*` kinds
+# derive `Serialize` / `Deserialize` over their postcard wire shapes, and
+# the cast-shaped `CrossingQueryParams` derives `bytemuck::Pod` /
+# `Zeroable`. Same dep specs the kinds carried in `aether-kinds`.
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+bytemuck = { workspace = true, features = ["derive"] }
 
 # Native-only: the substrate runtime the recorder cap's `NativeActor`
 # impl reaches for (`NativeCtx`, `HandleStore`, `BootError`). Gated behind

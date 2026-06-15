@@ -25,9 +25,9 @@
 //! (a per-crossing loop, a per-window dense solve; no recursion, per the
 //! load-bearing-code rule), so a given field + path replays byte-identically.
 
-use aether_kinds::{
-    CrossingClassification, CrossingVerdict, ScalarField, StencilOffset, TrajectoryLog,
-};
+use aether_kinds::TrajectoryLog;
+
+use crate::{CrossingClassification, CrossingVerdict, ScalarField, StencilOffset};
 
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach};
 
@@ -220,7 +220,9 @@ mod tests {
         Crossing, SeedState, classify_crossing, detect_crossings, solve_counterfactual_core,
     };
     use crate::test_support::stencil_4way;
-    use aether_kinds::{ScalarField, TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry};
+    use aether_kinds::{TrajectoryEndReason, TrajectoryLog, TrajectorySampleEntry};
+
+    use crate::ScalarField;
 
     const UNREACHABLE: u32 = u32::MAX;
 

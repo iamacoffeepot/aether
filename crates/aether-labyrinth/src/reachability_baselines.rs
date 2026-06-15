@@ -20,7 +20,7 @@
 use crate::corridor::build_corridor_graph_core;
 use crate::reachability::{UNREACHABLE, solve_cost_to_reach};
 use crate::test_support::{flow_in, flow_out, stencil_4way};
-use aether_kinds::{EdgeKind, ScalarField};
+use crate::{EdgeKind, ScalarField};
 
 /// Hand-rolled splitmix64 PRNG (Sebastiano Vigna, 2015). Dependency-
 /// free and integer-exact across platforms, so a given seed always

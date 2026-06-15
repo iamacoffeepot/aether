@@ -209,7 +209,9 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
+ "bytemuck",
  "postcard",
+ "serde",
 ]
 
 [[package]]
@@ -268,6 +270,7 @@ dependencies = [
  "aether-capabilities",
  "aether-data",
  "aether-kinds",
+ "aether-labyrinth",
  "aether-math",
  "aether-mesh",
  "aether-substrate-bundle",

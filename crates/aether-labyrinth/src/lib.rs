@@ -66,6 +66,14 @@
 //!   `aether-mcp`, which only reads the transform inventory) skip it; the
 //!   chassis bins enable `native` to register it.
 
+// The `aether.reach.*` / `aether.corridor.*` kind vocabulary (issue
+// 1914), relocated from `aether-kinds` so this crate owns the kinds its
+// solver, transforms, and passes operate over. Re-exported at the crate
+// root (`pub use kinds::*`) so peers (e.g. `aether-mesh-viewer`) and this
+// crate's own modules reach them by name.
+pub mod kinds;
+pub use kinds::*;
+
 // The pure cores back the certifier `#[transform]`s and the test/baseline
 // harness, all of which live in this crate; nothing reaches them across a
 // crate boundary, so they stay `pub(crate)` (as they were in

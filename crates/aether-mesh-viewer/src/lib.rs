@@ -38,7 +38,7 @@ pub struct LoadMesh {
 }
 
 /// `aether.corridor.load` — instruct the mesh viewer to load a
-/// postcard-encoded `aether_kinds::CorridorGraph` (issue 1858) from
+/// postcard-encoded `aether_labyrinth::CorridorGraph` (issue 1858) from
 /// `namespace://path` and build a tick-indexable scrub datum over it
 /// (issue 1869). The graph is a flat time-layered DAG: per-tick region
 /// components (`nodes`) and directed cross-tick `Flow` / intra-tick

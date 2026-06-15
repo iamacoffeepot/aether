@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 
-use aether_kinds::{
+use crate::{
     CorridorEdge, CorridorGraph, CorridorNode, EdgeKind, ForkDepth, ResolutionDepth, ScalarField,
     StencilOffset,
 };
@@ -608,7 +608,7 @@ pub fn corridor_resolution_depth_core(graph: &CorridorGraph) -> ResolutionDepth 
 mod tests {
     use super::build_corridor_graph_core;
     use crate::test_support::{flow_in, flow_out, stencil_4way};
-    use aether_kinds::{EdgeKind, ScalarField};
+    use crate::{EdgeKind, ScalarField};
 
     const UNREACHABLE: u32 = u32::MAX;
 
@@ -819,8 +819,8 @@ mod tests {
             "encoded corridor graph is {} bytes, over the {CAP}-byte cap",
             bytes.len()
         );
-        let back = aether_kinds::CorridorGraph::decode_from_bytes(&bytes)
-            .expect("corridor graph round-trips");
+        let back =
+            crate::CorridorGraph::decode_from_bytes(&bytes).expect("corridor graph round-trips");
         assert_eq!(graph, back);
     }
 }
@@ -828,7 +828,7 @@ mod tests {
 #[cfg(test)]
 mod resolution_depth_tests {
     use super::{corridor_resolution_depth_core, fork_resolution_depths, live_nodes};
-    use aether_kinds::{CorridorEdge, CorridorGraph, CorridorNode, EdgeKind};
+    use crate::{CorridorEdge, CorridorGraph, CorridorNode, EdgeKind};
 
     /// A node at `tick` (the other summary fields don't affect liveness or
     /// fork depth, which read only `tick` and the flow topology).
@@ -1023,7 +1023,7 @@ mod resolution_depth_tests {
         // node 0 forks into dead-end node 2: depth 1 (one tick of dead-end).
         assert_eq!(
             depths.forks,
-            vec![aether_kinds::ForkDepth {
+            vec![crate::ForkDepth {
                 node_index: 0,
                 depth: 1
             }]

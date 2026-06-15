@@ -4,7 +4,7 @@
 //! fixtures the test modules would otherwise each re-declare.
 
 use crate::reachability::test_fields::stencil_offsets;
-use aether_kinds::{CorridorEdge, EdgeKind, StencilOffset};
+use crate::{CorridorEdge, EdgeKind, StencilOffset};
 
 /// The 4-way movement stencil as raw offsets: the zero "stay" offset plus the
 /// four orthogonal one-cell moves. Delegates to the canonical

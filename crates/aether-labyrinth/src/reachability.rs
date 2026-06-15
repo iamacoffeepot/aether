@@ -16,7 +16,7 @@
 //! deterministic, and integer-exact, so a given field replays
 //! identically.
 
-use aether_kinds::{
+use crate::{
     ClosureDistribution, MovementStencil, PopulationSweepProblem, ReachabilityProblem,
     RealizationProblem, RunOutcome, ScalarField, StencilOffset, SurvivalCurve, SurvivalSample,
 };
@@ -1139,7 +1139,7 @@ fn unpack_realization(
 #[cfg(test)]
 pub mod test_fields {
     pub use super::UNREACHABLE;
-    use aether_kinds::{MovementStencil, StencilOffset};
+    use crate::{MovementStencil, StencilOffset};
 
     /// Stay + the four orthogonal one-cell moves, as raw offsets.
     pub fn stencil_offsets() -> Vec<StencilOffset> {
@@ -1165,7 +1165,7 @@ pub mod test_fields {
 mod tests {
     use super::test_fields::stencil_offsets as stencil_4way;
     use super::{UNREACHABLE, solve_cost_to_reach};
-    use aether_kinds::StencilOffset;
+    use crate::StencilOffset;
 
     #[test]
     fn single_start_cell_seeds_t0_others_unreachable() {
@@ -1257,7 +1257,7 @@ mod tests {
 mod population_tests {
     use super::test_fields::stencil_offsets as stencil_4way;
     use super::{UNREACHABLE, solve_cost_to_reach, solve_population_sweep};
-    use aether_kinds::{MovementStencil, PopulationSweepProblem, ReachabilityProblem, ScalarField};
+    use crate::{MovementStencil, PopulationSweepProblem, ReachabilityProblem, ScalarField};
 
     /// Build a sweep problem from a single start cell (the rest of the
     /// start region is the sentinel, so the population is sampled entirely
@@ -1542,7 +1542,7 @@ mod population_tests {
 mod realization_tests {
     use super::test_fields::stencil_4way;
     use super::{UNREACHABLE, realize_single, simulate_realization};
-    use aether_kinds::{MovementStencil, ReachabilityProblem, RealizationProblem, ScalarField};
+    use crate::{MovementStencil, ReachabilityProblem, RealizationProblem, ScalarField};
 
     /// A `RealizationProblem` over a `width × height` base field with the
     /// 4-way stencil, the start region the finite cells of `start`, and the
