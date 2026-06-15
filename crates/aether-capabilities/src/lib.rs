@@ -136,6 +136,10 @@ pub(crate) mod counterfactual;
 // would be dead.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod traffic;
+// Baseline-replay validation harness for the reachability solver (issue
+// 1860). Test-only; no production code.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod reachability_baselines;
 pub mod window;
 
 #[cfg(feature = "audio")]
