@@ -430,7 +430,7 @@ mod native {
         AdapterRegistry, Delete, FsError, List, NamespaceRoots, NamespaceRootsLayer, Read, Write,
         build_registry,
     };
-    use aether_actor::{OutboundReply, actor};
+    use aether_actor::actor;
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -517,8 +517,8 @@ mod native {
     /// `aether.fs` mailbox cap. Owns the resolved adapter registry +
     /// namespace roots. The dispatcher thread holds an `Arc<Self>` and
     /// routes envelopes through the macro-emitted `NativeDispatch` impl;
-    /// replies route via `ctx.reply(&result)` through the substrate's
-    /// `Mailer::send_reply`.
+    /// replies are returned directly from `#[handler]` methods (ADR-0112)
+    /// and dispatched through the substrate's `Mailer::send_reply`.
     pub struct FsCapability {
         registry: Arc<AdapterRegistry>,
     }
@@ -555,16 +555,15 @@ mod native {
         /// # Agent
         /// Reply: `ReadResult`. Echoes namespace + path on both arms.
         #[handler]
-        fn on_read(&self, ctx: &mut NativeCtx<'_>, mail: Read) {
+        fn on_read(&self, _ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
             let Some(adapter) = self.registry.get(&mail.namespace) else {
-                ctx.reply(&ReadResult::Err {
+                return ReadResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
                     error: FsError::UnknownNamespace,
-                });
-                return;
+                };
             };
-            let reply = match adapter.read(&mail.path) {
+            match adapter.read(&mail.path) {
                 Ok(bytes) => ReadResult::Ok {
                     namespace: mail.namespace,
                     path: mail.path,
@@ -575,8 +574,7 @@ mod native {
                     path: mail.path,
                     error,
                 },
-            };
-            ctx.reply(&reply);
+            }
         }
 
         /// Write bytes to a logical namespace path. Atomic via tmp+rename
@@ -586,16 +584,15 @@ mod native {
         /// # Agent
         /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
         #[handler]
-        fn on_write(&self, ctx: &mut NativeCtx<'_>, mail: Write) {
+        fn on_write(&self, _ctx: &mut NativeCtx<'_>, mail: Write) -> WriteResult {
             let Some(adapter) = self.registry.get(&mail.namespace) else {
-                ctx.reply(&WriteResult::Err {
+                return WriteResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
                     error: FsError::UnknownNamespace,
-                });
-                return;
+                };
             };
-            let reply = match adapter.write(&mail.path, &mail.bytes) {
+            match adapter.write(&mail.path, &mail.bytes) {
                 Ok(()) => WriteResult::Ok {
                     namespace: mail.namespace,
                     path: mail.path,
@@ -605,8 +602,7 @@ mod native {
                     path: mail.path,
                     error,
                 },
-            };
-            ctx.reply(&reply);
+            }
         }
 
         /// Delete a path under a namespace.
@@ -614,16 +610,15 @@ mod native {
         /// # Agent
         /// Reply: `DeleteResult`. Echoes namespace + path.
         #[handler]
-        fn on_delete(&self, ctx: &mut NativeCtx<'_>, mail: Delete) {
+        fn on_delete(&self, _ctx: &mut NativeCtx<'_>, mail: Delete) -> DeleteResult {
             let Some(adapter) = self.registry.get(&mail.namespace) else {
-                ctx.reply(&DeleteResult::Err {
+                return DeleteResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
                     error: FsError::UnknownNamespace,
-                });
-                return;
+                };
             };
-            let reply = match adapter.delete(&mail.path) {
+            match adapter.delete(&mail.path) {
                 Ok(()) => DeleteResult::Ok {
                     namespace: mail.namespace,
                     path: mail.path,
@@ -633,8 +628,7 @@ mod native {
                     path: mail.path,
                     error,
                 },
-            };
-            ctx.reply(&reply);
+            }
         }
 
         /// List entries under a namespace prefix.
@@ -642,16 +636,15 @@ mod native {
         /// # Agent
         /// Reply: `ListResult`. Echoes namespace + prefix.
         #[handler]
-        fn on_list(&self, ctx: &mut NativeCtx<'_>, mail: List) {
+        fn on_list(&self, _ctx: &mut NativeCtx<'_>, mail: List) -> ListResult {
             let Some(adapter) = self.registry.get(&mail.namespace) else {
-                ctx.reply(&ListResult::Err {
+                return ListResult::Err {
                     namespace: mail.namespace,
                     prefix: mail.prefix,
                     error: FsError::UnknownNamespace,
-                });
-                return;
+                };
             };
-            let reply = match adapter.list(&mail.prefix) {
+            match adapter.list(&mail.prefix) {
                 Ok(entries) => ListResult::Ok {
                     namespace: mail.namespace,
                     prefix: mail.prefix,
@@ -662,8 +655,7 @@ mod native {
                     prefix: mail.prefix,
                     error,
                 },
-            };
-            ctx.reply(&reply);
+            }
         }
     }
 
@@ -694,13 +686,10 @@ mod native {
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::Source;
 
-        use crate::test_chassis::{
-            TestChassis, cleanup, decode_reply, fresh_substrate, scratch_dir,
-        };
+        use crate::test_chassis::{TestChassis, cleanup, fresh_substrate, scratch_dir};
         use aether_substrate::mail::SourceAddr;
         use aether_substrate::mail::registry;
         use std::fs;
-        use std::sync::mpsc::Receiver;
 
         // ADR-0090: the confique migration is byte-identical to the prior
         // `env_or_default` reader. These exercise resolution without
@@ -736,17 +725,15 @@ mod native {
         /// and a `NativeBinding` long enough for handlers to borrow.
         struct TestFixture {
             cap: FsCapability,
-            rx: Receiver<EgressEvent>,
             transport: Arc<NativeBinding>,
         }
 
         impl TestFixture {
             fn new(reg: Arc<AdapterRegistry>) -> Self {
-                let (mailer, rx) = test_mailer_and_rx();
+                let (mailer, _rx) = test_mailer_and_rx();
                 let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
                 Self {
                     cap: FsCapability::from_registry(reg),
-                    rx,
                     transport,
                 }
             }
@@ -985,7 +972,6 @@ mod native {
         }
 
         use aether_data::{SessionToken, Uuid};
-        use aether_substrate::mail::outbound::EgressEvent;
 
         fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
             let adapter: Arc<dyn FileAdapter> = Arc::new(
@@ -1077,14 +1063,14 @@ mod native {
                 .expect("test setup: adapter accepts write");
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_read(
+            let result = fix.cap.on_read(
                 &mut ctx,
                 Read {
                     namespace: "save".to_string(),
                     path: "slot.bin".to_string(),
                 },
             );
-            match decode_reply::<ReadResult>(&fix.rx) {
+            match result {
                 ReadResult::Ok {
                     namespace,
                     path,
@@ -1105,14 +1091,14 @@ mod native {
             let reg = build_save_only_registry(&root, true);
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_read(
+            let result = fix.cap.on_read(
                 &mut ctx,
                 Read {
                     namespace: "nope".to_string(),
                     path: "x.bin".to_string(),
                 },
             );
-            match decode_reply::<ReadResult>(&fix.rx) {
+            match result {
                 ReadResult::Err {
                     namespace,
                     path,
@@ -1132,7 +1118,7 @@ mod native {
             let reg = build_save_only_registry(&root, true);
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_read(
+            let result = fix.cap.on_read(
                 &mut ctx,
                 Read {
                     namespace: "save".to_string(),
@@ -1140,7 +1126,7 @@ mod native {
                 },
             );
             assert!(matches!(
-                decode_reply::<ReadResult>(&fix.rx),
+                result,
                 ReadResult::Err {
                     error: FsError::NotFound,
                     ..
@@ -1156,7 +1142,7 @@ mod native {
             let reg_clone = Arc::clone(&reg);
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_write(
+            let result = fix.cap.on_write(
                 &mut ctx,
                 Write {
                     namespace: "save".to_string(),
@@ -1164,7 +1150,7 @@ mod native {
                     bytes: vec![1, 2, 3],
                 },
             );
-            match decode_reply::<WriteResult>(&fix.rx) {
+            match result {
                 WriteResult::Ok { namespace, path } => {
                     assert_eq!(namespace, "save");
                     assert_eq!(path, "slot.bin");
@@ -1188,7 +1174,7 @@ mod native {
             let reg = build_save_only_registry(&root, false);
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_write(
+            let result = fix.cap.on_write(
                 &mut ctx,
                 Write {
                     namespace: "save".to_string(),
@@ -1197,7 +1183,7 @@ mod native {
                 },
             );
             assert!(matches!(
-                decode_reply::<WriteResult>(&fix.rx),
+                result,
                 WriteResult::Err {
                     error: FsError::Forbidden,
                     ..
@@ -1217,14 +1203,14 @@ mod native {
                 .expect("test setup: adapter accepts write");
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_delete(
+            let result = fix.cap.on_delete(
                 &mut ctx,
                 Delete {
                     namespace: "save".to_string(),
                     path: "x.bin".to_string(),
                 },
             );
-            match decode_reply::<DeleteResult>(&fix.rx) {
+            match result {
                 DeleteResult::Ok { namespace, path } => {
                     assert_eq!(namespace, "save");
                     assert_eq!(path, "x.bin");
@@ -1255,14 +1241,14 @@ mod native {
                 .expect("test setup: adapter accepts a.bin write");
             let fix = TestFixture::new(reg);
             let mut ctx = fix.ctx(session_sender());
-            fix.cap.on_list(
+            let result = fix.cap.on_list(
                 &mut ctx,
                 List {
                     namespace: "save".to_string(),
                     prefix: String::new(),
                 },
             );
-            match decode_reply::<ListResult>(&fix.rx) {
+            match result {
                 ListResult::Ok {
                     namespace,
                     prefix,
