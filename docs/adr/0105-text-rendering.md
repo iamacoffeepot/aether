@@ -1,6 +1,6 @@
 # ADR-0105: Text Rendering
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the aether.text capability)
 - **Date:** 2026-06-12
 
 ## Context

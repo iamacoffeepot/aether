@@ -1,6 +1,6 @@
 # ADR-0112: Handler reply classes
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the reply-class migration + lock, #1850 / #1874–#1879)
 - **Date:** 2026-06-14
 
 ## Context

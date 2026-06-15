@@ -1,6 +1,6 @@
 # ADR-0102: Extract the RPC wire vocabulary into its own crate
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the aether-rpc crate)
 - **Date:** 2026-06-10
 
 ## Context

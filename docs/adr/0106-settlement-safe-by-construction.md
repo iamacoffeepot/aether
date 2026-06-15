@@ -1,6 +1,6 @@
 # ADR-0106: Settlement safe by construction
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — substrate settlement)
 - **Date:** 2026-06-12
 
 Amends **ADR-0094** (settlement-obligation guard) and the consumer side of **ADR-0080 §2**. The settlement semantics are unchanged — `(in_flight == 0 && held_open == 0)` is still the settled signal, and the producer-site brackets stay where they are. What changes is who implements the consumer side of the bracket for claimed mailboxes: the framework, once, instead of every hand-rolled drain.
