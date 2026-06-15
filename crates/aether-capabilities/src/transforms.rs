@@ -9,13 +9,13 @@
 
 use aether_data::transform;
 use aether_kinds::{
-    BudgetQuery, CorridorGraph, Mat4Apply, MovementStencil, ReachabilityMargin,
-    ReachabilityProblem, ScalarField,
+    BudgetQuery, CorridorGraph, Mat4Apply, MovementStencil, PopulationSweepProblem,
+    ReachabilityMargin, ReachabilityProblem, ScalarField, SurvivalCurve,
 };
 use aether_math::Vec4;
 
 use crate::corridor::build_corridor_graph_core;
-use crate::reachability::{UNREACHABLE, solve_cost_to_reach};
+use crate::reachability::{UNREACHABLE, solve_cost_to_reach, solve_population_sweep};
 
 /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
 /// first-party transform). `Mat4Apply` bundles both operands so the
@@ -133,6 +133,27 @@ fn build_corridor_graph(
     build_corridor_graph_core(&field, &stencil.offsets, query.budget)
 }
 
+/// Sweep a seeded Monte-Carlo population of reaction-delayed agents over a
+/// time-varying scalar cost field, emitting the completion-rate-vs-
+/// reaction-delay curve (issue 1863). `PopulationSweepProblem` bundles the
+/// shared reachability operands (field, stencil, start region), the goal
+/// region, and the sweep parameters (budget, population, window, seed, the
+/// delay set) so the transform stays a unary `Kind → Kind` node, the same
+/// shape `Mat4Apply` gives `mat4_apply`.
+///
+/// The body delegates to the pure [`solve_population_sweep`] core — each
+/// agent's planner is #1857's exact [`solve_cost_to_reach`] degraded by a
+/// reaction-delay lag, so at `delay = 0` with a full window the survival
+/// fraction approaches the exact reachable-under-budget bound. The seed is
+/// an explicit input and the PRNG deterministic, so the sweep is a pure
+/// function of its inputs and content-addresses correctly: it clears the
+/// `#[transform]` purity deny-list (no host fn, no `Ctx`, no `std::time` /
+/// `std::env`; seeded PRNG only).
+#[transform]
+fn solve_population(input: PopulationSweepProblem) -> SurvivalCurve {
+    solve_population_sweep(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::mat4_apply;
@@ -200,25 +221,12 @@ mod tests {
 #[cfg(test)]
 mod reachability_transform_tests {
     use super::{reachability_margin, solve};
+    use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
     use aether_data::{Kind, transforms};
     use aether_kinds::{
         BudgetQuery, MovementStencil, ReachabilityMargin, ReachabilityProblem, ScalarField,
         StencilOffset,
     };
-
-    const UNREACHABLE: u32 = u32::MAX;
-
-    fn stencil_4way() -> MovementStencil {
-        MovementStencil {
-            offsets: vec![
-                StencilOffset { dx: 0, dy: 0 },
-                StencilOffset { dx: 1, dy: 0 },
-                StencilOffset { dx: -1, dy: 0 },
-                StencilOffset { dx: 0, dy: 1 },
-                StencilOffset { dx: 0, dy: -1 },
-            ],
-        }
-    }
 
     /// 3×1 uniform-cost field, start at cell 0 — the same hand-checked
     /// field the solver-core tests pin, here driven through the transform.
@@ -393,22 +401,9 @@ mod reachability_transform_tests {
 #[cfg(test)]
 mod corridor_transform_tests {
     use super::build_corridor_graph;
+    use crate::reachability::test_fields::stencil_4way;
     use aether_data::{Kind, transforms};
-    use aether_kinds::{
-        BudgetQuery, CorridorGraph, EdgeKind, MovementStencil, ScalarField, StencilOffset,
-    };
-
-    fn stencil_4way() -> MovementStencil {
-        MovementStencil {
-            offsets: vec![
-                StencilOffset { dx: 0, dy: 0 },
-                StencilOffset { dx: 1, dy: 0 },
-                StencilOffset { dx: -1, dy: 0 },
-                StencilOffset { dx: 0, dy: 1 },
-                StencilOffset { dx: 0, dy: -1 },
-            ],
-        }
-    }
+    use aether_kinds::{BudgetQuery, CorridorGraph, EdgeKind, MovementStencil, ScalarField};
 
     /// 5×1 field with a sub-budget ridge at cell 2, driven through the
     /// transform: two components and a punch priced at the ridge `V`.
@@ -453,5 +448,131 @@ mod corridor_transform_tests {
         let b = build_corridor_graph(ridge_field(), stencil_4way(), BudgetQuery { budget: 5 });
         assert_eq!(a, b);
         assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
+    }
+}
+
+#[cfg(test)]
+mod population_transform_tests {
+    use super::solve_population;
+    use crate::reachability::test_fields::{UNREACHABLE, stencil_4way};
+    use aether_data::{Kind, transforms};
+    use aether_kinds::{PopulationSweepProblem, ReachabilityProblem, ScalarField, SurvivalCurve};
+
+    /// A small reachable sweep: a 3×1 uniform-cost field, the population
+    /// spawned at cell 0, goal at cell 2.
+    fn small_sweep() -> PopulationSweepProblem {
+        PopulationSweepProblem {
+            problem: ReachabilityProblem {
+                cost: ScalarField {
+                    width: 3,
+                    height: 1,
+                    ticks: 3,
+                    values: vec![1u32; 9],
+                },
+                stencil: stencil_4way(),
+                start: vec![0, UNREACHABLE, UNREACHABLE],
+            },
+            goal: vec![2],
+            budget: 5,
+            population: 16,
+            window: 8,
+            seed: 0xABCD_1234,
+            delays: vec![0, 1, 2],
+        }
+    }
+
+    #[test]
+    fn solve_population_produces_one_sample_per_delay() {
+        let curve = solve_population(small_sweep());
+        assert_eq!(curve.population, 16);
+        assert_eq!(curve.samples.len(), 3);
+        assert_eq!(curve.samples[0].delay, 0);
+        // Uniform-cost, full-window, zero-lag: the whole population clears
+        // the reachable-under-budget certificate.
+        assert_eq!(curve.samples[0].finished, 16);
+    }
+
+    #[test]
+    fn solve_population_registered_in_link_time_inventory() {
+        // Same contract as `mat4_apply` / `solve`: registered, one
+        // `PopulationSweepProblem` input slot, `SurvivalCurve` output.
+        let entry = transforms()
+            .find(|t| t.name.ends_with("::solve_population"))
+            .expect("solve_population not registered in link-time inventory");
+        assert_eq!(entry.input_kind_ids, [PopulationSweepProblem::ID]);
+        assert_eq!(entry.output_kind_id, SurvivalCurve::ID);
+    }
+
+    #[test]
+    fn population_kinds_resolve_distinctly() {
+        assert_ne!(PopulationSweepProblem::ID, SurvivalCurve::ID);
+        assert_ne!(PopulationSweepProblem::ID, ScalarField::ID);
+        assert_ne!(SurvivalCurve::ID, ReachabilityProblem::ID);
+    }
+
+    #[test]
+    fn solve_population_is_deterministic_and_content_addressable() {
+        // Same seed + field -> identical curve, and the content-addressing
+        // path (the encoded output bytes the executor keys on) replays
+        // byte-for-byte — the proof the seeded Monte-Carlo is pure.
+        let a = solve_population(small_sweep());
+        let b = solve_population(small_sweep());
+        assert_eq!(a, b);
+        assert_eq!(a.encode_into_bytes(), b.encode_into_bytes());
+    }
+
+    #[test]
+    fn canonical_field_sweep_encodes_under_output_cap_and_replays() {
+        // The canonical 64×64 grid over 1800 ticks driven through a multi-
+        // delay sweep: the `SurvivalCurve` output is a handful of
+        // `(delay, finished)` samples, so it sits far under the 64MB
+        // transform output cap (ADR-0048 §6), and two runs of the same
+        // input replay byte-identically. Uniform cost with the goal a few
+        // cells inside the planning window so agents reach it in a handful
+        // of ticks — the sweep exercises the canonical field dimensions
+        // without grinding the full horizon.
+        const CAP: usize = 64 * 1024 * 1024;
+        let width = 64u32;
+        let height = 64u32;
+        let ticks = 1800u32;
+        let plane = (width * height) as usize;
+        let sweep = || PopulationSweepProblem {
+            problem: ReachabilityProblem {
+                cost: ScalarField {
+                    width,
+                    height,
+                    ticks,
+                    values: vec![1u32; plane * ticks as usize],
+                },
+                stencil: stencil_4way(),
+                start: {
+                    let mut s = vec![UNREACHABLE; plane];
+                    s[0] = 0;
+                    s
+                },
+            },
+            goal: vec![5],
+            budget: 1000,
+            population: 4,
+            window: 8,
+            seed: 0x1357_9BDF,
+            delays: vec![0, 2, 5],
+        };
+
+        let curve = solve_population(sweep());
+        assert_eq!(curve.samples.len(), 3);
+
+        let bytes = curve.encode_into_bytes();
+        assert!(
+            bytes.len() < CAP,
+            "encoded survival curve is {} bytes, over the {CAP}-byte cap",
+            bytes.len()
+        );
+
+        let back = SurvivalCurve::decode_from_bytes(&bytes).expect("survival curve round-trips");
+        assert_eq!(curve, back);
+
+        let replay = solve_population(sweep());
+        assert_eq!(curve.encode_into_bytes(), replay.encode_into_bytes());
     }
 }
